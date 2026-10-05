@@ -19,6 +19,8 @@ gamechrome = { path = "../gamechrome" }
 # (`settingsfile::config_dir`), read capped and written atomically.
 settingsfile = { path = "../../gui/settingsfile" }
 safeio = { path = "../safeio" }
+# `is_plain`: a key pressed with Alt or the Windows key is not the table's.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

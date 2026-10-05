@@ -24,8 +24,6 @@
 //! recording whose markers are being saved -- and not if another program has
 //! changed it since it was opened.
 
-#![allow(dead_code, clippy::too_many_arguments, clippy::vec_init_then_push)]
-
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1065,19 +1063,30 @@ impl TrimRegion {
 // ============================================================================
 
 /// Simple noise gate that suppresses audio below a threshold.
+///
+/// It opens and shuts over [`attack_samples`](Self::attack_samples) rather
+/// than between one sample and the next. A signal cut in from silence at
+/// full level, or cut off from full level to silence, is a step, and a step
+/// is heard as a click -- at every edge of every word. The attack was always
+/// here and always documented, and nothing read it: the gate opened in one
+/// sample and shut in one.
 pub struct NoiseGate {
     /// Threshold level (0.0..1.0). Samples below this are zeroed.
     pub threshold: f32,
     /// Whether the gate is currently enabled.
     pub enabled: bool,
-    /// Whether the gate is currently open (signal is above threshold).
+    /// Whether the gate is open at all -- letting anything through.
     pub is_open: bool,
-    /// Attack time in samples (how quickly the gate opens).
+    /// How many samples the gate takes to open fully, and to shut.
     attack_samples: u32,
-    /// Release time in samples (how long to keep open after signal drops).
+    /// How long it stays open after the signal drops below the threshold,
+    /// in samples, before it starts to shut.
     release_samples: u32,
-    /// Counter for release timing.
+    /// Samples left of that hold.
     release_counter: u32,
+    /// How far open the gate is, in samples of its attack: none shut, all of
+    /// them fully open.
+    level: u32,
 }
 
 impl NoiseGate {
@@ -1086,10 +1095,34 @@ impl NoiseGate {
             threshold: threshold.clamp(0.0, 1.0),
             enabled: true,
             is_open: false,
-            attack_samples: 64,
+            attack_samples: 64,    // ~1.3ms at 48kHz
             release_samples: 4800, // ~100ms at 48kHz
             release_counter: 0,
+            level: 0,
         }
+    }
+
+    /// The level at which the gate is fully open. An attack of none opens
+    /// and shuts at once, rather than never opening.
+    fn fully_open(&self) -> u32 {
+        self.attack_samples.max(1)
+    }
+
+    /// `sample` through the gate as open as it is: itself when fully open,
+    /// silence when shut, in proportion between.
+    fn through(&self, sample: i16) -> i16 {
+        let full = self.fully_open();
+        if self.level >= full {
+            return sample;
+        }
+        i64::from(sample)
+            .checked_mul(i64::from(self.level))
+            .and_then(|scaled| scaled.checked_div(i64::from(full)))
+            .and_then(|scaled| i16::try_from(scaled).ok())
+            // Unreachable: the level is below full, so the product divided
+            // by full is smaller than the sample itself. Silence is the
+            // answer that cannot be heard as a fault.
+            .unwrap_or(0)
     }
 
     /// Set the threshold (0.0..1.0).
@@ -1110,29 +1143,36 @@ impl NoiseGate {
         for sample in samples.iter_mut() {
             let abs_sample = sample.saturating_abs();
 
-            if abs_sample > threshold_i16 {
-                // Signal above threshold: open the gate
-                self.is_open = true;
+            let wanted_open = if abs_sample > threshold_i16 {
+                // Signal above threshold: open, and hold open from here.
                 self.release_counter = self.release_samples;
-                any_passed = true;
+                true
             } else if self.release_counter > 0 {
-                // In release period: keep gate open
+                // In the hold: stay open.
                 self.release_counter = self.release_counter.saturating_sub(1);
-                any_passed = true;
+                true
             } else {
-                // Gate closed: zero the sample
-                self.is_open = false;
-                *sample = 0;
-            }
+                false
+            };
+            // One sample's step toward open or shut.
+            self.level = if wanted_open {
+                self.level.saturating_add(1).min(self.fully_open())
+            } else {
+                self.level.saturating_sub(1)
+            };
+            *sample = self.through(*sample);
+            any_passed |= self.level > 0;
         }
+        self.is_open = self.level > 0;
 
         any_passed
     }
 
-    /// Reset gate state.
+    /// Reset gate state: shut at once, with nothing held.
     pub fn reset(&mut self) {
         self.is_open = false;
         self.release_counter = 0;
+        self.level = 0;
     }
 
     /// Render the noise gate threshold indicator.
@@ -2045,6 +2085,9 @@ pub struct SoundRecorderApp {
     /// Where the press that began the drag landed.
     press_x: f32,
     hover: Option<Target>,
+    /// The user's focus width, which the marker-name field draws its
+    /// focus mark at (`appearance_changed`).
+    focus_ring_width: f32,
     last_hits: Vec<(Target, Rect)>,
     wheel: wheel::Accumulator,
     pub window_width: f32,
@@ -2099,6 +2142,7 @@ impl SoundRecorderApp {
             drag: None,
             press_x: 0.0,
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
             window_width: 980.0,
@@ -2581,26 +2625,32 @@ impl SoundRecorderApp {
         if self.rename.is_some() {
             return self.rename_key(key);
         }
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        // Every key but Ctrl's chords is taken plain, nothing held but Shift:
+        // a chord with Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key -- Alt+Space started a take
+        // and Alt+Delete removed a marker.
+        let plain = textline::is_plain(key.modifiers);
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal: Space would start a take from behind the card.
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
-        let ctrl = key.modifiers.ctrl;
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+S
+        // -- a Polish `ś` -- saved the markers.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return self.handle_ctrl_chord(key);
+        }
+        if !plain {
+            return EventResult::Ignored;
+        }
         let shift = key.modifiers.shift;
         match key.key {
-            Key::O if ctrl => self.open_picker(PickerFor::Open),
-            Key::S if ctrl && shift => self.open_picker(PickerFor::SaveKept),
-            Key::S if ctrl => {
-                self.save_markers();
-            }
-            Key::A if ctrl => self.with_open(OpenRecording::keep_all),
             Key::F5 => {
                 self.rescan();
                 self.status_line = String::from("Looked in the folder again");
@@ -2637,14 +2687,8 @@ impl SoundRecorderApp {
             }
             Key::Left | Key::Right => {
                 let forward = key.key == Key::Right;
-                if ctrl {
-                    self.with_open(|o| {
-                        o.to_marker(forward);
-                    });
-                } else {
-                    let step = if shift { 1.0 } else { 0.1 };
-                    self.with_open(|o| o.nudge(if forward { step } else { -step }));
-                }
+                let step = if shift { 1.0 } else { 0.1 };
+                self.with_open(|o| o.nudge(if forward { step } else { -step }));
             }
             Key::Home => self.with_open(|o| o.cursor = 0),
             Key::End => self.with_open(|o| o.cursor = o.info.frames),
@@ -2664,10 +2708,31 @@ impl SoundRecorderApp {
             Key::Space => {
                 self.record_key();
             }
-            Key::S if !ctrl && self.state != RecordingState::Idle => {
+            Key::S if self.state != RecordingState::Idle => {
                 self.stop_take();
             }
             Key::P => self.play(),
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// Ctrl's chords: open, save the markers or the kept part, keep it all,
+    /// and step from marker to marker.
+    fn handle_ctrl_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::O => self.open_picker(PickerFor::Open),
+            Key::S if key.modifiers.shift => self.open_picker(PickerFor::SaveKept),
+            Key::S => {
+                self.save_markers();
+            }
+            Key::A => self.with_open(OpenRecording::keep_all),
+            Key::Left | Key::Right => {
+                let forward = key.key == Key::Right;
+                self.with_open(|o| {
+                    o.to_marker(forward);
+                });
+            }
             _ => return EventResult::Ignored,
         }
         EventResult::Consumed
@@ -2703,10 +2768,14 @@ impl SoundRecorderApp {
 
     /// A key while a marker's name is being written: Enter keeps it, Escape
     /// leaves the old one.
+    ///
+    /// Both plain: Alt+Escape threw the name away. A chord goes on to the
+    /// field, which knows a command from typing.
     fn rename_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Enter => self.commit_rename(),
-            Key::Escape => self.rename = None,
+            Key::Enter if plain => self.commit_rename(),
+            Key::Escape if plain => self.rename = None,
             _ => {
                 if let Some(input) = self.rename.as_mut()
                     && let Some(copied) =
@@ -3493,14 +3562,11 @@ impl SoundRecorderApp {
                 self.palette.subtext1,
                 80.0,
             );
-            let name = Rect::new(
-                row.x + 104.0,
-                y + 1.0,
-                (row.w - 110.0).max(0.0),
-                MARKER_ROW_H - 4.0,
-            );
+            let name = marker_name_rect(row);
             match (&self.rename, chosen) {
-                (Some(input), true) => self.render_field(f, input, name),
+                (Some(input), true) => {
+                    self.render_field(f, input, name, self.hover == Some(Target::MarkerRow(i)));
+                }
                 _ => self.text(
                     f,
                     name.x,
@@ -3515,19 +3581,22 @@ impl SoundRecorderApp {
         }
     }
 
-    /// The marker name being written.
-    fn render_field(&self, f: &mut Frame<Target>, input: &TextInput, rect: Rect) {
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: self.palette.blue,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+    /// The marker name being written: the toolkit's field, in the theme's
+    /// shape (lane C, c-e-a-theme-can-shape-the-controls), with the
+    /// keyboard while it is up, lit while the pointer is on its row.
+    fn render_field(&self, f: &mut Frame<Target>, input: &TextInput, rect: Rect, hovered: bool) {
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered,
+                focused: true,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
+        );
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,
@@ -3855,9 +3924,24 @@ impl Default for SoundRecorderApp {
 // Entry point
 // ============================================================================
 
+/// Where a marker's name is drawn in its row -- and, while it is being
+/// written, its field.
+fn marker_name_rect(row: Rect) -> Rect {
+    Rect::new(
+        row.x + 104.0,
+        row.y + 1.0,
+        (row.w - 110.0).max(0.0),
+        MARKER_ROW_H - 4.0,
+    )
+}
+
 impl App for SoundRecorderApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4496,10 +4580,62 @@ mod tests {
     #[test]
     fn test_noise_gate_reset() {
         let mut ng = NoiseGate::new(0.01);
-        let mut samples = [20000i16];
+        let mut samples = [20000i16; 64];
         ng.process(&mut samples);
         assert!(ng.is_open);
         ng.reset();
+        assert!(!ng.is_open);
+        // Shut, not merely said to be: the next signal opens it from nothing.
+        let mut samples = [20000i16];
+        ng.process(&mut samples);
+        assert!(samples[0] < 1_000, "it was still open: {}", samples[0]);
+    }
+
+    /// **The gate opens over its attack, not in one sample**: a signal cut
+    /// in from silence at full level is a step, heard as a click.
+    #[test]
+    fn test_noise_gate_opens_over_its_attack() {
+        let mut ng = NoiseGate::new(0.01);
+        let mut samples = [20_000_i16; 128];
+        ng.process(&mut samples);
+        assert!(
+            samples[0] > 0 && samples[0] < 1_000,
+            "it opened at once: {}",
+            samples[0]
+        );
+        assert!(
+            samples.windows(2).all(|w| w[0] <= w[1]),
+            "it did not open steadily"
+        );
+        assert_eq!(samples[63], 20_000, "not fully open after its attack");
+        assert!(samples[64..].iter().all(|&s| s == 20_000));
+    }
+
+    /// **And shuts over the same time once its hold is over**, the tail of
+    /// a word passed whole through the hold and faded rather than cut.
+    #[test]
+    fn test_noise_gate_shuts_over_its_attack_after_its_hold() {
+        let mut ng = NoiseGate::new(0.01);
+        let mut loud = [20_000_i16; 64];
+        ng.process(&mut loud);
+        // Below the threshold (327), but not silence: the tail of a word.
+        let mut quiet = [200_i16; 4_800 + 128];
+        ng.process(&mut quiet);
+        assert!(
+            quiet[..4_800].iter().all(|&s| s == 200),
+            "the hold cut the tail"
+        );
+        let fade = &quiet[4_800..4_864];
+        assert!(
+            fade[0] > 150 && fade[0] < 200,
+            "it shut at once: {}",
+            fade[0]
+        );
+        assert!(
+            fade.windows(2).all(|w| w[0] >= w[1]),
+            "it did not shut steadily"
+        );
+        assert!(quiet[4_864..].iter().all(|&s| s == 0), "it did not shut");
         assert!(!ng.is_open);
     }
 
@@ -4764,6 +4900,69 @@ mod tests {
 
     use guitk::probe::{self, Probe};
 
+    /// The marker-name field is the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): marked at the user's focus width
+    /// while a name is written, lit while the pointer is on its row.
+    #[test]
+    fn the_marker_name_field_is_the_toolkits() {
+        let (_dir, mut app) = fixture("name-field");
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        app.handle_event(&key(Key::End));
+        app.handle_event(&key(Key::M));
+        app.handle_event(&key(Key::F2));
+        assert!(app.rename.is_some());
+        // The marker just put down, which is the one being named.
+        let chosen = app
+            .open
+            .as_ref()
+            .and_then(|o| o.chosen_marker)
+            .expect("a chosen marker");
+        let row = probe::rect_of(&app, Target::MarkerRow(chosen)).expect("the marker's row");
+        let field = marker_name_rect(row);
+        let draws = |app: &SoundRecorderApp, state: guitk::field::State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, field, state, width);
+            let frame = app.frame();
+            frame
+                .commands()
+                .windows(want.len())
+                .any(|w| w == want.as_slice())
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..guitk::field::State::default()
+        };
+        assert!(
+            draws(&app, keyed),
+            "the name being written is not marked at the user's width"
+        );
+        let (x, y) = row.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            draws(
+                &app,
+                guitk::field::State {
+                    hovered: true,
+                    ..keyed
+                }
+            ),
+            "the field is not lit with its row under the pointer"
+        );
+    }
+
     impl Probe for SoundRecorderApp {
         type Target = Target;
         type Outcome = EventResult;
@@ -4881,6 +5080,110 @@ mod tests {
         app.rescan();
         assert!(app.open_path(&a));
         (dir, app)
+    }
+
+    /// **A key held with Alt or the Windows key is not the recorder's, and
+    /// AltGr+S is not Ctrl+S**: each such chord is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+Space started a take,
+    /// Alt+Delete took a marker away, Alt+M put one down and Alt+[ cut the
+    /// recording; and AltGr+S, a Polish `ś`, saved the markers into the file.
+    ///
+    /// Each key is asserted as it is pressed: the cursor and the panel go
+    /// back and forth.
+    #[test]
+    fn a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let (_dir, mut app) = fixture("chords");
+        app.panel = Panel::Recording;
+        // The marker chosen, the cursor past it, and something to save.
+        if let Some(open) = app.open.as_mut() {
+            open.choose_marker(0);
+            open.cursor = 4_000;
+            open.markers_changed = true;
+        }
+        let state = |app: &SoundRecorderApp| {
+            (
+                app.open.as_ref().map(|o| {
+                    (
+                        o.cursor,
+                        o.markers.len(),
+                        o.markers_changed,
+                        o.kept.clone(),
+                        o.chosen_marker,
+                    )
+                }),
+                (app.panel, app.state, app.show_help, app.rename.is_some()),
+                (app.chosen_entry.clone(), app.picker.is_open()),
+                app.status_line.clone(),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Space,
+                Key::Delete,
+                Key::M,
+                Key::LeftBracket,
+                Key::RightBracket,
+                Key::Left,
+                Key::Home,
+                Key::Up,
+                Key::Tab,
+                Key::F2,
+                Key::F5,
+                Key::P,
+                Key::S,
+                Key::O,
+                Key::A,
+                Key::F1,
+            ] {
+                assert_eq!(
+                    app.handle_event(&chord(k, m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the recorder");
+            }
+        }
+
+        // The list of keys goes on a plain Escape or Enter only.
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help, "control: F1 raises the list");
+        app.handle_event(&chord(Key::Escape, Modifiers::alt()));
+        app.handle_event(&chord(Key::Enter, Modifiers::super_key()));
+        assert!(app.show_help, "a chorded Escape or Enter put the list away");
+        app.handle_event(&key(Key::Escape));
+
+        // A marker's name: Enter and Escape plain.
+        app.handle_event(&key(Key::F2));
+        assert!(app.rename.is_some(), "control: F2 names the marker");
+        app.handle_event(&chord(Key::Escape, Modifiers::alt()));
+        app.handle_event(&chord(Key::Enter, Modifiers::super_key()));
+        assert!(app.rename.is_some(), "a chorded Escape or Enter ended it");
+        app.handle_event(&key(Key::Escape));
+        assert!(app.rename.is_none(), "control: Escape ends it");
+
+        // Ctrl's chords still answer: Ctrl+Left goes to the marker before the
+        // cursor -- to it, not a tenth of a second back as Left does.
+        assert_eq!(app.open.as_ref().map(|o| o.cursor), Some(4_000));
+        app.handle_event(&chord(Key::Left, Modifiers::ctrl()));
+        assert_eq!(
+            app.open.as_ref().map(|o| o.cursor),
+            Some(2_000),
+            "control: Ctrl+Left goes to the marker"
+        );
     }
 
     /// The take model's clock and the free space it cannot measure.
@@ -5050,7 +5353,8 @@ mod tests {
             std::fs::write(path, b"somebody's").unwrap();
         }
         app.handle_event(&key(Key::Space));
-        // Loud enough to open the noise gate, which zeroes what is quieter.
+        // Loud enough to open the noise gate, which zeroes what is quieter
+        // and fades a take in over its attack.
         let samples: Vec<i16> = (0..4_410).map(|i| 1_000 + (i % 300) as i16).collect();
         app.process_samples(&samples);
         app.handle_event(&key(Key::M));
@@ -5075,9 +5379,21 @@ mod tests {
             .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
-        let mut both = samples.clone();
-        both.extend_from_slice(&samples);
-        assert_eq!(stored, both, "the take was not stored as captured");
+        let mut captured = samples.clone();
+        captured.extend_from_slice(&samples);
+        // What the gate let through, as a fresh gate lets it: the take
+        // fades in over the attack, and is stored as captured after it.
+        let mut through = captured.clone();
+        NoiseGate::new(app.noise_gate.threshold).process(&mut through);
+        assert_eq!(
+            stored, through,
+            "the take was not stored as the gate passed it"
+        );
+        assert_eq!(
+            stored[64..],
+            captured[64..],
+            "past the gate's attack the take is not as captured"
+        );
         let cues = wavpcm::cues(&bytes).unwrap();
         assert_eq!(
             cues,

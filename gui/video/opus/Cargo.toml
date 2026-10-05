@@ -1,0 +1,16 @@
+[package]
+name = "opus"
+version = "0.1.0"
+edition = "2024"
+description = "An Opus audio decoder: libopus's fixed-point decoder, ported to Rust and held to libopus sample for sample."
+# A derivative of libopus: its BSD licence (and the royalty-free patent
+# licences it names) is in `licenses/`, and every file translated from it says
+# which of libopus's files it came from.
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

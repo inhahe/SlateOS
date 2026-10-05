@@ -80,7 +80,8 @@ const ECHO: u32 = 0o10;
 // a second copy of it with `target_os = "linux"`, whose syscalls all return
 // `-38` and whose `errno` is a different cell — see
 // `scripts/check-one-libc-per-process.py`, which refuses that dependency. This
-// is the same binding `userspace/stty` uses, for the same reason.
+// is the route `libcall::termios` takes for coreutils' `stty`, for the same
+// reason.
 #[cfg(unix)]
 unsafe extern "C" {
     /// posix libc `ioctl` symbol — dispatches terminal control requests.

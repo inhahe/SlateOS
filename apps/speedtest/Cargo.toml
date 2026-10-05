@@ -12,6 +12,9 @@ guitk = { path = "../../gui/toolkit" }
 # worse here than in most apps — nothing delivered `Event::Tick`, so a test
 # started by a user could never advance a single frame.
 oswindow = { path = "../../gui/window" }
+# `is_plain` and `is_ctrl_chord`: a key held with Alt or the Windows key is not
+# the window's, and AltGr+Q -- a German `@` -- is not Ctrl+Q.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `appearance::palette_check`.

@@ -205,6 +205,24 @@ MUTATIONS = [
         "                self.open_picker(PickerFor::Folder);",
         ["where_outputs_go_is_chosen_by_key_too"],
     ),
+    (
+        'a chord raises the keys',
+        '        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {',
+        '        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {',
+        ['a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers) {',
+        '        if key.modifiers.ctrl {',
+        ['a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a key held with Alt or the Windows key is the window's",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl'],
+    ),
 ]
 
 ENGINE_MUTATIONS = [

@@ -84,8 +84,8 @@ MUTATIONS = [
     ),
     (
         "the program's window keeps nothing",
-        "        self.keeps_settings = true;\n        let (rules, problems)",
-        "        self.keeps_settings = false;\n        let (rules, problems)",
+        "        self.keeps_settings = true;\n        self.read_settings();",
+        "        self.keeps_settings = false;\n        self.read_settings();",
         [KEPT],
     ),
     (
@@ -197,20 +197,20 @@ MUTATIONS = [
     ),
     (
         "Ctrl+R is typed",
-        "                Key::R if key.modifiers.ctrl => {",
+        "                Key::R if textline::is_ctrl_chord(key.modifiers) => {",
         "                Key::R if false => {",
         [DOTS],
     ),
     (
         "a control character is typed",
-        "                        || key.text.chars().any(char::is_control)\n",
-        "",
+        "                    if !textline::types_into_field(key) {",
+        "                    if key.text.is_empty() || textline::is_command(key.modifiers) {",
         [CONTROL],
     ),
     (
         "the analyser draws the password in the clear",
-        "            let whole = if self.analyzer_revealed {",
-        "            let whole = if true {",
+        "        let shown = if self.analyzer_revealed {",
+        "        let shown = if true {",
         [DOTS],
     ),
     (
@@ -243,7 +243,131 @@ MUTATIONS = [
         "            let rules = if false {",
         [STATUS],
     ),
+    (
+        "AltGr+E opens the export dialog",
+        "        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::E {",
+        "        if key.modifiers.ctrl && key.key == Key::E {",
+        ["altgr_types_into_the_analyser_and_runs_no_chord"],
+    ),
+    (
+        "AltGr+R reveals the password",
+        "                Key::R if textline::is_ctrl_chord(key.modifiers) => {",
+        "                Key::R if key.modifiers.ctrl => {",
+        ["altgr_types_into_the_analyser_and_runs_no_chord"],
+    ),
+    (
+        "the analyser refuses what AltGr types",
+        "                    if !textline::types_into_field(key) {",
+        "                    if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["altgr_types_into_the_analyser_and_runs_no_chord"],
+    ),
+    (
+        "the analyser types a command's letter",
+        "                    if !textline::types_into_field(key) {",
+        "                    if !key.types_text() {",
+        ["altgr_types_into_the_analyser_and_runs_no_chord"],
+    ),
+    (
+        "a key held with Ctrl, Alt or the Windows key is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        "        // On the Rules tab",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with Ctrl is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with Alt is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        "        if key.modifiers.ctrl || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        "        if key.modifiers.ctrl || key.modifiers.alt {\n"
+        "            return EventResult::Ignored;\n        }\n"
+        "        // On the Rules tab",
+        ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        'an announced change is not read',
+        '            && group.file_name() == CONFIG_NAME\n        {\n            return if self.reread_settings() {',
+        '            && false\n        {\n            return if self.reread_settings() {',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            && group.file_name() == CONFIG_NAME\n        {\n            return if self.reread_settings() {',
+        '            && !group.file_name().is_empty()\n        {\n            return if self.reread_settings() {',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a window that keeps no settings reads them',
+        '        if !self.keeps_settings {\n            return false;\n        }\n        let before = (self.policy.clone(), self.settings_problems.clone());',
+        '        let before = (self.policy.clone(), self.settings_problems.clone());',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != (self.policy.clone(), self.settings_problems.clone())',
+        '        false',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed something when it did not',
+        '        before != (self.policy.clone(), self.settings_problems.clone())',
+        '        true',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+]
+
+# The password box is the toolkit's field (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+BOX = "the_password_box_is_the_toolkits_field"
+
+MUTATIONS += [
+    (
+        "the password box never has the keyboard",
+        "            focused: self.active_tab == ActiveTab::Analyzer\n",
+        "            focused: false && self.active_tab == ActiveTab::Analyzer\n",
+        [BOX],
+    ),
+    (
+        "the password box keeps its mark under the list of keys",
+        "                && !self.show_help\n                && self.dialog.is_none(),\n",
+        "                && self.dialog.is_none(),\n",
+        [BOX],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [BOX],
+    ),
+    (
+        "the caret is at the start of the password",
+        "                cursor: text::TextCursor::from(shown.len()),\n",
+        "                cursor: text::TextCursor::from(0),\n",
+        [BOX],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "passwordgen", timeout=900))
+    # Substrings of the mutation names run only those; none runs them all.
+    sys.exit(sweep(SRC, MUTATIONS, "passwordgen", timeout=900, only=sys.argv[1:] or None))

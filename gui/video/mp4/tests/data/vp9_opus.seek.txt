@@ -1,0 +1,36 @@
+# vp9_opus.mp4: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 1 -312 -312 K__ 312
+packet 0 0 0 K__ 0
+packet 1 648 648 K__ 0
+packet 1 1608 1608 K__ 0
+packet 1 2568 2568 K__ 0
+packet 1 3528 3528 K__ 0
+seek 250
+packet 1 -312 -312 K__ 312
+packet 0 0 0 K__ 0
+packet 1 648 648 K__ 0
+packet 1 1608 1608 K__ 0
+packet 1 2568 2568 K__ 0
+packet 1 3528 3528 K__ 0
+seek 550
+packet 1 22728 22728 K__ 0
+packet 1 23688 23688 K__ 0
+packet 0 5120 5120 K__ 0
+packet 1 24648 24648 K__ 0
+packet 1 25608 25608 K__ 0
+packet 1 26568 26568 K__ 0
+seek 900
+packet 1 22728 22728 K__ 0
+packet 1 23688 23688 K__ 0
+packet 0 5120 5120 K__ 0
+packet 1 24648 24648 K__ 0
+packet 1 25608 25608 K__ 0
+packet 1 26568 26568 K__ 0
+seek 99000
+packet 1 46728 46728 K__ 0
+packet 1 47688 47688 K__ 0
+packet 0 10240 10240 K__ 0
+packet 1 48648 48648 K__ 0
+packet 1 49608 49608 K__ 0
+packet 1 50568 50568 K__ 0

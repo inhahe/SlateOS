@@ -747,6 +747,12 @@ MUTATIONS += [
         "            // grey is 2.3:1 on a light band.\n            self.palette.overlay0,",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        'AltGr and a digit deals a new puzzle',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {',
+        '        if key.modifiers.ctrl {\n            return match key.key {',
+        ['altgr_or_the_windows_key_and_a_digit_is_not_a_difficulty'],
+    ),
 ]
 
 if __name__ == "__main__":

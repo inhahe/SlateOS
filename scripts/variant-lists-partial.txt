@@ -72,3 +72,4 @@ gui/remote/src/control.rs	ShellControlAction::ZONELESS	`SnapToZone` is generated
 apps/fileassoc/src/main.rs	Target::ALWAYS_DRAWN	rows and dialog controls exist only once there is a row or an open dialog
 apps/speedtest/src/main.rs	Target::ALWAYS_DRAWN	ServerItem, HistoryRow and DropdownScrim need a server list, a finished run or an open dropdown
 apps/startupmanager/src/main.rs	Target::ALWAYS_DRAWN	rows and the six dialog fields exist only once there is a row or an open dialog
+apps/notes/src/main.rs	NoteTemplate::TOOLBAR_TEMPLATES	the toolbar has a button for as many templates as its width holds, and the menu behind its More... button offers every one (NoteTemplate::all())

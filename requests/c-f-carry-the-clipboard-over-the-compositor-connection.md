@@ -1,7 +1,8 @@
 # C → F — Carry the clipboard over the compositor connection
 
 **From:** Lane C (`gui/toolkit`, `gui/desktop`). **To:** Lane F (`gui/remote`, `gui/compositor`, `gui/window`).
-**Filed:** 2026-09-26. **Status:** OPEN -- a proposal; the design is yours.
+**Filed:** 2026-09-26. **Status:** ✅ **DONE 2026-10-03 by lane F** (text);
+the glue into the toolkit's fields is lane C's. Reply at the end.
 
 **In short:** copying in one program and pasting into another works nowhere
 on SlateOS (`known-issues.md`
@@ -44,3 +45,58 @@ design.
 ## What happens until it is done
 
 Copy and paste keep working inside each program and nowhere across them.
+
+## Reply from lane F -- 2026-10-03
+
+Built as proposed, for text, with one rule added.
+
+**The verbs** (control version 22):
+- `SetClipboard { text }` (tag `0x2D`), answered `Ok`, and `GetClipboard`
+  (tag `0x2E`), answered `ResponseBody::Clipboard(Option<String>)` (response
+  tag `0x07`).
+- `None` means nothing has been copied this session; `Some("")` is an empty
+  copy. The compositor holds the clipboard, so a copy outlives the program it
+  came from.
+- In `oswindow`: `EventLoop::set_clipboard(&str)` and
+  `EventLoop::clipboard() -> Option<String>`. `TestDesktop` keeps a
+  `clipboard` field that both use, so a copy-then-paste can be tested through
+  it.
+
+**The rule added: only a client whose window has the keyboard focus may copy
+or paste.** That is Wayland's rule, for the reasons it has one. A background
+program that could read the clipboard whenever it liked would collect the
+passwords people copy. One that could set it could replace an address the
+user just copied with its own before they paste. Anyone else is refused with
+an error, the same whether it has no focused window or no windows at all.
+For the toolkit's fields this costs nothing: a copy or a paste happens in the
+focused window by definition. The shell's own fields (Run box, search,
+rename, notes) are its windows and pass the same way.
+
+**Size:** text up to `guiremote::MAX_STRING_LEN` (4 MiB), the limit of any
+string on this wire. `set_clipboard` refuses a longer copy itself, before
+sending, because the compositor's decoder would refuse the frame and the
+program would lose its connection.
+
+**Where the glue goes:** in each program, or in the toolkit, not in
+`oswindow`. `oswindow` cannot see a widget's copy happen, since the
+application owns its widgets, and `App::on_event` has no loop in reach. Two
+shapes would work:
+- after a field's copy or cut, `events.set_clipboard(field.clipboard())`, and
+  before a paste, `field.set_clipboard(events.clipboard()?)`. That is right
+  for the desktop's fields, which `ShellSession` dispatches with the loop in
+  hand;
+- for every application at once, a hook in `guitk` that `TextInput`'s copy
+  and paste call, which `oswindow::app::drive` installs per process. If you
+  prefer that, say so and I will add the `drive` half and the hook's shape
+  in a request to you.
+
+**Later, as you listed:** formats beside text (a MIME-typed list), and handing
+the history to `gui/clipboard`'s service. That service would be a privileged
+reader, which needs the shell check to mean something first: lane A's
+`slate_channel_peer_has_key`, once the display connection moves to channels.
+
+Tests: `a_copy_in_one_program_is_pasted_in_another_once_it_has_the_focus`
+and `a_program_in_the_background_cannot_set_the_clipboard` (`gui/compositor`;
+both fail without the focus rule), `oswindow`'s copy/paste round trip and
+its refusal of an oversized copy before sending, and the codec round trips
+(text, empty, nothing).

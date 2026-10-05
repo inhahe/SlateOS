@@ -18,17 +18,12 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![allow(dead_code, clippy::too_many_arguments)]
-
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
-#[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-#[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -76,7 +71,6 @@ const BUTTON_HEIGHT: f32 = 34.0;
 const BUTTON_SPACING: f32 = 8.0;
 const PADDING: f32 = 12.0;
 const SECTION_SPACING: f32 = 16.0;
-const ICON_SIZE: f32 = 16.0;
 const CORNER_RADIUS: f32 = 6.0;
 const SMALL_RADIUS: f32 = 4.0;
 
@@ -1953,19 +1947,32 @@ impl ScreenRecorderApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Every key here but Ctrl's four chords is a key taken plain, nothing
+        // held but Shift. A chord with Alt or the Windows key is the window's
+        // or the desktop's and arrives carrying its key: Alt+F9 started a
+        // recording and Alt+Delete deleted a clip.
+        let plain = textline::is_plain(key.modifiers);
         // Before the match below, so raising and dismissing the card are the
         // same decision. F9 starts a recording and Delete removes a clip from
         // the history, and neither should happen from behind a list somebody
         // is reading.
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
+        }
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+S
+        // -- a Polish `ś` -- switched the system audio off.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return self.handle_ctrl_chord(key);
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
 
         // The recording controls, which the module doc lists as "start / stop /
@@ -2021,6 +2028,14 @@ impl ScreenRecorderApp {
                     ActiveView::Trim => ActiveView::Settings,
                     ActiveView::Settings => ActiveView::Record,
                 };
+                EventResult::Consumed
+            }
+            // The microphone's volume, in every view as the list of keys says:
+            // before the history's arrows below, which took Shift+Up there.
+            Key::Up | Key::Down if key.modifiers.shift => {
+                let delta = if key.key == Key::Up { 0.1 } else { -0.1 };
+                let mic = self.audio.microphone_volume + delta;
+                self.audio.set_microphone_volume(mic);
                 EventResult::Consumed
             }
             // Move through the history, and open the trim editor on what is
@@ -2092,8 +2107,17 @@ impl ScreenRecorderApp {
                 self.region_selector.activate();
                 EventResult::Consumed
             }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Ctrl's chords: the frame rate, the two audio switches and the system
+    /// volume -- in every view, as the list of keys says. In the history the
+    /// arrows' arm came first and took Ctrl+Up for the selection.
+    fn handle_ctrl_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
             // Frame rate, through the presets the program already knows.
-            Key::F if key.modifiers.ctrl => {
+            Key::F => {
                 self.fps_preset = match self.fps_preset {
                     FpsPreset::Fps15 => FpsPreset::Fps24,
                     FpsPreset::Fps24 => FpsPreset::Fps30,
@@ -2104,24 +2128,18 @@ impl ScreenRecorderApp {
             }
             // Audio. `set_system_volume` and `set_microphone_volume` clamp,
             // and neither had a caller.
-            Key::S if key.modifiers.ctrl => {
+            Key::S => {
                 self.audio.system_audio_enabled = !self.audio.system_audio_enabled;
                 EventResult::Consumed
             }
-            Key::M if key.modifiers.ctrl => {
+            Key::M => {
                 self.audio.microphone_enabled = !self.audio.microphone_enabled;
                 EventResult::Consumed
             }
-            Key::Up | Key::Down if key.modifiers.ctrl => {
+            Key::Up | Key::Down => {
                 let delta = if key.key == Key::Up { 0.1 } else { -0.1 };
                 let system = self.audio.system_volume + delta;
                 self.audio.set_system_volume(system);
-                EventResult::Consumed
-            }
-            Key::Up | Key::Down if key.modifiers.shift => {
-                let delta = if key.key == Key::Up { 0.1 } else { -0.1 };
-                let mic = self.audio.microphone_volume + delta;
-                self.audio.set_microphone_volume(mic);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -2162,6 +2180,20 @@ impl ScreenRecorderApp {
 
     /// Handle a mouse event.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything: a press with any button puts it away and does
+        // nothing else -- it used to open the view or begin the region drag
+        // under it. A move or a release is not a press, and passes, so a drag
+        // begun before the list came up still ends where it is let go.
+        if self.show_help
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         // The sidebar: a click opens the view, and the pointer over one
         // lights it. It was drawn with an active row and a hover state and
         // answered neither -- the views were reachable only by their keys,
@@ -4580,6 +4612,77 @@ mod tests {
         assert_eq!(app.capture_mode, CaptureMode::CustomRegion);
     }
 
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else.** It opened the view under the list, or began a region drag
+    /// there. A drag begun before the list came up still ends where it is let
+    /// go. The control is the same press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = ScreenRecorderApp::new();
+        let views = ActiveView::all();
+        let (i, &view) = views
+            .iter()
+            .enumerate()
+            .find(|(_, v)| **v != app.active_view)
+            .expect("another view");
+        #[allow(clippy::cast_precision_loss)]
+        let y = SIDEBAR_NAV_TOP + i as f32 * SIDEBAR_ITEM_H + SIDEBAR_ITEM_H / 2.0;
+        let shown = app.active_view;
+
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), 40.0, y)),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.active_view, shown,
+            "the press opened a view under the list"
+        );
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right), 40.0, y));
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The region selector, armed: a press under the list begins no drag.
+        app.handle_event(&press(Key::Num3));
+        assert!(app.region_selector.active, "3 should arm the selector");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            100.0,
+            80.0,
+        ));
+        assert!(!app.region_selector.dragging, "a drag began under the list");
+        // But one begun before the list came up ends where it is let go.
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            100.0,
+            80.0,
+        ));
+        assert!(app.region_selector.dragging);
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(MouseEventKind::Move, 300.0, 260.0));
+        app.handle_event(&mouse(
+            MouseEventKind::Release(MouseButton::Left),
+            300.0,
+            260.0,
+        ));
+        assert!(
+            !app.region_selector.dragging,
+            "the release did not end the drag"
+        );
+        assert!(app.selected_region.is_some(), "the drag set no region");
+        app.handle_event(&press(Key::Escape));
+
+        // The control.
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left), 40.0, y));
+        assert_eq!(
+            app.active_view, view,
+            "control: the press opens nothing even with the list down"
+        );
+    }
+
     #[test]
     fn escape_abandons_a_drag_without_setting_a_region() {
         let mut app = ScreenRecorderApp::new();
@@ -4754,6 +4857,118 @@ mod tests {
             app.handle_event(&key_ev(Key::Down, false, true));
         }
         assert!(app.audio.microphone_volume.abs() < 0.001);
+    }
+
+    /// **A key held with Alt or the Windows key is not the recorder's, and
+    /// AltGr+S is not Ctrl+S**: each such chord is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+F9 started a recording,
+    /// Alt+Delete deleted a clip and Alt+Escape put the list of keys away;
+    /// and AltGr+S, a Polish `ś`, switched the system audio off.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round.
+    #[test]
+    fn a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let mut app = ScreenRecorderApp::new();
+        for name in ["a", "b"] {
+            app.history.add(HistoryEntry::new(
+                0,
+                name.into(),
+                PathBuf::new(),
+                10,
+                100,
+                30,
+                30,
+                1920,
+                1080,
+            ));
+        }
+        app.active_view = ActiveView::History;
+        app.handle_event(&key(Key::Down, Modifiers::NONE));
+        let state = |app: &ScreenRecorderApp| {
+            (
+                (
+                    app.recording_state,
+                    app.capture_mode,
+                    app.show_help,
+                    app.fps_preset,
+                ),
+                (
+                    app.audio.system_audio_enabled,
+                    app.audio.microphone_enabled,
+                    app.audio.system_volume.to_bits(),
+                    app.audio.microphone_volume.to_bits(),
+                ),
+                (app.active_view, app.settings_tab, app.trim.is_some()),
+                app.history
+                    .entries
+                    .iter()
+                    .map(|e| (e.id, e.selected))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::F9,
+                Key::F10,
+                Key::Num1,
+                Key::Num3,
+                Key::Tab,
+                Key::Up,
+                Key::Down,
+                Key::Enter,
+                Key::Delete,
+                Key::F,
+                Key::S,
+                Key::M,
+                Key::F1,
+                Key::Escape,
+            ] {
+                assert_eq!(
+                    app.handle_event(&key(k, m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the recorder");
+            }
+        }
+
+        // The list of keys goes on a plain Escape only.
+        app.handle_event(&key(Key::F1, Modifiers::NONE));
+        assert!(app.show_help, "control: F1 raises the list");
+        app.handle_event(&key(Key::Escape, Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put the list away");
+        app.handle_event(&key(Key::Escape, Modifiers::NONE));
+        assert!(!app.show_help, "control: Escape puts it away");
+
+        // The volumes answer in the history too, as the list of keys says,
+        // and the selection stays where it was.
+        let selected = state(&app).3;
+        let (system, mic) = (app.audio.system_volume, app.audio.microphone_volume);
+        app.handle_event(&key_ev(Key::Down, true, false));
+        assert!(
+            app.audio.system_volume < system,
+            "Ctrl+Down left the volume"
+        );
+        app.handle_event(&key_ev(Key::Down, false, true));
+        assert!(
+            app.audio.microphone_volume < mic,
+            "Shift+Down left the volume"
+        );
+        assert_eq!(state(&app).3, selected, "a volume key moved the selection");
     }
 
     // -- the window --

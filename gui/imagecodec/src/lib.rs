@@ -128,7 +128,8 @@
 //! # Where the code comes from
 //!
 //! Most of the decoders are ports of the libraries the browsers and Pillow
-//! run -- libjpeg-turbo, libtiff, libwebp, libavif and libyuv, Chromium's and
+//! run -- libjpeg-turbo, libtiff, libwebp and libavif (with libyuv's
+//! arithmetic, in its own crate, `gui/video/yuv`), Chromium's and
 //! image-rs's BMP and icon readers, Skia's EXIF reader -- because producing exactly their
 //! pixels is the point. Their notices travel with the code: each ported file
 //! names what it was translated or adapted from, and `licenses/` holds the

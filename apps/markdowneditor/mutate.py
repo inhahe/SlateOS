@@ -23,6 +23,11 @@ pointer:
     it, so Bold, Italic and Link could never wrap a selection;
   * and undoing a delete that spanned lines put the newlines *inside* one line.
 
+And since 2026-09-28 (C-Q24, §1416): the history is a tree -- an edit made
+after undoing starts a branch and the undone one is kept, reached with Alt+Z
+and Alt+Shift+Z -- Ctrl+F4 closes the document, and AltGr, which arrives as
+Ctrl+Alt, types its letter instead of being taken for a chord or dropped.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -194,7 +199,7 @@ MUTATIONS = [
     # -- the status bar and the dialogs ----------------------------------------
     (
         "the auto-save label is not a switch",
-        "            Target::Autosave => self.autosave_enabled = !self.autosave_enabled,",
+        "            Target::Autosave => self.set_autosave(!self.autosave_enabled),",
         "            Target::Autosave => {}",
         ["the_status_bar_switches_the_view_and_auto_save"],
     ),
@@ -290,6 +295,110 @@ MUTATIONS = [
         "        if !deleted.is_empty() {\n            self.push_undo(EditAction::Delete {\n"
         "                line: start.0,\n                col: raw.1,",
         ["a_selection_off_a_boundary_undoes_in_place"],
+    ),
+    # -- the history as a tree, and the keys (C-Q24, §1416) ----------------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(action) => self.apply_undo(&action),",
+        "                Travel::Undo(action) => self.apply_redo(&action),",
+        ["an_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.history.earlier();",
+        "        let steps = self.history.later();",
+        ["an_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "Alt+Z is not a key",
+        "    if modifiers.alt && !modifiers.ctrl && matches!(key, Key::Char('z' | 'Z')) {",
+        "    if false && modifiers.alt && !modifiers.ctrl && matches!(key, Key::Char('z' | 'Z')) {",
+        ["an_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "            doc.later()",
+        "            doc.earlier()",
+        ["an_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "the ends of the history are not said",
+        "            app.file_status = Some(FileNote::Done(String::from(if modifiers.shift {",
+        "            let _ = Some(FileNote::Done(String::from(if modifiers.shift {",
+        ["the_ends_of_the_history_are_said"],
+    ),
+    (
+        "a reload keeps the old buffer's history",
+        "        self.history.clear();",
+        "",
+        ["a_reload_starts_the_history_again"],
+    ),
+    (
+        "Ctrl+F4 closes nothing",
+        "        Key::Char('w' | 'W') | Key::Function(4) => app.request_close_tab(app.active_doc()),",
+        "        Key::Char('w' | 'W') => app.request_close_tab(app.active_doc()),",
+        ["ctrl_f4_closes_the_document"],
+    ),
+    (
+        "AltGr is taken for a chord",
+        "    let altgr = ev.modifiers.ctrl && ev.modifiers.alt && ev.types_text();",
+        "    let altgr = false;",
+        ["an_altgr_letter_is_typed"],
+    ),
+    (
+        "a Ctrl+Alt chord that types nothing is taken for AltGr",
+        "    let altgr = ev.modifiers.ctrl && ev.modifiers.alt && ev.types_text();",
+        "    let altgr = ev.modifiers.ctrl && ev.modifiers.alt;",
+        ["an_altgr_letter_is_typed"],
+    ),
+    (
+        'an announced change is not read',
+        '            GEvent::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            GEvent::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            GEvent::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            GEvent::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a window that keeps no settings reads them',
+        '        if !self.keeps_settings {\n            return false;\n        }\n        let on = settingsfile::load(CONFIG_NAME)',
+        '        let on = settingsfile::load(CONFIG_NAME)',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a deleted file keeps auto-save as it was',
+        '            .unwrap_or(AUTOSAVE_BY_DEFAULT);',
+        '            .unwrap_or(self.autosave_enabled);',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a change read is not drawn',
+        '                if self.reread_settings() {\n                    Response::Redraw',
+        '                if self.reread_settings() {\n                    Response::Idle',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    # -- the find panel's boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'the find box under the pointer is not lit',
+        '        hover == Some(Target::FindReplacement),\n',
+        '        false,\n',
+        ['the_find_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the find boxes take the toolkit\'s focus width, not the user\'s',
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_find_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the find box the keys type into is not marked',
+        '        &state.query,\n        !state.focus_replacement,\n',
+        '        &state.query,\n        false,\n',
+        ['the_find_boxes_are_the_toolkits_fields'],
     ),
 ]
 

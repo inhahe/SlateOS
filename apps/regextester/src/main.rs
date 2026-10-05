@@ -1303,7 +1303,7 @@ fn explain_regex(pattern: &str) -> Vec<String> {
 // Common regex patterns library
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct PatternEntry {
     name: String,
     pattern: String,
@@ -1942,6 +1942,9 @@ struct App {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl App {
@@ -1949,6 +1952,7 @@ impl App {
         Self {
             show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             pattern: TextInput::new(),
@@ -2154,6 +2158,30 @@ impl App {
                 .retain(|e| !(e.category == PatternCategory::Custom && e.name == name));
             self.library.push(custom_entry(&name, &pattern, flags));
         }
+    }
+
+    /// Read the user's patterns again after the desktop said
+    /// `regextester.yaml` changed -- a pattern saved or deleted in another
+    /// window, or a hand edit (§1418, §1434). The user's entries are replaced
+    /// by the file's; the built-in ones stay. The selection follows its entry
+    /// by name, and is let go if the entry went. Whether anything changed.
+    fn reread_library(&mut self) -> bool {
+        let selected = self
+            .selected_library_entry
+            .and_then(|i| self.library.get(i))
+            .map(|e| (e.category, e.name.clone()));
+        let before = self.library.clone();
+        self.library
+            .retain(|e| e.category != PatternCategory::Custom);
+        self.load_library(&settingsfile::load(CONFIG_NAME));
+        self.selected_library_entry = selected.and_then(|(category, name)| {
+            self.library
+                .iter()
+                .position(|e| e.category == category && e.name == name)
+        });
+        let shown = self.visible_library().len();
+        self.library_scroll = self.library_scroll.min(shown.saturating_sub(1));
+        before != self.library
     }
 
     /// The entries the chips leave, with their indices in the library.
@@ -2673,6 +2701,9 @@ impl App {
             l.pattern,
             &self.pattern,
             ActiveField::Pattern,
+            // A pattern that does not compile: red, as the error under it
+            // says -- while it is being typed, which is when it is fixed.
+            self.compile_error.is_some(),
             Target::PatternField,
         );
 
@@ -2707,6 +2738,7 @@ impl App {
                 replace,
                 &self.replace,
                 ActiveField::Replace,
+                false,
                 Target::ReplaceField,
             );
             // The replacement itself. `apply_replacement` has produced this on
@@ -2727,7 +2759,9 @@ impl App {
     }
 
     /// A labelled one-line field, drawn with the toolkit's single-line editor
-    /// so its caret, selection and sideways scroll are every other field's.
+    /// so its caret, selection and sideways scroll are every other field's,
+    /// in the toolkit's box -- red when what is in it is `invalid`.
+    #[allow(clippy::too_many_arguments)] // one field's whole description
     fn draw_field(
         &self,
         f: &mut Frame<Target>,
@@ -2735,6 +2769,7 @@ impl App {
         rect: Rect,
         input: &TextInput,
         field: ActiveField,
+        invalid: bool,
         target: Target,
     ) {
         let focused = self.active_tab == ActiveTab::Tester
@@ -2750,21 +2785,7 @@ impl App {
             max_width: Some(70.0),
             overflow: TextOverflow::Ellipsis,
         });
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
-            },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.draw_box(f, rect, focused, invalid, target);
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,
@@ -2795,6 +2816,32 @@ impl App {
         );
         f.extend(tree.commands);
         f.hit(target, rect);
+    }
+
+    /// A box text is typed into: the toolkit's field, in the theme's shape
+    /// (lane C, c-e-a-theme-can-shape-the-controls) -- the well, its edge,
+    /// red for a value that is wrong, lit under the pointer, and the focus
+    /// mark at the user's width while it has the keyboard.
+    fn draw_box(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        focused: bool,
+        invalid: bool,
+        target: Target,
+    ) {
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(target),
+                focused,
+                disabled: false,
+                invalid,
+            },
+            self.focus_ring_width,
+        );
     }
 
     /// The header every text box here has: a strip with its label, and a
@@ -2847,34 +2894,9 @@ impl App {
             "Test Input:",
             &format!("{} lines", self.input.line_count()),
         );
+        // The box the text is typed into, under the header that labels it.
         let body = l.input_body();
-        self.palette.push_surface_radii(
-            f,
-            body.x,
-            body.y,
-            body.w,
-            body.h,
-            CornerRadii {
-                top_left: 0.0,
-                top_right: 0.0,
-                bottom_left: 4.0,
-                bottom_right: 4.0,
-            },
-            Surface::Card,
-        );
-        f.push(RenderCommand::StrokeRect {
-            x: l.input.x,
-            y: l.input.y,
-            width: l.input.w,
-            height: l.input.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
-            },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.draw_box(f, body, focused, false, Target::InputArea);
         f.hit(Target::InputArea, body);
 
         let area = l.input_text();
@@ -3702,17 +3724,9 @@ impl App {
             overflow: TextOverflow::Ellipsis,
         });
         let field = Rect::new(card.x + 16.0, card.y + 44.0, (card.w - 32.0).max(0.0), 32.0);
-        self.palette
-            .push_surface(f, field.x, field.y, field.w, field.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: field.x,
-            y: field.y,
-            width: field.w,
-            height: field.h,
-            color: self.palette.blue,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        // It has the keyboard while the dialog is up; red while the name in
+        // it is one the library refused, as the line under it says.
+        self.draw_box(f, field, true, self.save_error.is_some(), Target::SaveName);
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,
@@ -3778,6 +3792,12 @@ impl App {
             }
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            // A pattern saved or deleted in another window, and the desktop
+            // says so: this window's library follows. Read at startup only,
+            // two windows each kept their own list.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                self.reread_library()
+            }
             _ => false,
         }
     }
@@ -3788,18 +3808,30 @@ impl App {
     /// tester rather than a viewer: the pattern is recompiled on every edit, so
     /// the match list under it follows the keystroke.
     fn handle_key(&mut self, key: &KeyEvent) -> bool {
-        if key.key == Key::F1 {
+        // The named keys are taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Delete deleted a saved pattern.
+        // The fields know a command from typing themselves.
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return true;
         }
-        if key.key == Key::Escape && self.show_help {
-            self.show_help = false;
-            return true;
+        // Modal while it is up: a plain Escape puts the list away and no other
+        // key reaches what it covers. It took only those two, so a letter was
+        // typed into the pattern under it, Tab moved between the fields and
+        // F3 stepped through the matches behind it.
+        if self.show_help {
+            if key.key == Key::Escape && plain {
+                self.show_help = false;
+                return true;
+            }
+            return false;
         }
         if self.save_name.is_some() {
             return self.handle_save_key(key);
         }
-        if key.key == Key::F3 {
+        if key.key == Key::F3 && plain {
             if key.modifiers.shift {
                 self.prev_match();
             } else {
@@ -3807,13 +3839,17 @@ impl App {
             }
             return !self.matches.is_empty();
         }
-        if key.modifiers.ctrl
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt and types
+        // into the field -- AltGr+I toggled case-insensitivity instead.
+        if textline::is_ctrl_chord(key.modifiers)
             && let Some(done) = self.handle_chord(key)
         {
             return done;
         }
         match self.active_tab {
             ActiveTab::Tester => self.handle_tester_key(key),
+            // A list's keys are named keys, and taken plain.
+            _ if !plain => false,
             ActiveTab::Library => self.handle_library_key(key),
             ActiveTab::Reference => self.handle_reference_key(key),
         }
@@ -3933,7 +3969,8 @@ impl App {
     }
 
     fn handle_tester_key(&mut self, key: &KeyEvent) -> bool {
-        if key.key == Key::Tab {
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::Tab && plain {
             // Cycles focus rather than inserting a tab: a regex tester's
             // fields are the whole interface, and Tab is how every form on
             // every desktop moves between them. Skips the replacement while
@@ -3947,11 +3984,11 @@ impl App {
                 match key.key {
                     // Up and Down have no meaning in a one-line box; they step
                     // through the matches, as they always did here.
-                    Key::Down | Key::Enter => {
+                    Key::Down | Key::Enter if plain => {
                         self.next_match();
                         return !self.matches.is_empty();
                     }
-                    Key::Up => {
+                    Key::Up if plain => {
                         self.prev_match();
                         return !self.matches.is_empty();
                     }
@@ -4053,13 +4090,15 @@ impl App {
 
     /// Keys while the save dialog is up: it has the keyboard.
     fn handle_save_key(&mut self, key: &KeyEvent) -> bool {
+        // The dialog's own keys are plain: Alt+Enter saved.
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.save_name = None;
                 self.save_error = None;
                 true
             }
-            Key::Enter => self.confirm_save(),
+            Key::Enter if plain => self.confirm_save(),
             _ => {
                 let clipboard = self.clipboard.clone();
                 let Some(name) = self.save_name.as_mut() else {
@@ -4454,6 +4493,10 @@ const TIPS: &[&str] = &[
 impl oswindow::app::App for App {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5367,6 +5410,41 @@ mod tests {
         }))
     }
 
+    /// **The shortcut list is modal for the keys.** It took only F1 and
+    /// Escape: with it up, a letter was typed into the pattern under it, Tab
+    /// moved between the fields and F3 stepped through the matches. The
+    /// control is the same letter with it down.
+    #[test]
+    fn the_shortcut_list_takes_every_key_while_it_is_up() {
+        let mut app = testing("a", "banana");
+        app.active_field = ActiveField::Pattern;
+        assert!(press(&mut app, Key::F1, ""));
+        assert!(app.show_help);
+        assert!(!press(&mut app, Key::X, "x"), "a letter was taken");
+        press(&mut app, Key::Tab, "");
+        press(&mut app, Key::F3, "");
+        assert!(
+            app.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(app.pattern.text(), "a", "a letter was typed under the list");
+        assert_eq!(
+            app.active_field,
+            ActiveField::Pattern,
+            "Tab moved between the fields under the list"
+        );
+        assert_eq!(
+            app.current_match_index, 0,
+            "F3 stepped through the matches under it"
+        );
+        assert!(press(&mut app, Key::Escape, ""));
+        assert!(!app.show_help, "Escape left the list up");
+
+        // The control.
+        press(&mut app, Key::X, "x");
+        assert_eq!(app.pattern.text(), "ax", "control: a letter types nothing");
+    }
+
     /// **Every key the shortcut list advertises is one this program answers.**
     ///
     /// The label is read by `guitk::shortcut` rather than matched against a
@@ -6018,6 +6096,81 @@ mod tests {
         Event::Mouse(MouseEvent { x, y, kind })
     }
 
+    /// The text boxes are the toolkit's fields, in the theme's shape (lane
+    /// C, c-e-a-theme-can-shape-the-controls): a pattern that does not
+    /// compile is red while it is typed, the box under the pointer is lit,
+    /// the save dialog's name is red while the library refuses it, and the
+    /// focus mark is the user's width.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = testing("(", "abc");
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        oswindow::app::App::appearance_changed(&mut app, &settings);
+        let draws = |app: &App, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let cmds = Probe::draw(app, App::SIZE).commands().to_vec();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's commands
+            // begin a focused one's under a ring or an underline, so finding them
+            // alone says nothing about the mark.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+
+        assert!(app.compile_error.is_some(), "( compiled");
+        let pattern = probe::rect_of(&app, Target::PatternField).expect("the pattern");
+        let wrong = guitk::field::State {
+            focused: true,
+            invalid: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, pattern, wrong),
+            "a pattern that does not compile is not red, at the user's width"
+        );
+
+        let input = probe::rect_of(&app, Target::InputArea).expect("the test input");
+        let (x, y) = input.centre();
+        app.handle_event(&mouse(x, y, MouseEventKind::Move));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, input, lit),
+            "the box under the pointer is not lit"
+        );
+
+        app.set_pattern("a+");
+        assert!(app.ask_to_save());
+        assert!(app.confirm_save(), "an empty name was not answered");
+        assert!(app.save_error.is_some());
+        let name = probe::rect_of(&app, Target::SaveName).expect("the name box");
+        assert!(
+            draws(&app, name, wrong),
+            "a name the library refused is not red"
+        );
+    }
+
     /// A tester with `pattern` run over `input`.
     fn testing(pattern: &str, input: &str) -> App {
         let mut app = App::new();
@@ -6540,6 +6693,87 @@ mod tests {
         });
     }
 
+    /// **A pattern saved or deleted in another window reaches this one**,
+    /// when the desktop says `regextester.yaml` changed (§1434): read at
+    /// startup only, each window kept its own list. The built-in patterns
+    /// stay; the selection follows its entry by name when the list shifts,
+    /// and is let go when its entry is deleted.
+    #[test]
+    fn the_library_follows_a_change_made_in_another_window() {
+        settingsfile::testing::with_scratch_config("rt_reread", |_| {
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            let save = |app: &mut App, pattern: &str, name: &str| {
+                app.set_pattern(pattern);
+                app.ask_to_save();
+                probe::type_str(app, name);
+                app.handle_event(&Event::Key(probe::press(Key::Enter)));
+            };
+            let place = |app: &App, name: &str| {
+                app.library
+                    .iter()
+                    .position(|e| e.category == PatternCategory::Custom && e.name == name)
+            };
+            let own = |app: &App| -> Vec<String> {
+                app.library
+                    .iter()
+                    .filter(|e| e.category == PatternCategory::Custom)
+                    .map(|e| e.name.clone())
+                    .collect()
+            };
+            let mut first = testing("a+", "");
+            save(&mut first, "a+", "alpha");
+            save(&mut first, "b+", "beta");
+            let mut second = App::new();
+            second.load_library(&settingsfile::load(CONFIG_NAME));
+            let built_in = second.library.len() - 2;
+            second.selected_library_entry = place(&second, "beta");
+
+            save(&mut first, "c+", "gamma");
+            let alpha = place(&first, "alpha").expect("alpha");
+            first.delete_library_entry(alpha);
+
+            assert!(!second.handle_event(&announce(b"notes")));
+            assert_eq!(
+                own(&second),
+                ["alpha", "beta"],
+                "another program's file was read"
+            );
+            assert!(second.handle_event(&announce(b"regextester")));
+            assert_eq!(
+                own(&second),
+                ["beta", "gamma"],
+                "the change did not reach it"
+            );
+            assert_eq!(
+                second.library.len(),
+                built_in + 2,
+                "a built-in pattern went"
+            );
+            assert_eq!(
+                second.selected_library_entry,
+                place(&second, "beta"),
+                "the selection lost its entry"
+            );
+
+            let beta = place(&first, "beta").expect("beta");
+            first.delete_library_entry(beta);
+            second.handle_event(&announce(b"regextester"));
+            assert_eq!(
+                second.selected_library_entry, None,
+                "a deleted entry stayed selected"
+            );
+
+            assert!(
+                !first.handle_event(&announce(b"regextester")),
+                "a window's own save, announced back, changed its list"
+            );
+        });
+    }
+
     #[test]
     fn saving_under_a_saved_name_replaces_it() {
         settingsfile::testing::with_scratch_config("rt_resave", |_| {
@@ -6773,5 +7007,109 @@ mod tests {
         let app = testing("a\\nb", "a\nb");
         assert_eq!(app.matches.len(), 1);
         assert!(texts(&app).contains(&"\"a\\nb\"".to_string()));
+    }
+
+    /// **A chord is not a tester key, and AltGr+S is not Ctrl+S**: Alt+Tab -- the
+    /// desktop's window switcher, arriving carrying its key -- moved between
+    /// the fields, Alt+Down stepped through the matches, Alt+Delete deleted a
+    /// saved pattern and Alt+Enter saved one; and AltGr+S -- a Polish `ś` --
+    /// asked to save the pattern, as Ctrl+S does, instead of typing into it.
+    ///
+    /// Each key is asserted as it is pressed: the matches go round, so a
+    /// step forward and a step back would end where they began.
+    #[test]
+    fn a_chord_is_neither_a_tester_key_nor_typing() {
+        use guitk::event::Modifiers;
+        settingsfile::testing::with_scratch_config("rt_chords", |_| {
+            let altgr = Modifiers {
+                alt: true,
+                ..Modifiers::ctrl()
+            };
+            let key = |k: Key, text: &str, modifiers: Modifiers| {
+                Event::Key(KeyEvent {
+                    key: k,
+                    pressed: true,
+                    modifiers,
+                    text: text.to_owned(),
+                })
+            };
+            let mut app = testing("a", "banana");
+            app.active_field = ActiveField::Pattern;
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                for k in [Key::F1, Key::F3, Key::Tab, Key::Enter, Key::Down, Key::Up] {
+                    assert!(!app.handle_event(&key(k, "", m)), "{m:?} {k:?} was taken");
+                    assert!(!app.show_help, "{m:?} {k:?} raised the keys");
+                    assert_eq!(
+                        app.active_field,
+                        ActiveField::Pattern,
+                        "{m:?} {k:?} moved between the fields"
+                    );
+                    assert_eq!(
+                        app.current_match_index, 0,
+                        "{m:?} {k:?} stepped through the matches"
+                    );
+                }
+            }
+
+            // AltGr's letters are typed, the ones Ctrl binds among them.
+            let flags = app.flags;
+            let filter = app.library_category_filter;
+            for (k, typed) in [(Key::S, "ś"), (Key::M, "µ"), (Key::L, "ł"), (Key::I, "í")] {
+                assert!(
+                    app.handle_event(&key(k, typed, altgr)),
+                    "AltGr+{k:?} typed nothing"
+                );
+                assert!(app.save_name.is_none(), "AltGr+{k:?} asked to save");
+                assert_eq!(app.flags, flags, "AltGr+{k:?} changed a flag");
+                assert_eq!(
+                    app.library_category_filter, filter,
+                    "AltGr+{k:?} changed the library's filter"
+                );
+            }
+            assert_eq!(app.pattern.text(), "aśµłí");
+
+            // The list of keys goes on a plain Escape only.
+            assert!(app.handle_event(&key(Key::F1, "", Modifiers::NONE)));
+            assert!(!app.handle_event(&key(Key::Escape, "", Modifiers::alt())));
+            assert!(app.show_help, "Alt+Escape put the list of keys away");
+            assert!(app.handle_event(&key(Key::Escape, "", Modifiers::NONE)));
+
+            // The save dialog's keys are plain too.
+            assert!(app.ask_to_save());
+            probe::type_str(&mut app, "kept");
+            assert!(!app.handle_event(&key(Key::Enter, "", Modifiers::alt())));
+            assert!(
+                !app.library.iter().any(|e| e.name == "kept"),
+                "Alt+Enter saved"
+            );
+            assert!(!app.handle_event(&key(Key::Escape, "", Modifiers::alt())));
+            assert!(app.save_name.is_some(), "Alt+Escape put the dialog away");
+            assert!(app.handle_event(&key(Key::Enter, "", Modifiers::NONE)));
+            let kept = app.library.iter().position(|e| e.name == "kept");
+            assert!(kept.is_some(), "Enter did not save");
+
+            // The library's keys: nothing a chord does reaches a saved pattern.
+            app.active_tab = ActiveTab::Library;
+            app.library_category_filter = Some(PatternCategory::Custom);
+            app.selected_library_entry = kept;
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                for k in [Key::Delete, Key::Down, Key::Up, Key::PageDown, Key::Enter] {
+                    assert!(!app.handle_event(&key(k, "", m)), "{m:?} {k:?} was taken");
+                    assert!(
+                        app.library.iter().any(|e| e.name == "kept"),
+                        "{m:?} {k:?} deleted the saved pattern"
+                    );
+                    assert_eq!(app.selected_library_entry, kept, "{m:?} {k:?} moved");
+                    assert_eq!(app.active_tab, ActiveTab::Library, "{m:?} {k:?} used it");
+                }
+            }
+
+            // Nor does one scroll the reference.
+            app.active_tab = ActiveTab::Reference;
+            app.reference_scroll = 0;
+            assert!(!app.handle_event(&key(Key::Down, "", Modifiers::alt())));
+            assert_eq!(app.reference_scroll, 0, "Alt+Down scrolled the reference");
+            assert!(app.handle_event(&key(Key::Down, "", Modifiers::NONE)));
+        });
     }
 }

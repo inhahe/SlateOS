@@ -4539,6 +4539,16 @@
 
 ## Judgment Calls
 
+### 2026-10-04 (lane F) — a damaged Opus packet in a video is concealed,
+### not dropped as FFmpeg drops it
+
+`videocodec::Sound` follows FFmpeg in what it trims from a file's sound and
+how it times it, but where a packet does not decode it fills the packet's
+length with libopus's concealment instead of dropping it (FFmpeg's choice),
+so that the sound has no hole for a player's clock to fall into. Reverse in
+`gui/video/codec/src/sound.rs`, `Sound::decode`'s error arm, if matching
+FFmpeg matters more. Design-decisions §1351.
+
 ### 2026-10-01 (lane B) — a refused power change is not forced, and the
 ### service manager's method names were chosen by its clients
 
@@ -56578,7 +56588,16 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
-## Games: read every word under themes that leave no room (lane E, 2026-09-28) -- NEXT
+## ~~Games: read every word under themes that leave no room (lane E, 2026-09-28)~~ -- DONE 2026-09-28
+
+**Done:** `gamechrome::legibility::looks()` -- the stock palettes and four
+themes a user can put together that sit at the palette's floor (soft text,
+light and dark; pale hues on light; deep hues on dark), each in both surface
+looks -- and every game's legibility test reads all twelve. It found words
+in five games, each moved for its ground: battleship's message bar, 2048's
+score values, hangman's keys, tic-tac-toe's winning marks and wordle's
+keys and header buttons. Reversi's score-bar row came back and is caught.
+The original entry, for the record:
 
 The games' legibility tests read the four stock looks (light and dark, bordered
 and card). Those palettes' text and hues read on every ground a game fills
@@ -57981,42 +58000,6 @@ then the remedy is to run
 by hand immediately after editing the hook, which is what found the 2026-09-12
 instance and its two hidden layers.
 
-
---------------------------------------------------------------------------------
-DEFERRED: coreutils `diff`'s parser exits instead of returning, so no refusal
-can be unit-tested. (lane B, 2026-09-12)
---------------------------------------------------------------------------------
-
-WHAT IS WRONG. `parse_args` in userspace/coreutils/src/bin/diff.rs calls
-`process::exit(2)` directly on an invalid option, an invalid context length and
-a missing `--width` argument. A unit test cannot drive any of those: the process
-leaves. So the thirteen tests in that file all prove the parser ACCEPTS things,
-and nothing proves it REFUSES anything -- the two-probe rule is unsatisfiable
-there as written.
-
-WHY IT IS NEW. This arrived with the port from `userspace/diff` on 2026-09-12.
-The implementation it replaced returned a `DiffArgs` struct and could be asked
-about bad input; the one that replaced it wins on behaviour (43 passed / 64
-differed against 21 / 86 on the same 107 cases) and loses on testability. Both
-halves of a duplicate are witnesses, and this is the part of the losing witness
-that did not survive.
-
-THE PROPER FIX. `parse_args` returns `Result<ParseResult, String>` (or a small
-error enum) and `main` does the printing and the exiting. That is the shape the
-retired implementation had and the shape the rest of coreutils uses -- see
-`patch.rs`'s `parse_args -> Result<Options, String>`, which is why its refusals
-ARE unit-tested. Roughly a dozen call sites inside one function.
-
-WHY DEFERRED. Doing it inside the port would have mixed a behaviour-preserving
-move with a behaviour-changing refactor, and the port's whole claim is that the
-differential number did not move: 43/64 before, 43/64 after. A refactor in the
-same commit makes that claim unverifiable, because a regression in either could
-hide the other.
-
-TRIGGER. Do it the next time anything in that parser is touched for any reason,
-or before adding an option to it -- whichever comes first. The cost of waiting
-is that a refusal regression there is invisible to `cargo test` and visible only
-to `scripts/diff-diff.sh`, which needs WSL and does not run in a hook.
 
 --------------------------------------------------------------------------
 SCOPED, NOT STARTED: scripts/uptime-diff.sh, and the one hazard free did not

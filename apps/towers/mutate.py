@@ -8,6 +8,10 @@ The table starts with the theme (the operator's answer to C-Q16, §1422): the
 pegs, the base and the chrome follow the user's palette, the disks keep their
 colours by size, and the buttons are the toolkit's.
 
+Then the history (the operator's answer to C-Q24, §1416): a tree of moves,
+where a move made after an undo keeps the one undone as a branch, reached with
+Alt+Z; Ctrl+Z and Ctrl+Y or Ctrl+Shift+Z beside the game's own `Z`.
+
 Usage:  python -u apps/towers/mutate.py [substring ...]
 """
 
@@ -19,6 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
+
+TREE = "a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"
+CTRL = "ctrl_z_undoes_and_ctrl_y_and_ctrl_shift_z_redo"
+ALTGR = "altgr_z_and_windows_alt_z_move_nothing"
+WAITS = "the_history_waits_for_a_held_disk_and_stops_the_solver"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -65,7 +74,100 @@ MUTATIONS = [
         "        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Card);",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    # ── The history: a tree, walked with Alt+Z (C-Q24) ────────────────────
+    (
+        "Ctrl+Z is not an undo",
+        "            HistoryKey::Undo => self.undo(),",
+        "            HistoryKey::Undo => false,",
+        [CTRL],
+    ),
+    (
+        "Ctrl+Y is not a redo",
+        "            HistoryKey::Redo => self.redo(),",
+        "            HistoryKey::Redo => false,",
+        [CTRL],
+    ),
+    (
+        "Alt+Z goes nowhere",
+        "            HistoryKey::Earlier => self.earlier(),",
+        "            HistoryKey::Earlier => false,",
+        [TREE, WAITS],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "            HistoryKey::Later => self.later(),",
+        "            HistoryKey::Later => self.earlier(),",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let Some((from, to)) = self.history.redo() else {",
+        "        let Some((from, to)) = self.history.undo() else {",
+        [TREE, CTRL],
+    ),
+    (
+        "Alt+Z only undoes",
+        "        let steps = self.history.earlier();",
+        "        let steps: Vec<Travel<(usize, usize)>> =\n"
+        "            self.history.undo().map(Travel::Undo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z only redoes",
+        "        let steps = self.history.later();",
+        "        let steps: Vec<Travel<(usize, usize)>> =\n"
+        "            self.history.redo().map(Travel::Redo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "a journey takes its steps back the wrong way",
+        "                Travel::Undo((from, to)) => self.take_back(from, to),",
+        "                Travel::Undo((from, to)) => self.make_again(from, to),",
+        [TREE],
+    ),
+    (
+        "a move made again is not counted",
+        "        self.moves = self.moves.saturating_add(1);\n        self.cursor = to;\n    }",
+        "        self.cursor = to;\n    }",
+        [TREE, CTRL],
+    ),
+    (
+        "a move taken back is still counted",
+        "        self.moves = self.moves.saturating_sub(1);\n        self.cursor = from;",
+        "        self.cursor = from;",
+        [TREE, "undo_takes_back_one_move_per_press"],
+    ),
+    (
+        "the history moves with a disk in the air",
+        "        self.playing() && self.held.is_none()\n    }",
+        "        self.playing()\n    }",
+        [WAITS, "undo_is_refused_with_a_disk_in_the_air"],
+    ),
+    (
+        "the history's keys leave the solver playing",
+        "    fn history_key(&mut self, key: HistoryKey) -> bool {\n        let stopped = self.interrupt();",
+        "    fn history_key(&mut self, key: HistoryKey) -> bool {\n        let stopped = false;",
+        [WAITS],
+    ),
+    (
+        "the history's keys reach the board behind the sheet",
+        "            if !self.show_help {\n                self.history_key(key);",
+        "            if true {\n                self.history_key(key);",
+        ["the_help_sheet_keeps_the_history_keys_too"],
+    ),
+    (
+        "a key held with Ctrl, Alt or the Windows key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {\n            return EventResult::Ignored;\n        }",
+        "",
+        [ALTGR],
+    ),
+    (
+        "the history keeps more than its limit",
+        "match core::num::NonZeroUsize::new(10_000) {",
+        "match core::num::NonZeroUsize::new(10_100) {",
+        ["the_history_keeps_its_last_moves"],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "towers", timeout=240))
+    sys.exit(sweep(SRC, MUTATIONS, "towers", timeout=240, only=sys.argv[1:] or None))

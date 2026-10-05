@@ -46,6 +46,7 @@
 //! move, or draw into a window belonging to someone else.
 
 use guiremote::DecodeError;
+use guiremote::channel::PeerCred;
 use guiremote::control::{
     DisplayInfo, Request, RequestBody, Response, ResponseBody, encode_responses_into,
 };
@@ -118,6 +119,36 @@ pub struct ClientLink {
     /// It is the *server's* to set and not the client's: nothing on the wire
     /// can change it, which is what keeps it a limit rather than a suggestion.
     image_budget: u64,
+    /// Who the kernel says is at the other end ([`Self::attest`]) — a client
+    /// that came through the display service. `None` over TCP, whose peer
+    /// cannot be asked, and never anything the client said about itself.
+    peer: Option<PeerCred>,
+    /// Whether that peer holds the display service's key: the shell's mark.
+    /// `None` when the kernel could not say, which is every TCP client.
+    peer_holds_key: Option<bool>,
+    /// Who may make the shell's requests on this link
+    /// ([`Self::require_shell`]). The server's to set, like `image_budget`.
+    shell_gate: ShellGate,
+}
+
+/// What a client that is not the shell is told when it makes a shell's
+/// request under [`ShellGate::KeyHolders`].
+pub(crate) const NOT_THE_SHELL: &str =
+    "only the shell may ask this, and this connection does not hold the display service's key";
+
+/// Who may make the requests that are a shell's and not an application's
+/// ([`ClientLink::require_shell`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShellGate {
+    /// Anyone. Where a session is until it starts its shell holding the
+    /// display service's key: a gate on the key before then would refuse the
+    /// shell itself — the taskbar, the switcher, the panels.
+    #[default]
+    Open,
+    /// Only a client the kernel says holds the display service's key — the
+    /// gate `design-decisions.md` §495 asks for, for a session that starts its
+    /// shell holding the key (`compositor --require-shell-key`).
+    KeyHolders,
 }
 
 /// Default ceiling on the uploaded image pixels one connection may keep
@@ -218,7 +249,43 @@ impl ClientLink {
             tray_sent: Vec::new(),
             window_list_sent: Vec::new(),
             image_budget: MAX_IMAGE_BYTES_PER_LINK,
+            peer: None,
+            peer_holds_key: None,
+            shell_gate: ShellGate::Open,
         }
+    }
+
+    /// Record who the kernel says is at the other end, as whatever accepted
+    /// the connection learned it (`guiremote::Socket::peer_cred` and
+    /// `peer_has_key`). A link nobody attests stays anonymous, which is what
+    /// a TCP client is.
+    pub const fn attest(&mut self, peer: Option<PeerCred>, holds_key: Option<bool>) {
+        self.peer = peer;
+        self.peer_holds_key = holds_key;
+    }
+
+    /// Who the kernel says is at the other end, if it said.
+    #[must_use]
+    pub const fn peer(&self) -> Option<PeerCred> {
+        self.peer
+    }
+
+    /// Whether the peer holds the display service's key; `None` when the
+    /// kernel could not say.
+    #[must_use]
+    pub const fn peer_holds_key(&self) -> Option<bool> {
+        self.peer_holds_key
+    }
+
+    /// Set who may make the shell's requests on this link.
+    pub const fn set_shell_gate(&mut self, gate: ShellGate) {
+        self.shell_gate = gate;
+    }
+
+    /// Who may make the shell's requests on this link.
+    #[must_use]
+    pub const fn shell_gate(&self) -> ShellGate {
+        self.shell_gate
     }
 
     /// Most bytes of uploaded image pixels this connection may hold at once.
@@ -373,34 +440,36 @@ impl ClientLink {
 
     /// The single place the compositor asks "is this connection a shell?".
     ///
-    /// **It does not currently check anything, and saying so is the point.**
     /// A handful of requests are a shell's and not an application's — reading
     /// the whole desktop's window list, acting on windows the sender does not
     /// own, reserving a panel edge, showing a different virtual desktop and
-    /// filing a window on one — and the honest gate for them does not exist
-    /// yet: the answer has to come
-    /// from a capability the kernel attests at connection accept, and kernel
-    /// channel IPC does not yet carry one to the compositor. A check written
-    /// against a value the *client* supplies would not be a gate but the
-    /// appearance of one, which is worse than none because it looks solved.
-    /// `design-decisions.md` §495 has the full reasoning; the consequence is
-    /// tracked as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`.
+    /// filing a window on one. The only honest answer is one the kernel gives:
+    /// whether the peer holds the display service's key
+    /// ([`Self::peer_holds_key`]). A check written against a value the
+    /// *client* supplies would not be a gate but the appearance of one, which
+    /// is worse than none because it looks solved. `design-decisions.md` §495
+    /// has the full reasoning.
     ///
-    /// What it buys today is that the privileged requests are named, greppable
-    /// and routed through **one** function, so the day the capability arrives
-    /// the fix is a body here rather than a hunt for every place that should
-    /// have asked. That was already the shape of the recorded proper fix when
-    /// there was one such request, and every one added since has gone through
-    /// here rather than growing a check of its own.
+    /// **Under [`ShellGate::Open`] it answers yes to everyone**, and every
+    /// session is there until it starts its shell holding the key; the
+    /// consequence is tracked as `TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`.
+    /// Under [`ShellGate::KeyHolders`] it is the gate, and a client the kernel
+    /// cannot vouch for — every TCP client — is refused.
+    ///
+    /// Every privileged request is routed through here rather than growing a
+    /// check of its own, so the gate is this one body rather than a hunt for
+    /// every place that should have asked.
     ///
     /// Returns the refusal to send, so a caller writes `link.require_shell()?`
     /// exactly as it writes `link.resolve(window)?`.
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "the signature is the seam; the day it checks, it returns Err"
-    )]
     fn require_shell(&self) -> Result<(), ResponseBody> {
-        Ok(())
+        match self.shell_gate {
+            ShellGate::Open => Ok(()),
+            ShellGate::KeyHolders if self.peer_holds_key == Some(true) => Ok(()),
+            ShellGate::KeyHolders => Err(ResponseBody::Error {
+                message: String::from(NOT_THE_SHELL),
+            }),
+        }
     }
 }
 
@@ -418,6 +487,8 @@ fn to_compositor_request(
             // From the link, never from the frame: a client that could state
             // its own pid could claim another process's windows in the taskbar.
             client_pid: link.client_pid,
+            // And the process the kernel names for the link, if it named one.
+            owner_pid: link.peer.map(|peer| peer.pid),
         },
         RequestBody::DestroyWindow { window } => CompositorRequest::DestroyWindow {
             window_id: link.resolve(window)?,
@@ -539,6 +610,22 @@ fn to_compositor_request(
             }
         }
         RequestBody::GetDisplayInfo => CompositorRequest::GetDisplayInfo,
+        // A shell's, because the answer is a fact about the keyboard rather
+        // than about anything the sender owns: a program free to ask could
+        // poll it and learn when the user holds Shift in another program's
+        // password field. Names no window, so there is nothing to resolve.
+        RequestBody::GetHeldModifiers => {
+            link.require_shell()?;
+            CompositorRequest::GetHeldModifiers
+        }
+        // Self-only, like every request about the sender's own window: a
+        // program may ask for the user's attention for its windows, never for
+        // another program's, which could make a convincing fake of somebody
+        // else's dialog demand to be looked at.
+        RequestBody::RequestAttention { window, wanted } => CompositorRequest::SetAttention {
+            window_id: link.resolve(window)?,
+            wanted,
+        },
         // Unlike every window request above there is no `link.resolve` on
         // either of these, and nothing to resolve: a reload names no window and
         // carries no settings, so there is no ownership question to ask. They
@@ -577,6 +664,26 @@ fn to_compositor_request(
         | RequestBody::ClickTrayIcon { .. } => {
             return Err(ResponseBody::Error {
                 message: "tray requests are link-level".to_string(),
+            });
+        }
+        // Link-level as well: whether the sender may touch the clipboard
+        // depends on whether its window has the focus, and a
+        // `CompositorRequest` carries no sender.
+        RequestBody::SetClipboard { .. } | RequestBody::GetClipboard => {
+            return Err(ResponseBody::Error {
+                message: "clipboard requests are link-level".to_string(),
+            });
+        }
+        // Link-level too: a sleep request's answer is owed to the link that
+        // asked, at a moment no `CompositorRequest` can name.
+        RequestBody::SleepDisplays | RequestBody::WakeDisplays => {
+            return Err(ResponseBody::Error {
+                message: "display sleep requests are link-level".to_string(),
+            });
+        }
+        RequestBody::PickWindow | RequestBody::CancelPick => {
+            return Err(ResponseBody::Error {
+                message: "window picks are link-level".to_string(),
             });
         }
         // The one window request that is deliberately *not* resolved against
@@ -659,11 +766,9 @@ fn to_compositor_request(
         // privileged, and the window named is the sender's own.
         RequestBody::WatchIdle { window, after_ms } => {
             let window_id = link.resolve(window)?;
-            // Through the same seam as a chord grab: whether the user is
+            // Through the same gate as a chord grab: whether the user is
             // present is a fact about the session, not about the asking
-            // window. It permits everything today -- see `require_shell` --
-            // and the point of naming it here is that the day it checks, this
-            // request is already covered.
+            // window.
             link.require_shell()?;
             CompositorRequest::WatchIdle {
                 window_id,
@@ -784,6 +889,8 @@ fn to_response_body(response: CompositorResponse) -> ResponseBody {
             width,
             height,
         },
+        CompositorResponse::Modifiers(modifiers) => ResponseBody::Modifiers(modifiers),
+        CompositorResponse::Picked(picked) => ResponseBody::Picked(picked),
         CompositorResponse::StreamStarted { .. } | CompositorResponse::StreamFrame { .. } => {
             ResponseBody::Error {
                 message: "stream responses have no client-facing wire form".to_string(),
@@ -865,6 +972,46 @@ impl Compositor {
         Ok(served)
     }
 
+    /// Send `link` the answers given since it asked: a wake's to its
+    /// [`RequestBody::SleepDisplays`], a click's to its
+    /// [`RequestBody::PickWindow`]. Answers how many.
+    ///
+    /// Called for every link every tick, readable or not, because a client
+    /// waiting on one of these has nothing to say until it comes.
+    pub fn route_deferred_replies(&mut self, link: &mut ClientLink) -> usize {
+        let answers = self.take_deferred_replies(link.client_pid);
+        if answers.is_empty() {
+            return 0;
+        }
+        let replies: Vec<Response> = answers
+            .into_iter()
+            .map(|(seq, answer)| Response::new(seq, to_response_body(answer)))
+            .collect();
+        encode_responses_into(&mut link.outbox, &replies);
+        replies.len()
+    }
+
+    /// The refusal to send a client that may not do `what` now, or `None`
+    /// if it may: it must own the window with the keyboard focus. The rule
+    /// for the clipboard and for starting a window pick -- things a program
+    /// in the background must not be able to do behind the user's back.
+    ///
+    /// The same answer whether the client has no window focused or no windows
+    /// at all, so a refusal tells a program nothing about anyone else's.
+    fn focus_refusal(&self, link: &ClientLink, what: &str) -> Option<ResponseBody> {
+        if self.focused_window().is_some_and(|id| link.owns(id)) {
+            return None;
+        }
+        Some(ResponseBody::Error {
+            message: format!("{what} is for the window with the keyboard focus"),
+        })
+    }
+
+    /// [`Self::focus_refusal`] for the clipboard.
+    fn clipboard_refusal(&self, link: &ClientLink) -> Option<ResponseBody> {
+        self.focus_refusal(link, "the clipboard")
+    }
+
     /// Dispatch a batch of control requests and append the replies.
     fn answer_requests(&mut self, link: &mut ClientLink, requests: &[Request]) {
         let mut replies = Vec::with_capacity(requests.len());
@@ -920,6 +1067,70 @@ impl Compositor {
                     replies.push(Response::new(req.seq, body));
                     continue;
                 }
+                // The clipboard verbs, answered here because the rule for both
+                // needs the connection and the compositor at once: only a
+                // client whose window has the keyboard focus may copy or paste.
+                // A background program that could read the clipboard would
+                // collect the passwords people copy; one that could set it
+                // could swap an address the user just copied for its own.
+                RequestBody::SetClipboard { text } => {
+                    let body = match self.clipboard_refusal(link) {
+                        Some(refusal) => refusal,
+                        None => {
+                            self.set_clipboard(text.clone());
+                            ResponseBody::Ok
+                        }
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                RequestBody::GetClipboard => {
+                    let body = self.clipboard_refusal(link).unwrap_or_else(|| {
+                        ResponseBody::Clipboard(self.clipboard().map(str::to_owned))
+                    });
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                // Answered at the wake, not now: the deferred reply is how the
+                // shell hears the displays woke (`route_wake_replies`). Here
+                // because the reply has to find its way back to this link.
+                RequestBody::SleepDisplays => {
+                    match link.require_shell() {
+                        Ok(()) => self.sleep_displays(link.client_pid, req.seq),
+                        Err(refusal) => replies.push(Response::new(req.seq, refusal)),
+                    }
+                    continue;
+                }
+                RequestBody::WakeDisplays => {
+                    let body = match link.require_shell() {
+                        Ok(()) => {
+                            self.wake_displays();
+                            ResponseBody::Ok
+                        }
+                        Err(refusal) => refusal,
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                // Answered at the click (`route_deferred_replies`), as a
+                // sleep is at the wake. Only the program the user is working
+                // in may start one: the click it takes is the user's.
+                RequestBody::PickWindow => {
+                    let refusal = self.focus_refusal(link, "picking a window").or_else(|| {
+                        self.arm_pick(link.client_pid, req.seq)
+                            .err()
+                            .map(|message| ResponseBody::Error { message })
+                    });
+                    if let Some(refusal) = refusal {
+                        replies.push(Response::new(req.seq, refusal));
+                    }
+                    continue;
+                }
+                RequestBody::CancelPick => {
+                    self.cancel_pick(link.client_pid);
+                    replies.push(Response::new(req.seq, ResponseBody::Ok));
+                    continue;
+                }
                 _ => {}
             }
             if let RequestBody::SubscribeWindowList { subscribe } = req.body {
@@ -965,7 +1176,12 @@ impl Compositor {
             };
             replies.push(Response::new(req.seq, body));
         }
-        encode_responses_into(&mut link.outbox, &replies);
+        // A batch can now end with nothing to say -- a lone `SleepDisplays`,
+        // answered at the wake -- and an empty frame would be bytes sent to
+        // say so.
+        if !replies.is_empty() {
+            encode_responses_into(&mut link.outbox, &replies);
+        }
     }
 
     /// Weigh an image upload against what its connection already holds, and
@@ -1354,6 +1570,41 @@ mod tests {
         assert!((win.opacity - 0.5).abs() < f32::EPSILON);
     }
 
+    /// The held-modifiers question is answered from the state every key is
+    /// folded into -- here a Shift that went down before anyone asked, as one
+    /// held while the desktop starts does (the evdev source reads it from the
+    /// device and hands it over as a press before the first client is
+    /// answered).
+    #[test]
+    fn the_held_modifiers_are_the_ones_the_compositor_saw_go_down() {
+        let (mut comp, mut link) = wired();
+        let ask = |comp: &mut Compositor, link: &mut ClientLink| {
+            exchange(comp, link, vec![RequestBody::GetHeldModifiers])
+                .pop()
+                .map(|response| response.body)
+        };
+        assert_eq!(
+            ask(&mut comp, &mut link),
+            Some(ResponseBody::Modifiers(Modifiers::NONE))
+        );
+
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x2A,
+            character: None,
+        });
+        assert_eq!(
+            ask(&mut comp, &mut link),
+            Some(ResponseBody::Modifiers(Modifiers::shift()))
+        );
+
+        comp.handle_input(crate::InputEvent::KeyUp { scancode: 0x2A });
+        assert_eq!(
+            ask(&mut comp, &mut link),
+            Some(ResponseBody::Modifiers(Modifiers::NONE)),
+            "a released Shift is not still reported held"
+        );
+    }
+
     #[test]
     fn a_client_cannot_touch_a_window_it_did_not_open() {
         let (mut comp, mut link) = wired();
@@ -1392,6 +1643,170 @@ mod tests {
             .window_ref(WindowId::from_raw(theirs))
             .expect("still there");
         assert_eq!(victim.title, "Theirs");
+    }
+
+    /// A sleep request is answered when the displays wake, not before: the
+    /// deferred reply is how the shell hears of the wake.
+    #[test]
+    fn a_sleep_request_is_answered_when_the_displays_wake() {
+        let (mut comp, mut link) = wired();
+        link.receive(&encode_requests(&[Request::new(
+            9,
+            RequestBody::SleepDisplays,
+        )]));
+        comp.serve(&mut link).expect("serves");
+        assert!(comp.displays_asleep());
+        assert!(!link.has_outgoing(), "answered before the wake");
+        assert_eq!(comp.route_deferred_replies(&mut link), 0);
+
+        // Somebody touches the space bar.
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x39,
+            character: None,
+        });
+        assert_eq!(comp.route_deferred_replies(&mut link), 1);
+        let (responses, _) = decode_responses(&link.take_outgoing()).expect("decodes");
+        assert_eq!(responses, vec![Response::new(9, ResponseBody::Ok)]);
+    }
+
+    /// Waking the displays by request answers that request and the sleep it
+    /// ends.
+    #[test]
+    fn waking_the_displays_by_request_answers_both() {
+        let (mut comp, mut link) = wired();
+        link.receive(&encode_requests(&[Request::new(
+            9,
+            RequestBody::SleepDisplays,
+        )]));
+        comp.serve(&mut link).expect("serves");
+        let responses = exchange(&mut comp, &mut link, vec![RequestBody::WakeDisplays]);
+        assert_eq!(responses, vec![Response::new(1, ResponseBody::Ok)]);
+        assert!(!comp.displays_asleep());
+        assert_eq!(comp.route_deferred_replies(&mut link), 1);
+    }
+
+    /// Copy in one program, paste in another: the clipboard is the
+    /// compositor's, and each program reaches it while its window has the
+    /// keyboard -- and only then.
+    #[test]
+    fn a_copy_in_one_program_is_pasted_in_another_once_it_has_the_focus() {
+        let (mut comp, mut writer) = wired();
+        let mut reader = ClientLink::new(99);
+        let source = open(&mut comp, &mut writer, "Source");
+        let target = open(&mut comp, &mut reader, "Target");
+        let one = |comp: &mut Compositor, link: &mut ClientLink, body: RequestBody| {
+            exchange(comp, link, vec![body])
+                .pop()
+                .map(|response| response.body)
+        };
+
+        comp.focus_window(WindowId::from_raw(source));
+        assert_eq!(
+            one(&mut comp, &mut writer, RequestBody::GetClipboard),
+            Some(ResponseBody::Clipboard(None)),
+            "nothing copied yet is not an empty copy"
+        );
+        assert_eq!(
+            one(
+                &mut comp,
+                &mut writer,
+                RequestBody::SetClipboard {
+                    text: "hunter2".to_string()
+                }
+            ),
+            Some(ResponseBody::Ok)
+        );
+        // The other program, in the background: no paste.
+        assert!(matches!(
+            one(&mut comp, &mut reader, RequestBody::GetClipboard),
+            Some(ResponseBody::Error { .. })
+        ));
+
+        comp.focus_window(WindowId::from_raw(target));
+        assert_eq!(
+            one(&mut comp, &mut reader, RequestBody::GetClipboard),
+            Some(ResponseBody::Clipboard(Some("hunter2".to_string())))
+        );
+        // And the first program, now in the background, cannot read it back.
+        assert!(matches!(
+            one(&mut comp, &mut writer, RequestBody::GetClipboard),
+            Some(ResponseBody::Error { .. })
+        ));
+    }
+
+    /// A program in the background cannot set the clipboard: it could replace
+    /// an address the user just copied with its own before they paste it.
+    #[test]
+    fn a_program_in_the_background_cannot_set_the_clipboard() {
+        let (mut comp, mut user) = wired();
+        let mut lurker = ClientLink::new(99);
+        let working = open(&mut comp, &mut user, "Wallet");
+        let _hidden = open(&mut comp, &mut lurker, "Lurker");
+        comp.focus_window(WindowId::from_raw(working));
+        exchange(
+            &mut comp,
+            &mut user,
+            vec![RequestBody::SetClipboard {
+                text: "the real address".to_string(),
+            }],
+        );
+
+        let refused = exchange(
+            &mut comp,
+            &mut lurker,
+            vec![RequestBody::SetClipboard {
+                text: "the attacker's address".to_string(),
+            }],
+        );
+        assert!(
+            matches!(refused[0].body, ResponseBody::Error { .. }),
+            "{refused:?}"
+        );
+        assert_eq!(comp.clipboard(), Some("the real address"));
+    }
+
+    /// A program asks for attention for its own windows only: one asking for
+    /// another program's could make a convincing fake of somebody else's
+    /// dialog demand to be looked at.
+    #[test]
+    fn a_window_asks_for_attention_for_itself_and_nobody_else() {
+        let (mut comp, mut link) = wired();
+        let mine = open(&mut comp, &mut link, "Mine");
+        let mut other = ClientLink::new(99);
+        let theirs = open(&mut comp, &mut other, "Theirs");
+        // A third window has the user, so neither request is moot.
+        let third = comp.create_window("Third".to_string(), 50, 50, 7);
+        comp.focus_window(third);
+
+        let responses = exchange(
+            &mut comp,
+            &mut link,
+            vec![
+                RequestBody::RequestAttention {
+                    window: mine,
+                    wanted: true,
+                },
+                RequestBody::RequestAttention {
+                    window: theirs,
+                    wanted: true,
+                },
+            ],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "{responses:?}"
+        );
+        assert!(
+            matches!(responses[1].body, ResponseBody::Error { .. }),
+            "asking for another program's window was not refused: {responses:?}"
+        );
+        let asking = |id: u64| {
+            comp.window_ref(WindowId::from_raw(id))
+                .expect("window")
+                .demands_attention
+        };
+        assert!(asking(mine));
+        assert!(!asking(theirs));
     }
 
     #[test]
@@ -1963,12 +2378,422 @@ mod tests {
             &mut shell,
             vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
         );
-        // `require_shell` does not refuse anything yet -- the capability behind
-        // it is the kernel's and does not exist. What this pins is that the
-        // request goes *through* it, so that when it does answer, the tray is
-        // covered without another edit.
+        // Under the default gate anyone may; `the_shells_requests_need_the_key`
+        // pins that the subscription is refused once the gate is armed.
         assert!(matches!(responses[0].body, ResponseBody::Ok));
         assert!(shell.wants_tray());
+    }
+
+    /// One of each request that is a shell's and not an application's,
+    /// naming `own` wherever a window is wanted.
+    ///
+    /// The list is the claim under test: a request added to the protocol as a
+    /// shell's belongs here, and one missing from the gate shows up as a
+    /// reply that is not the refusal.
+    fn shell_requests(own: u64) -> Vec<RequestBody> {
+        use guiremote::control::{StackTier, WindowPolicy};
+        use guiremote::reserve::PanelEdge;
+        use guitk::event::MouseButton;
+        vec![
+            RequestBody::ShellSetOpacity {
+                window: own,
+                opacity: 0.5,
+            },
+            RequestBody::ShellMove {
+                window: own,
+                x: 1,
+                y: 2,
+            },
+            RequestBody::ShellResize {
+                window: own,
+                width: 300,
+                height: 200,
+            },
+            RequestBody::ShellSetStackTier {
+                window: own,
+                tier: StackTier::Top,
+            },
+            RequestBody::ShellSetWindowPolicy {
+                window: own,
+                policy: WindowPolicy::default(),
+            },
+            RequestBody::ShellSetSizeLimits {
+                window: own,
+                min_width: 0,
+                min_height: 0,
+                max_width: 0,
+                max_height: 0,
+            },
+            RequestBody::GetHeldModifiers,
+            RequestBody::RecoverDisplay,
+            RequestBody::ShellControl {
+                window: own,
+                action: ShellControlAction::Activate,
+            },
+            RequestBody::ReserveEdge {
+                window: own,
+                edge: PanelEdge::Bottom,
+                size: 40,
+            },
+            RequestBody::SwitchWorkspace { workspace: 1 },
+            RequestBody::SetWindowWorkspace {
+                window: own,
+                workspace: 1,
+            },
+            RequestBody::GrabKey {
+                window: own,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+            RequestBody::UngrabKey {
+                window: own,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+            RequestBody::GrabModifierChord {
+                window: own,
+                modifiers: Modifiers::alt(),
+            },
+            RequestBody::UngrabModifierChord {
+                window: own,
+                modifiers: Modifiers::alt(),
+            },
+            RequestBody::WatchIdle {
+                window: own,
+                after_ms: 60_000,
+            },
+            RequestBody::SubscribeWindowList { subscribe: true },
+            RequestBody::SubscribeTrayIcons { subscribe: true },
+            RequestBody::ClickTrayIcon {
+                owner: 1,
+                id: 1,
+                button: MouseButton::Left,
+            },
+            RequestBody::WakeDisplays,
+            // Last: allowed, it is answered at the wake rather than now.
+            RequestBody::SleepDisplays,
+        ]
+    }
+
+    fn is_refusal(body: &ResponseBody) -> bool {
+        matches!(body, ResponseBody::Error { message } if message == NOT_THE_SHELL)
+    }
+
+    #[test]
+    fn the_shells_requests_need_the_key_once_the_gate_is_armed() {
+        // Each kind of client the kernel cannot vouch for as the shell: one it
+        // names nothing about (every TCP client), one it names but that holds
+        // no key, and one it names and cannot say about.
+        let anonymous = (None, None);
+        let named = Some(PeerCred {
+            pid: 300,
+            uid: 1000,
+            gid: 1000,
+        });
+        for (peer, holds_key) in [anonymous, (named, Some(false)), (named, None)] {
+            let (mut comp, mut link) = wired();
+            let own = open(&mut comp, &mut link, "Panel");
+            link.attest(peer, holds_key);
+            link.set_shell_gate(ShellGate::KeyHolders);
+
+            let requests = shell_requests(own);
+            let responses = exchange(&mut comp, &mut link, requests.clone());
+            assert_eq!(responses.len(), requests.len(), "one refusal each");
+            for (request, response) in requests.iter().zip(&responses) {
+                assert!(
+                    is_refusal(&response.body),
+                    "{request:?} from {peer:?} (key {holds_key:?}) got {:?}",
+                    response.body
+                );
+            }
+            // And refused means not done.
+            assert!(!link.wants_window_list());
+            assert!(!link.wants_tray());
+            assert!(!comp.displays_asleep());
+        }
+    }
+
+    #[test]
+    fn the_key_holder_is_the_shell() {
+        let (mut comp, mut link) = wired();
+        let own = open(&mut comp, &mut link, "Panel");
+        link.attest(
+            Some(PeerCred {
+                pid: 200,
+                uid: 1000,
+                gid: 1000,
+            }),
+            Some(true),
+        );
+        link.set_shell_gate(ShellGate::KeyHolders);
+
+        let requests = shell_requests(own);
+        let responses = exchange(&mut comp, &mut link, requests.clone());
+        // All but the sleep, which is answered when the displays wake.
+        assert_eq!(responses.len(), requests.len() - 1);
+        for response in &responses {
+            assert!(!is_refusal(&response.body), "{response:?}");
+        }
+        assert!(link.wants_window_list());
+        assert!(link.wants_tray());
+        assert!(comp.displays_asleep(), "the sleep was taken");
+    }
+
+    #[test]
+    fn under_the_open_gate_anyone_is_the_shell_as_before() {
+        // Where every session is until its shell holds the key: arming the
+        // gate is the session's step, not a side effect of anything here.
+        let (mut comp, mut link) = wired();
+        assert_eq!(link.shell_gate(), ShellGate::Open);
+        let own = open(&mut comp, &mut link, "Panel");
+        let requests = shell_requests(own);
+        let responses = exchange(&mut comp, &mut link, requests.clone());
+        assert_eq!(responses.len(), requests.len() - 1);
+        for response in &responses {
+            assert!(!is_refusal(&response.body), "{response:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_link_is_anonymous_until_something_attests_it() {
+        let mut link = ClientLink::new(7);
+        assert_eq!(link.peer(), None);
+        assert_eq!(link.peer_holds_key(), None);
+        let cred = PeerCred {
+            pid: 41,
+            uid: 1000,
+            gid: 100,
+        };
+        link.attest(Some(cred), Some(true));
+        assert_eq!(link.peer(), Some(cred));
+        assert_eq!(link.peer_holds_key(), Some(true));
+        assert_eq!(
+            link.client_pid(),
+            7,
+            "the connection's own id is not the attested pid: one process may hold two"
+        );
+    }
+
+    #[test]
+    fn an_application_request_does_not_need_the_key() {
+        // The gate is for the shell's requests only: an application under an
+        // armed gate still opens, titles and draws its own windows.
+        let (mut comp, mut link) = wired();
+        link.set_shell_gate(ShellGate::KeyHolders);
+        let own = open(&mut comp, &mut link, "Editor");
+        let responses = exchange(
+            &mut comp,
+            &mut link,
+            vec![
+                RequestBody::SetTitle {
+                    window: own,
+                    title: String::from("Editor - notes.txt"),
+                },
+                RequestBody::GetDisplayInfo,
+            ],
+        );
+        assert!(matches!(responses[0].body, ResponseBody::Ok));
+        assert!(matches!(responses[1].body, ResponseBody::Display(_)));
+    }
+
+    // ---- Picking a window ----
+
+    /// The answers `link` is owed and has now been sent, decoded.
+    fn deferred(comp: &mut Compositor, link: &mut ClientLink) -> Vec<Response> {
+        comp.route_deferred_replies(link);
+        let bytes = link.take_outgoing();
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+        decode_responses(&bytes).expect("decodes").0
+    }
+
+    /// Send `requests` and return whatever replies came at once -- none, for
+    /// a request answered later.
+    fn send(comp: &mut Compositor, link: &mut ClientLink, requests: &[Request]) -> Vec<Response> {
+        link.receive(&encode_requests(requests));
+        comp.serve(link).expect("serves");
+        let bytes = link.take_outgoing();
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+        decode_responses(&bytes).expect("decodes").0
+    }
+
+    fn pick(seq: u32) -> Request {
+        Request::new(seq, RequestBody::PickWindow)
+    }
+
+    /// Open a 300 by 200 window over `link` with its client area at `at`.
+    fn open_at(comp: &mut Compositor, link: &mut ClientLink, title: &str, at: (i32, i32)) -> u64 {
+        let spec = WindowSpec {
+            position: Some(at),
+            ..WindowSpec::new(title, 300, 200)
+        };
+        match exchange(comp, link, vec![RequestBody::CreateWindow(spec)]).as_slice() {
+            [
+                Response {
+                    body: ResponseBody::WindowCreated { window },
+                    ..
+                },
+            ] => *window,
+            other => panic!("expected one WindowCreated, got {other:?}"),
+        }
+    }
+
+    fn click(comp: &mut Compositor, x: i32, y: i32) {
+        for pressed in [true, false] {
+            comp.handle_input(crate::InputEvent::MouseButton {
+                button: crate::MouseButton::Left,
+                pressed,
+                x,
+                y,
+            });
+        }
+    }
+
+    /// The program the user is working in asks; the click is answered to it
+    /// with the window clicked and the process the kernel named for that
+    /// window's connection.
+    #[test]
+    fn a_pick_is_answered_at_the_click_with_the_attested_owner() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut notes = ClientLink::new(10);
+        notes.attest(
+            Some(PeerCred {
+                pid: 777,
+                uid: 1000,
+                gid: 1000,
+            }),
+            Some(false),
+        );
+        let window = open_at(&mut comp, &mut notes, "notes.txt", (100, 100));
+
+        let mut explorer = ClientLink::new(11);
+        let _own = open_at(&mut comp, &mut explorer, "Process Explorer", (480, 360));
+        let now = send(&mut comp, &mut explorer, &[pick(1)]);
+        assert!(now.is_empty(), "answered before the click: {now:?}");
+
+        click(&mut comp, 150, 150);
+        let replies = deferred(&mut comp, &mut explorer);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].seq, 1);
+        let ResponseBody::Picked(Some(picked)) = &replies[0].body else {
+            panic!("{:?}", replies[0].body);
+        };
+        assert_eq!(picked.window, window);
+        assert_eq!(picked.title, "notes.txt");
+        assert_eq!(picked.pid, Some(777), "the kernel's name for the owner");
+        assert!(deferred(&mut comp, &mut notes).is_empty());
+    }
+
+    /// A window opened over a link nothing attested has no owner to name:
+    /// the pick says so rather than give the connection's number.
+    #[test]
+    fn a_window_opened_over_tcp_is_picked_without_a_process() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut app = ClientLink::new(10);
+        let window = open_at(&mut comp, &mut app, "remote", (100, 100));
+        let mut explorer = ClientLink::new(11);
+        let _own = open_at(&mut comp, &mut explorer, "Process Explorer", (480, 360));
+        assert!(send(&mut comp, &mut explorer, &[pick(1)]).is_empty());
+        click(&mut comp, 150, 150);
+        let replies = deferred(&mut comp, &mut explorer);
+        let ResponseBody::Picked(Some(picked)) = &replies[0].body else {
+            panic!("{:?}", replies[0].body);
+        };
+        assert_eq!(picked.window, window);
+        assert_eq!(picked.pid, None);
+    }
+
+    /// A program in the background cannot start a pick: the click it would
+    /// take is the user's, for the program the user is working in.
+    #[test]
+    fn a_program_in_the_background_cannot_start_a_pick() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut background = ClientLink::new(10);
+        let _theirs = open(&mut comp, &mut background, "Background");
+        let mut front = ClientLink::new(11);
+        let _mine = open(&mut comp, &mut front, "Front"); // takes the focus
+        let replies = send(&mut comp, &mut background, &[pick(1)]);
+        assert!(
+            matches!(&replies[0].body, ResponseBody::Error { message } if message.contains("focus")),
+            "{replies:?}"
+        );
+        assert!(!comp.picking());
+
+        // Nor can a program with no window at all.
+        let mut windowless = ClientLink::new(12);
+        let replies = send(&mut comp, &mut windowless, &[pick(1)]);
+        assert!(matches!(replies[0].body, ResponseBody::Error { .. }));
+    }
+
+    /// Giving up answers the pick too: nothing is left waiting.
+    #[test]
+    fn a_cancelled_pick_is_answered_as_nothing_picked() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut explorer = ClientLink::new(11);
+        let _own = open(&mut comp, &mut explorer, "Process Explorer");
+        assert!(send(&mut comp, &mut explorer, &[pick(1)]).is_empty());
+        let replies = exchange(&mut comp, &mut explorer, vec![RequestBody::CancelPick]);
+        assert!(matches!(replies[0].body, ResponseBody::Ok));
+        let replies = deferred(&mut comp, &mut explorer);
+        assert_eq!(replies.len(), 1);
+        assert!(matches!(replies[0].body, ResponseBody::Picked(None)));
+        assert!(!comp.picking());
+    }
+
+    /// Two programs cannot both wait on one click.
+    #[test]
+    fn a_second_program_is_refused_while_a_pick_is_open() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let mut first = ClientLink::new(11);
+        let _a = open(&mut comp, &mut first, "First");
+        assert!(send(&mut comp, &mut first, &[pick(1)]).is_empty());
+        let mut second = ClientLink::new(12);
+        let _b = open(&mut comp, &mut second, "Second"); // takes the focus
+        let replies = send(&mut comp, &mut second, &[pick(1)]);
+        assert!(
+            matches!(&replies[0].body, ResponseBody::Error { message } if message.contains("another program")),
+            "{replies:?}"
+        );
+    }
+
+    /// The window list names each window's process as the kernel named it --
+    /// shared by two connections of one process, absent over TCP -- beside
+    /// the per-connection number it has always carried.
+    #[test]
+    fn the_window_list_names_the_process_the_kernel_named() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeWindowList { subscribe: true }],
+        );
+        let cred = PeerCred {
+            pid: 777,
+            uid: 1000,
+            gid: 1000,
+        };
+        let mut first = ClientLink::new(21);
+        first.attest(Some(cred), Some(false));
+        let mut second = ClientLink::new(22);
+        second.attest(Some(cred), Some(false));
+        let mut remote = ClientLink::new(23);
+        let a = open_in(&mut comp, &mut first, "First", Layer::Normal);
+        let b = open_in(&mut comp, &mut second, "Second", Layer::Normal);
+        let c = open_in(&mut comp, &mut remote, "Remote", Layer::Normal);
+
+        let lists = pump_lists(&mut comp, &mut shell);
+        let list = lists.last().expect("a list");
+        let entry = |id: u64| list.iter().find(|w| w.id == id).expect("listed");
+        assert_eq!((entry(a).pid, entry(a).process), (21, Some(777)));
+        assert_eq!(
+            (entry(b).pid, entry(b).process),
+            (22, Some(777)),
+            "two connections, one process"
+        );
+        assert_eq!((entry(c).pid, entry(c).process), (23, None));
     }
 
     /// An unchanged tray is not resent.

@@ -93,6 +93,10 @@
 //! still a mai ek, and the shaper downstream still has to know it is a mark to
 //! give it no advance. Rewriting the character would lose that, because a
 //! private-use codepoint's general category is `Co`.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-ot-shaper-thai.cc`,
+//! copyright © 2010, 2012 Google, Inc. Used under HarfBuzz's licence: see
+//! `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 use core::ops::Range;

@@ -1,0 +1,13 @@
+{
+ "issue_without_status": [
+  "b-split-ran-its-filter-through-bin-sh-whatever-shell-said-called-a-killed-command-exit-1-and-could-truncate-its-own-input-it-is-gnus-646e14bf",
+  "td-b-coreutils-has-913-defensive-lint-findings",
+  "td-b-diff-chooses-its-own-edit-script",
+  "td-b-install-reimplements-a-backup-policy-coreutils-already-has",
+  "td-b-mkdirp-walks-by-name"
+ ],
+ "lowercase_marker": [],
+ "decision_files": [],
+ "deferred_without_trigger": [],
+ "todo_done_paragraphs": []
+}

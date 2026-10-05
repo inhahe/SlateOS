@@ -1441,10 +1441,12 @@ enum FilterRowKind {
 // ─── Application ─────────────────────────────────────────────────────
 
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
+use guitk::textedit;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1488,14 +1490,6 @@ const ROW_FONT: f32 = 12.0;
 /// Font size of the results table's header and its remaining cells.
 const ROW_FONT_SMALL: f32 = 11.0;
 
-/// Main file search application
-/// The keys this program answers, raised by `F1`.
-///
-/// `?` is not a second way in: the search box takes a typed query, so a `?`
-/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
-///
-/// The six sort chords are `Ctrl` plus the first letter of the column, which
-/// is the only reason they are letters rather than a menu.
 /// What the query's `ext:` and `in:` words narrowed a search to, for the
 /// status line -- so a search that found nothing because of them says so.
 fn narrowing(criteria: &SearchCriteria) -> String {
@@ -1513,6 +1507,13 @@ fn narrowing(criteria: &SearchCriteria) -> String {
     }
 }
 
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the search box takes a typed query, so a `?`
+/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
+///
+/// The six sort chords are `Ctrl` plus the first letter of the column, which
+/// is the only reason they are letters rather than a menu.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the results"),
     ("PageUp / PageDown", "A page of results"),
@@ -1537,6 +1538,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "This list"),
 ];
 
+/// Main file search application
 pub struct FileSearchApp {
     pub index: FileIndex,
     pub criteria: SearchCriteria,
@@ -1586,6 +1588,10 @@ pub struct FileSearchApp {
     pub root: Option<std::path::PathBuf>,
     /// What the pointer is over, so it can be drawn lit and named.
     hover: Option<Target>,
+    /// How wide the mark is round the query's box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    focus_ring_width: f32,
     /// Every box the last paint recorded; see [`FileSearchApp::target_at`].
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder over the results, so a trackpad's fractions add
@@ -1636,6 +1642,7 @@ impl FileSearchApp {
             filters_scroll: 0.0,
             root: None,
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             results_wheel: wheel::Accumulator::default(),
             unreadable_saved: Vec::new(),
@@ -1690,6 +1697,23 @@ impl FileSearchApp {
         // A new answer starts at its top.
         self.selected_result = None;
         self.results_scroll = 0;
+    }
+
+    /// How the query's box is drawn now: it has the keyboard whenever
+    /// nothing covers it -- every key that types goes to it -- and neither
+    /// that nor the light under the pointer while the shortcut card or the
+    /// folder picker is over it; red while a query has found nothing, once
+    /// any search of the files' contents has finished.
+    fn query_box_state(&self) -> field::State {
+        let open = !self.show_help && !self.picker.is_open();
+        field::State {
+            hovered: open && self.hover == Some(Target::SearchBox),
+            focused: open,
+            disabled: false,
+            invalid: !self.criteria.query.trim().is_empty()
+                && self.results.is_empty()
+                && self.content.is_none(),
+        }
     }
 
     /// Start reading the files the filters leave for the query.
@@ -1823,6 +1847,7 @@ impl FileSearchApp {
             search.is_bookmarked = false;
             search.name = None;
         }
+        self.keep_filters_in_reach();
     }
 
     /// Get selected entry
@@ -1962,7 +1987,19 @@ impl FileSearchApp {
                     self.window = (*width as f32, *height as f32);
                 }
                 self.keep_selection_visible();
+                self.keep_filters_in_reach();
                 EventResult::Consumed
+            }
+            // A search saved or forgotten in another window, and the desktop
+            // says so: this window follows. Read at startup only, its list
+            // went stale -- and its next save wrote the stale list over the
+            // other window's, losing what that one had saved.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                if self.reread_saved_searches() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
             _ => EventResult::Ignored,
         }
@@ -1999,7 +2036,10 @@ impl FileSearchApp {
         if let Some(answered) = self.handle_key_help_card(key) {
             return answered;
         }
-        let ctrl = key.modifiers.ctrl;
+        // Ctrl alone: Ctrl+Alt is AltGr, which types -- Polish `ś` is
+        // AltGr+S, which sorted by size -- and the Windows key's chords are
+        // the desktop's.
+        let ctrl = textline::is_ctrl_chord(key.modifiers);
         match key.key {
             Key::Up => self.step_selection(-1),
             Key::Down => self.step_selection(1),
@@ -2091,11 +2131,14 @@ impl FileSearchApp {
                 self.criteria.include_directories = !self.criteria.include_directories;
                 self.rerun_with_filters()
             }
+            // What a key typed, AltGr's among it -- refused with every Ctrl
+            // key once, so German `@` could not be typed -- and not a
+            // command's letter: Alt+X typed an `x`, and Windows+E an `e`.
             _ => {
-                if key.text.is_empty() || ctrl {
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                self.criteria.query.push_str(&key.text);
+                self.criteria.query.extend(key.typed());
                 self.execute_search();
                 EventResult::Consumed
             }
@@ -2327,42 +2370,62 @@ impl FileSearchApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search input
+        // Search input: the toolkit's field. Every key that types goes to it,
+        // so it has the keyboard whenever nothing covers it.
         let search = search_box_rect(width);
-        self.palette.push_surface(
-            f,
-            search.x,
-            search.y,
-            search.w,
-            search.h,
-            6.0,
-            Surface::Card,
-        );
+        let state = self.query_box_state();
+        field::draw(f, &self.palette, search, state, self.focus_ring_width);
         f.hit(Target::SearchBox, search);
-
-        let search_text = if self.criteria.query.is_empty() {
-            "Search files...  ext:pdf or in:Documents narrow it".to_string()
-        } else {
-            self.criteria.query.clone()
-        };
-        f.push(RenderCommand::Text {
-            x: search.x + 12.0,
-            y: 36.0,
-            text: search_text,
-            font_size: 13.0,
-            color: if self.criteria.query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some((search.w - 190.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
 
         // Save this search, then the match mode, both inside the box's right
         // end. The mode was a label; it is the switch Ctrl+R turns now.
         let (save, mode) = search_switch_rects(search);
+
+        // The query, with the caret after it -- scrolled so the end being
+        // typed stays in view -- up to the switches; empty, what it is for.
+        let line = guitk::text::line_height(13.0, FontWeightHint::Regular);
+        let inner = Rect::new(
+            search.x + 12.0,
+            search.y + (search.h - line) / 2.0,
+            (save.x - 8.0 - (search.x + 12.0)).max(0.0),
+            line,
+        );
+        if self.criteria.query.is_empty() {
+            f.push(RenderCommand::Text {
+                x: inner.x,
+                y: inner.y,
+                text: "Search files...  ext:pdf or in:Documents narrow it".to_string(),
+                font_size: 13.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(inner.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &self.criteria.query,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: guitk::text::TextCursor::from(self.criteria.query.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: inner.x,
+                y: inner.y,
+                width: inner.w,
+                line_height: line,
+                font_size: 13.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
+
         let saved = self.current_search_is_saved();
         let save_label = if saved { "★ Saved" } else { "☆ Save" };
         self.draw_button(f, save, save_label, Target::SaveSearch);
@@ -3353,7 +3416,14 @@ impl FileSearchApp {
         EventResult::Consumed
     }
 
-    /// Read the saved searches from the user's settings.
+    /// Make this window's saved searches the ones `doc` records: at startup,
+    /// and again whenever the desktop says `filesearch.yaml` changed.
+    ///
+    /// A search saved here that `doc` no longer has is forgotten as its ×
+    /// forgets it, staying among the recent ones; one `doc` has that is not
+    /// saved here is saved as Ctrl+D saves it, keeping what it found when it
+    /// last ran here. Either way a search keeps its id, so a row the pointer
+    /// is over is still that search's row.
     ///
     /// Entries that do not parse -- an unknown mode word, an empty query -- are
     /// not shown, and not invented into something else either. They are kept,
@@ -3361,16 +3431,38 @@ impl FileSearchApp {
     /// search this version cannot run (one saved by a newer version, say) is
     /// still theirs.
     pub fn load_saved_searches(&mut self, doc: &yamldoc::Document) {
+        let mut wanted = Vec::new();
+        self.unreadable_saved.clear();
         for item in doc.get_seq(&SAVED_KEY).unwrap_or_default() {
             let parsed = item.split_once(':').and_then(|(word, query)| {
                 SearchMode::from_key(word)
                     .filter(|_| !query.is_empty())
                     .map(|mode| (mode, query.to_string()))
             });
-            let Some((mode, query)) = parsed else {
-                self.unreadable_saved.push(item);
+            match parsed {
+                Some(search) => wanted.push(search),
+                None => self.unreadable_saved.push(item),
+            }
+        }
+        for search in &mut self.search_history {
+            let kept = wanted
+                .iter()
+                .any(|(mode, query)| search.mode == *mode && search.query == *query);
+            if search.is_bookmarked && !kept {
+                search.is_bookmarked = false;
+                search.name = None;
+            }
+        }
+        for (mode, query) in wanted {
+            if let Some(search) = self
+                .search_history
+                .iter_mut()
+                .find(|s| s.mode == mode && s.query == query)
+            {
+                search.is_bookmarked = true;
+                search.name = Some(query);
                 continue;
-            };
+            }
             let id = self.next_search_id;
             self.next_search_id = self.next_search_id.saturating_add(1);
             self.search_history.push(SavedSearch {
@@ -3383,6 +3475,27 @@ impl FileSearchApp {
                 is_bookmarked: true,
             });
         }
+        self.keep_filters_in_reach();
+    }
+
+    /// Read the saved searches again after the desktop said `filesearch.yaml`
+    /// changed -- a search saved or forgotten in another window, or a hand
+    /// edit (§1418, §1434). Whether anything changed.
+    fn reread_saved_searches(&mut self) -> bool {
+        let before = self.saved_search_items();
+        self.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+        before != self.saved_search_items()
+    }
+
+    /// Keep the filters panel's scroll within what it holds, which shrinks
+    /// when a saved search is forgotten -- here or in another window -- or
+    /// the window grows. Past it, the panel showed its top rows scrolled away
+    /// and nothing beneath them until the wheel was turned.
+    fn keep_filters_in_reach(&mut self) {
+        let l = Layout::of(self, self.window.0, self.window.1);
+        self.filters_scroll = self
+            .filters_scroll
+            .min(self.filters_scroll_limit(l.filters));
     }
 
     /// The saved searches as the settings file records them.
@@ -3497,6 +3610,10 @@ pub fn format_relative_time(seconds: u64) -> String {
 impl App for FileSearchApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4405,19 +4522,24 @@ mod tests {
         // by analogy with the seven other apps, where the picker IS in that
         // function -- and failed against correct code. The render path is
         // per-app and has to be read off the app.
+        //
+        // Looked for as the picker's own commands, in order, rather than as a
+        // frame that grew by their number: what is under the picker changes
+        // when it comes up -- the query's box gives up its keyboard mark --
+        // so a count says nothing about whether the picker is in the frame.
         let mut app = FileSearchApp::new();
-        let before = app.render(1024.0, 768.0).commands.len();
         app.open_folder_dialog();
         assert!(app.picker.is_open(), "no picker came up");
-        let after = app.render(1024.0, 768.0).commands.len();
-        let own = app.picker.render(&app.palette, 1024.0, 768.0).len();
+        let frame = app.render(1024.0, 768.0).commands;
+        let own = app.picker.render(&app.palette, 1024.0, 768.0);
         assert!(
-            own > 0,
+            !own.is_empty(),
             "the picker itself draws nothing, so this proves nothing"
         );
         assert!(
-            after >= before + own,
-            "the frame does not contain the picker's own {own} command(s) ({before} before, {after} after) -- something else grew instead"
+            frame.windows(own.len()).any(|w| w == own.as_slice()),
+            "the frame does not contain the picker's own {} command(s)",
+            own.len()
         );
     }
 
@@ -5759,6 +5881,219 @@ mod tests {
         });
     }
 
+    /// What the desktop sends every window when `name.yaml` changed.
+    fn announce(name: &[u8]) -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(name).expect("a settings name"),
+            ),
+        }
+    }
+
+    /// The saved searches as the file would record them, in a stable order.
+    fn saved_items(app: &FileSearchApp) -> Vec<String> {
+        let mut items = app.saved_search_items();
+        items.sort();
+        items
+    }
+
+    /// **A search saved or forgotten in another window reaches this one**,
+    /// when the desktop says `filesearch.yaml` changed (§1434). Read at
+    /// startup only, the list went stale -- and this window's next save wrote
+    /// it over the file, losing what the other window had saved.
+    ///
+    /// A search this window ran stays the one it ran: saved elsewhere, it
+    /// keeps its id and what it found rather than being listed twice;
+    /// forgotten elsewhere, it stays among the recent ones, as its × leaves
+    /// it. An entry this version cannot read is written back once however
+    /// often the file is read again.
+    #[test]
+    fn a_search_saved_in_another_window_reaches_this_one() {
+        settingsfile::testing::with_scratch_config("fs_reread", |_| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_seq(&SAVED_KEY, &["fuzzy:repor"]);
+            settingsfile::store(CONFIG_NAME, &doc).expect("store the file");
+            let mut first = wired();
+            first.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+            let mut second = wired();
+            second.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+
+            // The second window has run `*.rs` and opened what it found.
+            second.criteria.query = "*.rs".to_string();
+            second.criteria.mode = SearchMode::Glob;
+            second.execute_search();
+            second.selected_result = Some(0);
+            second.open_selected();
+            let ran = second
+                .search_history
+                .iter()
+                .find(|s| s.query == "*.rs")
+                .map(|s| (s.id, s.result_count))
+                .expect("the search was not remembered");
+            assert_eq!(ran.1, 2);
+
+            // The first saves it, and another.
+            for (query, mode) in [
+                ("*.rs", SearchMode::Glob),
+                ("budget", SearchMode::Substring),
+            ] {
+                first.criteria.query = query.to_string();
+                first.criteria.mode = mode;
+                first.toggle_saved();
+            }
+
+            assert_eq!(
+                second.handle_event(&announce(b"weather")),
+                EventResult::Ignored
+            );
+            assert_eq!(
+                saved_items(&second),
+                ["fuzzy:repor"],
+                "another program's file was read"
+            );
+            assert_eq!(
+                second.handle_event(&announce(b"filesearch")),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                saved_items(&second),
+                ["fuzzy:repor", "glob:*.rs", "name:budget"]
+            );
+            let rs = second
+                .search_history
+                .iter()
+                .find(|s| s.query == "*.rs")
+                .map(|s| (s.id, s.result_count));
+            assert_eq!(rs, Some(ran), "the search this window ran became another");
+            assert_eq!(
+                second.search_history.len(),
+                2,
+                "a search was listed twice: {:?}",
+                second.search_history
+            );
+            assert_eq!(
+                first.handle_event(&announce(b"filesearch")),
+                EventResult::Ignored,
+                "a window's own save, announced back, changed its list"
+            );
+
+            // The second's own save keeps the first's.
+            second.criteria.query = "notes".to_string();
+            second.criteria.mode = SearchMode::Substring;
+            second.toggle_saved();
+            first.handle_event(&announce(b"filesearch"));
+            assert_eq!(
+                saved_items(&first),
+                ["fuzzy:repor", "glob:*.rs", "name:budget", "name:notes"]
+            );
+
+            // The first forgets `*.rs`, and so does the second -- which still
+            // offers it as a search it ran.
+            first.criteria.query = "*.rs".to_string();
+            first.criteria.mode = SearchMode::Glob;
+            first.toggle_saved();
+            assert_eq!(
+                second.handle_event(&announce(b"filesearch")),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                saved_items(&second),
+                ["fuzzy:repor", "name:budget", "name:notes"]
+            );
+            assert!(
+                second
+                    .search_history
+                    .iter()
+                    .any(|s| s.query == "*.rs" && !s.is_bookmarked),
+                "a search this window ran left its recent ones"
+            );
+            let kept = settingsfile::load(CONFIG_NAME)
+                .get_seq(&SAVED_KEY)
+                .expect("the saved list");
+            assert_eq!(
+                kept.iter().filter(|item| *item == "fuzzy:repor").count(),
+                1,
+                "{kept:?}"
+            );
+        });
+    }
+
+    /// **The filters panel is not left scrolled past its end** when what it
+    /// holds shrinks: saved searches forgotten in another window, one
+    /// forgotten by its ×, or the window grown. It showed its top rows
+    /// scrolled away and nothing beneath them until the wheel was turned.
+    #[test]
+    fn the_filters_panel_is_not_left_scrolled_past_its_end() {
+        settingsfile::testing::with_scratch_config("fs_filters_reach", |_| {
+            let store = |count: usize| {
+                let items: Vec<String> = (0..count).map(|i| format!("name:q{i:02}")).collect();
+                let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+                let mut doc = yamldoc::Document::new();
+                doc.set_seq(&SAVED_KEY, &refs);
+                settingsfile::store(CONFIG_NAME, &doc).expect("store the file");
+            };
+            let mut app = wired();
+            app.window = <FileSearchApp as Probe>::SIZE;
+            let panel = Layout::of(&app, app.window.0, app.window.1).filters;
+            let at_end = |app: &mut FileSearchApp| {
+                let limit = app.filters_scroll_limit(panel);
+                assert!(limit > 0.0, "the panel does not scroll: nothing to test");
+                app.filters_scroll = limit;
+                limit
+            };
+            store(40);
+            app.load_saved_searches(&settingsfile::load(CONFIG_NAME));
+
+            // Another window forgets twenty; eight are listed as recent.
+            let end = at_end(&mut app);
+            store(20);
+            app.handle_event(&announce(b"filesearch"));
+            let limit = app.filters_scroll_limit(panel);
+            assert!(limit < end, "the panel did not shrink: nothing tested");
+            assert!(
+                app.filters_scroll <= limit,
+                "scrolled {} past an end at {limit}",
+                app.filters_scroll
+            );
+
+            // Its × forgets one more, which the full recent list does not show.
+            let end = at_end(&mut app);
+            let last = app
+                .search_history
+                .iter()
+                .rfind(|s| s.is_bookmarked)
+                .map(|s| s.id)
+                .expect("a saved search");
+            assert!(probe::is_visible(&app, Target::Unsave(last)));
+            probe::click(&mut app, Target::Unsave(last));
+            let limit = app.filters_scroll_limit(panel);
+            assert!(limit < end, "the panel did not shrink: nothing tested");
+            assert!(
+                app.filters_scroll <= limit,
+                "scrolled {} past an end at {limit}",
+                app.filters_scroll
+            );
+
+            // The window grows by less than the panel scrolls.
+            let end = at_end(&mut app);
+            app.handle_event(&Event::Resize {
+                width: 1280,
+                height: 900,
+            });
+            let taller = Layout::of(&app, 1280.0, 900.0).filters;
+            let limit = app.filters_scroll_limit(taller);
+            assert!(
+                limit > 0.0 && limit < end,
+                "{limit} against {end}: nothing tested"
+            );
+            assert!(
+                app.filters_scroll <= limit,
+                "scrolled {} past an end at {limit}",
+                app.filters_scroll
+            );
+        });
+    }
+
     /// A recent search is offered back, and pressing it runs it again.
     #[test]
     fn a_recent_search_can_be_run_again() {
@@ -6137,5 +6472,209 @@ mod tests {
         );
         // The box still shows what was typed.
         assert_eq!(app.criteria.query, "report ext:pdf in:2025");
+    }
+    // -- The query's box is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// The window size these tests draw and point at.
+    const W: f32 = 1280.0;
+    const H: f32 = 800.0;
+
+    /// A key held with `modifiers` that typed `text`.
+    fn key_with(key: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        })
+    }
+
+    fn mouse(kind: MouseEventKind, (x, y): (f32, f32)) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// Whether the window, drawn at `W` by `H`, draws exactly the toolkit's
+    /// field for the query's box in `state` -- and, unless `state` has the
+    /// keyboard, not the focused one as well.
+    fn draws_query_box(app: &mut FileSearchApp, p: &Palette, state: field::State) -> bool {
+        let rect = search_box_rect(W);
+        let ring = app.focus_ring_width;
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, ring);
+            v
+        };
+        let cmds = app.render(W, H).commands;
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// **The query's box is the toolkit's field**: it has the keyboard --
+    /// every key that types goes to it -- marked as the theme marks a field
+    /// in the user's width, lit under the pointer and not after it leaves,
+    /// red while a query finds nothing, and neither marked nor lit under the
+    /// shortcut card. It was a card, the same whether it had the keyboard or
+    /// not, with no caret.
+    #[test]
+    fn the_query_box_is_the_toolkits_field() {
+        let mut app = indexed();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_query_box(&mut app, &p, focused),
+            "the query's box does not have the keyboard"
+        );
+
+        // Over the box's typing, left of its switches.
+        let rect = search_box_rect(W);
+        let at = (rect.x + 40.0, rect.y + rect.h / 2.0);
+        assert_eq!(
+            app.handle_event(&mouse(MouseEventKind::Move, at)),
+            EventResult::Consumed
+        );
+        assert!(
+            draws_query_box(
+                &mut app,
+                &p,
+                field::State {
+                    hovered: true,
+                    ..focused
+                }
+            ),
+            "the pointer does not light the box"
+        );
+        app.handle_event(&mouse(MouseEventKind::Leave, at));
+        assert!(
+            draws_query_box(&mut app, &p, focused),
+            "the light stays after the pointer leaves"
+        );
+
+        for c in "zzzzqqqq".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert!(app.results.is_empty());
+        assert!(
+            draws_query_box(
+                &mut app,
+                &p,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a query that finds nothing does not turn the box red"
+        );
+
+        app.show_help = true;
+        assert!(
+            draws_query_box(
+                &mut app,
+                &p,
+                field::State {
+                    invalid: true,
+                    ..field::State::default()
+                }
+            ),
+            "the box keeps the keyboard's mark under the shortcut card"
+        );
+    }
+
+    /// **AltGr types into the query, and a command does not.** Every key
+    /// held with Ctrl was refused, and AltGr arrives as Ctrl+Alt: German `@`
+    /// could not be typed, and AltGr+S -- Polish `ś` -- sorted by size. Alt+X
+    /// typed an `x`, and Windows+E an `e`.
+    #[test]
+    fn altgr_types_into_the_query_and_a_command_does_not() {
+        let mut app = indexed();
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let sort = (app.sort_column, app.sort_ascending);
+        app.handle_event(&key_with(Key::S, "\u{15b}", altgr));
+        app.handle_event(&key_with(Key::Q, "@", altgr));
+        assert_eq!(
+            app.criteria.query, "\u{15b}@",
+            "AltGr's letters were not typed"
+        );
+        assert_eq!(
+            (app.sort_column, app.sort_ascending),
+            sort,
+            "AltGr+S sorted the results"
+        );
+        for (k, t, m) in [
+            (
+                Key::X,
+                "x",
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
+            (Key::K, "k", Modifiers::ctrl()),
+            (
+                Key::E,
+                "e",
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        ] {
+            app.handle_event(&key_with(k, t, m));
+        }
+        assert_eq!(
+            app.criteria.query, "\u{15b}@",
+            "a command's letter was typed"
+        );
+    }
+
+    /// **The caret is after the query, inside its box and short of the
+    /// switches.**
+    #[test]
+    fn the_caret_follows_the_query_in_its_box() {
+        let mut app = indexed();
+        for c in "report".chars() {
+            app.handle_event(&typed(c));
+        }
+        let cmds = app.render(W, H).commands;
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "report"))
+            .expect("the query is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the query: {other:?}"),
+        };
+        let rect = search_box_rect(W);
+        let (save, _) = search_switch_rects(rect);
+        let end = rect.x + 12.0 + guitk::text::measure("report", 13.0, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5 && caret < save.x,
+            "the caret is at {caret}, not after the query at {end}, short of {save:?}"
+        );
     }
 }

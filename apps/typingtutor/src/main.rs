@@ -705,8 +705,14 @@ impl TypingTutorApp {
         }
 
         match self.view {
-            AppView::LessonSelect => self.handle_lesson_select(event),
+            // A lesson takes what was typed, AltGr's letters among them.
             AppView::Typing => self.handle_typing(event),
+            // Everywhere else the keys are bindings on keys, taken plain --
+            // nothing held but Shift. A chord with Ctrl, Alt or the Windows
+            // key is the window's or the desktop's and arrives carrying its
+            // key: Alt+Enter started a lesson and Alt+R restarted one.
+            _ if !textline::is_plain(event.modifiers) => EventResult::Ignored,
+            AppView::LessonSelect => self.handle_lesson_select(event),
             AppView::Results => self.handle_results(event),
             AppView::Statistics => self.handle_statistics(event),
         }
@@ -801,25 +807,32 @@ impl TypingTutorApp {
     }
 
     fn handle_typing(&mut self, event: &KeyEvent) -> EventResult {
-        if event.key == Key::Escape {
+        // A plain Escape: Alt+Escape threw the lesson away.
+        if event.key == Key::Escape && textline::is_plain(event.modifiers) {
             self.view = AppView::LessonSelect;
             self.session = None;
             return EventResult::Consumed;
         }
 
-        if event.key == Key::Backspace {
+        // Backspace edits, so it is refused only to Alt and the Windows key.
+        if event.key == Key::Backspace && !textline::is_alt_or_windows_chord(event.modifiers) {
             if let Some(ref mut session) = self.session {
                 session.backspace();
             }
             return EventResult::Consumed;
         }
 
-        // Type the character.
+        // Type the character -- what was typed, AltGr's letters among it,
+        // and not the letter a command carries: Ctrl+C scored a `c` against
+        // the lesson, and Alt+X an `x`.
         //
         // `typed`, not `text`: Enter and Tab produce `\r` and `\t` on most
         // layouts, and a lesson that scored those would count a carriage
         // return the user never saw as a mistyped letter — and then report an
         // accuracy the typist has no way to explain.
+        if !textline::types_into_field(event) {
+            return EventResult::Ignored;
+        }
         let mut typed_any = false;
         if let Some(ref mut session) = self.session {
             for ch in event.typed() {
@@ -2204,6 +2217,78 @@ mod tests {
         let mut app = TypingTutorApp::new();
         app.handle_key(&make_key(Key::Up, None));
         assert_eq!(app.selected_lesson, 0);
+    }
+
+    /// **A chord is neither a tutor key nor typing, and AltGr types**: a
+    /// chord with Ctrl, Alt or the Windows key carries its key -- Alt+Enter
+    /// started a lesson, Alt+S opened the statistics, Alt+Escape threw a
+    /// lesson away, and Ctrl+C and Alt+X were scored as a typed `c` and `x`;
+    /// while a letter typed with AltGr counts as typing, as it should.
+    #[test]
+    fn a_chord_is_neither_a_tutor_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = TypingTutorApp::new();
+        let state = |app: &TypingTutorApp| {
+            (
+                app.view,
+                app.selected_lesson,
+                app.session.is_some(),
+                app.category_filter,
+            )
+        };
+        let before = state(&app);
+        for m in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [Key::Down, Key::End, Key::C, Key::S, Key::Enter] {
+                assert_eq!(
+                    app.handle_key(&chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the list");
+            }
+        }
+
+        // A lesson: only what was typed is scored.
+        app.handle_key(&make_key(Key::Enter, None));
+        assert_eq!(app.view, AppView::Typing, "control: Enter starts one");
+        let keystrokes =
+            |app: &TypingTutorApp| app.session.as_ref().map_or(0, |s| s.total_keystrokes);
+        for (k, text, m) in [
+            (Key::C, "c", Modifiers::ctrl()),
+            (Key::X, "x", Modifiers::alt()),
+            (Key::X, "x", Modifiers::super_key()),
+        ] {
+            app.handle_key(&chord(k, text, m));
+            assert_eq!(keystrokes(&app), 0, "{m:?} {k:?} was scored as typing");
+        }
+        app.handle_key(&chord(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(
+            app.view,
+            AppView::Typing,
+            "Alt+Escape threw the lesson away"
+        );
+        app.handle_key(&chord(Key::S, "\u{15b}", altgr));
+        assert_eq!(keystrokes(&app), 1, "AltGr's letter was not typed");
+        app.handle_key(&chord(Key::Backspace, "", Modifiers::alt()));
+        assert_eq!(
+            app.session.as_ref().map(|s| s.cursor),
+            Some(1),
+            "Alt+Backspace took the letter back"
+        );
     }
 
     #[test]

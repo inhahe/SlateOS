@@ -11,6 +11,8 @@ guitk = { path = "../../gui/toolkit" }
 # built a board, dropped it and exited, and the lattice it would have drawn was
 # sized from three constants that no window ever reached.
 oswindow = { path = "../../gui/window" }
+# `is_plain`: a key held with Alt or the Windows key is not the game's.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

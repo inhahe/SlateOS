@@ -7,7 +7,11 @@
 //! Each of those has GNU's long spelling too — `--create`, `--extract` (or
 //! `--get`), `--list`, `--verbose`, `--file`, `--directory`,
 //! `--preserve-permissions` (or `--same-permissions`) — abbreviable to any
-//! unambiguous prefix, and `--` ends the options. `-?`/`--help`, `--usage` and
+//! unambiguous prefix, and `--` ends the options. Owners and modes follow GNU:
+//! as root an extraction gives every member its archived owner (by name where
+//! this machine knows it) and its exact mode, and `--same-owner`,
+//! `--no-same-owner`, `--no-same-permissions` and `--numeric-owner` adjust
+//! that; see [`Ownership`]. `-?`/`--help`, `--usage` and
 //! `--version` answer and exit 0. The other 160 long options GNU has are
 //! **recognised and refused** rather than ignored; see
 //! [`LONG_OPTIONS`] for why a table of names this tar does not implement is
@@ -18,6 +22,21 @@
 //! write tar, and it is older than getopt. A first argument with no leading
 //! dash is a run of option letters whose value-taking letters take the argv
 //! words that follow, in letter order; see [`explode_old_option`].
+//!
+//! # The archive, and the two standard streams
+//!
+//! `-f -` -- and no `-f` at all, unless `TAPE` names an archive -- is standard
+//! output to `-c` and standard input to `-t` and `-x`, so `tar -cf - dir | tar
+//! -xf - -C there` works; see [`resolve_archive`]. Either is refused when it is
+//! a terminal ([`refuse_terminal`]), and an archive that is `/dev/null` is not
+//! written at all, nor are its regular files opened ([`is_dev_null`]).
+//!
+//! Nothing written is allowed to vanish. A write of the archive that fails is
+//! fatal, and says how much of the record went ([`archive_write_failed`]); a
+//! member list that could not be written, or a diagnostic that could not, turns
+//! the exit status to 2 at the end of the run, as GNU's `close_stdout` does
+//! ([`conclude`]). Both standard descriptors are first put through gnulib's
+//! `stdopen`, as GNU tar's are, which decides what a *closed* one looks like.
 //!
 //! Supports basic POSIX/ustar tar format (uncompressed).
 //! Files > 8GB and paths > 255 chars are not supported.
@@ -87,7 +106,7 @@ use coreutils::quote::{escape, escape_os, os_bytes, quote, quoteaf};
 // it is the non-unix twin of `Dir` that needs it, to build a path out of a
 // member's bytes; on unix every component is handed to `openat` as it stands.
 use coreutils::quote::os_from_bytes;
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 // Split, and not merged back: `BTreeSet` backs [`PrefixNotice`], which every
 // host builds because `tar -tf` issues the same `Removing leading` notices a
 // unix extraction does. `BTreeMap` backs the uid/gid name cache and the
@@ -105,6 +124,11 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// The standard descriptors as the process was started with them; `main` calls
+// `stdfd::restore` and then `stdfd::stdopen`, which is GNU tar's own first act.
+coreutils::guard_std_fds!();
 
 /// GNU tar's exit status for "a fatal error occurred". Used for every failure
 /// that leaves the archive or the extracted tree incomplete, because a caller
@@ -445,6 +469,8 @@ fn failed_with_previous_errors() -> i32 {
 /// partial or merely incomplete.
 fn fatal() -> i32 {
     diag!("tar: Error is not recoverable: exiting now");
+    // GNU exits here, so nothing after this point is checked. See [`FATAL`].
+    FATAL.store(true, Ordering::Relaxed);
     EXIT_FATAL
 }
 
@@ -511,16 +537,36 @@ struct TarArgs {
     /// `-t`/`--list`, which is why `tar -tt` is `tar -tv`. See [`Verbose`] for
     /// what each level renders.
     verbose: u8,
-    /// `-p`, `--same-permissions`: restore the stored mode exactly, umask and
-    /// setuid bits included. Without it a non-root extraction applies
-    /// `mode & 0o777 & !umask`, which is what GNU does and what this tar did
-    /// not do at all — it left every extracted file at whatever `File::create`
-    /// produced.
-    same_permissions: bool,
+    /// `-p`, `--same-permissions` (`Some(true)`) or `--no-same-permissions`
+    /// (`Some(false)`), the last one written winning; `None` if neither was.
+    /// With it, the stored mode is restored exactly, umask and setuid bits
+    /// included; without it an extraction applies `mode & 0o777 & !umask`.
+    /// `None` means GNU's default, which is "on" for the superuser and "off"
+    /// for everyone else -- see [`Ownership::resolve`].
+    same_permissions: Option<bool>,
+    /// `--same-owner` (`Some(true)`) or `--no-same-owner` (`Some(false)`), the
+    /// last one written winning; `None` for GNU's default, which is again "on"
+    /// for the superuser only. On, every extracted member is given the owner
+    /// the archive records for it.
+    same_owner: Option<bool>,
+    /// `--numeric-owner`: the archive's numeric ids are the owner, and the
+    /// user and group *names* beside them are neither read nor written --
+    /// `-c` stores them empty, `-tv` shows the numbers, and `-x` gives files
+    /// the numbers even where this machine knows the names.
+    numeric_owner: bool,
     /// What to do about something already standing where a member is to go.
     /// See [`OldFiles`].
     old_files: OldFiles,
+    /// The last `-f` / `--file` given, if any, exactly as written -- `-` is not
+    /// resolved here. What it means, and what an absent one means, is decided
+    /// once by [`resolve_archive`].
     archive_file: Option<OsString>,
+    /// How many times `-f` / `--file` was given. GNU keeps every one, as the
+    /// volumes of a multi-volume archive, and refuses more than one without
+    /// `-M` -- which this tar does not have, so a second `-f` is always the
+    /// refusal. Counted rather than collected because the refusal is the only
+    /// thing the extra names are ever used for.
+    archives_named: usize,
     /// Every `-C` / `--directory`, in the order it was written.
     ///
     /// Not `Option<OsString>`, because `-C` is not an option carrying a value —
@@ -563,9 +609,12 @@ impl Default for TarArgs {
         Self {
             mode: Mode::default(),
             verbose: 0,
-            same_permissions: false,
+            same_permissions: None,
+            same_owner: None,
+            numeric_owner: false,
             old_files: OldFiles::default(),
             archive_file: None,
+            archives_named: 0,
             chdirs: Vec::new(),
             files: Vec::new(),
             record_size: DEFAULT_RECORD_SIZE,
@@ -617,6 +666,17 @@ impl TarArgs {
         self.mode.choose(Mode::List)?;
         self.verbose = self.verbose.saturating_add(1);
         Ok(())
+    }
+
+    /// `-f` / `--file`: name the archive, and count the naming.
+    ///
+    /// The count is what [`TarArgs::archives_named`] is for: a second `-f` is
+    /// refused, but not here -- GNU refuses it after every option has been
+    /// read, so `tar -f a -f b --frobnicate` is an unknown option, not two
+    /// archives. A helper so that the short and long spellings count alike.
+    fn name_archive(&mut self, value: Option<OsString>) {
+        self.archive_file = value;
+        self.archives_named = self.archives_named.saturating_add(1);
     }
 }
 
@@ -937,7 +997,7 @@ fn parse_record_size(value: &OsStr) -> Result<u64, getopt::Error> {
     let size = parse_decimal(digits)
         .and_then(|n| n.checked_mul(scale))
         .ok_or_else(invalid)?;
-    if size % BLOCK_SIZE as u64 != 0 {
+    if !size.is_multiple_of(BLOCK_SIZE as u64) {
         return Err(usage_error(
             "Record size must be a multiple of 512.".to_string(),
         ));
@@ -1004,10 +1064,10 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // [`Verbose`].
             Opt::Short(b't', _) => out.list()?,
             Opt::Short(b'v', _) => out.verbose = out.verbose.saturating_add(1),
-            Opt::Short(b'p', _) => out.same_permissions = true,
+            Opt::Short(b'p', _) => out.same_permissions = Some(true),
             Opt::Short(b'k', _) => out.old_files.choose(OldFiles::Keep)?,
             Opt::Short(b'U', _) => out.old_files.choose(OldFiles::UnlinkFirst)?,
-            Opt::Short(b'f', value) => out.archive_file = value,
+            Opt::Short(b'f', value) => out.name_archive(value),
             // Pushed, not assigned: see [`TarArgs::chdirs`]. `value` is
             // `Required` in both tables, so `None` cannot reach here.
             Opt::Short(b'C', value) => out.chdirs.extend(value),
@@ -1037,8 +1097,14 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 "extract" | "get" => out.mode.choose(Mode::Extract)?,
                 "list" => out.list()?,
                 "verbose" => out.verbose = out.verbose.saturating_add(1),
-                "preserve-permissions" | "same-permissions" => out.same_permissions = true,
-                "file" => out.archive_file = value,
+                "preserve-permissions" | "same-permissions" => out.same_permissions = Some(true),
+                "no-same-permissions" => out.same_permissions = Some(false),
+                // The ownership family. Each pair is one setting, the last one
+                // written winning, as GNU's `same_owner_option` is one int.
+                "same-owner" => out.same_owner = Some(true),
+                "no-same-owner" => out.same_owner = Some(false),
+                "numeric-owner" => out.numeric_owner = true,
+                "file" => out.name_archive(value),
                 "directory" => out.chdirs.extend(value),
                 // Both spellings of the record size. See
                 // [`TarArgs::record_size`] for why they share a field.
@@ -1127,7 +1193,7 @@ fn explode_old_option(args: &[OsString]) -> Result<Vec<OsString>, getopt::Error>
     if letters.first() == Some(&b'-') {
         return Ok(args.to_vec());
     }
-    let mut out = Vec::with_capacity(args.len() + letters.len());
+    let mut out = Vec::with_capacity(args.len().saturating_add(letters.len()));
     let mut rest = args.get(1..).unwrap_or_default().iter();
     for &letter in letters {
         out.push(os_from_bytes(&[b'-', letter]));
@@ -1165,7 +1231,7 @@ fn takes_a_value(letter: u8) -> bool {
     let spec = option_letters().as_bytes();
     spec.iter()
         .position(|&b| b == letter)
-        .is_some_and(|i| spec.get(i + 1) == Some(&b':'))
+        .is_some_and(|i| spec.get(i.saturating_add(1)) == Some(&b':'))
 }
 
 /// The full option list, on stdout, for `-?` and `--help`.
@@ -1213,10 +1279,20 @@ Examples:
   -C, --directory=DIR        change to directory DIR
   -f, --file=ARCHIVE         use archive file ARCHIVE; with no -f the archive
                                is standard input or standard output
-  -p, --preserve-permissions, --same-permissions
-                             extract the stored permissions exactly, rather
-                               than applying the umask
   -v, --verbose              list each file as it is processed
+
+ Handling of file attributes:
+
+      --no-same-owner        extract files as yourself (default for ordinary
+                             users)
+      --no-same-permissions  apply the user's umask when extracting permissions
+                             from the archive (default for ordinary users)
+      --numeric-owner        always use numbers for user/group names
+  -p, --preserve-permissions, --same-permissions
+                             extract information about file permissions
+                             (default for superuser)
+      --same-owner           try extracting files with the same ownership as
+                             exists in the archive (default for superuser)
 
  Overwrite control:
 
@@ -1269,23 +1345,44 @@ instead of doing something else and reporting success.
 /// `v` and `k` before `U`. The value-taking letters follow in GNU's order too —
 /// `[-C DIR] [-T FILE] [-X FILE] [-f ARCHIVE] [-F NAME] [-L NUMBER] [-b BLOCKS]`
 /// there, so `-b` goes after `-f` here. The long names come from the same line
-/// and put the overwrite family between `--directory` and
-/// `--preserve-permissions`, which is where argp's table has it and *not* where
-/// the help text does; the two record-size spellings likewise follow
-/// `--file=ARCHIVE` and precede `--verbose`.
+/// and put the overwrite family between `--directory` and the file-attribute
+/// family, which is where argp's table has it and *not* where the help text
+/// does; that family runs `--no-same-owner`, `--no-same-permissions`,
+/// `--numeric-owner`, `--preserve-permissions`, `--same-permissions`,
+/// `--same-owner` -- not alphabetical, the table's own order, measured -- and
+/// the two record-size spellings follow `--file=ARCHIVE` and precede
+/// `--verbose`. The
+/// lines are broken where argp breaks them, at the last whole item that fits in
+/// 79 columns.
 fn usage_text() -> String {
     "\
 Usage: tar [-ctxkUpv?] [-C DIR] [-f ARCHIVE] [-b BLOCKS] [--create] [--list]
             [--extract] [--get] [--directory=DIR] [--keep-newer-files]
             [--keep-old-files] [--overwrite] [--skip-old-files]
-            [--unlink-first] [--preserve-permissions] [--same-permissions]
-            [--file=ARCHIVE] [--blocking-factor=BLOCKS] [--record-size=NUMBER]
-            [--verbose] [--help] [--usage] [--version] [FILE]...
+            [--unlink-first] [--no-same-owner] [--no-same-permissions]
+            [--numeric-owner] [--preserve-permissions] [--same-permissions]
+            [--same-owner] [--file=ARCHIVE] [--blocking-factor=BLOCKS]
+            [--record-size=NUMBER] [--verbose] [--help] [--usage] [--version]
+            [FILE]...
 "
     .to_string()
 }
 
 fn main() {
+    // The standard descriptors as the process was given them, and then gnulib's
+    // `stdopen` over them -- GNU tar's first act, before it reads an option.
+    // The second step is what makes a closed descriptor behave as GNU tar's
+    // does rather than as a coreutils program's: it is reopened the wrong way
+    // round, so `tar -tf a.tar >&-` reports `stdout: write error` with no
+    // reason, and `tar -cf - dir >&-` succeeds, because standard output is now
+    // `/dev/null` and an archive written there is not written at all. See
+    // [`stdfd::stdopen`].
+    stdfd::restore();
+    if stdfd::stdopen().is_err() {
+        diag!("tar: failed to assert availability of the standard file descriptors");
+        process::exit(fatal());
+    }
+
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(p) => p,
@@ -1324,6 +1421,27 @@ fn main() {
         }
         Request::Run(parsed) => parsed,
     };
+
+    // The tail of GNU's `decode_options`, which runs after every option has
+    // been read -- so an unknown option is still reported ahead of this -- and
+    // before anything is opened. A second `-f` names a second volume, which
+    // needs `-M`, which this tar does not have.
+    if parsed.archives_named > 1 {
+        diag!("tar: Multiple archive files require '-M' option");
+        diag!("{TRY_HELP}");
+        process::exit(conclude(EXIT_FATAL, true));
+    }
+    let archive = resolve_archive(
+        parsed.archive_file.as_deref(),
+        env::var_os("TAPE").as_deref(),
+    );
+    let archive = archive.as_deref();
+    // GNU's `stdlis`: the member list goes to standard output, except when the
+    // archive itself is being written there -- then the names would be
+    // interleaved with the archive's bytes and ruin both, so they go to
+    // standard error instead. Which of the two it is also decides how the run
+    // ends; see [`conclude`].
+    let listing_on_stdout = !(parsed.mode == Mode::Create && archive.is_none());
 
     // Every mode returns its own status rather than exiting inline, so that
     // "some members failed" survives to the caller. A tool that reports 0
@@ -1372,17 +1490,18 @@ fn main() {
         }
         Mode::Create => {
             // The one case where the member list is a diagnostic rather than
-            // output: with no `-f`, the archive itself is on stdout, and a name
-            // printed there would be a block of the archive.
-            let verbose = Verbose::new(parsed.verbose, parsed.archive_file.is_none());
+            // output: the archive itself is on stdout, and a name printed
+            // there would be a block of the archive.
+            let verbose = Verbose::new(parsed.verbose, !listing_on_stdout);
             #[cfg(unix)]
             {
                 do_create(
-                    parsed.archive_file.as_deref(),
+                    archive,
                     &parsed.chdirs,
                     &parsed.files,
                     verbose,
                     parsed.record_size,
+                    parsed.numeric_owner,
                 )
             }
             #[cfg(not(unix))]
@@ -1393,20 +1512,23 @@ fn main() {
             }
         }
         Mode::Extract => do_extract(
-            parsed.archive_file.as_deref(),
+            archive,
             &parsed.chdirs,
             // Extraction never writes the archive to stdout, so the list always
             // goes there.
             Verbose::new(parsed.verbose, false),
             &parsed.files,
-            parsed.same_permissions,
+            Ownership::resolve(&parsed),
             parsed.old_files,
+            parsed.record_size,
         ),
         Mode::List => do_list_main(
-            parsed.archive_file.as_deref(),
+            archive,
             &parsed.chdirs,
             parsed.verbose,
+            parsed.numeric_owner,
             &parsed.files,
+            parsed.record_size,
         ),
         Mode::Unset => {
             // GNU's own sentence, listing options this tar does not have. That
@@ -1428,7 +1550,268 @@ fn main() {
         }
     };
 
-    process::exit(status);
+    process::exit(conclude(status, listing_on_stdout));
+}
+
+// ============================================================================
+// the archive's name, the standard streams, and how a run ends
+// ============================================================================
+
+/// Which archive a run is about: GNU's `archive_name_array[0]`, resolved the way
+/// `decode_options` resolves it.
+///
+/// The last `-f` given; else `TAPE` from the environment; else `-`. And `-` --
+/// *exactly* `-`, so that `./-` is a file of that name -- is the standard stream
+/// the mode uses: standard input to read an archive, standard output to write
+/// one. `None` is that stream; `Some` is a file to open.
+///
+/// That `-` was treated as a file name here until 2026-10-03, so `tar -cf - dir
+/// | ssh host tar -xf -` -- the reason the convention exists -- wrote an archive
+/// called `-` into the current directory and nothing into the pipe. An empty
+/// `TAPE` is a name like any other, as it is in GNU, and fails to open as
+/// `tar: : Cannot open: No such file or directory`.
+fn resolve_archive(given: Option<&OsStr>, tape: Option<&OsStr>) -> Option<OsString> {
+    let name = given.or(tape)?;
+    if name == OsStr::new("-") {
+        None
+    } else {
+        Some(name.to_os_string())
+    }
+}
+
+/// GNU's `check_tty`: refuse to read an archive from a terminal, or write one to
+/// it, when the archive is a standard stream.
+///
+/// A `tar -c dir` typed without `-f` would otherwise pour binary over the
+/// terminal, and a `tar -x` would sit waiting for an archive to be typed in.
+/// Only for the standard stream: `-f /dev/tty` names the terminal on purpose and
+/// is obeyed. Checked where GNU checks it, as the archive is opened -- after the
+/// command line has been accepted and after the record size, before anything is
+/// read, written or entered.
+fn refuse_terminal(writing: bool) -> Result<(), i32> {
+    let (fd, what) = if writing {
+        (1, "write archive contents to")
+    } else {
+        (0, "read archive contents from")
+    };
+    if stdfd::is_tty(fd) {
+        diag!("tar: Refusing to {what} terminal (missing -f option?)");
+        return Err(fatal());
+    }
+    Ok(())
+}
+
+/// The archive on a standard stream, read and written with `read(2)` and
+/// `write(2)` themselves.
+///
+/// Not `io::stdin()` and `io::stdout()`: both pass their results through the
+/// standard library's `handle_ebadf`, which makes a closed descriptor read as an
+/// empty archive and write as a successful one. GNU reports both -- see
+/// [`stdfd::stdopen`] for what a closed descriptor looks like by then -- and a
+/// `tar -cf - dir` that exits 0 having written nowhere is the failure this whole
+/// file is arranged against. Unbuffered: the reader sits behind a `BufReader`
+/// and the writer behind a [`RecordWriter`], which do that job.
+struct StdioArchive(i32);
+
+impl Read for StdioArchive {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        stdfd::read(self.0, buf)
+    }
+}
+
+impl Write for StdioArchive {
+    /// One `write(2)`, and its count as it came back -- a short write is
+    /// [`RecordWriter`]'s to account for, since GNU's `Wrote only` message
+    /// reports exactly how far it got.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        stdfd::write_some(self.0, buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Whether an archive opened for writing is `/dev/null`: GNU's
+/// `sys_detect_dev_null_output`.
+///
+/// By name, or by being the same character device: `/dev/./null`, a symlink to
+/// it, and a standard output redirected to it all count. GNU then writes
+/// nothing at all and opens none of the regular files it archives -- their
+/// contents would only be thrown away -- which is observable: `tar -cf /dev/null
+/// unreadable-file` succeeds silently where any other archive reports `Cannot
+/// open: Permission denied`. It is the idiom for asking `tar` to walk a tree
+/// (`-v` still lists it) without paying to read it.
+#[cfg(unix)]
+fn is_dev_null(name: Option<&OsStr>, archive: Option<&fs::Metadata>) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    if name.is_some_and(|n| n == OsStr::new("/dev/null")) {
+        return true;
+    }
+    let Some(archive) = archive else {
+        return false;
+    };
+    if !archive.file_type().is_char_device() {
+        return false;
+    }
+    // `stat`, following a symlink, as GNU's does. A `/dev/null` that cannot be
+    // stat'ed is simply not this archive.
+    fs::metadata("/dev/null")
+        .is_ok_and(|null| null.ino() == archive.ino() && null.dev() == archive.dev())
+}
+
+/// Set by [`fatal`]: the run ended inside a fatal error.
+///
+/// GNU's `fatal_exit` exits on the spot, from inside the failure, with no look
+/// at standard output or standard error afterwards. [`conclude`] honours that by
+/// checking nothing once this is set, so a listing lost earlier in a run that
+/// then died of a truncated archive is not reported a second time.
+static FATAL: AtomicBool = AtomicBool::new(false);
+
+/// Set when the member list's reader has gone away.
+///
+/// GNU is killed by `SIGPIPE` at the flush that discovers it: no more members,
+/// no more messages, and no deferred work done. SlateOS has no signal to be
+/// killed by (`design-decisions` §377), so the translation is the one the rest
+/// of the tree uses -- stop where GNU would have died, say nothing more, and keep
+/// the status the run had earned so far. Every loop that writes the list asks
+/// [`reader_gone`] after doing so and unwinds when it is set.
+static READER_GONE: AtomicBool = AtomicBool::new(false);
+
+/// See [`READER_GONE`].
+fn reader_gone() -> bool {
+    READER_GONE.load(Ordering::Relaxed)
+}
+
+/// One line of the member list on standard output: GNU's `fprintf (stdlis, …)`
+/// and the `fflush (stdlis)` that ends every `print_header`.
+///
+/// A failure is recorded by the [`Stream`], not acted on. GNU never looks at
+/// what `fprintf` returned and goes on archiving, extracting or listing; the
+/// verdict is taken once, at the end, by [`conclude`] -- `tar: stdout: write
+/// error`. The flush after every line is why that message carries no reason:
+/// each line fails, and is discarded, as it is written, so the close at the end
+/// has nothing left to fail on.
+///
+/// The one failure acted on at once is the reader leaving. See [`READER_GONE`].
+fn list_line(line: &[u8]) {
+    let mut out = Stream::stdout_line_buffered();
+    // `Stream`'s `Write` never fails: the failure is kept in the stream, which
+    // is where both checks below and `conclude` find it.
+    drop(out.write_all(line));
+    drop(out.flush());
+    if out.error().is_some_and(|e| stdfd::reader_gone(&e)) {
+        READER_GONE.store(true, Ordering::Relaxed);
+    }
+}
+
+/// A write of the archive itself failed: GNU's `archive_write_error`, which is
+/// fatal -- every member after it would land at the wrong offset.
+///
+/// Worded by how far the record had got, as GNU's `write_error_details` words
+/// it:
+///
+/// | the record | GNU says |
+/// |---|---|
+/// | none of it went | `tar: a.tar: Cannot write: No space left on device` |
+/// | part of it went | `tar: a.tar: Wrote only 4096 of 10240 bytes` |
+///
+/// The first renders the name the way every `Cannot` diagnostic does; the
+/// second prints it as it stands -- GNU's bare `%s` -- and that is reproduced
+/// rather than tidied. Both are followed by [`fatal`]'s line. The second is what
+/// a backup that fills its disk ends with, which is why it is worth getting
+/// right.
+///
+/// Except a reader of a piped archive going away, which is reported by nobody:
+/// GNU is killed by `SIGPIPE` at that write, and this sets [`READER_GONE`]
+/// instead, for the caller to stop on.
+///
+/// Create mode is unix-only (see the module docs), and so is its one caller.
+#[cfg(unix)]
+fn archive_write_failed(label: &[u8], e: &io::Error, sent: usize, record: usize) {
+    if stdfd::reader_gone(e) {
+        READER_GONE.store(true, Ordering::Relaxed);
+        return;
+    }
+    if sent == 0 {
+        diag!("tar: {}: Cannot write: {}", escape(label), strerror(e));
+    } else {
+        // "bytes", never "byte": `ngettext` picks the singular for a record of
+        // one byte, and a record is a whole number of 512-byte blocks.
+        let mut line = b"tar: ".to_vec();
+        line.extend_from_slice(label);
+        line.extend_from_slice(format!(": Wrote only {sent} of {record} bytes\n").as_bytes());
+        stdfd::diag_bytes(&line);
+    }
+    fatal();
+}
+
+/// [`list_line`] as an `io::Write`, for [`list_archive`], which writes to
+/// whatever it is handed so that the unit tests can hand it a `Vec`.
+struct Listing;
+
+impl Write for Listing {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        list_line(buf);
+        Ok(buf.len())
+    }
+
+    /// Every line is flushed as it is written, so there is never anything
+    /// left to flush.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The bottom of GNU tar's `main`: what became of the two standard streams,
+/// folded into the exit status.
+///
+/// ```c
+/// if (stdlis == stdout)
+///   close_stdout ();
+/// else if (ferror (stderr) || fclose (stderr) != 0)
+///   set_exit_status (TAREXIT_FAILURE);
+/// ```
+///
+/// With the list on standard output, gnulib's `close_stdout` decides: a list
+/// that did not arrive is `tar: stdout: write error` and status 2 whatever the
+/// run had earned, and then a diagnostic that did not arrive is status 2 as well,
+/// silently. With the list on standard error -- the archive was written to
+/// standard output -- only standard error is looked at, and a lost diagnostic
+/// *raises* the status to 2. The two come to the same thing for every status
+/// this tar can produce; they are kept apart because they are GNU's two rules,
+/// and the second one does not look at standard output at all.
+///
+/// A run that died of a fatal error is not checked (see [`FATAL`]), and one
+/// whose reader left keeps its earned status (see [`READER_GONE`]).
+fn conclude(status: i32, listing_on_stdout: bool) -> i32 {
+    if FATAL.load(Ordering::Relaxed) {
+        return EXIT_FATAL;
+    }
+    if reader_gone() {
+        return status;
+    }
+    if listing_on_stdout {
+        match Stream::stdout_line_buffered().finish() {
+            Ok(()) => {}
+            // Unreachable while `list_line` is the only writer, since it would
+            // have set `READER_GONE`; kept so that a reader leaving can never be
+            // reported as a write error.
+            Err(e) if stdfd::reader_gone(&e) => return status,
+            Err(e) => {
+                stdfd::write_error_named("tar", "stdout", &e);
+                return EXIT_FATAL;
+            }
+        }
+        if stdfd::diagnostic_lost() {
+            return EXIT_FATAL;
+        }
+        status
+    } else if stdfd::diagnostic_lost() {
+        status.max(EXIT_FATAL)
+    } else {
+        status
+    }
 }
 
 // ============================================================================
@@ -1782,10 +2165,10 @@ impl Verbose {
         if self.to_stderr {
             stdfd::diag_bytes(line);
         } else {
-            // Unbuffered, by fd. Nothing else in `-c`/`-x` writes to stdout, so
-            // there is no ordering to keep with a `BufWriter`, and a failure to
-            // write the listing must not abort the archive.
-            drop(stdfd::write_all(1, line));
+            // A line at a time, and a failure recorded rather than acted on: a
+            // listing that cannot be written must not abort the archive, and is
+            // reported once the run is over. See [`list_line`].
+            list_line(line);
         }
     }
 }
@@ -2076,8 +2459,20 @@ impl OwnerNames {
 /// two are separate command-line arguments, and stores the *first* name it
 /// happened to archive, so `tar -c t/h t/a.txt` links `a.txt` to `h`.
 #[cfg(unix)]
-struct Creator<'a> {
-    out: &'a mut dyn Write,
+struct Creator<'a, 'w> {
+    /// The archive, a record at a time. The writer itself rather than any
+    /// `Write`, because a failed write is reported with how much of the record
+    /// it had delivered -- see [`archive_write_failed`].
+    out: &'a mut RecordWriter<'w>,
+    /// The archive's name as GNU's write diagnostics give it: as typed, or `-`
+    /// for standard output. See [`archive_label`].
+    label: Vec<u8>,
+    /// The archive is `/dev/null`, so no regular file is opened: see
+    /// [`is_dev_null`] and [`Creator::dumpable`].
+    dev_null: bool,
+    /// `--numeric-owner`: no user or group names in the headers, and numbers
+    /// in the `-vv` lines. See [`TarArgs::numeric_owner`].
+    numeric: bool,
     verbose: Verbose,
     /// 0, or [`EXIT_FATAL`] once anything has gone wrong. A member that cannot
     /// be archived sets this and is skipped; it does not abandon the archive.
@@ -2108,14 +2503,17 @@ struct Creator<'a> {
     /// grows — the result is a much larger file holding a truncated snapshot of
     /// itself, and no warning that it happened.
     archive_id: Option<(u64, u64)>,
-    /// Cleared by the first failed write. There is no point continuing after
-    /// one: every later member would land at the wrong offset, producing a file
-    /// that looks like an archive and is not one.
+    /// Cleared when the run is over before its operands are: by the first
+    /// failed write of the archive, which is fatal -- every later member would
+    /// land at the wrong offset, producing a file that looks like an archive and
+    /// is not one -- and by the member list's reader leaving (see
+    /// [`READER_GONE`]). Nothing is stat'ed, opened, written or announced after
+    /// it, because GNU is no longer running by then.
     writable: bool,
 }
 
 #[cfg(unix)]
-impl Creator<'_> {
+impl Creator<'_, '_> {
     fn fail(&mut self) {
         self.status = EXIT_FATAL;
     }
@@ -2134,14 +2532,24 @@ impl Creator<'_> {
     /// Both would render the same today. This one cannot drift into rendering a
     /// *stored* name, which is the difference the paragraph above turns on.
     fn announce(&mut self, shown: &[u8], meta: &fs::Metadata, typeflag: u8, linkname: &[u8]) {
-        use std::os::unix::fs::MetadataExt;
         if self.verbose.silent() {
             return;
         }
-        if !self.verbose.long() {
+        if self.verbose.long() {
+            self.announce_long(shown, meta, typeflag, linkname);
+        } else {
             self.verbose.line(shown);
-            return;
         }
+        // The line went nowhere, and nobody will read the next one: stop where
+        // GNU would have been killed. See [`READER_GONE`].
+        if reader_gone() {
+            self.writable = false;
+        }
+    }
+
+    /// [`Creator::announce`]'s `-vv` line.
+    fn announce_long(&mut self, shown: &[u8], meta: &fs::Metadata, typeflag: u8, linkname: &[u8]) {
+        use std::os::unix::fs::MetadataExt;
         // Borrowed out first: the two lookups take `&mut self`, and the struct
         // literal below borrows it again.
         let uname = self.owners.user(meta.uid()).to_vec();
@@ -2171,7 +2579,13 @@ impl Creator<'_> {
             uname,
             gname,
         };
-        let line = long_line(&member, linkname, &mut self.ugswidth, &self.zone);
+        let line = long_line(
+            &member,
+            linkname,
+            &mut self.ugswidth,
+            &self.zone,
+            self.numeric,
+        );
         self.verbose.write(&line);
     }
 
@@ -2182,12 +2596,29 @@ impl Creator<'_> {
         match self.out.write_all(buf) {
             Ok(()) => true,
             Err(e) => {
-                diag!("tar: Cannot write: {}", strerror(&e));
                 self.writable = false;
-                self.fail();
+                archive_write_failed(&self.label, &e, self.out.sent(), self.out.record());
                 false
             }
         }
+    }
+
+    /// Whether a regular file's contents are read at all: GNU's
+    /// `file_dumpable_p`.
+    ///
+    /// Not when the archive is `/dev/null` -- the bytes would be thrown away,
+    /// and so the file is not even opened (see [`is_dev_null`]). And not when it
+    /// is empty and readable by everyone: there is nothing to read, and nothing
+    /// the open could tell us. An empty file *without* those permissions is still
+    /// opened, because the open is what discovers that it cannot be read.
+    fn dumpable(&self, meta: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        /// GNU's `MODE_R`: read permission for owner, group and other alike.
+        const MODE_R: u32 = 0o444;
+        if self.dev_null {
+            return false;
+        }
+        !(meta.len() == 0 && meta.mode() & MODE_R == MODE_R)
     }
 
     /// The name this member goes into the archive under: `name` with any
@@ -2253,9 +2684,13 @@ impl Creator<'_> {
         TarHeader::set_octal(&mut header.uid, u64::from(meta.uid()));
         TarHeader::set_octal(&mut header.gid, u64::from(meta.gid()));
         // Beside each number, the name it stands for here. The number alone is
-        // meaningless on any other machine; see [`OwnerNames`].
-        TarHeader::set_owner_name(&mut header.uname, self.owners.user(meta.uid()));
-        TarHeader::set_owner_name(&mut header.gname, self.owners.group(meta.gid()));
+        // meaningless on any other machine; see [`OwnerNames`]. Not under
+        // `--numeric-owner`, which is GNU's way of saying the number is the
+        // owner: the fields are left empty, which is how ustar says "no name".
+        if !self.numeric {
+            TarHeader::set_owner_name(&mut header.uname, self.owners.user(meta.uid()));
+            TarHeader::set_owner_name(&mut header.gname, self.owners.group(meta.gid()));
+        }
         TarHeader::set_octal(&mut header.size, 0);
         TarHeader::set_octal(&mut header.mtime, meta.mtime().unsigned_abs());
         header.magic = *b"ustar\0";
@@ -2273,6 +2708,11 @@ impl Creator<'_> {
     /// file. Restoring such an archive does not restore the tree.
     fn add(&mut self, path: &Path, name: &[u8]) {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        // The run is over -- a fatal write, or nobody reading the list. Nothing
+        // more is looked at, so nothing more is reported; see the field.
+        if !self.writable {
+            return;
+        }
         let meta = match fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(e) => {
@@ -2448,13 +2888,18 @@ impl Creator<'_> {
         // `tar-hardnotice3.sh`.
         let stored = self.stored_name(name, false);
 
-        let mut f = match File::open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
-                self.fail();
-                return false;
+        // Opened only if it is going to be read: see [`Creator::dumpable`].
+        let file = if self.dumpable(meta) {
+            match File::open(path) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    diag!("tar: {}: Cannot open: {}", escape(name), strerror(&e));
+                    self.fail();
+                    return false;
+                }
             }
+        } else {
+            None
         };
 
         let Some(mut header) = self.header_for(&stored, meta) else {
@@ -2468,6 +2913,16 @@ impl Creator<'_> {
         }
 
         self.announce(name, meta, b'0', b"");
+        if !self.writable {
+            return false;
+        }
+        // Not read, so no data blocks: an empty file has none, and an archive
+        // that is `/dev/null` is not written to at all, so the blocks the header
+        // promises have nowhere to go. GNU's loop runs over them without
+        // filling them; there is nothing here for it to do.
+        let Some(mut f) = file else {
+            return true;
+        };
 
         let mut remaining = declared;
         let mut buf = [0u8; BLOCK_SIZE];
@@ -2545,6 +3000,9 @@ impl Creator<'_> {
         let mut shown = name.to_vec();
         shown.push(b'/');
         self.announce(&shown, meta, b'5', b"");
+        if !self.writable {
+            return;
+        }
 
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
@@ -2658,6 +3116,14 @@ struct RecordWriter<'a> {
     /// the end, so the file that comes out is the same file.
     buf: Vec<u8>,
     record: usize,
+    /// How many bytes of the record being written have reached the stream.
+    ///
+    /// Reset as each record starts going out, and read only after a write has
+    /// failed: GNU reports a record that went out in part as `Wrote only N of M
+    /// bytes`, and one that did not go out at all as `Cannot write:` with the
+    /// reason -- a disk that fills part-way through a record is the first case,
+    /// `/dev/full` the second. See [`archive_write_failed`].
+    sent: usize,
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -2667,14 +3133,48 @@ impl<'a> RecordWriter<'a> {
             inner,
             buf: Vec::new(),
             record,
+            sent: 0,
         }
+    }
+
+    /// Bytes of the current record delivered so far. See the field.
+    fn sent(&self) -> usize {
+        self.sent
+    }
+
+    /// The record size, for the `of M bytes` half of the same message.
+    fn record(&self) -> usize {
+        self.record
+    }
+
+    /// `write` until `data` is gone, counting every byte that went into
+    /// [`RecordWriter::sent`] -- `write_all`, with the count kept when it fails.
+    fn deliver(&mut self, data: &[u8]) -> io::Result<()> {
+        let mut rest = data;
+        while !rest.is_empty() {
+            match self.inner.write(rest) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                Ok(n) => {
+                    self.sent = self.sent.saturating_add(n);
+                    rest = rest.get(n..).unwrap_or_default();
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
 
     /// Hand the record in hand to the stream and start a new one.
     fn spill(&mut self) -> io::Result<()> {
-        self.inner.write_all(&self.buf)?;
+        self.sent = 0;
+        // Taken out for the call, which needs `&mut self` for the count, and put
+        // back afterwards so that its allocation is reused by the next record.
+        let record = std::mem::take(&mut self.buf);
+        let result = self.deliver(&record);
+        self.buf = record;
         self.buf.clear();
-        Ok(())
+        result
     }
 
     /// Write the last record, padded out to the full record length, and flush.
@@ -2685,9 +3185,11 @@ impl<'a> RecordWriter<'a> {
     ///
     /// # Errors
     ///
-    /// Whatever the underlying stream gives. The caller reports it as
-    /// `Cannot write:` — this is the point at which the bytes that make the file
-    /// a valid archive reach the disk, so a failure here loses exactly those.
+    /// Whatever the underlying stream gives, with [`RecordWriter::sent`]
+    /// counting the record's bytes and its pad's alike, since the two are one
+    /// record. The caller reports it through [`archive_write_failed`] — this is
+    /// the point at which the bytes that make the file a valid archive reach the
+    /// disk, so a failure here loses exactly those.
     fn finish(&mut self) -> io::Result<()> {
         if !self.buf.is_empty() {
             let pad = self.record.saturating_sub(self.buf.len());
@@ -2702,7 +3204,7 @@ impl<'a> RecordWriter<'a> {
                 let Some(chunk) = zeros.get(..take) else {
                     break;
                 };
-                self.inner.write_all(chunk)?;
+                self.deliver(chunk)?;
                 left = left.saturating_sub(take);
             }
         }
@@ -2740,34 +3242,53 @@ impl Write for RecordWriter<'_> {
 
 #[cfg(unix)]
 fn do_create(
-    archive_file: Option<&OsStr>,
+    archive: Option<&OsStr>,
     chdirs: &[OsString],
     files: &[Operand],
     verbose: Verbose,
     record_size: u64,
+    numeric: bool,
 ) -> i32 {
-    // Identified by inode, not by name: `tar -cf ./b.tar .` and `tar -cf b.tar
-    // .` name the archive differently and it is the same file both times, and
-    // comparing the strings would catch neither.
-    let mut archive_id = None;
-    let mut sink: Box<dyn Write> = match archive_file {
+    use std::os::unix::fs::MetadataExt;
+    // `None` is standard output; see [`resolve_archive`]. Either way the
+    // archive is `fstat`ed once it is open, for the two checks below.
+    let (opened, archive_meta): (Box<dyn Write>, Option<fs::Metadata>) = match archive {
         Some(path) => match File::create(path) {
+            // A stat that fails is not fatal; it only costs the two checks,
+            // and the archive is otherwise fine.
             Ok(f) => {
-                use std::os::unix::fs::MetadataExt;
-                // A stat that fails is not fatal; it only costs the self-check,
-                // and the archive is otherwise fine.
-                if let Ok(m) = f.metadata() {
-                    archive_id = Some((m.dev(), m.ino()));
-                }
-                Box::new(f)
+                let meta = f.metadata().ok();
+                (Box::new(f), meta)
             }
             Err(e) => {
                 diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
                 return fatal();
             }
         },
-        None => Box::new(io::stdout()),
+        None => {
+            if let Err(rc) = refuse_terminal(true) {
+                return rc;
+            }
+            (Box::new(StdioArchive(1)), stdfd::metadata(1).ok())
+        }
     };
+    let dev_null = is_dev_null(archive, archive_meta.as_ref());
+    // Nothing is written to `/dev/null` at all -- see [`is_dev_null`] -- which
+    // also covers a standard output that `stdopen` made a *read-only*
+    // `/dev/null`, where a write would fail.
+    let mut sink: Box<dyn Write> = if dev_null {
+        Box::new(io::sink())
+    } else {
+        opened
+    };
+    // Identified by inode, not by name: `tar -cf ./b.tar .` and `tar -cf b.tar
+    // .` name the archive differently and it is the same file both times, and
+    // comparing the strings would catch neither. The same for an archive on
+    // standard output that was redirected into the tree being archived. Not for
+    // `/dev/null`, where GNU skips the check along with the writing.
+    let archive_id = archive_meta
+        .filter(|_| !dev_null)
+        .map(|m| (m.dev(), m.ino()));
 
     // A record larger than a `usize` cannot be buffered, and cannot be asked for
     // either on the hosts this runs on: `--record-size` accepts up to 2⁶⁴−512,
@@ -2779,6 +3300,9 @@ fn do_create(
 
     let mut creator = Creator {
         out: &mut out,
+        label: archive_label(archive),
+        dev_null,
+        numeric,
         verbose,
         status: 0,
         links: BTreeMap::new(),
@@ -2794,6 +3318,11 @@ fn do_create(
     // so `entered` only ever moves forward and a plain chdir suffices.
     let mut entered = 0usize;
     for operand in files {
+        // A fatal write, or a reader that left: the run is over, and GNU would
+        // not be here to enter the next `-C` or report on the next operand.
+        if !creator.writable {
+            break;
+        }
         if let Err(rc) = enter_chdirs(chdirs, &mut entered, operand.dir) {
             return rc;
         }
@@ -2803,6 +3332,17 @@ fn do_create(
         // the whole point of `-C` over a path prefix.
         let name = os_bytes(&operand.name);
         creator.add(Path::new(&operand.name), &name);
+    }
+    // Ended early. A write that failed has been reported and was fatal
+    // (`archive_write_failed`); a reader that left is reported by nobody, and
+    // the run keeps the status it had earned by then (`READER_GONE`). Neither
+    // writes the end of the archive, and neither says anything more.
+    if !creator.writable {
+        return if reader_gone() {
+            creator.status
+        } else {
+            EXIT_FATAL
+        };
     }
     // A `-C` written after the last operand is still *executed* — so one naming
     // a directory that does not exist is the ordinary fatal chdir failure, and
@@ -2818,15 +3358,18 @@ fn do_create(
     let mut status = creator.status;
     // Read out before the borrow of `out` ends, and checked before finishing:
     // once a write has failed there is nothing to gain by writing the pad, and
-    // something to lose — a second `Cannot write:` for one broken stream, where
-    // GNU reports it once.
-    let writable = creator.writable;
+    // something to lose — a second report for one broken stream, where GNU
+    // reports it once, having exited at the first.
+    let label = creator.label.clone();
+    if !creator.writable {
+        return if reader_gone() { status } else { EXIT_FATAL };
+    }
     // The end-of-archive marker and the pad after it are the last things
     // written, so a failure here loses precisely the bytes that make the file a
     // valid archive.
-    if writable && let Err(e) = out.finish() {
-        diag!("tar: Cannot write: {}", strerror(&e));
-        status = EXIT_FATAL;
+    if let Err(e) = out.finish() {
+        archive_write_failed(&label, &e, out.sent(), out.record());
+        return if reader_gone() { status } else { EXIT_FATAL };
     }
 
     // Having executed the trailing `-C`s above, GNU then refuses the command
@@ -3043,36 +3586,89 @@ fn decode_member(block: &[u8; BLOCK_SIZE]) -> Member {
     }
 }
 
-/// Why a walk over an archive stopped.
+/// How a walk over an archive ended.
 ///
-/// Every variant but [`Stop::End`] used to be the same code path — `break` —
-/// and the same exit status: zero. That is the defect this enum exists to
-/// remove. A tool that cannot distinguish "the archive ended" from "the file
-/// was never an archive" reports success for both.
+/// Every way of ending used to be the same code path — `break` — and the same
+/// exit status: zero. That is the defect this type exists to remove. A tool
+/// that cannot distinguish "the archive ended" from "the file was never an
+/// archive" reports success for both.
+///
+/// What the walk had to *say* about the archive, it has said by the time it
+/// returns — at the place in the archive where it found it, as GNU's
+/// `read_and` does; see [`walk`]. This records only what the caller still has
+/// to act on.
 #[cfg_attr(test, derive(Debug))]
 enum Stop {
-    /// Ran out of blocks at a header boundary. An archive may legally end
-    /// without its two zero blocks and GNU accepts that in silence, so this is
-    /// the *only* clean ending.
+    /// The archive ended: at its two zero blocks, at a lone one (warned
+    /// about), or where the stream ran out between members. Anything wrong on
+    /// the way is in [`Walked::failed`].
     End,
-    /// Ended after a single zero block where the marker is a pair. Clean — GNU
-    /// exits 0 — but it warns, and the warning carries the block's ordinal.
-    LoneZeroBlock(u64),
-    /// The first block was not a header: an empty file, a short read at offset
-    /// zero, or a checksum that does not match.
-    NotAnArchive,
-    /// A later block was not a header.
-    BadHeader,
-    /// The stream ended inside a member's *data*. Note that ending inside a
-    /// later *header* is not this — see [`walk`].
-    Truncated,
-    /// The archive could not be read at all — the classic case being a
-    /// directory passed to `-f`, which opens and then fails at the first read.
-    /// The flag is "this was the very first block", which GNU words differently
-    /// ("At beginning of tape, quitting now").
-    Unreadable(io::Error, bool),
+    /// The archive cannot be read any further: a member's data ran out
+    /// (`Unexpected EOF in archive`), or a read failed (`Cannot read`).
+    /// Reported, and fatal — the caller does what GNU's `fatal_exit_hook` does
+    /// and then prints [`fatal`]'s line.
+    Fatal,
     /// The handler asked to stop and has already reported why.
     Handler(i32),
+}
+
+/// What [`walk`] found.
+#[cfg_attr(test, derive(Debug))]
+struct Walked {
+    stop: Stop,
+    /// Something in the archive was not a header where one had to be: `This
+    /// does not look like a tar archive`, `Skipping to next header`. GNU's
+    /// `ERROR`, which ends the run with status 2 however the rest of it went.
+    /// A lone zero block is a `WARN`, and does not count.
+    failed: bool,
+    /// The block a lone-zero-block warning named, when one was given. Kept for
+    /// the tests, which cannot read the warning back off standard error; the
+    /// run itself has already said it, so nothing else reads it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    lone_zero_block: Option<u64>,
+}
+
+/// GNU's `prev_status`: what the block before this one turned out to be, which
+/// decides what a block that is not a header is worth saying.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Previous {
+    /// Nothing has been read yet.
+    Nothing,
+    /// A member's header.
+    Header,
+    /// A block that was not a header, already reported.
+    Failure,
+}
+
+/// A `Read` that counts what passes through it: GNU's `current_block_ordinal`,
+/// in bytes.
+///
+/// Headers, data blocks and zero blocks alike. The lone-zero-block warning
+/// names a block by its place in the whole archive, and counting only the
+/// blocks [`walk`] reads for itself -- which is what this tar did -- named the
+/// wrong block as soon as any member had data: `A lone zero block at 4` where
+/// GNU says `at 6`.
+struct Counting<'a> {
+    inner: &'a mut dyn Read,
+    bytes: u64,
+}
+
+impl Read for Counting<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes = self
+            .bytes
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        Ok(n)
+    }
+}
+
+impl Counting<'_> {
+    /// Whole blocks consumed so far.
+    fn blocks(&self) -> u64 {
+        // The divisor is the constant 512, so the division always happens.
+        self.bytes.checked_div(BLOCK_SIZE as u64).unwrap_or(0)
+    }
 }
 
 /// Why [`read_block`] could not deliver a whole block.
@@ -3123,52 +3719,109 @@ fn read_block(input: &mut dyn Read, buf: &mut [u8; BLOCK_SIZE]) -> Result<Option
 /// The handler is responsible for the member's data blocks only when it returns
 /// [`Handled::Consumed`]; otherwise the driver skips them, which is what keeps
 /// the stream aligned when a member is refused.
-fn walk<F>(input: &mut dyn Read, mut handle: F) -> Stop
+///
+/// GNU's `read_and`, and like it this reports on the archive *as it reads it*:
+/// a block that is not a header is announced before the members after it are
+/// listed or extracted, and everything said here comes before the caller's
+/// `Not found in archive` lines. This tar used to keep it all for the end, which
+/// put the two in the opposite order to GNU's.
+///
+/// A block that is not a header is skipped, and the walk goes on looking for
+/// the next one -- `Skipping to next header` is a description, not a farewell.
+/// That is what lets a damaged archive give back the members after the damage;
+/// this tar used to stop at the first bad block and lose every one of them.
+/// Every block after it is tried as a header, data blocks included, exactly as
+/// GNU tries them, and only the first of a run of bad blocks is reported.
+///
+/// `label` names the archive in a read error, which is the one message here
+/// that needs it.
+fn walk<F>(input: &mut dyn Read, label: &[u8], mut handle: F) -> Walked
 where
     F: FnMut(&Member, &mut dyn Read) -> Handled,
 {
-    let mut first = true;
-    // Counts every block consumed, so the lone-zero-block warning can name one.
-    let mut ordinal = 0u64;
+    let mut input = Counting {
+        inner: input,
+        bytes: 0,
+    };
+    let mut previous = Previous::Nothing;
+    let mut failed = false;
+    let ended = |failed: bool, lone_zero_block: Option<u64>| Walked {
+        stop: Stop::End,
+        failed,
+        lone_zero_block,
+    };
+    let fatal_end = |failed: bool| Walked {
+        stop: Stop::Fatal,
+        failed,
+        lone_zero_block: None,
+    };
     loop {
         let mut block = [0u8; BLOCK_SIZE];
-        match read_block(input, &mut block) {
-            Ok(Some(())) => ordinal = ordinal.saturating_add(1),
-            Ok(None) => {
-                // An empty file is not an archive; an archive that simply ran
-                // out after its last member is one that ended.
-                return if first { Stop::NotAnArchive } else { Stop::End };
+        match read_block(&mut input, &mut block) {
+            Ok(Some(())) => {}
+            // An empty file, or one shorter than a block, is not an archive;
+            // an archive that simply ran out after its last member, or after a
+            // bad block, is one that ended. A short read where a *header*
+            // should start is an ending, not a truncation — GNU only calls it
+            // truncation when a member's data runs out. Measured on a
+            // 3584-byte archive whose members are 6 and 8 bytes: `head -c 512`,
+            // `-c 513` and `-c 700` all exit 0 in silence, while `-c 1024` and
+            // `-c 1100` — which cut into the first member's data — give
+            // "Unexpected EOF in archive"; `head -c 300` is "This does not look
+            // like a tar archive", and nothing more.
+            Ok(None) | Err(ReadStop::Short) => {
+                if previous == Previous::Nothing {
+                    diag!("tar: This does not look like a tar archive");
+                    failed = true;
+                }
+                return ended(failed, None);
             }
-            // A short read where a *header* should start is an ending, not a
-            // truncation — GNU only calls it truncation when a member's data
-            // runs out. Measured on a 3584-byte archive whose members are 6 and
-            // 8 bytes: `head -c 512`, `-c 513` and `-c 700` all exit 0 in
-            // silence, while `-c 1024` and `-c 1100` — which cut into the first
-            // member's data — give "Unexpected EOF in archive". Only a short
-            // read of the *first* block is rejected outright, as GNU's "This
-            // does not look like a tar archive" (`head -c 300`).
-            Err(ReadStop::Short) if first => return Stop::NotAnArchive,
-            Err(ReadStop::Short) => return Stop::End,
-            Err(ReadStop::Io(e)) => return Stop::Unreadable(e, first),
+            Err(ReadStop::Io(e)) => {
+                diag!("tar: {}: Cannot read: {}", escape(label), strerror(&e));
+                if previous == Previous::Nothing {
+                    // GNU's phrasing for "nothing at all was read", inherited
+                    // from when the archive really was on tape. Kept because it
+                    // is the line that tells an unreadable archive from one that
+                    // failed part-way through.
+                    diag!("tar: At beginning of tape, quitting now");
+                }
+                return fatal_end(failed);
+            }
         }
 
         // The end-of-archive marker is *two* zero blocks. GNU accepts one and
-        // exits 0, but warns, so look ahead once to tell the two apart.
+        // exits 0, but warns, naming the block by its place in the archive --
+        // counted before the look-ahead, which GNU does not count either.
         if block.iter().all(|&b| b == 0) {
+            let ordinal = input.blocks();
             let mut next = [0u8; BLOCK_SIZE];
-            return match read_block(input, &mut next) {
-                Ok(Some(())) if next.iter().all(|&b| b == 0) => Stop::End,
-                _ => Stop::LoneZeroBlock(ordinal),
+            return match read_block(&mut input, &mut next) {
+                Ok(Some(())) if next.iter().all(|&b| b == 0) => ended(failed, None),
+                _ => {
+                    diag!("tar: A lone zero block at {ordinal}");
+                    ended(failed, Some(ordinal))
+                }
             };
         }
         if !checksum_ok(&block) {
-            return if first {
-                Stop::NotAnArchive
-            } else {
-                Stop::BadHeader
-            };
+            // GNU's `HEADER_FAILURE`. The first block of all gets both lines --
+            // the file may not be an archive at all, and either way it is being
+            // skipped -- a block after a member gets the second, and a block
+            // after a block that was already reported gets nothing, so a
+            // stretch of damage is one message rather than one per block.
+            match previous {
+                Previous::Nothing => {
+                    diag!("tar: This does not look like a tar archive");
+                    diag!("tar: Skipping to next header");
+                }
+                Previous::Header => diag!("tar: Skipping to next header"),
+                Previous::Failure => {}
+            }
+            failed = true;
+            previous = Previous::Failure;
+            continue;
         }
-        first = false;
+        previous = Previous::Header;
 
         let member = decode_member(&block);
         // A header that passes the checksum and names nothing is *not* refused.
@@ -3179,69 +3832,32 @@ where
         // the rest of a readable archive over one blank name field, which is a
         // strictly worse answer than GNU's; see [`PrefixNotice::strip`].
         let size = if member.has_data() { member.size } else { 0 };
-        match handle(&member, input) {
-            Handled::Consumed => {}
-            Handled::Skip => {
-                if !skip_data(input, size) {
-                    return Stop::Truncated;
-                }
+        let data_ran_out = match handle(&member, &mut input) {
+            Handled::Consumed => false,
+            Handled::Skip => !skip_data(&mut input, size),
+            Handled::Truncated => true,
+            Handled::Stop(s) => {
+                return Walked {
+                    stop: Stop::Handler(s),
+                    failed,
+                    lone_zero_block: None,
+                };
             }
-            Handled::Truncated => return Stop::Truncated,
-            Handled::Stop(s) => return Stop::Handler(s),
-        }
-    }
-}
-
-/// Turn the reason a walk stopped into GNU's closing diagnostics and a status.
-///
-/// `label` is the archive's name in bytes, for the one message that mentions
-/// it — `-` when the archive is standard input, as GNU spells it.
-fn report_stop(stop: Stop, label: &[u8]) -> i32 {
-    match stop {
-        Stop::End => 0,
-        Stop::LoneZeroBlock(n) => {
-            // A warning, not an error: GNU prints this and still exits 0.
-            // Measured — a 3584-byte archive cut to 3072 leaves one zero block
-            // as its sixth, and GNU says "A lone zero block at 6", rc 0.
-            diag!("tar: A lone zero block at {n}");
-            0
-        }
-        Stop::NotAnArchive => {
-            diag!("tar: This does not look like a tar archive");
-            failed_with_previous_errors()
-        }
-        Stop::BadHeader => {
-            // GNU scans forward for the next plausible header and says so. We
-            // stop instead — the remaining bytes are of unknown provenance and
-            // resynchronising on them is guessing — but the line it prints is
-            // the same, because what a caller needs to know is that a header
-            // was not where one was expected.
-            diag!("tar: Skipping to next header");
-            failed_with_previous_errors()
-        }
-        Stop::Truncated => {
+        };
+        if data_ran_out {
             diag!("tar: Unexpected EOF in archive");
-            fatal()
+            return fatal_end(failed);
         }
-        Stop::Unreadable(e, at_start) => {
-            diag!("tar: {}: Cannot read: {}", escape(label), strerror(&e));
-            if at_start {
-                // GNU's phrasing for "nothing at all was read", inherited from
-                // when the archive really was on tape. Kept because it is the
-                // line that distinguishes an unreadable archive from one that
-                // failed part-way through.
-                diag!("tar: At beginning of tape, quitting now");
-            }
-            fatal()
-        }
-        Stop::Handler(s) => s,
     }
 }
 
 /// Number of 512-byte blocks a member of `size` bytes occupies.
 fn data_blocks(size: u64) -> u64 {
-    size.saturating_add(BLOCK_SIZE as u64 - 1)
-        .saturating_div(BLOCK_SIZE as u64)
+    // The divisor is the constant 512, so the division always happens.
+    const BLOCK: u64 = BLOCK_SIZE as u64;
+    size.saturating_add(BLOCK - 1)
+        .checked_div(BLOCK)
+        .unwrap_or(0)
 }
 
 /// Consume and discard a member's data blocks so the next header is read from
@@ -3377,6 +3993,137 @@ fn read_umask() -> u32 {
     *UMASK.get_or_init(coreutils::umask::current)
 }
 
+/// Whether extracted files get the archive's owners and its exact modes, and
+/// how an owner is read off a member: GNU's `same_owner_option`,
+/// `same_permissions_option` and `numeric_owner_option`, as `extr_init` leaves
+/// them.
+///
+/// Measured against GNU tar 1.35 as root (in a user namespace) and as an
+/// ordinary user:
+///
+/// | | ordinary user | root |
+/// |---|---|---|
+/// | owner | stays the extracting user's | the archive's, by name where this machine knows it |
+/// | mode | `stored & 0o777 & !umask` | `stored`, setuid bits and all |
+///
+/// and `--same-owner`, `--no-same-owner`, `-p` and `--no-same-permissions` move
+/// either row to the other column. A root restore that does not give files back
+/// to their owners hands every file in a backup to root.
+#[derive(Clone, Copy)]
+struct Ownership {
+    /// Give each member the owner the archive records for it.
+    restore_owner: bool,
+    /// Restore stored modes exactly -- setuid bits kept, umask not applied.
+    exact_modes: bool,
+    /// `--numeric-owner`: the archive's numbers are the owner, and its names
+    /// are not consulted.
+    numeric: bool,
+    /// The process is the superuser -- GNU's `we_are_root`. It is what turns
+    /// both defaults on, and it also decides a new directory's first mode; see
+    /// [`Ownership::safe_dir_mode`].
+    root: bool,
+}
+
+impl Ownership {
+    /// GNU's `extr_init`: each option as it was given, or -- where it was not
+    /// -- on for the superuser and off for everyone else.
+    fn resolve(args: &TarArgs) -> Self {
+        let root = coreutils::fsattr::chown_privileges();
+        Self {
+            restore_owner: args.same_owner.unwrap_or(root),
+            exact_modes: args.same_permissions.unwrap_or(root),
+            numeric: args.numeric_owner,
+            root,
+        }
+    }
+
+    /// The mode a regular file, fifo or device is *created* with, before its
+    /// data is written and its stored metadata applied: GNU's
+    /// `st_mode & MODE_RWX & ~(same_owner ? S_IRWXG | S_IRWXO : 0)`, which the
+    /// umask then narrows as it narrows any `open`.
+    ///
+    /// The stored bits, not the blanket `0666` this tar used. That difference
+    /// was a leak: a member stored `0600` -- a private key in a backup, say --
+    /// was created world-readable and only narrowed once the run reached its
+    /// end, and anyone who opened it in between kept the open descriptor. And
+    /// when the file is about to be given to its owner, it is created private to
+    /// the extracting user until then, so that nobody else can open it in the
+    /// window before the `chown`.
+    fn creation_mode(self, stored: u32) -> u32 {
+        let private = if self.restore_owner { 0o077 } else { 0 };
+        stored & 0o777 & !private
+    }
+
+    /// GNU's `safe_dir_mode`: the mode a directory member is created with.
+    ///
+    /// Only the owner's bits when owners or exact modes are being restored, so
+    /// that, in GNU's words, "processes owned by other users do not
+    /// inadvertently create files under this directory that inherit the wrong
+    /// owner, group, or permissions"; and for anyone but root, write and search
+    /// for the owner whatever the stored mode says, so that the members inside
+    /// it can be created. The stored mode is applied when the extraction is
+    /// done with the directory -- see [`DelayedDir`].
+    fn safe_dir_mode(self, stored: u32) -> u32 {
+        let kept = if self.restore_owner || self.exact_modes {
+            0o700
+        } else {
+            0o777
+        };
+        let writable = if self.root { 0 } else { 0o300 };
+        (stored & kept) | writable
+    }
+}
+
+/// Who a member belongs to on this machine: GNU's `decode_header`, which
+/// prefers the archive's user and group *names*, looked up here, to its numbers,
+/// and falls back to the numbers where a name is empty or unknown.
+///
+/// The name wins because the number is only meaningful on the machine that
+/// wrote it: an archive from a system where `alice` is uid 1001 should give
+/// `alice`'s files to this machine's `alice`, whatever her uid is here.
+/// Measured: a member stored as `root` with uid 4321 is extracted as uid 0.
+struct OwnerLookup {
+    /// `None` under `--numeric-owner`, where names are not consulted at all,
+    /// and when owners are not being restored, where nothing asks.
+    db: Option<pwdb::Db>,
+}
+
+impl OwnerLookup {
+    fn new(own: Ownership) -> Self {
+        Self {
+            db: (own.restore_owner && !own.numeric).then(pwdb::Db::load),
+        }
+    }
+
+    /// The `(uid, gid)` `member` is to be given.
+    fn ids(&self, member: &Member) -> (u32, u32) {
+        let Some(db) = &self.db else {
+            return (member.uid, member.gid);
+        };
+        let uid = Some(member.uname.as_slice())
+            .filter(|n| !n.is_empty())
+            .and_then(|n| db.user_by_name(n))
+            .map_or(member.uid, |u| u.uid);
+        let gid = Some(member.gname.as_slice())
+            .filter(|n| !n.is_empty())
+            .and_then(|n| db.group_by_name(n))
+            .map_or(member.gid, |g| g.gid);
+        (uid, gid)
+    }
+}
+
+/// What an extracted member is to end up as, worked out once per member.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// The mode applied last, after the owner -- a `chown` can clear setuid
+    /// bits, so the mode has to follow it. See [`extraction_mode`].
+    mode: u32,
+    /// The mode it is created with. See [`Ownership::creation_mode`].
+    create_mode: u32,
+    /// The owner it is given, when owners are being restored.
+    owner: Option<(u32, u32)>,
+}
+
 /// The mode an extracted member actually gets.
 ///
 /// Measured against GNU as a non-root user: by default the stored mode is
@@ -3413,21 +4160,87 @@ fn extraction_mode(stored: u32, same_permissions: bool, umask: u32) -> u32 {
 /// The wording of the mode failure is GNU's, symbolic bits and all
 /// (`Cannot change mode to rwxr-xr-x`), which is why [`mode_string`] is shared
 /// with the `-tv` listing rather than each having its own.
-fn restore_metadata(at: &Located, name: &[u8], mode: u32, mtime: i64, status: &mut i32) {
+///
+/// The owner, when one is to be restored, goes between the two -- GNU's
+/// `set_stat` order -- because changing a file's owner can clear its setuid and
+/// setgid bits, so the mode must come after it to survive. It is never given
+/// through a symlink: if the member was swapped for one since it was created,
+/// it is the link that changes hands, not whatever the link names, which in a
+/// directory someone else can write to is the difference between restoring a
+/// backup and giving away `/etc/shadow`.
+fn restore_metadata(
+    at: &Located,
+    name: &[u8],
+    mode: u32,
+    mtime: i64,
+    owner: Option<(u32, u32)>,
+    status: &mut i32,
+) {
     if let Err(e) = at.set_mtime(mtime) {
         diag!("tar: {}: Cannot utime: {}", escape(name), strerror(&e));
         *status = EXIT_FATAL;
+    }
+    if let Some((uid, gid)) = owner
+        && let Err(e) = at.set_owner(uid, gid, false)
+    {
+        report_owner_failure(name, uid, gid, &e, status);
     }
     if let Err(e) = at.set_mode(mode) {
         let bits = mode_string(mode, b'0');
         diag!(
             "tar: {}: Cannot change mode to {}: {}",
             escape(name),
-            String::from_utf8_lossy(bits.get(1..).unwrap_or(&[])),
+            // `mode_string` writes ASCII letters only.
+            std::str::from_utf8(bits.get(1..).unwrap_or(&[])).unwrap_or_default(),
             strerror(&e)
         );
         *status = EXIT_FATAL;
     }
+}
+
+/// [`restore_metadata`] for a symlink: its own mtime and its own owner, and no
+/// mode, which a symlink does not have. GNU's `set_stat` with `SYMTYPE`, whose
+/// failures are reported only where the system *implements* the call -- a
+/// filesystem that cannot stamp or give away a link is not an error.
+fn restore_symlink_metadata(
+    at: &Located,
+    name: &[u8],
+    mtime: i64,
+    owner: Option<(u32, u32)>,
+    status: &mut i32,
+) {
+    if let Err(e) = at.set_symlink_mtime(mtime)
+        && implemented(&e)
+    {
+        diag!("tar: {}: Cannot utime: {}", escape(name), strerror(&e));
+        *status = EXIT_FATAL;
+    }
+    if let Some((uid, gid)) = owner
+        && let Err(e) = at.set_owner(uid, gid, false)
+        && implemented(&e)
+    {
+        report_owner_failure(name, uid, gid, &e, status);
+    }
+}
+
+/// GNU's `implemented`: the call failed, rather than not existing here.
+fn implemented(e: &io::Error) -> bool {
+    /// `ENOSYS`, and `ENOTSUP`, which Linux spells the same as `EOPNOTSUPP`.
+    const ENOSYS: i32 = 38;
+    const ENOTSUP: i32 = 95;
+    !matches!(e.raw_os_error(), Some(ENOSYS | ENOTSUP))
+}
+
+/// GNU's `chown_error_details`. An error, not a warning -- measured, a root
+/// restore whose owners cannot be given exits 2 -- and worded with the numbers
+/// actually asked for, after any name was looked up.
+fn report_owner_failure(name: &[u8], uid: u32, gid: u32, e: &io::Error, status: &mut i32) {
+    diag!(
+        "tar: {}: Cannot change ownership to uid {uid}, gid {gid}: {}",
+        escape(name),
+        strerror(e)
+    );
+    *status = EXIT_FATAL;
 }
 
 /// Create something for the member called `name`, beneath `root`, replacing
@@ -3641,7 +4454,7 @@ fn make_ancestors(root: &Dir, name: &[u8], status: &mut i32) {
         // components rejoined: it is what the diagnostic prints, and a name
         // with a doubled slash must be named back the way it was written.
         let ancestor = name.get(..i).unwrap_or(name);
-        match root.locate(ancestor).and_then(|at| at.mkdir()) {
+        match root.locate(ancestor).and_then(|at| at.mkdir(0o777)) {
             Ok(()) => failure = None,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => failure = None,
             Err(e) => {
@@ -3904,10 +4717,13 @@ struct Located {
 #[cfg(unix)]
 impl Located {
     /// `mkdir`, plain: `EEXIST` comes straight back out.
-    fn mkdir(&self) -> io::Result<()> {
-        // 0o777 is masked by the umask, which is what `fs::create_dir` passes
-        // too; the archive's own mode is applied afterwards.
-        self.dir.mkdir(&self.leaf, 0o777)
+    ///
+    /// `mode` is masked by the umask, as any `mkdir`'s is; a directory
+    /// *member*'s own mode is applied afterwards, once the extraction is done
+    /// with it. An intermediate directory -- one the archive does not hold a
+    /// member for -- is made `0o777`, what `fs::create_dir` passes too.
+    fn mkdir(&self, mode: u32) -> io::Result<()> {
+        self.dir.mkdir(&self.leaf, mode)
     }
 
     /// `mkdir` for a directory *member*, where an existing directory is success.
@@ -3923,8 +4739,8 @@ impl Located {
     /// and reports success — leaving the symlink in place for every member that
     /// followed to be written through. Not following the link is the whole of
     /// the difference, and [`Located::is_real_dir`] is where it lives.
-    fn mkdir_member(&self) -> io::Result<()> {
-        match self.mkdir() {
+    fn mkdir_member(&self, mode: u32) -> io::Result<()> {
+        match self.mkdir(mode) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists && self.is_real_dir() => Ok(()),
             other => other,
         }
@@ -4060,10 +4876,11 @@ impl Located {
     /// paths this program takes -- but it costs nothing and the guarantee is
     /// worth stating outright rather than deducing from the flag two lines above.
     ///
-    /// 0o666 is the mode `File::create` would have asked for, and the umask
-    /// takes it down from there; the archive's own mode is applied afterwards.
-    fn create_file(&self) -> io::Result<File> {
-        self.dir.create_new(&self.leaf, 0o666)
+    /// `mode` is the member's own permission bits, narrowed by the umask --
+    /// see [`Ownership::creation_mode`] for why it is not the `0o666` this used
+    /// to be. The archive's exact mode is applied afterwards.
+    fn create_file(&self, mode: u32) -> io::Result<File> {
+        self.dir.create_new(&self.leaf, mode)
     }
 
     /// [`create_file`](Self::create_file) as `--overwrite` wants it: keep the
@@ -4089,8 +4906,8 @@ impl Located {
     /// A **directory** in the way is deliberately not recovered from: `openat`
     /// says `EISDIR`, and GNU reports `Cannot open: Is a directory` and exits 2
     /// rather than removing it. `--overwrite` truncates; it does not delete.
-    fn create_file_overwriting(&self) -> io::Result<File> {
-        self.dir.create_truncating(&self.leaf, 0o666)
+    fn create_file_overwriting(&self, mode: u32) -> io::Result<File> {
+        self.dir.create_truncating(&self.leaf, mode)
     }
 
     /// Clear the leaf out of the way for `-U`, before anything is created.
@@ -4203,6 +5020,12 @@ impl Located {
     fn set_mode(&self, mode: u32) -> io::Result<()> {
         self.chmod(mode)
     }
+
+    /// Give the leaf the owner `uid` and group `gid` -- the leaf itself when
+    /// `follow` is false, which is how a symlink's own owner is set.
+    fn set_owner(&self, uid: u32, gid: u32, follow: bool) -> io::Result<()> {
+        self.dir.chown(&self.leaf, uid, gid, follow)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4276,12 +5099,13 @@ impl Located {
         self.dir.join(os_from_bytes(&self.leaf))
     }
 
-    fn mkdir(&self) -> io::Result<()> {
+    /// No permission bits off unix; `mode` is the unix arm's.
+    fn mkdir(&self, _mode: u32) -> io::Result<()> {
         fs::create_dir(self.path())
     }
 
-    fn mkdir_member(&self) -> io::Result<()> {
-        match self.mkdir() {
+    fn mkdir_member(&self, mode: u32) -> io::Result<()> {
+        match self.mkdir(mode) {
             Err(e)
                 if e.kind() == io::ErrorKind::AlreadyExists
                     && fs::symlink_metadata(self.path()).is_ok_and(|m| m.is_dir()) =>
@@ -4304,14 +5128,15 @@ impl Located {
         fs::hard_link(target.path(), self.path())
     }
 
-    fn create_file(&self) -> io::Result<File> {
+    /// No permission bits off unix; `mode` is the unix arm's.
+    fn create_file(&self, _mode: u32) -> io::Result<File> {
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(self.path())
     }
 
-    fn create_file_overwriting(&self) -> io::Result<File> {
+    fn create_file_overwriting(&self, _mode: u32) -> io::Result<File> {
         fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -4354,7 +5179,7 @@ impl Located {
     }
 
     fn create_placeholder(&self) -> io::Result<()> {
-        self.create_file().map(drop)
+        self.create_file(0).map(drop)
     }
 
     /// `(0, 0)` for everything: there is no inode number to compare here, so the
@@ -4409,12 +5234,20 @@ impl Located {
     }
 
     /// A no-op: there are no symlinks here to stamp.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
     fn set_symlink_mtime(&self, _mtime: i64) -> io::Result<()> {
         Ok(())
     }
 
     /// A no-op off unix, where there are no permission bits to set.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
     fn set_mode(&self, _mode: u32) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// A no-op off unix, where there are no numeric owners to give away.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
+    fn set_owner(&self, _uid: u32, _gid: u32, _follow: bool) -> io::Result<()> {
         Ok(())
     }
 }
@@ -4541,6 +5374,28 @@ impl Roots {
     /// The process exit status, already reported, if a directory in the chain
     /// cannot be entered or the destination cannot be opened.
     fn at(&mut self, chdirs: &[OsString], want: usize) -> Result<&Dir, i32> {
+        // `map_err` with a closure, not a value: `fatal()` *prints*, and must
+        // only be reached when there is an error. An eager argument here once
+        // put `Error is not recoverable: exiting now` on stderr once per member
+        // of every successful extraction -- caught by the differential harness,
+        // and the reason a fallible-looking accessor on a hot path is worth
+        // reading twice.
+        self.reach(chdirs, want).map_err(|Unreachable| fatal())
+    }
+
+    /// [`Roots::at`] without the fatal line: the directory that could not be
+    /// entered is reported, and the rest is the caller's.
+    ///
+    /// For the extraction walk, where GNU's `fatal_exit` runs `extract_finish`
+    /// *before* it says `Error is not recoverable` -- the directories already
+    /// extracted still get their stamps, and the delayed links are still made.
+    /// See `do_extract`.
+    ///
+    /// # Errors
+    ///
+    /// [`Unreachable`], already reported, if a directory in the chain cannot be
+    /// entered or the destination cannot be opened.
+    fn reach(&mut self, chdirs: &[OsString], want: usize) -> Result<&Dir, Unreachable> {
         while self.dirs.len() <= want {
             // One behind the level being opened: `dirs` always holds level 0.
             let Some(dir) = chdirs.get(self.dirs.len().saturating_sub(1)) else {
@@ -4548,13 +5403,13 @@ impl Roots {
             };
             if let Err(e) = env::set_current_dir(dir) {
                 diag!("tar: {}: Cannot open: {}", escape_os(dir), strerror(&e));
-                return Err(fatal());
+                return Err(Unreachable);
             }
             match Dir::open_root(Path::new(".")) {
                 Ok(root) => self.dirs.push(root),
                 Err(e) => {
                     diag!("tar: {}: Cannot open: {}", escape_os(dir), strerror(&e));
-                    return Err(fatal());
+                    return Err(Unreachable);
                 }
             }
         }
@@ -4562,18 +5417,233 @@ impl Roots {
         // which means the loop always reaches it. `last()` is a fallback that
         // cannot be taken, preferred over indexing so that no `unwrap` is
         // needed to say so.
-        //
-        // `ok_or_else`, not `ok_or`: the latter builds its argument before it
-        // looks at the `Option`, and `fatal()` *prints*. Written that way it put
-        // `Error is not recoverable: exiting now` on stderr once per member of
-        // every successful extraction — caught by the differential harness, and
-        // the reason a fallible-looking accessor on a hot path is worth reading
-        // twice.
         self.dirs
             .get(want)
             .or_else(|| self.dirs.last())
-            .ok_or_else(fatal)
+            .ok_or(Unreachable)
     }
+}
+
+/// A `-C` destination that could not be entered: reported, and fatal, with
+/// [`fatal`]'s closing line still to be printed. See [`Roots::reach`].
+struct Unreachable;
+
+/// A directory whose stored metadata waits until extraction is done with it:
+/// GNU's `struct delayed_set_stat`.
+///
+/// It has to wait. Every member written into a directory bumps its mtime, and a
+/// directory whose stored mode has no write bit cannot receive members at all,
+/// so a mode and a stamp applied when the directory member is met would be
+/// undone, or would stop the extraction. GNU applies them when the extraction
+/// *leaves* the directory -- before the first member that is not inside it --
+/// and whatever is still waiting at the end, in [`finish_extraction`].
+struct DelayedDir {
+    /// Which `-C` destination the member went to. See [`Roots`].
+    level: usize,
+    /// The member's name as stored, without its trailing slash: what
+    /// [`is_ancestor`] compares later members' names against.
+    name: Vec<u8>,
+    mode: u32,
+    mtime: i64,
+    /// The owner it is given, when owners are being restored.
+    owner: Option<(u32, u32)>,
+    /// Waits for the delayed links, not just for the members inside it: set for
+    /// `.`, and for the directory a delayed link is made in, whose mtime making
+    /// the link would otherwise undo. See [`mark_after_links`].
+    after_links: bool,
+}
+
+/// GNU's `delay_set_stat`: queue a directory member's metadata.
+///
+/// The same directory named a second time updates the record rather than
+/// adding one, so the last member's metadata is the one that sticks, as in GNU.
+/// "The same" here is the name *and* the `-C` destination, where GNU compares
+/// the name alone: `-C d1 x/ -C d2 x/` gives each `x` its own record, where
+/// GNU's second would take over the first and leave `d1/x` unstamped.
+fn delay_dir(dirs: &mut Vec<DelayedDir>, entry: DelayedDir) {
+    let index = if let Some(i) = dirs
+        .iter()
+        .position(|d| d.level == entry.level && d.name == entry.name)
+    {
+        let Some(same) = dirs.get_mut(i) else {
+            return;
+        };
+        same.mode = entry.mode;
+        same.mtime = entry.mtime;
+        same.owner = entry.owner;
+        i
+    } else {
+        dirs.push(entry);
+        dirs.len().saturating_sub(1)
+    };
+    // `.` covers everything the run writes, delayed links included, so its
+    // stamp is the last thing applied.
+    if dirs
+        .get(index)
+        .is_some_and(|d| must_be_dot_or_slash(&d.name))
+    {
+        mark_after_links(dirs, index);
+    }
+}
+
+/// GNU's `mark_after_links`: the record at `index`, and every older one below
+/// it down to the first already marked, waits for the delayed links.
+///
+/// Older records are, in an archive in the usual order, the ancestors of the
+/// newer ones -- a directory's members follow it -- so this is "this directory
+/// and the ones it is inside".
+fn mark_after_links(dirs: &mut [DelayedDir], index: usize) {
+    let Some(head) = dirs.get_mut(..=index) else {
+        return;
+    };
+    for (n, dir) in head.iter_mut().rev().enumerate() {
+        // The record that started the marking is marked whatever it was; past
+        // it, the first record already marked ends the walk.
+        if n > 0 && dir.after_links {
+            break;
+        }
+        dir.after_links = true;
+    }
+}
+
+/// GNU's `find_direct_ancestor` and the marking that follows it, for a delayed
+/// link stood up as a placeholder at `name`: the waiting directory it is made
+/// directly inside of, if there is one, will be stamped after the link exists.
+fn mark_parent_after_links(dirs: &mut [DelayedDir], name: &[u8]) {
+    let leaf = name
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    let parent = dirs.iter().rposition(|d| {
+        !d.after_links
+            && name.starts_with(&d.name)
+            && name.get(d.name.len()) == Some(&b'/')
+            && d.name.len().saturating_add(1) == leaf
+    });
+    if let Some(index) = parent {
+        mark_after_links(dirs, index);
+    }
+}
+
+/// Whether the member `file` is inside the directory member `dir`, judged by
+/// their names the way GNU judges it: `dir` is a proper prefix of `file`, and
+/// the prefix ends at a slash -- `file`'s next byte, or `dir`'s own last one.
+fn is_ancestor(dir: &[u8], file: &[u8]) -> bool {
+    dir.len() < file.len()
+        && file.starts_with(dir)
+        && (file.get(dir.len()) == Some(&b'/') || dir.last() == Some(&b'/'))
+}
+
+/// GNU's `must_be_dot_or_slash`: whether a name can only mean `.` or `/` --
+/// `.`, `./`, `././.`, `//`, `/./` and the like.
+fn must_be_dot_or_slash(name: &[u8]) -> bool {
+    let at = |i: usize| name.get(i).copied().unwrap_or(0);
+    if at(0) == b'/' {
+        let mut i = 0usize;
+        loop {
+            if at(i.saturating_add(1)) == b'/' {
+                i = i.saturating_add(1);
+            } else if at(i.saturating_add(1)) == b'.' {
+                // `/.` or `/..`, followed by a slash, steps over that component.
+                let dots = if at(i.saturating_add(2)) == b'.' {
+                    2
+                } else {
+                    1
+                };
+                if at(i.saturating_add(1).saturating_add(dots)) == b'/' {
+                    i = i.saturating_add(dots).saturating_add(1);
+                } else {
+                    return false;
+                }
+            } else {
+                return at(i.saturating_add(1)) == 0;
+            }
+        }
+    }
+    let mut i = 0usize;
+    while at(i) == b'.' && at(i.saturating_add(1)) == b'/' {
+        i = i.saturating_add(2);
+        while at(i) == b'/' {
+            i = i.saturating_add(1);
+        }
+    }
+    at(i) == 0 || (at(i) == b'.' && at(i.saturating_add(1)) == 0)
+}
+
+/// GNU's `apply_nonancestor_delayed_set_stat`: stamp every waiting directory
+/// that `name` is not inside of, newest first, stopping at the first one it is
+/// inside of -- and, unless `after_links`, at the first one that waits for the
+/// delayed links.
+///
+/// Called before each member is extracted, so a directory is stamped as soon as
+/// the extraction has left it, and with `name` empty at the end, where nothing
+/// is inside anything. The timing is observable: a message about a directory
+/// comes out between the members, where GNU puts it, rather than in a block at
+/// the end.
+fn apply_nonancestor(
+    roots: &mut Roots,
+    chdirs: &[OsString],
+    dirs: &mut Vec<DelayedDir>,
+    name: &[u8],
+    after_links: bool,
+    status: &mut i32,
+) {
+    while let Some(top) = dirs.last() {
+        if (!after_links && top.after_links) || is_ancestor(&top.name, name) {
+            break;
+        }
+        let Some(top) = dirs.pop() else {
+            break;
+        };
+        set_dir_stat(roots, chdirs, &top, status);
+    }
+}
+
+/// Apply one waiting directory's metadata.
+///
+/// Every level recorded was entered when the directory was made, so the
+/// destination cannot fail to open; it is a `Result` all the same, and a
+/// failure is reported rather than assumed away.
+fn set_dir_stat(roots: &mut Roots, chdirs: &[OsString], dir: &DelayedDir, status: &mut i32) {
+    let root = match roots.at(chdirs, dir.level) {
+        Ok(root) => root,
+        Err(rc) => {
+            *status = rc;
+            return;
+        }
+    };
+    match root.locate(&dir.name) {
+        Ok(at) => restore_metadata(&at, &dir.name, dir.mode, dir.mtime, dir.owner, status),
+        Err(e) => {
+            // The directory was made, and resolved, a moment ago. That it does
+            // not resolve now means the tree changed underneath the extraction,
+            // and the stamp is declined rather than applied to whatever took
+            // the name.
+            diag!("tar: {}: Cannot utime: {}", escape(&dir.name), strerror(&e));
+            *status = EXIT_FATAL;
+        }
+    }
+}
+
+/// GNU's `extract_finish`: what an extraction leaves to the end, in GNU's
+/// order -- the directories that are only waiting for the extraction to leave
+/// them, then the delayed links, then the directories that waited for the
+/// links, since making a link bumps the mtime of the directory it is made in.
+///
+/// Run at the end of every extraction that started, *including* one that died
+/// of a fatal error part-way: GNU registers this as `fatal_exit_hook`, so the
+/// directories already extracted still get their modes and stamps, and the
+/// delayed links are still made, before `Error is not recoverable` is said.
+fn finish_extraction(
+    roots: &mut Roots,
+    chdirs: &[OsString],
+    dirs: &mut Vec<DelayedDir>,
+    links: Vec<DelayedLink>,
+    status: &mut i32,
+) {
+    apply_nonancestor(roots, chdirs, dirs, b"", false, status);
+    apply_delayed_links(roots, chdirs, links, status);
+    apply_nonancestor(roots, chdirs, dirs, b"", true, status);
 }
 
 /// Replace every placeholder with the symlink it stood for.
@@ -4634,36 +5704,64 @@ fn apply_delayed_links(
             *status = EXIT_FATAL;
             continue;
         }
-        if let Err(e) = at.set_symlink_mtime(link.mtime) {
-            diag!(
-                "tar: {}: Cannot utime: {}",
-                escape(&link.name),
-                strerror(&e)
-            );
-            *status = EXIT_FATAL;
-        }
+        restore_symlink_metadata(&at, &link.name, link.mtime, link.owner, status);
     }
 }
 
-fn do_extract(
-    archive_file: Option<&OsStr>,
-    chdirs: &[OsString],
-    verbose: Verbose,
-    members: &[Operand],
-    same_permissions: bool,
-    old_files: OldFiles,
-) -> i32 {
-    // The archive is opened before the `-C` chdir, so its own path is resolved
-    // against the directory the user was standing in, as GNU does.
-    let mut input: Box<dyn Read> = match archive_file {
+/// The most a reading buffer is allowed to be, whatever the record size.
+///
+/// A record is GNU's unit of reading, and buffering one record is what makes a
+/// block-at-a-time decoder cost one system call per record rather than one per
+/// 512 bytes. But `--record-size` accepts records far beyond anything worth
+/// holding in memory to read a few kilobytes, so the buffer stops growing here;
+/// past it, a record is simply read in more than one call.
+const READ_BUFFER_MAX: usize = 1 << 20;
+
+/// Open the archive `-t` and `-x` read: GNU's `_open_archive (ACCESS_READ)`.
+///
+/// A file, or standard input once [`refuse_terminal`] has had its say; either
+/// way behind a buffer one record long (see [`READ_BUFFER_MAX`]). Standard input
+/// is read with `read(2)` itself rather than through `io::stdin()`, which would
+/// report a closed descriptor as an empty archive -- see [`StdioArchive`].
+///
+/// # Errors
+///
+/// The status, already reported, when the archive cannot be opened or is a
+/// terminal. Both are fatal, as they are in GNU.
+fn open_for_reading(archive: Option<&OsStr>, record_size: u64) -> Result<Box<dyn Read>, i32> {
+    let raw: Box<dyn Read> = match archive {
         Some(path) => match File::open(path) {
             Ok(f) => Box::new(f),
             Err(e) => {
                 diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
-                return fatal();
+                return Err(fatal());
             }
         },
-        None => Box::new(io::stdin()),
+        None => {
+            refuse_terminal(false)?;
+            Box::new(StdioArchive(0))
+        }
+    };
+    let capacity = usize::try_from(record_size)
+        .unwrap_or(usize::MAX)
+        .clamp(BLOCK_SIZE, READ_BUFFER_MAX);
+    Ok(Box::new(io::BufReader::with_capacity(capacity, raw)))
+}
+
+fn do_extract(
+    archive: Option<&OsStr>,
+    chdirs: &[OsString],
+    verbose: Verbose,
+    members: &[Operand],
+    own: Ownership,
+    old_files: OldFiles,
+    record_size: u64,
+) -> i32 {
+    // The archive is opened before the `-C` chdir, so its own path is resolved
+    // against the directory the user was standing in, as GNU does.
+    let mut input = match open_for_reading(archive, record_size) {
+        Ok(input) => input,
+        Err(rc) => return rc,
     };
 
     // Each member goes to the destination *its own operand* named, so the chain
@@ -4694,21 +5792,21 @@ fn do_extract(
     let mut prefixes = PrefixNotice::new();
     let mut selector = Selector::new(members, chdirs.len());
     let umask = read_umask();
+    // The passwd and group files, read once, when names are to be turned into
+    // owners. See [`OwnerLookup`].
+    let owners = OwnerLookup::new(own);
     // Only `-xvv` uses these, but both are cheap and reading `TZ` once up front
     // is what stops a long extraction from straddling a zone change mid-file —
     // the same reason `do_list_main` resolves it before the first member.
     let mut ugswidth = UGSWIDTH_MIN;
     let zone = localtime::Zone::from_env();
-    // Directory metadata is applied last, in reverse order. It has to be: a
-    // directory's mtime is bumped by every child written into it, and a
-    // directory whose stored mode has no write bit cannot receive children at
-    // all. GNU defers both for the same reason, which is why `tar -xf` restores
-    // a 0500 directory's mode *and* its timestamp, and ours restored neither.
-    // The `-C` level travels with the name: a directory member and a file member
-    // can belong to different destinations, and the stamp has to be applied under
-    // the one that member was written into. Measured — `-C d1 t/sub -C d2 t/a.txt`
-    // restores `d1/t/sub`'s 0500 mode and its stored mtime, not `d1/d2`'s.
-    let mut pending_dirs: Vec<(usize, Vec<u8>, u32, i64)> = Vec::new();
+    // Directory metadata waits until the extraction has left the directory; see
+    // [`DelayedDir`]. The `-C` level travels with the name: a directory member
+    // and a file member can belong to different destinations, and the stamp has
+    // to be applied under the one that member was written into. Measured —
+    // `-C d1 t/sub -C d2 t/a.txt` restores `d1/t/sub`'s 0500 mode and its stored
+    // mtime, not `d1/d2`'s.
+    let mut dirs: Vec<DelayedDir> = Vec::new();
     let mut delayed: Vec<DelayedLink> = Vec::new();
     // Type flag `7` is announced once per *run*, not once per member, and the
     // line names no member — unlike the unknown-flag warning below, which does
@@ -4724,7 +5822,8 @@ fn do_extract(
         directory_member: false,
     };
 
-    let stop = walk(input.as_mut(), |member, input| {
+    let label = archive_label(archive);
+    let walked = walk(input.as_mut(), &label, |member, input| {
         let raw_name = member.name.as_slice();
 
         // Stripping happens as the header is decoded, before the member is
@@ -4748,10 +5847,11 @@ fn do_extract(
         let Some(level) = selector.wants(raw_name) else {
             return Handled::Skip;
         };
-        let root = match roots.at(chdirs, level) {
-            Ok(root) => root,
-            Err(rc) => return Handled::Stop(rc),
-        };
+        // A `-C` that cannot be entered is fatal, with its last line held back:
+        // `do_extract` finishes what GNU's `fatal_exit_hook` would first.
+        if roots.reach(chdirs, level).is_err() {
+            return Handled::Stop(EXIT_FATAL);
+        }
 
         // Nothing below may use `raw_name` as a path. It is attacker-chosen,
         // and stripping a prefix does not make a `..` in the middle safe.
@@ -4774,10 +5874,32 @@ fn do_extract(
         // running `ugswidth` maximum lives beside the walk here exactly as it
         // does in `list_archive`.
         if verbose.long() {
-            verbose.write(&long_line(member, &link_target, &mut ugswidth, &zone));
+            verbose.write(&long_line(
+                member,
+                &link_target,
+                &mut ugswidth,
+                &zone,
+                own.numeric,
+            ));
         } else {
             verbose.line(raw_name);
         }
+        // Nobody is reading the list any more, and GNU would have been killed
+        // writing that line: this member is not extracted, and neither is
+        // anything after it. See [`READER_GONE`].
+        if reader_gone() {
+            return Handled::Stop(0);
+        }
+
+        // The directories this member is not inside of are finished with, and
+        // get their metadata now -- after the member's `-v` line and before the
+        // member itself, which is where GNU's `extract_archive` does it, and so
+        // where any message about them comes out. See [`DelayedDir`].
+        apply_nonancestor(&mut roots, chdirs, &mut dirs, &name, false, &mut status);
+        // Entered above; this only hands back the handle.
+        let Ok(root) = roots.reach(chdirs, level) else {
+            return Handled::Stop(EXIT_FATAL);
+        };
 
         // `--keep-newer-files` is decided here, above the type switch, because
         // it applies to *every* member type and not only to the regular files
@@ -4790,6 +5912,14 @@ fn do_extract(
         {
             return Handled::Skip;
         }
+
+        // What this member is to end up as: its final mode, the mode it is
+        // made with, and -- when owners are being restored -- its owner.
+        let shape = Shape {
+            mode: extraction_mode(member.mode, own.exact_modes, umask),
+            create_mode: own.creation_mode(member.mode),
+            owner: own.restore_owner.then(|| owners.ids(member)),
+        };
 
         match member.typeflag {
             _ if member.is_dir() => {
@@ -4807,7 +5937,7 @@ fn do_extract(
                 // `--overwrite`, wrong for these, and for two different reasons.
                 //
                 // Under `-k` and `--skip-old-files` it is wrong because success
-                // is what puts the member's mode and mtime in `pending_dirs`:
+                // is what queues the member's mode and mtime ([`delay_dir`]):
                 // measured, `tar -xkf` over a directory it has already unpacked
                 // leaves that directory's 0700 mode and old timestamp exactly as
                 // found, where the default restores the member's (`tar-ovw6.sh`).
@@ -4819,9 +5949,21 @@ fn do_extract(
                 // The mtime plays no part: an on-disk directory is exempt from
                 // the age test (see [`keeps_newer`]), so what decides is only
                 // whether the removal succeeds (`tar-knf3.sh`).
-                let create: fn(&Located) -> io::Result<()> = match old_files {
-                    OldFiles::Keep | OldFiles::Skip | OldFiles::KeepNewer => Located::mkdir,
-                    _ => Located::mkdir_member,
+                //
+                // Either way it is made with GNU's `safe_dir_mode`, not its
+                // stored mode, which is applied when the extraction is done
+                // with it. See [`Ownership::safe_dir_mode`].
+                let first_mode = own.safe_dir_mode(member.mode);
+                let plain = matches!(
+                    old_files,
+                    OldFiles::Keep | OldFiles::Skip | OldFiles::KeepNewer
+                );
+                let create = |at: &Located| {
+                    if plain {
+                        at.mkdir(first_mode)
+                    } else {
+                        at.mkdir_member(first_mode)
+                    }
                 };
                 match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e)) => {
@@ -4841,14 +5983,17 @@ fn do_extract(
                         status = EXIT_FATAL;
                     }
                     Err(NotCreated::Silent) => {}
-                    Ok(_) => {
-                        pending_dirs.push((
+                    Ok(_) => delay_dir(
+                        &mut dirs,
+                        DelayedDir {
                             level,
                             name,
-                            extraction_mode(member.mode, same_permissions, umask),
-                            member.mtime,
-                        ));
-                    }
+                            mode: shape.mode,
+                            mtime: member.mtime,
+                            owner: shape.owner,
+                            after_links: false,
+                        },
+                    ),
                 }
                 Handled::Skip
             }
@@ -4864,8 +6009,7 @@ fn do_extract(
                     contiguous_warned = true;
                     diag!("tar: Extracting contiguous files as regular files");
                 }
-                let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(root, input, &name, member, mode, ovw, &mut status)
+                extract_plain(root, input, &name, member, shape, ovw, &mut status)
             }
             b'2' if is_delayed_target(&member.linkname) => {
                 // A symlink out of the destination — absolute, or climbing —
@@ -4884,13 +6028,20 @@ fn do_extract(
                 // stops that one is [`Dir::locate`], which refuses to walk
                 // through it however it got there.
                 match make_placeholder(root, &name, ovw, &mut status) {
-                    Ok(id) => delayed.push(DelayedLink {
-                        name: name.clone(),
-                        target: member.linkname.clone(),
-                        mtime: member.mtime,
-                        id,
-                        dir: level,
-                    }),
+                    Ok(id) => {
+                        delayed.push(DelayedLink {
+                            name: name.clone(),
+                            target: member.linkname.clone(),
+                            mtime: member.mtime,
+                            owner: shape.owner,
+                            id,
+                            dir: level,
+                        });
+                        // Making the link at the end will bump the mtime of the
+                        // directory it is made in, so that directory's stamp
+                        // waits until after it, as GNU's does.
+                        mark_parent_after_links(&mut dirs, &name);
+                    }
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Cannot open`, not `Cannot create symlink`: at this
                         // point GNU really is opening a file, and the wording
@@ -4924,10 +6075,13 @@ fn do_extract(
                     // it points at, which for an archived `-> /etc/passwd` is
                     // the whole attack.
                     Ok((at, ())) => {
-                        if let Err(e) = at.set_symlink_mtime(member.mtime) {
-                            diag!("tar: {}: Cannot utime: {}", escape(&name), strerror(&e));
-                            status = EXIT_FATAL;
-                        }
+                        restore_symlink_metadata(
+                            &at,
+                            &name,
+                            member.mtime,
+                            shape.owner,
+                            &mut status,
+                        );
                     }
                 }
                 Handled::Skip
@@ -4965,24 +6119,29 @@ fn do_extract(
                 Handled::Skip
             }
             b'6' => {
-                let mode = extraction_mode(member.mode, same_permissions, umask);
-                match create_at(root, &name, ovw, &mut status, |at| at.make_fifo(mode)) {
+                let create = |at: &Located| at.make_fifo(shape.create_mode);
+                match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         diag!("tar: {}: Cannot mkfifo: {}", escape(&name), strerror(&e));
                         status = EXIT_FATAL;
                     }
                     Err(NotCreated::Silent) => {}
-                    Ok((at, ())) => {
-                        restore_metadata(&at, &name, mode, member.mtime, &mut status);
-                    }
+                    Ok((at, ())) => restore_metadata(
+                        &at,
+                        &name,
+                        shape.mode,
+                        member.mtime,
+                        shape.owner,
+                        &mut status,
+                    ),
                 }
                 Handled::Skip
             }
             b'3' | b'4' => {
-                let mode = extraction_mode(member.mode, same_permissions, umask);
                 let block = member.typeflag == b'4';
-                let create =
-                    |at: &Located| at.make_device(mode, block, member.devmajor, member.devminor);
+                let create = |at: &Located| {
+                    at.make_device(shape.create_mode, block, member.devmajor, member.devminor)
+                };
                 match create_at(root, &name, ovw, &mut status, create) {
                     Err(NotCreated::Failed(e) | NotCreated::Immovable(e)) => {
                         // `Operation not permitted` for everyone but root, and
@@ -4993,9 +6152,14 @@ fn do_extract(
                         status = EXIT_FATAL;
                     }
                     Err(NotCreated::Silent) => {}
-                    Ok((at, ())) => {
-                        restore_metadata(&at, &name, mode, member.mtime, &mut status);
-                    }
+                    Ok((at, ())) => restore_metadata(
+                        &at,
+                        &name,
+                        shape.mode,
+                        member.mtime,
+                        shape.owner,
+                        &mut status,
+                    ),
                 }
                 Handled::Skip
             }
@@ -5017,65 +6181,43 @@ fn do_extract(
                     escape(&name),
                     escape(&[other])
                 );
-                let mode = extraction_mode(member.mode, same_permissions, umask);
-                extract_plain(root, input, &name, member, mode, ovw, &mut status)
+                extract_plain(root, input, &name, member, shape, ovw, &mut status)
             }
         }
     });
 
-    // A `-C` that could not be entered is fatal *where it is met*: GNU prints
-    // `Error is not recoverable: exiting now` and exits on the spot, so none of
-    // what normally rounds off a run happens — not the delayed links, not the
-    // directory stamps, not the `Not found in archive` notices for operands the
-    // archive had not reached yet. Measured: `-C nosuchdir t/a.txt -C d1
-    // t/z.txt` says only `nosuchdir: Cannot open`, never a word about `t/z.txt`.
-    if let Stop::Handler(rc) = stop
-        && rc != 0
-    {
-        return rc;
+    // A reader of the list that went away: GNU was killed writing to it, so
+    // nothing that rounds off a run happens and nothing more is said, and the
+    // run keeps the status it had earned. See [`READER_GONE`].
+    if reader_gone() {
+        return status;
     }
 
-    // Links before directories, because creating one bumps the mtime of the
-    // directory it lands in. GNU reaches the same place by a longer route — it
-    // fixes every directory that is *not* an ancestor of a delayed link, then
-    // applies the links, then fixes the ancestors — and the observable result
-    // is identical: measured, an archive whose only member under `sub/` is a
-    // symlink to an absolute path leaves `sub`'s stored mtime intact.
-    apply_delayed_links(&mut roots, chdirs, delayed, &mut status);
-
-    // Deepest first: `pending_dirs` is in archive order, which is parents
-    // before children, so the reverse leaves a parent's timestamp untouched by
-    // work still to be done inside it.
-    for (level, name, mode, mtime) in pending_dirs.into_iter().rev() {
-        // Every level recorded here was entered during the walk, so this cannot
-        // fail; it is a `Result` all the same, and a failure is reported rather
-        // than assumed away.
-        let root = match roots.at(chdirs, level) {
-            Ok(root) => root,
-            Err(rc) => {
-                status = rc;
-                continue;
-            }
-        };
-        match root.locate(&name) {
-            Ok(at) => restore_metadata(&at, &name, mode, mtime, &mut status),
-            Err(e) => {
-                // The directory was made a moment ago and resolved then. That
-                // it does not resolve now means the tree changed underneath the
-                // extraction, and the stamp is declined rather than applied to
-                // whatever took the name.
-                diag!("tar: {}: Cannot utime: {}", escape(&name), strerror(&e));
-                status = EXIT_FATAL;
-            }
-        }
+    // A fatal stop -- a `-C` that could not be entered, an archive whose data
+    // ran out or could not be read -- has said what went wrong where it was
+    // met. GNU then runs `extract_finish` from `fatal_exit_hook` before its
+    // last line: the directories already extracted still get their modes and
+    // stamps, and the delayed links are still made. What it does *not* do is
+    // the `Not found in archive` notices, which belong to the end of a read
+    // that did not end. Measured: `-C nosuchdir t/a.txt -C d1 t/z.txt` says
+    // only `nosuchdir: Cannot open`, never a word about `t/z.txt`.
+    let fatal_stop = match walked.stop {
+        Stop::Fatal => true,
+        Stop::Handler(rc) => rc != 0,
+        Stop::End => false,
+    };
+    if fatal_stop {
+        finish_extraction(&mut roots, chdirs, &mut dirs, delayed, &mut status);
+        return fatal();
     }
 
+    // GNU's order at the end of a read: what the archive itself had to say
+    // (already said, by the walk), then the members asked for and not found,
+    // then everything left waiting -- directories, links, the directories that
+    // waited for the links.
     let missing = selector.report_missing();
-    let walk_status = report_stop(stop, &archive_label(archive_file));
-    if walk_status != 0 {
-        return walk_status;
-    }
-    if status == 0 && missing == 0 {
+    finish_extraction(&mut roots, chdirs, &mut dirs, delayed, &mut status);
+    if status == 0 && missing == 0 && !walked.failed {
         0
     } else {
         failed_with_previous_errors()
@@ -5093,11 +6235,11 @@ fn extract_plain(
     input: &mut dyn Read,
     name: &[u8],
     member: &Member,
-    mode: u32,
+    shape: Shape,
     ovw: Overwriting,
     status: &mut i32,
 ) -> Handled {
-    if extract_regular_file(root, input, name, member, mode, ovw, status) {
+    if extract_regular_file(root, input, name, member, shape, ovw, status) {
         Handled::Consumed
     } else {
         Handled::Truncated
@@ -5149,6 +6291,9 @@ struct DelayedLink {
     name: Vec<u8>,
     target: Vec<u8>,
     mtime: i64,
+    /// The owner the link is given once it exists, when owners are being
+    /// restored -- the link's own, not its target's.
+    owner: Option<(u32, u32)>,
     /// Which `-C` level the member belonged to, so the link is created under
     /// the destination its placeholder went to rather than under whichever one
     /// happened to be current when the archive ended. See [`Roots`].
@@ -5159,9 +6304,11 @@ struct DelayedLink {
     id: (u64, u64),
 }
 
-/// The archive's name for a diagnostic: its path, or `-` for standard input.
-fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
-    archive_file.map_or_else(|| b"-".to_vec(), |p| os_bytes(p).into_owned())
+/// The archive's name for a diagnostic: its path, or `-` for the standard
+/// stream -- which is how GNU names it, since `-` is what its
+/// `archive_name_array` holds.
+fn archive_label(archive: Option<&OsStr>) -> Vec<u8> {
+    archive.map_or_else(|| b"-".to_vec(), |p| os_bytes(p).into_owned())
 }
 
 /// Open the file a regular member is to be written to, reporting why not.
@@ -5191,6 +6338,7 @@ fn archive_label(archive_file: Option<&OsStr>) -> Vec<u8> {
 fn open_for_member(
     root: &Dir,
     name: &[u8],
+    mode: u32,
     ovw: Overwriting,
     status: &mut i32,
 ) -> Option<(Located, File)> {
@@ -5198,10 +6346,13 @@ fn open_for_member(
     // is done about its failure: `O_TRUNC` where the others use `O_EXCL`, so the
     // inode survives and every other name for it changes with the contents. See
     // [`Located::create_file_overwriting`].
-    let create: fn(&Located) -> io::Result<File> = if ovw.old_files == OldFiles::Overwrite {
-        Located::create_file_overwriting
-    } else {
-        Located::create_file
+    let overwrite = ovw.old_files == OldFiles::Overwrite;
+    let create = |at: &Located| {
+        if overwrite {
+            at.create_file_overwriting(mode)
+        } else {
+            at.create_file(mode)
+        }
     };
     match create_at(root, name, ovw, status, create) {
         Ok(pair) => Some(pair),
@@ -5231,7 +6382,7 @@ fn extract_regular_file(
     input: &mut dyn Read,
     name: &[u8],
     member: &Member,
-    mode: u32,
+    shape: Shape,
     ovw: Overwriting,
     status: &mut i32,
 ) -> bool {
@@ -5241,7 +6392,7 @@ fn extract_regular_file(
     // That is as true of a member `--skip-old-files` stepped over as of one that
     // could not be opened — the bytes are in the stream either way, and the
     // headers after them only line up if they are read.
-    let mut opened = open_for_member(root, name, ovw, status);
+    let mut opened = open_for_member(root, name, shape.create_mode, ovw, status);
 
     let mut remaining = size;
     let mut block = [0u8; BLOCK_SIZE];
@@ -5279,27 +6430,23 @@ fn extract_regular_file(
             diag!("tar: {}: Cannot write: {}", escape(name), strerror(&e));
             *status = EXIT_FATAL;
         } else {
-            restore_metadata(&at, name, mode, member.mtime, status);
+            restore_metadata(&at, name, shape.mode, member.mtime, shape.owner, status);
         }
     }
     true
 }
 
 fn do_list_main(
-    archive_file: Option<&OsStr>,
+    archive: Option<&OsStr>,
     chdirs: &[OsString],
     verbose: u8,
+    numeric: bool,
     members: &[Operand],
+    record_size: u64,
 ) -> i32 {
-    let mut input: Box<dyn Read> = match archive_file {
-        Some(path) => match File::open(path) {
-            Ok(f) => Box::new(f),
-            Err(e) => {
-                diag!("tar: {}: Cannot open: {}", escape_os(path), strerror(&e));
-                return fatal();
-            }
-        },
-        None => Box::new(io::stdin()),
+    let mut input = match open_for_reading(archive, record_size) {
+        Ok(input) => input,
+        Err(rc) => return rc,
     };
 
     // Listing writes nothing to the filesystem, so a `-C` cannot change the
@@ -5322,54 +6469,55 @@ fn do_list_main(
         return rc;
     }
 
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
     let mut selector = Selector::new(members, chdirs.len());
     // Read once, before any member is printed. `-tv` renders every timestamp in
     // the machine's zone, and re-resolving `TZ` per member would let a listing
     // straddle a zone change mid-file.
     let zone = localtime::Zone::from_env();
 
-    let (stop, write_err) = list_archive(
+    // Each line goes out as it is made and a failed one is remembered, not
+    // acted on: GNU lists to the end of the archive however many lines were
+    // lost, and says so once, at exit. See [`list_line`] and [`conclude`].
+    let label = archive_label(archive);
+    let walked = list_archive(
         input.as_mut(),
-        &mut out,
+        &mut Listing,
         verbose,
+        numeric,
         &mut selector,
         &zone,
         chdirs,
         &mut entered,
+        &label,
     );
 
-    let flush_err = out.flush().err();
-    if let Some(e) = write_err.or(flush_err) {
-        // `tar -tf big.tar | head -5` closes the pipe on purpose; that is how
-        // a pipeline ends, not a failure of this program.
-        if e.kind() == io::ErrorKind::BrokenPipe {
-            return 0;
-        }
-        diag!("tar: 'standard output': Cannot write: {}", strerror(&e));
-        return fatal();
+    // `tar -tf big.tar | head -5` closes the pipe on purpose; that is how a
+    // pipeline ends, not a failure of this program, and GNU -- killed by the
+    // signal -- reports nothing after it, not even the members it never
+    // reached. See [`READER_GONE`].
+    if reader_gone() {
+        return 0;
     }
 
-    // A `-C` that could not be entered exits on the spot; see `do_extract`.
-    if let Stop::Handler(rc) = stop
-        && rc != 0
-    {
-        return rc;
+    match walked.stop {
+        // A `-C` that could not be entered exits on the spot; see `do_extract`.
+        Stop::Handler(rc) if rc != 0 => return rc,
+        // Reported where it was met, by the walk.
+        Stop::Fatal => return fatal(),
+        Stop::End | Stop::Handler(_) => {}
     }
 
-    // Order matters: a member the caller named and the archive does not hold is
-    // worth saying even when the archive also ended badly, because the two are
-    // different complaints about different things.
+    // After everything the archive itself had to say, as GNU's
+    // `names_notfound` comes after its read loop: a member the caller named
+    // and the archive did not hold is said even when the archive also ended
+    // badly, because the two are different complaints about different things,
+    // and it is said second. Measured: `A lone zero block at 6`, then
+    // `nosuch: Not found in archive`.
     let missing = selector.report_missing();
-    let walk_status = report_stop(stop, &archive_label(archive_file));
-    if walk_status != 0 {
-        return walk_status;
-    }
-    if missing == 0 {
-        0
-    } else {
+    if walked.failed || missing > 0 {
         failed_with_previous_errors()
+    } else {
+        0
     }
 }
 
@@ -5385,12 +6533,17 @@ const UGSWIDTH_MIN: usize = 18;
 
 /// List an archive's members to `out`.
 ///
-/// Returns the reason the walk stopped and the first write error, if any; the
-/// caller turns those into a status. Splitting it that way is what lets the
-/// unit tests drive a synthetic archive through the real code path and inspect
-/// both the bytes written and *why* the read ended — the old version returned
-/// `io::Result<()>` and answered `Ok(())` for a truncated archive, a corrupt
-/// one, and a file that was never an archive alike.
+/// Returns the reason the walk stopped; the caller turns that into a status.
+/// Splitting it that way is what lets the unit tests drive a synthetic archive
+/// through the real code path and inspect both the bytes written and *why* the
+/// read ended — the old version returned `io::Result<()>` and answered `Ok(())`
+/// for a truncated archive, a corrupt one, and a file that was never an archive
+/// alike.
+///
+/// What became of the bytes written is not this function's business: `out` is
+/// [`Listing`] in a real run, which keeps a failure for [`conclude`] to report
+/// at exit, as GNU does, and the walk stops early only when the reader has gone
+/// (see [`READER_GONE`]).
 ///
 /// `verbose` is the counter, not a flag. Listing is the mode where that matters
 /// most: `-t` alone is already level 1 because `-t` bumps it, so the interesting
@@ -5400,26 +6553,29 @@ fn list_archive(
     input: &mut dyn Read,
     out: &mut dyn Write,
     verbose: u8,
+    numeric: bool,
     selector: &mut Selector,
     zone: &localtime::Zone,
     chdirs: &[OsString],
     entered: &mut usize,
-) -> (Stop, Option<io::Error>) {
+    label: &[u8],
+) -> Walked {
     let mut ugswidth = UGSWIDTH_MIN;
-    let mut write_err: Option<io::Error> = None;
     // Listing announces the prefixes it *would* strip, exactly as extraction
     // does: measured, `tar -tf` on an archive holding `/a` prints ``Removing
     // leading `/' from member names`` above the `/a` line, and exits 0. The
     // notice belongs to reading a header, not to writing a file.
     let mut prefixes = PrefixNotice::new();
 
-    let stop = walk(input, |member, _data| {
-        // The notices go to stderr while the listing goes through a buffer, so
-        // without a flush every notice would surface after the whole listing.
-        // GNU has the same split and solves it the same way: gnulib's `error()`
-        // does `fflush(stdout)` before it writes. The hook is only invoked when
-        // a diagnostic is actually about to print, so the common member costs
-        // no extra syscall.
+    walk(input, label, |member, _data| {
+        // The notices go to stderr while the listing goes to `out`, so a writer
+        // that buffered would put every notice ahead of lines written before
+        // it. GNU has the same split and solves it the same way: gnulib's
+        // `error()` does `fflush(stdout)` before it writes. [`Listing`] flushes
+        // every line and `diag!` flushes standard output first anyway, so in a
+        // real run the hook finds nothing to do; it is kept so that the order
+        // does not depend on which writer `out` happens to be. It is only
+        // invoked when a diagnostic is about to print.
         let _stored_under =
             prefixes.strip_flushing(&member.name, PrefixKind::MemberNames, &mut || {
                 drop(out.flush());
@@ -5451,22 +6607,22 @@ fn list_archive(
         // its own terms: GNU's output is not feedable back either, and a name
         // containing a newline would put two lines in the manifest.
         let line = if verbose >= 2 {
-            long_line(member, &link_target, &mut ugswidth, zone)
+            long_line(member, &link_target, &mut ugswidth, zone, numeric)
         } else {
             let mut l = escape(&member.name).into_bytes();
             l.push(b'\n');
             l
         };
-        if let Err(e) = out.write_all(&line) {
-            write_err = Some(e);
-            // Zero, not a failure status: the reason is carried in `write_err`
-            // and a closed pipe is not an error at all.
+        // A failure is the writer's to keep: [`Listing`] records it and never
+        // returns one, and a test's `Vec` cannot fail. Discarded rather than
+        // acted on, because GNU goes on listing past a line it could not write.
+        drop(out.write_all(&line));
+        // Zero, not a failure status: a reader that left is not an error at all.
+        if reader_gone() {
             return Handled::Stop(0);
         }
         Handled::Skip
-    });
-
-    (stop, write_err)
+    })
 }
 
 /// One line of `tar -tv`, byte for byte as GNU lays it out.
@@ -5484,17 +6640,20 @@ fn long_line(
     link_target: &[u8],
     ugswidth: &mut usize,
     zone: &localtime::Zone,
+    numeric: bool,
 ) -> Vec<u8> {
-    // ustar stores the owner's *name* beside the number; `--numeric-owner`
-    // leaves it empty and GNU then prints the number. Falling back the other
-    // way — looking the uid up in this machine's passwd file — would be wrong:
-    // the archive may come from a machine where uid 1000 is someone else.
-    let user = if member.uname.is_empty() {
+    // ustar stores the owner's *name* beside the number; an archive written
+    // with `--numeric-owner` leaves it empty, and GNU then prints the number --
+    // as it does for any archive when this run was given `--numeric-owner`
+    // (`numeric`). Falling back the other way — looking the uid up in this
+    // machine's passwd file — would be wrong: the archive may come from a
+    // machine where uid 1000 is someone else.
+    let user = if numeric || member.uname.is_empty() {
         member.uid.to_string().into_bytes()
     } else {
         member.uname.clone()
     };
-    let group = if member.gname.is_empty() {
+    let group = if numeric || member.gname.is_empty() {
         member.gid.to_string().into_bytes()
     } else {
         member.gname.clone()
@@ -5744,38 +6903,38 @@ mod tests {
     ///
     /// Level 1 is what a bare `-t` produces: `-t` bumps the counter once, so
     /// the plain listing is level 1, not level 0 (which is silent).
-    fn list_names(input: &[u8], out: &mut Vec<u8>) -> Stop {
+    fn list_names(input: &[u8], out: &mut Vec<u8>) -> Walked {
         let mut sel = Selector::new(&[], 0);
         let mut entered = 0usize;
-        let (stop, err) = list_archive(
+        list_archive(
             &mut &input[..],
             out,
             1,
+            false,
             &mut sel,
             &Zone::utc(),
             &[],
             &mut entered,
-        );
-        assert!(err.is_none(), "unexpected write error listing to a Vec");
-        stop
+            b"test.tar",
+        )
     }
 
     /// As [`list_names`], in the long (`-tv`) form — level 2, the counter's
     /// ceiling.
-    fn list_long(input: &[u8], out: &mut Vec<u8>) -> Stop {
+    fn list_long(input: &[u8], out: &mut Vec<u8>) -> Walked {
         let mut sel = Selector::new(&[], 0);
         let mut entered = 0usize;
-        let (stop, err) = list_archive(
+        list_archive(
             &mut &input[..],
             out,
             2,
+            false,
             &mut sel,
             &Zone::utc(),
             &[],
             &mut entered,
-        );
-        assert!(err.is_none(), "unexpected write error listing to a Vec");
-        stop
+            b"test.tar",
+        )
     }
 
     /// A header with every field a `-tv` line reads set explicitly.
@@ -5990,7 +7149,7 @@ mod tests {
         .unwrap();
         assert_eq!(a.mode, Mode::Create);
         assert_eq!(a.verbose, 1);
-        assert!(a.same_permissions);
+        assert_eq!(a.same_permissions, Some(true));
         assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("out.tar")));
         assert_eq!(a.chdirs, s(&["/tmp"]));
         assert_eq!(a.names(), s(&["x"]));
@@ -6015,15 +7174,17 @@ mod tests {
         // Two names, one option, in both of GNU's pairs.
         assert_eq!(run_args(&s(&["--get"])).unwrap().mode, Mode::Extract);
         assert_eq!(run_args(&s(&["--extract"])).unwrap().mode, Mode::Extract);
-        assert!(
+        assert_eq!(
             run_args(&s(&["--same-permissions"]))
                 .unwrap()
-                .same_permissions
+                .same_permissions,
+            Some(true)
         );
-        assert!(
+        assert_eq!(
             run_args(&s(&["--preserve-permissions"]))
                 .unwrap()
-                .same_permissions
+                .same_permissions,
+            Some(true)
         );
     }
 
@@ -6563,10 +7724,12 @@ mod tests {
         // both exiting 64. It is also the measurement
         // `scripts/getopt-ambiguity-check.py` reads GNU's table with.
         let err = run_args(&s(&["--=x"])).unwrap_err();
-        let expected: String = LONG_OPTIONS
-            .iter()
-            .map(|(name, _)| format!(" '--{name}'"))
-            .collect();
+        let expected = LONG_OPTIONS.iter().fold(String::new(), |mut s, (name, _)| {
+            use std::fmt::Write as _;
+            // Writing to a String cannot fail.
+            let _ = write!(s, " '--{name}'");
+            s
+        });
         // The word as typed, `=x` and all — glibc names the argv word in an
         // ambiguity, and only resolves to a table name once one entry has won.
         assert_eq!(
@@ -6911,6 +8074,10 @@ mod tests {
             "--file",
             "--preserve-permissions",
             "--same-permissions",
+            "--no-same-permissions",
+            "--same-owner",
+            "--no-same-owner",
+            "--numeric-owner",
             "--verbose",
             "--keep-newer-files",
             "--keep-old-files",
@@ -7267,7 +8434,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert!(out.is_empty());
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7280,7 +8447,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "hello.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7294,7 +8461,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "data.bin\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7312,7 +8479,7 @@ mod tests {
         let stop = list_names(&input, &mut out);
         let listing = String::from_utf8(out).unwrap();
         assert_eq!(listing, "a.txt\nb.txt\nc.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7328,7 +8495,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "caf\\351.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7343,7 +8510,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "café.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     /// `t/` + `n`×`d` + `/` + `m`×`f`, the shape every split test uses.
@@ -7578,7 +8745,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "a\\nb.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7611,7 +8778,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "liar.bin\n");
-        assert!(matches!(stop, Stop::Truncated), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::Fatal), "{stop:?}");
     }
 
     #[test]
@@ -7626,7 +8793,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "whole.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7640,7 +8807,10 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "a.txt\n");
-        assert!(matches!(stop, Stop::LoneZeroBlock(2)), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert_eq!(stop.lone_zero_block, Some(2));
+        // A warning, not an error: nothing turns the status to 2.
+        assert!(!stop.failed);
     }
 
     #[test]
@@ -7651,7 +8821,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "a.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7662,7 +8832,8 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert!(out.is_empty());
-        assert!(matches!(stop, Stop::NotAnArchive), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert!(stop.failed);
     }
 
     #[test]
@@ -7674,7 +8845,8 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert!(out.is_empty(), "{:?}", String::from_utf8_lossy(&out));
-        assert!(matches!(stop, Stop::NotAnArchive), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert!(stop.failed);
     }
 
     #[test]
@@ -7691,7 +8863,46 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "good.txt\n");
-        assert!(matches!(stop, Stop::BadHeader), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert!(stop.failed);
+    }
+
+    #[test]
+    fn list_skips_a_bad_block_and_finds_the_header_after_it() {
+        // `Skipping to next header` is a description, not a farewell: a
+        // damaged block in the middle of an archive costs the members it
+        // damaged, and the walk picks up at the next block that is a header.
+        // This tar used to stop there, and report every member after the
+        // damage as `Not found in archive`. Measured against GNU with one
+        // block of random bytes spliced between two members: both list the
+        // member after it.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&make_header(b"before.txt", 0, b'0'));
+        input.extend_from_slice(&[0xa5; BLOCK_SIZE]);
+        input.extend_from_slice(&[0x5a; BLOCK_SIZE]);
+        input.extend_from_slice(&make_header(b"after.txt", 0, b'0'));
+        input.extend_from_slice(&[0u8; BLOCK_SIZE * 2]);
+        let mut out = Vec::new();
+        let stop = list_names(&input, &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "before.txt\nafter.txt\n");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
+        assert!(stop.failed);
+    }
+
+    #[test]
+    fn a_lone_zero_block_is_numbered_counting_the_data_blocks() {
+        // The warning names the block by its place in the archive. Counting
+        // only the headers named the wrong one as soon as a member had data:
+        // here the header is block 1, its two data blocks are 2 and 3, and the
+        // zero block is block 4 -- not 2.
+        let mut input: Vec<u8> = Vec::new();
+        input.extend_from_slice(&make_header(b"a.bin", 600, b'0'));
+        input.extend_from_slice(&[b'x'; BLOCK_SIZE * 2]);
+        input.extend_from_slice(&[0u8; BLOCK_SIZE]);
+        let mut out = Vec::new();
+        let stop = list_names(&input, &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), "a.bin\n");
+        assert_eq!(stop.lone_zero_block, Some(4));
     }
 
     #[test]
@@ -7715,7 +8926,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "deep/dir/leaf.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     #[test]
@@ -7738,7 +8949,7 @@ mod tests {
         let mut out = Vec::new();
         let stop = list_names(&input, &mut out);
         assert_eq!(String::from_utf8(out).unwrap(), "leaf.txt\n");
-        assert!(matches!(stop, Stop::End), "{stop:?}");
+        assert!(matches!(stop.stop, Stop::End), "{stop:?}");
     }
 
     // ---------------- the -tv long format ----------------
@@ -8122,5 +9333,348 @@ mod tests {
         // every member name there is.
         assert_eq!(trim_slashes(b"/"), b"/");
         assert_eq!(trim_slashes(b""), b"");
+    }
+
+    // ---------------- which archive, and how far a write got ----------------
+
+    #[test]
+    fn a_dash_is_the_standard_stream_and_nothing_else_is() {
+        assert_eq!(resolve_archive(Some(OsStr::new("-")), None), None);
+        // Only exactly `-`: with anything else in the name it is a file.
+        assert_eq!(
+            resolve_archive(Some(OsStr::new("./-")), None),
+            Some(OsString::from("./-"))
+        );
+        assert_eq!(
+            resolve_archive(Some(OsStr::new("a.tar")), None),
+            Some(OsString::from("a.tar"))
+        );
+        // No `-f` and no `TAPE` is `-`.
+        assert_eq!(resolve_archive(None, None), None);
+    }
+
+    #[test]
+    fn tape_names_the_archive_only_when_no_f_does() {
+        let tape = Some(OsStr::new("t.tar"));
+        assert_eq!(resolve_archive(None, tape), Some(OsString::from("t.tar")));
+        assert_eq!(
+            resolve_archive(Some(OsStr::new("f.tar")), tape),
+            Some(OsString::from("f.tar"))
+        );
+        // `-f -` outranks a `TAPE` naming a file, as any `-f` does.
+        assert_eq!(resolve_archive(Some(OsStr::new("-")), tape), None);
+        // `-` in `TAPE` is the stream too, and an empty `TAPE` is a name -- one
+        // that will not open, which is GNU's `tar: : Cannot open`.
+        assert_eq!(resolve_archive(None, Some(OsStr::new("-"))), None);
+        assert_eq!(
+            resolve_archive(None, Some(OsStr::new(""))),
+            Some(OsString::new())
+        );
+    }
+
+    #[test]
+    fn every_f_is_counted_whatever_its_spelling() {
+        let a = run_args(&s(&["-c", "-f", "a.tar", "--file=b.tar", "x"])).unwrap();
+        assert_eq!(a.archives_named, 2);
+        // The last is the one kept, though with two it is never used.
+        assert_eq!(a.archive_file.as_deref(), Some(OsStr::new("b.tar")));
+        // The old style hands each `f` its own word.
+        let a = run_args(&s(&["cff", "a.tar", "b.tar", "x"])).unwrap();
+        assert_eq!(a.archives_named, 2);
+        let a = run_args(&s(&["-cf", "a.tar", "x"])).unwrap();
+        assert_eq!(a.archives_named, 1);
+        assert_eq!(run_args(&s(&["-c", "x"])).unwrap().archives_named, 0);
+    }
+
+    /// A stream with room for `room` more bytes, which then fails the way a
+    /// full disk does -- `ENOSPC`, after a short write if the room ran out
+    /// part-way through one.
+    struct Filling {
+        room: usize,
+    }
+
+    impl Write for Filling {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.room == 0 {
+                return Err(io::Error::from_raw_os_error(28));
+            }
+            let n = buf.len().min(self.room);
+            self.room -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_record_that_went_in_part_says_how_much_went() {
+        // 1024-byte records and room for one and a half of them.
+        let mut disk = Filling { room: 1536 };
+        let mut w = RecordWriter::new(&mut disk, 1024);
+        // The first record is only buffered; the second write spills it, whole.
+        w.write_all(&[b'a'; 1024]).unwrap();
+        w.write_all(&[b'b'; 1024]).unwrap();
+        assert_eq!(w.sent(), 1024);
+        // The third spills the second record, which gets half way.
+        let err = w.write_all(&[b'c'; 512]).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(28));
+        assert_eq!((w.sent(), w.record()), (512, 1024));
+    }
+
+    #[test]
+    fn a_record_that_went_nowhere_says_none_went() {
+        let mut disk = Filling { room: 0 };
+        let mut w = RecordWriter::new(&mut disk, 512);
+        w.write_all(&[b'a'; 512]).unwrap();
+        assert!(w.finish().is_err());
+        assert_eq!(w.sent(), 0);
+    }
+
+    #[test]
+    fn the_pad_counts_toward_the_record_it_finishes() {
+        // A last record of 100 bytes of member and 924 of pad, and room for
+        // 300: the data goes, and the pad runs out 200 bytes in. One record,
+        // so one count -- which is what GNU's message is about.
+        let mut disk = Filling { room: 300 };
+        let mut w = RecordWriter::new(&mut disk, 1024);
+        w.write_all(&[b'a'; 100]).unwrap();
+        assert!(w.finish().is_err());
+        assert_eq!((w.sent(), w.record()), (300, 1024));
+    }
+
+    #[test]
+    fn a_closed_pipe_is_not_counted_as_a_short_write() {
+        // `EPIPE` part-way through is the reader leaving, whatever was sent
+        // first: the count is kept, and it is the caller -- seeing the kind --
+        // that stays quiet. See `archive_write_failed`.
+        struct Leaving;
+        impl Write for Leaving {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut pipe = Leaving;
+        let mut w = RecordWriter::new(&mut pipe, 512);
+        w.write_all(&[b'a'; 512]).unwrap();
+        let err = w.finish().unwrap_err();
+        assert!(stdfd::reader_gone(&err));
+        assert_eq!(w.sent(), 0);
+    }
+
+    // ---------------- directories that wait ----------------
+
+    #[test]
+    fn dot_and_slash_are_recognised_however_they_are_spelled() {
+        // GNU's `must_be_dot_or_slash`, case by case -- including its two
+        // surprises, `/.` and `/./.`, which it does *not* count.
+        for name in [
+            &b"."[..],
+            b"./",
+            b"././",
+            b"./.",
+            b".//",
+            b"",
+            b"/",
+            b"//",
+            b"/./",
+            b"/../",
+        ] {
+            assert!(
+                must_be_dot_or_slash(name),
+                "{:?}",
+                String::from_utf8_lossy(name)
+            );
+        }
+        for name in [
+            &b"a"[..],
+            b"./a",
+            b"/a",
+            b"..",
+            b"../",
+            b"/.",
+            b"/./.",
+            b".a",
+        ] {
+            assert!(
+                !must_be_dot_or_slash(name),
+                "{:?}",
+                String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_contains_what_its_name_and_a_slash_begin() {
+        assert!(is_ancestor(b"d", b"d/f"));
+        assert!(is_ancestor(b"a/b", b"a/b/c/d"));
+        assert!(is_ancestor(b".", b"./x"));
+        // A name ending in a slash already ends at the boundary.
+        assert!(is_ancestor(b"d/", b"d/x"));
+        // A prefix that does not end at a slash is a different name, and a
+        // directory does not contain itself.
+        assert!(!is_ancestor(b"d", b"df"));
+        assert!(!is_ancestor(b"d", b"d"));
+        // `.` is not, by name, an ancestor of a name that does not spell it --
+        // which is the reason it waits for the links instead.
+        assert!(!is_ancestor(b".", b"x"));
+    }
+
+    fn waiting(name: &[u8]) -> DelayedDir {
+        DelayedDir {
+            level: 0,
+            name: name.to_vec(),
+            mode: 0o755,
+            mtime: 0,
+            owner: None,
+            after_links: false,
+        }
+    }
+
+    #[test]
+    fn dot_waits_for_the_links_and_takes_the_older_records_with_it() {
+        let mut dirs = Vec::new();
+        delay_dir(&mut dirs, waiting(b"outer"));
+        delay_dir(&mut dirs, waiting(b"."));
+        delay_dir(&mut dirs, waiting(b"./later"));
+        let marked: Vec<bool> = dirs.iter().map(|d| d.after_links).collect();
+        // `.` and everything queued before it; not what came after.
+        assert_eq!(marked, [true, true, false]);
+    }
+
+    #[test]
+    fn the_same_directory_twice_is_one_record_with_the_later_metadata() {
+        let mut dirs = Vec::new();
+        delay_dir(&mut dirs, waiting(b"d"));
+        let mut again = waiting(b"d");
+        again.mode = 0o700;
+        again.mtime = 7;
+        delay_dir(&mut dirs, again);
+        assert_eq!(dirs.len(), 1);
+        assert_eq!((dirs[0].mode, dirs[0].mtime), (0o700, 7));
+        // At another `-C` destination it is a different directory.
+        let mut elsewhere = waiting(b"d");
+        elsewhere.level = 1;
+        delay_dir(&mut dirs, elsewhere);
+        assert_eq!(dirs.len(), 2);
+    }
+
+    #[test]
+    fn a_delayed_link_holds_back_the_directory_it_is_made_in() {
+        let mut dirs = vec![waiting(b"a"), waiting(b"a/b")];
+        // Made directly inside `a/b`: `a/b` waits, and so does `a` beneath it.
+        mark_parent_after_links(&mut dirs, b"a/b/link");
+        assert!(dirs.iter().all(|d| d.after_links));
+
+        let mut dirs = vec![waiting(b"a"), waiting(b"a/b")];
+        // Made directly inside `a`, not inside `a/b`: only `a` waits.
+        mark_parent_after_links(&mut dirs, b"a/link");
+        let marked: Vec<bool> = dirs.iter().map(|d| d.after_links).collect();
+        assert_eq!(marked, [true, false]);
+
+        // Made inside nothing that is waiting: nothing changes.
+        let mut dirs = vec![waiting(b"a")];
+        mark_parent_after_links(&mut dirs, b"z/link");
+        assert!(!dirs[0].after_links);
+    }
+
+    // ---------------- owners and modes ----------------
+
+    #[test]
+    fn the_ownership_options_are_three_way_and_the_last_one_wins() {
+        let a = run_args(&s(&["-x", "--same-owner", "--no-same-owner"])).unwrap();
+        assert_eq!(a.same_owner, Some(false));
+        let a = run_args(&s(&["-x", "--no-same-permissions", "-p"])).unwrap();
+        assert_eq!(a.same_permissions, Some(true));
+        let a = run_args(&s(&["-x", "-p", "--no-same-permissions"])).unwrap();
+        assert_eq!(a.same_permissions, Some(false));
+        assert!(
+            run_args(&s(&["-x", "--numeric-owner"]))
+                .unwrap()
+                .numeric_owner
+        );
+        // Given nothing, nothing is decided here: the default is the
+        // superuser's question, answered by `Ownership::resolve`.
+        let a = run_args(&s(&["-x"])).unwrap();
+        assert_eq!(
+            (a.same_owner, a.same_permissions, a.numeric_owner),
+            (None, None, false)
+        );
+    }
+
+    fn ownership(restore_owner: bool, exact_modes: bool, root: bool) -> Ownership {
+        Ownership {
+            restore_owner,
+            exact_modes,
+            numeric: false,
+            root,
+        }
+    }
+
+    #[test]
+    fn a_file_is_made_with_its_own_bits_and_private_until_it_changes_hands() {
+        // An ordinary user: the stored permission bits, never more -- a 0600
+        // member is never readable by anyone else, not even mid-write -- and
+        // never the setuid bit, which only the final mode may carry.
+        let user = ownership(false, false, false);
+        assert_eq!(user.creation_mode(0o600), 0o600);
+        assert_eq!(user.creation_mode(0o4755), 0o755);
+        assert_eq!(user.creation_mode(0o000), 0o000);
+        // Restoring owners: the owner's bits only, until the `chown`.
+        let root = ownership(true, true, true);
+        assert_eq!(root.creation_mode(0o644), 0o600);
+        assert_eq!(root.creation_mode(0o750), 0o700);
+    }
+
+    #[test]
+    fn a_directory_is_made_with_gnus_safe_mode() {
+        // An ordinary user: the stored bits plus write and search for the
+        // owner, so that the members inside it can be created.
+        let user = ownership(false, false, false);
+        assert_eq!(user.safe_dir_mode(0o555), 0o755);
+        assert_eq!(user.safe_dir_mode(0o700), 0o700);
+        // Root restoring owners: the owner's bits only, nothing added.
+        let root = ownership(true, true, true);
+        assert_eq!(root.safe_dir_mode(0o755), 0o700);
+        assert_eq!(root.safe_dir_mode(0o555), 0o500);
+        // `-p` as an ordinary user: the owner's bits, plus write and search.
+        assert_eq!(ownership(false, true, false).safe_dir_mode(0o755), 0o700);
+    }
+
+    #[test]
+    fn an_owner_is_found_by_name_and_otherwise_by_number() {
+        let db = pwdb::Db::from_bytes(
+            b"root:x:0:0::/root:/bin/sh\nalice:x:1001:1001::/home/alice:/bin/sh\n",
+            b"root:x:0:\nstaff:x:50:\n",
+        );
+        let lookup = OwnerLookup { db: Some(db) };
+        let member = |uname: &[u8], gname: &[u8]| {
+            decode_member(&make_full_header(
+                b"f", 0o644, 4321, 4322, 0, 0, b'0', b"", uname, gname,
+            ))
+        };
+        // The names win: the numbers are only meaningful where they were made.
+        assert_eq!(lookup.ids(&member(b"alice", b"staff")), (1001, 50));
+        assert_eq!(lookup.ids(&member(b"root", b"root")), (0, 0));
+        // A name this machine does not know, or no name, is the number.
+        assert_eq!(lookup.ids(&member(b"mallory", b"staff")), (4321, 50));
+        assert_eq!(lookup.ids(&member(b"", b"")), (4321, 4322));
+        // `--numeric-owner` (or not restoring owners): numbers only.
+        let numeric = OwnerLookup { db: None };
+        assert_eq!(numeric.ids(&member(b"alice", b"staff")), (4321, 4322));
+    }
+
+    #[test]
+    fn a_missing_call_is_not_a_failed_one() {
+        // GNU's `implemented`: `ENOSYS` and `ENOTSUP` say the system cannot do
+        // this to a symlink at all, and are not reported.
+        assert!(!implemented(&io::Error::from_raw_os_error(38)));
+        assert!(!implemented(&io::Error::from_raw_os_error(95)));
+        assert!(implemented(&io::Error::from_raw_os_error(1)));
+        assert!(implemented(&io::Error::from_raw_os_error(22)));
     }
 }

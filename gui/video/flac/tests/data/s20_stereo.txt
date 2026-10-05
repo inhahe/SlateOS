@@ -1,0 +1,25 @@
+# s20_stereo.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 4096 4096 5499 15876 48000 2 20 9600
+meta 3 18
+meta 4 84
+meta 1 8192
+frame 0 4096 2 20 48000 bbbd55f66a65c56c
+frame 4096 4096 2 20 48000 fb77267e21ee6a2e
+frame 8192 1408 2 20 48000 d9d5097d9804a1db
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 4096 2 20 48000 bbbd55f66a65c56c
+frame 4096 4096 2 20 48000 fb77267e21ee6a2e
+frame 8192 1408 2 20 48000 d9d5097d9804a1db
+seek 3200
+frame 3200 896 2 20 48000 c1644f1bcc490ca6
+frame 4096 4096 2 20 48000 fb77267e21ee6a2e
+frame 8192 1408 2 20 48000 d9d5097d9804a1db
+seek 4801
+frame 4801 3391 2 20 48000 0191341a219d0d4f
+frame 8192 1408 2 20 48000 d9d5097d9804a1db
+seek 9599
+frame 9599 1 2 20 48000 75b47f8d98fb19cc
+seek 9605
+seek-failed

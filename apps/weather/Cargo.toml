@@ -14,6 +14,8 @@ oswindow = { path = "../../gui/window" }
 # The units the user chose, kept between sessions in their settings.
 settingsfile = { path = "../../gui/settingsfile" }
 yamldoc = { path = "../../yamldoc" }
+# `is_plain`: a key held with Ctrl, Alt or the Windows key is not the window's.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }

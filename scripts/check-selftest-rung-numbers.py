@@ -128,6 +128,9 @@ MD_CITE = re.compile(r'[Rr]ung (\d+)')
 # another lane's ladder.  Only these two were measured; per DD 635 the corpus
 # starts at what is known to land clean rather than at everything that might.
 MD_DOCS = ("known-issues.md", "design-decisions.md")
+# Where each document's entries live since the one-file-per-entry cutover.
+MD_DOC_DIRS = {"known-issues.md": ("known-issues", "known-issues-resolved"),
+               "design-decisions.md": ("design-decisions",)}
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "kernel" / "src" / "kshell.rs"
@@ -390,6 +393,17 @@ def main() -> int:
     announced = {n for n, _ in banners(text)}
     md_docs: list[tuple[str, str]] = []
     for name in MD_DOCS:
+        # Since 2026-10-02 each issue and decision is its own file under a
+        # directory named for the old document (doc_entries.py); the old name
+        # is a signpost. Read the entry files when the directory is there, the
+        # single file otherwise (a lane branch from before the cutover).
+        dirs = MD_DOC_DIRS[name]
+        files = [p for d in dirs if (ROOT / d).is_dir() for p in sorted((ROOT / d).glob("*.md"))
+                 if p.name != "README.md"]
+        if files:
+            md_docs.extend((p.relative_to(ROOT).as_posix(), p.read_text(encoding="utf-8", errors="replace"))
+                           for p in files)
+            continue
         p = ROOT / name
         if not p.exists():
             # Not fatal: the shared documents live at the repo root and a

@@ -946,6 +946,18 @@ MUTATIONS = [
         "                Kind::Plain,",
         ["the_footer_switches_show_when_they_are_on"],
     ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return if matches!(self.view, View::Playing) {',
+        '        if key.modifiers.ctrl {\n            return if matches!(self.view, View::Playing) {',
+        ['a_key_held_with_a_modifier_is_not_the_puzzles'],
+    ),
+    (
+        "a key held with Alt or the Windows key is the puzzle's",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n        match self.view {',
+        '        match self.view {',
+        ['a_key_held_with_a_modifier_is_not_the_puzzles'],
+    ),
 ]
 
 if __name__ == "__main__":

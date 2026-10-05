@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Differential test: our `coreutils::extfloat` against glibc's `strtold` and
-# `printf`.
+# Differential test: our `cprintf::extfloat` against glibc's `strtold` and
+# `printf`, and its `strtod` and `strtof` against glibc's.
 #
 # ## Why this exists separately from `seq-diff.sh`
 #
@@ -30,8 +30,9 @@
 # lived in WSL, which meant six `wsl -e` round trips per run and a copy of every
 # case file through the 9p mount -- but, much more to the point, it meant the
 # subject was built by a path that has no staleness guard. `extfloat-probe` is
-# an example in the `coreutils` package, so it links the same library that was
-# three commits stale on 2026-08-24 while `cargo build` kept exiting 0. The
+# an example (in the `coreutils` package then, `cprintf` since 2026-10-01), so
+# it links the same library that was three commits stale on 2026-08-24 while
+# `cargo build` kept exiting 0. The
 # preamble's `diff_assert_fresh` is the reason to be here; the round trips going
 # away is a bonus.
 #
@@ -44,6 +45,15 @@
 # system counterpart. What plays that role instead is `--flip`, which runs the
 # C probe against itself with the two modes' outputs swapped, and must report
 # differences. If it reports none, the comparison is not comparing.
+#
+# ## Why `strtod` and `strtof` too
+#
+# They are the same grammar and the same exact reading rounded to 53 and 24
+# bits, and glibc rounds them with the same `round_and_return` -- dropped round
+# bit and all -- so the module reads them with the same machinery rather than
+# narrowing an 80-bit answer, which would round twice. `readd` and `readf` run
+# the `read` cases plus each format's own edges and print the value's bits, a
+# NaN's payload included.
 #
 # ## Why `LC_ALL=C`
 #
@@ -67,6 +77,9 @@ DIFF_PROG='extfloat'
 # build, no reference of the same name on `PATH` (`DIFF_NO_REF`), and no pair of
 # same-named binaries to put behind one `PATH` entry (`DIFF_NO_BINDIR`).
 DIFF_EXAMPLES=extfloat-probe
+# The example lives in `userspace/cprintf`, the crate `extfloat` moved to from
+# coreutils on 2026-10-01.
+DIFF_PKG=cprintf
 DIFF_NO_REF=1
 DIFF_NO_BINDIR=1
 # `gcc` builds the reference; `python3` generates the cases. Without either, the
@@ -172,6 +185,8 @@ run_mode() {
 }
 
 run_mode read
+run_mode readd
+run_mode readf
 run_mode write
 
 echo

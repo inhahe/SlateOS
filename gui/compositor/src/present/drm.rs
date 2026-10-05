@@ -934,6 +934,37 @@ impl<S: KmsSys> Present for DrmScanout<S> {
         }
     }
 
+    /// Turn every live head's scanout off: a `SETCRTC` naming no framebuffer,
+    /// no connector and no mode, the legacy way to disable a CRTC. A monitor
+    /// that loses its signal goes into its own power saving.
+    ///
+    /// All or nothing. If any head refuses, the ones already turned off are
+    /// programmed again and this answers `false`, so the server shows black
+    /// instead -- a flip onto a CRTC with no mode is refused, and a refused
+    /// flip marks its head dead, so a half-asleep card would lose monitors.
+    /// [`Present::wake`] is [`Self::reset`], which programs every head again.
+    fn sleep(&mut self) -> bool {
+        let sys = &mut self.sys;
+        let mut off = Vec::new();
+        for head in self.heads.iter().filter(|h| h.alive) {
+            if disable_crtc(sys, head.crtc_id).is_err() {
+                for back_on in self.heads.iter().filter(|h| off.contains(&h.crtc_id)) {
+                    if let Some(on_screen) = back_on.buffers.get(back_on.front).map(|b| b.fb_id) {
+                        let pick = Chosen {
+                            connector_id: back_on.connector_id,
+                            mode: back_on.mode,
+                            crtc_id: back_on.crtc_id,
+                        };
+                        set_mode(sys, &pick, on_screen);
+                    }
+                }
+                return false;
+            }
+            off.push(head.crtc_id);
+        }
+        true
+    }
+
     /// The next hotplug probe. Nothing tells this module a cable moved (see
     /// `PROBE_INTERVAL`), so a desktop nobody is touching must still wake
     /// this often for a monitor plugged into it to light up.
@@ -1386,6 +1417,19 @@ fn set_mode(sys: &mut dyn KmsSys, pick: &Chosen, fb_id: u32) {
     // Discarded per the doc comment above: the flip that follows is a strictly
     // stronger test of the same thing.
     let _ = call(sys, uapi::SETCRTC, set.to_bytes(), &mut arrays);
+}
+
+/// Turn a CRTC off: no framebuffer, no connectors, no mode.
+///
+/// # Errors
+///
+/// Whatever the card answers; a driver that cannot disable a CRTC refuses.
+fn disable_crtc(sys: &mut dyn KmsSys, crtc_id: u32) -> Result<(), ScanoutError> {
+    let off = ModeCrtc {
+        crtc_id,
+        ..ModeCrtc::default()
+    };
+    call(sys, uapi::SETCRTC, off.to_bytes(), &mut []).map(drop)
 }
 
 /// Allocate, map and register one scanout buffer.

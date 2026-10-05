@@ -103,12 +103,17 @@
 
 use coreutils::diag;
 use coreutils::quote::{os_bytes, quote};
+use coreutils::stdfd::{self, Stream};
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fs::Metadata;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::SystemTime;
+
+// The standard descriptors as the process was given them; see `stdfd`.
+coreutils::guard_std_fds!();
 
 /// A malformed expression. Always status 2 — `test` has no other error.
 #[derive(Debug)]
@@ -122,8 +127,9 @@ const FALSE: u8 = 1;
 const SYNTAX: u8 = 2;
 
 fn main() -> ExitCode {
+    stdfd::restore();
     let raw: Vec<OsString> = std::env::args_os().collect();
-    let mut argv: Vec<Vec<u8>> = raw
+    let argv: Vec<Vec<u8>> = raw
         .iter()
         .map(|a| os_bytes(a.as_os_str()).into_owned())
         .collect();
@@ -135,20 +141,39 @@ fn main() -> ExitCode {
         .map(|a| basename_is_bracket(a))
         .unwrap_or(false);
 
+    // Standard output is written only by `[ --help` and `[ --version`, and it
+    // is checked on every path all the same: upstream registers
+    // `close_stdout` with `atexit` after `initialize_exit_failure
+    // (TEST_FAILURE)`, so a help text that did not arrive is
+    // `[: write error: ...` and status 2, and a diagnostic that did not arrive
+    // is status 2 too -- which every diagnostic here already is. `print!` used
+    // to be the writer, and it panicked on a full disk (status 134) and said
+    // nothing at all on a closed descriptor (status 0).
+    let mut out = Stream::stdout();
+    let earned = evaluate(argv, bracket, &mut out);
+    let prog = if bracket { "[" } else { "test" };
+    stdfd::close_stdout_with(prog, out, earned, SYNTAX)
+}
+
+/// Everything `main` does but the final word on standard output.
+fn evaluate(mut argv: Vec<Vec<u8>>, bracket: bool, out: &mut Stream) -> ExitCode {
     if bracket {
         // Direct comparison rather than an option parser, because an option
         // parser would accept `[ --hel`, and upstream is explicit that
         // abbreviations must not be recognised here.
+        //
+        // The writes cannot fail -- a `Stream` keeps a failure for `main`'s
+        // `close_stdout_with` -- so their results are dropped.
         if argv.len() == 2 {
             if argv.get(1).is_some_and(|a| a == b"--help") {
-                print!("{}", usage_text());
+                drop(out.write_all(usage_text().as_bytes()));
                 return ExitCode::from(TRUE);
             }
             if argv.get(1).is_some_and(|a| a == b"--version") {
                 // `[`, not `test`: this branch is only reachable under the
                 // bracket alias, and GNU names the invoked program here
                 // (measured: `[ (GNU coreutils) 9.4`).
-                println!("[ (SlateOS coreutils) 9.4");
+                drop(out.write_all(b"[ (SlateOS coreutils) 9.4\n"));
                 return ExitCode::from(TRUE);
             }
         }
@@ -290,6 +315,9 @@ impl Ctx {
         }
     }
 
+    // Cannot fail, unlike its siblings; it answers `Answer` so that the
+    // dispatch on the argument count above reads alike for every count.
+    #[allow(clippy::unnecessary_wraps)]
     fn one_argument(&mut self) -> Answer {
         let value = !self.at(self.pos).is_empty();
         self.pos = self.pos.saturating_add(1);
@@ -507,7 +535,8 @@ impl Ctx {
                 let right = self.at(op.saturating_add(1)).to_vec();
                 self.pos = self.pos.saturating_add(3);
                 if l_is_l || r_is_l {
-                    let name = String::from_utf8_lossy(&opname).into_owned();
+                    // One of the three spellings matched just above.
+                    let name = std::str::from_utf8(&opname).unwrap_or_default();
                     return Err(Fail(format!("{name} does not accept -l")));
                 }
                 return Ok(match opname.as_slice() {
@@ -1031,12 +1060,21 @@ EXPR2' or 'test EXPR1 || test EXPR2' instead.
 
 NOTE: [ honors the --help and --version options, but test does not.
 test treats each of those as it treats any other nonempty STRING.
+
+NOTE: your shell may have its own version of test and/or [, which usually supersedes
+the version described here.  Please refer to your shell's documentation
+for details about the options it supports.
 "
     .to_string()
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
 

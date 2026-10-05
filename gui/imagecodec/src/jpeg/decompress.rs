@@ -517,7 +517,7 @@ impl<'d, 't> Decompress<'d, 't> {
                     } else {
                         ColorSpace::YCbCr
                     }
-                } else if ids == [b'R', b'G', b'B'] || header.lossless {
+                } else if ids == *b"RGB" || header.lossless {
                     ColorSpace::Rgb
                 } else {
                     ColorSpace::YCbCr

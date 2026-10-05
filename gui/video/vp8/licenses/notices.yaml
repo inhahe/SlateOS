@@ -1,0 +1,12 @@
+# The third-party code gui/video/vp8 carries (design-decisions 1433), read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate.
+#
+# Not an entry here: the decoder is libvpx 1.17.0's, translated (each source
+# file names the libvpx files it derives from), BSD-3-Clause with libvpx's
+# patent grant. gather-notices.py requires each project to be named once for
+# the tree, and libvpx 1.17.0 is named in gui/video/vp9's manifest, for the
+# VP9 decoder and encoder ported from the same release. Its texts are beside
+# this file too (libvpx-LICENSE, libvpx-PATENTS), for the sources that cite
+# them. The test vectors in tests/data are the WebM project's, published with
+# libvpx under the same licence, and are not built into anything.

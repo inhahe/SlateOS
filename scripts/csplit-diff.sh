@@ -146,9 +146,13 @@ compare_argv() {
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(csplit | od)` the recorded
   # status is od's, and PIPESTATUS is set in the substitution's subshell where
-  # it cannot be read. Same note as cat-diff.sh and comm-diff.sh.
-  run_side ours o "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-  run_side gnu  g "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+  # it cannot be read. Same note as cat-diff.sh and comm-diff.sh. With
+  # `TO_FULL` set it goes to /dev/full instead, and what is compared is how
+  # each side reports the output it could not write.
+  local o_dest=$o_bin g_dest=$g_bin
+  if [ -n "${TO_FULL:-}" ]; then o_dest=/dev/full; g_dest=/dev/full; fi
+  run_side ours o "$@" >"$o_dest" 2>"$o_err"; o_rc=$?
+  run_side gnu  g "$@" >"$g_dest" 2>"$g_err"; g_rc=$?
 
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -303,6 +307,25 @@ run_case seq20.txt '%5'
 run_case seq20.txt '{x}'
 run_case seq20.txt 4 '{1'
 run_case seq20.txt '/5/+x'
+
+# Standard output that cannot be written: the sizes and `--help` are stdio's,
+# reported at exit by `close_stdout` -- `write error`, status 1 -- and the
+# pieces already written are kept.
+TO_FULL=1
+run_case seq20.txt 5
+run_case seq20.txt -s 5
+raw_case - --help
+TO_FULL=
+
+# A pattern that will not compile: the whole argument quoted -- delimiters and
+# offset with it -- then `invalid regular expression:` and glibc's sentence.
+run_case seq20.txt '/[/'
+run_case seq20.txt '/[/+1'
+run_case seq20.txt '%a\(%'
+run_case seq20.txt '/a\{1/'
+run_case seq20.txt '/[[:foo:]]/'
+run_case seq20.txt '/\1/'
+run_case seq20.txt '/a\{x\}/-2'
 
 # Option arguments that are not numbers, and a suffix format that is not a
 # single integer conversion.

@@ -14,6 +14,10 @@ guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 # The export writes a file of passwords; a half-written one looks complete.
 safeio = { path = "../safeio" }
+
+# Whether a key is a chord, a command or typing: AltGr arrives as Ctrl+Alt,
+# and a command carries its letter as text.
+textline = { path = "../textline" }
 # The checking rules the user sets on the Rules tab are kept in
 # `passwordgen.yaml`, one settings file per program (C-Q26).
 settingsfile = { path = "../../gui/settingsfile" }

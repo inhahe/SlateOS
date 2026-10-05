@@ -18,20 +18,22 @@
 //! frame to the next in a [`Codecs`], which the animation (`animation.rs`)
 //! holds for as long as it plays.
 //!
-//! After decoding, Chrome's checks apply: a frame whose size, depth or chroma
-//! layout is not the container's is refused, as Chrome refuses it (libavif
-//! would take the frame's word).
+//! A tile decoded at another size than its `ispe` (or its track's) is
+//! brought to that size as libavif brings it ([`scale_tile`], over libyuv's
+//! scaling in `gui/video/yuv`). After decoding, Chrome's checks apply: a frame
+//! whose size, depth or chroma layout is not the container's is refused, as
+//! Chrome refuses it (libavif would take the frame's word).
 //!
 //! Portions of this file are copyright 2019 Joe Drago, from libavif, and
 //! used under its BSD-2-Clause licence: `licenses/libavif-LICENSE.txt`.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use rav1d::safe::{self, Data, Decoder, Layout, Settings};
 
 use super::setup::{Grid, Layer, Picture, Tile, TileInput, YuvFormat};
 use super::{Error, IMAGE_SIZE_LIMIT};
+use yuv::scale::{Scaled, scale_plane};
 
 /// A sample of 8 or 16 bits.
 pub(crate) trait Sample: Copy + Default + Into<u32> + 'static {
@@ -61,65 +63,21 @@ impl Sample for u16 {
     }
 }
 
-/// One plane of samples, packed: `height` rows of `width`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Plane<T> {
-    pub(crate) width: usize,
-    pub(crate) height: usize,
-    pub(crate) samples: Vec<T>,
+/// One plane of samples, packed: `height` rows of `width` -- libyuv's
+/// port's owned plane, which its conversions and scaling read.
+pub(crate) type Plane<T> = yuv::PlaneBuf<T>;
+
+/// A `width` x `height` plane of zeros.
+fn new_plane<T: Copy + Default>(width: usize, height: usize) -> Result<Plane<T>, Error> {
+    Plane::new(width, height).ok_or(Error::Parse("AVIF plane size"))
 }
 
-impl<T> Plane<T> {
-    /// Row `y`: empty past the last.
-    pub(crate) fn row(&self, y: usize) -> &[T] {
-        let start = y.saturating_mul(self.width);
-        self.samples
-            .get(start..start.saturating_add(self.width))
-            .unwrap_or_default()
-    }
-
-    fn row_mut(&mut self, y: usize) -> &mut [T] {
-        let start = y.saturating_mul(self.width);
-        let end = start.saturating_add(self.width);
-        self.samples.get_mut(start..end).unwrap_or_default()
-    }
-}
-
-impl<T: Copy + Default> Plane<T> {
-    fn new(width: usize, height: usize) -> Result<Self, Error> {
-        let len = width
-            .checked_mul(height)
-            .ok_or(Error::Parse("AVIF plane size"))?;
-        Ok(Self {
-            width,
-            height,
-            samples: vec![T::default(); len],
-        })
-    }
-
-    /// The `width` x `height` rectangle at (`x`, `y`) -- `avifImageSetViewRect`,
-    /// as a copy.
-    pub(crate) fn view(&self, x: usize, y: usize, width: usize, height: usize) -> Self {
-        let mut samples = Vec::with_capacity(width.saturating_mul(height));
-        for row in y..y.saturating_add(height) {
-            let source = self.row(row);
-            samples.extend(source.iter().skip(x).take(width));
-        }
-        Self {
-            width,
-            height,
-            samples,
-        }
-    }
-}
-
-impl<T> From<safe::Plane<T>> for Plane<T> {
-    fn from(plane: safe::Plane<T>) -> Self {
-        Self {
-            width: plane.width,
-            height: plane.height,
-            samples: plane.samples,
-        }
+/// A plane rav1d decoded.
+fn plane_of<T>(plane: safe::Plane<T>) -> Plane<T> {
+    Plane {
+        width: plane.width,
+        height: plane.height,
+        samples: plane.samples,
     }
 }
 
@@ -175,7 +133,7 @@ impl<T: Sample> Yuv<T> {
         let (xu, yu, wu, hu) = (at(x)?, at(y)?, at(width)?, at(height)?);
         let chroma = |plane: &Plane<T>| {
             let (cw, ch) = (at(chroma_size(width, sx))?, at(chroma_size(height, sy))?);
-            Some(plane.view(at(x >> sx)?, at(y >> sy)?, cw, ch))
+            Some(plane.crop(at(x >> sx)?, at(y >> sy)?, cw, ch))
         };
         let [luma, u, v] = &self.planes;
         Some(Self {
@@ -188,7 +146,7 @@ impl<T: Sample> Yuv<T> {
             transfer: self.transfer,
             matrix: self.matrix,
             planes: [
-                luma.as_ref().map(|p| p.view(xu, yu, wu, hu)),
+                luma.as_ref().map(|p| p.crop(xu, yu, wu, hu)),
                 match u {
                     Some(p) => Some(chroma(p)?),
                     None => None,
@@ -198,7 +156,7 @@ impl<T: Sample> Yuv<T> {
                     None => None,
                 },
             ],
-            alpha: self.alpha.as_ref().map(|p| p.view(xu, yu, wu, hu)),
+            alpha: self.alpha.as_ref().map(|p| p.crop(xu, yu, wu, hu)),
             alpha_premultiplied: self.alpha_premultiplied,
         })
     }
@@ -440,7 +398,7 @@ fn one_decoder(picture: &Picture<'_>, layers: &[(&Layer, bool)]) -> bool {
     })
 }
 
-fn decode_as<T: Sample>(
+fn decode_as<T: Sample + Scaled>(
     picture: &Picture<'_>,
     layers: &[(&Layer, bool)],
     samples: &[alloc::borrow::Cow<'_, [u8]>],
@@ -503,13 +461,7 @@ fn decode_as<T: Sample>(
                     }
                 }
             }
-            if (tile_image.width, tile_image.height) != (tile.width, tile.height) {
-                // avifImageScaleWithLimit: libyuv's box filter, which is not
-                // ported yet.
-                return Err(Error::Unsupported(
-                    "AVIF frame of another size than its ispe",
-                ));
-            }
+            scale_tile(&mut tile_image, tile.width, tile.height, alpha)?;
             match layer.grid {
                 Some(grid) => {
                     if tile_index == 0 {
@@ -568,7 +520,7 @@ fn tile_image<T: Sample>(picture: &safe::Picture, alpha: bool) -> Result<Decoded
     let colour = picture.colour();
     let full_range = colour.is_some_and(|c| c.full_range);
     let format = format_of(picture.layout());
-    let plane = |i| T::plane(picture, i).map(Plane::from);
+    let plane = |i| T::plane(picture, i).map(plane_of);
     // An alpha tile gives its luma only, as does a grey one.
     let planes = if alpha || format == YuvFormat::Yuv400 {
         [Some(plane(0).ok_or(failed)?), None, None]
@@ -588,6 +540,52 @@ fn tile_image<T: Sample>(picture: &safe::Picture, alpha: bool) -> Result<Decoded
         colour,
         planes,
     })
+}
+
+/// `avifImageScaleWithLimit`, as `avifDecoderDecodeTiles` calls it for a
+/// tile decoded at another size than its `ispe` (or its track's): every
+/// plane brought to `width` x `height` -- chroma to that size's chroma size
+/// -- by libyuv's scaling (`scale.rs`).
+///
+/// Refused as libavif refuses it, which turns its refusal into a failure to
+/// decode the tile: a size of 0, a size past libavif's limits, or a decoded
+/// frame over 16384 on a side, which libyuv's fixed point could overflow.
+fn scale_tile<T: Sample + Scaled>(
+    tile: &mut DecodedTile<T>,
+    width: u32,
+    height: u32,
+    alpha: bool,
+) -> Result<(), Error> {
+    if (tile.width, tile.height) == (width, height) {
+        return Ok(());
+    }
+    let failed = decode_failed(alpha);
+    if width == 0 || height == 0 || super::too_large(width, height) {
+        return Err(failed);
+    }
+    if tile.width > 16384 || tile.height > 16384 {
+        return Err(failed);
+    }
+    let (sx, sy) = match tile.format {
+        YuvFormat::Yuv420 => (1, 1),
+        YuvFormat::Yuv422 => (1, 0),
+        YuvFormat::Yuv444 | YuvFormat::Yuv400 => (0, 0),
+    };
+    let at = |v: u32| usize::try_from(v).map_err(|_| failed);
+    // Luma or alpha at the new size; chroma at its own.
+    let sizes = [
+        (width, height),
+        (chroma_size(width, sx), chroma_size(height, sy)),
+        (chroma_size(width, sx), chroma_size(height, sy)),
+    ];
+    for (plane, (w, h)) in tile.planes.iter_mut().zip(sizes) {
+        if let Some(p) = plane {
+            *p = scale_plane(p.view(), at(w)?, at(h)?).ok_or(failed)?;
+        }
+    }
+    tile.width = width;
+    tile.height = height;
+    Ok(())
 }
 
 /// The single-tile case of `avifDecoderDecodeTiles`: the image takes the
@@ -674,18 +672,18 @@ fn allocate<T: Sample>(
     let width = usize::try_from(image.width).map_err(|_| grid_error)?;
     let height = usize::try_from(image.height).map_err(|_| grid_error)?;
     if alpha {
-        image.alpha = Some(Plane::new(width, height)?);
+        image.alpha = Some(new_plane(width, height)?);
     } else {
         let (sx, sy) = image.chroma_shift();
         let cw = usize::try_from(chroma_size(image.width, sx)).map_err(|_| grid_error)?;
         let ch = usize::try_from(chroma_size(image.height, sy)).map_err(|_| grid_error)?;
         image.planes = if image.format == YuvFormat::Yuv400 {
-            [Some(Plane::new(width, height)?), None, None]
+            [Some(new_plane(width, height)?), None, None]
         } else {
             [
-                Some(Plane::new(width, height)?),
-                Some(Plane::new(cw, ch)?),
-                Some(Plane::new(cw, ch)?),
+                Some(new_plane(width, height)?),
+                Some(new_plane(cw, ch)?),
+                Some(new_plane(cw, ch)?),
             ]
         };
     }

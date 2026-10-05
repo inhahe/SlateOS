@@ -111,6 +111,8 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+coreutils::guard_std_fds!();
+
 /// `readlink`'s usage status is 1 — measured: `readlink -x; echo $?` prints 1.
 const READLINK: Program = Program::new("readlink", 1);
 
@@ -152,36 +154,41 @@ enum Request {
     Run(Flags, Vec<OsString>),
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- an output or
+/// a diagnostic that did not arrive is status 1, as `readlink: write error:
+/// ...` for the first. The descriptor guard is what lets a closed one be seen
+/// at all; the runtime used to answer it with a quiet `/dev/null`. See
+/// [`stdfd::close_stdout`].
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout("readlink", out, earned)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            // Never an error: the stream records it for the funnel.
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Ok(Request::Version) => {
-            println!("readlink (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"readlink (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, files)) => {
-            let mut out = io::stdout().lock();
             // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
             // diagnostic that never arrived has to reach `close_stderr`'s flag.
             let mut err = Stream::stderr();
-            let ok = read_all(&flags, &files, &RealFs, &mut out, &mut err);
-            // A closed stdout must not be reported as success. `-z` output is
-            // usually piped into `xargs -0`, and a pipe that goes away mid-list
-            // would otherwise look like a complete list.
-            let flushed = out.flush().is_ok();
-            if ok && flushed {
+            let ok = read_all(&flags, &files, &RealFs, out, &mut err);
+            // A failure to write is the funnel's to report, and a closed stdout
+            // is one -- which matters because `-z` output is usually piped into
+            // `xargs -0`, and a pipe that goes away mid-list would otherwise
+            // look like a complete list.
+            if ok {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -616,20 +623,28 @@ mod tests {
     /// run identically on every host and cover the cases the host cannot build
     /// — a name that is not UTF-8, and a symlink at all, which an unprivileged
     /// Windows process cannot create.
-    struct FakeFs(BTreeMap<&'static [u8], Option<&'static [u8]>>);
+    struct FakeFs(BTreeMap<&'static [u8], Node>);
+
+    /// What a name in [`FakeFs`] is.
+    #[derive(Clone, Copy)]
+    enum Node {
+        /// A regular file or a directory.
+        Plain,
+        /// A symbolic link, and its target.
+        Link(&'static [u8]),
+    }
 
     impl FakeFs {
-        /// `None` is a regular file or directory; `Some(target)` is a symlink.
         fn new() -> Self {
-            let mut m: BTreeMap<&'static [u8], Option<&'static [u8]>> = BTreeMap::new();
-            m.insert(b"/", None);
-            m.insert(b"/w", None);
-            m.insert(b"/w/real", None);
-            m.insert(b"/w/link", Some(b"real"));
-            m.insert(b"/w/link2", Some(b"real"));
+            let mut m: BTreeMap<&'static [u8], Node> = BTreeMap::new();
+            m.insert(b"/", Node::Plain);
+            m.insert(b"/w", Node::Plain);
+            m.insert(b"/w/real", Node::Plain);
+            m.insert(b"/w/link", Node::Link(b"real"));
+            m.insert(b"/w/link2", Node::Link(b"real"));
             // A target that is not valid UTF-8, which is the case the output
             // path has to survive; see defect 3's output half.
-            m.insert(b"/w/oddlink", Some(b"od\xffd"));
+            m.insert(b"/w/oddlink", Node::Link(b"od\xffd"));
             Self(m)
         }
 
@@ -642,13 +657,13 @@ mod tests {
         /// through, exactly as `readlink(2)` receives it. A fake that only
         /// understood absolute names would answer `ENOENT` for every
         /// non-canonicalising call and quietly test nothing.
-        fn lookup(&self, path: &[u8]) -> Option<&Option<&'static [u8]>> {
+        fn lookup(&self, path: &[u8]) -> Option<Node> {
             if path.first() == Some(&b'/') {
-                return self.0.get(path);
+                return self.0.get(path).copied();
             }
             let mut abs = b"/w/".to_vec();
             abs.extend_from_slice(path);
-            self.0.get(abs.as_slice())
+            self.0.get(abs.as_slice()).copied()
         }
     }
 
@@ -661,15 +676,15 @@ mod tests {
                 // EINVAL is how "exists and is not a symlink" is reported, and
                 // it is what makes `-v` on a regular file say `Invalid
                 // argument` rather than something about links.
-                Some(None) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
-                Some(Some(t)) => Ok((*t).to_vec()),
+                Some(Node::Plain) => Err(io::Error::from(io::ErrorKind::InvalidInput)),
+                Some(Node::Link(t)) => Ok(t.to_vec()),
                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
             }
         }
         fn dir_check(&self, path: &[u8]) -> io::Result<()> {
             match self.lookup(path) {
-                Some(None) => Ok(()),
-                Some(Some(_)) => Err(io::Error::from(io::ErrorKind::NotADirectory)),
+                Some(Node::Plain) => Ok(()),
+                Some(Node::Link(_)) => Err(io::Error::from(io::ErrorKind::NotADirectory)),
                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
             }
         }
@@ -681,8 +696,8 @@ mod tests {
         /// recursion to fall into.
         fn exists(&self, path: &[u8]) -> io::Result<()> {
             match self.lookup(path) {
-                Some(None) => Ok(()),
-                Some(Some(target)) => self.exists(target),
+                Some(Node::Plain) => Ok(()),
+                Some(Node::Link(target)) => self.exists(target),
                 None => Err(io::Error::from(io::ErrorKind::NotFound)),
             }
         }

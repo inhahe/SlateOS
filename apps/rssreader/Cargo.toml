@@ -18,6 +18,9 @@ safeio = { path = "../safeio" }
 # asked before a close would lose a change a save is failing to write.
 settingsfile = { path = "../../gui/settingsfile" }
 textfmt = { path = "../../textfmt" }
+# Whether a key is a command or typing, and whether it is plain: a chord with
+# Alt or the Windows key is not the reader's, and AltGr types.
+textline = { path = "../textline" }
 unsaved = { path = "../unsaved" }
 
 [dev-dependencies]

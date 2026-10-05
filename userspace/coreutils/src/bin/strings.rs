@@ -72,26 +72,32 @@
 //! `ello` at offset 1 in a little-endian `hello`, and reproducing it is the
 //! difference between agreeing with upstream on such a file and not.
 //!
-//! # Where this deliberately diverges
+//! # `-U`/`--unicode`
 //!
-//! 1. **`-d`/`--data` and `-T`/`--target` are refused, not ignored.** Both ask
-//!    for a scan of particular sections of an object file, which needs an
-//!    object-file reader this build does not have. Accepting them and scanning
-//!    the whole file anyway would answer a question other than the one asked --
-//!    quietly, and with *more* output than expected, which is the shape of
-//!    error a reader is least likely to notice.
-//! 2. **`-U`/`--unicode` accepts only `d`.** `d` — treat UTF-8 as ordinary
-//!    bytes — is upstream's default and is what this build does. The other
-//!    five modes re-render multi-byte sequences, and pretending to honour them
-//!    would misreport what is in the file.
-//! 3. **`@FILE` is not read.** Upstream takes options from a file that way.
-//!    Nothing else in this coreutils does, and adding one utility's private
-//!    argument-file syntax would be a surprise in the other direction.
+//! Upstream's six modes, ported from `strings.c`'s `print_unicode_stream` and
+//! `print_unicode_buffer` with their quirks, because each is visible: `l`
+//! prints only the *first byte* of a character (`printf ("%.1s", ...)`); a
+//! four-byte character is escaped through arithmetic that is not its code
+//! point (U+1F600 is `\u07c600`); the help advertises `show`/`s` where the
+//! parser takes `locale`/`l` and refuses `s`; and any mode but `d` forces
+//! `-e S`. See [`Unicode`].
 //!
-//! Each of the three is a diagnostic naming the limitation, never a silent
-//! difference in output. They are logged in `known-issues.md` as
-//! `B-STRINGS-HAS-NO-OBJECT-FILE-READER`.
+//! # `@FILE`
+//!
+//! libiberty's `expandargv`, which upstream runs before it parses anything:
+//! each `@FILE` argument that names a readable file is replaced by the words
+//! in it, split and quoted as `buildargv` splits them. See
+//! [`expand_at_files`].
+//!
+//! # Where this diverges
+//!
+//! **`-T`/`--target` is refused, not ignored.** It names a BFD object format
+//! for `-d` to read the file as, and this build reads ELF64 only. Accepting a
+//! format and reading the file as ELF anyway would answer a question other
+//! than the one asked, quietly. Logged as
+//! `known-issues/B-STRINGS-HAS-NO-OBJECT-FILE-READER.md`.
 
+use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::os_bytes;
 use coreutils::stdfd::{self, Stream};
@@ -210,6 +216,9 @@ struct Options {
     data_only: bool,
     /// What follows each string. A newline unless `-s` said otherwise.
     separator: Vec<u8>,
+    /// `-U`: what a UTF-8 sequence is. Anything but the default forces
+    /// `-e S`, as upstream does after its option loop.
+    unicode: Unicode,
 }
 
 impl Default for Options {
@@ -222,6 +231,7 @@ impl Default for Options {
             include_all_whitespace: false,
             data_only: false,
             separator: b"\n".to_vec(),
+            unicode: Unicode::Default,
         }
     }
 }
@@ -242,6 +252,9 @@ enum Request {
     /// test, which `strings -` alone fails.
     Usage,
     Run(Box<Options>, Vec<Source>),
+    /// A refusal upstream prints with `fatal`: `strings: SENTENCE`, status 1,
+    /// no usage. Bytes, because it quotes an argument as given.
+    Fatal(Vec<u8>),
 }
 
 impl PartialEq for Options {
@@ -253,6 +266,7 @@ impl PartialEq for Options {
             && self.print_file_name == other.print_file_name
             && self.include_all_whitespace == other.include_all_whitespace
             && self.separator == other.separator
+            && self.unicode == other.unicode
     }
 }
 
@@ -296,8 +310,7 @@ fn help_text() -> String {
     text.push_str("  -h --help                 Display this information\n");
     text.push_str("  -v -V --version           Print the program's version number\n");
     text.push('\n');
-    text.push_str("This build has no object-file reader, so it always scans the whole file:\n");
-    text.push_str("--target, @<file>, and every --unicode mode but `d' are refused\n");
+    text.push_str("This build reads ELF64 objects only, for --data, so --target is refused\n");
     text.push_str("rather than silently ignored.\n");
     text
 }
@@ -395,22 +408,28 @@ fn strtoul_base0(text: &[u8]) -> Option<u64> {
 /// at `UINT_MAX` the value is inlined mid-sentence, and above it the original
 /// text is appended. Reproduced as measured rather than tidied, so that a
 /// script matching on either sentence sees what it sees on Linux.
-fn read_min_length(argument: &[u8]) -> Result<usize, getopt::Error> {
-    let text = String::from_utf8_lossy(argument).into_owned();
+///
+/// The refusal is upstream's `fatal`, the argument quoted back as given, so it
+/// is bytes: an argument need not be text.
+fn read_min_length(argument: &[u8]) -> Result<usize, Vec<u8>> {
+    let with_argument = |head: &str| {
+        let mut sentence = head.as_bytes().to_vec();
+        sentence.extend_from_slice(argument);
+        sentence
+    };
     let Some(value) = strtoul_base0(argument) else {
-        return Err(STRINGS.usage(format!("invalid integer argument {text}")));
+        return Err(with_argument("invalid integer argument "));
     };
     if value == MIN_LENGTH_CEILING {
-        return Err(STRINGS.usage(format!("minimum string length {value} is too big")));
+        return Err(format!("minimum string length {value} is too big").into_bytes());
     }
     if value > MIN_LENGTH_CEILING {
-        return Err(STRINGS.usage(format!("minimum string length is too big: {text}")));
+        return Err(with_argument("minimum string length is too big: "));
     }
     if value < 1 {
-        return Err(STRINGS.usage(format!("minimum string length is too small: {text}")));
+        return Err(with_argument("minimum string length is too small: "));
     }
-    usize::try_from(value)
-        .map_err(|_| STRINGS.usage(format!("minimum string length is too big: {text}")))
+    usize::try_from(value).map_err(|_| with_argument("minimum string length is too big: "))
 }
 
 /// An option whose argument upstream rejects with the bare usage and no
@@ -438,7 +457,13 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     // Upstream's `files_given`. A `-` operand deliberately does not set it.
     let mut any_operand = false;
 
-    for item in STRINGS.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+    // Upstream's `numeric_opt`: see the digit arm.
+    let mut numeric: Option<OsString> = None;
+    let mut parser = STRINGS.parse(args, SHORT_OPTIONS, LONG_OPTIONS);
+    // Not a `for`: the digit arm asks the parser which word it is in, between
+    // items, and a `for` loop holds the parser for the loop's whole length.
+    #[allow(clippy::while_let_on_iterator)]
+    while let Some(item) = parser.next() {
         match item? {
             Opt::Long("help", _) | Opt::Short(b'h' | b'H', _) => return Ok(Request::Help),
             Opt::Long("version", _) | Opt::Short(b'v' | b'V', _) => return Ok(Request::Version),
@@ -458,13 +483,17 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
 
             Opt::Long("bytes", value) | Opt::Short(b'n', value) => {
                 let value = value.unwrap_or_default();
-                options.min = read_min_length(&os_bytes(value.as_os_str()))?;
+                match read_min_length(&os_bytes(value.as_os_str())) {
+                    Ok(min) => options.min = min,
+                    Err(sentence) => return Ok(Request::Fatal(sentence)),
+                }
             }
-            // The digit shorthand: `-5` is `-n 5`, and `-0` is refused for
-            // being too small, exactly as `-n 0` is.
-            Opt::Short(digit @ b'0'..=b'9', _) => {
-                options.min = read_min_length(&[digit])?;
-            }
+            // The digit shorthand, upstream's `numeric_opt`: the word that held
+            // the last digit option, read whole after its `-` once every other
+            // option has been. So `-12` is twelve, not two; `-5 -n 3` is five,
+            // whichever comes first; and `-a5` is `invalid integer argument
+            // a5`. Measured, binutils 2.42.
+            Opt::Short(b'0'..=b'9', _) => numeric = parser.current_word().cloned(),
 
             Opt::Short(b'o', _) => options.radix = Some(Radix::Octal),
             Opt::Long("radix", value) | Opt::Short(b't', value) => {
@@ -497,14 +526,15 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
 
             Opt::Long("unicode", value) | Opt::Short(b'U', value) => {
                 let value = value.unwrap_or_default();
-                let bytes = os_bytes(value.as_os_str()).into_owned();
-                if bytes.as_slice() != b"d" {
-                    let text = String::from_utf8_lossy(&bytes).into_owned();
-                    return Err(STRINGS.usage(format!(
-                        "invalid argument to -U/--unicode: {text} \
-                         (this build supports only `d')"
-                    )));
-                }
+                let bytes = os_bytes(value.as_os_str());
+                let Some(mode) = Unicode::parse(&bytes) else {
+                    // `fatal (_("invalid argument to -U/--unicode: %s"),
+                    // optarg)`: the argument as given, and no usage.
+                    let mut sentence = b"invalid argument to -U/--unicode: ".to_vec();
+                    sentence.extend_from_slice(&bytes);
+                    return Ok(Request::Fatal(sentence));
+                };
+                options.unicode = mode;
             }
 
             Opt::Long(other, _) => {
@@ -519,14 +549,17 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                     // and it does not satisfy `files_given`.
                     continue;
                 }
-                if bytes.as_ref().starts_with(b"@") {
-                    return Err(STRINGS.usage(
-                        "reading options from @FILE is not implemented in this build".to_owned(),
-                    ));
-                }
                 any_operand = true;
                 sources.push(Source::Path(operand.clone()));
             }
+        }
+    }
+
+    if let Some(word) = numeric {
+        let bytes = os_bytes(&word);
+        match read_min_length(bytes.get(1..).unwrap_or_default()) {
+            Ok(min) => options.min = min,
+            Err(sentence) => return Ok(Request::Fatal(sentence)),
         }
     }
 
@@ -548,6 +581,11 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         sources.push(Source::Stdin);
     }
 
+    // Upstream's `if (unicode_display != unicode_default) encoding = 'S';`,
+    // after the whole option loop, so it wins over any `-e`.
+    if options.unicode != Unicode::Default {
+        options.encoding = Encoding::Ascii8;
+    }
     Ok(Request::Run(Box::new(options), sources))
 }
 
@@ -761,11 +799,16 @@ fn read_and_scan_sections<W: Write>(
     out: &mut W,
     name: &[u8],
     options: &Options,
+    tty: bool,
 ) -> io::Result<()> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
     match elf_alloc_ranges(&buf) {
-        None => scan(buf.as_slice(), out, Some(name), options, 0),
+        None if options.unicode == Unicode::Default => {
+            scan(buf.as_slice(), out, Some(name), options, 0)
+        }
+        // Not an object: upstream falls back to reading it as a stream.
+        None => scan_unicode_stream(buf.as_slice(), out, Some(name), options, 0, tty),
         Some(ranges) => {
             for (offset, size) in ranges {
                 // Bounds were checked when the range was built; `get` rather
@@ -776,7 +819,11 @@ fn read_and_scan_sections<W: Write>(
                 // Each section is its own stream: a run of printable bytes
                 // that happens to straddle a boundary is two strings, not one,
                 // which is what upstream reports.
-                scan(section, out, Some(name), options, offset as u64)?;
+                if options.unicode == Unicode::Default {
+                    scan(section, out, Some(name), options, offset as u64)?;
+                } else {
+                    scan_unicode_buffer(section, out, Some(name), options, offset as u64, tty)?;
+                }
             }
             Ok(())
         }
@@ -849,6 +896,624 @@ fn scan<R: Read, W: Write>(
     }
 }
 
+// ------------------------------------------------------------ -U/--unicode ---
+
+/// `-U`/`--unicode`: what a scan does with a UTF-8 sequence.
+///
+/// Upstream's spellings are what its *code* accepts, which is not quite what
+/// its `--help` advertises: the help lists `show`/`s`, and the parser takes
+/// `locale`/`l` for that mode and refuses `s`. Measured; the code wins.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Unicode {
+    /// `d`, `default`: no special treatment. A byte above 127 is judged by
+    /// `-e` like any other.
+    #[default]
+    Default,
+    /// `l`, `locale`: the character as it is -- except that upstream prints it
+    /// with `printf ("%.1s", buffer)`, which is its *first byte* only, and
+    /// that is what this prints too.
+    Locale,
+    /// `e`, `escape`: `\uXXXX`.
+    Escape,
+    /// `x`, `hex`: `<0xC3A9>`, the encoded bytes.
+    Hex,
+    /// `h`, `highlight`: as `escape`, in red on white when standard output is
+    /// a terminal.
+    Highlight,
+    /// `i`, `invalid`: a valid sequence ends a run, as a non-graphic byte does.
+    Invalid,
+}
+
+impl Unicode {
+    /// Upstream's `-U` argument table, exact spellings only.
+    fn parse(value: &[u8]) -> Option<Self> {
+        Some(match value {
+            b"default" | b"d" => Unicode::Default,
+            b"locale" | b"l" => Unicode::Locale,
+            b"escape" | b"e" => Unicode::Escape,
+            b"invalid" | b"i" => Unicode::Invalid,
+            b"hex" | b"x" => Unicode::Hex,
+            b"highlight" | b"h" => Unicode::Highlight,
+            _ => return None,
+        })
+    }
+}
+
+/// How long the UTF-8 sequence led by `lead` is, by upstream's rule: the two
+/// bits below the top two. A lead it has already accepted is the only input.
+fn utf8_len(lead: u8) -> usize {
+    match lead & 0x30 {
+        0x00 | 0x10 => 2,
+        0x20 => 3,
+        _ => 4,
+    }
+}
+
+/// Upstream's `is_valid_utf8`: how many bytes the sequence at the front of
+/// `bytes` takes, or `None`. Only the lead's top bits and the continuation
+/// bytes' `10` prefix are checked -- not overlong forms, not surrogates, not a
+/// lead above `0xF4` -- and that leniency is reproduced, because it decides
+/// which runs are printed.
+fn valid_utf8(bytes: &[u8]) -> Option<usize> {
+    let lead = *bytes.first()?;
+    let continues = |i: usize| bytes.get(i).is_some_and(|b| b & 0xc0 == 0x80);
+    if lead < 0xc0 || !continues(1) {
+        return None;
+    }
+    if lead & 0x20 == 0 {
+        return Some(2);
+    }
+    if !continues(2) {
+        return None;
+    }
+    if lead & 0x10 == 0 {
+        return Some(3);
+    }
+    if !continues(3) {
+        return None;
+    }
+    Some(4)
+}
+
+/// Upstream's `display_utf8_char`: render the sequence at the front of
+/// `bytes`, which is known to be valid, and say how many bytes it was.
+///
+/// The arithmetic is upstream's to the bit, including where it is wrong: a
+/// four-byte sequence is split into three fields that are not the code
+/// point's bytes, and the first can overflow `%02x`'s two digits. Measured
+/// against GNU strings 2.42: U+1F600 prints as `߆00` and U+10FFFF as
+/// `ြfff`, where U+00E9 and U+20AC print as `é` and `€`.
+fn display_utf8_char<W: Write>(
+    out: &mut W,
+    bytes: &[u8],
+    mode: Unicode,
+    tty: bool,
+) -> io::Result<usize> {
+    let byte = |i: usize| u32::from(bytes.get(i).copied().unwrap_or(0));
+    let len = utf8_len(bytes.first().copied().unwrap_or(0));
+    match mode {
+        Unicode::Escape | Unicode::Highlight => {
+            let paint = mode == Unicode::Highlight && tty;
+            if paint {
+                out.write_all(b"\x1b[31;47m")?;
+            }
+            match len {
+                2 => write!(
+                    out,
+                    "\\u{:02x}{:02x}",
+                    (byte(0) & 0x1c) >> 2,
+                    ((byte(0) & 0x03) << 6) | (byte(1) & 0x3f)
+                )?,
+                3 => write!(
+                    out,
+                    "\\u{:02x}{:02x}",
+                    ((byte(0) & 0x0f) << 4) | ((byte(1) & 0x3c) >> 2),
+                    ((byte(1) & 0x03) << 6) | (byte(2) & 0x3f)
+                )?,
+                _ => write!(
+                    out,
+                    "\\u{:02x}{:02x}{:02x}",
+                    ((byte(0) & 0x07) << 6) | ((byte(1) & 0x3c) >> 2),
+                    ((byte(1) & 0x03) << 6) | ((byte(2) & 0x3c) >> 2),
+                    ((byte(2) & 0x03) << 6) | (byte(3) & 0x3f)
+                )?,
+            }
+            if paint {
+                out.write_all(b"\x1b[0m")?;
+            }
+        }
+        Unicode::Hex => {
+            out.write_all(b"<0x")?;
+            for i in 0..len {
+                write!(out, "{:02x}", byte(i))?;
+            }
+            out.write_all(b">")?;
+        }
+        // `printf ("%.1s", buffer)`: one byte.
+        Unicode::Locale => out.write_all(bytes.get(..1).unwrap_or_default())?,
+        // Upstream never calls this in either mode.
+        Unicode::Default | Unicode::Invalid => {}
+    }
+    Ok(len)
+}
+
+/// A byte at a time, as `getc` gives them, with upstream's pushback stack in
+/// front: `get_unicode_byte`. `read` counts only the bytes that came from the
+/// stream, not those taken back off the stack -- upstream's `num_read`, which
+/// is how it computes addresses, quirks and all.
+struct UnicodeReader<R: Read> {
+    window: Window<R>,
+    putback: Vec<u8>,
+}
+
+impl<R: Read> UnicodeReader<R> {
+    fn get(&mut self, read: &mut u32) -> io::Result<Option<u8>> {
+        if let Some(b) = self.putback.pop() {
+            return Ok(Some(b));
+        }
+        *read = read.wrapping_add(1);
+        if !self.window.ensure(1)? {
+            return Ok(None);
+        }
+        let b = self.window.peek(1).and_then(|s| s.first().copied());
+        self.window.advance(1);
+        Ok(b)
+    }
+
+    /// Push bytes back, in the order given: the last one pushed comes out first.
+    fn unget(&mut self, bytes: &[u8]) {
+        self.putback.extend_from_slice(bytes);
+    }
+}
+
+/// Upstream's `print_unicode_stream` and its tail-recursive body, as a loop.
+///
+/// The first phase looks for `min` characters, keeping them; the second prints
+/// them and then everything after them up to the first byte that is not part
+/// of a string. Two of upstream's quirks are kept because they are visible:
+///
+/// - A four-byte sequence refused under `invalid` is pushed back in the order
+///   4th, 2nd, 3rd -- so it is re-read as 3rd, 2nd, 4th -- where every other
+///   case pushes back in reverse. Harmless for the string it ends, and kept
+///   for the next one it may start.
+/// - The address of a string is `num_read - 1` past the start of the body's
+///   pass, where `num_read` counts bytes read from the *stream*. A string
+///   whose first byte was a pushed-back one is therefore placed at
+///   `UINT_MAX` past the pass's start -- `-t` shows it as a huge offset.
+fn scan_unicode_stream<R: Read, W: Write>(
+    input: R,
+    out: &mut W,
+    label: Option<&[u8]>,
+    options: &Options,
+    base: u64,
+    tty: bool,
+) -> io::Result<()> {
+    let mode = options.unicode;
+    let graphic = |c: u8| {
+        is_string_char(
+            u32::from(c),
+            Encoding::Ascii8,
+            options.include_all_whitespace,
+        )
+    };
+    let mut reader = UnicodeReader {
+        window: Window::new(input),
+        putback: Vec::with_capacity(5),
+    };
+    let mut address = base;
+    let mut kept: Vec<u8> = Vec::with_capacity(options.min.saturating_mul(4).saturating_add(1));
+
+    loop {
+        let mut start_point: u64 = 0;
+        let mut read: u32 = 0;
+        let mut chars: usize = 0;
+        kept.clear();
+        let mut c: Option<u8> = Some(0);
+
+        // Phase one: `min` characters in a row.
+        loop {
+            if chars >= options.min {
+                break;
+            }
+            c = reader.get(&mut read)?;
+            let Some(b) = c else { break };
+            if !graphic(b) {
+                chars = 0;
+                kept.clear();
+                continue;
+            }
+            if chars == 0 {
+                start_point = u64::from(read.wrapping_sub(1));
+            }
+            if b < 127 {
+                kept.push(b);
+                chars = chars.saturating_add(1);
+                continue;
+            }
+            if b < 0xc0 {
+                chars = 0;
+                kept.clear();
+                continue;
+            }
+            let mut seq = [b, 0, 0, 0];
+            c = reader.get(&mut read)?;
+            let Some(b1) = c else { break };
+            seq[1] = b1;
+            if b1 & 0xc0 != 0x80 {
+                reader.unget(&[b1]);
+                chars = 0;
+                kept.clear();
+                continue;
+            }
+            if b & 0x20 == 0 {
+                if mode == Unicode::Invalid {
+                    reader.unget(&[b1]);
+                    chars = 0;
+                    kept.clear();
+                } else {
+                    kept.extend_from_slice(&seq[..2]);
+                    chars = chars.saturating_add(1);
+                }
+                continue;
+            }
+            c = reader.get(&mut read)?;
+            let Some(b2) = c else { break };
+            seq[2] = b2;
+            if b2 & 0xc0 != 0x80 {
+                reader.unget(&[b2, b1]);
+                chars = 0;
+                kept.clear();
+                continue;
+            }
+            if b & 0x10 == 0 {
+                if mode == Unicode::Invalid {
+                    reader.unget(&[b2, b1]);
+                    chars = 0;
+                    kept.clear();
+                } else {
+                    kept.extend_from_slice(&seq[..3]);
+                    chars = chars.saturating_add(1);
+                }
+                continue;
+            }
+            c = reader.get(&mut read)?;
+            let Some(b3) = c else { break };
+            seq[3] = b3;
+            if b3 & 0xc0 != 0x80 {
+                reader.unget(&[b3, b2, b1]);
+                chars = 0;
+                kept.clear();
+            } else if mode == Unicode::Invalid {
+                // Upstream's order, not the reverse: see the doc comment.
+                reader.unget(&[b3, b1, b2]);
+                chars = 0;
+                kept.clear();
+            } else {
+                kept.extend_from_slice(&seq);
+                chars = chars.saturating_add(1);
+            }
+        }
+
+        if chars >= options.min {
+            if let Some(label) = label.filter(|_| options.print_file_name) {
+                out.write_all(label)?;
+                out.write_all(b": ")?;
+            }
+            if let Some(radix) = options.radix {
+                out.write_all(&offset_field(address.wrapping_add(start_point), radix))?;
+            }
+            let mut i = 0;
+            while let Some(&b) = kept.get(i) {
+                if b < 127 {
+                    out.write_all(&[b])?;
+                    i = i.saturating_add(1);
+                } else {
+                    let len = display_utf8_char(out, kept.get(i..).unwrap_or_default(), mode, tty)?;
+                    i = i.saturating_add(len);
+                }
+            }
+
+            // Phase two: the rest of the run, unchecked against `min`.
+            loop {
+                c = reader.get(&mut read)?;
+                let Some(b) = c else { break };
+                if !graphic(b) {
+                    break;
+                }
+                if b < 127 {
+                    out.write_all(&[b])?;
+                    continue;
+                }
+                if b < 0xc0 {
+                    break;
+                }
+                let mut seq = [b, 0, 0, 0];
+                c = reader.get(&mut read)?;
+                let Some(b1) = c else { break };
+                seq[1] = b1;
+                if b1 & 0xc0 != 0x80 {
+                    reader.unget(&[b1]);
+                    break;
+                }
+                if b & 0x20 == 0 {
+                    if mode == Unicode::Invalid {
+                        reader.unget(&[b1]);
+                        break;
+                    }
+                    display_utf8_char(out, &seq, mode, tty)?;
+                    continue;
+                }
+                c = reader.get(&mut read)?;
+                let Some(b2) = c else { break };
+                seq[2] = b2;
+                if b2 & 0xc0 != 0x80 {
+                    reader.unget(&[b2, b1]);
+                    break;
+                }
+                if b & 0x10 == 0 {
+                    if mode == Unicode::Invalid {
+                        reader.unget(&[b2, b1]);
+                        break;
+                    }
+                    display_utf8_char(out, &seq, mode, tty)?;
+                    continue;
+                }
+                c = reader.get(&mut read)?;
+                let Some(b3) = c else { break };
+                seq[3] = b3;
+                if b3 & 0xc0 != 0x80 || mode == Unicode::Invalid {
+                    reader.unget(&[b3, b2, b1]);
+                    break;
+                }
+                display_utf8_char(out, &seq, mode, tty)?;
+            }
+            out.write_all(&options.separator)?;
+        }
+
+        if c.is_none() {
+            return Ok(());
+        }
+        address = address.wrapping_add(u64::from(read));
+    }
+}
+
+/// Upstream's `print_unicode_buffer`: the same search over bytes already in
+/// memory -- an object file's section under `-d` -- where a sequence is checked
+/// by looking ahead rather than by reading and pushing back. Its rule differs
+/// from the stream's in one place that shows: a valid sequence *starts* a run
+/// here only if it is not refused, and the search resumes one byte later.
+fn scan_unicode_buffer<W: Write>(
+    buf: &[u8],
+    out: &mut W,
+    label: Option<&[u8]>,
+    options: &Options,
+    address: u64,
+    tty: bool,
+) -> io::Result<()> {
+    let mode = options.unicode;
+    let graphic = |c: u8| {
+        is_string_char(
+            u32::from(c),
+            Encoding::Ascii8,
+            options.include_all_whitespace,
+        )
+    };
+    let mut from = 0usize;
+    loop {
+        let rest = buf.get(from..).unwrap_or_default();
+        if rest.is_empty() {
+            return Ok(());
+        }
+        let mut start = 0usize;
+        let mut found = 0usize;
+        let mut i = 0usize;
+        while i < rest.len() {
+            let c = rest.get(i).copied().unwrap_or(0);
+            let mut len = 1;
+            if !graphic(c) {
+                found = 0;
+                i = i.saturating_add(len);
+                continue;
+            }
+            if c > 126 {
+                if c < 0xc0 {
+                    found = 0;
+                    i = i.saturating_add(len);
+                    continue;
+                }
+                match valid_utf8(rest.get(i..).unwrap_or_default()) {
+                    None => {
+                        found = 0;
+                        i = i.saturating_add(1);
+                        continue;
+                    }
+                    Some(n) => {
+                        len = n;
+                        if mode == Unicode::Invalid {
+                            found = 0;
+                            i = i.saturating_add(len);
+                            continue;
+                        }
+                    }
+                }
+            }
+            if found == 0 {
+                start = i;
+            }
+            found = found.saturating_add(1);
+            if found >= options.min {
+                break;
+            }
+            i = i.saturating_add(len);
+        }
+        if found < options.min {
+            return Ok(());
+        }
+
+        if let Some(label) = label.filter(|_| options.print_file_name) {
+            out.write_all(label)?;
+            out.write_all(b": ")?;
+        }
+        if let Some(radix) = options.radix {
+            let at = address.wrapping_add(from as u64).wrapping_add(start as u64);
+            out.write_all(&offset_field(at, radix))?;
+        }
+        let mut i = start;
+        while let Some(&c) = rest.get(i) {
+            if !graphic(c) {
+                break;
+            }
+            if c < 127 {
+                out.write_all(&[c])?;
+                i = i.saturating_add(1);
+                continue;
+            }
+            if valid_utf8(rest.get(i..).unwrap_or_default()).is_none() || mode == Unicode::Invalid {
+                break;
+            }
+            let len = display_utf8_char(out, rest.get(i..).unwrap_or_default(), mode, tty)?;
+            i = i.saturating_add(len);
+        }
+        out.write_all(&options.separator)?;
+        from = from.saturating_add(i);
+    }
+}
+
+// ------------------------------------------------------------- @FILE ---
+
+/// Why `@FILE` expansion stopped the program: libiberty's two refusals, which
+/// it prints as `ARGV0: error: ...` and exits 1 on, before any option is read.
+#[derive(Debug, PartialEq, Eq)]
+enum AtFileError {
+    /// More than 2000 `@FILE`s, counted across nesting: the guard against a
+    /// file that names itself.
+    TooMany,
+    /// An `@FILE` that names a directory.
+    Directory,
+}
+
+impl AtFileError {
+    fn sentence(&self) -> &'static str {
+        match self {
+            AtFileError::TooMany => "error: too many @-files encountered",
+            AtFileError::Directory => "error: @-file refers to a directory",
+        }
+    }
+}
+
+/// libiberty's `expandargv`: replace every argument that is `@FILE`, where
+/// `FILE` can be read, by the arguments the file holds -- and those, in turn,
+/// if they are `@FILE`s themselves.
+///
+/// Every argument is looked at, options and operands alike and after `--`
+/// too, because the expansion runs before the option parser has seen any of
+/// them. An `@FILE` whose file cannot be `stat`ed or opened is left as it is,
+/// so it reaches the parser and, as an operand, is reported as a file that
+/// does not exist. A file holding nothing but white space expands to nothing.
+fn expand_at_files(args: &[OsString]) -> Result<Vec<OsString>, AtFileError> {
+    let mut out: Vec<OsString> = args.to_vec();
+    let mut limit: u32 = 2000;
+    let mut i = 0usize;
+    while i < out.len() {
+        let Some(arg) = out.get(i) else { break };
+        let bytes = os_bytes(arg.as_os_str()).into_owned();
+        let Some(name) = bytes.strip_prefix(b"@") else {
+            i = i.saturating_add(1);
+            continue;
+        };
+        limit = limit.saturating_sub(1);
+        if limit == 0 {
+            return Err(AtFileError::TooMany);
+        }
+        let path = coreutils::quote::os_from_bytes(name);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            i = i.saturating_add(1);
+            continue;
+        };
+        if meta.is_dir() {
+            return Err(AtFileError::Directory);
+        }
+        let Ok(content) = std::fs::read(&path) else {
+            i = i.saturating_add(1);
+            continue;
+        };
+        // Upstream reads the file into a C string, so a NUL ends it.
+        let text = content.split(|&b| b == 0).next().unwrap_or_default();
+        let words: Vec<OsString> = if text.iter().all(|&b| is_c_space(b)) {
+            Vec::new()
+        } else {
+            build_argv(text)
+                .into_iter()
+                .map(|w| coreutils::quote::os_from_bytes(&w))
+                .collect()
+        };
+        // Replace the `@FILE` and look again from its first word, so that a
+        // file naming another file is expanded too.
+        out.splice(i..=i, words);
+    }
+    Ok(out)
+}
+
+/// C's `isspace` in the C locale, which is what libiberty's `ISSPACE` is.
+fn is_c_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// libiberty's `buildargv`: split `text` into words at white space, where
+/// `'...'` and `"..."` quote white space -- and may start or end mid-word --
+/// and a backslash makes the next byte literal, inside quotes or out. The
+/// quotes themselves are dropped. The input is not empty and not all white
+/// space; the caller checks.
+fn build_argv(text: &[u8]) -> Vec<Vec<u8>> {
+    let mut words = Vec::new();
+    let mut at = text.iter().take_while(|&&b| is_c_space(b)).count();
+    let (mut squote, mut dquote, mut bsquote) = (false, false, false);
+    loop {
+        let mut word = Vec::new();
+        while let Some(&b) = text.get(at) {
+            if is_c_space(b) && !squote && !dquote && !bsquote {
+                break;
+            }
+            if bsquote {
+                bsquote = false;
+                word.push(b);
+            } else if b == b'\\' {
+                bsquote = true;
+            } else if squote {
+                if b == b'\'' {
+                    squote = false;
+                } else {
+                    word.push(b);
+                }
+            } else if dquote {
+                if b == b'"' {
+                    dquote = false;
+                } else {
+                    word.push(b);
+                }
+            } else if b == b'\'' {
+                squote = true;
+            } else if b == b'"' {
+                dquote = true;
+            } else {
+                word.push(b);
+            }
+            at = at.saturating_add(1);
+        }
+        words.push(word);
+        at = at.saturating_add(
+            text.get(at..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|&&b| is_c_space(b))
+                .count(),
+        );
+        if at >= text.len() {
+            return words;
+        }
+    }
+}
+
 // -------------------------------------------------------- the diagnostics ---
 
 /// `strings: 'NAME': No such file` — upstream's message for *any* failed
@@ -895,7 +1560,24 @@ fn main() -> ExitCode {
 fn run_main() -> ExitCode {
     stdfd::restore();
 
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let mut argv = std::env::args_os();
+    // Upstream names itself by `argv[0]` as given in `expandargv`'s two
+    // refusals, which run before anything else.
+    let argv0 = argv
+        .next()
+        .map_or_else(|| b"strings".to_vec(), |a| os_bytes(&a).into_owned());
+    let given: Vec<OsString> = argv.collect();
+    let args = match expand_at_files(&given) {
+        Ok(args) => args,
+        Err(e) => {
+            let mut line = argv0;
+            line.extend_from_slice(b": ");
+            line.extend_from_slice(e.sentence().as_bytes());
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            return ExitCode::from(1);
+        }
+    };
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(e) => {
@@ -948,6 +1630,13 @@ fn run_main() -> ExitCode {
             ExitCode::from(1)
         }
         Request::Run(options, sources) => run(&mut out, &options, &sources),
+        Request::Fatal(sentence) => {
+            let mut line = b"strings: ".to_vec();
+            line.extend_from_slice(&sentence);
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            ExitCode::from(1)
+        }
     };
 
     stdfd::close_stdout("strings", out, earned)
@@ -955,12 +1644,19 @@ fn run_main() -> ExitCode {
 
 fn run(out: &mut Stream, options: &Options, sources: &[Source]) -> ExitCode {
     let mut failed = false;
+    // `-U h` colours only for a terminal, as upstream's `isatty (1)` decides.
+    let tty = stdfd::is_tty(1);
 
     for source in sources {
         match source {
             Source::Stdin => {
-                if let Err(e) = scan(io::stdin().lock(), out, Some(STDIN_LABEL), options, 0) {
-                    stdfd::diag_bytes(&read_failed(STDIN_LABEL, &e.to_string()));
+                let result = if options.unicode == Unicode::Default {
+                    scan(io::stdin().lock(), out, Some(STDIN_LABEL), options, 0)
+                } else {
+                    scan_unicode_stream(io::stdin().lock(), out, Some(STDIN_LABEL), options, 0, tty)
+                };
+                if let Err(e) = result {
+                    stdfd::diag_bytes(&read_failed(STDIN_LABEL, &strerror(&e)));
                     failed = true;
                 }
             }
@@ -983,7 +1679,7 @@ fn run(out: &mut Stream, options: &Options, sources: &[Source]) -> ExitCode {
                 let file = match File::open(path) {
                     Ok(file) => file,
                     Err(e) => {
-                        stdfd::diag_bytes(&open_failed(&name, &clean_reason(&e)));
+                        stdfd::diag_bytes(&open_failed(&name, &strerror(&e)));
                         failed = true;
                         continue;
                     }
@@ -994,12 +1690,14 @@ fn run(out: &mut Stream, options: &Options, sources: &[Source]) -> ExitCode {
                 // does not fit in memory is exactly the kind `strings` is
                 // pointed at.
                 let result = if options.data_only {
-                    read_and_scan_sections(file, out, &name, options)
-                } else {
+                    read_and_scan_sections(file, out, &name, options, tty)
+                } else if options.unicode == Unicode::Default {
                     scan(file, out, Some(&name), options, 0)
+                } else {
+                    scan_unicode_stream(file, out, Some(&name), options, 0, tty)
                 };
                 if let Err(e) = result {
-                    stdfd::diag_bytes(&read_failed(&name, &clean_reason(&e)));
+                    stdfd::diag_bytes(&read_failed(&name, &strerror(&e)));
                     failed = true;
                 }
             }
@@ -1010,15 +1708,6 @@ fn run(out: &mut Stream, options: &Options, sources: &[Source]) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
-    }
-}
-
-/// `strerror`'s sentence, without the `(os error N)` tail Rust appends.
-fn clean_reason(e: &io::Error) -> String {
-    let text = e.to_string();
-    match text.split_once(" (os error ") {
-        Some((head, _)) => head.to_owned(),
-        None => text,
     }
 }
 
@@ -1100,15 +1789,18 @@ mod tests {
     fn the_minimum_length_accepts_leading_blanks_and_a_sign() {
         assert_eq!(run_options(&["-n", " 5", "f"]).min, 5);
         assert_eq!(run_options(&["-n", "+5", "f"]).min, 5);
-        let e = parse_args(&argv(&["-n", "5 ", "f"])).unwrap_err();
-        assert_eq!(e.sentence, "invalid integer argument 5 ");
+        assert_eq!(
+            parse_args(&argv(&["-n", "5 ", "f"])).unwrap(),
+            Request::Fatal(b"invalid integer argument 5 ".to_vec())
+        );
     }
 
     #[test]
     fn a_minimum_length_that_is_not_a_number_is_fatal() {
-        let e = parse_args(&argv(&["-n", "abc", "f"])).unwrap_err();
-        assert_eq!(e.sentence, "invalid integer argument abc");
-        assert_eq!(e.status, 1);
+        assert_eq!(
+            parse_args(&argv(&["-n", "abc", "f"])).unwrap(),
+            Request::Fatal(b"invalid integer argument abc".to_vec())
+        );
     }
 
     /// The old implementation quietly used the default here. Upstream reads
@@ -1116,18 +1808,26 @@ mod tests {
     /// least tells the user something went wrong.
     #[test]
     fn a_trailing_dash_n_consumes_the_next_word_whatever_it_is() {
-        let e = parse_args(&argv(&["-n", "file"])).unwrap_err();
-        assert_eq!(e.sentence, "invalid integer argument file");
+        assert_eq!(
+            parse_args(&argv(&["-n", "file"])).unwrap(),
+            Request::Fatal(b"invalid integer argument file".to_vec())
+        );
     }
 
     #[test]
     fn zero_and_the_empty_argument_are_too_small() {
-        let e = parse_args(&argv(&["-n", "0", "f"])).unwrap_err();
-        assert_eq!(e.sentence, "minimum string length is too small: 0");
-        let e = parse_args(&argv(&["-n", "", "f"])).unwrap_err();
-        assert_eq!(e.sentence, "minimum string length is too small: ");
-        let e = parse_args(&argv(&["-0", "f"])).unwrap_err();
-        assert_eq!(e.sentence, "minimum string length is too small: 0");
+        assert_eq!(
+            parse_args(&argv(&["-n", "0", "f"])).unwrap(),
+            Request::Fatal(b"minimum string length is too small: 0".to_vec())
+        );
+        assert_eq!(
+            parse_args(&argv(&["-n", "", "f"])).unwrap(),
+            Request::Fatal(b"minimum string length is too small: ".to_vec())
+        );
+        assert_eq!(
+            parse_args(&argv(&["-0", "f"])).unwrap(),
+            Request::Fatal(b"minimum string length is too small: 0".to_vec())
+        );
     }
 
     /// Two different sentences for two adjacent values, as measured. The word
@@ -1135,17 +1835,37 @@ mod tests {
     #[test]
     fn the_two_too_big_sentences_differ_at_the_ceiling() {
         assert_eq!(run_options(&["-n", "4294967294", "f"]).min, 4_294_967_294);
-        let e = parse_args(&argv(&["-n", "4294967295", "f"])).unwrap_err();
-        assert_eq!(e.sentence, "minimum string length 4294967295 is too big");
-        let e = parse_args(&argv(&["-n", "4294967296", "f"])).unwrap_err();
-        assert_eq!(e.sentence, "minimum string length is too big: 4294967296");
+        assert_eq!(
+            parse_args(&argv(&["-n", "4294967295", "f"])).unwrap(),
+            Request::Fatal(b"minimum string length 4294967295 is too big".to_vec())
+        );
+        assert_eq!(
+            parse_args(&argv(&["-n", "4294967296", "f"])).unwrap(),
+            Request::Fatal(b"minimum string length is too big: 4294967296".to_vec())
+        );
+    }
+
+    #[test]
+    fn the_digit_shorthand_is_its_whole_word_read_after_the_rest() {
+        assert_eq!(run_options(&["-12", "f"]).min, 12);
+        assert_eq!(run_options(&["-5", "-n", "3", "f"]).min, 5);
+        assert_eq!(run_options(&["-n", "3", "-5", "f"]).min, 5);
+        assert_eq!(run_options(&["-1", "-6", "f"]).min, 6);
+        // Base 0: a leading 0 is octal.
+        assert_eq!(run_options(&["-010", "f"]).min, 8);
+        assert_eq!(
+            parse_args(&argv(&["-a5", "f"])).unwrap(),
+            Request::Fatal(b"invalid integer argument a5".to_vec())
+        );
     }
 
     /// `strtoul` wraps a negative, so `-3` is enormous rather than negative.
     #[test]
     fn a_negative_minimum_length_is_too_big_not_too_small() {
-        let e = parse_args(&argv(&["-n", "-3", "f"])).unwrap_err();
-        assert_eq!(e.sentence, "minimum string length is too big: -3");
+        assert_eq!(
+            parse_args(&argv(&["-n", "-3", "f"])).unwrap(),
+            Request::Fatal(b"minimum string length is too big: -3".to_vec())
+        );
     }
 
     #[test]
@@ -1227,16 +1947,190 @@ mod tests {
         assert!(run_options(&["-d", "f"]).data_only);
         assert!(run_options(&["--data", "f"]).data_only);
         assert!(!run_options(&["f"]).data_only);
-        let e = parse_args(&argv(&["-U", "h", "f"])).unwrap_err();
-        assert!(e.sentence.contains("invalid argument to -U/--unicode"));
-        // The one mode this build does implement is upstream's default.
-        assert_eq!(run_options(&["-U", "d", "f"]).min, 4);
+    }
+
+    // ------------------------------------------------------------ -U ---
+
+    #[test]
+    fn the_unicode_modes_are_the_ones_the_parser_takes() {
+        for (arg, mode) in [
+            ("d", Unicode::Default),
+            ("default", Unicode::Default),
+            ("l", Unicode::Locale),
+            ("locale", Unicode::Locale),
+            ("e", Unicode::Escape),
+            ("escape", Unicode::Escape),
+            ("x", Unicode::Hex),
+            ("hex", Unicode::Hex),
+            ("h", Unicode::Highlight),
+            ("highlight", Unicode::Highlight),
+            ("i", Unicode::Invalid),
+            ("invalid", Unicode::Invalid),
+        ] {
+            assert_eq!(run_options(&["-U", arg, "f"]).unicode, mode, "{arg}");
+        }
+        // The help says `show`/`s`; the parser refuses both, as upstream's
+        // does, without the usage.
+        for bad in ["s", "show", "D", ""] {
+            let request = parse_args(&argv(&["-U", bad, "f"])).unwrap();
+            let mut want = b"invalid argument to -U/--unicode: ".to_vec();
+            want.extend_from_slice(bad.as_bytes());
+            assert_eq!(request, Request::Fatal(want), "{bad}");
+        }
     }
 
     #[test]
-    fn an_at_file_is_refused_rather_than_read_as_a_filename() {
-        let e = parse_args(&argv(&["@opts.txt"])).unwrap_err();
-        assert!(e.sentence.contains("@FILE"), "{:?}", e.sentence);
+    fn a_unicode_mode_forces_eight_bit_characters() {
+        assert_eq!(run_options(&["-U", "e", "f"]).encoding, Encoding::Ascii8);
+        assert_eq!(
+            run_options(&["-e", "l", "-U", "x", "f"]).encoding,
+            Encoding::Ascii8
+        );
+        assert_eq!(
+            run_options(&["-U", "d", "-e", "l", "f"]).encoding,
+            Encoding::Little16
+        );
+    }
+
+    fn unicode_out(input: &[u8], mode: Unicode, extra: impl Fn(&mut Options)) -> Vec<u8> {
+        let mut options = Options {
+            unicode: mode,
+            encoding: Encoding::Ascii8,
+            ..Options::default()
+        };
+        extra(&mut options);
+        let mut out = Vec::new();
+        scan_unicode_stream(input, &mut out, None, &options, 0, false).unwrap();
+        out
+    }
+
+    /// Each measured with GNU strings 2.42 on the same bytes.
+    #[test]
+    fn each_mode_renders_a_character_as_upstream_does() {
+        let input =
+            b"abc\xc3\xa9def\0xyz\xe2\x82\xacuvw\0pq\xf0\x9f\x98\x80rs\0ab\xf4\x8f\xbf\xbfcd\n";
+        assert_eq!(
+            unicode_out(input, Unicode::Escape, |_| {}),
+            b"abc\\u00e9def\nxyz\\u20acuvw\npq\\u07c600rs\nab\\u103cfffcd\n"
+        );
+        assert_eq!(
+            unicode_out(input, Unicode::Hex, |_| {}),
+            b"abc<0xc3a9>def\nxyz<0xe282ac>uvw\npq<0xf09f9880>rs\nab<0xf48fbfbf>cd\n"
+        );
+        // `%.1s`: the lead byte alone.
+        assert_eq!(
+            unicode_out(input, Unicode::Locale, |_| {}),
+            b"abc\xc3def\nxyz\xe2uvw\npq\xf0rs\nab\xf4cd\n"
+        );
+        // Off a terminal, highlighting is escaping.
+        assert_eq!(
+            unicode_out(input, Unicode::Highlight, |_| {}),
+            unicode_out(input, Unicode::Escape, |_| {})
+        );
+        assert_eq!(unicode_out(input, Unicode::Invalid, |_| {}), b"");
+    }
+
+    #[test]
+    fn a_character_counts_once_toward_the_minimum() {
+        // `\xc3\xa9` is one character, so `a\u00e9b` is three, not four.
+        let input = b"a\xc3\xa9b\0";
+        assert_eq!(unicode_out(input, Unicode::Escape, |o| o.min = 4), b"");
+        assert_eq!(
+            unicode_out(input, Unicode::Escape, |o| o.min = 3),
+            b"a\\u00e9b\n"
+        );
+    }
+
+    #[test]
+    fn a_broken_sequence_ends_a_run() {
+        // A lead byte without its continuation, and a stray continuation.
+        assert_eq!(
+            unicode_out(b"abcd\xc3Xefgh\0", Unicode::Escape, |_| {}),
+            b"abcd\nXefgh\n"
+        );
+        assert_eq!(
+            unicode_out(b"abcd\xa9efgh\0", Unicode::Escape, |_| {}),
+            b"abcd\nefgh\n"
+        );
+    }
+
+    #[test]
+    fn valid_utf8_is_upstream_s_lenient_test() {
+        assert_eq!(valid_utf8(b"\xc3\xa9"), Some(2));
+        assert_eq!(valid_utf8(b"\xe2\x82\xac"), Some(3));
+        assert_eq!(valid_utf8(b"\xf0\x9f\x98\x80"), Some(4));
+        // Overlong and out-of-range forms pass, as upstream's do.
+        assert_eq!(valid_utf8(b"\xc0\x80"), Some(2));
+        assert_eq!(valid_utf8(b"\xff\x80\x80\x80"), Some(4));
+        assert_eq!(valid_utf8(b"\xc3"), None);
+        assert_eq!(valid_utf8(b"\xc3A"), None);
+        assert_eq!(valid_utf8(b"\xa9"), None);
+        assert_eq!(valid_utf8(b"a"), None);
+    }
+
+    // ------------------------------------------------------------ @FILE ---
+
+    #[test]
+    fn buildargv_splits_and_quotes_as_libiberty_does() {
+        let words = |t: &[u8]| build_argv(t);
+        assert_eq!(
+            words(b"-n 5 f"),
+            [b"-n".to_vec(), b"5".to_vec(), b"f".to_vec()]
+        );
+        assert_eq!(words(b"  a\t\nb  "), [b"a".to_vec(), b"b".to_vec()]);
+        assert_eq!(words(b"'a b' \"c d\""), [b"a b".to_vec(), b"c d".to_vec()]);
+        assert_eq!(words(b"x'a b'y"), [b"xa by".to_vec()]);
+        assert_eq!(words(b"a\\ b"), [b"a b".to_vec()]);
+        assert_eq!(words(b"'it\\'s'"), [b"it's".to_vec()]);
+        assert_eq!(words(b"\"\""), [Vec::new()]);
+        // An unterminated quote runs to the end of the file.
+        assert_eq!(words(b"'a b"), [b"a b".to_vec()]);
+    }
+
+    #[test]
+    fn an_at_file_becomes_the_words_in_it() {
+        let dir = std::env::temp_dir().join(format!("strings-atfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = dir.join("opts");
+        let nested = dir.join("nested");
+        let blank = dir.join("blank");
+        // Paths written into a file are spelled with `/`: a backslash there
+        // is buildargv's escape, and the Windows host's separator is one.
+        let spelled = |p: &std::path::Path| {
+            p.display()
+                .to_string()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        };
+        std::fs::write(&opts, b"-n 6 '-s' :").unwrap();
+        std::fs::write(&blank, b" \n\t ").unwrap();
+        std::fs::write(&nested, format!("-f @{}", spelled(&opts))).unwrap();
+        let at = |p: &std::path::Path| OsString::from(format!("@{}", p.display()));
+        let names = |v: Vec<OsString>| -> Vec<String> {
+            v.into_iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+
+        let got = expand_at_files(&[at(&opts), OsString::from("f")]).unwrap();
+        assert_eq!(names(got), ["-n", "6", "-s", ":", "f"]);
+        // A file naming a file is expanded too.
+        let got = expand_at_files(&[at(&nested)]).unwrap();
+        assert_eq!(names(got), ["-f", "-n", "6", "-s", ":"]);
+        // White space alone is nothing at all.
+        let got = expand_at_files(&[at(&blank), OsString::from("f")]).unwrap();
+        assert_eq!(names(got), ["f"]);
+        // A file that is not there leaves the argument as it was.
+        let missing = OsString::from(format!("@{}", dir.join("nope").display()));
+        assert_eq!(
+            expand_at_files(std::slice::from_ref(&missing)).unwrap(),
+            [missing]
+        );
+        // A directory is refused outright.
+        assert_eq!(expand_at_files(&[at(&dir)]), Err(AtFileError::Directory));
+        // A file that names itself is stopped by the count.
+        std::fs::write(&opts, format!("@{}", spelled(&opts))).unwrap();
+        assert_eq!(expand_at_files(&[at(&opts)]), Err(AtFileError::TooMany));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // ------------------------------------------------------------ operands --
@@ -1540,12 +2434,6 @@ mod tests {
     fn a_non_utf8_name_survives_the_diagnostic() {
         let line = no_such_file(b"\xff\xfegone");
         assert_eq!(line, b"strings: '\xff\xfegone': No such file\n");
-    }
-
-    #[test]
-    fn the_os_error_tail_is_stripped_from_a_reason() {
-        let e = io::Error::new(io::ErrorKind::PermissionDenied, "Permission denied");
-        assert_eq!(clean_reason(&e), "Permission denied");
     }
 
     // ------------------------------------------------------------- the text --

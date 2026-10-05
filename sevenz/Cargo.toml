@@ -1,0 +1,30 @@
+[package]
+name = "sevenz"
+version = "0.1.0"
+edition = "2024"
+description = "7z archives, read as 7-Zip reads them: a port of 7-Zip's 7z reader from the public-domain LZMA SDK 26.00."
+# The LZMA SDK is in the public domain; `licenses/notices.yaml` names it for
+# the image's notices.
+license-file = "licenses/lzma-sdk-LICENSE.txt"
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` + `alloc`, as `xz` and `bzip2`, which it decodes through.
+[dependencies]
+# The CRC-32 7z's headers and files carry.
+crc32 = { path = "../crc32" }
+# LZMA, LZMA2, the branch converters and delta.
+xz = { path = "../xz" }
+# BZip2.
+bzip2 = { path = "../bzip2" }
+# 7z's encryption: AES-256 with a SHA-256 key.
+aes = { path = "../aes" }
+sha2 = { path = "../sha2" }
+
+[dev-dependencies]
+# Deflate streams for `inflate`'s tests, from a compressor of another hand.
+deflate = { path = "../deflate" }
+
+[lints]
+workspace = true

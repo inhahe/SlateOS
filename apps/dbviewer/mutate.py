@@ -165,8 +165,8 @@ MUTATIONS = [
     # -- what is painted -----------------------------------------------------
     (
         "only the toolbar is filled, leaving the rest of the window bare",
-        "        f.push(fill(l.window, BASE, 0.0));",
-        "        f.push(fill(l.toolbar, BASE, 0.0));",
+        "        f.push(fill(l.window, self.palette.base, 0.0));",
+        "        f.push(fill(l.toolbar, self.palette.base, 0.0));",
         ["the_window_is_painted_edge_to_edge_at_every_size"],
     ),
     (
@@ -292,7 +292,8 @@ MUTATIONS = [
         "            f.hit(Target::Execute, btn);",
         [
             "the_filters_button_shows_and_hides_the_builder",
-            "export_puts_the_table_in_the_editor_and_import_reads_it_back",
+            "exporting_opens_a_picker_and_does_not_eat_the_query",
+            "importing_opens_a_picker",
         ],
     ),
     (
@@ -407,16 +408,15 @@ MUTATIONS = [
     ),
     (
         "an import reads the file and leaves the old table on the screen",
-        "                        self.select_table(&name);\n"
-        '                        format!("Imported {name}")',
-        '                        format!("Imported {name}")',
-        ["export_puts_the_table_in_the_editor_and_import_reads_it_back"],
+        "                self.select_table(&name);\n                let rows = self\n",
+        "                let rows = self\n",
+        ["a_table_survives_a_write_and_a_read"],
     ),
     (
-        "an export is thrown away rather than put where it can be seen",
-        "            Target::Export(format) => match self.export_current_table(format) {",
-        "            Target::Export(format) => match self.export_current_table(format).filter(|_| false) {",
-        ["export_puts_the_table_in_the_editor_and_import_reads_it_back"],
+        "an export opens no picker, so there is nowhere for it to go",
+        "                    self.open_file_dialog(FileIntent::Export(format));\n",
+        "",
+        ["exporting_opens_a_picker_and_does_not_eat_the_query"],
     ),
     # -- the entry points the platform calls ---------------------------------
     (
@@ -451,6 +451,155 @@ MUTATIONS = [
         "        // other time. There is no clock on the screen to keep.\n        None",
         "        Some(Duration::from_millis(16))",
         ["the_window_says_what_it_is"],
+    ),
+    (
+        'a release is a keystroke',
+        '        if !event.pressed {\n            return;\n        }\n        // Every key but what is typed is taken plain',
+        '        // Every key but what is typed is taken plain',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if event.key == Key::F1 && plain {',
+        '        if event.key == Key::F1 {',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord works Escape, Tab, Backspace and Enter',
+        '            _ if !plain => {}\n',
+        '',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        "a command's letter is typed",
+        '        if textline::types_into_field(event)',
+        '        if event.types_text()',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord works the letter shortcuts',
+        '        if !plain {\n            return;\n        }\n        match event.key {\n            Key::N =>',
+        '        match event.key {\n            Key::N =>',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'a text box is drawn the same wherever the pointer is',
+        '            hovered: open && self.hover == Some(target),\n',
+        '            hovered: false,\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a text box is not marked while it has the keyboard',
+        '            focused: open && self.focus == focus,\n',
+        '            focused: false,\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a text box lights under a cover',
+        '            hovered: open && self.hover == Some(target),\n',
+        '            hovered: self.hover == Some(target),\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a text box is marked under a cover',
+        '            focused: open && self.focus == focus,\n',
+        '            focused: self.focus == focus,\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the file dialog is no cover',
+        '        self.picker.is_open() || self.show_help\n',
+        '        self.show_help\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the shortcut card is no cover',
+        '        self.picker.is_open() || self.show_help\n',
+        '        self.picker.is_open()\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the pointer is not followed',
+        '                self.hover = self.frame(size.0, size.1).hit_test(mouse.x, mouse.y);\n',
+        '                let _ = size;\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the pointer is not followed under a cover',
+        '        let Event::Mouse(mouse) = event else {\n'
+        '            return;\n'
+        '        };\n'
+        '        match mouse.kind {\n'
+        '            MouseEventKind::Move => {\n'
+        '                self.hover',
+        '        let Event::Mouse(mouse) = event else {\n'
+        '            return;\n'
+        '        };\n'
+        '        if self.covered() {\n'
+        '            return;\n'
+        '        }\n'
+        '        match mouse.kind {\n'
+        '            MouseEventKind::Move => {\n'
+        '                self.hover',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'leaving the window leaves a box lit',
+        '            MouseEventKind::Leave => self.hover = None,\n',
+        '            MouseEventKind::Leave => {}\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the pane's clip cuts the editor's focus ring",
+        '        let (side, top) = (8.0_f32.max(ring), 4.0_f32.max(ring));\n',
+        '        let (side, top) = (8.0_f32 + 0.0 * ring, 4.0_f32);\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the filter's value box is not the toolkit's field",
+        '            if target == Target::FilterValue {\n'
+        '                // The one row that takes text: the toolkit\'s field.\n',
+        '            if false {\n'
+        '                // The one row that takes text: the toolkit\'s field.\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '        if self.show_help {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n'
+        '            // press, with any button, puts it away rather than reaching the\n'
+        '            // control drawn under it.\n'
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n'
+        '            }\n'
+        '            return;\n'
+        '        }\n',
+        '',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'only the left button puts the card away',
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {\n'
+        '                self.show_help = false;\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
+    ),
+    (
+        'a move puts the card away',
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if !matches!(event.kind, MouseEventKind::Leave) {\n'
+        '                self.show_help = false;\n',
+        ['the_shortcut_card_takes_a_press_rather_than_passing_it_on'],
     ),
 ]
 

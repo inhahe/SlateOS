@@ -100,6 +100,28 @@ unsafe extern "C" {
     fn umask(mask: u32) -> u32;
 }
 
+/// Set the mask to `0`, and answer the mask it replaced: `install`'s first act
+/// (`umask (0)`, `install.c:808`), after which every mode it creates a file or
+/// directory with is the mode it asked for.
+///
+/// This changes the mask for the rest of the process's life, which a utility's
+/// `main` may do and a test may not -- see the module docs for what a mask
+/// changed under `cargo test` does to the tests running beside it.
+#[cfg(unix)]
+pub fn clear() -> u32 {
+    // SAFETY: `umask` takes and returns a plain integer, touches no memory and
+    // cannot fail.
+    unsafe { umask(0) }
+}
+
+/// On a host with no mask there is nothing to clear: it is `0` already, as
+/// [`current`] answers there.
+#[cfg(not(unix))]
+#[must_use]
+pub fn clear() -> u32 {
+    0
+}
+
 /// The POSIX idiom, used only where [`from_proc`] could not answer.
 ///
 /// See the module docs for why `0` and not `0777`.

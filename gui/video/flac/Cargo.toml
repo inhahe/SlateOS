@@ -1,0 +1,16 @@
+[package]
+name = "flac"
+version = "0.1.0"
+edition = "2024"
+description = "FLAC: libFLAC 1.5.0's decoder ported to Rust and held to libFLAC sample for sample."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# STREAMINFO's MD5 of the decoded samples, checked as libFLAC checks it.
+md5 = { path = "../../../md5" }
+
+[lints]
+workspace = true

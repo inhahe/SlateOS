@@ -104,6 +104,11 @@ printf '0123456789' > tiny.txt
 # Colon-separated, for --separator.
 printf 'a:b:c:d:e:' > colons.txt
 
+# 1.3 MB of lines: one piece of it fills a pipe many times over, so a
+# `--filter` command that stops reading early is still being written to when it
+# exits, and the next write finds the pipe closed.
+seq 1 200000 > big.txt
+
 # 700 one-character records. 700 crosses the alphabetic widening point at 650,
 # the numeric one at 90 and the hex one at 240, so one fixture drives all three
 # name_case runs.
@@ -134,9 +139,15 @@ for _ in $(seq 1 700); do printf 'z'; done > wide.txt
 # of the stderr the caller captures; `diff-wsl.sh` says why. The subshell does
 # not make it unnecessary — the subshell is the shell that waits on the child,
 # and it inherited the caller's redirected stderr along with everything else.
+#
+# With `IGNORE_PIPE` set, split starts with SIGPIPE ignored -- the subshell's
+# `trap '' PIPE` is inherited across `exec` -- which is what decides the
+# disposition a `--filter` command is handed.
 run_side() {
   local side=$1 dir=$2; shift 2
-  ( cd "$dir" && diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side:$PATH" split "$@" )
+  ( cd "$dir" || exit
+    [ -n "${IGNORE_PIPE:-}" ] && trap '' PIPE
+    diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side:$PATH" split "$@" )
 }
 
 # Every file the run left behind, in name order, with its contents.
@@ -179,6 +190,10 @@ names() {
 # $1 = fixture (or `-` for none), $2 = `full` or `names`, $3 = stdin redirect
 # source (`-` for none), rest = the whole argv.
 #
+# With `TO_FULL` set, both sides write their standard output to `/dev/full`
+# instead, and what is compared is how each reports the write it could not
+# make; there is no output left to compare.
+#
 # The argv is passed whole rather than assembled here because a few cases have
 # to put something *before* the file operand, and a few have no file operand at
 # all (reading stdin).
@@ -195,12 +210,14 @@ compare_argv() {
   # stdout through a file, not a pipe: in `x=$(split | od)` the recorded status
   # is od's, and PIPESTATUS is set in the substitution's subshell where it
   # cannot be read. Same note as csplit-diff.sh and cat-diff.sh.
+  local o_dest=$o_bin g_dest=$g_bin
+  if [ -n "${TO_FULL:-}" ]; then o_dest=/dev/full; g_dest=/dev/full; fi
   if [ "$stdin" = - ]; then
-    run_side ours o "$@" >"$o_bin" 2>"$o_err" </dev/null; o_rc=$?
-    run_side gnu  g "$@" >"$g_bin" 2>"$g_err" </dev/null; g_rc=$?
+    run_side ours o "$@" >"$o_dest" 2>"$o_err" </dev/null; o_rc=$?
+    run_side gnu  g "$@" >"$g_dest" 2>"$g_err" </dev/null; g_rc=$?
   else
-    run_side ours o "$@" >"$o_bin" 2>"$o_err" <"$stdin"; o_rc=$?
-    run_side gnu  g "$@" >"$g_bin" 2>"$g_err" <"$stdin"; g_rc=$?
+    run_side ours o "$@" >"$o_dest" 2>"$o_err" <"$stdin"; o_rc=$?
+    run_side gnu  g "$@" >"$g_dest" 2>"$g_err" <"$stdin"; g_rc=$?
   fi
 
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
@@ -258,7 +275,7 @@ names_case() {
 raw_case() {
   local fixture=$1; shift
   compare_argv "$fixture" full - "$@"
-  report "${ENVV[*]:+${ENVV[*]} }split $*"
+  report "${IGNORE_PIPE:+[SIGPIPE ignored] }${ENVV[*]:+${ENVV[*]} }split $*${TO_FULL:+  [>/dev/full]}"
 }
 
 # Reading the fixture from stdin rather than naming it.
@@ -591,6 +608,93 @@ run_case seq20.txt -l 5 --filter='cat > $FILE.z'
 run_case seq20.txt -n 3 --filter='cat > $FILE'
 run_case seq20.txt -n 2/3 --filter=cat
 run_case seq20.txt -l 5 --filter='exit 3'
+
+# The shell is the user's: `$SHELL`, named in argv[0] by its last component,
+# and `/bin/sh` only when SHELL is unset. `$0` is what shows it.
+ENVV=(SHELL=/bin/bash)
+raw_case seq20.txt -l 10 --filter='echo "$0" > $FILE' in.txt
+raw_case seq20.txt -l 10 --filter='nosuchcommand' in.txt
+ENVV=(SHELL=/bin/sh)
+raw_case seq20.txt -l 10 --filter='echo "$0" > $FILE' in.txt
+ENVV=(-u SHELL)
+raw_case seq20.txt -l 10 --filter='echo "$0" > $FILE' in.txt
+# A shell that cannot be run is reported by the child upstream forks -- which
+# then exits 1, and the parent reports that. An empty SHELL is used rather than
+# replaced, and a name with no slash is not looked up on PATH: `execl` does
+# neither, so `SHELL=sh` means `./sh`.
+ENVV=(SHELL=/nonexistent/sh)
+raw_case seq20.txt -l 10 --filter='cat > $FILE' in.txt
+ENVV=(SHELL=)
+raw_case seq20.txt -l 10 --filter='cat > $FILE' in.txt
+ENVV=(SHELL=sh)
+raw_case seq20.txt -l 10 --filter='cat > $FILE' in.txt
+ENVV=()
+
+# A command killed by a signal is reported by gnulib's name for it, and the run
+# exits 128 plus its number. 36 is RTMIN+2 under glibc, whose real-time signals
+# start at 34. SIGPIPE is the exception: the command's own reader left first,
+# which is not this run's failure, and the run goes on.
+raw_case seq20.txt -l 10 --filter='kill -TERM $$' in.txt
+raw_case seq20.txt -l 10 --filter='kill -KILL $$' in.txt
+raw_case seq20.txt -l 10 --filter='kill -USR1 $$' in.txt
+raw_case seq20.txt -l 10 --filter='kill -36 $$' in.txt
+raw_case seq20.txt -l 10 --filter='kill -PIPE $$' in.txt
+
+# A command that stops reading early: the write that finds its pipe closed is
+# not an error (upstream's `ignorable`), and the command's status decides.
+raw_case big.txt -b 2M --filter='head -c 1 > $FILE' in.txt
+raw_case big.txt -b 2M --filter='head -c 1 > $FILE; exit 4' in.txt
+
+# The disposition a command is handed is the one split was started with: the
+# default restored only if it was the default (upstream's `default_SIGPIPE`).
+# `yes` into a closed pipe dies of the signal quietly under the default, and
+# under an inherited "ignore" sees EPIPE and says `Broken pipe`.
+raw_case seq20.txt -l 10 --filter='yes | head -c 1 > $FILE' in.txt
+IGNORE_PIPE=1
+raw_case seq20.txt -l 10 --filter='yes | head -c 1 > $FILE' in.txt
+IGNORE_PIPE=
+
+# `--verbose` names the piece with `quotef` -- bare unless it needs quoting --
+# and the line waits in stdio's buffer while the command writes to the same
+# standard output directly, so it arrives after everything the commands wrote.
+raw_case seq20.txt -l 5 --verbose --filter=cat in.txt
+raw_case seq20.txt -l 10 --verbose --filter='cat > "$FILE"' in.txt 'p q'
+raw_case seq20.txt -l 10 --filter='exit 3' in.txt 'p q'
+
+# --- an output that is the input ----------------------------------------------
+
+# Refused before it is truncated: the fourteenth name `-a 1` makes from `i`,
+# with `.txt` after it, is `in.txt` -- the file being split. The thirteen before
+# it are made, and the announcement of the fourteenth is still printed.
+raw_case seq20.txt -l 1 -a 1 --additional-suffix=.txt in.txt i
+raw_case seq20.txt -l 1 -a 1 --additional-suffix=.txt --verbose in.txt i
+
+# --- an input that cannot be read ---------------------------------------------
+
+# A directory opens and then fails to read: `.: Is a directory`, bare, except
+# in the two chunk modes, which read first to learn the size and say so.
+raw_case - -l 5 .
+raw_case - -b 5 .
+raw_case - -n 2 .
+raw_case - -n l/2 .
+raw_case - -n r/2 .
+compare_argv - full . -l 5 -
+report "split -l 5 - < ."
+
+# --- standard output that cannot be written -----------------------------------
+
+# `-n K/N` writes the byte piece straight to descriptor 1 and names it `-`;
+# the line and round-robin modes, and everything printed through stdio, say
+# `write error` -- the round-robin one only at the final flush, and that is
+# not visible in what is compared here.
+TO_FULL=1
+raw_case seq20.txt -n 1/2 in.txt
+raw_case seq20.txt -n l/1/2 in.txt
+raw_case seq20.txt -n r/1/2 in.txt
+raw_case seq20.txt -n r/1/2 -u in.txt
+raw_case seq20.txt --verbose -l 10 in.txt
+raw_case seq20.txt --help
+TO_FULL=
 
 # --- not implemented ----------------------------------------------------------
 

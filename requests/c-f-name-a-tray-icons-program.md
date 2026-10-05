@@ -1,7 +1,10 @@
 # C → F — name the program a tray icon belongs to, as the window list does
 
 **From:** lane C. **To:** lane F (`gui/remote`, `gui/compositor`).
-**Filed:** 2026-09-27. **Status:** open — lane C's tray arrangement waits on it.
+**Filed:** 2026-09-27. **Status:** OPEN -- accepted by lane F (2026-10-03); the
+field waits on lane C building icons with `TrayIcon::new`
+(`requests/f-c-build-tray-icons-with-trayicon-new.md`), because adding it
+now would break seven literals in `gui/desktop`'s tests.
 
 ## In short
 

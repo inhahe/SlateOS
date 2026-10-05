@@ -30,9 +30,14 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text::{self, TextCursor};
+use guitk::textedit;
 use guitk::textfind;
+use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::path::{Path, PathBuf};
@@ -287,6 +292,12 @@ impl ThemeColors {
 // ============================================================================
 
 const WINDOW_WIDTH: f32 = 900.0;
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 14.0;
+/// How far the search box's text sits in from its left edge.
+const SEARCH_TEXT_INSET: f32 = 8.0;
+/// The most characters the search box holds.
+const SEARCH_CAPACITY: usize = 256;
 const WINDOW_HEIGHT: f32 = 700.0;
 /// A window narrower or shorter than this lays out a page one character
 /// wide and one line tall. The compositor is not asked to forbid the size;
@@ -1337,6 +1348,18 @@ pub struct EbookApp {
     pub search_query: String,
     pub search_active: bool,
     pub search_matches: Vec<SearchMatch>,
+    /// The query `search_matches` were found for: a query that has not been
+    /// searched since it was typed is not yet "found nothing".
+    searched: Option<String>,
+    /// The search box's caret and selection, laid over `search_query`, which
+    /// stays the truth: reloaded whenever the query changes under it.
+    search_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
+    search_clipboard: String,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
     pub current_match_idx: Option<usize>,
 
     // TOC / bookmark list selection
@@ -1464,6 +1487,10 @@ impl EbookApp {
             search_query: String::new(),
             search_active: false,
             search_matches: Vec::new(),
+            searched: None,
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             current_match_idx: None,
             list_selection: 0,
             window_width: WINDOW_WIDTH,
@@ -1764,6 +1791,23 @@ impl EbookApp {
         }
     }
 
+    /// Read the theme again after the desktop said `ebook.yaml` changed --
+    /// chosen in another window, or a hand edit (§1418, §1434). A reader that
+    /// keeps nothing reads nothing either, as at startup; a theme this does
+    /// not know is said, as at startup. Whether anything changed.
+    fn reread_theme(&mut self) -> bool {
+        if !self.keeps_settings {
+            return false;
+        }
+        let (theme, problem) = stored_theme(&settingsfile::load(CONFIG_NAME));
+        let mut changed = std::mem::replace(&mut self.theme, theme) != theme;
+        if let Some(problem) = problem {
+            changed |= self.status != problem;
+            self.status = problem;
+        }
+        changed
+    }
+
     /// Get current theme colors.
     pub fn theme_colors(&self) -> ThemeColors {
         ThemeColors::from_kind(self.theme, &self.palette)
@@ -1778,7 +1822,9 @@ impl EbookApp {
         self.search_active = true;
         self.search_query.clear();
         self.search_matches.clear();
+        self.searched = None;
         self.current_match_idx = None;
+        self.search_editor.set_text("");
     }
 
     /// Close the search bar.
@@ -1790,6 +1836,7 @@ impl EbookApp {
     pub fn execute_search(&mut self) {
         if let Some(book) = self.library.get(self.selected_book) {
             self.search_matches = find_all_matches(&book.text, &self.search_query);
+            self.searched = Some(self.search_query.clone());
             if self.search_matches.is_empty() {
                 self.current_match_idx = None;
             } else {
@@ -2092,17 +2139,23 @@ impl EbookApp {
             return false;
         }
 
+        // Every key but a Ctrl chord and what the search types is taken
+        // plain: a chord with Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key -- Alt+Y answered "remove
+        // this book?" with yes, and Alt+Right turned the page.
+        let plain = textline::is_plain(event.modifiers);
+
         // Above the view dispatch, so the card works from all five and closes
         // from all five. `F1` alone: `?` is Shift and the slash key, and the
         // slash arm below opens the search without looking at Shift.
-        if event.key == Key::F1 {
+        if event.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return true;
         }
         if self.show_help {
             // Modal. Letting keys through would mean turning pages the reader
             // cannot see.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return true;
@@ -2111,6 +2164,7 @@ impl EbookApp {
             // Modal too: the question is about one book, and a key that moved
             // the selection would leave it asking about another.
             match event.key {
+                _ if !plain => {}
                 Key::Enter | Key::Y => {
                     self.confirm_remove = None;
                     self.remove_book(index);
@@ -2120,9 +2174,31 @@ impl EbookApp {
             }
             return true;
         }
-        if event.key == Key::O && event.modifiers.ctrl {
-            self.picker.open_to_read();
-            return true;
+        // The search box, while it is open, takes the keys it answers --
+        // Ctrl+A, C, X and V among them -- before the window's chords.
+        if self.view == AppView::Reading
+            && self.search_active
+            && let Some(taken) = self.search_box_key(event)
+        {
+            return taken;
+        }
+        // The two Ctrl chords, as Ctrl chords: AltGr arrives as Ctrl+Alt and
+        // types -- AltGr+O is a Polish `ó`, and opened a file.
+        if textline::is_ctrl_chord(event.modifiers) {
+            return match event.key {
+                Key::O => {
+                    self.picker.open_to_read();
+                    true
+                }
+                Key::B if self.view == AppView::Reading && !self.search_active => {
+                    self.show_bookmark_list();
+                    true
+                }
+                _ => false,
+            };
+        }
+        if !plain {
+            return false;
         }
 
         match self.view {
@@ -2187,12 +2263,9 @@ impl EbookApp {
                 self.go_to_last_page();
                 true
             }
+            // Ctrl+B, the list of bookmarks, is answered with the chords.
             Key::B => {
-                if event.modifiers.ctrl {
-                    self.show_bookmark_list();
-                } else {
-                    self.toggle_bookmark();
-                }
+                self.toggle_bookmark();
                 true
             }
             Key::T => {
@@ -2232,6 +2305,62 @@ impl EbookApp {
         }
     }
 
+    /// A key while the search box is open: Escape and Enter, plain, close it
+    /// and search; every key a field answers is the box's editor's
+    /// (`textline::apply_key`) -- the caret keys, Backspace and Delete,
+    /// Ctrl+A, C, X and V, and typing, which knows a command from AltGr:
+    /// Alt+X typed an `x`, and AltGr+O is a Polish `ó`. `None` for a key the
+    /// box does not answer, which goes on to the window. The box typed onto
+    /// the end of the query, and Backspace from the end was its only edit.
+    fn search_box_key(&mut self, event: &KeyEvent) -> Option<bool> {
+        if textline::is_plain(event.modifiers) && matches!(event.key, Key::Escape | Key::Enter) {
+            return Some(self.handle_search_key(event));
+        }
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            event,
+            SEARCH_CAPACITY,
+            &self.search_clipboard,
+            SEARCH_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.search_clipboard = copied;
+        }
+        if self.search_editor.text() != self.search_query {
+            self.search_query = self.search_editor.text().to_owned();
+        }
+        edit.handled.then_some(true)
+    }
+
+    /// Where the search box is drawn: along the foot of the page, above the
+    /// status bar, while the search is open.
+    pub fn search_box_rect(&self) -> Option<Rect> {
+        self.search_active.then(|| {
+            Rect::new(
+                CONTENT_PADDING,
+                self.window_height - STATUS_BAR_HEIGHT - 36.0,
+                self.window_width - 2.0 * CONTENT_PADDING,
+                30.0,
+            )
+        })
+    }
+
+    /// The palette the search box is drawn in: the desktop's, with the
+    /// reading theme's colours in the roles a field paints with -- the well,
+    /// the edge, the mark and the red -- so that a sepia page has a sepia
+    /// box, in the shape the theme gives a field.
+    fn field_palette(&self, tc: &ThemeColors) -> Palette {
+        let mut p = self.palette;
+        p.crust = tc.background;
+        p.surface1 = tc.separator;
+        p.accent = tc.accent;
+        p.red = tc.error;
+        p
+    }
+
     fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
         match event.key {
             Key::Escape => {
@@ -2242,18 +2371,8 @@ impl EbookApp {
                 self.execute_search();
                 true
             }
-            Key::Backspace => {
-                self.search_query.pop();
-                true
-            }
-            _ => {
-                // If the key produces a character, add it to the query.
-                if event.types_text() {
-                    self.search_query.extend(event.typed());
-                    return true;
-                }
-                false
-            }
+            // Every other key is the box's editor's (`search_box_key`).
+            _ => false,
         }
     }
 
@@ -2474,6 +2593,16 @@ impl EbookApp {
 
     /// Handle a mouse click. Returns true if consumed.
     pub fn handle_mouse_event(&mut self, event: &MouseEvent) -> bool {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than opening the
+            // book or turning the page drawn under it.
+            if matches!(event.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return true;
+            }
+            return false;
+        }
         if let MouseEventKind::Press(MouseButton::Left) = &event.kind {
             if self.confirm_remove.is_some() {
                 return self.click_confirm(event.x, event.y);
@@ -2994,36 +3123,26 @@ impl EbookApp {
         }
 
         // -- Search bar --
-        if self.search_active {
-            let bar_y = self.window_height - STATUS_BAR_HEIGHT - 36.0;
-            cmds.push(RenderCommand::FillRect {
-                x: CONTENT_PADDING,
-                y: bar_y,
-                width: self.window_width - 2.0 * CONTENT_PADDING,
-                height: 30.0,
-                color: tc.surface,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
-            cmds.push(RenderCommand::StrokeRect {
-                x: CONTENT_PADDING,
-                y: bar_y,
-                width: self.window_width - 2.0 * CONTENT_PADDING,
-                height: 30.0,
-                color: tc.accent,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
-            let search_display = format!("/{}", self.search_query);
-            cmds.push(RenderCommand::Text {
-                x: CONTENT_PADDING + 8.0,
-                y: bar_y + 8.0,
-                text: search_display,
-                color: tc.text,
-                font_size: 14.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(self.window_width - 2.0 * CONTENT_PADDING - 120.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if let Some(rect) = self.search_box_rect() {
+            let bar_y = rect.y;
+            // The toolkit's field, in the reading theme's colours; red once
+            // a search of exactly what it holds has found nothing.
+            let state = field::State {
+                hovered: false,
+                focused: !self.show_help,
+                disabled: false,
+                invalid: !self.search_query.is_empty()
+                    && self.search_matches.is_empty()
+                    && self.searched.as_deref() == Some(self.search_query.as_str()),
+            };
+            field::draw(
+                cmds,
+                &self.field_palette(tc),
+                rect,
+                state,
+                self.focus_ring_width,
+            );
+            self.render_search_text(cmds, tc, rect, state.focused);
 
             // Match count
             if !self.search_matches.is_empty() {
@@ -3046,6 +3165,70 @@ impl EbookApp {
 
         // -- Status bar with progress --
         self.render_status_bar(tc, cmds);
+    }
+
+    /// The search box's query -- or what the box is for, faint, while it is
+    /// empty -- with the caret and the selection, in the reading theme's
+    /// colours. Room is left at the right for the count of matches.
+    fn render_search_text(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        tc: &ThemeColors,
+        rect: Rect,
+        focused: bool,
+    ) {
+        let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + SEARCH_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - SEARCH_TEXT_INSET - 120.0).max(0.0),
+        );
+        let mut tree = guitk::render::RenderTree::new();
+        if self.search_query.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: String::from("Search the book"),
+                color: tc.text_dim,
+                font_size: SEARCH_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(&mut tree, x, y, line, tc.text, textedit::CARET_WIDTH);
+            }
+        } else {
+            let synced = self.search_editor.text() == self.search_query;
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: if synced {
+                        self.search_editor.cursor()
+                    } else {
+                        TextCursor::from(self.search_query.len())
+                    },
+                    selection_anchor: if synced {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused,
+                    x,
+                    y,
+                    width,
+                    line_height: line,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: tc.text,
+                    selection_bg: tc.accent,
+                    selection_fg: tc.background,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        cmds.extend(tree.commands);
     }
 
     fn render_status_bar(&self, tc: &ThemeColors, cmds: &mut Vec<RenderCommand>) {
@@ -3352,6 +3535,10 @@ impl Default for EbookApp {
 // ============================================================================
 
 impl App for EbookApp {
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
     }
@@ -3446,6 +3633,16 @@ impl App for EbookApp {
                     Response::Idle
                 }
             }
+            // The theme chosen in another window, and the desktop says so:
+            // this window follows. Read at startup only, it kept the theme it
+            // opened with until it was opened again.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                if self.reread_theme() {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
             _ => Response::Idle,
         }
     }
@@ -3527,6 +3724,82 @@ mod tests {
 
     fn make_app() -> EbookApp {
         EbookApp::with_sample_library()
+    }
+
+    /// **A chord is neither a reader's key nor typing, and AltGr types**:
+    /// Alt+Y answered "remove this book?" with yes, Alt+Right turned the
+    /// page and Alt+B bookmarked it, each chord arriving carrying its key;
+    /// AltGr+O -- a Polish `ó` -- opened a file rather than typing; and the
+    /// search took Alt+X as an `x` and Ctrl+B as a `b`.
+    #[test]
+    fn a_chord_is_neither_a_readers_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chords = [Modifiers::alt(), Modifiers::super_key(), altgr];
+        let typed = |key: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = make_app();
+        let books = app.library.len();
+        for m in chords {
+            for k in [Key::Delete, Key::Enter, Key::Down, Key::F1] {
+                assert!(
+                    !app.handle_key_event(&make_key_with_mod(k, m)),
+                    "{m:?} {k:?} was taken in the library"
+                );
+            }
+        }
+        assert_eq!(app.view, AppView::Library, "a chord opened a book");
+        assert!(
+            app.confirm_remove.is_none(),
+            "a chord asked to remove a book"
+        );
+
+        // Asked by a plain Delete, the question takes a plain answer only.
+        app.handle_key_event(&make_key(Key::Delete));
+        assert!(app.confirm_remove.is_some(), "control: Delete asks");
+        for m in chords {
+            app.handle_key_event(&make_key_with_mod(Key::Y, m));
+            app.handle_key_event(&make_key_with_mod(Key::Enter, m));
+        }
+        assert_eq!(app.library.len(), books, "a chord removed a book");
+        assert!(
+            app.confirm_remove.is_some(),
+            "a chord answered the question"
+        );
+        app.handle_key_event(&make_key(Key::Escape));
+
+        // Reading: chords turn no page and bookmark nothing.
+        app.handle_key_event(&make_key(Key::Enter));
+        assert_eq!(app.view, AppView::Reading, "control: Enter opens the book");
+        let page = app.current_page();
+        for m in chords {
+            for k in [Key::Right, Key::End, Key::B, Key::S, Key::T, Key::Escape] {
+                assert!(
+                    !app.handle_key_event(&make_key_with_mod(k, m)),
+                    "{m:?} {k:?} was taken while reading"
+                );
+            }
+        }
+        assert_eq!(app.current_page(), page, "a chord turned the page");
+        assert!(app.bookmarks().is_empty(), "a chord bookmarked the page");
+
+        // The search types what a key typed.
+        app.handle_key_event(&make_key(Key::Slash));
+        assert!(app.search_active, "control: / searches");
+        app.handle_key_event(&typed(Key::X, "x", Modifiers::alt()));
+        app.handle_key_event(&typed(Key::B, "b", Modifiers::ctrl()));
+        app.handle_key_event(&typed(Key::O, "ó", altgr));
+        assert_eq!(
+            app.search_query, "ó",
+            "the search typed a command or lost AltGr's ó"
+        );
+        assert!(!app.picker.is_open(), "AltGr+O opened a file");
     }
 
     fn make_key(key: Key) -> KeyEvent {
@@ -4091,6 +4364,109 @@ mod tests {
         app.handle_key_event(&make_key_with_text(Key::H, 'h'));
         app.handle_key_event(&make_key_with_text(Key::I, 'i'));
         assert_eq!(app.search_query, "hi");
+    }
+
+    /// **The search box is the toolkit's field, in the reading theme's
+    /// colours, and edits like one**: the theme's mark at the user's width;
+    /// a sepia page's box is sepia; the caret keys, Backspace and Delete at
+    /// the caret, Ctrl+A, X and V; red once a search of exactly what it
+    /// holds has found nothing -- not while it is still being typed. It was
+    /// a bar reading `/query`, typed onto the end of.
+    #[test]
+    fn the_search_box_is_the_toolkits_field_in_the_reading_theme() {
+        let mut app = make_app();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.open_book(0);
+        app.handle_key_event(&make_key(Key::Slash));
+        assert!(app.search_active, "control: / opens the search");
+        let rect = app.search_box_rect().expect("the search shows no box");
+        let draws = |app: &EbookApp, state: field::State| {
+            let fp = app.field_palette(&app.theme_colors());
+            let mut want: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut want, &fp, rect, state, app.focus_ring_width);
+            let cmds = app.render_commands();
+            cmds.windows(want.len()).any(|w| w == want.as_slice())
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws(&app, focused),
+            "the search box with the keyboard has no mark"
+        );
+
+        for (k, c) in [(Key::O, 'o'), (Key::R, 'r'), (Key::E, 'e'), (Key::M, 'm')] {
+            app.handle_key_event(&make_key_with_text(k, c));
+        }
+        app.handle_key_event(&make_key(Key::Home));
+        app.handle_key_event(&make_key(Key::Delete));
+        assert_eq!(
+            app.search_query, "rem",
+            "Home and Delete did not edit the start"
+        );
+        let ctrl = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        };
+        app.handle_key_event(&ctrl(Key::A));
+        app.handle_key_event(&ctrl(Key::X));
+        assert_eq!(app.search_query, "", "Ctrl+A and Ctrl+X did not cut");
+        app.handle_key_event(&ctrl(Key::V));
+        app.handle_key_event(&ctrl(Key::V));
+        assert_eq!(
+            app.search_query, "remrem",
+            "Ctrl+V did not paste what was cut"
+        );
+
+        // Not red while it is typed; red once it has been searched for.
+        for c in "zzqq".chars() {
+            app.handle_key_event(&make_key_with_text(Key::Unknown(0), c));
+        }
+        assert!(draws(&app, focused), "a query not yet searched for is red");
+        app.handle_key_event(&make_key(Key::Enter));
+        if app.search_active {
+            let red = field::State {
+                invalid: true,
+                ..focused
+            };
+            assert!(draws(&app, red), "a search that found nothing is not red");
+        } else {
+            assert!(
+                app.search_matches.is_empty(),
+                "control: the search finds nothing"
+            );
+        }
+
+        // A sepia page has a sepia box.
+        app.open_search();
+        app.theme = ThemeKind::Sepia;
+        let well = ThemeColors::sepia().background;
+        assert!(
+            app.render_commands().iter().any(|c| matches!(c,
+                RenderCommand::FillRect { x, y, color, .. }
+                    if (*x - rect.x).abs() < 0.01 && (*y - rect.y).abs() < 0.01 && *color == well)),
+            "the box on a sepia page is not sepia"
+        );
+        assert!(
+            draws(&app, focused),
+            "the sepia box is not the toolkit's field"
+        );
     }
 
     #[test]
@@ -4668,6 +5044,46 @@ mod tests {
     // ================================================================
     // Mouse event tests
     // ================================================================
+
+    #[test]
+    fn test_mouse_click_library_under_the_card() {
+        // **A press while the card is up puts it away and does nothing
+        // else.** It used to go straight through the card and open the book
+        // drawn under it. The control is the same press with the card down.
+        let mut app = make_app();
+        let f1 = KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        let press = |button| MouseEvent {
+            x: 100.0,
+            y: TOOLBAR_HEIGHT + 10.0,
+            kind: MouseEventKind::Press(button),
+        };
+        app.handle_key_event(&f1);
+        assert!(app.show_help);
+        assert!(app.handle_mouse_event(&press(MouseButton::Left)));
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.view,
+            AppView::Library,
+            "the press went through the card and opened the book"
+        );
+        // Any button: the right one does nothing to a book, but it is still
+        // a press on the card.
+        app.handle_key_event(&f1);
+        app.handle_mouse_event(&press(MouseButton::Right));
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        app.handle_mouse_event(&press(MouseButton::Left));
+        assert_eq!(
+            app.view,
+            AppView::Reading,
+            "control: the press does nothing even with the card down"
+        );
+    }
 
     #[test]
     fn test_mouse_click_library() {
@@ -6180,6 +6596,79 @@ mod tests {
                 !dir.join("slateos").join("ebook.yaml").exists(),
                 "a reader that keeps nothing wrote its theme"
             );
+        });
+    }
+
+    /// What the desktop sends every window when `name.yaml` changed.
+    fn announce(name: &[u8]) -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(name).expect("a settings name"),
+            ),
+        }
+    }
+
+    /// **The theme chosen in one window reaches the others**, when the
+    /// desktop says `ebook.yaml` changed (§1434): read at startup only, the
+    /// others kept the theme they opened with. Another program's announcement
+    /// is not this one's; a window's own choice announced back changes
+    /// nothing; a theme written by hand that this does not know is said; a
+    /// deleted file gives the desktop's theme.
+    #[test]
+    fn the_theme_chosen_in_one_window_reaches_the_others() {
+        settingsfile::testing::with_scratch_config("ebook-theme-reread", |dir| {
+            let mut first = EbookApp::new();
+            let mut second = EbookApp::new();
+            first.toggle_theme();
+            assert_eq!(first.theme, ThemeKind::Sepia);
+
+            assert!(matches!(
+                second.on_event(&announce(b"notes")),
+                Response::Idle
+            ));
+            assert_eq!(second.theme, ThemeKind::System, "another file was read");
+            assert!(matches!(
+                second.on_event(&announce(b"ebook")),
+                Response::Redraw
+            ));
+            assert_eq!(second.theme, ThemeKind::Sepia, "the theme did not reach it");
+            assert!(
+                matches!(first.on_event(&announce(b"ebook")), Response::Idle),
+                "a window's own choice, announced back, changed it"
+            );
+
+            let file = dir.join("slateos").join("ebook.yaml");
+            std::fs::write(&file, "theme: purple\n").expect("write the file");
+            assert!(matches!(
+                second.on_event(&announce(b"ebook")),
+                Response::Redraw
+            ));
+            assert_eq!(second.theme, ThemeKind::System);
+            assert!(second.status.contains("purple"), "{:?}", second.status);
+
+            std::fs::remove_file(&file).expect("delete the file");
+            first.on_event(&announce(b"ebook"));
+            assert_eq!(
+                first.theme,
+                ThemeKind::System,
+                "a deleted file kept its theme"
+            );
+        });
+    }
+
+    /// A reader a test builds keeps no theme, so it follows none either: the
+    /// developer's own `ebook.yaml` is not what a test reads.
+    #[test]
+    fn a_reader_a_test_builds_follows_no_theme() {
+        settingsfile::testing::with_scratch_config("ebook-theme-reread-quiet", |_| {
+            let mut kept = EbookApp::new();
+            kept.toggle_theme();
+            let mut quiet = EbookApp::with_shelf(None);
+            assert!(matches!(
+                quiet.on_event(&announce(b"ebook")),
+                Response::Idle
+            ));
+            assert_eq!(quiet.theme, ThemeKind::System);
         });
     }
 

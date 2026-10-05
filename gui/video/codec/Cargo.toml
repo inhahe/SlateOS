@@ -1,0 +1,32 @@
+[package]
+name = "videocodec"
+version = "0.1.0"
+edition = "2024"
+description = "Video files for SlateOS programs: a file's pictures in order, each with its time, decoded and converted to 0xAARRGGBB pixels by the stream's own colour."
+publish = false
+
+[dependencies]
+# The containers: Matroska (and WebM), MP4, and Ogg.
+matroska = { path = "../matroska" }
+mp4 = { path = "../mp4" }
+ogg = { path = "../ogg" }
+# The codecs: VP8 and VP9, libvpx's decoders ported; AV1, rav1d vendored.
+vp8 = { path = "../vp8" }
+vp9 = { path = "../vp9" }
+rav1d = { path = "../rav1d" }
+# YUV to pixels, exactly as an AVIF still of the same picture is converted.
+yuv = { path = "../yuv" }
+# The sound: Opus, libopus's decoder ported; Vorbis, Tremor ported; FLAC,
+# libFLAC ported (and its reader of native .flac files); MPEG audio,
+# minimp3 ported (and a reader of .mp3 files held to FFmpeg's).
+opus = { path = "../opus" }
+vorbis = { path = "../vorbis" }
+flac = { path = "../flac" }
+mp3 = { path = "../mp3" }
+
+[dev-dependencies]
+# The fixtures' answers are MD5s of each frame's pixels.
+md5 = { path = "../../../md5" }
+
+[lints]
+workspace = true

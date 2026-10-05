@@ -88,6 +88,11 @@
 //! only thing it means anything to: it selects which of the two joined glyphs
 //! moves. It is not a general statement about the run's direction and must not
 //! be treated as one.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's
+//! `src/hb-ot-layout-gsubgpos.hh`, copyright © 2007, 2008, 2009, 2010 Red Hat,
+//! Inc. and © 2010, 2012 Google, Inc. Used under HarfBuzz's licence: see
+//! `gui/font/licenses/harfbuzz-COPYING`.
 
 use crate::gsub::SubGlyph;
 use crate::norm::Ignorable;

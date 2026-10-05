@@ -34,7 +34,7 @@
 
 use std::process::ExitCode;
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, HistoryKey, help};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -45,6 +45,7 @@ use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use statehistory::StateHistory;
 
 // ── The tiles ───────────────────────────────────────────────────────
 //
@@ -135,9 +136,33 @@ fn legend_label(codes: &str, kind: TileKind) -> String {
 /// The note under the legend explaining the asterisks.
 const LEGEND_NOTE: &str = "* match any in group";
 
-/// The key hints along the bottom of the window.
-const HELP_TEXT: &str =
-    "N=New  Z=Undo  H=Hint  S=Shuffle  Arrows=Navigate  Enter/Space=Select  Esc=Deselect";
+/// The key hints along the bottom of the window. F1 first: the line is cut
+/// with an ellipsis in a narrow window, and the key to the rest is the one
+/// that must survive.
+const HELP_TEXT: &str = "F1=All keys  N=New  Z=Undo  H=Hint  S=Shuffle  Arrows=Navigate  Enter/Space=Select  Esc=Deselect";
+
+/// Every key the game answers, on the list F1 raises.
+///
+/// The game had no list, and its hint line had room for neither the
+/// history's keys -- Ctrl+Shift+Z and Alt+Z, which the operator's answer to
+/// C-Q24 added (`design-decisions.md` §1416) -- nor, in most windows, the
+/// end of itself. **Each row is a key the game answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move between the free tiles"),
+    ("Enter / Space", "Choose the tile, or take the pair"),
+    ("Esc", "Let go of the tile, and hide the hint"),
+    ("H", "Show a pair that can be taken"),
+    ("S", "Shuffle the tiles still in play"),
+    ("Z / Ctrl+Z", "Take back a pair or a shuffle"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The board before / after this one, on any branch",
+    ),
+    ("N", "Deal a new game"),
+    ("F1 / ?", "This list"),
+];
 
 // ── Layout ──────────────────────────────────────────────────────────
 
@@ -718,12 +743,26 @@ fn turtle_layout() -> Vec<TilePos> {
 
 // ── Game state ──────────────────────────────────────────────────────
 
-/// Undo record: a pair of tiles that was removed.
+/// The tiles as they lay at one moment, for the history: every tile, where
+/// it is, what it shows and whether it has been taken, and the move count.
+///
+/// Whole tiles and not the pair a move took, as the stack kept: a shuffle
+/// changes what the tiles still in play show, the pair an undo put back
+/// among them, and a redo of that pair's removal would then take two tiles
+/// that may no longer match. A shuffle is an edit of its own now, undone
+/// like any other.
 #[derive(Clone, Debug)]
-struct UndoEntry {
-    tile_a: usize,
-    tile_b: usize,
+struct Snapshot {
+    tiles: Vec<PlacedTile>,
+    moves: u32,
 }
+
+/// How many moves the history keeps: a game is 72 pairs and a few
+/// shuffles, and the history keeps branches too.
+const HISTORY_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(1_000) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 /// Overall game status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -886,16 +925,6 @@ impl Board {
         }
     }
 
-    /// Restore a pair of tiles (undo).
-    fn restore_pair(&mut self, a: usize, b: usize) {
-        if let Some(tile) = self.tiles.get_mut(a) {
-            tile.removed = false;
-        }
-        if let Some(tile) = self.tiles.get_mut(b) {
-            tile.removed = false;
-        }
-    }
-
     /// Shuffle the remaining (non-removed) tiles' kinds while keeping
     /// their positions fixed.
     fn shuffle_remaining(&mut self, rng: &mut SeededRng) {
@@ -969,7 +998,10 @@ struct Mahjong {
     seed: u64,
     selected: Option<usize>,
     cursor: Cursor,
-    undo_stack: Vec<UndoEntry>,
+    /// Every board this game has had, as a tree (C-Q24,
+    /// `design-decisions.md` §1416): a move made after an undo keeps the
+    /// moves undone as a branch, reached with Alt+Z.
+    history: StateHistory<Snapshot>,
     moves: u32,
     status: GameStatus,
     hint: Option<(usize, usize)>,
@@ -987,6 +1019,9 @@ struct Mahjong {
     /// the defaults; the framework calls `App::theme_changed` before the
     /// first frame. A new game deals into this same state, so they carry over.
     palette: Palette,
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// pair taken under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl Mahjong {
@@ -1015,7 +1050,7 @@ impl Mahjong {
             cursor: Cursor {
                 tile_idx: first_free,
             },
-            undo_stack: Vec::new(),
+            history: StateHistory::new(HISTORY_LIMIT),
             moves: 0,
             status: GameStatus::Playing,
             hint: None,
@@ -1024,6 +1059,7 @@ impl Mahjong {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            show_help: false,
         };
         app.update_status();
         app
@@ -1048,7 +1084,7 @@ impl Mahjong {
         self.rng = rng;
         self.selected = None;
         self.cursor.tile_idx = self.board.free_tiles().first().copied();
-        self.undo_stack.clear();
+        self.history.clear();
         self.moves = 0;
         self.status = GameStatus::Playing;
         self.hint = None;
@@ -1101,11 +1137,9 @@ impl Mahjong {
                     _ => false,
                 } {
                     // Match found!
+                    let before = self.snapshot();
                     self.board.remove_pair(prev, idx);
-                    self.undo_stack.push(UndoEntry {
-                        tile_a: prev,
-                        tile_b: idx,
-                    });
+                    self.history.begin(before);
                     self.selected = None;
                     self.moves = self.moves.saturating_add(1);
                     self.show_hint = false;
@@ -1127,22 +1161,75 @@ impl Mahjong {
         true
     }
 
-    /// Undo the last move. Returns whether the screen changed.
+    /// Undo the last move -- a pair taken, or a shuffle. Returns whether the
+    /// screen changed.
     fn undo(&mut self) -> bool {
-        if let Some(entry) = self.undo_stack.pop() {
-            self.board.restore_pair(entry.tile_a, entry.tile_b);
-            self.moves = self.moves.saturating_sub(1);
-            self.selected = None;
-            self.show_hint = false;
-            self.hint = None;
-            self.status = GameStatus::Playing;
-            self.message = Some("Undo!");
-            true
-        } else {
-            let changed = self.message != Some("Nothing to undo");
-            self.message = Some("Nothing to undo");
-            changed
+        let now = self.snapshot();
+        let then = self.history.undo(now);
+        self.put_back(then, "Undo!", "Nothing to undo")
+    }
+
+    /// Make the move last undone again, on the branch the game is on --
+    /// Ctrl+Y or Ctrl+Shift+Z.
+    fn redo(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.redo(now);
+        self.put_back(then, "Redo!", "Nothing to redo")
+    }
+
+    /// The board as it lay just before this, on whichever branch -- Alt+Z:
+    /// the way back to moves undone and then played over.
+    fn earlier(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.earlier(now);
+        self.put_back(then, "Back a step", "Nothing earlier")
+    }
+
+    /// The board as it lay just after this -- Alt+Shift+Z.
+    fn later(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.later(now);
+        self.put_back(then, "On a step", "Nothing later")
+    }
+
+    /// The board as it stands, for the history.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            tiles: self.board.tiles.clone(),
+            moves: self.moves,
         }
+    }
+
+    /// Put the board the history handed back in place and say `done`, or
+    /// say `nothing` when it handed none back. Returns whether the screen
+    /// changed: saying `nothing` again changes nothing.
+    fn put_back(
+        &mut self,
+        then: Option<Snapshot>,
+        done: &'static str,
+        nothing: &'static str,
+    ) -> bool {
+        let Some(s) = then else {
+            let changed = self.message != Some(nothing);
+            self.message = Some(nothing);
+            return changed;
+        };
+        self.board.tiles = s.tiles;
+        self.moves = s.moves;
+        self.selected = None;
+        self.show_hint = false;
+        self.hint = None;
+        self.message = Some(done);
+        // Won or lost is read off the tiles, as a move reads it.
+        self.status = GameStatus::Playing;
+        self.update_status();
+        // The cursor off a tile that is gone, as a move moves it.
+        if let Some(ci) = self.cursor.tile_idx
+            && self.board.tiles.get(ci).is_none_or(|t| t.removed)
+        {
+            self.cursor.tile_idx = self.board.free_tiles().first().copied();
+        }
+        true
     }
 
     /// Show a hint (highlight a valid pair). Returns whether anything changed.
@@ -1172,7 +1259,9 @@ impl Mahjong {
         if self.status == GameStatus::Won {
             return false;
         }
+        let before = self.snapshot();
         self.board.shuffle_remaining(&mut self.rng);
+        self.history.begin(before);
         self.selected = None;
         self.show_hint = false;
         self.hint = None;
@@ -1286,6 +1375,41 @@ impl Mahjong {
         if !event.pressed {
             return EventResult::Ignored;
         }
+        // The list of keys is modal: what raised it, Escape or Enter put it
+        // away, and nothing reaches the board under it.
+        if self.show_help {
+            if help::closes(event) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if help::raises(event) {
+            self.show_help = true;
+            return EventResult::Consumed;
+        }
+        // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
+        // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
+        if let Some(key) = HistoryKey::of(event) {
+            let changed = match key {
+                HistoryKey::Undo => self.undo(),
+                HistoryKey::Redo => self.redo(),
+                HistoryKey::Earlier => self.earlier(),
+                HistoryKey::Later => self.later(),
+            };
+            return if changed {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
+        // Any other key held with Ctrl, Alt or the Windows key is not the
+        // game's. The keys matched on the key alone: Ctrl+N dealt a new game
+        // under the window's own Ctrl+N, Ctrl+S shuffled, and AltGr+Z --
+        // which types ż, and arrives as Ctrl+Alt -- took a move back.
+        let m = event.modifiers;
+        if m.ctrl || m.alt || m.super_key {
+            return EventResult::Ignored;
+        }
 
         let changed = match event.key {
             Key::N => {
@@ -1328,6 +1452,15 @@ impl Mahjong {
     /// second copy of the geometry, kept in step with the picture by nothing
     /// but care, and wrong the moment either side was edited alone.
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // A click anywhere puts the list of keys away, and does nothing
+        // else: the tile under it is one the player cannot see.
+        if self.show_help {
+            if let MouseEventKind::Press(_) = event.kind {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         // A tile game answers the left button. Answering all three meant a
         // right-click removed a pair, which is a move the player did not make.
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
@@ -1387,6 +1520,17 @@ impl Mahjong {
         self.draw_help(&mut f, &l, &c);
 
         f.unclip();
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
+        }
         f
     }
 
@@ -1901,8 +2045,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let chrome = gamechrome::Chrome::of(&p);
             let off: Vec<_> = [chrome.band, chrome.page]
                 .into_iter()
@@ -1925,7 +2068,7 @@ mod tests {
             for (what, f) in every_look(&p) {
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -3135,15 +3278,16 @@ mod tests {
 
     #[test]
     fn undoing_a_pair_puts_both_tiles_back_where_they_were() {
-        let mut b = board_of(&[
-            (0, 0, 0, TileKind::Bamboo(1)),
-            (0, 0, 2, TileKind::Bamboo(1)),
-        ]);
-        assert_eq!(b.remaining(), 2);
-        b.remove_pair(0, 1);
-        assert_eq!(b.remaining(), 0);
-        b.restore_pair(0, 1);
-        assert_eq!(b.remaining(), 2, "undo did not restore the pair");
+        let mut g = game();
+        let before = g.board.remaining();
+        let (a, b) = take_a_pair(&mut g);
+        assert_eq!(g.board.remaining(), before - 2);
+        assert!(g.undo());
+        assert_eq!(g.board.remaining(), before, "undo did not restore the pair");
+        assert!(
+            !g.board.tiles[a].removed && !g.board.tiles[b].removed,
+            "not the pair that was taken"
+        );
     }
 
     #[test]
@@ -4048,7 +4192,301 @@ mod tests {
             "a tile is still selected after the pair went"
         );
         assert_eq!(g.moves, 1, "the move was not counted");
-        assert_eq!(g.undo_stack.len(), 1, "the move cannot be undone");
+        assert!(g.history.can_undo(), "the move cannot be undone");
+    }
+
+    // ── The history: a tree of whole boards, walked with Alt+Z (C-Q24) ──
+
+    fn held(ctrl: bool, alt: bool, shift: bool, key: Key) -> Event {
+        Event::Key(probe::press_with(
+            key,
+            Modifiers {
+                ctrl,
+                alt,
+                shift,
+                super_key: false,
+            },
+        ))
+    }
+
+    /// Take the pair the hint would show. Returns it.
+    fn take_a_pair(g: &mut Mahjong) -> (usize, usize) {
+        let (a, b) = g.board.find_hint().expect("a fresh deal has no move");
+        assert!(g.try_select(a));
+        assert!(g.try_select(b));
+        (a, b)
+    }
+
+    fn faces(g: &Mahjong) -> Vec<(TileKind, bool)> {
+        g.board.tiles.iter().map(|t| (t.kind, t.removed)).collect()
+    }
+
+    /// Games chosen so that between them every key on the list of keys has
+    /// work. A key here answers only when it changes something, so: the
+    /// cursor on every free tile in turn, for each arrow to have somewhere
+    /// to go from one of them; a tile chosen, for Escape; a pair taken, for
+    /// Ctrl+Z and Alt+Z; and one taken back, for Ctrl+Y and Alt+Shift+Z.
+    fn list_states() -> Vec<Mahjong> {
+        let mut states: Vec<Mahjong> = game()
+            .board
+            .free_tiles()
+            .into_iter()
+            .map(|idx| {
+                let mut g = game();
+                g.cursor.tile_idx = Some(idx);
+                g
+            })
+            .collect();
+        let mut took = game();
+        take_a_pair(&mut took);
+        let mut undone = game();
+        take_a_pair(&mut undone);
+        assert!(undone.undo());
+        let mut chosen = game();
+        press_key(&mut chosen, Key::Enter);
+        assert!(chosen.selected.is_some(), "Enter chose no tile");
+        states.extend([game(), took, undone, chosen]);
+        states
+    }
+
+    /// **Every key the list of keys advertises is one the game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed through the window's own
+    /// route, rather than matched against a table beside it here.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|g| handle_event(g, &Event::Key(stroke.clone())) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 18, "only {checked} keystrokes were checked");
+    }
+
+    /// Every string the window paints at its opening size, joined.
+    fn drawn_texts(g: &Mahjong) -> String {
+        g.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; and the hint line starts with how to raise it,
+    /// the part an ellipsis leaves.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut g = game();
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "up before anybody asked"
+        );
+        assert!(
+            HELP_TEXT.starts_with("F1"),
+            "the hint line does not start with F1"
+        );
+        assert_eq!(press_key(&mut g, Key::F1), EventResult::Consumed);
+        let shown = drawn_texts(&g);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        press_key(&mut g, Key::Escape);
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "Escape did not close it"
+        );
+    }
+
+    /// **While the list of keys is up, the board takes nothing**: a pair
+    /// taken under the list would be one the player cannot see. A click puts
+    /// the list away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut g = game();
+        let tile = g.cursor.tile_idx.expect("a fresh deal has a free tile");
+        press_key(&mut g, Key::F1);
+        let seen = |g: &Mahjong| (faces(g), g.moves, g.selected, g.cursor.tile_idx);
+        let before = seen(&g);
+        for key in [Key::S, Key::N, Key::H, Key::Z, Key::Right, Key::Space] {
+            assert_eq!(press_key(&mut g, key), EventResult::Consumed);
+            assert!(g.show_help, "{key:?} put the list away");
+        }
+        assert!(seen(&g) == before, "a key reached the board");
+        probe::click(&mut g, Target::Tile(tile));
+        assert!(!g.show_help, "a click did not put the list away");
+        assert!(seen(&g) == before, "the click chose a tile");
+        press_key(&mut g, Key::F1);
+        press_key(&mut g, Key::Enter);
+        assert!(!g.show_help, "Enter did not put the list away");
+        assert!(seen(&g) == before, "Enter chose a tile as it closed");
+    }
+
+    /// **A move made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every board there has been, in the order each was reached;
+    /// Alt+Shift+Z comes forward again. The new branch here is a shuffle,
+    /// which the history keeps as a move of its own.
+    #[test]
+    fn a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut g = game();
+        let start = faces(&g);
+        take_a_pair(&mut g);
+        let took = faces(&g);
+        assert!(g.undo());
+        assert_eq!(press_key(&mut g, Key::S), EventResult::Consumed);
+        let shuffled = faces(&g);
+        // `redo` answers whether the screen changed, and "Nothing to redo" is a
+        // change: the board is what says whether it redid.
+        g.redo();
+        assert_eq!(faces(&g), shuffled, "redo went onto the branch left");
+        assert_eq!(
+            handle_event(&mut g, &held(false, true, false, Key::Z)),
+            EventResult::Consumed
+        );
+        assert_eq!(faces(&g), took, "the pair undone was lost");
+        handle_event(&mut g, &held(false, true, false, Key::Z));
+        assert_eq!(faces(&g), start);
+        handle_event(&mut g, &held(false, true, true, Key::Z));
+        handle_event(&mut g, &held(false, true, true, Key::Z));
+        assert_eq!(faces(&g), shuffled);
+        // Past the newest board: nothing moves, and the message line says so.
+        handle_event(&mut g, &held(false, true, true, Key::Z));
+        assert_eq!(faces(&g), shuffled, "past the newest board");
+        assert_eq!(g.message, Some("Nothing later"));
+    }
+
+    /// **Every pair a journey arrives at having been taken was a matching
+    /// pair**, however the tiles were shuffled in between. The history kept
+    /// the pair a move took, and a shuffle after its undo changed what those
+    /// two tiles showed, so taking them again would have taken two that did
+    /// not match.
+    #[test]
+    fn a_pair_taken_again_after_a_shuffle_still_matches() {
+        let mut g = game();
+        let (a, b) = take_a_pair(&mut g);
+        assert!(g.undo());
+        press_key(&mut g, Key::S);
+        // Back to the board where the pair had been taken.
+        g.earlier();
+        let (ta, tb) = (g.board.tiles[a], g.board.tiles[b]);
+        assert!(
+            ta.removed && tb.removed,
+            "not the board the pair was taken on"
+        );
+        assert!(
+            ta.kind.matches(tb.kind),
+            "the tiles taken are not a matching pair"
+        );
+    }
+
+    /// **A win undone is lost, and redone is won again**: won or lost is
+    /// read off the tiles a redo puts back, as a move reads it.
+    #[test]
+    fn a_won_game_undone_and_redone_is_won_again() {
+        let mut g = game();
+        g.board = board_of(&[
+            (0, 0, 0, TileKind::Bamboo(1)),
+            (0, 0, 2, TileKind::Bamboo(1)),
+        ]);
+        assert!(g.try_select(0));
+        assert!(g.try_select(1));
+        assert_eq!(g.status, GameStatus::Won);
+        assert!(g.undo());
+        assert_eq!(
+            g.status,
+            GameStatus::Playing,
+            "the undone win is still a win"
+        );
+        assert!(g.redo());
+        assert_eq!(g.status, GameStatus::Won, "the redone win is not a win");
+    }
+
+    /// **A shuffle can be undone**: the tiles go back to showing what they
+    /// showed.
+    #[test]
+    fn a_shuffle_can_be_undone() {
+        let mut g = game();
+        let before = faces(&g);
+        assert_eq!(press_key(&mut g, Key::S), EventResult::Consumed);
+        assert!(g.undo());
+        assert_eq!(faces(&g), before, "the shuffle outlived its undo");
+    }
+
+    /// **Ctrl+Y and Ctrl+Shift+Z make a move again.** There was no redo.
+    #[test]
+    fn ctrl_y_and_ctrl_shift_z_make_a_move_again() {
+        let mut g = game();
+        take_a_pair(&mut g);
+        let took = (faces(&g), g.moves);
+        handle_event(&mut g, &held(true, false, false, Key::Z));
+        assert_eq!(g.moves, 0, "Ctrl+Z did not undo");
+        assert_eq!(
+            handle_event(&mut g, &held(true, false, false, Key::Y)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            (faces(&g), g.moves),
+            took,
+            "Ctrl+Y did not take the pair again"
+        );
+        handle_event(&mut g, &held(true, false, false, Key::Z));
+        handle_event(&mut g, &held(true, false, true, Key::Z));
+        assert_eq!(
+            (faces(&g), g.moves),
+            took,
+            "Ctrl+Shift+Z did not take it again"
+        );
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the game's**,
+    /// bar the history's. The keys matched on the key alone: Ctrl+N dealt a
+    /// new game, Ctrl+S shuffled, AltGr+Z -- ż on a Polish keyboard -- took a
+    /// move back.
+    #[test]
+    fn a_key_held_with_ctrl_alt_or_the_windows_key_is_not_the_games() {
+        let mut g = game();
+        take_a_pair(&mut g);
+        let before = (faces(&g), g.moves);
+        let windows = |key| {
+            Event::Key(probe::press_with(
+                key,
+                Modifiers {
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                    super_key: true,
+                },
+            ))
+        };
+        for event in [
+            held(true, false, false, Key::N),
+            held(true, false, false, Key::S),
+            held(true, true, false, Key::Z),
+            windows(Key::Z),
+            held(false, true, false, Key::H),
+        ] {
+            assert_eq!(
+                handle_event(&mut g, &event),
+                EventResult::Ignored,
+                "{event:?}"
+            );
+        }
+        assert_eq!((faces(&g), g.moves), before, "a held key changed the game");
     }
 
     #[test]
@@ -4291,7 +4729,7 @@ mod tests {
         assert_ne!(g.seed, seed, "the new game reused the old seed");
         assert_eq!(g.board.remaining(), 144, "the new deal is short of tiles");
         assert_eq!(g.moves, 0, "the move count survived the new deal");
-        assert!(g.undo_stack.is_empty(), "the old game can still be undone");
+        assert!(!g.history.can_undo(), "the old game can still be undone");
         assert_eq!(g.status, GameStatus::Playing);
         assert_ne!(
             g.board.tiles.iter().map(|t| t.kind).collect::<Vec<_>>(),
@@ -4554,7 +4992,7 @@ mod tests {
     fn a_key_this_game_does_not_use_is_left_for_the_window() {
         // Swallowing it would break every shortcut the window itself owns.
         let mut g = game();
-        for key in [Key::A, Key::Q, Key::F1, Key::Tab] {
+        for key in [Key::A, Key::Q, Key::F9, Key::Tab] {
             assert_eq!(
                 press_key(&mut g, key),
                 EventResult::Ignored,

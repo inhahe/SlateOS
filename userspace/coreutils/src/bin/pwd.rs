@@ -325,27 +325,27 @@ fn logical_name_is_usable(wd: &[u8]) -> bool {
     if wd.first() != Some(&b'/') {
         return false;
     }
-    let mut i = 0;
-    while i + 1 < wd.len() {
+    let mut i = 0usize;
+    while i.saturating_add(1) < wd.len() {
         let (Some(&here), Some(&next)) = (wd.get(i), wd.get(i.saturating_add(1))) else {
             break;
         };
         if here != b'/' || next != b'.' {
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
         // `wd[i..]` starts `/.`; classify what follows the dot.
-        match wd.get(i + 2) {
+        match wd.get(i.saturating_add(2)) {
             // `/.` at the end, or a `/./` component.
             None | Some(b'/') => return false,
-            Some(b'.') => match wd.get(i + 3) {
+            Some(b'.') => match wd.get(i.saturating_add(3)) {
                 // `/..` at the end, or a `/../` component.
                 None | Some(b'/') => return false,
                 _ => {}
             },
             _ => {}
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     true
 }

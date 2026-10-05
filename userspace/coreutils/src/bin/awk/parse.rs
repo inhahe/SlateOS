@@ -1,11 +1,17 @@
 //! The awk parser: tokens to [`Program`].
 //!
-//! ## The three ambiguities awk's grammar actually has
+//! ## The four ambiguities awk's grammar actually has
 //!
 //! **`print a > b`.** The `>` is a redirection, not a comparison — but only at
 //! the top level of a print's argument list, so `print (a > b)` compares. The
 //! parser carries a `no_gt` flag through expression parsing for exactly this,
 //! rather than trying to undo the parse afterwards.
+//!
+//! **`print (a, b)` versus `print (a)(b)`.** POSIX gives print a
+//! parenthesised argument list, and an argument list may also *begin* with a
+//! grouping. What follows the closing `)` decides: the end of the statement or
+//! a redirection means the list, anything else more expression. See
+//! `Parser::parenthesised_print_list`.
 //!
 //! **`a (b)`.** With no space this is a call of the function `a`; with a space
 //! it is `a` concatenated with `b`. The *lexer* settles it, because by the time
@@ -27,24 +33,62 @@
 //! "calling undefined function".
 
 use crate::ast::{
-    BinOp, Builtin, CmpOp, Expr, Func, Getline, GetlineSrc, Lvalue, Pattern, Program, RedirMode,
-    Redirect, Rule, SPECIALS, Stmt, VarRef,
+    BinOp, Builtin, CmpOp, Expr, ExprKind, Func, Getline, GetlineSrc, Loc, Lvalue, Pattern,
+    Program, RedirMode, Redirect, Rule, SPECIALS, Stmt, VarRef,
 };
 use crate::lex::{BUILTINS, Kw, Lexer, Tok, Token};
-use ere::Regex;
+use crate::source::{self, SourceMap};
+use crate::value::Str;
+use coreutils::quote::escape_unprintable;
+use ere::awk::{self as escape, CompileError, Warnings};
+use ere::{Regex, Syntax};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Parse a whole program.
+/// Parse a whole program, its escape warnings going to `warnings`' tables and
+/// to `said`, each beside the [`Loc`] of the token that earned it.
+///
+/// `map` says where the program text came from, so that what is reported --
+/// here and, through the [`Loc`]s the statements carry, at run time -- names
+/// the line as gawk does.
 ///
 /// # Errors
-/// Returns a one-line diagnostic. awk parses the entire program before running
-/// any of it, so a syntax error in a rule that would never have matched is
-/// still fatal — better than dying halfway through a report.
-pub fn parse(src: &[u8]) -> Result<Program, String> {
-    let tokens = Lexer::new(src).tokens()?;
+/// Returns the diagnostics, one per line, in the order gawk gives them. awk
+/// parses the entire program before running any of it, so a syntax error in a
+/// rule that would never have matched still stops it — better than dying
+/// halfway through a report.
+///
+/// ## How gawk orders what it finds
+///
+/// gawk's parser asks its lexer for one token at a time, so it meets the
+/// problems in reading order, and they come in two strengths. An `error:` --
+/// a constant zero divisor, `next` in a BEGIN action -- is reported and the
+/// parse carries on, so a program can earn several; the program does not run,
+/// exit 1. A syntax error, or a regex literal that will not compile, stops the
+/// parse there. And the lexer's own refusals stop it too: a backslash-newline
+/// in a string is `fatal:` (exit 2), an unterminated string a syntax error.
+///
+/// Our lexer reads the whole program before the parser starts, so the order
+/// has to be put back. [`Lexer::tokenize`] hands over every token it made
+/// before it stopped, the parser runs over those, and whatever the parser
+/// reported first is kept ahead of the lexer's complaint -- unless the parser
+/// needed a token from beyond where the lexer stopped, in which case gawk's
+/// lexer would have been asked for it, and complained, first.
+pub fn parse(
+    src: &[u8],
+    map: &SourceMap,
+    warnings: &mut Warnings,
+    said: &mut Vec<(Loc, Str)>,
+) -> Result<Program, ParseError> {
+    let names = map.names();
+    let mut raw_said = Vec::new();
+    let (tokens, lex_error) = Lexer::tokenize(src, warnings, &mut raw_said);
+    said.extend(raw_said.into_iter().map(|(at, m)| (map.loc(at), m)));
+    let locs = tokens.iter().map(|t| map.loc(t.at)).collect();
     let mut p = Parser {
         toks: tokens,
+        locs,
+        names,
         i: 0,
         globals: SPECIALS.iter().map(|s| (*s).to_string()).collect(),
         global_index: SPECIALS
@@ -59,13 +103,173 @@ pub fn parse(src: &[u8]) -> Result<Program, String> {
         called: Vec::new(),
         ranges: 0,
         loop_depth: 0,
+        action: Action::Rule,
+        groups: 0,
+        errors: Vec::new(),
+        cut: lex_error.is_some(),
+        reached_cut: std::cell::Cell::new(false),
     };
-    let prog = p.program()?;
-    Ok(prog)
+    let parsed = p.program();
+    let mut messages = std::mem::take(&mut p.errors);
+    if let Some((at, e)) = lex_error {
+        match parsed {
+            // The parser stopped before it needed a token the lexer never
+            // made: that is gawk's report, and gawk would not have read on.
+            Err(syntax) if !p.reached_cut.get() => {
+                messages.push(syntax);
+                return Err(ParseError {
+                    fatal: false,
+                    messages,
+                });
+            }
+            _ => {
+                // gawk's fatal lexing errors name their line; its syntax
+                // errors here are compared by presence and keep our wording.
+                let fatal = e.starts_with("fatal: ");
+                messages.push(if fatal {
+                    located(&p.names, map.loc(at), e.as_bytes())
+                } else {
+                    e.into_bytes()
+                });
+                return Err(ParseError { fatal, messages });
+            }
+        }
+    }
+    match parsed {
+        Err(syntax) => {
+            messages.push(syntax);
+            Err(ParseError {
+                fatal: false,
+                messages,
+            })
+        }
+        Ok(_) if !messages.is_empty() => Err(ParseError {
+            fatal: false,
+            messages,
+        }),
+        Ok(mut prog) => {
+            prog.sources = p.names;
+            Ok(prog)
+        }
+    }
+}
+
+/// Why a program will not run, said before any of it has.
+#[derive(Debug)]
+pub struct ParseError {
+    /// gawk reports one of these as `fatal:`, which is exit status 2 rather
+    /// than 1 -- a backslash-newline inside a string under `--posix`, say,
+    /// against a missing brace, a constant zero divisor or a regex literal
+    /// that will not compile (gawk's `error:`).
+    ///
+    /// A field rather than a reading of [`ParseError::messages`]: a message
+    /// can quote the program (`the string "a: fatal: b"`), and a file name in
+    /// its location prefix can hold any byte, so no test of the text could
+    /// tell the two kinds apart for every program.
+    pub fatal: bool,
+    /// The diagnostics, each a line after `awk: `, in the order gawk says them
+    /// -- as bytes, because a location prefix names the program's file and a
+    /// regex in one quotes the program, neither of which need be text.
+    pub messages: Vec<Str>,
+}
+
+/// For a test's failure message only: the program prints the bytes.
+#[cfg(test)]
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let joined = self.messages.join(&b'\n');
+        f.write_str(&String::from_utf8_lossy(&joined))
+    }
+}
+
+#[cfg(test)]
+impl From<ParseError> for String {
+    fn from(e: ParseError) -> String {
+        e.to_string()
+    }
+}
+
+/// Which kind of action is being parsed: gawk refuses `next` and `nextfile`
+/// in BEGIN and END outright, and leaves the decision to run time inside a
+/// function, which any of them may call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Begin,
+    End,
+    Rule,
+    Function,
+}
+
+impl Action {
+    /// gawk's name for a BEGIN or END action (`ruletab`), or `None`.
+    fn begin_or_end(self) -> Option<&'static str> {
+        match self {
+            Action::Begin => Some("BEGIN"),
+            Action::End => Some("END"),
+            Action::Rule | Action::Function => None,
+        }
+    }
+}
+
+/// The value gawk's parser would fold `e` to, if it would fold it at all.
+///
+/// gawk checks a divisor at parse time, and only one it has reduced to a
+/// single numeric constant instruction (`mk_binary` in awkgram.y): a numeric
+/// literal, unary minus of one (`-0`), `!` of a constant (`!1`, `!"a"`), or
+/// two constants combined by `+ - * / % ^`. A string is not folded (`"0"`),
+/// nor is unary plus (`+0`), nor anything in parentheses, because gawk 5.2
+/// always appends an `Op_parens` after a grouping -- `1/(2-2)` is a fatal at
+/// run time, not this. The caller rules out parentheses; this is the rest.
+fn folded_constant(e: &Expr) -> Option<f64> {
+    match &e.kind {
+        ExprKind::Num(n) => Some(*n),
+        ExprKind::Neg(inner) => folded_constant(inner).map(|n| -n),
+        ExprKind::Not(inner) => match &inner.kind {
+            // `!` folds a string constant too: to 1 if it is empty, else 0.
+            ExprKind::Str(s) => Some(if s.is_empty() { 1.0 } else { 0.0 }),
+            _ => folded_constant(inner).map(|n| if n == 0.0 { 1.0 } else { 0.0 }),
+        },
+        ExprKind::Bin(op, a, b) => {
+            let (l, r) = (folded_constant(a)?, folded_constant(b)?);
+            Some(match op {
+                BinOp::Add => l + r,
+                BinOp::Sub => l - r,
+                BinOp::Mul => l * r,
+                // A zero divisor is refused, not folded: gawk reports it and
+                // keeps the operation, so nothing folds through it.
+                BinOp::Div if r == 0.0 => return None,
+                BinOp::Mod if r == 0.0 => return None,
+                BinOp::Div => l / r,
+                BinOp::Mod => l % r,
+                BinOp::Pow => crate::value::calc_exp(l, r),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `message` with gawk's location prefix: `cmd. line:3: fatal: ...`.
+///
+/// Bytes, because the prefix names the program's file, and a file name need
+/// not be text: gawk prints it with `%s`.
+fn located(names: &[Option<Str>], loc: Loc, message: &[u8]) -> Str {
+    let mut out = source::prefix(names, loc);
+    out.extend_from_slice(message);
+    out
+}
+
+/// Stop the parse, saying why. The reason is bytes, as every diagnostic here
+/// is (see [`located`]); most are this file's own sentences, built as text.
+fn halt<T>(message: impl Into<Str>) -> Result<T, Str> {
+    Err(message.into())
 }
 
 struct Parser {
     toks: Vec<Token>,
+    /// Where each token is, by index with `toks`.
+    locs: Vec<Loc>,
+    /// The sources `locs` index, for a diagnostic's prefix.
+    names: Vec<Option<Str>>,
     i: usize,
     globals: Vec<String>,
     global_index: HashMap<String, usize>,
@@ -78,18 +282,56 @@ struct Parser {
     called: Vec<String>,
     ranges: usize,
     loop_depth: usize,
+    /// The kind of action being parsed, for `next` and `nextfile`.
+    action: Action,
+    /// How many parenthesised groupings have been parsed so far. A divisor
+    /// whose parse moved it is not a folded constant to gawk; see
+    /// [`folded_constant`].
+    groups: usize,
+    /// gawk's `error:`s found so far, each already placed: the parse carries
+    /// on past them, and the program does not run.
+    errors: Vec<Str>,
+    /// The token list ends where the lexer stopped with an error, not at the
+    /// end of the program, so its last `Eof` is a cut rather than the end.
+    cut: bool,
+    /// The parser has looked at the cut: it needed a token the lexer never
+    /// made, so the lexer's error is what gawk would have reported first. A
+    /// `Cell` because looking (`peek`) is not otherwise a change.
+    reached_cut: std::cell::Cell<bool>,
 }
 
 impl Parser {
     // ---- token access -----------------------------------------------------
 
     fn peek(&self) -> &Tok {
-        self.toks.get(self.i).map_or(&Tok::Eof, |t| &t.kind)
+        self.peek_at(0)
+    }
+    /// Where the next token is.
+    fn loc_here(&self) -> Loc {
+        self.locs.get(self.i).copied().unwrap_or_default()
+    }
+    /// Where the token just consumed is.
+    fn loc_prev(&self) -> Loc {
+        self.locs
+            .get(self.i.saturating_sub(1))
+            .copied()
+            .unwrap_or_default()
     }
     fn peek_at(&self, k: usize) -> &Tok {
-        self.toks
-            .get(self.i.saturating_add(k))
-            .map_or(&Tok::Eof, |t| &t.kind)
+        let at = self.i.saturating_add(k);
+        if self.cut && at.saturating_add(1) >= self.toks.len() {
+            self.reached_cut.set(true);
+        }
+        self.toks.get(at).map_or(&Tok::Eof, |t| &t.kind)
+    }
+
+    /// Report gawk's `error:` at `loc` and carry on parsing.
+    fn error(&mut self, loc: Loc, message: &str) {
+        self.errors.push(located(
+            &self.names,
+            loc,
+            format!("error: {message}").as_bytes(),
+        ));
     }
     fn bump(&mut self) -> Tok {
         let t = self.peek().clone();
@@ -105,15 +347,22 @@ impl Parser {
         }
         false
     }
-    fn expect(&mut self, t: &Tok, what: &str) -> Result<(), String> {
+    fn expect(&mut self, t: &Tok, what: &str) -> Result<(), Str> {
         if self.eat(t) {
             return Ok(());
         }
-        Err(format!(
+        halt(format!(
             "syntax error: expected {what}, found {}",
             describe(self.peek())
         ))
     }
+    /// After an action's `}`: newlines, at most one `;`, newlines.
+    fn after_action(&mut self) {
+        self.skip_newlines();
+        self.eat(&Tok::Semi);
+        self.skip_newlines();
+    }
+
     /// Skip newlines and semicolons that separate items or statements.
     fn skip_terms(&mut self) {
         while matches!(self.peek(), Tok::Newline | Tok::Semi) {
@@ -157,27 +406,42 @@ impl Parser {
 
     // ---- program ----------------------------------------------------------
 
-    fn program(&mut self) -> Result<Program, String> {
+    /// The whole program: rules, separated as gawk's grammar separates them.
+    ///
+    /// Newlines may stand anywhere between rules. After a rule's `}` one `;`
+    /// may follow, with newlines either side (`action: l_brace statements
+    /// r_brace opt_semi opt_nls`); a rule that is only a pattern ends at a
+    /// newline or one `;`. So a leading `;`, or `;;` between rules, is a syntax
+    /// error, as it is in gawk. And BEGIN and END take their `{` on the same
+    /// line.
+    fn program(&mut self) -> Result<Program, Str> {
         let mut prog = Program::default();
-        self.skip_terms();
+        self.skip_newlines();
         while self.peek() != &Tok::Eof {
             if self.eat(&Tok::Keyword(Kw::Function)) {
+                self.action = Action::Function;
                 self.function()?;
+                self.after_action();
             } else if self.eat(&Tok::Keyword(Kw::Begin)) {
-                self.skip_newlines();
+                self.action = Action::Begin;
                 let body = self.block()?;
                 prog.begin.extend(body);
+                self.after_action();
             } else if self.eat(&Tok::Keyword(Kw::End)) {
-                self.skip_newlines();
+                self.action = Action::End;
                 let body = self.block()?;
                 prog.end.extend(body);
+                self.after_action();
             } else if self.peek() == &Tok::LBrace {
+                self.action = Action::Rule;
                 let action = self.block()?;
                 prog.rules.push(Rule {
                     pattern: Pattern::Always,
                     action: Some(action),
                 });
+                self.after_action();
             } else {
+                self.action = Action::Rule;
                 let first = self.expr(false)?;
                 let pattern = if self.eat(&Tok::Comma) {
                     self.skip_newlines();
@@ -193,19 +457,35 @@ impl Parser {
                 } else {
                     None
                 };
+                let has_action = action.is_some();
                 prog.rules.push(Rule { pattern, action });
+                if has_action {
+                    self.after_action();
+                } else {
+                    // A pattern alone ends at a newline, one `;`, or the end.
+                    if !matches!(self.peek(), Tok::Newline | Tok::Semi | Tok::Eof) {
+                        return halt(format!("syntax error at {}", describe(self.peek())));
+                    }
+                    self.eat(&Tok::Semi);
+                    self.skip_newlines();
+                }
             }
-            self.skip_terms();
         }
 
-        for name in &self.called {
-            let defined = self
-                .func_index
-                .get(name)
-                .and_then(|s| self.funcs.get(*s))
-                .is_some_and(Option::is_some);
-            if !defined {
-                return Err(format!("calling undefined function {name}"));
+        // Ours, not gawk's (which finds an undefined function when it is
+        // called): see main.rs's table of deliberate differences. A program
+        // that gawk's own `error:`s already stop is not checked further, as
+        // gawk would not have got as far as running it.
+        if self.errors.is_empty() {
+            for name in &self.called {
+                let defined = self
+                    .func_index
+                    .get(name)
+                    .and_then(|s| self.funcs.get(*s))
+                    .is_some_and(Option::is_some);
+                if !defined {
+                    return halt(format!("calling undefined function {name}"));
+                }
             }
         }
         prog.funcs = self
@@ -216,6 +496,7 @@ impl Parser {
                     name: String::new(),
                     params: Vec::new(),
                     body: Vec::new(),
+                    loc: Loc::default(),
                 })
             })
             .collect();
@@ -225,40 +506,41 @@ impl Parser {
         Ok(prog)
     }
 
-    fn function(&mut self) -> Result<(), String> {
-        let name = match self.bump() {
+    fn function(&mut self) -> Result<(), Str> {
+        let tok = self.bump();
+        let loc = self.loc_prev();
+        let name = match tok {
             Tok::Name(n) | Tok::FuncName(n) => n,
             other => {
-                return Err(format!(
+                return halt(format!(
                     "syntax error: expected a function name, found {}",
                     describe(&other)
                 ));
             }
         };
         if BUILTINS.iter().any(|(b, _, _)| *b == name) {
-            return Err(format!("cannot redefine the built-in function {name}"));
+            return halt(format!("cannot redefine the built-in function {name}"));
         }
         self.expect(&Tok::LParen, "`(' after the function name")?;
         let mut params: Vec<String> = Vec::new();
-        self.skip_newlines();
+        // A newline may follow a comma here, and nowhere else in the list
+        // (the lexer swallows that one): not after `(`, not before `,` or `)`.
         if !self.eat(&Tok::RParen) {
             loop {
-                self.skip_newlines();
                 match self.bump() {
                     Tok::Name(p) => {
                         if params.contains(&p) {
-                            return Err(format!("function {name}: parameter {p} appears twice"));
+                            return halt(format!("function {name}: parameter {p} appears twice"));
                         }
                         params.push(p);
                     }
                     other => {
-                        return Err(format!(
+                        return halt(format!(
                             "syntax error: expected a parameter name, found {}",
                             describe(&other)
                         ));
                     }
                 }
-                self.skip_newlines();
                 if self.eat(&Tok::Comma) {
                     continue;
                 }
@@ -269,7 +551,7 @@ impl Parser {
 
         let slot = self.func_slot(&name);
         if self.funcs.get(slot).is_some_and(Option::is_some) {
-            return Err(format!("function {name} is defined twice"));
+            return halt(format!("function {name} is defined twice"));
         }
         self.locals = params
             .iter()
@@ -282,14 +564,19 @@ impl Parser {
         self.in_function = false;
         self.locals.clear();
         if let Some(entry) = self.funcs.get_mut(slot) {
-            *entry = Some(Func { name, params, body });
+            *entry = Some(Func {
+                name,
+                params,
+                body,
+                loc,
+            });
         }
         Ok(())
     }
 
     // ---- statements -------------------------------------------------------
 
-    fn block(&mut self) -> Result<Vec<Stmt>, String> {
+    fn block(&mut self) -> Result<Vec<Stmt>, Str> {
         self.expect(&Tok::LBrace, "`{'")?;
         let mut out = Vec::new();
         loop {
@@ -298,14 +585,21 @@ impl Parser {
                 return Ok(out);
             }
             if self.peek() == &Tok::Eof {
-                return Err("syntax error: unexpected end of program, `}' missing".to_string());
+                return halt("syntax error: unexpected end of program, `}' missing".to_string());
             }
             out.push(self.stmt()?);
         }
     }
 
-    /// A statement, plus whatever terminates it.
-    fn stmt(&mut self) -> Result<Stmt, String> {
+    /// A statement, plus whatever terminates it, wrapped in the [`Stmt::At`]
+    /// that tells a diagnostic raised while it runs which line it is on.
+    fn stmt(&mut self) -> Result<Stmt, Str> {
+        let loc = self.loc_here();
+        let s = self.bare_stmt()?;
+        Ok(Stmt::At(loc, Box::new(s)))
+    }
+
+    fn bare_stmt(&mut self) -> Result<Stmt, Str> {
         let s = self.unterminated_stmt()?;
         // A statement that ends in another statement — the body of an `if`, a
         // `while`, a `for` — has already had its terminator eaten by that body,
@@ -325,12 +619,12 @@ impl Parser {
         if matches!(self.peek(), Tok::Newline | Tok::Semi) {
             self.i = self.i.saturating_add(1);
         } else if !matches!(self.peek(), Tok::RBrace | Tok::Eof | Tok::Keyword(Kw::Else)) {
-            return Err(format!("syntax error at {}", describe(self.peek())));
+            return halt(format!("syntax error at {}", describe(self.peek())));
         }
         Ok(s)
     }
 
-    fn unterminated_stmt(&mut self) -> Result<Stmt, String> {
+    fn unterminated_stmt(&mut self) -> Result<Stmt, Str> {
         match self.peek().clone() {
             Tok::LBrace => Ok(Stmt::Block(self.block()?)),
             Tok::Semi => Ok(Stmt::Nop),
@@ -346,25 +640,38 @@ impl Parser {
                 self.i = self.i.saturating_add(1);
                 self.print_stmt(true)
             }
+            // gawk refuses these in BEGIN and END as it parses them -- an
+            // `error:`, so it carries on -- and decides at run time inside a
+            // function, because which rule calls the function is not known
+            // until then.
             Tok::Keyword(Kw::Next) => {
                 self.i = self.i.saturating_add(1);
+                if let Some(rule) = self.action.begin_or_end() {
+                    self.error(self.loc_prev(), &format!("`next' used in {rule} action"));
+                }
                 Ok(Stmt::Next)
             }
             Tok::Keyword(Kw::NextFile) => {
                 self.i = self.i.saturating_add(1);
+                if let Some(rule) = self.action.begin_or_end() {
+                    self.error(
+                        self.loc_prev(),
+                        &format!("`nextfile' used in {rule} action"),
+                    );
+                }
                 Ok(Stmt::NextFile)
             }
             Tok::Keyword(Kw::Break) => {
                 self.i = self.i.saturating_add(1);
                 if self.loop_depth == 0 {
-                    return Err("break used outside a loop".to_string());
+                    return halt("break used outside a loop".to_string());
                 }
                 Ok(Stmt::Break)
             }
             Tok::Keyword(Kw::Continue) => {
                 self.i = self.i.saturating_add(1);
                 if self.loop_depth == 0 {
-                    return Err("continue used outside a loop".to_string());
+                    return halt("continue used outside a loop".to_string());
                 }
                 Ok(Stmt::Continue)
             }
@@ -375,7 +682,7 @@ impl Parser {
             Tok::Keyword(Kw::Return) => {
                 self.i = self.i.saturating_add(1);
                 if !self.in_function {
-                    return Err("return used outside a function".to_string());
+                    return halt("return used outside a function".to_string());
                 }
                 Ok(Stmt::Return(self.optional_expr()?))
             }
@@ -387,7 +694,7 @@ impl Parser {
         }
     }
 
-    fn optional_expr(&mut self) -> Result<Option<Expr>, String> {
+    fn optional_expr(&mut self) -> Result<Option<Expr>, Str> {
         if matches!(
             self.peek(),
             Tok::Newline | Tok::Semi | Tok::RBrace | Tok::Eof
@@ -397,18 +704,20 @@ impl Parser {
         Ok(Some(self.expr(false)?))
     }
 
-    fn if_stmt(&mut self) -> Result<Stmt, String> {
+    fn if_stmt(&mut self) -> Result<Stmt, Str> {
         self.i = self.i.saturating_add(1);
         self.expect(&Tok::LParen, "`(' after if")?;
         let cond = self.expr(false)?;
         self.expect(&Tok::RParen, "`)' after the if condition")?;
         self.skip_newlines();
         let then = Box::new(self.stmt()?);
-        // The `else` may be separated from the then-branch by any number of
-        // terminators; that is why this looks ahead rather than trusting that
-        // `stmt` stopped on it.
+        // The `else` may be separated from the then-branch by newlines; that
+        // is why this looks ahead rather than trusting that `stmt` stopped on
+        // it. Not by a further `;`: the then-branch took its own terminator,
+        // and another is an empty statement, after which `else` has no `if`
+        // (gawk: a syntax error).
         let save = self.i;
-        self.skip_terms();
+        self.skip_newlines();
         if self.eat(&Tok::Keyword(Kw::Else)) {
             self.skip_newlines();
             let other = Box::new(self.stmt()?);
@@ -418,7 +727,7 @@ impl Parser {
         Ok(Stmt::If(cond, then, None))
     }
 
-    fn while_stmt(&mut self) -> Result<Stmt, String> {
+    fn while_stmt(&mut self) -> Result<Stmt, Str> {
         self.i = self.i.saturating_add(1);
         self.expect(&Tok::LParen, "`(' after while")?;
         let cond = self.expr(false)?;
@@ -434,7 +743,7 @@ impl Parser {
         Ok(Stmt::While(cond, Box::new(body?)))
     }
 
-    fn do_stmt(&mut self) -> Result<Stmt, String> {
+    fn do_stmt(&mut self) -> Result<Stmt, Str> {
         self.i = self.i.saturating_add(1);
         self.skip_newlines();
         self.loop_depth = self.loop_depth.saturating_add(1);
@@ -452,7 +761,7 @@ impl Parser {
         Ok(Stmt::DoWhile(Box::new(body), cond))
     }
 
-    fn for_stmt(&mut self) -> Result<Stmt, String> {
+    fn for_stmt(&mut self) -> Result<Stmt, Str> {
         self.i = self.i.saturating_add(1);
         self.expect(&Tok::LParen, "`(' after for")?;
         // `for (x in a)` and `for (i = 1; …)` both start here, so look ahead
@@ -464,7 +773,7 @@ impl Parser {
             && self.peek_at(3) == &Tok::RParen
         {
             self.i = self.i.saturating_add(4);
-            let var = Lvalue::Var(self.var(&n));
+            let var = self.var(&n);
             let array = self.var(&arr);
             self.skip_newlines();
             self.loop_depth = self.loop_depth.saturating_add(1);
@@ -517,11 +826,11 @@ impl Parser {
         })
     }
 
-    fn delete_stmt(&mut self) -> Result<Stmt, String> {
+    fn delete_stmt(&mut self) -> Result<Stmt, Str> {
         let name = match self.bump() {
             Tok::Name(n) | Tok::FuncName(n) => n,
             other => {
-                return Err(format!(
+                return halt(format!(
                     "syntax error: delete wants an array name, found {}",
                     describe(&other)
                 ));
@@ -529,29 +838,62 @@ impl Parser {
         };
         let arr = self.var(&name);
         if self.eat(&Tok::LBracket) {
+            let groups = self.groups;
             let subs = self.expr_list(&Tok::RBracket)?;
             self.expect(&Tok::RBracket, "`]'")?;
             if subs.is_empty() {
-                return Err("delete: an empty subscript is not a subscript".to_string());
+                return halt("delete: an empty subscript is not a subscript".to_string());
             }
-            return Ok(Stmt::Delete(arr, subs));
+            // A lone name is bare unless a grouping was parsed around it.
+            let bare = match subs.as_slice() {
+                [
+                    Expr {
+                        kind: ExprKind::Get(Lvalue::Var(v)),
+                        ..
+                    },
+                ] if self.groups == groups => Some(*v),
+                _ => None,
+            };
+            return Ok(Stmt::Delete {
+                array: arr,
+                subs,
+                bare,
+            });
         }
         // `delete a (…)` cannot happen — the lexer only makes a `FuncName` when
         // a `(` follows, and that is the one shape `delete` does not accept.
         if self.eat(&Tok::LParen) {
             let subs = self.expr_list(&Tok::RParen)?;
             self.expect(&Tok::RParen, "`)'")?;
-            return Ok(Stmt::Delete(arr, subs));
+            return Ok(Stmt::Delete {
+                array: arr,
+                subs,
+                bare: None,
+            });
         }
-        Ok(Stmt::Delete(arr, Vec::new()))
+        Ok(Stmt::Delete {
+            array: arr,
+            subs: Vec::new(),
+            bare: None,
+        })
     }
 
-    fn print_stmt(&mut self, formatted: bool) -> Result<Stmt, String> {
+    fn print_stmt(&mut self, formatted: bool) -> Result<Stmt, Str> {
         // Inside a print's argument list a bare `>` redirects, so expressions
         // are parsed with `no_gt`. `print (a > b)` still compares, because the
         // parenthesised expression is parsed without the flag.
         let mut args: Vec<Expr> = Vec::new();
-        if !matches!(
+        if let Some(close) = self.parenthesised_print_list() {
+            // `printf("%s\n", x)`: the parentheses hold the whole list, and
+            // inside them a `>` compares, as anywhere in parentheses.
+            self.i = self.i.saturating_add(1);
+            args = self.expr_list(&Tok::RParen)?;
+            self.expect(&Tok::RParen, "`)' after the print list")?;
+            debug_assert_eq!(self.i, close.saturating_add(1));
+            if args.is_empty() {
+                return halt("syntax error: `()' is not an expression".to_string());
+            }
+        } else if !matches!(
             self.peek(),
             Tok::Newline | Tok::Semi | Tok::RBrace | Tok::Eof | Tok::Gt | Tok::Append | Tok::Pipe
         ) {
@@ -589,7 +931,7 @@ impl Parser {
             None => None,
         };
         if formatted && args.is_empty() {
-            return Err("printf: no format string".to_string());
+            return halt("printf: no format string".to_string());
         }
         if formatted {
             Ok(Stmt::Printf(args, redirect))
@@ -598,19 +940,68 @@ impl Parser {
         }
     }
 
+    /// Whether a print's arguments are one parenthesised list, `print (a, b)`,
+    /// rather than expressions that happen to begin with a grouping, `print
+    /// (a)(b)` or `print (i, j) in arr`; if so, the index of the closing `)`.
+    ///
+    /// POSIX's grammar has both shapes (`Print '(' multiple_expr_list ')'`
+    /// beside a list whose first expression is grouped), and what tells them
+    /// apart comes *after* the parentheses: the list form is followed by the
+    /// end of the statement or a redirection, the other by more expression.
+    /// So find the matching `)` and look at what follows it, which is the
+    /// decision gawk's grammar makes with its `in_parens` state.
+    fn parenthesised_print_list(&self) -> Option<usize> {
+        if self.peek() != &Tok::LParen {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut at = self.i;
+        loop {
+            match self.toks.get(at).map(|t| &t.kind)? {
+                Tok::LParen => depth = depth.saturating_add(1),
+                Tok::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                // Not closed before the program, or the lexer, ran out: not
+                // this shape, and the ordinary parse reports what is wrong.
+                Tok::Eof => return None,
+                _ => {}
+            }
+            at = at.saturating_add(1);
+        }
+        let after = self.toks.get(at.saturating_add(1)).map(|t| &t.kind);
+        matches!(
+            after,
+            Some(
+                Tok::Newline
+                    | Tok::Semi
+                    | Tok::RBrace
+                    | Tok::Eof
+                    | Tok::Gt
+                    | Tok::Append
+                    | Tok::Pipe
+            )
+        )
+        .then_some(at)
+    }
+
     // ---- expressions ------------------------------------------------------
 
-    fn expr_list(&mut self, end: &Tok) -> Result<Vec<Expr>, String> {
+    /// The expressions of a call, a grouping, a subscript or an `in` list, up
+    /// to (not including) `end`. A newline may follow a comma -- the lexer
+    /// swallows it -- and nowhere else: not after the `(` or `[`, not before a
+    /// `,` or the close, as in gawk's grammar.
+    fn expr_list(&mut self, end: &Tok) -> Result<Vec<Expr>, Str> {
         let mut out = Vec::new();
-        self.skip_newlines();
         if self.peek() == end {
             return Ok(out);
         }
         loop {
             out.push(self.expr(false)?);
-            self.skip_newlines();
             if self.eat(&Tok::Comma) {
-                self.skip_newlines();
                 continue;
             }
             return Ok(out);
@@ -623,7 +1014,7 @@ impl Parser {
     /// checking whether an assignment operator follows, which is how a
     /// recursive-descent parser handles an operator whose left side must be an
     /// lvalue without a separate grammar level for lvalues.
-    fn expr(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn expr(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let lhs = self.ternary(no_gt)?;
         let op = match self.peek() {
             Tok::Assign => None,
@@ -636,69 +1027,80 @@ impl Parser {
             _ => return Ok(lhs),
         };
         self.i = self.i.saturating_add(1);
-        self.skip_newlines();
-        let Expr::Get(target) = lhs else {
-            return Err("syntax error: the left side of an assignment must be a variable, a field or an array element".to_string());
+        let loc = self.loc_prev();
+        let ExprKind::Get(target) = lhs.kind else {
+            return halt("syntax error: the left side of an assignment must be a variable, a field or an array element".to_string());
         };
         let rhs = Box::new(self.expr(no_gt)?);
-        Ok(match op {
-            None => Expr::Assign(target, rhs),
-            Some(o) => Expr::AugAssign(target, o, rhs),
-        })
+        Ok(Expr::new(
+            match op {
+                None => ExprKind::Assign(target, rhs),
+                Some(o) => ExprKind::AugAssign(target, o, rhs),
+            },
+            loc,
+        ))
     }
 
-    fn ternary(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn ternary(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let cond = self.or(no_gt)?;
         if !self.eat(&Tok::Question) {
             return Ok(cond);
         }
-        self.skip_newlines();
+        // No newline around `?` or `:`: gawk allows one only outside
+        // `--posix`.
+        let loc = self.loc_prev();
         let yes = self.expr(no_gt)?;
-        self.skip_newlines();
         self.expect(&Tok::Colon, "`:' in a ?: expression")?;
-        self.skip_newlines();
         let no = self.expr(no_gt)?;
-        Ok(Expr::Cond(Box::new(cond), Box::new(yes), Box::new(no)))
+        Ok(Expr::new(
+            ExprKind::Cond(Box::new(cond), Box::new(yes), Box::new(no)),
+            loc,
+        ))
     }
 
-    fn or(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn or(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.and(no_gt)?;
         while self.eat(&Tok::Or) {
+            let loc = self.loc_prev();
             self.skip_newlines();
-            lhs = Expr::Or(Box::new(lhs), Box::new(self.and(no_gt)?));
+            let rhs = self.and(no_gt)?;
+            lhs = Expr::new(ExprKind::Or(Box::new(lhs), Box::new(rhs)), loc);
         }
         Ok(lhs)
     }
 
-    fn and(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn and(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.in_expr(no_gt)?;
         while self.eat(&Tok::And) {
+            let loc = self.loc_prev();
             self.skip_newlines();
-            lhs = Expr::And(Box::new(lhs), Box::new(self.in_expr(no_gt)?));
+            let rhs = self.in_expr(no_gt)?;
+            lhs = Expr::new(ExprKind::And(Box::new(lhs), Box::new(rhs)), loc);
         }
         Ok(lhs)
     }
 
-    fn in_expr(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn in_expr(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.match_expr(no_gt)?;
         while self.peek() == &Tok::Keyword(Kw::In) {
             self.i = self.i.saturating_add(1);
+            let loc = self.loc_prev();
             let name = match self.bump() {
                 Tok::Name(n) => n,
                 other => {
-                    return Err(format!(
+                    return halt(format!(
                         "syntax error: `in' wants an array name, found {}",
                         describe(&other)
                     ));
                 }
             };
             let arr = self.var(&name);
-            lhs = Expr::In(vec![lhs], arr);
+            lhs = Expr::new(ExprKind::In(vec![lhs], arr), loc);
         }
         Ok(lhs)
     }
 
-    fn match_expr(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn match_expr(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.relational(no_gt)?;
         loop {
             let neg = match self.peek() {
@@ -707,19 +1109,23 @@ impl Parser {
                 _ => return Ok(lhs),
             };
             self.i = self.i.saturating_add(1);
+            let loc = self.loc_prev();
             let rhs = self.relational(no_gt)?;
-            lhs = Expr::Match {
-                neg,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            lhs = Expr::new(
+                ExprKind::Match {
+                    neg,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                loc,
+            );
         }
     }
 
     /// Comparison is *non*-associative in awk: `a < b < c` is `(a < b) < c` in
     /// C but a syntax error in POSIX awk. Accepting the C reading would quietly
     /// give a wrong answer, so only one comparison is parsed here.
-    fn relational(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn relational(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let lhs = self.pipe_getline(no_gt)?;
         let op = match self.peek() {
             Tok::Lt => CmpOp::Lt,
@@ -732,9 +1138,12 @@ impl Parser {
             _ => return Ok(lhs),
         };
         self.i = self.i.saturating_add(1);
-        self.skip_newlines();
+        let loc = self.loc_prev();
         let rhs = self.pipe_getline(no_gt)?;
-        Ok(Expr::Cmp(op, Box::new(lhs), Box::new(rhs)))
+        Ok(Expr::new(
+            ExprKind::Cmp(op, Box::new(lhs), Box::new(rhs)),
+            loc,
+        ))
     }
 
     /// `"cmd" | getline [var]`.
@@ -742,15 +1151,20 @@ impl Parser {
     /// This sits between comparison and concatenation so that
     /// `"cmd" | getline line > 0` reads as `(("cmd" | getline line) > 0)`,
     /// which is how the idiom is always written.
-    fn pipe_getline(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn pipe_getline(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.concat(no_gt)?;
         while self.peek() == &Tok::Pipe && self.peek_at(1) == &Tok::Keyword(Kw::Getline) {
             self.i = self.i.saturating_add(2);
+            // The read is gawk's `getline` instruction, made from that token.
+            let loc = self.loc_prev();
             let into = self.optional_getline_target()?;
-            lhs = Expr::Getline(Box::new(Getline {
-                into,
-                src: GetlineSrc::Cmd(lhs),
-            }));
+            lhs = Expr::new(
+                ExprKind::Getline(Box::new(Getline {
+                    into,
+                    src: GetlineSrc::Cmd(lhs),
+                })),
+                loc,
+            );
         }
         Ok(lhs)
     }
@@ -760,10 +1174,14 @@ impl Parser {
     /// `+` and `-` are deliberately not treated as the start of an operand
     /// here, because `a - b` has to be subtraction; the additive level below
     /// has already taken them.
-    fn concat(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn concat(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.additive(no_gt)?;
         while self.starts_operand() {
-            lhs = Expr::Concat(Box::new(lhs), Box::new(self.additive(no_gt)?));
+            let rhs = self.additive(no_gt)?;
+            // Concatenation has no operator token; it is placed with its
+            // left operand.
+            let loc = lhs.loc;
+            lhs = Expr::new(ExprKind::Concat(Box::new(lhs), Box::new(rhs)), loc);
         }
         Ok(lhs)
     }
@@ -772,7 +1190,7 @@ impl Parser {
         match self.peek() {
             Tok::Number(_)
             | Tok::Str(_)
-            | Tok::Ere(_)
+            | Tok::Ere { .. }
             | Tok::Name(_)
             | Tok::FuncName(_)
             | Tok::Builtin(_)
@@ -789,7 +1207,7 @@ impl Parser {
         }
     }
 
-    fn additive(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn additive(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.multiplicative(no_gt)?;
         loop {
             let op = match self.peek() {
@@ -798,11 +1216,13 @@ impl Parser {
                 _ => return Ok(lhs),
             };
             self.i = self.i.saturating_add(1);
-            lhs = Expr::Bin(op, Box::new(lhs), Box::new(self.multiplicative(no_gt)?));
+            let loc = self.loc_prev();
+            let rhs = self.multiplicative(no_gt)?;
+            lhs = Expr::new(ExprKind::Bin(op, Box::new(lhs), Box::new(rhs)), loc);
         }
     }
 
-    fn multiplicative(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn multiplicative(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let mut lhs = self.unary(no_gt)?;
         loop {
             let op = match self.peek() {
@@ -812,104 +1232,138 @@ impl Parser {
                 _ => return Ok(lhs),
             };
             self.i = self.i.saturating_add(1);
-            lhs = Expr::Bin(op, Box::new(lhs), Box::new(self.unary(no_gt)?));
+            let loc = self.loc_prev();
+            let groups = self.groups;
+            let rhs = self.unary(no_gt)?;
+            // gawk refuses a divisor it has folded to zero while it parses
+            // (`mk_binary`), reports it at the operator, and parses on: the
+            // program does not run, exit 1. `1/0`, `x/-0`, `x/0.0` and
+            // `x/1e-400` all earn it, `x/(0)` and `x/"0"` do not.
+            if self.groups == groups
+                && matches!(op, BinOp::Div | BinOp::Mod)
+                && folded_constant(&rhs) == Some(0.0)
+            {
+                self.error(
+                    loc,
+                    if op == BinOp::Div {
+                        "division by zero attempted"
+                    } else {
+                        "division by zero attempted in `%'"
+                    },
+                );
+            }
+            lhs = Expr::new(ExprKind::Bin(op, Box::new(lhs), Box::new(rhs)), loc);
         }
     }
 
-    fn unary(&mut self, no_gt: bool) -> Result<Expr, String> {
-        match self.peek() {
-            Tok::Not => {
-                self.i = self.i.saturating_add(1);
-                Ok(Expr::Not(Box::new(self.unary(no_gt)?)))
-            }
-            Tok::Minus => {
-                self.i = self.i.saturating_add(1);
-                Ok(Expr::Neg(Box::new(self.unary(no_gt)?)))
-            }
-            Tok::Plus => {
-                self.i = self.i.saturating_add(1);
-                Ok(Expr::Pos(Box::new(self.unary(no_gt)?)))
-            }
-            _ => self.power(no_gt),
-        }
+    fn unary(&mut self, no_gt: bool) -> Result<Expr, Str> {
+        let kind: fn(Box<Expr>) -> ExprKind = match self.peek() {
+            Tok::Not => ExprKind::Not,
+            Tok::Minus => ExprKind::Neg,
+            Tok::Plus => ExprKind::Pos,
+            _ => return self.power(no_gt),
+        };
+        self.i = self.i.saturating_add(1);
+        let loc = self.loc_prev();
+        let operand = self.unary(no_gt)?;
+        Ok(Expr::new(kind(Box::new(operand)), loc))
     }
 
     /// `^` is right-associative and binds tighter than unary minus on the
     /// right: `2^3^2` is 512, and `-2^2` is -4.
-    fn power(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn power(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let base = self.postfix(no_gt)?;
         if self.eat(&Tok::Caret) {
+            let loc = self.loc_prev();
             let exp = self.unary(no_gt)?;
-            return Ok(Expr::Bin(BinOp::Pow, Box::new(base), Box::new(exp)));
+            return Ok(Expr::new(
+                ExprKind::Bin(BinOp::Pow, Box::new(base), Box::new(exp)),
+                loc,
+            ));
         }
         Ok(base)
     }
 
-    fn postfix(&mut self, no_gt: bool) -> Result<Expr, String> {
+    fn postfix(&mut self, no_gt: bool) -> Result<Expr, Str> {
         let e = self.primary(no_gt)?;
         // `x++` only makes sense on an lvalue; `(a+b)++` is a parse of `(a+b)`
         // followed by `++` starting the next operand, and leaving it alone here
         // is what lets that keep working.
-        if let Expr::Get(lv) = &e {
-            if self.eat(&Tok::Incr) {
-                return Ok(Expr::PostIncr(lv.clone(), 1.0));
-            }
-            if self.eat(&Tok::Decr) {
-                return Ok(Expr::PostIncr(lv.clone(), -1.0));
-            }
+        if let ExprKind::Get(lv) = &e.kind {
+            let delta = if self.eat(&Tok::Incr) {
+                1.0
+            } else if self.eat(&Tok::Decr) {
+                -1.0
+            } else {
+                return Ok(e);
+            };
+            return Ok(Expr::new(
+                ExprKind::PostIncr(lv.clone(), delta),
+                self.loc_prev(),
+            ));
         }
         Ok(e)
     }
 
-    fn primary(&mut self, no_gt: bool) -> Result<Expr, String> {
-        match self.bump() {
-            Tok::Number(n) => Ok(Expr::Num(n)),
-            Tok::Str(s) => Ok(Expr::Str(Rc::new(s))),
-            Tok::Ere(s) => Ok(Expr::Regex(Rc::new(compile_regex(&s)?))),
+    fn primary(&mut self, no_gt: bool) -> Result<Expr, Str> {
+        let tok = self.bump();
+        // Every primary is placed at its first token: the literal, the name,
+        // the `$`, the `++`, the `getline`.
+        let loc = self.loc_prev();
+        let kind = match tok {
+            Tok::Number(n) => ExprKind::Num(n),
+            Tok::Str(s) => ExprKind::Str(Rc::new(s)),
+            // gawk compiles a regex literal as it parses it, and one that will
+            // not compile is its `error:` -- exit 1, like a syntax error, but
+            // worded and placed as gawk words and places it. gawk stops the
+            // parse there, unlike its other `error:`s.
+            Tok::Ere { source, pattern } => {
+                let compiled = compile_literal(&source, &pattern)
+                    .map_err(|e| located(&self.names, loc, &e))?;
+                ExprKind::Regex(Rc::new(compiled))
+            }
             Tok::Dollar => {
                 // `$` binds tighter than everything but `()` and `++`, so
                 // `$NF-1` is `($NF)-1` and `$i++` increments `$i`.
                 let inner = self.primary(no_gt)?;
-                Ok(Expr::Get(Lvalue::Field(Box::new(inner))))
+                ExprKind::Get(Lvalue::Field(Box::new(inner), loc))
             }
-            Tok::Incr => {
-                let target = self.lvalue_operand(no_gt)?;
-                Ok(Expr::PreIncr(target, 1.0))
-            }
-            Tok::Decr => {
-                let target = self.lvalue_operand(no_gt)?;
-                Ok(Expr::PreIncr(target, -1.0))
-            }
+            Tok::Incr => ExprKind::PreIncr(self.lvalue_operand(no_gt)?, 1.0),
+            Tok::Decr => ExprKind::PreIncr(self.lvalue_operand(no_gt)?, -1.0),
             Tok::LParen => {
                 let items = self.expr_list(&Tok::RParen)?;
                 self.expect(&Tok::RParen, "`)'")?;
                 if self.peek() == &Tok::Keyword(Kw::In) {
                     self.i = self.i.saturating_add(1);
+                    let in_loc = self.loc_prev();
                     let name = match self.bump() {
                         Tok::Name(n) => n,
                         other => {
-                            return Err(format!(
+                            return halt(format!(
                                 "syntax error: `in' wants an array name, found {}",
                                 describe(&other)
                             ));
                         }
                     };
                     let arr = self.var(&name);
-                    return Ok(Expr::In(items, arr));
+                    return Ok(Expr::new(ExprKind::In(items, arr), in_loc));
                 }
                 let mut it = items.into_iter();
                 let Some(first) = it.next() else {
-                    return Err("syntax error: `()' is not an expression".to_string());
+                    return halt("syntax error: `()' is not an expression".to_string());
                 };
                 if it.next().is_some() {
                     // `(a, b)` is only a list before `in`; anywhere else it is
                     // a grouping with a stray comma.
-                    return Err(
+                    return halt(
                         "syntax error: a parenthesised list is only allowed before `in'"
                             .to_string(),
                     );
                 }
-                Ok(first)
+                // A grouping is not a node of its own, but gawk marks one
+                // (`Op_parens`), and a constant inside one is not folded.
+                self.groups = self.groups.saturating_add(1);
+                return Ok(first);
             }
             Tok::Name(n) => {
                 let v = self.var(&n);
@@ -917,13 +1371,14 @@ impl Parser {
                     let subs = self.expr_list(&Tok::RBracket)?;
                     self.expect(&Tok::RBracket, "`]'")?;
                     if subs.is_empty() {
-                        return Err(
-                            "syntax error: an empty subscript is not a subscript".to_string()
+                        return halt(
+                            "syntax error: an empty subscript is not a subscript".to_string(),
                         );
                     }
-                    return Ok(Expr::Get(Lvalue::Index(v, subs)));
+                    ExprKind::Get(Lvalue::Index(v, subs))
+                } else {
+                    ExprKind::Get(Lvalue::Var(v))
                 }
-                Ok(Expr::Get(Lvalue::Var(v)))
             }
             Tok::FuncName(n) => {
                 self.expect(&Tok::LParen, "`(' in a function call")?;
@@ -931,33 +1386,29 @@ impl Parser {
                 self.expect(&Tok::RParen, "`)' after the arguments")?;
                 let slot = self.func_slot(&n);
                 self.called.push(n);
-                Ok(Expr::Call(slot, args))
+                ExprKind::Call(slot, args)
             }
-            Tok::Builtin(name) => self.builtin_call(name),
+            Tok::Builtin(name) => return self.builtin_call(name, loc),
             Tok::Keyword(Kw::Getline) => {
                 let into = self.optional_getline_target()?;
-                if self.eat(&Tok::Lt) {
-                    let file = self.concat(no_gt)?;
-                    return Ok(Expr::Getline(Box::new(Getline {
-                        into,
-                        src: GetlineSrc::File(file),
-                    })));
-                }
-                Ok(Expr::Getline(Box::new(Getline {
-                    into,
-                    src: GetlineSrc::Main,
-                })))
+                let src = if self.eat(&Tok::Lt) {
+                    GetlineSrc::File(self.concat(no_gt)?)
+                } else {
+                    GetlineSrc::Main
+                };
+                ExprKind::Getline(Box::new(Getline { into, src }))
             }
-            other => Err(format!("syntax error at {}", describe(&other))),
-        }
+            other => return halt(format!("syntax error at {}", describe(&other))),
+        };
+        Ok(Expr::new(kind, loc))
     }
 
     /// The variable `++`/`--` applies to.
-    fn lvalue_operand(&mut self, no_gt: bool) -> Result<Lvalue, String> {
+    fn lvalue_operand(&mut self, no_gt: bool) -> Result<Lvalue, Str> {
         let e = self.primary(no_gt)?;
-        match e {
-            Expr::Get(lv) => Ok(lv),
-            _ => Err(
+        match e.kind {
+            ExprKind::Get(lv) => Ok(lv),
+            _ => halt(
                 "syntax error: ++ and -- want a variable, a field or an array element".to_string(),
             ),
         }
@@ -968,7 +1419,7 @@ impl Parser {
     /// Only a bare name, a subscripted name, or a `$`-field counts. Anything
     /// else is the *next* expression — `getline > 0` compares the result, it
     /// does not read into the variable `0`.
-    fn optional_getline_target(&mut self) -> Result<Option<Lvalue>, String> {
+    fn optional_getline_target(&mut self) -> Result<Option<Lvalue>, Str> {
         match self.peek().clone() {
             Tok::Name(n) => {
                 self.i = self.i.saturating_add(1);
@@ -982,14 +1433,16 @@ impl Parser {
             }
             Tok::Dollar => {
                 self.i = self.i.saturating_add(1);
+                let loc = self.loc_prev();
                 let inner = self.primary(false)?;
-                Ok(Some(Lvalue::Field(Box::new(inner))))
+                Ok(Some(Lvalue::Field(Box::new(inner), loc)))
             }
             _ => Ok(None),
         }
     }
 
-    fn builtin_call(&mut self, name: &'static str) -> Result<Expr, String> {
+    /// A call of a built-in, placed at its name.
+    fn builtin_call(&mut self, name: &'static str, loc: Loc) -> Result<Expr, Str> {
         let b = builtin_of(name);
         let args = if self.eat(&Tok::LParen) {
             let a = self.expr_list(&Tok::RParen)?;
@@ -999,7 +1452,7 @@ impl Parser {
             // `length` alone is `length($0)`. It is the only built-in that may
             // be written without parentheses, and POSIX says so explicitly.
             if b != Builtin::Length {
-                return Err(format!(
+                return halt(format!(
                     "syntax error: {name} needs its arguments in parentheses"
                 ));
             }
@@ -1018,7 +1471,7 @@ impl Parser {
             } else {
                 format!("{min} to {max}")
             };
-            return Err(format!(
+            return halt(format!(
                 "{name}: wants {want} arguments, given {}",
                 args.len()
             ));
@@ -1027,21 +1480,26 @@ impl Parser {
         // expression. Checking here means `split(s, "x")` is refused before the
         // program runs, not at the line where it first happens.
         match b {
-            Builtin::Split if !matches!(args.get(1), Some(Expr::Get(Lvalue::Var(_)))) => {
-                return Err("split: the second argument must be an array".to_string());
+            Builtin::Split
+                if !matches!(
+                    args.get(1).map(|a| &a.kind),
+                    Some(ExprKind::Get(Lvalue::Var(_)))
+                ) =>
+            {
+                return halt("split: the second argument must be an array".to_string());
             }
             Builtin::Sub | Builtin::Gsub => {
                 if let Some(target) = args.get(2)
-                    && !matches!(target, Expr::Get(_))
+                    && !matches!(target.kind, ExprKind::Get(_))
                 {
-                    return Err(format!(
+                    return halt(format!(
                         "{name}: the third argument must be a variable, a field or an array element"
                     ));
                 }
             }
             _ => {}
         }
-        Ok(Expr::Builtin(b, args))
+        Ok(Expr::new(ExprKind::Builtin(b, args), loc))
     }
 }
 
@@ -1072,22 +1530,47 @@ fn builtin_of(name: &str) -> Builtin {
     }
 }
 
-/// Compile a `/re/` literal, wording the failure the way awk does.
+/// Compile a `/re/` literal the lexer has already put through awk's escape
+/// layer, in the syntax gawk compiles with under `--posix`.
 ///
-/// `//` is legal awk and matches every record — `awk '//'` is `cat`. The engine
-/// refuses an empty pattern outright, because its first caller was the shell's
-/// `[[ =~ ]]`, where bash makes `[[ x =~ "" ]]` an error rather than a match; an
-/// empty *group* is fine there, so that is what the empty pattern becomes.
-pub fn compile_regex(pat: &[u8]) -> Result<Regex, String> {
-    let source = if pat.is_empty() {
-        b"()".as_slice()
-    } else {
-        pat
-    };
-    Regex::new(source).map_err(|e| {
-        let shown = String::from_utf8_lossy(pat).into_owned();
-        let why = String::from_utf8_lossy(&e.detail).into_owned();
-        format!("/{shown}/: {why}")
+/// `source` is the text as the program had it -- what the diagnostic quotes,
+/// as gawk's does -- and `pattern` what [`escape::regexp`] made of it. A
+/// literal that will not compile is gawk's `error:`, a syntax error found
+/// while parsing (exit 1), and the sentence after it is glibc's, which
+/// [`ere::EreError::message`] carries: gawk prints whatever `regcomp` said.
+///
+/// `//` is legal awk and matches every record — `awk '//'` is `cat` — and the
+/// engine compiles an empty pattern to exactly that.
+///
+/// # Errors
+/// The diagnostic, worded as above.
+pub fn compile_literal(source: &[u8], pattern: &[u8]) -> Result<Regex, Str> {
+    Regex::new_syntax(pattern, false, Syntax::POSIX_AWK).map_err(|e| {
+        // The regex as written, which need not be text.
+        let mut said = format!("error: {}: /", e.message()).into_bytes();
+        said.extend_from_slice(source);
+        said.push(b'/');
+        said
+    })
+}
+
+/// Compile a regex whose text was computed at run time -- the right side of
+/// `~`, a `match`, `split`, `sub` or `gsub` pattern, a multi-character `FS` or
+/// `RS`: gawk's `make_regexp`, escape layer and compiler both.
+///
+/// # Errors
+/// gawk's fatal diagnostic: `fatal: invalid regexp: <glibc's sentence>:
+/// /<text>/`, or the escape layer's own.
+pub fn compile_dynamic(text: &[u8], warnings: &mut Warnings) -> Result<Regex, Str> {
+    escape::compile(text, false, warnings).map_err(|e| match e {
+        CompileError::Nul(n) => format!("fatal: {}", n.message()).into_bytes(),
+        CompileError::Regex(e) => {
+            // The regex as computed, which need not be text.
+            let mut said = format!("fatal: invalid regexp: {}: /", e.message()).into_bytes();
+            said.extend_from_slice(text);
+            said.push(b'/');
+            said
+        }
     })
 }
 
@@ -1096,8 +1579,10 @@ fn describe(t: &Tok) -> String {
         Tok::Eof => "the end of the program".to_string(),
         Tok::Newline => "a newline".to_string(),
         Tok::Number(n) => format!("`{n}'"),
-        Tok::Str(s) => format!("the string \"{}\"", String::from_utf8_lossy(s)),
-        Tok::Ere(s) => format!("the regex /{}/", String::from_utf8_lossy(s)),
+        // This file's own wording, not gawk's, so the program's bytes are
+        // escaped where they are not printable rather than passed through.
+        Tok::Str(s) => format!("the string \"{}\"", escape_unprintable(s)),
+        Tok::Ere { source, .. } => format!("the regex /{}/", escape_unprintable(source)),
         Tok::Name(n) | Tok::FuncName(n) => format!("`{n}'"),
         Tok::Builtin(n) => format!("`{n}'"),
         Tok::Keyword(k) => format!("`{}'", keyword_text(*k)),
@@ -1185,11 +1670,233 @@ fn punct_text(t: &Tok) -> &'static str {
 mod tests {
     use super::*;
 
+    impl ParseError {
+        /// The messages as text, to compare with literals. Every program
+        /// these tests parse is text.
+        fn texts(&self) -> Vec<String> {
+            self.messages
+                .iter()
+                .map(|m| String::from_utf8(m.clone()).unwrap())
+                .collect()
+        }
+    }
+
+    /// The statement inside the [`Stmt::At`] that every parsed statement
+    /// arrives in.
+    fn bare(s: &Stmt) -> &Stmt {
+        match s {
+            Stmt::At(_, inner) => inner,
+            other => other,
+        }
+    }
+
     fn ok(src: &str) -> Program {
-        parse(src.as_bytes()).unwrap_or_else(|e| panic!("parsing {src:?}: {e}"))
+        parse(
+            src.as_bytes(),
+            &SourceMap::operand(src.as_bytes()),
+            &mut Warnings::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|e| panic!("parsing {src:?}: {e}"))
     }
     fn err(src: &str) -> String {
-        parse(src.as_bytes()).unwrap_err()
+        parse_error(src).to_string()
+    }
+    fn parse_error(src: &str) -> ParseError {
+        parse(
+            src.as_bytes(),
+            &SourceMap::operand(src.as_bytes()),
+            &mut Warnings::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+    }
+
+    /// Which failures are gawk's `fatal:` is carried beside the message, not
+    /// read back out of it: a syntax error can quote a string that says
+    /// `fatal:` and is still a syntax error.
+    #[test]
+    fn a_fatal_parse_error_is_told_from_a_syntax_error_by_kind_not_text() {
+        // gawk --posix: a backslash-newline inside a string is `fatal: POSIX
+        // does not allow physical newlines in string values`, placed on the
+        // line of the backslash.
+        let newline = parse_error("BEGIN { x = 1 }\nBEGIN { print \"a\\\nb\" }");
+        assert!(newline.fatal);
+        assert_eq!(
+            newline.texts(),
+            ["cmd. line:2: fatal: POSIX does not allow physical newlines in string values"]
+        );
+        // A regex literal that will not compile is gawk's `error:` -- placed,
+        // but exit 1 like any syntax error.
+        let bad_regex = parse_error("BEGIN { x = 1 }\n/a(/");
+        assert!(!bad_regex.fatal);
+        assert_eq!(
+            bad_regex.texts(),
+            [r"cmd. line:2: error: Unmatched ( or \(: /a(/"]
+        );
+
+        let syntax = parse_error(r#"BEGIN { delete "a: fatal: b" }"#);
+        assert!(!syntax.fatal, "{syntax}");
+        assert!(syntax.to_string().contains("a: fatal: b"), "{syntax}");
+    }
+
+    /// gawk folds a divisor that is a constant and refuses a zero one while
+    /// it parses (`mk_binary`): an `error:` at the operator, after which the
+    /// parse carries on and the program does not run. Measured against gawk
+    /// 5.2.1 `--posix`, case by case.
+    #[test]
+    fn a_constant_zero_divisor_is_refused_where_gawk_folds_it() {
+        for src in [
+            "BEGIN { print 1/0 }",
+            "BEGIN { x = 1; print x/0.0 }",
+            "BEGIN { print 1/-0 }",
+            "BEGIN { x = 1; print x/1e-400 }",
+            "BEGIN { print 2^-1/0 }",
+            "BEGIN { x = 1; print x / 0^2 }",
+            "BEGIN { x = 1; print x / !1 }",
+            r#"BEGIN { x = 1; print x / !"a" }"#,
+            // In a branch that never runs, and in a function never called:
+            // it is a property of the text.
+            r#"BEGIN { if (0) print 1/0; print "ran" }"#,
+            r#"function f() { return 1/0 } BEGIN { print "x" }"#,
+        ] {
+            let e = parse_error(src);
+            assert!(!e.fatal, "{src}");
+            assert_eq!(
+                e.texts(),
+                ["cmd. line:1: error: division by zero attempted"],
+                "{src}"
+            );
+        }
+        let m = parse_error("BEGIN { x = 3; print x % 0 }");
+        assert_eq!(
+            m.texts(),
+            ["cmd. line:1: error: division by zero attempted in `%'"]
+        );
+        // What gawk does not fold, it leaves to run time.
+        for src in [
+            "BEGIN { print 1/(0) }",
+            "BEGIN { print 1/(2-2) }",
+            "BEGIN { print 1/+0 }",
+            r#"BEGIN { print 1/"0" }"#,
+            "BEGIN { print 1/z }",
+            "BEGIN { x = 1; print x / 0^-1 }",
+            "BEGIN { x = 1; x /= 0 }",
+        ] {
+            let _ = ok(src);
+        }
+    }
+
+    /// The parse goes on past an `error:`, so each is reported, in order,
+    /// and so is the syntax error or regex literal that stops it after them.
+    #[test]
+    fn errors_are_collected_in_reading_order() {
+        let two = parse_error("BEGIN { print 1/0\n print 2%0 }");
+        assert_eq!(
+            two.texts(),
+            [
+                "cmd. line:1: error: division by zero attempted",
+                "cmd. line:2: error: division by zero attempted in `%'",
+            ]
+        );
+        let then_regex = parse_error("BEGIN { print 1/0 }\n/a(/");
+        assert_eq!(
+            then_regex.texts(),
+            [
+                "cmd. line:1: error: division by zero attempted",
+                r"cmd. line:2: error: Unmatched ( or \(: /a(/",
+            ]
+        );
+        let then_syntax = parse_error("BEGIN { print 1/0\n print ( }");
+        assert_eq!(then_syntax.texts().len(), 2, "{then_syntax}");
+        assert_eq!(
+            then_syntax.texts().first().map(String::as_str),
+            Some("cmd. line:1: error: division by zero attempted")
+        );
+        // A regex literal stops gawk's parse: only the first is reported.
+        let regexes = parse_error("/a(/\n/b(/");
+        assert_eq!(
+            regexes.texts(),
+            [r"cmd. line:1: error: Unmatched ( or \(: /a(/"]
+        );
+    }
+
+    /// The lexer reads the whole program first; what the parser met before
+    /// the lexer's stopping point keeps its place ahead of the lexer's own
+    /// complaint, as gawk, whose parser pulls one token at a time, says them.
+    #[test]
+    fn a_lexing_error_is_ordered_as_gawk_meets_it() {
+        let after_error = parse_error("BEGIN { print 1/0 }\nBEGIN { print \"a\\\nb\" }");
+        assert!(after_error.fatal);
+        assert_eq!(
+            after_error.texts(),
+            [
+                "cmd. line:1: error: division by zero attempted",
+                "cmd. line:2: fatal: POSIX does not allow physical newlines in string values",
+            ]
+        );
+        // A syntax error before the lexer stopped is gawk's report, alone.
+        let syntax_first = parse_error("BEGIN { print ( }\nBEGIN { print \"a\\\nb\" }");
+        assert!(!syntax_first.fatal, "{syntax_first}");
+        assert_eq!(syntax_first.texts().len(), 1, "{syntax_first}");
+        assert!(
+            !syntax_first.to_string().contains("POSIX"),
+            "{syntax_first}"
+        );
+    }
+
+    /// gawk refuses `next` and `nextfile` in BEGIN and END as it parses
+    /// them, and leaves a function's to run time.
+    #[test]
+    fn next_in_begin_or_end_is_an_error() {
+        assert_eq!(
+            parse_error("BEGIN { next }").texts(),
+            ["cmd. line:1: error: `next' used in BEGIN action"]
+        );
+        assert_eq!(
+            parse_error("END { x = 1\n nextfile }").texts(),
+            ["cmd. line:2: error: `nextfile' used in END action"]
+        );
+        let _ = ok("function f() { next } { f() }");
+        let _ = ok("{ next } END { print NR }");
+    }
+
+    /// `printf("%s\n", x)`: one parenthesised list, told from expressions
+    /// that merely begin with a grouping by what follows the `)`.
+    #[test]
+    fn a_print_list_may_be_parenthesised() {
+        let args_of = |src: &str| -> (usize, bool) {
+            let p = ok(src);
+            match p.begin.first().map(bare) {
+                Some(Stmt::Print(args, r) | Stmt::Printf(args, r)) => (args.len(), r.is_some()),
+                other => panic!("{src:?}: {other:?}"),
+            }
+        };
+        assert_eq!(args_of(r#"BEGIN { printf("%s-%s\n", 1, 2) }"#), (3, false));
+        assert_eq!(args_of(r#"BEGIN { print("a", "b") }"#), (2, false));
+        assert_eq!(args_of(r#"BEGIN { print("a", "b") > "f" }"#), (2, true));
+        assert_eq!(args_of("BEGIN { printf(\"%s\\n\",\n 1) }"), (2, false));
+        // Not the list form: the grouping is the start of an expression.
+        assert_eq!(args_of(r#"BEGIN { print ("a")("b") }"#), (1, false));
+        assert_eq!(args_of("BEGIN { print (1,2) in a }"), (1, false));
+        assert_eq!(args_of("BEGIN { print (1), (2) }"), (2, false));
+        assert!(err("BEGIN { print () }").contains("syntax error"));
+    }
+
+    /// An expression is placed at its operator, so a statement that spans
+    /// lines names the line its failing operation is on.
+    #[test]
+    fn an_expression_is_placed_at_its_operator() {
+        let p = ok("BEGIN {\n if (1 &&\n  1/z) print }");
+        let Some(Stmt::If(cond, ..)) = p.begin.first().map(bare) else {
+            panic!("no if");
+        };
+        assert_eq!(cond.loc.line, 2, "the `&&`");
+        let ExprKind::And(_, rhs) = &cond.kind else {
+            panic!("not an and");
+        };
+        assert_eq!(rhs.loc.line, 3, "the `/`");
+        assert!(matches!(rhs.kind, ExprKind::Bin(BinOp::Div, ..)));
     }
 
     #[test]
@@ -1217,6 +1924,7 @@ mod tests {
             .first()
             .and_then(|r| r.action.as_ref())
             .and_then(|a| a.first())
+            .map(bare)
         else {
             panic!("expected a redirected print");
         };
@@ -1228,10 +1936,14 @@ mod tests {
             .first()
             .and_then(|r| r.action.as_ref())
             .and_then(|a| a.first())
+            .map(bare)
         else {
             panic!("expected an unredirected print");
         };
-        assert!(matches!(args.first(), Some(Expr::Cmp(CmpOp::Gt, _, _))));
+        assert!(matches!(
+            args.first().map(|a| &a.kind),
+            Some(ExprKind::Cmp(CmpOp::Gt, _, _))
+        ));
     }
 
     #[test]
@@ -1241,7 +1953,8 @@ mod tests {
                 .rules
                 .first()
                 .and_then(|r| r.action.as_ref())
-                .and_then(|a| a.first()),
+                .and_then(|a| a.first())
+                .map(bare),
             Some(Stmt::ForIn { .. })
         ));
         assert!(matches!(
@@ -1249,7 +1962,8 @@ mod tests {
                 .rules
                 .first()
                 .and_then(|r| r.action.as_ref())
-                .and_then(|a| a.first()),
+                .and_then(|a| a.first())
+                .map(bare),
             Some(Stmt::For { .. })
         ));
     }
@@ -1273,8 +1987,11 @@ mod tests {
             panic!("no function")
         };
         assert!(matches!(
-            f.body.first(),
-            Some(Stmt::Return(Some(Expr::Get(Lvalue::Var(VarRef::Local(0))))))
+            f.body.first().map(bare),
+            Some(Stmt::Return(Some(Expr {
+                kind: ExprKind::Get(Lvalue::Var(VarRef::Local(0))),
+                ..
+            })))
         ));
     }
 
@@ -1305,26 +2022,26 @@ mod tests {
         // `2 ^ 3 ^ 2` is 2^(3^2) = 512 in awk, not (2^3)^2 = 64. Right-
         // associative, which is the opposite of every other binary operator
         // here and the reason `^` is worth its own case.
-        let Expr::Bin(BinOp::Pow, lhs, rhs) = print_arg("2 ^ 3 ^ 2") else {
+        let ExprKind::Bin(BinOp::Pow, lhs, rhs) = print_arg("2 ^ 3 ^ 2") else {
             panic!("`2 ^ 3 ^ 2` did not parse as a power at the top");
         };
         assert!(
-            matches!(*lhs, Expr::Num(n) if (n - 2.0).abs() < f64::EPSILON),
+            matches!(lhs.kind, ExprKind::Num(n) if (n - 2.0).abs() < f64::EPSILON),
             "left operand should be the bare 2, so the nesting is on the right"
         );
         assert!(
-            matches!(&*rhs, Expr::Bin(BinOp::Pow, _, _)),
+            matches!(rhs.kind, ExprKind::Bin(BinOp::Pow, _, _)),
             "`^` must be right-associative: 2^(3^2), not (2^3)^2"
         );
 
         // `-2 ^ 2` is -(2^2) = -4, not (-2)^2 = 4: `^` binds tighter than
         // unary minus, which is the case C gets the other way round.
         let neg = print_arg("-2 ^ 2");
-        let Expr::Neg(inner) = neg else {
+        let ExprKind::Neg(inner) = neg else {
             panic!("`-2 ^ 2` should negate a power, not raise a negative");
         };
         assert!(
-            matches!(&*inner, Expr::Bin(BinOp::Pow, _, _)),
+            matches!(inner.kind, ExprKind::Bin(BinOp::Pow, _, _)),
             "`^` binds tighter than unary minus: -(2^2), not (-2)^2"
         );
 
@@ -1332,18 +2049,18 @@ mod tests {
         // second-to-last field instead of subtracting from the last one, and
         // both are valid programs -- which is exactly why it needs a shape
         // assertion rather than a parse check.
-        let Expr::Bin(BinOp::Sub, lhs, _) = print_arg("$NF - 1") else {
+        let ExprKind::Bin(BinOp::Sub, lhs, _) = print_arg("$NF - 1") else {
             panic!("`$NF - 1` should subtract at the top, not index a field");
         };
         assert!(
-            matches!(*lhs, Expr::Get(Lvalue::Field(_))),
+            matches!(lhs.kind, ExprKind::Get(Lvalue::Field(..))),
             "`$` binds tighter than `-`: ($NF) - 1, not $(NF - 1)"
         );
 
         // Concatenation is an operator with no symbol, and it binds looser
         // than arithmetic. `1 " " 2` is three operands joined, not a number.
         assert!(
-            matches!(print_arg(r#"1 " " 2"#), Expr::Concat(_, _)),
+            matches!(print_arg(r#"1 " " 2"#), ExprKind::Concat(_, _)),
             "adjacent expressions concatenate"
         );
     }
@@ -1354,7 +2071,7 @@ mod tests {
     /// need the tree rather than a yes/no on parsing. Every failure here is a
     /// panic naming the program, because a test that cannot reach its subject
     /// has not passed.
-    fn print_arg(src: &str) -> Expr {
+    fn print_arg(src: &str) -> ExprKind {
         // A `BEGIN` block lands in `program.begin`, not in `program.rules` --
         // the first draft of this helper looked in `rules` and reported "no
         // rule parsed", which reads like a parser failure and was a navigation
@@ -1365,11 +2082,14 @@ mod tests {
             .into_iter()
             .next()
             .unwrap_or_else(|| panic!("no BEGIN statement parsed from {src:?}"));
-        let Stmt::Print(mut args, _) = stmt else {
+        let Stmt::At(_, stmt) = stmt else {
+            panic!("{src:?} parsed to a statement with no location");
+        };
+        let Stmt::Print(mut args, _) = *stmt else {
             panic!("{src:?} did not parse as a print");
         };
         assert_eq!(args.len(), 1, "{src:?} should print exactly one expression");
-        args.pop().unwrap_or_else(|| unreachable!())
+        args.pop().unwrap_or_else(|| unreachable!()).kind
     }
 
     #[test]
@@ -1400,6 +2120,71 @@ mod tests {
     fn a_newline_inside_a_continued_construct_is_not_a_terminator() {
         let _ = ok("BEGIN {\n  if (1 &&\n      2)\n    print \"y\"\n  else\n    print \"n\"\n}");
         let _ = ok("BEGIN { print 1,\n 2 }");
+    }
+
+    /// Where gawk --posix lets a newline stand: after `{ && || , ; do else`,
+    /// a statement's `)` and a rule's `}`. Measured, case by case.
+    #[test]
+    fn a_newline_stands_only_where_gawk_lets_it() {
+        for src in [
+            "BEGIN { print 1,\n 2 }",
+            "BEGIN { print (1 &&\n 1) }",
+            "BEGIN { if (1)\n\n print 1 }",
+            "BEGIN { for (i = 0;\n i < 1;\n i++) print i }",
+            "function f(a,\n b) { return 1 }\nBEGIN { print f() }",
+            "function f(a)\n{ return 1 }\nBEGIN { print f() }",
+            "BEGIN { a[1,\n 2] = 1 }",
+            "NR==1,\nNR==2",
+            "BEGIN { if (1) print 1\n\nelse print 2 }",
+        ] {
+            let _ = ok(src);
+        }
+        for src in [
+            "BEGIN\n{ print 1 }",
+            "BEGIN { print (\n1) }",
+            "BEGIN { print (1\n) }",
+            "BEGIN { a[1] = 1; print a[\n1] }",
+            "function f(\na) { return 1 }",
+            "function f(a\n, b) { return 1 }",
+            "BEGIN { x =\n1 }",
+            "BEGIN { print (1 ==\n1) }",
+            "BEGIN { print (1 ?\n2 : 3) }",
+            "BEGIN { print (1 ? 2\n: 3) }",
+            "BEGIN { print (1 ? 2 :\n3) }",
+        ] {
+            assert!(err(src).contains("syntax error"), "{src:?}: {}", err(src));
+        }
+    }
+
+    /// One `;` may follow a rule's `}`, with newlines about it; a pattern
+    /// alone ends at a newline or one `;`; nothing else separates rules.
+    #[test]
+    fn rules_are_separated_as_gawk_separates_them() {
+        for src in [
+            "BEGIN { print 1 };",
+            "BEGIN { print 1 }; END { print 2 }",
+            "BEGIN { print 1 }\n;\nEND { print 2 }",
+            "NR==1;NR==2",
+            "BEGIN { print 1 } END { print 2 }",
+        ] {
+            let _ = ok(src);
+        }
+        for src in [
+            ";BEGIN { print 1 }",
+            "BEGIN { print 1 };; END { print 2 }",
+            "NR==1;;NR==2",
+            ";",
+            "BEGIN { if (1) print 1;; else print 2 }",
+        ] {
+            assert!(err(src).contains("syntax error"), "{src:?}: {}", err(src));
+        }
+    }
+
+    /// `func` is an ordinary name: POSIX does not reserve it.
+    #[test]
+    fn func_is_a_name() {
+        let _ = ok("BEGIN { func = 3; print func }");
+        assert!(!err("func f() { return 1 }\nBEGIN { print f() }").is_empty());
     }
 
     #[test]

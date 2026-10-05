@@ -2392,6 +2392,9 @@ pub struct EmailApp {
     clipboard: String,
     /// How wide carets are drawn: the user's `caret_width_scale` applied.
     caret_width: f32,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at.
+    focus_ring_width: f32,
     /// How far the list is scrolled, in rows, and the message read, in lines.
     pub list_scroll: usize,
     pub read_scroll: usize,
@@ -2461,6 +2464,7 @@ impl EmailApp {
             picker_for: PickerFor::Open,
             clipboard: String::new(),
             caret_width: textedit::CARET_WIDTH,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             list_scroll: 0,
             read_scroll: 0,
             hover: None,
@@ -3048,16 +3052,21 @@ impl EmailApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Every key but a Ctrl chord and what is typed is taken plain: a
+        // chord with Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+Delete deleted the message and
+        // Alt+R started a reply.
+        let plain = textline::is_plain(key.modifiers);
         // Above the compose form and the search box, because `F1` is not text
         // and a reader may want the keys from either.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal: letting keys through would mean deleting a message you
             // cannot see.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -3069,7 +3078,9 @@ impl EmailApp {
             return self.handle_search_key(key);
         }
 
-        if key.modifiers.ctrl {
+        // As Ctrl chords: AltGr arrives as Ctrl+Alt and types, and AltGr+S --
+        // a Polish `ś` -- changed the sort order.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::N => {
                     self.compose_new();
@@ -3096,6 +3107,9 @@ impl EmailApp {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -3173,6 +3187,17 @@ impl EmailApp {
 
     /// Keys while the search box is open.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        // What a key typed, AltGr's among it, and not a command's letter,
+        // which a chord carries: Ctrl+A in the box typed an `a`, and Alt+X an
+        // `x`. The box's own keys are taken plain.
+        if textline::types_into_field(key) {
+            self.search_query.extend(key.typed());
+            self.reanchor_selection();
+            return EventResult::Consumed;
+        }
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         match key.key {
             Key::Escape => {
                 self.searching = false;
@@ -3189,15 +3214,7 @@ impl EmailApp {
                 self.reanchor_selection();
                 EventResult::Consumed
             }
-            _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.search_query.push_str(&typed);
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
+            _ => EventResult::Ignored,
         }
     }
 
@@ -3207,12 +3224,21 @@ impl EmailApp {
     /// says it cannot send, Escape closes (asking first over unsaved work),
     /// and everything else types into the field.
     fn handle_compose_key(&mut self, key: &KeyEvent) -> EventResult {
-        let ctrl = key.modifiers.ctrl;
+        // Alt's and the Windows key's chords are never the form's nor a
+        // field's: the body is the toolkit's field, which types the letter of
+        // a chord it does not know, and Alt+X typed an `x` into the message.
+        if textline::is_alt_or_windows_chord(key.modifiers) {
+            return EventResult::Ignored;
+        }
+        // Ctrl chords, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+S
+        // -- a Polish `ś` -- saved a draft instead of typing.
+        let ctrl = textline::is_ctrl_chord(key.modifiers);
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => self.close_compose(),
+            Key::Escape if plain => self.close_compose(),
             Key::Enter if ctrl => self.send(),
             Key::S if ctrl => self.save_draft(),
-            Key::Tab => {
+            Key::Tab if plain => {
                 if let Some(compose) = self.compose.as_mut() {
                     compose.field = compose.field.step(key.modifiers.shift);
                 }
@@ -3959,26 +3985,20 @@ impl EmailApp {
         }
         // The search box: a press puts the keyboard in it.
         let search = Rect::new(128.0, 10.0, 320.0, 28.0);
-        self.palette.push_surface(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             f,
-            search.x,
-            search.y,
-            search.w,
-            search.h,
-            6.0,
-            Surface::Card,
+            &self.palette,
+            search,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::SearchBox),
+                focused: self.searching,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
         );
-        if self.searching {
-            f.push(RenderCommand::StrokeRect {
-                x: search.x,
-                y: search.y,
-                width: search.w,
-                height: search.h,
-                color: self.palette.blue,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-        }
         let (shown, color) = if self.search_query.is_empty() && !self.searching {
             ("Search mail (Ctrl+F)".to_string(), self.palette.subtext0)
         } else if self.searching {
@@ -4553,21 +4573,20 @@ impl EmailApp {
         focused: bool,
         field: ComposeField,
     ) {
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(field)),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+            self.focus_ring_width,
+        );
         if input.text().is_empty() && !focused {
             let hint = match field {
                 ComposeField::From => "Your name <you@example.com>",
@@ -4624,21 +4643,20 @@ impl EmailApp {
     fn render_body(&self, f: &mut Frame<Target>, compose: &Compose) {
         let rect = self.field_rect(ComposeField::Body);
         let focused = compose.field == ComposeField::Body;
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(ComposeField::Body)),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+            self.focus_ring_width,
+        );
         f.hit(Target::Field(ComposeField::Body), rect);
         let area = Rect::new(
             rect.x + 8.0,
@@ -5047,10 +5065,11 @@ fn mime_for(name: &str) -> &'static str {
 // ─── Main ────────────────────────────────────────────────────────────
 
 impl App for EmailApp {
-    /// The carets' width, the one appearance setting this window reads that
-    /// is not a colour.
+    /// The carets' and the focus marks' widths, the appearance settings this
+    /// window reads that are not colours.
     fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
         self.caret_width = settings.caret_width();
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn theme_changed(&mut self, palette: &Palette) {
@@ -5599,6 +5618,95 @@ mod tests {
         let mut app = EmailApp::new();
         app.seed_sample_mail();
         app
+    }
+
+    /// **A chord is neither a mail key nor typing, and AltGr types**:
+    /// Alt+Delete deleted the message and Alt+R started a reply, each chord
+    /// arriving carrying its key; AltGr+S -- a Polish `ś` -- changed the sort
+    /// order, and in a message saved a draft instead of typing; Alt+X typed
+    /// an `x` into the search and into the message.
+    #[test]
+    fn a_chord_is_neither_a_mail_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let typed = |key: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = seeded();
+        app.selected_message = app.messages.first().map(|m| m.id);
+        let where_it_is = |app: &EmailApp| {
+            app.selected_message
+                .and_then(|id| app.messages.iter().find(|m| m.id == id))
+                .map(|m| m.mailbox.clone())
+        };
+        let (sort, selected, mailbox) = (app.sort_order, app.selected_message, where_it_is(&app));
+        assert!(mailbox.is_some(), "control: a message is selected");
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Delete, Key::R, Key::S, Key::Down, Key::Right, Key::F1] {
+                assert_eq!(
+                    app.handle_event(&typed(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.sort_order, sort, "a chord changed the sort order");
+        assert_eq!(
+            app.selected_message, selected,
+            "a chord moved the selection"
+        );
+        assert_eq!(where_it_is(&app), mailbox, "a chord deleted the message");
+        assert!(app.compose.is_none(), "a chord started a reply");
+
+        // The search types what a key typed.
+        app.handle_event(&typed(Key::F, "f", Modifiers::ctrl()));
+        assert!(app.searching, "control: Ctrl+F searches");
+        app.handle_event(&typed(Key::A, "a", Modifiers::ctrl()));
+        app.handle_event(&typed(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&typed(Key::S, "ś", altgr));
+        assert_eq!(
+            app.search_query, "ś",
+            "the search typed a command or lost AltGr's ś"
+        );
+        app.handle_event(&typed(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&typed(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(app.search_query, "ś", "Alt+Backspace deleted");
+        assert!(app.searching, "Alt+Escape closed the search");
+
+        // So does a message, and AltGr+S saves no draft.
+        let mut app = writing_a_body();
+        let drafts = app.messages.len();
+        app.handle_event(&typed(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&typed(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&typed(Key::S, "ś", altgr));
+        assert_eq!(
+            body_text(&app),
+            "ś",
+            "the body typed a command or lost AltGr's ś"
+        );
+        assert_eq!(app.messages.len(), drafts, "AltGr+S saved a draft");
+        app.handle_event(&typed(Key::Escape, "", Modifiers::alt()));
+        app.handle_event(&typed(Key::Escape, "", Modifiers::ctrl()));
+        app.handle_event(&typed(Key::Tab, "", Modifiers::ctrl()));
+        // The message holds unsaved text, so a first Escape would only ask:
+        // the question is what shows a chorded one was taken.
+        assert!(
+            app.compose.as_ref().is_some_and(|c| !c.confirm_close),
+            "a chorded Escape closed the message or asked to"
+        );
+        assert_eq!(
+            app.compose.as_ref().map(|c| c.field),
+            Some(ComposeField::Body),
+            "Ctrl+Tab left the body"
+        );
     }
 
     /// Every string the window draws, joined.
@@ -6813,6 +6921,110 @@ mod tests {
     // -- The window over mail kept in files ------------------------------------
 
     use guitk::probe::{self, Probe};
+
+    /// The search box and the compose form's fields are the toolkit's (lane
+    /// C, c-e-a-theme-can-shape-the-controls): lit under the pointer, out when
+    /// it leaves, and marked at the user's focus width while they have the
+    /// keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = seeded();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &EmailApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame();
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let search = probe::rect_of(&app, Target::SearchBox).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        let at = |kind| Event::Mouse(MouseEvent { x, y, kind });
+        app.handle_event(&at(MouseEventKind::Move));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: -1.0,
+            y: -1.0,
+            kind: MouseEventKind::Leave,
+        }));
+        assert!(
+            draws(&app, search, idle),
+            "the box stayed lit after the pointer left"
+        );
+        probe::click(&mut app, Target::SearchBox);
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, search, keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+        app.handle_event(&press(Key::Escape));
+
+        probe::click(&mut app, Target::Compose);
+        let subject =
+            probe::rect_of(&app, Target::Field(ComposeField::Subject)).expect("the subject");
+        let body = probe::rect_of(&app, Target::Field(ComposeField::Body)).expect("the body");
+        probe::click(&mut app, Target::Field(ComposeField::Subject));
+        let (bx, by) = body.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: bx,
+            y: by,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            draws(&app, subject, keyed),
+            "the subject with the keyboard is not marked"
+        );
+        assert!(
+            draws(&app, body, lit),
+            "the body under the pointer is not lit"
+        );
+        // And a one-line field under it, not only the body.
+        let to = probe::rect_of(&app, Target::Field(ComposeField::To)).expect("the To field");
+        let (tx, ty) = to.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: tx,
+            y: ty,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(draws(&app, to, lit), "a field under the pointer is not lit");
+    }
 
     impl Probe for EmailApp {
         type Target = Target;

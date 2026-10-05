@@ -16,7 +16,7 @@
 //! synchronously, as it was, "White is thinking" was a string no frame ever
 //! showed, because the search ran to completion before the handler returned.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, HistoryKey, help};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -27,6 +27,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
+use statehistory::StateHistory;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -129,6 +130,27 @@ const PANEL_LINES: [(&str, &str); 5] = [
 
 const NEW_GAME_LABEL: &str = "New game (N)";
 const UNDO_LABEL: &str = "Undo (Z)";
+
+/// The keys this game answers, on the list F1 raises.
+///
+/// The game had none: the status line named four keys, and the history's
+/// -- Ctrl+Y and Alt+Z, which the operator's answer to C-Q24 added
+/// (`design-decisions.md` §1416) -- could be found only by pressing them.
+/// **Each row is a key this game answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the cursor"),
+    ("Enter / Space", "Place a stone"),
+    ("Z / Ctrl+Z", "Take back your stone and the reply"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Play them again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The board before / after this one, on any branch",
+    ),
+    ("N", "Start a new game"),
+    ("F1 / ?", "This list"),
+];
 
 /// The panel's buttons, drawn centred at [`Layout::small`].
 const PANEL_BUTTONS: [&str; 2] = [NEW_GAME_LABEL, UNDO_LABEL];
@@ -783,6 +805,32 @@ fn find_best_move(board: &Board, ai_stone: Cell) -> Option<(usize, usize)> {
     Some(best_move)
 }
 
+// ── The history ─────────────────────────────────────────────────────
+
+/// The whole of a game at one moment, for the history: everything a stone
+/// changes, the scoreboard included -- so a turn taken back takes back the
+/// point its win scored, and a turn played again scores it again.
+#[derive(Clone, Debug)]
+struct Snapshot {
+    board: Board,
+    phase: GamePhase,
+    current_turn: Cell,
+    move_history: Vec<MoveRecord>,
+    move_count: usize,
+    win_line: Option<WinLine>,
+    winner: Cell,
+    scores: (u32, u32, u32),
+    last_move: Option<(usize, usize)>,
+}
+
+/// How many turns the history keeps. A game is over in at most 113 of the
+/// player's turns; the history keeps branches too, each a game taken back
+/// and played another way.
+const HISTORY_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(1_000) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
+
 // ── Main application struct ─────────────────────────────────────────
 
 /// The Gomoku application state.
@@ -800,6 +848,10 @@ struct GomokuApp {
     scores: (u32, u32, u32),
     /// The last stone placed (for the marker dot).
     last_move: Option<(usize, usize)>,
+    /// Every position the player has had the move in this game, as a tree
+    /// (C-Q24, `design-decisions.md` §1416): a turn played after an undo
+    /// keeps the turns undone as a branch, reached with Alt+Z.
+    history: StateHistory<Snapshot>,
     /// The size the window is now, which is the size the last frame was drawn
     /// at and so the size the next click has to be read against.
     width: f32,
@@ -808,6 +860,9 @@ struct GomokuApp {
     /// the defaults; the framework calls `App::theme_changed` before the
     /// first frame.
     palette: Palette,
+    /// Whether the list of keys is up. While it is, it is the window's:
+    /// a stone placed under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl GomokuApp {
@@ -825,9 +880,11 @@ impl GomokuApp {
             winner: Cell::Empty,
             scores: (0, 0, 0),
             last_move: None,
+            history: StateHistory::new(HISTORY_LIMIT),
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            show_help: false,
         }
     }
 
@@ -858,6 +915,7 @@ impl GomokuApp {
         self.win_line = None;
         self.winner = Cell::Empty;
         self.last_move = None;
+        self.history.clear();
     }
 
     /// Attempt to place a stone at the cursor position.
@@ -874,7 +932,13 @@ impl GomokuApp {
             return false;
         }
 
+        let before = self.snapshot();
         self.place_stone(row, col);
+        // A turn is the player's stone and White's reply to it: one step of
+        // the history, begun here -- the one way the player places a stone --
+        // and closed when the next turn begins or the history is walked. So
+        // undo, redo and the journeys all land where it is the player's move.
+        self.history.begin(before);
         true
     }
 
@@ -953,53 +1017,78 @@ impl GomokuApp {
         true
     }
 
-    /// Undo the last move(s). If the last move was by the AI (White),
-    /// undo both the AI move and the preceding player move.
-    fn undo(&mut self) {
-        if self.move_history.is_empty() {
-            return;
-        }
-
-        // If the game is over, undo the score it awarded as well as the
-        // move. A search that has not run yet awarded nothing, so Thinking
-        // just goes back to Playing.
-        if self.phase == GamePhase::Thinking {
-            self.phase = GamePhase::Playing;
-        } else if self.phase != GamePhase::Playing {
-            self.phase = GamePhase::Playing;
-            self.win_line = None;
-            // Take back the credit this game awarded. `Cell::Empty` is the
-            // draw, which is the only reason a colourless stone names a
-            // score at all.
-            match self.winner {
-                Cell::Black => self.scores.0 = self.scores.0.saturating_sub(1),
-                Cell::White => self.scores.1 = self.scores.1.saturating_sub(1),
-                Cell::Empty => self.scores.2 = self.scores.2.saturating_sub(1),
-            }
-            self.winner = Cell::Empty;
-        }
-
-        // Take back White's reply if it made one, then Black's move, so
-        // that one press of Z gives the board back to the player rather than
-        // handing them a position the opponent is about to answer.
-        self.take_back(Cell::White);
-        self.take_back(Cell::Black);
-
-        // Update current turn and last_move
-        self.current_turn = Cell::Black;
-        self.last_move = self.move_history.last().map(|m| (m.row, m.col));
+    /// Take back the last turn: White's reply if it made one, and the
+    /// player's stone -- so one press gives the board back to the player
+    /// rather than handing them a position White is about to answer -- and
+    /// the point a win or a draw scored with them. A search that had not run
+    /// yet scored nothing, and is simply not run. Returns whether there was a
+    /// turn to take back.
+    ///
+    /// A turn is one step of the history (see `try_place_stone`), a whole
+    /// position at each end, so none of this is worked out by hand: it was,
+    /// and each piece -- White's stone before Black's, the point, the phase --
+    /// was a place for it to go wrong.
+    fn undo(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.undo(now);
+        self.put_back(then)
     }
 
-    /// Lift the last stone from the board if it was `stone`'s.
-    fn take_back(&mut self, stone: Cell) {
-        if self.move_history.last().map(|m| m.stone) != Some(stone) {
-            return;
+    /// Play the last turn taken back again, on the branch the game is on --
+    /// Ctrl+Y or Ctrl+Shift+Z -- White's reply and a win's point included.
+    fn redo(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.redo(now);
+        self.put_back(then)
+    }
+
+    /// The position the player had the move in just before this one, on
+    /// whichever branch -- Alt+Z.
+    fn earlier(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.earlier(now);
+        self.put_back(then)
+    }
+
+    /// The position reached just after this one -- Alt+Shift+Z.
+    fn later(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.later(now);
+        self.put_back(then)
+    }
+
+    /// The game as it stands, for the history.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            board: self.board.clone(),
+            phase: self.phase,
+            current_turn: self.current_turn,
+            move_history: self.move_history.clone(),
+            move_count: self.move_count,
+            win_line: self.win_line.clone(),
+            winner: self.winner,
+            scores: self.scores,
+            last_move: self.last_move,
         }
-        let Some(record) = self.move_history.pop() else {
-            return;
+    }
+
+    /// Put the game the history handed back in place, if it handed one. The
+    /// cursor stays where it is: it is where the player is looking, not part
+    /// of the game.
+    fn put_back(&mut self, then: Option<Snapshot>) -> bool {
+        let Some(s) = then else {
+            return false;
         };
-        self.board.set(record.row, record.col, Cell::Empty);
-        self.move_count = self.move_count.saturating_sub(1);
+        self.board = s.board;
+        self.phase = s.phase;
+        self.current_turn = s.current_turn;
+        self.move_history = s.move_history;
+        self.move_count = s.move_count;
+        self.win_line = s.win_line;
+        self.winner = s.winner;
+        self.scores = s.scores;
+        self.last_move = s.last_move;
+        true
     }
 
     /// Handle keyboard input.
@@ -1012,6 +1101,42 @@ impl GomokuApp {
     fn handle_key(&mut self, event: &KeyEvent) -> EventResult {
         if !event.pressed {
             return EventResult::Ignored;
+        }
+        // The list of keys is modal: what raised it, Escape or Enter put it
+        // away, and nothing reaches the board under it.
+        if self.show_help {
+            if help::closes(event) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
+        // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
+        if let Some(key) = HistoryKey::of(event) {
+            let moved = match key {
+                HistoryKey::Undo => self.undo(),
+                HistoryKey::Redo => self.redo(),
+                HistoryKey::Earlier => self.earlier(),
+                HistoryKey::Later => self.later(),
+            };
+            return if moved {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
+        // Any other key held with Ctrl, Alt or the Windows key is not the
+        // board's. The arms below matched on the key alone, so AltGr+Z --
+        // which types ż, and arrives as Ctrl+Alt -- took a turn back, Ctrl+N
+        // dealt a new game from under the window's own Ctrl+N, and the
+        // Windows key's combinations moved the cursor.
+        let m = event.modifiers;
+        if m.ctrl || m.alt || m.super_key {
+            return EventResult::Ignored;
+        }
+        if help::raises(event) {
+            self.show_help = true;
+            return EventResult::Consumed;
         }
         match event {
             // Arrow key movement
@@ -1067,6 +1192,15 @@ impl GomokuApp {
     /// game, which made New game and Undo keyboard-only -- so the pointer
     /// could not start a second game after the first one ended.
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // A click anywhere puts the list of keys away, and plays nothing: the
+        // point under the list is one the player cannot see.
+        if self.show_help {
+            if let MouseEventKind::Press(_) = event.kind {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return EventResult::Ignored;
         };
@@ -1121,6 +1255,17 @@ impl GomokuApp {
         self.draw_board(f, l, &c);
         self.draw_panel(f, l, &c);
         self.draw_status(f, l, &c);
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                f,
+                &self.palette,
+                (l.window.w, l.window.h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
+        }
     }
 
     /// The title, and beside it whose turn it is.
@@ -1489,7 +1634,7 @@ impl GomokuApp {
             GamePhase::Draw => ("A draw. N for a new game", c.chrome.even),
             GamePhase::Thinking => ("White is thinking...", c.chrome.title),
             GamePhase::Playing => (
-                "Arrows move, Enter places, Z undoes, N starts again",
+                "Arrows move, Enter places, Z undoes, F1 lists the rest",
                 c.chrome.dim,
             ),
         };
@@ -1739,8 +1884,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let off = guitk::button::paint(
                 &p,
                 guitk::button::Kind::Plain,
@@ -1756,7 +1900,7 @@ mod tests {
             for (what, f) in every_look(&p) {
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -2651,6 +2795,7 @@ mod tests {
         assert!(app.last_move.is_none());
         assert!(app.win_line.is_none());
         assert_eq!(app.scores, (3, 2, 1), "a new game reset the scoreboard");
+        assert!(!app.undo(), "a new game could be undone into the old one");
     }
 
     // =======================================================================
@@ -2707,22 +2852,288 @@ mod tests {
         assert_eq!(checked, 2);
     }
 
-    /// Undoing a draw takes back the draw's point too.
+    /// A board full but for (0, 0), in a pattern with no five in a row
+    /// anywhere: pairs of a colour along each row, the pairs shifting by one
+    /// from row to row, so no line of any direction runs longer than two.
+    /// (0, 0) is Black's in the pattern.
+    fn one_stone_from_a_draw() -> GomokuApp {
+        let mut app = GomokuApp::new();
+        for r in 0..BOARD_SIZE {
+            for c in 0..BOARD_SIZE {
+                if (r, c) == (0, 0) {
+                    continue;
+                }
+                let stone = if (c / 2).saturating_add(r) % 2 == 0 {
+                    Cell::Black
+                } else {
+                    Cell::White
+                };
+                place_raw(&mut app.board, r, c, stone);
+            }
+        }
+        app
+    }
+
+    /// Undoing a draw takes back the draw's point too -- a draw reached by
+    /// play, for the history holds only what was played.
     #[test]
     fn undoing_a_draw_takes_back_the_point_it_scored() {
-        let mut app = GomokuApp::new();
-        app.phase = GamePhase::Draw;
-        app.winner = Cell::Empty;
-        app.scores = (0, 0, 1);
-        app.move_history.push(MoveRecord {
-            row: 0,
-            col: 0,
-            stone: Cell::Black,
-        });
-        app.move_count = 1;
-        place_raw(&mut app.board, 0, 0, Cell::Black);
-        app.undo();
+        let mut app = one_stone_from_a_draw();
+        app.cursor_row = 0;
+        app.cursor_col = 0;
+        assert!(app.try_place_stone());
+        assert_eq!(app.phase, GamePhase::Draw, "the fixture is not a draw");
+        assert_eq!(app.scores, (0, 0, 1));
+        assert!(app.undo());
         assert_eq!(app.scores, (0, 0, 0), "the draw's point survived the undo");
+        assert_eq!(app.phase, GamePhase::Playing);
+    }
+
+    // =======================================================================
+    // The history: a tree of turns, walked with Alt+Z (C-Q24)
+    // =======================================================================
+
+    fn held(ctrl: bool, alt: bool, shift: bool, key: Key) -> KeyEvent {
+        probe::press_with(
+            key,
+            guitk::event::Modifiers {
+                ctrl,
+                alt,
+                shift,
+                super_key: false,
+            },
+        )
+    }
+
+    /// **A turn played after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every position the player has had the move in, in the order each was
+    /// reached; Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_turn_after_an_undo_keeps_the_undone_turn_reachable_with_alt_z() {
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(7, 7)]);
+        let first = app.board.clone();
+        assert!(app.undo());
+        play_moves(&mut app, &[(3, 3)]);
+        let second = app.board.clone();
+        assert!(!app.redo(), "redo went onto the branch left");
+        assert_eq!(
+            app.handle_key(&held(false, true, false, Key::Z)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.board.cells, first.cells, "the turn undone was lost");
+        assert_eq!(app.move_count, 2);
+        app.handle_key(&held(false, true, false, Key::Z));
+        assert_eq!(app.board.stone_count(), 0);
+        app.handle_key(&held(false, true, true, Key::Z));
+        app.handle_key(&held(false, true, true, Key::Z));
+        assert_eq!(app.board.cells, second.cells);
+        assert_eq!(
+            app.handle_key(&held(false, true, true, Key::Z)),
+            EventResult::Ignored,
+            "past the newest position"
+        );
+    }
+
+    /// **Ctrl+Y and Ctrl+Shift+Z play the turn taken back again**, and a win
+    /// played again scores again. There was no redo.
+    #[test]
+    fn ctrl_y_and_ctrl_shift_z_play_a_turn_again_and_a_win_scores_again() {
+        let mut app = GomokuApp::new();
+        for c in 4..8 {
+            place_raw(&mut app.board, 7, c, Cell::Black);
+        }
+        app.cursor_row = 7;
+        app.cursor_col = 8;
+        assert!(app.try_place_stone());
+        assert_eq!((app.phase, app.scores), (GamePhase::Won, (1, 0, 0)));
+        app.handle_key(&held(true, false, false, Key::Z));
+        assert_eq!((app.phase, app.scores), (GamePhase::Playing, (0, 0, 0)));
+        assert_eq!(
+            app.handle_key(&held(true, false, false, Key::Y)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            (app.phase, app.scores),
+            (GamePhase::Won, (1, 0, 0)),
+            "Ctrl+Y did not play the winning turn again"
+        );
+        assert!(app.win_line.is_some(), "the winning five are not marked");
+        app.handle_key(&held(true, false, false, Key::Z));
+        app.handle_key(&held(true, false, true, Key::Z));
+        assert_eq!(
+            (app.phase, app.scores),
+            (GamePhase::Won, (1, 0, 0)),
+            "Ctrl+Shift+Z did not play it again"
+        );
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is not the board's.**
+    /// The arms matched on the key alone: AltGr+Z (ż on a Polish keyboard)
+    /// took a turn back, Ctrl+N dealt a new game, Windows+Up moved the
+    /// cursor.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_boards() {
+        let windows = |key| {
+            probe::press_with(
+                key,
+                guitk::event::Modifiers {
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                    super_key: true,
+                },
+            )
+        };
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(7, 7)]);
+        let row = app.cursor_row;
+        for event in [
+            held(true, true, false, Key::Z),
+            windows(Key::Z),
+            held(true, false, false, Key::N),
+            held(false, true, false, Key::Up),
+            windows(Key::Up),
+        ] {
+            assert_eq!(app.handle_key(&event), EventResult::Ignored, "{event:?}");
+        }
+        assert_eq!(
+            app.move_count, 2,
+            "a held key took a turn back or dealt a game"
+        );
+        assert_eq!(app.cursor_row, row, "a held key moved the cursor");
+    }
+
+    /// **Every key the list of keys advertises is one this game answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here -- a third copy of the same fact drifts from both
+    /// the list and the handler. The property is "some game answers this
+    /// key": Ctrl+Y has nothing to play again until a turn is taken back.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|a| a.handle_key(&stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no game answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Games chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<GomokuApp> {
+        // A fresh game, the cursor in the middle: the arrows, Enter, N, F1.
+        let plain = GomokuApp::new();
+        // A turn played, so Z, Ctrl+Z and Alt+Z have one to take back.
+        let mut played = GomokuApp::new();
+        play_moves(&mut played, &[(7, 7)]);
+        // ...and taken back, so Ctrl+Y and Alt+Shift+Z have one to play.
+        let mut undone = GomokuApp::new();
+        play_moves(&mut undone, &[(7, 7)]);
+        undone.handle_key(&key_of(Key::Z));
+        vec![plain, played, undone]
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away. `?` raises it as F1 does -- from the slash key
+    /// with Shift, or wherever a layout puts it.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut app = GomokuApp::new();
+        let frame = |a: &GomokuApp| a.frame(a.width, a.height);
+        assert!(!says(&frame(&app), help::CLOSES), "up before anybody asked");
+        // And the status line says how to raise it: a list nobody can find
+        // is no better than none.
+        // In the status band itself: the list, once up, says F1 too.
+        let status = Layout::solve(app.width, app.height).status;
+        assert!(
+            says_in(&frame(&app), "F1", status),
+            "the status line does not say F1"
+        );
+        assert_eq!(app.handle_key(&key_of(Key::F1)), EventResult::Consumed);
+        let shown = frame(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(says(&shown, keys), "{keys:?} never reached the window");
+            assert!(says(&shown, what), "{what:?} never reached the window");
+        }
+        app.handle_key(&key_of(Key::Escape));
+        assert!(!says(&frame(&app), help::CLOSES), "Escape did not close it");
+        let german = KeyEvent {
+            key: Key::Minus,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::shift(),
+            text: "?".to_owned(),
+        };
+        for stroke in [
+            probe::press_with(Key::Slash, guitk::event::Modifiers::shift()),
+            german,
+        ] {
+            app.handle_key(&stroke);
+            assert!(app.show_help, "{stroke:?} did not raise the list");
+            app.handle_key(&stroke);
+            assert!(!app.show_help, "{stroke:?} did not put it away");
+        }
+    }
+
+    /// **While the list of keys is up, the board takes nothing.** A stone
+    /// placed under the card would be one the player cannot see; a click
+    /// puts the card away and places nothing, and Alt+F1 is not F1.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut app = GomokuApp::new();
+        let point = probe::rect_of(&app, Target::Point(7, 7)).expect("the middle point");
+        app.handle_key(&key_of(Key::F1));
+        let cursor = (app.cursor_row, app.cursor_col);
+        // Checked after each key, not once after all of them: N starts a new
+        // game, which would put back whatever a key before it moved.
+        for key in [Key::Left, Key::Space, Key::Z, Key::N] {
+            assert_eq!(app.handle_key(&key_of(key)), EventResult::Consumed);
+            assert!(app.show_help, "{key:?} put the list away");
+            assert_eq!(
+                (app.cursor_row, app.cursor_col),
+                cursor,
+                "{key:?} moved the cursor"
+            );
+            assert_eq!(app.move_count, 0, "{key:?} put a stone down under the list");
+        }
+        app.handle_key(&probe::press_with(Key::F1, guitk::event::Modifiers::alt()));
+        assert!(app.show_help, "Alt+F1 put the list away");
+        // A click on a point: the list goes, and no stone goes down.
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: point.x + point.w / 2.0,
+            y: point.y + point.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!app.show_help, "a click did not put the list away");
+        assert_eq!(app.move_count, 0, "the click that closed it placed a stone");
+        // Enter puts it away too.
+        app.handle_key(&key_of(Key::F1));
+        app.handle_key(&key_of(Key::Enter));
+        assert!(!app.show_help, "Enter did not put the list away");
+        assert_eq!(app.move_count, 0, "Enter placed a stone as it closed");
+    }
+
+    /// **A turn taken back while White was thinking is redone to White's
+    /// move**, which White then makes on its tick.
+    #[test]
+    fn a_turn_undone_mid_thought_is_redone_to_whites_move() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 7;
+        app.cursor_col = 7;
+        assert!(app.try_place_stone());
+        assert_eq!(app.phase, GamePhase::Thinking);
+        assert!(app.undo());
+        assert_eq!(app.board.stone_count(), 0);
+        assert!(app.redo());
+        assert_eq!(app.phase, GamePhase::Thinking, "White's move was lost");
+        assert_eq!(app.move_count, 1);
     }
 
     /// Undo during White's search cancels it rather than scoring anything.

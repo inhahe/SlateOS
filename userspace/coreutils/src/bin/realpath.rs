@@ -111,6 +111,8 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+coreutils::guard_std_fds!();
+
 /// `realpath`'s usage status is 1 — measured: `realpath -X foo; echo $?`.
 const REALPATH: Program = Program::new("realpath", 1);
 
@@ -175,36 +177,41 @@ enum Request {
     Run(Flags, Vec<OsString>),
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- an output or
+/// a diagnostic that did not arrive is status 1, as `realpath: write error:
+/// ...` for the first. The descriptor guard is what lets a closed one be seen
+/// at all; the runtime used to answer it with a quiet `/dev/null`. See
+/// [`stdfd::close_stdout`].
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout("realpath", out, earned)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            // Never an error: the stream records it for the funnel.
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Ok(Request::Version) => {
-            println!("realpath (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"realpath (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, files)) => {
-            let mut out = io::stdout().lock();
             // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
             // diagnostic that never arrived has to reach `close_stderr`'s flag.
             let mut err = Stream::stderr();
-            let ok = run(&flags, &files, &RealFs, &mut out, &mut err);
-            // A closed stdout must not be reported as success: `-z` output is
-            // usually piped into `xargs -0`, and a pipe that goes away mid-list
-            // would otherwise look like a complete list.
-            let flushed = out.flush().is_ok();
-            if ok && flushed {
+            let ok = run(&flags, &files, &RealFs, out, &mut err);
+            // A failure to write is the funnel's to report, and a closed stdout
+            // is one -- which matters because `-z` output is usually piped into
+            // `xargs -0`, and a pipe that goes away mid-list would otherwise
+            // look like a complete list.
+            if ok {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)
@@ -258,10 +265,10 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         match item? {
             Opt::Operand(file) => files.push(file.clone()),
             Opt::Short(b'e', _) | Opt::Long("canonicalize-existing", _) => {
-                flags.mode = Mode::Existing
+                flags.mode = Mode::Existing;
             }
             Opt::Short(b'm', _) | Opt::Long("canonicalize-missing", _) => {
-                flags.mode = Mode::Missing
+                flags.mode = Mode::Missing;
             }
             // The three link flags each set *both* fields, which is what makes
             // them last-wins as a group rather than three independent toggles.

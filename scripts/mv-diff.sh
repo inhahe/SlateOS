@@ -1894,6 +1894,23 @@ TREE=''
 FAR='mkdir -p d/sub; printf hello > d/f; chmod 2750 d'
 run_case -v @FAR@/d g
 
+# The same directory named twice, where the first move copies it and then
+# cannot remove it -- the far directory has lost its write bit after its
+# contents were made, so `d`'s own contents go and `d` stays. The second
+# operand finds the directory already copied to the same place: upstream
+# warns that it was specified more than once and moves on, rather than
+# copying the tree a second time over the first. Without `-v` too, and three
+# times over, which warns twice.
+TREE='mkdir dest'
+FAR='mkdir -p d/sub; printf hello > d/f; chmod 555 .'
+run_case -v @FAR@/d @FAR@/d dest
+TREE='mkdir dest'
+FAR='mkdir -p d/sub; printf hello > d/f; chmod 555 .'
+run_case @FAR@/d @FAR@/d dest
+TREE='mkdir dest'
+FAR='mkdir -p d/sub; printf hello > d/f; chmod 555 .'
+run_case @FAR@/d @FAR@/d @FAR@/d dest
+
 # `-u` across the boundary. The comparison is made before the fallback is
 # chosen, so the option decides whether the copy happens at all. Older
 # destination: it does.

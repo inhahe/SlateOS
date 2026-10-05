@@ -50,10 +50,14 @@ use unsaved::{Choice, Question};
 // argued once. See `known-issues.md`
 // C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
 use guitk::date;
+use guitk::field;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
 use guitk::textfind;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 
 // ============================================================================
@@ -2305,6 +2309,19 @@ pub struct RssReaderApp {
     /// What has been typed into that prompt.
     pub text_buffer: String,
     pub search_results: Vec<SearchResult>,
+    /// The search box's caret and selection, laid over `search_query`,
+    /// which stays the truth: reloaded whenever the query has changed under
+    /// it (Escape clears it).
+    search_editor: TextInput,
+    /// The prompt's box's caret and selection, laid over `text_buffer`, the
+    /// same way: a rename seeds the buffer with the feed's title.
+    entry_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from either box, for Ctrl+V.
+    clipboard: String,
+    /// How wide the mark is round a box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    focus_ring_width: f32,
 
     // Display state
     pub show_help: bool,
@@ -2390,6 +2407,10 @@ impl RssReaderApp {
             text_entry: None,
             text_buffer: String::new(),
             search_results: Vec::new(),
+            search_editor: TextInput::new(),
+            entry_editor: TextInput::new(),
+            clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             show_help: false,
             show_feed_health: false,
             status_message: String::new(),
@@ -3411,6 +3432,23 @@ impl RssReaderApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The list of keys before anything else, because it is drawn over
+        // everything else, and modal: a plain F1, `?` or Escape puts it away
+        // and no other key reaches what it covers. It took only Escape, and
+        // only with nothing else holding the keys, so with it up `r` marked
+        // the article under it read, `D` asked to remove a feed behind it, and
+        // Ctrl+F opened a search that the next letters were typed into.
+        if self.show_help {
+            let plain = textline::is_plain(key.modifiers);
+            if plain
+                && (matches!(key.key, Key::F1 | Key::Escape)
+                    || key.key == Key::Slash && key.modifiers.shift)
+            {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // The search box takes every key while it is open, or typing a query
         // containing `r` would mark an article read behind it.
         if self.search_active {
@@ -3428,7 +3466,9 @@ impl RssReaderApp {
             return self.handle_prompt_key(key);
         }
 
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and
+        // AltGr+A -- a Polish `ą` -- marked every article read.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::F => {
                     self.search_active = true;
@@ -3461,6 +3501,14 @@ impl RssReaderApp {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+
+        // Every other binding is on a key, taken plain -- nothing held but
+        // Shift. A chord with Alt or the Windows key is the window's or the
+        // desktop's, and arrives carrying its key: Alt+D asked to remove a
+        // feed, Alt+R marked an article read and Alt+Tab changed the pane.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -3620,9 +3668,6 @@ impl RssReaderApp {
                     self.search_query.clear();
                     self.search_results.clear();
                     EventResult::Consumed
-                } else if self.show_help {
-                    self.show_help = false;
-                    EventResult::Consumed
                 } else if self.show_feed_health {
                     self.show_feed_health = false;
                     EventResult::Consumed
@@ -3649,12 +3694,14 @@ impl RssReaderApp {
             // be able to type into a cell -- so somebody who has learned one
             // key is never stuck. `?` as well, here, where nothing is obliged
             // to type one.
+            // Each only ever raises it: with the list up, the keys never get
+            // here.
             Key::F1 => {
-                self.show_help = !self.show_help;
+                self.show_help = true;
                 EventResult::Consumed
             }
             Key::Slash if key.modifiers.shift => {
-                self.show_help = !self.show_help;
+                self.show_help = true;
                 EventResult::Consumed
             }
             // The other half of the overlay's "Ctrl+F / /".
@@ -3685,34 +3732,39 @@ impl RssReaderApp {
     }
 
     /// Keys while the search box is open.
+    ///
+    /// Its own keys are plain, and it types only what was typed: a command
+    /// arrives carrying its letter, so Alt+X put an `x` in the query and
+    /// Ctrl+F, pressed again, an `f`. AltGr types.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.search_active = false;
                 self.search_query.clear();
                 self.search_results.clear();
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.search_active = false;
                 EventResult::Consumed
             }
-            Key::Backspace => {
-                self.search_query.pop();
-                self.perform_search();
-                EventResult::Consumed
-            }
             _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
+                let Some(changed) = edit_box(
+                    &mut self.search_editor,
+                    &mut self.search_query,
+                    &mut self.clipboard,
+                    key,
+                ) else {
                     return EventResult::Ignored;
-                }
-                self.search_query.push_str(&typed);
-                // `perform_search` on every keystroke rather than on Enter:
-                // it filters an in-memory list, and a search box that shows
+                };
+                // `perform_search` on every change rather than on Enter: it
+                // filters an in-memory list, and a search box that shows
                 // nothing until it is submitted is a search box you have to be
                 // told how to use.
-                self.perform_search();
+                if changed {
+                    self.perform_search();
+                }
                 EventResult::Consumed
             }
         }
@@ -3739,6 +3791,11 @@ impl RssReaderApp {
         // Whatever happens, the question comes down: a prompt that survives a
         // keypress it did not understand is one you cannot get out of.
         self.prompt = None;
+        // But only a plain key answers it: Alt+Y, a chord of the window's
+        // arriving carrying its key, removed the feed, and Alt+1 filed one.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Consumed;
+        }
         match prompt {
             Prompt::RemoveFeed(id) => {
                 // Only `Y`. A destructive answer should not be reachable by
@@ -3829,27 +3886,29 @@ impl RssReaderApp {
     /// "Books" must not hide the sidebar on its `b` and cycle the sort order
     /// on its `o`.
     fn handle_text_entry_key(&mut self, key: &KeyEvent) -> EventResult {
+        // As the search box: its own keys plain, and only typing typed --
+        // Alt+X put an `x` in a feed's name. AltGr types.
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.text_entry = None;
                 self.text_buffer.clear();
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.commit_text_entry();
                 EventResult::Consumed
             }
-            Key::Backspace => {
-                self.text_buffer.pop();
-                EventResult::Consumed
-            }
             _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
+                match edit_box(
+                    &mut self.entry_editor,
+                    &mut self.text_buffer,
+                    &mut self.clipboard,
+                    key,
+                ) {
+                    Some(_) => EventResult::Consumed,
+                    None => EventResult::Ignored,
                 }
-                self.text_buffer.push_str(&typed);
-                EventResult::Consumed
             }
         }
     }
@@ -4638,43 +4697,16 @@ impl RssReaderApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search box
-        let search_x = self.width - 260.0;
-        let mut paint = self.palette.surface_paint(Surface::Card);
-        if self.search_active {
-            paint.border = Some(self.palette.blue);
-        }
-        self.palette.push_paint_radii(
+        // Search box: the toolkit's field. It was a card whose edge turned
+        // blue with the keyboard, with no caret at all.
+        let search = Rect::new(self.width - 260.0, y + 6.0, 240.0, 24.0);
+        self.render_box(
             cmds,
-            search_x,
-            y + 6.0,
-            240.0,
-            24.0,
-            CornerRadii::all(4.0),
-            paint,
+            Target::SearchBox,
+            search,
+            "Search articles... (Ctrl+F)",
         );
-        cmds.hit(Target::SearchBox, Rect::new(search_x, y + 6.0, 240.0, 24.0));
-
-        let search_display = if self.search_query.is_empty() {
-            "Search articles... (Ctrl+F)".to_string()
-        } else {
-            self.search_query.clone()
-        };
-        let search_text_color = if self.search_query.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        cmds.push(RenderCommand::Text {
-            x: search_x + 8.0,
-            y: y + 10.0,
-            text: search_display,
-            font_size: 11.0,
-            color: search_text_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(224.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        cmds.hit(Target::SearchBox, search);
 
         // Bottom border
         cmds.push(RenderCommand::Line {
@@ -5723,19 +5755,26 @@ impl RssReaderApp {
                 self.button(cmds, rect, label, target);
                 right = rect.x - 6.0;
             }
+            // What is being asked for, then the box it is typed into: the
+            // toolkit's field, between the label and the buttons. It was a
+            // line of blue text with an `_` typed onto the end for a caret.
+            let label = format!("{label}:");
+            let label_x = self.width / 2.0;
             cmds.push(RenderCommand::Text {
-                x: self.width / 2.0,
+                x: label_x,
                 y: y + 7.0,
-                text: format!(
-                    "{label}: {}_  (Enter to accept, Esc to cancel)",
-                    self.text_buffer
-                ),
-                font_size: 11.0,
-                color: self.palette.ink(self.palette.blue),
+                text: label.clone(),
+                font_size: BOX_TEXT_SIZE,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some((right - self.width / 2.0 - 8.0).max(0.0)),
-                overflow: TextOverflow::Ellipsis,
+                max_width: None,
+                overflow: TextOverflow::Clip,
             });
+            let box_x =
+                label_x + text::measure(&label, BOX_TEXT_SIZE, FontWeightHint::Regular) + 8.0;
+            let entry = Rect::new(box_x, y + 4.0, (right - 6.0 - box_x).max(0.0), height - 8.0);
+            self.render_box(cmds, Target::EntryBox, entry, "");
+            cmds.hit(Target::EntryBox, entry);
             return;
         } else if let Some(error) = &self.store_error {
             // Before any passing message: it stays true until a save works.
@@ -6051,13 +6090,194 @@ pub enum Target {
     MoveTo(Option<FolderId>),
     EntryAccept,
     EntryCancel,
+    /// The box the prompt's text is typed into.
+    EntryBox,
     /// "? Help" in the status bar.
     HelpHint,
     HelpCard,
     HealthOverlay,
 }
 
+/// The size a box's text is drawn at, the search's and the prompt's.
+const BOX_TEXT_SIZE: f32 = 11.0;
+
+/// How far a box's text sits in from either side of the box.
+const BOX_TEXT_INSET: f32 = 8.0;
+
+/// The most characters a box holds: room for any address or name, and a
+/// stop for a paste of something that is not one.
+const BOX_CAPACITY: usize = 2048;
+
+/// Apply an editing key to a box whose text is `text`, with `editor` laid
+/// over it: the caret keys, Backspace and Delete, Ctrl+A, C, X and V, and
+/// typing, which knows a command from AltGr (`textline::apply_key`) -- Alt+X
+/// types nothing, AltGr types. The editor is reloaded first if the text has
+/// changed under it.
+///
+/// `None` when the key is not the box's; `Some(changed)` when it is, saying
+/// whether the text changed. Each box had no caret: Backspace from the end
+/// was its only edit.
+fn edit_box(
+    editor: &mut TextInput,
+    text: &mut String,
+    clipboard: &mut String,
+    key: &KeyEvent,
+) -> Option<bool> {
+    if editor.text() != text.as_str() {
+        editor.set_text(text);
+    }
+    let edit = textline::apply_key(editor, key, BOX_CAPACITY, clipboard.as_str(), BOX_TEXT_SIZE);
+    if let Some(copied) = edit.copied {
+        *clipboard = copied;
+    }
+    if !edit.handled {
+        return None;
+    }
+    let changed = editor.text() != text.as_str();
+    if changed {
+        *text = editor.text().to_owned();
+    }
+    Some(changed)
+}
+
+/// Where a box's caret is drawn: the editor's while the box has the
+/// keyboard (its end, if the text changed under the editor), the start of
+/// the text otherwise. One answer for the drawing and for a press.
+fn drawn_cursor(editor: &TextInput, text: &str, focused: bool) -> TextCursor {
+    if !focused {
+        TextCursor::default()
+    } else if editor.text() == text {
+        editor.cursor()
+    } else {
+        TextCursor::from(text.len())
+    }
+}
+
 impl RssReaderApp {
+    /// The editor, the text and whether it has the keyboard, for the box
+    /// `target` names.
+    fn box_parts(&self, target: Target) -> Option<(&TextInput, &str, bool)> {
+        match target {
+            Target::SearchBox => {
+                Some((&self.search_editor, &self.search_query, self.search_active))
+            }
+            Target::EntryBox => Some((
+                &self.entry_editor,
+                &self.text_buffer,
+                self.text_entry.is_some(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Put the caret of the box `target`, drawn at `rect` with its caret at
+    /// `drawn` before the press, under the pointer at `x` -- if the press
+    /// gave the box the keyboard.
+    fn place_caret(&mut self, target: Target, rect: Rect, drawn: TextCursor, x: f32) {
+        let Some((_, text, true)) = self.box_parts(target) else {
+            return;
+        };
+        let text = text.to_owned();
+        let editor = match target {
+            Target::SearchBox => &mut self.search_editor,
+            _ => &mut self.entry_editor,
+        };
+        if editor.text() != text {
+            editor.set_text(&text);
+        }
+        let cursor = textedit::cursor_at_click(
+            &text,
+            drawn,
+            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+            BOX_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - BOX_TEXT_INSET,
+        );
+        editor.set_selection_anchor(None);
+        editor.set_cursor(cursor);
+    }
+
+    /// How a box is drawn: lit under the pointer, with the keyboard's mark
+    /// while it has the keyboard -- the search box not while the prompt or
+    /// a question is up, nothing under the list of keys or the feed health
+    /// card -- and the search red while it finds no article.
+    fn box_state(&self, target: Target) -> field::State {
+        let overlay = self.show_help || self.show_feed_health;
+        let (focused, invalid, covered) = match target {
+            Target::SearchBox => (
+                self.search_active,
+                !self.search_query.is_empty() && self.search_results.is_empty(),
+                overlay || self.prompt.is_some() || self.text_entry.is_some(),
+            ),
+            _ => (self.text_entry.is_some(), false, overlay),
+        };
+        field::State {
+            hovered: self.hover == Some(target) && !covered,
+            focused: focused && !covered,
+            disabled: false,
+            invalid,
+        }
+    }
+
+    /// The box `target` at `rect`: the toolkit's field, holding its text
+    /// with the editor's caret and selection while it has the keyboard,
+    /// scrolled to keep the caret in view -- or `placeholder`, grey, while
+    /// it is empty and idle.
+    fn render_box(&self, cmds: &mut Frame<Target>, target: Target, rect: Rect, placeholder: &str) {
+        let Some((editor, text, has_keys)) = self.box_parts(target) else {
+            return;
+        };
+        let state = self.box_state(target);
+        field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
+        let line = text::line_height(BOX_TEXT_SIZE, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            rect.x + BOX_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+        );
+        if text.is_empty() && !state.focused && !placeholder.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: placeholder.to_string(),
+                font_size: BOX_TEXT_SIZE,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+        let editing = has_keys && editor.text() == text;
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text,
+                cursor: drawn_cursor(editor, text, has_keys),
+                selection_anchor: if editing {
+                    editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: BOX_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        for command in tree.commands {
+            cmds.push(command);
+        }
+    }
+
     /// What is under `(x, y)` in the frame last shown.
     fn target_at(&self, x: f32, y: f32) -> Option<Target> {
         if self.last_hits.is_empty() {
@@ -6074,8 +6294,20 @@ impl RssReaderApp {
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
-                let target = self.frame().hit_test(event.x, event.y);
-                self.press(target)
+                let frame = self.frame();
+                let target = frame.hit_test(event.x, event.y);
+                // A press in a box puts its caret under the pointer, measured
+                // against the box as it was drawn before the press.
+                let caret = target.and_then(|t| {
+                    let (editor, text, has_keys) = self.box_parts(t)?;
+                    let rect = frame.rect_of(|u| *u == t)?;
+                    Some((t, rect, drawn_cursor(editor, text, has_keys)))
+                });
+                let result = self.press(target);
+                if let Some((t, rect, drawn)) = caret {
+                    self.place_caret(t, rect, drawn, event.x);
+                }
+                result
             }
             MouseEventKind::Move => {
                 let over = self.target_at(event.x, event.y);
@@ -6186,6 +6418,9 @@ impl RssReaderApp {
                     self.text_buffer.clear();
                     EventResult::Consumed
                 }
+                // The box keeps the keyboard; the caret goes under the
+                // pointer (`handle_mouse`).
+                Some(Target::EntryBox) => EventResult::Consumed,
                 _ => EventResult::Ignored,
             };
         }
@@ -6273,6 +6508,7 @@ impl RssReaderApp {
             | Target::MoveTo(_)
             | Target::EntryAccept
             | Target::EntryCancel
+            | Target::EntryBox
             | Target::HelpCard
             | Target::HealthOverlay => return EventResult::Ignored,
         }
@@ -6326,6 +6562,10 @@ pub fn wrap_text(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
 impl App for RssReaderApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -6792,6 +7032,136 @@ mod tests {
             .collect()
     }
 
+    /// **A chord is neither a reader key nor typing, and AltGr+A is not
+    /// Ctrl+A**: a chord with Alt or the Windows key is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+D asked to remove a feed,
+    /// Alt+Y then removed it, Alt+1 filed one into a folder, and Alt+X typed
+    /// an `x` into the search; and AltGr+A, a Polish `ą`, marked every article
+    /// read as Ctrl+A does.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round.
+    #[test]
+    fn a_chord_is_neither_a_reader_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = app();
+        let feed = app.feeds.first().map(|f| f.id).expect("control: a feed");
+        app.sidebar_selection = SidebarSelection::Feed(feed);
+        let state = |app: &RssReaderApp| {
+            (
+                app.articles
+                    .iter()
+                    .map(|a| (a.is_read, a.is_starred))
+                    .collect::<Vec<_>>(),
+                app.feeds
+                    .iter()
+                    .map(|f| (f.id, f.folder_id))
+                    .collect::<Vec<_>>(),
+                app.folders.len(),
+                (
+                    app.selected_article_index,
+                    app.active_pane,
+                    app.sidebar_selection,
+                    app.filter_mode,
+                    app.sort_order,
+                ),
+                (app.show_help, app.show_feed_health, app.sidebar_visible),
+                (
+                    app.search_active,
+                    app.text_entry.is_some(),
+                    app.prompt.is_some(),
+                    app.picker.is_open(),
+                ),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::D,
+                Key::V,
+                Key::A,
+                Key::N,
+                Key::R,
+                Key::M,
+                Key::S,
+                Key::Enter,
+                Key::Space,
+                Key::Num2,
+                Key::H,
+                Key::F1,
+                Key::Slash,
+                Key::B,
+                Key::O,
+                Key::F,
+                Key::Tab,
+                Key::J,
+                Key::Down,
+            ] {
+                assert_eq!(
+                    app.handle_event(&key(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the reader");
+            }
+        }
+
+        // A question waiting on one key comes down for a chord, as for any
+        // key, and is not answered by it.
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            app.handle_event(&press(Key::D));
+            assert!(app.prompt.is_some(), "control: D asks");
+            app.handle_event(&key(Key::Y, "y", m));
+            assert!(app.prompt.is_none(), "{m:?} Y left the question up");
+            app.handle_event(&press(Key::V));
+            assert!(app.prompt.is_some(), "control: V asks where");
+            app.handle_event(&key(Key::Num1, "1", m));
+            assert_eq!(state(&app), before, "{m:?} answered the question");
+        }
+
+        // The search types what was typed, and AltGr's letters among it.
+        app.handle_event(&key(Key::F, "f", Modifiers::ctrl()));
+        assert!(app.search_active, "control: Ctrl+F opens the search");
+        app.handle_event(&key(Key::F, "f", Modifiers::ctrl()));
+        app.handle_event(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&key(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&key(Key::S, "ś", altgr));
+        app.handle_event(&key(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Enter, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(
+            app.search_query, "ś",
+            "the search typed a command's letter, or lost AltGr's"
+        );
+        assert!(app.search_active, "a chorded Enter or Escape closed it");
+        app.handle_event(&press(Key::Escape));
+
+        // As does the prompt for a name.
+        app.handle_event(&press(Key::A));
+        assert!(app.text_entry.is_some(), "control: A asks for an address");
+        app.handle_event(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&key(Key::S, "ś", altgr));
+        app.handle_event(&key(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Enter, "", Modifiers::alt()));
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(app.text_buffer, "ś", "the prompt typed a command's letter");
+        assert!(
+            app.text_entry.is_some(),
+            "a chorded Enter or Escape closed it"
+        );
+    }
+
     /// `A` subscribes to a feed by address.
     ///
     /// `add_feed` had eight production callers and every one was the OPML
@@ -7203,11 +7573,171 @@ mod tests {
             a.handle_event(&types(c));
         }
 
+        // What is asked, and what is typed, in the box beside it.
+        let shown = drawn_text(&a);
         assert!(
-            drawn_text(&a)
-                .iter()
-                .any(|t| t.contains("New folder: Reading")),
-            "the prompt is nowhere on screen"
+            shown.iter().any(|t| t == "New folder:"),
+            "nothing says what is asked: {shown:?}"
+        );
+        let typed = a
+            .render_commands()
+            .iter()
+            .any(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "Reading"));
+        assert!(typed, "what is typed is nowhere on screen");
+    }
+
+    /// **The search box and the prompt's box are the toolkit's field**:
+    /// lit under the pointer, with the keyboard in the theme's mark at the
+    /// user's width -- the search box not while the prompt has the keyboard
+    /// -- the search red while it finds no article; a press puts the caret
+    /// under the pointer, and the editor's keys edit. The search box was a
+    /// card whose edge turned blue, with no caret; the prompt a line of blue
+    /// text with an `_` typed onto it.
+    #[test]
+    fn the_search_and_the_prompt_are_the_toolkits_field() {
+        let mut a = app();
+        let mut p = a.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        a.theme_changed(&p);
+        a.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            a.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let draws = |a: &RssReaderApp, target: Target, s: field::State| {
+            let rect = a.frame().rect_of(|t| *t == target).expect("the box");
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, a.focus_ring_width);
+                v
+            };
+            let cmds = a.render_commands();
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws(&a, Target::SearchBox, idle),
+            "the search box is not the toolkit's field"
+        );
+
+        let search = a
+            .frame()
+            .rect_of(|t| *t == Target::SearchBox)
+            .expect("the box");
+        let (cx, cy) = search.centre();
+        a.handle_event(&Event::Mouse(MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            draws(
+                &a,
+                Target::SearchBox,
+                field::State {
+                    hovered: true,
+                    ..idle
+                }
+            ),
+            "the box under the pointer is not lit"
+        );
+        a.handle_event(&Event::Mouse(MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Leave,
+        }));
+
+        probe::click(&mut a, Target::SearchBox);
+        assert!(a.search_active);
+        assert!(
+            draws(&a, Target::SearchBox, focused),
+            "the search box has no keyboard mark"
+        );
+        for c in "zzqx".chars() {
+            a.handle_event(&types(c));
+        }
+        assert!(a.search_results.is_empty());
+        assert!(
+            draws(
+                &a,
+                Target::SearchBox,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a search that finds nothing is not red"
+        );
+        // The editor's keys: Home, Delete, and a press at the box's left
+        // edge, which puts the caret before the query.
+        a.handle_event(&press(Key::Home));
+        a.handle_event(&press(Key::Delete));
+        assert_eq!(
+            a.search_query, "zqx",
+            "Home and Delete did not edit the start"
+        );
+        a.handle_event(&Event::Mouse(MouseEvent {
+            x: search.x + BOX_TEXT_INSET + 1.0,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        a.handle_event(&types('q'));
+        assert_eq!(
+            a.search_query, "qzqx",
+            "the caret did not go where the press was"
+        );
+        a.handle_event(&press(Key::Escape));
+
+        a.handle_event(&key_ev(Key::N, true, false));
+        assert!(a.text_entry.is_some());
+        assert!(
+            draws(&a, Target::EntryBox, focused),
+            "the prompt's box has no keyboard mark"
+        );
+        // The prompt is modal: the search box under the pointer is not lit.
+        a.handle_event(&Event::Mouse(MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            draws(&a, Target::SearchBox, idle),
+            "the search box is lit or marked while the prompt has the keyboard"
+        );
+        // A press in the prompt's box puts the caret under the pointer, and
+        // asks for the frame that shows it.
+        for c in "ooks".chars() {
+            a.handle_event(&types(c));
+        }
+        let entry = a
+            .frame()
+            .rect_of(|t| *t == Target::EntryBox)
+            .expect("the box");
+        assert_eq!(
+            a.handle_event(&Event::Mouse(MouseEvent {
+                x: entry.x + BOX_TEXT_INSET + 1.0,
+                y: entry.centre().1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })),
+            EventResult::Consumed
+        );
+        a.handle_event(&types('B'));
+        assert_eq!(
+            a.text_buffer, "Books",
+            "the caret did not go where the press was"
+        );
+        a.show_help = true;
+        assert!(
+            draws(&a, Target::EntryBox, idle),
+            "the prompt's box keeps its mark under the list of keys"
         );
     }
 
@@ -7358,6 +7888,45 @@ mod tests {
 
         assert!(a.search_active, "/ did not open the search box");
         assert!(!a.show_help, "/ opened the help overlay instead");
+    }
+
+    /// **The list of keys is modal for the keys.** It took only Escape, and
+    /// only with nothing else holding the keys: with it up, Tab changed the
+    /// pane under it, a digit changed the filter, and Ctrl+F opened a search
+    /// that the next letter was typed into. The controls are the same keys
+    /// with it down.
+    #[test]
+    fn the_list_of_keys_takes_every_key_while_it_is_up() {
+        let mut a = app();
+        let (pane, filter) = (a.active_pane, a.filter_mode);
+        a.handle_event(&press(Key::F1));
+        assert!(a.show_help);
+        a.handle_event(&press(Key::Tab));
+        a.handle_event(&press(Key::Num3));
+        a.handle_event(&key_ev(Key::F, true, false));
+        a.handle_event(&types('x'));
+        assert!(
+            a.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(a.active_pane, pane, "Tab changed the pane under the list");
+        assert_eq!(a.filter_mode, filter, "a digit changed the filter under it");
+        assert!(!a.search_active, "Ctrl+F opened a search under the list");
+        assert!(a.search_query.is_empty(), "a letter was typed under it");
+        a.handle_event(&key_ev(Key::Slash, false, true));
+        assert!(!a.show_help, "? left the list up");
+        a.handle_event(&press(Key::F1));
+        a.handle_event(&press(Key::Escape));
+        assert!(!a.show_help, "Escape left the list up");
+        a.handle_event(&press(Key::F1));
+        a.handle_event(&press(Key::F1));
+        assert!(!a.show_help, "F1 left the list up");
+
+        // The controls.
+        a.handle_event(&press(Key::Num3));
+        assert_ne!(a.filter_mode, filter, "control: a digit changes nothing");
+        a.handle_event(&press(Key::Tab));
+        assert_ne!(a.active_pane, pane, "control: Tab changes nothing");
     }
 
     /// `?` still opens help, rather than being taken by the new `/`.

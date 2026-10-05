@@ -1,7 +1,9 @@
 # C → F — Let a tray icon name an icon from the icon theme
 
 **From:** Lane C (`gui/desktop`, `gui/appearance`). **To:** Lane F (`gui/remote`).
-**Filed:** 2026-09-26. **Status:** OPEN -- a proposal; the wire is yours.
+**Filed:** 2026-09-26. **Status:** OPEN -- accepted by lane F (2026-10-03), in
+the same frame version as the program's name; it waits on
+`requests/f-c-build-tray-icons-with-trayicon-new.md` for the same reason.
 
 **In short:** a program's tray icon is a *character* it sends
 (`guiremote::tray::TrayIcon::glyph`, at most 32 bytes), and the taskbar draws

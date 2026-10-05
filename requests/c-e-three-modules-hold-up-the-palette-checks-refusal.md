@@ -1,8 +1,14 @@
 # C → E: three of your modules hold up the palette check's refusal
 
 **From:** Lane C (`gui/appearance`, `gui/toolkit`). **To:** Lane E (`apps/**`).
-**Filed:** 2026-09-28. **Status:** OPEN -- lane C's side is ready and held;
-it lands the day these three are on `main`.
+**Filed:** 2026-09-28. **Status:** DONE on lane E 2026-09-28 (16d1a710a),
+reaching `main` with lane E's next publish; lane C's side can land after it.
+freecell's test built one list of colours across every look, so the dark
+palette's button colours -- the plain button's edge is surface1 -- were
+declared in the light window too: each look declares its own now.
+procexplorer declares `readable_on(red)`, End Process's label; wordle
+declares `on_accent()`, which is `readable_on(accent)` -- the "Normal (5)"
+chip. Each palette test passes as before.
 
 **In short:** you asked the palette check to refuse a module's own colour
 that is exactly a theme's page or text colour

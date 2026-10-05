@@ -54,6 +54,23 @@ failures:
     a_capture_never_reuses_a_taken_id
 
 test result: FAILED. 1 passed; 1 failed; 0 ignored
+
+     Running unittests src/main.rs (target/debug/deps/editor-4567)
+
+running 2 tests
+test undo_tests::an_undone_branch_is_kept ... FAILED
+test external_merge_tests::a_reload_starts_the_history_again ... FAILED
+
+failures:
+
+---- undo_tests::an_undone_branch_is_kept stdout ----
+thread panicked at src/main.rs:20:5:
+
+failures:
+    undo_tests::an_undone_branch_is_kept
+    external_merge_tests::a_reload_starts_the_history_again
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored
 """
 
 SRC = "pub fn f() -> u8 {\n    1\n}\n"
@@ -126,10 +143,17 @@ def main() -> int:
             "...and is not found when the sweep runs another crate",
             check_the_table(SRC, row("pinned_by_the_user"), lib), 1))
     got = failed_tests(CARGO_OUTPUT)
-    want = {"closes_when_asked", "saves_on_exit", "a_capture_never_reuses_a_taken_id"}
+    want = {
+        "closes_when_asked",
+        "saves_on_exit",
+        "a_capture_never_reuses_a_taken_id",
+        # In modules not called `tests`: unread until 2026-09-28.
+        "an_undone_branch_is_kept",
+        "a_reload_starts_the_history_again",
+    }
     ok = got == want
     print(f"  {'ok  ' if ok else 'FAIL'}  failures are read from unit and integration "
-          f"binaries alike (got {sorted(got)})")
+          f"binaries alike, whatever the test's module is called (got {sorted(got)})")
     results.append(ok)
     passed = sum(results)
     print(f"all {passed} mutation_harness tests passed" if all(results)

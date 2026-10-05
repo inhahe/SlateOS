@@ -38,8 +38,11 @@
 //! character. A backslash is a member like any other. A `-` that is neither
 //! the first member nor the last is an error, as it is in glibc, where POSIX
 //! leaves it undefined. The bracket is rebuilt for the ERE parser rather than
-//! copied, since that parser does read `[:` as a class and a backslash as an
-//! escape.
+//! copied, since that parser reads `[:` as a class. The rebuilt bracket quotes
+//! `[`, `]`, `\`, `-` and `^` with a backslash, and is compiled with
+//! [`Syntax::backslash_escape_in_lists`] so that the parser reads a quote
+//! there -- the one bracket syntax in which every member can be written in
+//! any position, which is what a rebuild needs.
 //!
 //! A range written backwards, `[z-a]`, is **empty** rather than an error:
 //! `RE_SYNTAX_EMACS` lacks the `RE_NO_EMPTY_RANGES` bit that every POSIX syntax
@@ -61,9 +64,12 @@ use crate::ch::{BStr, Ch, Str, chars};
 use crate::engine::{EreError, RegCode, Regex, Syntax};
 
 /// The ERE dialect a translation is compiled in: POSIX's, except that a
-/// backwards range is empty. See the module docs.
+/// backwards range is empty, and that a backslash in a bracket quotes the
+/// character after it -- which is how [`member`] writes the four characters
+/// that are special there. See the module docs.
 const SYNTAX: Syntax = Syntax {
     empty_ranges: true,
+    backslash_escape_in_lists: true,
     ..Syntax::POSIX_EXTENDED
 };
 
@@ -72,8 +78,32 @@ const SYNTAX: Syntax = Syntax {
 /// # Errors
 /// Returns the translation's error, or the ERE engine's, whichever stops first.
 pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
-    let ere = to_ere(pattern)?;
+    let ere = translate(pattern, false)?;
     Regex::new_syntax(&ere, ci, SYNTAX)
+}
+
+/// Compile a pattern in `RE_SYNTAX_EMACS | RE_DOT_NEWLINE`, where `.` matches
+/// a newline as well: findutils' default `-regextype`, `findutils-default`.
+/// Measured, findutils 4.9: `-regextype findutils-default -regex 't/a.b'`
+/// finds a file named `a<newline>b`, and `-regextype emacs` does not.
+///
+/// # Errors
+/// As [`compile`].
+pub fn compile_dot_newline(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
+    let ere = translate(pattern, true)?;
+    Regex::new_syntax(&ere, ci, SYNTAX)
+}
+
+/// [`compile`], with the pattern and the subject read a byte at a time -- how
+/// glibc reads both in the C locale, where a byte above 0x7f is a character of
+/// its own: `[é]` is a bracket of two bytes, and `.` takes one. See
+/// [`Regex::new_syntax_bytes`].
+///
+/// # Errors
+/// As [`compile`].
+pub fn compile_bytes(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
+    let ere = translate_with(pattern, false, true)?;
+    Regex::new_syntax_bytes(&ere, ci, SYNTAX)
 }
 
 /// Translate an Emacs-syntax pattern into the equivalent ERE.
@@ -84,7 +114,21 @@ pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
 /// `[.x.]`/`[=x=]` naming no single character. A backwards range is not an
 /// error here; see the module docs.
 pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
-    let cs: Vec<Ch> = chars(pattern).collect();
+    translate(pattern, false)
+}
+
+/// [`to_ere`], with `dot_newline` choosing whether `.` matches a newline.
+fn translate(pattern: BStr<'_>, dot_newline: bool) -> Result<Str, EreError> {
+    translate_with(pattern, dot_newline, false)
+}
+
+/// [`translate`], with `bytes` reading the pattern a byte at a time.
+fn translate_with(pattern: BStr<'_>, dot_newline: bool, bytes: bool) -> Result<Str, EreError> {
+    let cs: Vec<Ch> = if bytes {
+        crate::ch::byte_positions(pattern).map(|(_, c)| c).collect()
+    } else {
+        chars(pattern).collect()
+    };
     let mut out = Str::new();
     let mut i = 0usize;
     // Whether a repetition operator here has something to repeat.
@@ -179,8 +223,13 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                 i = i.saturating_add(1);
             }
             Some('.') => {
-                // `RE_DOT_NEWLINE` is not in this syntax.
-                out.extend_from_slice(b"[^\n]");
+                // `RE_DOT_NEWLINE` is not in Emacs syntax itself; findutils
+                // adds it for its default type.
+                if dot_newline {
+                    out.push(b'.');
+                } else {
+                    out.extend_from_slice(b"[^\n]");
+                }
                 prev_atom = true;
                 i = i.saturating_add(1);
             }
@@ -213,8 +262,9 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
 }
 
 /// Emit `c` as a literal for the ERE parser: escaped if ERE would read it as an
-/// operator, bare otherwise. Bare matters for letters, which the ERE parser
-/// would read as `\n`, `\t` and so on if they were escaped.
+/// operator, bare otherwise. Bare matters for letters and digits, which the
+/// ERE parser would read as the GNU operators (`\w`, `\b`, ...) and as
+/// backreferences if they were escaped.
 fn literal(c: Ch, out: &mut Str) {
     match c.as_ascii() {
         Some(
@@ -228,8 +278,9 @@ fn literal(c: Ch, out: &mut Str) {
     }
 }
 
-/// Emit `c` as a member of an ERE bracket: the four characters that parser
-/// treats specially there are escaped, as its bracket reader allows.
+/// Emit `c` as a member of an ERE bracket: the characters that parser treats
+/// specially there are quoted with a backslash, which [`SYNTAX`]'s
+/// [`Syntax::backslash_escape_in_lists`] makes it read as quoting.
 fn member(c: Ch, out: &mut Str) {
     match c.as_ascii() {
         Some(m @ ('[' | ']' | '\\' | '-' | '^')) => {
@@ -362,6 +413,34 @@ mod tests {
             .unwrap()
             .find(text.as_bytes())
             .unwrap()
+    }
+
+    /// Read as the C locale reads it, a pattern's bytes above 0x7f are each a
+    /// character: `[é]` takes either byte of an `é`, `é*` repeats the second,
+    /// and `.` takes one byte.
+    #[test]
+    fn the_c_locale_reads_the_pattern_a_byte_at_a_time() {
+        let bytes = |p: &str, text: &[u8]| {
+            super::compile_bytes(p.as_bytes(), false)
+                .unwrap()
+                .find(text)
+                .unwrap()
+        };
+        let e = "\u{e9}".as_bytes(); // C3 A9
+        assert_eq!(bytes("[\u{e9}]", b"x\xa9"), Some((1, 2)));
+        assert_eq!(bytes("[\u{e9}]", e), Some((0, 1)));
+        assert_eq!(bytes("\u{e9}*x", b"\xc3\xa9\xa9x"), Some((0, 4)));
+        assert_eq!(bytes("a.b", b"a\xffb"), Some((0, 3)));
+        assert_eq!(bytes("a..b", "a\u{e9}b".as_bytes()), Some((0, 4)));
+        // Read as UTF-8, `[é]` is one character, which a lone byte is not.
+        assert_eq!(find("[\u{e9}]", "x\u{e9}"), Some((1, 3)));
+        assert_eq!(
+            compile("[\u{e9}]".as_bytes(), false)
+                .unwrap()
+                .find(b"x\xa9")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -1,0 +1,12 @@
+# reordered.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 snow 1/1000
+stream 1 snow 1/1000
+packet 0 0 10 4 163 K__ da6c56969ff19daf215df520e6739e19 -
+packet 1 0 10 4 173 K__ 9aad8723b78a15d039d8c5b9bac6b34e -
+packet 0 40 10 4 183 ___ 9f677ee7efd1ef93a2648b5732a28ca3 -
+packet 1 1020 10 4 202 ___ c761ef7ce648456241b3eba09a776641 -
+packet 1 990 10 4 212 ___ fda8e092b4198d5166f0b7e25f71f340 -
+packet 0 1040 10 4 222 ___ bcec8aefc82f75e867a03b0e7d02bcdd -
+packet 0 1000 10 4 232 K__ 961006ee4501824485bcf9dc8a74808f -
+packet 1 1060 10 4 242 ___ 796d9d1cde5b75240a317c88064be35b -
+packet 0 1080 10 4 252 ___ 32c5abff947e4999614ac05b232bef9d -

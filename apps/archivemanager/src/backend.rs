@@ -13,18 +13,22 @@
 //! links, promoted out of `kernel/src/fs/zip.rs` at lane C's request precisely
 //! so that this program would not have to grow a second one.
 //!
-//! TAR and TAR.GZ, via [`tararchive`] and the workspace's `deflate`: listed,
-//! extracted, tested, and written back -- a member added or deleted, a new
-//! archive created. A TAR is read in place like a ZIP; a TAR.GZ is one gzip
-//! stream over the whole archive, so it is inflated into memory (under the
-//! same [`MAX_ARCHIVE_BYTES`] as everything else) and rewritten whole. What
-//! the bytes are decides, not the name: a gzipped `.tar` opens as a TAR.GZ.
+//! TAR, TAR.GZ, TAR.BZ2 and TAR.XZ, via [`tararchive`] and the workspace's
+//! `deflate`, `bzip2` and `xz`: listed, extracted, tested, and written back,
+//! a member added or deleted, a new archive created. A TAR is read in place like a ZIP; a
+//! compressed TAR is one stream over the whole archive, so it is decompressed
+//! into memory (under the same [`MAX_ARCHIVE_BYTES`] as everything else) and
+//! rewritten whole. What the bytes are decides, not the name: a gzipped
+//! `.tar` opens as a TAR.GZ, a `.tgz` holding bzip2 as a TAR.BZ2.
 //!
-//! TAR.BZ2, TAR.XZ and 7z are named by [`ArchiveFormat`] and refused here in
-//! words rather than silently mis-parsed: `ArchiveError::NotYetReadable` says
-//! which format it was -- found by name, or by the bytes when the name says
-//! TAR. Their decompressors are in the kernel, where no program can reach
-//! them (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
+//! 7z, via the workspace's `sevenz` -- a port of 7-Zip's own reader --
+//! listed, extracted and tested, read-only. A 7z is held whole and a solid
+//! block (many files in one compressed stream) is decoded whole, once, for
+//! whichever of its files are wanted; each file then gets the verdict 7-Zip
+//! would give it -- intact, "CRC Failed", "Data Error" -- so a damaged
+//! archive still gives up the files before the damage. Found by name, or by
+//! its bytes under another name. An encrypted one is listed, and its files
+//! refused for want of a password: this build does not ask for one yet.
 //!
 //! # An entry name is not a path
 //!
@@ -82,7 +86,8 @@ pub enum ArchiveError {
     TooLarge { bytes: u64 },
     /// The name does not end in any extension this program recognises.
     UnknownFormat { name: String },
-    /// A format this program knows about but cannot yet read.
+    /// A format that cannot be read this way: `decompress_tar` given one
+    /// that is no compressed TAR, which `open` never does.
     NotYetReadable { format: ArchiveFormat },
     /// The ZIP parser refused the bytes.
     Zip(ziparchive::Error),
@@ -90,6 +95,12 @@ pub enum ArchiveError {
     NotTar { why: tararchive::Damage },
     /// A `.tar.gz` whose gzip stream will not inflate.
     Gzip(deflate::Error),
+    /// A `.tar.bz2` whose bzip2 stream will not decompress.
+    Bzip2(bzip2::Error),
+    /// A `.tar.xz` whose xz stream will not decompress.
+    Xz(xz::Error),
+    /// The 7z reader refused the archive.
+    SevenZ(sevenz::Error),
 }
 
 impl fmt::Display for ArchiveError {
@@ -107,7 +118,7 @@ impl fmt::Display for ArchiveError {
             }
             Self::NotYetReadable { format } => write!(
                 f,
-                "{} — this build reads ZIP, TAR and TAR.GZ",
+                "{} — this build reads ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ and 7z",
                 format.display_name()
             ),
             Self::Zip(e) => write!(f, "{e}"),
@@ -118,6 +129,22 @@ impl fmt::Display for ArchiveError {
                 guitk::bytes::iec(MAX_ARCHIVE_BYTES)
             ),
             Self::Gzip(e) => write!(f, "its gzip stream will not inflate: {e}"),
+            Self::Bzip2(bzip2::Error::OutputTooLarge) => write!(
+                f,
+                "it decompresses to more than {}, the most this program reads",
+                guitk::bytes::iec(MAX_ARCHIVE_BYTES)
+            ),
+            Self::Bzip2(e) => write!(f, "its bzip2 stream will not decompress: {e}"),
+            Self::Xz(xz::Error::OutputTooLarge) => write!(
+                f,
+                "it decompresses to more than {}, the most this program reads",
+                guitk::bytes::iec(MAX_ARCHIVE_BYTES)
+            ),
+            Self::Xz(e) => write!(f, "its xz stream will not decompress: {e}"),
+            Self::SevenZ(sevenz::Error::PasswordRequired) => f.write_str(
+                "its list of files is encrypted, and this build does not ask for a password yet",
+            ),
+            Self::SevenZ(e) => write!(f, "it is not a readable 7z archive: {e}"),
         }
     }
 }
@@ -150,6 +177,10 @@ pub struct ArchiveSource {
 enum Members {
     Zip(HashMap<u64, ziparchive::ZipEntry>),
     Tar(HashMap<u64, tararchive::Entry>),
+    /// A 7z's entries by their index in the archive: `sevenz` borrows the
+    /// bytes, so the archive is opened again -- its header, not its data --
+    /// for each extraction or test.
+    SevenZ(HashMap<u64, usize>),
 }
 
 impl Members {
@@ -157,6 +188,7 @@ impl Members {
         match self {
             Self::Zip(m) => m.len(),
             Self::Tar(m) => m.len(),
+            Self::SevenZ(m) => m.len(),
         }
     }
 }
@@ -298,7 +330,7 @@ impl ArchiveSource {
     pub fn member(&self, id: u64) -> Option<&ziparchive::ZipEntry> {
         match &self.members {
             Members::Zip(m) => m.get(&id),
-            Members::Tar(_) => None,
+            Members::Tar(_) | Members::SevenZ(_) => None,
         }
     }
 
@@ -307,7 +339,7 @@ impl ArchiveSource {
     pub fn tar_member(&self, id: u64) -> Option<&tararchive::Entry> {
         match &self.members {
             Members::Tar(m) => m.get(&id),
-            Members::Zip(_) => None,
+            Members::Zip(_) | Members::SevenZ(_) => None,
         }
     }
 
@@ -339,9 +371,6 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
             ),
         });
     };
-    if !format.readable() {
-        return Err(ArchiveError::NotYetReadable { format });
-    }
     // Ask the size before reading, so an archive too big to hold is refused by
     // name instead of by running the machine out of memory first.
     let size = fs::metadata(path)
@@ -368,8 +397,15 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
     if format == ArchiveFormat::Zip {
         return parse_zip(path, bytes);
     }
-    // A TAR or a TAR.GZ, by what its bytes are rather than its name -- and a
-    // TAR compressed some way this build cannot undo, named as what it is.
+    if format == ArchiveFormat::SevenZip {
+        let whole = read_all(&bytes).map_err(|source| ArchiveError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        return parse_7z(path, whole);
+    }
+    // A TAR or a compressed TAR, by what its bytes are rather than its name --
+    // and a 7z under a TAR's name, named as what it is.
     // Read as a TAR, its first block is compressed data, and "it is not a TAR
     // archive" would be the wrong refusal: it is one, inside a wrapper.
     let mut magic = [0_u8; 6];
@@ -380,20 +416,63 @@ pub fn open(path: &Path) -> Result<ArchiveModel, ArchiveError> {
             source,
         })?;
     let wrapped = compressed_as(magic.get(..read).unwrap_or_default());
-    if let Some(format) = wrapped.filter(|f| !f.readable()) {
-        return Err(ArchiveError::NotYetReadable { format });
+    match wrapped {
+        // A 7z under a TAR's name: opened as what it is.
+        Some(ArchiveFormat::SevenZip) => {
+            let whole = read_all(&bytes).map_err(|source| ArchiveError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            parse_7z(path, whole)
+        }
+        Some(format) => {
+            let compressed = read_all(&bytes).map_err(|source| ArchiveError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            let tar = decompress_tar(format, &compressed)?;
+            drop(compressed);
+            parse_tar(path, ArchiveBytes::Memory(tar), format, size)
+        }
+        None => parse_tar(path, bytes, ArchiveFormat::Tar, size),
     }
-    if wrapped == Some(ArchiveFormat::TarGz) {
-        let compressed = read_all(&bytes).map_err(|source| ArchiveError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let limit = usize::try_from(MAX_ARCHIVE_BYTES).unwrap_or(usize::MAX);
-        let tar = deflate::gunzip_limited(&compressed, limit).map_err(ArchiveError::Gzip)?;
-        drop(compressed);
-        parse_tar(path, ArchiveBytes::Memory(tar), ArchiveFormat::TarGz, size)
-    } else {
-        parse_tar(path, bytes, ArchiveFormat::Tar, size)
+}
+
+/// The TAR inside a compressed TAR's `compressed` bytes, under the open
+/// budget.
+fn decompress_tar(format: ArchiveFormat, compressed: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+    let limit = usize::try_from(MAX_ARCHIVE_BYTES).unwrap_or(usize::MAX);
+    decompress_tar_within(format, compressed, limit)
+}
+
+/// As [`decompress_tar`], under `limit` bytes: apart so that a test can reach
+/// the cap without decompressing half a gigabyte.
+fn decompress_tar_within(
+    format: ArchiveFormat,
+    compressed: &[u8],
+    limit: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    match format {
+        ArchiveFormat::TarGz => {
+            deflate::gunzip_limited(compressed, limit).map_err(ArchiveError::Gzip)
+        }
+        ArchiveFormat::TarBz2 => {
+            bzip2::decompress_limited(compressed, limit).map_err(ArchiveError::Bzip2)
+        }
+        ArchiveFormat::TarXz => xz::decompress_limited(compressed, limit).map_err(ArchiveError::Xz),
+        format => Err(ArchiveError::NotYetReadable { format }),
+    }
+}
+
+/// A compressed TAR's bytes for the TAR `tar`: gzip at its default level,
+/// bzip2 at `bzip2 -9`, xz at `xz -6`, as the command-line tools write them
+/// by default -- for bzip2 and xz, byte for byte.
+fn compress_tar(format: ArchiveFormat, tar: &[u8]) -> Result<Vec<u8>, SaveError> {
+    match format {
+        ArchiveFormat::TarGz => Ok(deflate::gzip(tar)),
+        ArchiveFormat::TarBz2 => Ok(bzip2::compress(tar, bzip2::Level::BEST)),
+        ArchiveFormat::TarXz => Ok(xz::compress(tar, xz::Preset::DEFAULT)),
+        format => Err(SaveError::Unwritable { format }),
     }
 }
 
@@ -509,7 +588,7 @@ pub fn parse_tar(
         });
         by_id.insert(id, member);
     }
-    if format == ArchiveFormat::TarGz {
+    if format.is_compressed_tar() {
         model.total_compressed = on_disk;
     }
     model.damage = match listing.end {
@@ -543,6 +622,8 @@ fn carries_bytes(kind: tararchive::Kind) -> bool {
 fn tar_method(kind: tararchive::Kind, format: ArchiveFormat) -> String {
     match kind {
         tararchive::Kind::File if format == ArchiveFormat::TarGz => String::from("Gzip"),
+        tararchive::Kind::File if format == ArchiveFormat::TarBz2 => String::from("Bzip2"),
+        tararchive::Kind::File if format == ArchiveFormat::TarXz => String::from("XZ"),
         tararchive::Kind::File => String::from("Stored"),
         tararchive::Kind::Directory => String::new(),
         tararchive::Kind::Symlink => String::from("Symbolic link"),
@@ -761,6 +842,102 @@ fn display_path(raw: &[u8]) -> String {
     shown.trim_end_matches('/').to_string()
 }
 
+/// Parse a 7z's `bytes` into a model, through `sevenz`, 7-Zip's own reader
+/// ported.
+///
+/// # Errors
+///
+/// [`ArchiveError::SevenZ`] when the reader refuses the archive -- not a 7z,
+/// cut short, a damaged header, or one encrypted whole.
+pub fn parse_7z(path: &Path, bytes: Vec<u8>) -> Result<ArchiveModel, ArchiveError> {
+    let mut model = ArchiveModel::new(path, ArchiveFormat::SevenZip);
+    let mut by_id = HashMap::new();
+    {
+        let archive = sevenz::Archive::open(&bytes).map_err(ArchiveError::SevenZ)?;
+        // 7-Zip shows a solid block's packed size on the first of its files.
+        let mut packed_shown = vec![false; archive.num_folders()];
+        for entry in archive.entries() {
+            let raw = wtf8(entry.name_utf16());
+            let display = display_path(&raw);
+            let name = display
+                .rsplit_once('/')
+                .map_or(display.as_str(), |(_, last)| last)
+                .to_string();
+            let folder = archive.folder_of(entry.index());
+            let compressed_size = match folder.and_then(|f| packed_shown.get_mut(f).map(|s| (f, s)))
+            {
+                Some((f, shown)) if !*shown => {
+                    *shown = true;
+                    archive.folder_packed_size(f)
+                }
+                _ => 0,
+            };
+            let id = model.add_entry(ArchiveEntry {
+                depth: u32::try_from(display.matches('/').count()).unwrap_or(u32::MAX),
+                name,
+                is_dir: entry.is_dir(),
+                size: entry.size(),
+                compressed_size,
+                modified: entry.mtime().map_or(0, unix_from_filetime),
+                crc32: entry.crc(),
+                encrypted: folder.is_some_and(|f| archive.is_folder_encrypted(f)),
+                method: folder.map_or_else(String::new, |f| archive.folder_method(f)),
+                path: display,
+                expanded: false,
+                selected: false,
+                id: 0, // assigned by add_entry
+            });
+            by_id.insert(id, entry.index());
+        }
+        if archive.was_recovered() {
+            model.damage = Some(String::from(
+                "its start header was never written: the list of files was found at its end",
+            ));
+        }
+    }
+    model.source = Some(ArchiveSource {
+        bytes: ArchiveBytes::Memory(bytes),
+        members: Members::SevenZ(by_id),
+    });
+    model.rebuild_tree();
+    Ok(model)
+}
+
+/// A 7z name's UTF-16 units as WTF-8 -- UTF-8, with a lone surrogate encoded
+/// as if it were a character -- so that the ZIP path's helpers serve it:
+/// [`display_path`] shows a name that is not text by its bytes, and
+/// [`safe_destination`] refuses to write one. Nothing is lost either way.
+fn wtf8(units: &[u16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(units.len());
+    for unit in char::decode_utf16(units.iter().copied()) {
+        match unit {
+            Ok(c) => {
+                let mut buf = [0_u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+            Err(e) => {
+                // A lone surrogate, D800 to DFFF: the three bytes UTF-8 would
+                // give it were it a character -- 1110xxxx 10xxxxxx 10xxxxxx.
+                let [hi, lo] = e.unpaired_surrogate().to_be_bytes();
+                out.extend_from_slice(&[
+                    0xE0 | (hi >> 4),
+                    0x80 | ((hi & 0x0F) << 2) | (lo >> 6),
+                    0x80 | (lo & 0x3F),
+                ]);
+            }
+        }
+    }
+    out
+}
+
+/// Seconds since the Unix epoch for a Windows `FILETIME` -- 100-nanosecond
+/// ticks since 1601 -- as 7z records times, or `0` (shown as `-`) for one
+/// before 1970.
+fn unix_from_filetime(ticks: u64) -> u64 {
+    const EPOCH_GAP: u64 = 11_644_473_600;
+    (ticks / 10_000_000).saturating_sub(EPOCH_GAP)
+}
+
 /// Why a member was not extracted.
 #[derive(Debug)]
 pub enum SkipReason {
@@ -791,6 +968,11 @@ pub enum SkipReason {
     NotAFile,
     /// A hard link to a member the archive does not hold.
     LinkTargetMissing,
+    /// A 7z member the reader would not give: damaged data, a CRC that does
+    /// not match, a method this build does not have, or a password.
+    SevenZ(sevenz::Error),
+    /// A 7z "anti-item": a record that a file was deleted, not a file.
+    Deletion,
     /// The archive itself could not be read at that member's offset.
     ///
     /// Separate from [`Self::Io`], which is the *output* failing, and from
@@ -826,6 +1008,8 @@ impl fmt::Display for SkipReason {
             Self::Zip(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
             Self::Unreadable(e) => write!(f, "the archive could not be read: {e}"),
+            Self::SevenZ(e) => f.write_str(seven_z_reason(*e)),
+            Self::Deletion => f.write_str("it records a deletion, not a file"),
             Self::SymbolicLink => f.write_str(
                 "it is a symbolic link, which this build does not make: a link can point outside the destination",
             ),
@@ -940,6 +1124,158 @@ pub fn extract(source: &ArchiveSource, members: &[&ArchiveEntry], dest: &Path) -
     match &source.members {
         Members::Zip(_) => extract_zip(source, members, dest),
         Members::Tar(map) => extract_tar(&source.bytes, map, members, dest),
+        Members::SevenZ(map) => extract_7z(&source.bytes, map, members, dest),
+    }
+}
+
+/// What one solid block of a 7z may decode to: the open budget, as every
+/// other format's whole archive.
+const SEVEN_Z_BLOCK_LIMIT: u64 = MAX_ARCHIVE_BYTES;
+
+/// A 7z's bytes: always held whole, as `parse_7z` keeps them.
+fn seven_z_bytes(bytes: &ArchiveBytes) -> &[u8] {
+    match bytes {
+        ArchiveBytes::Memory(b) => b,
+        ArchiveBytes::File { .. } => &[],
+    }
+}
+
+/// Why 7-Zip would not give a 7z member, in words.
+fn seven_z_reason(e: sevenz::Error) -> &'static str {
+    match e {
+        sevenz::Error::Data => "its compressed data is damaged",
+        sevenz::Error::Crc => "its contents do not match the checksum the archive declared",
+        sevenz::Error::Unsupported => "it uses a compression method this build does not have",
+        sevenz::Error::PasswordRequired => {
+            "it is encrypted, and this build does not ask for a password yet"
+        }
+        sevenz::Error::OutputTooLarge => {
+            "decompressing it needs more memory than this program will use"
+        }
+        // Not a 7z, cut short, a damaged header: the archive itself.
+        _ => "the archive is damaged where it is listed",
+    }
+}
+
+/// A 7z member's verdict for Test, from the reader's refusal.
+fn seven_z_test_result(e: sevenz::Error) -> TestResult {
+    match e {
+        sevenz::Error::PasswordRequired => TestResult::DecryptionFailed,
+        // The budget, not the archive -- see `TestResult::Unreadable`.
+        sevenz::Error::OutputTooLarge => TestResult::Unreadable(seven_z_reason(e).to_string()),
+        e => TestResult::Corrupted(seven_z_reason(e).to_string()),
+    }
+}
+
+/// [`extract`] for a 7z: each solid block a wanted member is in decoded
+/// once, whole, and those members written; a directory made, an empty file
+/// written empty. A member 7-Zip would not give -- damaged, failing its CRC,
+/// encrypted, in a method this build lacks -- is skipped with its reason,
+/// and the members before the damage still come out, as 7-Zip gives them.
+fn extract_7z(
+    bytes: &ArchiveBytes,
+    map: &HashMap<u64, usize>,
+    members: &[&ArchiveEntry],
+    dest: &Path,
+) -> ExtractReport {
+    let mut report = ExtractReport::default();
+    let archive = match sevenz::Archive::open(seven_z_bytes(bytes)) {
+        Ok(a) => a,
+        Err(e) => {
+            for entry in members {
+                report
+                    .skipped
+                    .push((entry.path.clone(), SkipReason::SevenZ(e)));
+            }
+            return report;
+        }
+    };
+    // The members with data, by solid block, in the archive's order.
+    let mut by_block: std::collections::BTreeMap<usize, Vec<(&ArchiveEntry, usize, PathBuf)>> =
+        std::collections::BTreeMap::new();
+    for entry in members {
+        // The model and its source disagree -- as in `extract_zip`.
+        let Some(member) = map.get(&entry.id).and_then(|&i| archive.entry(i)) else {
+            report
+                .skipped
+                .push((entry.path.clone(), SkipReason::Escapes));
+            continue;
+        };
+        if member.is_anti() {
+            report
+                .skipped
+                .push((entry.path.clone(), SkipReason::Deletion));
+            continue;
+        }
+        let target = match safe_destination(dest, &wtf8(member.name_utf16())) {
+            Ok(p) => p,
+            Err(why) => {
+                report.skipped.push((entry.path.clone(), why));
+                continue;
+            }
+        };
+        if member.is_dir() {
+            match fs::create_dir_all(&target) {
+                Ok(()) => report.directories = report.directories.saturating_add(1),
+                Err(e) => report.skipped.push((entry.path.clone(), SkipReason::Io(e))),
+            }
+            continue;
+        }
+        match archive.folder_of(member.index()) {
+            Some(block) => by_block
+                .entry(block)
+                .or_default()
+                .push((entry, member.index(), target)),
+            // No data: an empty file.
+            None => write_out(&mut report, entry, &target, &[]),
+        }
+    }
+    let limit = usize::try_from(SEVEN_Z_BLOCK_LIMIT).unwrap_or(usize::MAX);
+    for (block, wanted) in by_block {
+        match archive.read_folder(block, limit) {
+            Ok(result) => {
+                let mut files: HashMap<usize, sevenz::Result<Vec<u8>>> =
+                    result.files.into_iter().collect();
+                for (entry, index, target) in wanted {
+                    match files.remove(&index) {
+                        Some(Ok(data)) => write_out(&mut report, entry, &target, &data),
+                        Some(Err(e)) => report
+                            .skipped
+                            .push((entry.path.clone(), SkipReason::SevenZ(e))),
+                        None => report.skipped.push((
+                            entry.path.clone(),
+                            SkipReason::SevenZ(sevenz::Error::Header),
+                        )),
+                    }
+                }
+            }
+            Err(e) => {
+                for (entry, ..) in wanted {
+                    report
+                        .skipped
+                        .push((entry.path.clone(), SkipReason::SevenZ(e)));
+                }
+            }
+        }
+    }
+    report
+}
+
+/// Writes `data` as `entry` at `target`, its directory made first, into
+/// `report`.
+fn write_out(report: &mut ExtractReport, entry: &ArchiveEntry, target: &Path, data: &[u8]) {
+    if let Some(parent) = target.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        report.skipped.push((entry.path.clone(), SkipReason::Io(e)));
+        return;
+    }
+    match fs::write(target, data) {
+        Ok(()) => {
+            report.written = report.written.saturating_add(1);
+            report.bytes = report.bytes.saturating_add(data.len() as u64);
+        }
+        Err(e) => report.skipped.push((entry.path.clone(), SkipReason::Io(e))),
     }
 }
 
@@ -1123,6 +1459,10 @@ pub fn verify(model: &ArchiveModel) -> ArchiveTestResults {
         verify_tar(&source.bytes, map, &files, &mut results);
         return results;
     }
+    if let Members::SevenZ(map) = &source.members {
+        verify_7z(&source.bytes, map, &files, &mut results);
+        return results;
+    }
     for entry in files {
         let result = match source.member(entry.id) {
             None => TestResult::Corrupted(String::from("no record of this entry in the archive")),
@@ -1196,6 +1536,78 @@ fn verify_tar(
             Some(_) => TestResult::Ok,
         };
         results.record(&entry.path, result);
+    }
+}
+
+/// [`verify`] for a 7z: every solid block decoded, once, and each file given
+/// 7-Zip's verdict -- intact, failing its CRC, damaged, encrypted. A block
+/// that fails only after its last file, or whose coder stops short of its
+/// input, leaves its files intact and the archive not whole: `damage`.
+fn verify_7z(
+    bytes: &ArchiveBytes,
+    map: &HashMap<u64, usize>,
+    files: &[&ArchiveEntry],
+    results: &mut ArchiveTestResults,
+) {
+    let archive = match sevenz::Archive::open(seven_z_bytes(bytes)) {
+        Ok(a) => a,
+        Err(e) => {
+            for entry in files {
+                results.record(&entry.path, seven_z_test_result(e));
+            }
+            return;
+        }
+    };
+    let mut by_block: std::collections::BTreeMap<usize, Vec<(&ArchiveEntry, usize)>> =
+        std::collections::BTreeMap::new();
+    for entry in files {
+        match map.get(&entry.id) {
+            None => results.record(
+                &entry.path,
+                TestResult::Corrupted(String::from("no record of this entry in the archive")),
+            ),
+            Some(&index) => match archive.folder_of(index) {
+                Some(block) => by_block.entry(block).or_default().push((entry, index)),
+                // An empty file, or a deletion: no data to test.
+                None => results.record(&entry.path, TestResult::Ok),
+            },
+        }
+    }
+    let limit = usize::try_from(SEVEN_Z_BLOCK_LIMIT).unwrap_or(usize::MAX);
+    for (block, wanted) in by_block {
+        match archive.read_folder(block, limit) {
+            Ok(result) => {
+                let verdicts: HashMap<usize, Option<sevenz::Error>> = result
+                    .files
+                    .into_iter()
+                    .map(|(i, r)| (i, r.err()))
+                    .collect();
+                for (entry, index) in wanted {
+                    let verdict = match verdicts.get(&index) {
+                        Some(None) => TestResult::Ok,
+                        Some(Some(e)) => seven_z_test_result(*e),
+                        None => seven_z_test_result(sevenz::Error::Header),
+                    };
+                    results.record(&entry.path, verdict);
+                }
+                if result.error_after_files.is_some() {
+                    results.damage.get_or_insert_with(|| {
+                        String::from("a block of it is damaged after its last file")
+                    });
+                } else if result.data_after_end {
+                    results.damage.get_or_insert_with(|| {
+                        String::from(
+                            "a block of it has data after the end of its compressed stream",
+                        )
+                    });
+                }
+            }
+            Err(e) => {
+                for (entry, _) in wanted {
+                    results.record(&entry.path, seven_z_test_result(e));
+                }
+            }
+        }
     }
 }
 
@@ -1307,7 +1719,7 @@ impl fmt::Display for SaveError {
             Self::Io { path, source } => write!(f, "cannot write {}: {source}", path.shown()),
             Self::Unwritable { format } => write!(
                 f,
-                "this build writes ZIP, TAR and TAR.GZ, and not {}",
+                "this build writes ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ, and not {}",
                 format.display_name()
             ),
         }
@@ -1521,6 +1933,12 @@ fn save_within(
     if let Members::Tar(map) = &source.members {
         return save_tar(model, source, map, adding, limit);
     }
+    // A 7z is read here, not written: refused before anything is touched.
+    if let Members::SevenZ(_) = &source.members {
+        return Err(SaveError::Unwritable {
+            format: ArchiveFormat::SevenZip,
+        });
+    }
 
     // Before anything is allocated, and before the old archive is touched.
     let projected = projected_save_bytes(source, model, &adding);
@@ -1619,13 +2037,15 @@ fn save_within(
     })
 }
 
-/// [`save`] for a TAR or a TAR.GZ: the model's members, in its order, less
-/// those an added file of the same name displaces, then the added files.
+/// [`save`] for a TAR, a TAR.GZ or a TAR.BZ2: the model's members, in its
+/// order, less those an added file of the same name displaces, then the added
+/// files.
 ///
 /// A TAR is written to the file as it is produced, a member at a time, its
-/// bytes copied across a chunk at a time. A TAR.GZ is one gzip stream over
-/// the whole archive, so the archive is built in memory and compressed --
-/// which is what its projection counts, and refuses past `limit`.
+/// bytes copied across a chunk at a time. A TAR.GZ or TAR.BZ2 is one
+/// compressed stream over the whole archive, so the archive is built in memory
+/// and compressed -- which is what its projection counts, and refuses past
+/// `limit`.
 fn save_tar(
     model: &ArchiveModel,
     source: &ArchiveSource,
@@ -1633,9 +2053,9 @@ fn save_tar(
     adding: Vec<PendingAdd>,
     limit: u64,
 ) -> Result<SaveReport, SaveError> {
-    let gzipped = model.format == ArchiveFormat::TarGz;
+    let compressed = model.format.is_compressed_tar();
     let added_bytes: u64 = adding.iter().map(|a| a.data.len() as u64).sum();
-    let projected = if gzipped {
+    let projected = if compressed {
         // The archive being built -- every member padded, two headers each
         // at most -- and its compressed copy beside it.
         let members: u64 = model
@@ -1726,13 +2146,13 @@ fn save_tar(
         tararchive::write_end(&mut *out).map_err(failed)?;
         Ok((written, replaced))
     };
-    let ((written, replaced), bytes) = if gzipped {
+    let ((written, replaced), bytes) = if compressed {
         let mut tar = Vec::new();
         let counts = write(&mut tar)?;
-        let gz = deflate::gzip(&tar);
+        let packed = compress_tar(model.format, &tar)?;
         drop(tar);
-        replace_file(&model.path, &gz)?;
-        (counts, gz.len() as u64)
+        replace_file(&model.path, &packed)?;
+        (counts, packed.len() as u64)
     } else {
         replace_file_with(&model.path, |file| write(file))?
     };
@@ -1746,7 +2166,7 @@ fn save_tar(
 
 /// Write an empty archive at `path`, in the format its name says -- a ZIP
 /// when it names none. An empty TAR is its two closing blocks; an empty
-/// TAR.GZ, those gzipped.
+/// TAR.GZ, TAR.BZ2 or TAR.XZ, those compressed.
 ///
 /// It wrote an empty ZIP whatever the name, so a new `backup.tar` was a ZIP
 /// under a TAR's name, which nothing then opened as either.
@@ -1760,8 +2180,10 @@ pub fn create_empty(path: &Path) -> Result<(), SaveError> {
     let bytes = match ArchiveFormat::from_path(path) {
         None | Some(ArchiveFormat::Zip) => ziparchive::create(&[]),
         Some(ArchiveFormat::Tar) => empty_tar.to_vec(),
-        Some(ArchiveFormat::TarGz) => deflate::gzip(&empty_tar),
-        Some(format @ (ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::SevenZip)) => {
+        Some(format @ (ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz)) => {
+            compress_tar(format, &empty_tar)?
+        }
+        Some(format @ ArchiveFormat::SevenZip) => {
             return Err(SaveError::Unwritable { format });
         }
     };
@@ -2481,61 +2903,48 @@ mod tests {
             }
             other => panic!("expected it to be said not to be a TAR, got {other:?}"),
         }
+        // A 7z's signature and nothing after it: the 7z reader's refusal.
         let seven = dir.join("bundle.7z");
         fs::write(&seven, b"7z\xBC\xAF\x27\x1C").expect("write it");
         match open(&seven) {
-            Err(e @ ArchiveError::NotYetReadable { .. }) => {
-                assert!(e.to_string().contains("reads ZIP, TAR and TAR.GZ"), "{e}");
+            Err(e @ ArchiveError::SevenZ(_)) => {
+                assert!(e.to_string().contains("not a readable 7z archive"), "{e}");
             }
-            other => panic!("expected a refusal naming the format, got {other:?}"),
+            other => panic!("expected the 7z reader to refuse it, got {other:?}"),
         }
 
-        // A TAR in a wrapper this build cannot undo is named as what it is,
-        // whatever the name says -- not "not a TAR", which it is, inside.
-        for (name, head, format) in [
-            (
-                "src.tar.xz",
-                &b"\xFD7zXZ\x00 then LZMA2"[..],
-                ArchiveFormat::TarXz,
-            ),
-            (
-                "xz-named-tar.tar",
-                &b"\xFD7zXZ\x00 then LZMA2"[..],
-                ArchiveFormat::TarXz,
-            ),
-            (
-                "bz-named-tgz.tgz",
-                &b"BZh91AY&SY then blocks"[..],
-                ArchiveFormat::TarBz2,
-            ),
-            (
-                "7z-named-tar.tar",
-                &b"7z\xBC\xAF\x27\x1C then headers"[..],
-                ArchiveFormat::SevenZip,
-            ),
-        ] {
-            let path = dir.join(name);
-            fs::write(&path, head).expect("write it");
-            match open(&path) {
-                Err(ArchiveError::NotYetReadable { format: said }) => {
-                    assert_eq!(said, format, "{name} was named as the wrong format");
-                }
-                other => panic!("{name}: expected {format:?} to be refused by name, got {other:?}"),
-            }
-        }
-        // A refused name is refused before a byte is read: a `.tar.bz2` whose
-        // bytes are nothing in particular is still named TAR.BZ2, not "not a
-        // TAR".
-        let named = dir.join("named-only.tar.bz2");
+        // A 7z under a TAR's name is read as what it is -- not "not a TAR".
+        let path = dir.join("7z-named-tar.tar");
+        fs::write(&path, b"7z\xBC\xAF\x27\x1C then headers").expect("write it");
+        assert!(
+            matches!(open(&path), Err(ArchiveError::SevenZ(_))),
+            "a 7z under a TAR's name was not read as a 7z"
+        );
+        // A `.7z` whose bytes are nothing in particular is no 7z.
+        let named = dir.join("named-only.7z");
         fs::write(&named, b"not really").expect("write it");
         assert!(
             matches!(
                 open(&named),
-                Err(ArchiveError::NotYetReadable {
-                    format: ArchiveFormat::TarBz2
-                })
+                Err(ArchiveError::SevenZ(sevenz::Error::NotSevenZip))
             ),
-            "a .tar.bz2 was read before being refused by its name"
+            "a .7z without the signature was not refused as no 7z"
+        );
+        // An xz stream under a TAR's name is decompressed, and a damaged one
+        // says it is the xz that failed.
+        let xz_named = dir.join("xz-named-tar.tar");
+        fs::write(&xz_named, b"\xFD7zXZ\x00 then LZMA2").expect("write it");
+        match open(&xz_named) {
+            Err(e @ ArchiveError::Xz(_)) => assert!(e.to_string().contains("xz"), "{e}"),
+            other => panic!("expected the xz to be refused, got {other:?}"),
+        }
+        // A readable name is no promise: a `.tar.bz2` that is not bzip2 is
+        // read as what its bytes are -- here, not a TAR either.
+        let named = dir.join("named-only.tar.bz2");
+        fs::write(&named, b"not really").expect("write it");
+        assert!(
+            matches!(open(&named), Err(ArchiveError::NotTar { .. })),
+            "a .tar.bz2 holding no bzip2 was not read by its bytes"
         );
         // "BZh" with no block-size digit after it is not bzip2's magic.
         let almost = dir.join("almost.tar");
@@ -3262,6 +3671,439 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// A TAR.BZ2 is the same archive, bzip2-compressed: decompressed, listed,
+    /// its compressed size the file's -- whatever it is called, since the
+    /// bytes decide. A damaged stream says it is the bzip2 that failed.
+    #[test]
+    fn a_bzipped_tar_is_decompressed_and_listed_whatever_it_is_called() {
+        let dir = scratch("tbz-list");
+        let bz = bzip2::compress(&tar_fixture(), bzip2::Level::BEST);
+        for name in [
+            "bundle.tar.bz2",
+            "bundle.tbz2",
+            "misnamed.tar",
+            "misnamed.tgz",
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, &bz).unwrap();
+            let model = open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(model.format, ArchiveFormat::TarBz2, "{name}");
+            assert_eq!(model.entries.len(), 5, "{name}");
+            assert_eq!(model.total_compressed, bz.len() as u64, "{name}");
+            assert_eq!(model.entries[1].method, "Bzip2", "{name}");
+        }
+        let mut broken = bz.clone();
+        let middle = broken.len() / 2;
+        broken.truncate(middle);
+        let cut = dir.join("cut.tar.bz2");
+        fs::write(&cut, &broken).unwrap();
+        match open(&cut) {
+            Err(e @ ArchiveError::Bzip2(bzip2::Error::UnexpectedEnd)) => {
+                assert!(e.to_string().contains("bzip2"), "{e}");
+            }
+            other => panic!("expected the bzip2 to be refused, got {other:?}"),
+        }
+        let mut flipped = bz.clone();
+        let at = flipped.len() / 2;
+        flipped[at] ^= 0x55;
+        let bad = dir.join("bad.tar.bz2");
+        fs::write(&bad, &flipped).unwrap();
+        assert!(
+            matches!(open(&bad), Err(ArchiveError::Bzip2(_))),
+            "a damaged bzip2 stream was read"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A TAR.XZ that GNU tar and xz 5.2.5 wrote (`tests/data/real.tar.xz`:
+    /// `tar --format=ustar -cf - docs top.bin | xz -6`, the folder holding
+    /// `docs/readme.txt`, "read me first", and `top.bin`, 1300 bytes of 7):
+    /// decompressed, listed and extracted, whatever it is called -- and
+    /// compressed again, the same bytes.
+    #[test]
+    fn a_tar_xz_that_xz_wrote_is_listed_and_extracted() {
+        let dir = scratch("txz");
+        let real = include_bytes!("../tests/data/real.tar.xz");
+        for name in ["real.tar.xz", "real.txz", "misnamed.tar"] {
+            let path = dir.join(name);
+            fs::write(&path, real).unwrap();
+            let model = open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(model.format, ArchiveFormat::TarXz, "{name}");
+            let paths: Vec<&str> = model.entries.iter().map(|e| e.path.as_str()).collect();
+            assert_eq!(paths, ["docs", "docs/readme.txt", "top.bin"], "{name}");
+            assert_eq!(model.total_compressed, real.len() as u64, "{name}");
+            let file = model.entries.iter().find(|e| e.path == "top.bin").unwrap();
+            assert_eq!((file.size, file.method.as_str()), (1300, "XZ"), "{name}");
+            let dest = dir.join(format!("{name}-out"));
+            let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+            extract(model.source.as_ref().unwrap(), &all, &dest);
+            assert_eq!(
+                fs::read(dest.join("docs/readme.txt")).unwrap(),
+                b"read me first"
+            );
+            assert_eq!(fs::read(dest.join("top.bin")).unwrap(), vec![7u8; 1300]);
+        }
+        let mut cut = real.to_vec();
+        cut.truncate(real.len() - 20);
+        let path = dir.join("cut.tar.xz");
+        fs::write(&path, &cut).unwrap();
+        assert!(matches!(
+            open(&path),
+            Err(ArchiveError::Xz(xz::Error::UnexpectedEnd))
+        ));
+        // Written back, it is what `xz -6` wrote: the archive manager writes
+        // a TAR.XZ as the command-line tools do, byte for byte.
+        let tar = xz::decompress(real).unwrap();
+        assert_eq!(compress_tar(ArchiveFormat::TarXz, &tar).unwrap(), real);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 7z that 7-Zip 26.00 wrote (`tests/data/real.7z`: `7z a -m0=LZMA2
+    /// real.7z docs top.bin empty.txt`, the folder holding
+    /// `docs/readme.txt`, "read me first", `top.bin`, 1300 bytes of 7, and
+    /// the empty `empty.txt`, all dated 2026-01-01 00:00 UTC): one solid
+    /// block, listed as 7-Zip lists it -- its method, its packed size on its
+    /// first file -- extracted and tested, under its own name and a TAR's.
+    #[test]
+    fn a_7z_that_7zip_wrote_is_listed_extracted_and_tested() {
+        let dir = scratch("7z");
+        let real = include_bytes!("../tests/data/real.7z");
+        for name in ["real.7z", "misnamed.tar"] {
+            let path = dir.join(name);
+            fs::write(&path, real).unwrap();
+            let model = open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(model.format, ArchiveFormat::SevenZip, "{name}");
+            let mut paths: Vec<&str> = model.entries.iter().map(|e| e.path.as_str()).collect();
+            paths.sort_unstable();
+            assert_eq!(
+                paths,
+                ["docs", "docs/readme.txt", "empty.txt", "top.bin"],
+                "{name}"
+            );
+            let find = |p: &str| model.entries.iter().find(|e| e.path == p).unwrap();
+            let readme = find("docs/readme.txt");
+            assert_eq!(
+                (readme.size, readme.compressed_size, readme.method.as_str()),
+                (13, 35, "LZMA2:12"),
+                "{name}"
+            );
+            assert_eq!(readme.crc32, Some(0x6F15_3150));
+            assert_eq!(readme.modified, 1_767_225_600);
+            assert!(!readme.encrypted);
+            // The block's packed size is shown once, on its first file.
+            assert_eq!(
+                (find("top.bin").size, find("top.bin").compressed_size),
+                (1300, 0)
+            );
+            assert!(find("docs").is_dir);
+            assert!(model.damage.is_none());
+
+            let dest = dir.join(format!("{name}-out"));
+            let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+            let report = extract(model.source.as_ref().unwrap(), &all, &dest);
+            assert!(report.skipped.is_empty(), "{name}: {:?}", report.skipped);
+            assert_eq!(
+                (report.written, report.directories, report.bytes),
+                (3, 1, 1313)
+            );
+            assert_eq!(
+                fs::read(dest.join("docs/readme.txt")).unwrap(),
+                b"read me first"
+            );
+            assert_eq!(fs::read(dest.join("top.bin")).unwrap(), vec![7u8; 1300]);
+            assert_eq!(fs::read(dest.join("empty.txt")).unwrap(), b"");
+
+            let results = verify(&model);
+            assert!(results.all_passed(), "{name}: {results:?}");
+            assert_eq!(results.tested, 3);
+        }
+        // One file asked for: its block is decoded, and only it is written.
+        let path = dir.join("real.7z");
+        let model = open(&path).unwrap();
+        let top: Vec<&ArchiveEntry> = model
+            .entries
+            .iter()
+            .filter(|e| e.path == "top.bin")
+            .collect();
+        let dest = dir.join("one-out");
+        let report = extract(model.source.as_ref().unwrap(), &top, &dest);
+        assert_eq!((report.written, report.skipped.len()), (1, 0));
+        assert!(!dest.join("docs").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 7z damaged after its last file -- the LZMA2 stream's end marker, the
+    /// last byte of the block -- gives every file whole and is still not
+    /// whole; one damaged inside a file (`tests/data/copy.7z`, the same tree
+    /// stored with `-m0=Copy -mhc=off`, a byte of `top.bin` changed) gives
+    /// the others and refuses that one by its CRC, as 7-Zip does.
+    #[test]
+    fn a_damaged_7z_gives_up_what_7zip_would() {
+        let dir = scratch("7z-damaged");
+        let mut tail = include_bytes!("../tests/data/real.7z").to_vec();
+        // The block is 35 bytes after the 32-byte start header.
+        assert_eq!(tail[32 + 35 - 1], 0, "the end marker");
+        tail[32 + 35 - 1] = 1;
+        let path = dir.join("tail.7z");
+        fs::write(&path, &tail).unwrap();
+        let model = open(&path).unwrap();
+        let results = verify(&model);
+        assert_eq!((results.passed, results.failed), (3, 0));
+        assert!(
+            results
+                .damage
+                .as_deref()
+                .is_some_and(|d| d.contains("after its last file"))
+        );
+        assert!(!results.all_passed());
+        let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+        let report = extract(model.source.as_ref().unwrap(), &all, &dir.join("tail-out"));
+        assert_eq!((report.written, report.skipped.len()), (3, 0));
+
+        let mut bad = include_bytes!("../tests/data/copy.7z").to_vec();
+        let at = bad
+            .windows(1300)
+            .position(|w| w.iter().all(|&b| b == 7))
+            .expect("top.bin, stored");
+        bad[at + 600] ^= 0xFF;
+        let path = dir.join("bad.7z");
+        fs::write(&path, &bad).unwrap();
+        let model = open(&path).unwrap();
+        let results = verify(&model);
+        assert_eq!((results.passed, results.failed), (2, 1));
+        assert!(matches!(
+            results.results.get("top.bin"),
+            Some(TestResult::Corrupted(why)) if why.contains("checksum")
+        ));
+        let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+        let dest = dir.join("bad-out");
+        let report = extract(model.source.as_ref().unwrap(), &all, &dest);
+        assert_eq!(report.written, 2);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].0, "top.bin");
+        assert!(matches!(
+            report.skipped[0].1,
+            SkipReason::SevenZ(sevenz::Error::Crc)
+        ));
+        assert!(
+            !dest.join("top.bin").exists(),
+            "a file failing its CRC was written"
+        );
+        assert_eq!(
+            fs::read(dest.join("docs/readme.txt")).unwrap(),
+            b"read me first"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 7z encryption: with the names in the clear (`tests/data/encrypted.7z`,
+    /// the same tree with `-psecret`) the files are listed, marked encrypted,
+    /// and refused for want of a password -- the empty one, which has no
+    /// data, comes out; with the names encrypted too
+    /// (`encrypted-names.7z`, `-mhe=on`) nothing can be listed, and the
+    /// refusal says so.
+    #[test]
+    fn an_encrypted_7z_is_listed_and_its_files_wait_for_a_password() {
+        let dir = scratch("7z-encrypted");
+        let path = dir.join("encrypted.7z");
+        fs::write(&path, include_bytes!("../tests/data/encrypted.7z")).unwrap();
+        let model = open(&path).unwrap();
+        let readme = model
+            .entries
+            .iter()
+            .find(|e| e.path == "docs/readme.txt")
+            .unwrap();
+        assert!(readme.encrypted);
+        let results = verify(&model);
+        assert_eq!(
+            results.results.get("top.bin"),
+            Some(&TestResult::DecryptionFailed)
+        );
+        assert_eq!(results.results.get("empty.txt"), Some(&TestResult::Ok));
+        let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+        let report = extract(model.source.as_ref().unwrap(), &all, &dir.join("out"));
+        assert_eq!((report.written, report.skipped.len()), (1, 2));
+        assert!(
+            report
+                .skipped
+                .iter()
+                .all(|(_, why)| why.to_string().contains("password"))
+        );
+
+        let path = dir.join("names.7z");
+        fs::write(&path, include_bytes!("../tests/data/encrypted-names.7z")).unwrap();
+        match open(&path) {
+            Err(e @ ArchiveError::SevenZ(sevenz::Error::PasswordRequired)) => {
+                assert!(e.to_string().contains("encrypted"), "{e}");
+            }
+            other => panic!("expected the list of files to need a password, got {other:?}"),
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 7z whose start header was never written -- its writing cut off,
+    /// the 24 bytes after the signature still zero -- is found from its
+    /// end, as 7-Zip finds it, and opened with a note that it is not whole.
+    #[test]
+    fn a_7z_whose_start_header_was_never_written_is_found_from_its_end() {
+        let dir = scratch("7z-recovered");
+        let mut cut = include_bytes!("../tests/data/real.7z").to_vec();
+        cut[8..32].fill(0);
+        let path = dir.join("cut.7z");
+        fs::write(&path, &cut).unwrap();
+        let model = open(&path).unwrap();
+        assert!(
+            model
+                .damage
+                .as_deref()
+                .is_some_and(|d| d.contains("start header")),
+            "{:?}",
+            model.damage
+        );
+        let results = verify(&model);
+        assert_eq!((results.passed, results.failed), (3, 0));
+        assert!(!results.all_passed());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 7z with bytes after a block's packed stream (`tests/data/after-end.7z`:
+    /// `copy.7z` with two bytes after its first stream, its packed size grown
+    /// to cover them): every file is whole, and the archive is not -- 7-Zip's
+    /// "There are some data after the end of the payload data".
+    #[test]
+    fn a_7z_with_data_after_a_block_is_whole_in_its_files_only() {
+        let dir = scratch("7z-after-end");
+        let path = dir.join("after-end.7z");
+        fs::write(&path, include_bytes!("../tests/data/after-end.7z")).unwrap();
+        let model = open(&path).unwrap();
+        let results = verify(&model);
+        assert_eq!((results.passed, results.failed), (3, 0));
+        assert!(
+            results
+                .damage
+                .as_deref()
+                .is_some_and(|d| d.contains("after the end")),
+            "{:?}",
+            results.damage
+        );
+        assert!(!results.all_passed());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 7-Zip differential update records a deleted file as a deletion
+    /// (`tests/data/anti.7z`: `7z u base.7z -u- -up0q3r2x2y2z0w2!anti.7z d`
+    /// after `d/gone.txt` was deleted): listed, never written as a file, and
+    /// nothing to test.
+    #[test]
+    fn a_7z_deletion_record_is_not_extracted_as_a_file() {
+        let dir = scratch("7z-anti");
+        let path = dir.join("anti.7z");
+        fs::write(&path, include_bytes!("../tests/data/anti.7z")).unwrap();
+        let model = open(&path).unwrap();
+        let gone = model
+            .entries
+            .iter()
+            .find(|e| e.path == "d/gone.txt")
+            .unwrap();
+        assert!(!gone.is_dir);
+        let dest = dir.join("out");
+        let report = extract(model.source.as_ref().unwrap(), &[gone], &dest);
+        assert_eq!(report.written, 0);
+        assert!(matches!(
+            report.skipped.as_slice(),
+            [(_, SkipReason::Deletion)]
+        ));
+        assert!(!dest.join("d/gone.txt").exists());
+        let results = verify(&model);
+        assert_eq!(results.results.get("d/gone.txt"), Some(&TestResult::Ok));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// This build reads 7z and does not write it: a save -- which Add and
+    /// Delete both are -- is refused, and the file is not touched.
+    #[test]
+    fn a_7z_is_not_rewritten() {
+        let dir = scratch("7z-save");
+        let path = dir.join("real.7z");
+        let real = include_bytes!("../tests/data/real.7z");
+        fs::write(&path, real).unwrap();
+        let model = open(&path).unwrap();
+        match save(&model, Vec::new()) {
+            Err(e @ SaveError::Unwritable { .. }) => {
+                assert!(e.to_string().contains("7-Zip"), "{e}");
+            }
+            other => panic!("expected the 7z to be refused, got {other:?}"),
+        }
+        assert_eq!(fs::read(&path).unwrap(), real);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A 7z name's UTF-16 becomes UTF-8, and a lone surrogate -- no
+    /// character, so no UTF-8 -- the three bytes it would have been, which
+    /// the display shows by its bytes and extraction refuses to write.
+    #[test]
+    fn a_7z_name_that_is_not_text_is_kept_as_bytes() {
+        assert_eq!(wtf8(&[0x61, 0x2F, 0xE9]), "a/\u{e9}".as_bytes());
+        assert_eq!(wtf8(&[0xD83D, 0xDE00]), "\u{1F600}".as_bytes());
+        assert_eq!(wtf8(&[0x61, 0xD800, 0x62]), [0x61, 0xED, 0xA0, 0x80, 0x62]);
+        assert_eq!(wtf8(&[0xDFFF]), [0xED, 0xBF, 0xBF]);
+        assert!(std::str::from_utf8(&wtf8(&[0xDC00])).is_err());
+        assert!(matches!(
+            safe_destination(Path::new("out"), &wtf8(&[0x61, 0xD800])),
+            Err(SkipReason::UnnameableHere)
+        ));
+    }
+
+    /// A Windows `FILETIME` -- 100-nanosecond ticks since 1601 -- as Unix
+    /// seconds, and a time before 1970 as none.
+    #[test]
+    fn a_7z_time_is_read_from_windows_ticks() {
+        assert_eq!(unix_from_filetime(116_444_736_000_000_000), 0);
+        assert_eq!(
+            unix_from_filetime(116_444_736_000_000_000 + 10_000_000 * 1_767_225_600),
+            1_767_225_600
+        );
+        assert_eq!(unix_from_filetime(1), 0);
+    }
+
+    /// A compressed TAR that would decompress past the budget is refused as
+    /// too big for this program, in words -- not as damage, which it need not
+    /// be: every decoder stops at the cap it is given, and a decompression
+    /// bomb and a large archive reach it alike. A cap of exactly the TAR's
+    /// size still reads it.
+    #[test]
+    fn a_compressed_tar_past_the_budget_is_too_big_not_damaged() {
+        let real = include_bytes!("../tests/data/real.tar.xz");
+        let tar = xz::decompress(real).unwrap();
+        let budget = guitk::bytes::iec(MAX_ARCHIVE_BYTES);
+        for format in [
+            ArchiveFormat::TarGz,
+            ArchiveFormat::TarBz2,
+            ArchiveFormat::TarXz,
+        ] {
+            let compressed = if format == ArchiveFormat::TarXz {
+                real.to_vec()
+            } else {
+                compress_tar(format, &tar).unwrap()
+            };
+            assert_eq!(
+                decompress_tar_within(format, &compressed, tar.len()).unwrap(),
+                tar,
+                "{format:?} at a cap of exactly its size"
+            );
+            let e = decompress_tar_within(format, &compressed, tar.len() - 1).unwrap_err();
+            let said = e.to_string();
+            assert!(
+                said.contains("the most this program reads") && said.contains(&budget),
+                "{format:?}: {said}"
+            );
+            assert!(
+                !said.contains("will not"),
+                "{format:?} is told as damage: {said}"
+            );
+        }
+    }
+
     #[test]
     fn a_tar_extracts_its_files_folders_and_hard_links_and_not_its_symbolic_links() {
         let dir = scratch("tar-extract");
@@ -3342,20 +4184,27 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Adding to a TAR, deleting from it, and the same for a TAR.GZ: the file
-    /// is rewritten in its own format, and reads back as the list said.
+    /// Adding to a TAR, deleting from it, and the same for a TAR.GZ, a TAR.BZ2
+    /// and a TAR.XZ: the file is rewritten in its own format, and reads back
+    /// as the list said.
     #[test]
-    fn a_tar_and_a_tar_gz_are_rewritten_in_their_own_format() {
+    fn a_tar_and_a_compressed_tar_are_rewritten_in_their_own_format() {
         let dir = scratch("tar-save");
-        for (name, gzipped) in [("bundle.tar", false), ("bundle.tar.gz", true)] {
+        for (name, format) in [
+            ("bundle.tar", ArchiveFormat::Tar),
+            ("bundle.tar.gz", ArchiveFormat::TarGz),
+            ("bundle.tar.bz2", ArchiveFormat::TarBz2),
+            ("bundle.tar.xz", ArchiveFormat::TarXz),
+        ] {
             let path = dir.join(name);
             let bytes = tar_fixture();
             fs::write(
                 &path,
-                if gzipped {
-                    deflate::gzip(&bytes)
-                } else {
-                    bytes
+                match format {
+                    ArchiveFormat::TarGz => deflate::gzip(&bytes),
+                    ArchiveFormat::TarBz2 => bzip2::compress(&bytes, bzip2::Level::BEST),
+                    ArchiveFormat::TarXz => xz::compress(&bytes, xz::Preset::DEFAULT),
+                    _ => bytes,
                 },
             )
             .unwrap();
@@ -3383,14 +4232,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!((report.added, report.replaced), (2, 1), "{name}");
             let after = open(&path).unwrap();
-            assert_eq!(
-                after.format,
-                if gzipped {
-                    ArchiveFormat::TarGz
-                } else {
-                    ArchiveFormat::Tar
-                }
-            );
+            assert_eq!(after.format, format, "{name}");
             let paths: Vec<&str> = after.entries.iter().map(|e| e.path.as_str()).collect();
             assert_eq!(
                 paths,
@@ -3425,6 +4267,8 @@ mod tests {
         for (name, format) in [
             ("new.tar", ArchiveFormat::Tar),
             ("new.tar.gz", ArchiveFormat::TarGz),
+            ("new.tar.bz2", ArchiveFormat::TarBz2),
+            ("new.tar.xz", ArchiveFormat::TarXz),
             ("new.zip", ArchiveFormat::Zip),
         ] {
             let path = dir.join(name);
@@ -3439,14 +4283,8 @@ mod tests {
             }
             other => panic!("expected 7z to be refused, got {other:?}"),
         }
-        match create_empty(&dir.join("new.tar.xz")) {
-            Err(e @ SaveError::Unwritable { .. }) => {
-                assert!(e.to_string().contains("TAR.XZ"), "{e}");
-            }
-            other => panic!("expected TAR.XZ to be refused, got {other:?}"),
-        }
         assert!(
-            !dir.join("new.tar.xz").exists(),
+            !dir.join("new.7z").exists(),
             "a refused archive left a file behind"
         );
         fs::remove_dir_all(&dir).ok();

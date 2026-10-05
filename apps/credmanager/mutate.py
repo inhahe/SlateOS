@@ -17,7 +17,17 @@ Two tables:
   what the file is, and every field quoted; a backup is the vault sealed,
   restored only with its master password and only after asking. And the
   entry's own controls (2026-09-27): Edit changes what the form shows and
-  keeps what it does not; Delete asks first.
+  keeps what it does not; Delete asks first.  And the auto-lock (2026-10-03),
+  which never fired in a window: no clock was asked for, so no tick came.
+  It is asked for at the deadline now; a window runs on the wall clock, a
+  test on ticks whose part seconds are carried; and the event that finds the
+  lock due is not taken.  And the text boxes (2026-10-03), the toolkit's
+  fields: lit under the pointer as settled after every event, marked where
+  typing goes -- which follows from what is showing -- and red where a
+  refusal was about them.  And the auto-lock slider (2026-10-03), which was
+  a number nothing set and a knob drawn for nothing: the toolkit's slider,
+  showing and setting the vault's own time, keeping a drag only when let go,
+  and dead under a dialog, another panel or the lock screen.
 * **vaultfile.rs** -- the file itself: a header that asks for too much work is
   refused before any is done, and contents are read whole or not at all.
 
@@ -58,6 +68,14 @@ EDIT_KIND = "an_entry_being_edited_keeps_its_kind"
 CARD_KEPT = "a_card_number_left_alone_stays_as_it_was_kept"
 DELETE_ASKS = "delete_asks_first_and_then_takes_the_entry_out_of_the_vault"
 BUTTONS_ON_ENTRY = "edit_and_delete_can_be_pressed_on_an_entry"
+LOCKS_ITSELF = "left_alone_the_vault_locks_itself_on_time"
+LOCK_DUE = "the_event_that_finds_the_lock_due_is_not_taken"
+WALL_CLOCK = "a_window_runs_on_the_wall_clock"
+LOCK_BOX = "the_lock_screens_box_is_the_toolkits_field"
+SEARCH_BOXES = "the_search_and_the_forms_boxes_are_the_toolkits_fields"
+FIRST_RUN_BOXES = "the_first_runs_and_the_restores_boxes_are_the_toolkits_fields"
+SLIDER_SETS = "the_auto_lock_slider_shows_and_sets_the_vaults_own_time"
+SLIDER_GUARDED = "the_auto_lock_slider_is_not_used_through_a_dialog_or_by_passing_over_it"
 
 MAIN = [
     (
@@ -218,6 +236,484 @@ MAIN = [
         "        frame.hit(target, Rect::new(bx, y - 4.0, width, 26.0));\n",
         "",
         [BUTTONS_ON_ENTRY],
+    ),
+    (
+        "a command's letter is typed into an entry",
+        '    if textline::types_into_field(key) {\n        let typed: String = key.typed().collect();',
+        '    if key.types_text() {\n        let typed: String = key.typed().collect();',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a chord works the entry form's keys",
+        '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Ignored;\n    }\n    match key.key {\n        Key::Escape => {',
+        '    match key.key {\n        Key::Escape => {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed into a new master password",
+        '            Gate::Create(form) if textline::types_into_field(key) => {',
+        '            Gate::Create(form) if key.types_text() => {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord works the new-vault form',
+        '            Gate::Create(_) if !textline::is_plain(key.modifiers) => {',
+        '            Gate::Create(_) if false => {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed into the master password",
+        '        if textline::types_into_field(key) {\n            state.master_input.extend(key.typed());',
+        '        if key.types_text() {\n            state.master_input.extend(key.typed());',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord works the lock screen',
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n        match key.key {\n            Key::Enter => attempt_unlock(state),',
+        '        match key.key {\n            Key::Enter => attempt_unlock(state),',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the vault',
+        '    let chord = textline::is_ctrl_chord(key.modifiers);',
+        '    let chord = key.modifiers.ctrl;',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '        _ if textline::types_into_field(key) => {',
+        '        _ if key.types_text() => {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord works the list',
+        '        _ if !textline::is_plain(key.modifiers) => EventResult::Ignored,\n',
+        '',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the generator',
+        '    let ctrl = textline::is_ctrl_chord(key.modifiers);',
+        '    let ctrl = key.modifiers.ctrl;',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a chord moves the generator's length",
+        '    if textline::is_plain(key.modifiers) && matches!(key.key, Key::Left | Key::Right) {',
+        '    if !key.modifiers.ctrl && matches!(key.key, Key::Left | Key::Right) {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed into a backup's password",
+        '            if textline::types_into_field(key) =>',
+        '            if key.types_text() =>',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord answers a vault dialog',
+        '        _ if !textline::is_plain(key.modifiers) => Then::Nothing,\n',
+        '',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'AltGr+Q closes the window',
+        '            && textline::is_ctrl_chord(key.modifiers)',
+        '            && key.modifiers.ctrl',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    # -- the auto-lock, 2026-10-03: no clock was asked for, so it never fired
+    (
+        'no clock is asked for',
+        '        self.vault\n'
+        '            .auto_lock_in(self.now)\n'
+        '            .map(std::time::Duration::from_secs)\n',
+        '        None\n',
+        [LOCKS_ITSELF],
+    ),
+    (
+        "the auto-lock falls due at the last use, not a timeout after it",
+        '        let due = self.last_access.saturating_add(timeout_seconds);\n',
+        '        let due = self.last_access;\n',
+        [LOCKS_ITSELF],
+    ),
+    (
+        "a tick's part second is dropped",
+        '                    let total = carry_ms.saturating_add(*elapsed_ms);\n',
+        '                    let total = *elapsed_ms;\n',
+        [LOCKS_ITSELF],
+    ),
+    (
+        'the part second is not carried',
+        '                    *carry_ms = total % 1000;\n',
+        '                    *carry_ms = 0;\n',
+        [LOCKS_ITSELF],
+    ),
+    (
+        "a window's clock is not the wall clock",
+        '            Clock::Wall => self.now = unix_now(),\n',
+        '            Clock::Wall => {}\n',
+        [WALL_CLOCK],
+    ),
+    (
+        'the lock is looked for only at a tick',
+        '        if self.vault.should_auto_lock(self.now) {\n'
+        '            self.lock_vault();\n'
+        '            return true;\n',
+        '        if matches!(event, Event::Tick { .. }) && self.vault.should_auto_lock(self.now) {\n'
+        '            self.lock_vault();\n'
+        '            return true;\n',
+        [LOCK_DUE],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'a text box is drawn the same wherever the pointer is',
+        '            hovered: self.hover == Some(target),\n',
+        '            hovered: false,\n',
+        [LOCK_BOX, SEARCH_BOXES],
+    ),
+    (
+        'no text box is marked where typing goes',
+        '            focused: self.typing_into() == Some(target),\n',
+        '            focused: false,\n',
+        [LOCK_BOX, SEARCH_BOXES, FIRST_RUN_BOXES],
+    ),
+    (
+        'a wrong text box is not red',
+        '            invalid: wrong,\n',
+        '            invalid: false,\n',
+        [LOCK_BOX, FIRST_RUN_BOXES],
+    ),
+    (
+        'the search box is marked under the file dialog',
+        '        if self.picker.is_open() {\n'
+        '            return None;\n'
+        '        }\n'
+        '        if !self.vault.is_unlocked() {\n',
+        '        if !self.vault.is_unlocked() {\n',
+        [SEARCH_BOXES],
+    ),
+    (
+        'the lock screen box is not marked',
+        '                Gate::Unlock => Some(Target::MasterInput),\n',
+        '                Gate::Unlock => None,\n',
+        [LOCK_BOX],
+    ),
+    (
+        "the first run's keyboard is always in the first box",
+        '                Gate::Create(form) if form.confirming => Some(Target::ConfirmPassword),\n',
+        '',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        "the restore dialog's box is not marked",
+        '            Some(VaultDialog::RestorePassword { .. }) => return Some(Target::RestoreInput),\n',
+        '',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'the search box is marked under a vault dialog',
+        '            Some(_) => return None,\n',
+        '            Some(_) => {}\n',
+        [SEARCH_BOXES],
+    ),
+    (
+        'the search box keeps the keyboard from the new-entry form',
+        '            return Some(Target::NewField(form.focused));\n',
+        '            let _ = form;\n',
+        [SEARCH_BOXES],
+    ),
+    (
+        'the pointer is not followed',
+        '                MouseEventKind::Move => self.pointer = Some((mouse.x, mouse.y)),\n',
+        '                MouseEventKind::Move => {}\n',
+        [LOCK_BOX, SEARCH_BOXES],
+    ),
+    (
+        'leaving the window leaves a box lit',
+        '                MouseEventKind::Leave => self.pointer = None,\n',
+        '                MouseEventKind::Leave => {}\n',
+        [LOCK_BOX],
+    ),
+    (
+        'a change of light asks for no repaint',
+        '        match response {\n'
+        '            Response::Idle if self.hover != lit => Response::Redraw,\n'
+        '            other => other,\n'
+        '        }\n',
+        '        let _ = lit;\n'
+        '        response\n',
+        [LOCK_BOX],
+    ),
+    (
+        'the light is settled only when the pointer moves',
+        '        self.hover = self.text_box_under_pointer();\n',
+        '        if matches!(event, Event::Mouse(_)) {\n'
+        '            self.hover = self.text_box_under_pointer();\n'
+        '        }\n',
+        [SEARCH_BOXES],
+    ),
+    (
+        'a button under the pointer counts as a box',
+        '        self.target_at(x, y).filter(|t| t.is_text_box())\n',
+        '        self.target_at(x, y)\n',
+        [LOCK_BOX],
+    ),
+    (
+        'a short master password is not the box made red',
+        '        form.wrong = Some(Target::NewPassword);\n',
+        '',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'a second password that does not match is not the box made red',
+        '        form.wrong = Some(Target::ConfirmPassword);\n',
+        '',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'typing leaves the box red',
+        '                field.extend(key.typed());\n'
+        '                form.error = None;\n'
+        '                form.wrong = None;\n',
+        '                field.extend(key.typed());\n'
+        '                form.error = None;\n',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'a Backspace leaves the box red',
+        '                    field.pop();\n'
+        '                    form.error = None;\n'
+        '                    form.wrong = None;\n',
+        '                    field.pop();\n'
+        '                    form.error = None;\n',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        'a refused master password is not shown red',
+        '        state.field_state(Target::MasterInput, state.unlock_failed),\n',
+        '        state.field_state(Target::MasterInput, false),\n',
+        [LOCK_BOX],
+    ),
+    (
+        "a refused backup password is not shown red",
+        '            error.is_some(),\n',
+        '            false,\n',
+        [FIRST_RUN_BOXES],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [LOCK_BOX, SEARCH_BOXES, FIRST_RUN_BOXES],
+    ),
+    # -- the auto-lock slider, 2026-10-03: a number nothing set, a knob for nothing
+    (
+        "the panel shows the slider's own time, not the vault's",
+        '        if !shown.is_dragging() {\n'
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n'
+        '        }\n',
+        '',
+        [SLIDER_SETS],
+    ),
+    (
+        "a drag's minutes are not shown as it goes",
+        '        if !shown.is_dragging() {\n',
+        '        if true {\n',
+        [SLIDER_SETS],
+    ),
+    (
+        'letting a drag go keeps nothing',
+        '        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {\n'
+        '            self.set_auto_lock(minutes);\n'
+        '        }\n'
+        '        (response.is_taken()',
+        '        (response.is_taken()',
+        [SLIDER_SETS],
+    ),
+    (
+        'a drag keeps every minute it passes',
+        '        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {\n'
+        '            self.set_auto_lock(minutes);\n'
+        '        }\n'
+        '        (response.is_taken()',
+        '        if let Some(event) = response.event() {\n'
+        '            self.set_auto_lock(event.value());\n'
+        '        }\n'
+        '        (response.is_taken()',
+        [SLIDER_SETS],
+    ),
+    (
+        "the slider's keys keep nothing",
+        '        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {\n'
+        '            self.set_auto_lock(minutes);\n'
+        '        }\n'
+        '        response.is_taken().then_some',
+        '        response.is_taken().then_some',
+        [SLIDER_SETS],
+    ),
+    (
+        'the slider takes Up and Down from the entry list',
+        '        if !its_key && !self.auto_lock.is_dragging() {\n'
+        '            return None;\n'
+        '        }\n',
+        '',
+        [SLIDER_SETS],
+    ),
+    (
+        'the slider is moved with another panel up',
+        '            && self.detail_view == DetailView::Settings\n',
+        '',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'the slider is moved through a vault dialog',
+        '            && self.dialog.is_none()\n'
+        '    }\n',
+        '    }\n',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'the slider is moved through the lock screen',
+        '    fn settings_live(&self) -> bool {\n'
+        '        self.vault.is_unlocked()\n'
+        '            && self.detail_view',
+        '    fn settings_live(&self) -> bool {\n'
+        '        self.detail_view',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'a press on the slider is not use of the vault',
+        '        if matches!(\n'
+        '            mouse.kind,\n'
+        '            MouseEventKind::Press(_) | MouseEventKind::Release(_)\n'
+        '        ) {\n'
+        '            state.vault.touch(state.now);\n'
+        '        }\n',
+        '',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'the pointer passing over the slider is use of the vault',
+        '            MouseEventKind::Press(_) | MouseEventKind::Release(_)\n',
+        '            MouseEventKind::Press(_) | MouseEventKind::Release(_) | MouseEventKind::Move\n',
+        [SLIDER_GUARDED],
+    ),
+    (
+        'the slider has no place among the controls',
+        '    frame.hit(Target::AutoLock, placement.hit());\n',
+        '',
+        [SLIDER_SETS],
+    ),
+    # -- an entry's times, 2026-10-03: counts of seconds, not dates
+    (
+        "an entry's creation is a count of seconds",
+        '    let created_text = format!("Created: {}", stamp(entry.created_at));\n',
+        '    let created_text = format!(\n'
+        '        "Created: {} seconds ago",\n'
+        '        state.now.saturating_sub(entry.created_at)\n'
+        '    );\n',
+        ['an_entrys_times_are_dates'],
+    ),
+    (
+        "an entry's change is dated by its creation",
+        '    let modified_text = format!("Modified: {}", stamp(entry.modified_at));\n',
+        '    let modified_text = format!("Modified: {}", stamp(entry.created_at));\n',
+        ['an_entrys_times_are_dates'],
+    ),
+    (
+        'the event that finds the lock due is taken as well',
+        '    if state.advance_clock(event) {\n'
+        '        // Locked by the time that has passed. The event is not taken: it was\n'
+        '        // meant for a vault that is no longer open -- a key would go into the\n'
+        '        // master password, a press land on the lock screen.\n'
+        '        return EventResult::Consumed;\n'
+        '    }\n',
+        '    state.advance_clock(event);\n',
+        [LOCK_DUE],
+    ),
+]
+
+# The list of keys, and the Lock button (2026-10-04): F1 did nothing, and
+# the Lock button locked the vault without lock_vault's last save.
+REACHES = "the_shortcut_list_reaches_the_window"
+MODAL = "the_shortcut_list_takes_the_keys_and_a_press"
+LOCKS = "locking_puts_the_list_away"
+BUTTON = "the_lock_button_saves_what_could_not_be_saved_as_ctrl_l_does"
+
+MAIN += [
+    (
+        "the list of keys never comes up",
+        "    if key.key == Key::F1 && textline::is_plain(key.modifiers) {\n        state.show_help = true;\n",
+        "    if key.key == Key::F1 && textline::is_plain(key.modifiers) {\n",
+        # Not the every-key test: F1 is still answered, with nothing.
+        [REACHES],
+    ),
+    (
+        "Alt+F1 raises the list",
+        "    if key.key == Key::F1 && textline::is_plain(key.modifiers) {\n",
+        "    if key.key == Key::F1 {\n",
+        [REACHES],
+    ),
+    (
+        "the list is not modal",
+        "        if let Some(response) = self.help_event(event) {\n            return response;\n        }\n",
+        "",
+        [MODAL],
+    ),
+    (
+        "Escape leaves the list up",
+        "                    && matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                    && matches!(key.key, Key::F1)\n",
+        [REACHES],
+    ),
+    (
+        "Alt+Escape puts the list away",
+        "                if key.pressed\n                    && textline::is_plain(key.modifiers)\n",
+        "                if key.pressed\n",
+        [REACHES],
+    ),
+    (
+        "a press leaves the list up",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    Some(Response::Redraw)\n",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    Some(Response::Redraw)\n",
+        [MODAL],
+    ),
+    (
+        "a press reaches what the list covers",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    Some(Response::Redraw)\n",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    None\n",
+        [MODAL],
+    ),
+    (
+        "the wheel scrolls what the list covers",
+        "                MouseEventKind::Scroll { .. } => Some(Response::Idle),\n",
+        "",
+        [MODAL],
+    ),
+    (
+        "the list of keys is not drawn",
+        "        if self.show_help {\n            frame.discard_hits();\n",
+        "        if false {\n            frame.discard_hits();\n",
+        [REACHES],
+    ),
+    (
+        "the list outlives a lock",
+        "        self.vault.lock();\n        self.show_help = false;\n",
+        "        self.vault.lock();\n",
+        [LOCKS],
+    ),
+    (
+        "the Lock button skips the last save",
+        "        Target::LockVault => {\n            state.lock_vault();\n",
+        "        Target::LockVault => {\n            state.vault.lock();\n",
+        [BUTTON],
     ),
 ]
 

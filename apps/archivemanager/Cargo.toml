@@ -22,6 +22,12 @@ ziparchive = { path = "../../ziparchive" }
 # The TAR reader and writer, and the gzip a .tar.gz is wrapped in.
 tararchive = { path = "../tararchive" }
 deflate = { path = "../../deflate" }
+# The bzip2 a .tar.bz2 is wrapped in: libbzip2's own bytes, ported.
+bzip2 = { path = "../../bzip2" }
+# The xz a .tar.xz is wrapped in: liblzma's decoder, ported.
+xz = { path = "../../xz" }
+# 7z: the port of 7-Zip's own reader, with its codecs.
+sevenz = { path = "../../sevenz" }
 
 [lints]
 workspace = true

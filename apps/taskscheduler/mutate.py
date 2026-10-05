@@ -268,7 +268,7 @@ MUTATIONS = [
         "                    x: PADDING,\n"
         "                    w: width - PADDING * 2.0,\n"
         "                    size: FONT_SIZE_SMALL,\n"
-        "                    color: COLOR_SUBTEXT,\n"
+        "                    color: self.palette.subtext0,\n"
         "                    weight: FontWeightHint::Regular,\n"
         "                },\n"
         "                format!(\"{hidden} more\"),\n"
@@ -291,7 +291,7 @@ MUTATIONS = [
         "                    x: PADDING,\n"
         "                    w: width - PADDING * 2.0,\n"
         "                    size: FONT_SIZE_SMALL,\n"
-        "                    color: COLOR_SUBTEXT,\n"
+        "                    color: self.palette.subtext0,\n"
         "                    weight: FontWeightHint::Regular,\n"
         "                },\n"
         "                format!(\"{hidden} more\"),\n"
@@ -324,7 +324,7 @@ MUTATIONS = [
         "                x: PADDING,\n"
         "                w: width - PADDING * 2.0,\n"
         "                size: FONT_SIZE_SMALL,\n"
-        "                color: COLOR_YELLOW,\n"
+        "                color: self.palette.yellow,\n"
         "                weight: FontWeightHint::Regular,\n"
         "            },\n"
         "            message.to_string(),\n"
@@ -333,7 +333,7 @@ MUTATIONS = [
         "            x: PADDING,\n"
         "            y: band.y + (bar_h - FONT_SIZE_SMALL) / 2.0,\n"
         "            text: message.to_string(),\n"
-        "            color: COLOR_YELLOW,\n"
+        "            color: self.palette.yellow,\n"
         "            font_size: FONT_SIZE_SMALL,\n"
         "            font_weight: FontWeightHint::Regular,\n"
         "            max_width: Some(width - PADDING * 2.0),\n"
@@ -362,7 +362,7 @@ MUTATIONS = [
     ),
     (
         "a dialog row is handed to its control uncut",
-        "        let cut = |r: Rect| r.intersect(dialog).unwrap_or(Rect::EMPTY);\n"
+        "        let cut = |r: Rect| r.intersect(room).unwrap_or(Rect::EMPTY);\n"
         "        let mut label = |frame: &mut Frame, text: &str| {",
         "        let cut = |r: Rect| r;\n"
         "        let mut label = |frame: &mut Frame, text: &str| {",
@@ -417,17 +417,10 @@ MUTATIONS = [
         "        // nothing is neither.",
         CONTAINMENT,
     ),
-    (
-        "the caret follows the unelided value off the field's right edge",
-        "            let caret_x = (x + text::measure(value, FONT_SIZE, FontWeightHint::Regular))\n"
-        "                .min(rect.right() - 3.0);",
-        "            let caret_x = x + text::measure(value, FONT_SIZE, FontWeightHint::Regular);",
-        # The clamp that replaced two that could not be reached.  `text::measure`
-        # sizes the value before eliding, so a value wider than the field puts
-        # the caret past its right edge -- which is what the sweep's "a value far
-        # wider than the field" state is for.
-        CONTAINMENT,
-    ),
+    # No row for the caret's clamp to the box's right edge: since 2026-10-04
+    # the box's text and caret are drawn by guitk::textedit::draw, which
+    # scrolls the text to keep the caret in the box and clips to it; the
+    # containment sweep's "a value far wider than the field" still holds it.
     (
         "a button's label is centred whether or not the button is wide enough",
         "        if let (Some(y), Some((x, w))) = (centre_line(rect, FONT_SIZE), span(rect, text_x, rect.w))\n"
@@ -436,6 +429,295 @@ MUTATIONS = [
         "            (centre_line(rect, FONT_SIZE), Some((text_x, rect.w)))\n"
         "        {",
         CONTAINMENT,
+    ),
+    # No rows for "the form refuses what AltGr types" or "types a command's
+    # letter": since 2026-10-04 the form's typing is textline::apply_key's,
+    # which makes both distinctions itself, in its own crate and with its own
+    # tests; the_form_takes_altgr_letters_and_no_commands_letter still holds
+    # the form to them.
+    (
+        "a key held with Alt or the Windows key is the main window's",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return false;\n        }\n        if let Some(movement) = ListKey::of(key) {",
+        "        if let Some(movement) = ListKey::of(key) {",
+        ["a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows"],
+    ),
+    (
+        "a key held with the Windows key is the main window's",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return false;\n        }\n        if let Some(movement) = ListKey::of(key) {",
+        "        if key.modifiers.alt {\n            return false;\n        }\n        if let Some(movement) = ListKey::of(key) {",
+        ["a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows"],
+    ),
+    (
+        'the lists read no list key',
+        '        if let Some(movement) = ListKey::of(key) {',
+        '        if let Some(movement) = ListKey::of(key).filter(|_| false) {',
+        ['the_task_list_moves_as_every_list_does', 'the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        "the history takes a list key as the task list's",
+        '        if self.tab == UiTab::History {',
+        '        if false {',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'Up does not scroll the history',
+        '                ListKey::Previous => from.saturating_sub(1),',
+        '                ListKey::Previous => from,',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'Down does not scroll the history',
+        '                ListKey::Next => from.saturating_add(1).min(last_top),',
+        '                ListKey::Next => from,',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'the history scrolls past its end',
+        '                ListKey::Next => from.saturating_add(1).min(last_top),',
+        '                ListKey::Next => from.saturating_add(1),',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'Page Up scrolls the history one row',
+        '                ListKey::PageUp => from.saturating_sub(page),',
+        '                ListKey::PageUp => from.saturating_sub(1),',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'Page Down scrolls the history one row',
+        '                ListKey::PageDown => from.saturating_add(page).min(last_top),',
+        '                ListKey::PageDown => from.saturating_add(1).min(last_top),',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        "Home does not reach the history's top",
+        '                ListKey::First => 0,',
+        '                ListKey::First => from,',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        "End does not reach the history's end",
+        '                ListKey::Last => last_top,',
+        '                ListKey::Last => from,',
+        ['the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'a page of either list is one row',
+        '        let page = self.list_capacity();',
+        '        let page = 1;',
+        ['the_task_list_moves_as_every_list_does', 'the_history_scrolls_with_the_list_keys'],
+    ),
+    (
+        'a page counts rows the list does not show',
+        '        scroll_window::capacity(ROW_HEIGHT, content.h - ROW_HEIGHT - LIST_MORE_HEIGHT)\n',
+        '        scroll_window::capacity(ROW_HEIGHT, content.h)\n',
+        ['the_task_list_moves_as_every_list_does'],
+    ),
+    (
+        'a task chosen from the keyboard is not brought on screen',
+        '        self.reveal_row(next);\n        changed ||',
+        '        changed ||',
+        ['the_task_list_moves_as_every_list_does'],
+    ),
+    (
+        'bringing the chosen task on screen is not a change',
+        '        changed || scrolled != self.task_list_scroll',
+        '        changed',
+        ['the_task_list_moves_as_every_list_does'],
+    ),
+]
+
+FIELDS = 'the_text_boxes_are_the_toolkits_fields'
+BOUNDS = 'nothing_is_painted_outside_the_window'
+
+MUTATIONS += [
+    # The dialog's boxes are the toolkit's fields (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        'a box never lights',
+        '                hovered: self.hover == Some(target),\n',
+        '                hovered: false,\n',
+        [FIELDS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELDS],
+    ),
+    (
+        'the pointer is never followed',
+        '        self.hover = over;\n',
+        '        let _ = over;\n',
+        [FIELDS],
+    ),
+    (
+        'the light stays after the pointer leaves',
+        '            MouseEventKind::Leave => result(ui.point_at(None)),\n',
+        '',
+        [FIELDS],
+    ),
+    (
+        "the dialog's boxes leave the mark no room at the dialog's edge",
+        '        let ring = self.focus_ring_width.max(0.0).ceil();\n',
+        '        let ring = 0.0_f32;\n',
+        [BOUNDS],
+    ),
+]
+
+# The list of keys (2026-10-04): F1 did nothing, and Delete and Space --
+# which ask to delete a task and turn one off -- could be found only by
+# pressing them.
+EVERY = "every_advertised_key_does_something"
+REACHES = "the_shortcut_list_reaches_the_window"
+QUESTION = "a_question_mark_is_typed_into_a_box_and_f1_still_raises_the_list"
+MODAL = "the_shortcut_list_takes_the_keys_and_a_press"
+
+HELP_ANCHOR = "        if plain && (key.key == Key::F1 || question && self.focus.is_none()) {\n"
+CLOSE_ANCHOR = "            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {\n"
+PRESS_ANCHOR = "        Event::Mouse(m) if ui.show_help => match m.kind {\n"
+
+MUTATIONS += [
+    (
+        "the list of keys never comes up",
+        "            self.show_help = true;\n            return true;\n",
+        "            return true;\n",
+        [REACHES],
+    ),
+    (
+        "F1 raises nothing from a box",
+        HELP_ANCHOR,
+        "        if plain && self.focus.is_none() && (key.key == Key::F1 || question) {\n",
+        [QUESTION],
+    ),
+    (
+        "? raises the list from a box",
+        HELP_ANCHOR,
+        "        if plain && (key.key == Key::F1 || question) {\n",
+        [QUESTION],
+    ),
+    (
+        "Alt+F1 raises the list",
+        HELP_ANCHOR,
+        "        if key.key == Key::F1 || plain && question && self.focus.is_none() {\n",
+        [REACHES],
+    ),
+    (
+        "the list is not modal for the keys",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return true;\n"
+        "        }\n",
+        "                self.show_help = false;\n"
+        "            }\n"
+        "        }\n",
+        [MODAL],
+    ),
+    (
+        "Escape leaves the list up",
+        CLOSE_ANCHOR,
+        "            if plain && (matches!(key.key, Key::F1) || question) {\n",
+        [REACHES],
+    ),
+    (
+        "Alt+Escape puts the list away",
+        CLOSE_ANCHOR,
+        "            if matches!(key.key, Key::F1 | Key::Escape) || question {\n",
+        [REACHES],
+    ),
+    (
+        "the list of keys is not drawn",
+        "        if self.show_help {\n            frame.discard_hits();\n",
+        "        if false {\n            frame.discard_hits();\n",
+        [REACHES, QUESTION],
+    ),
+    (
+        "a press reaches what the list covers",
+        PRESS_ANCHOR,
+        "        Event::Mouse(m) if ui.show_help && !matches!(m.kind, MouseEventKind::Press(_)) => match m.kind {\n",
+        [MODAL],
+    ),
+    (
+        "the wheel scrolls what the list covers",
+        PRESS_ANCHOR,
+        "        Event::Mouse(m) if ui.show_help && !matches!(m.kind, MouseEventKind::Scroll { .. }) => match m.kind {\n",
+        [MODAL],
+    ),
+]
+
+# The boxes edit at a caret (2026-10-04,
+# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
+# took typing at their end and Backspace from it, and nothing else.
+CARET = "a_box_edits_at_a_caret"
+NUMBER = "a_number_box_edits_its_digits_and_refuses_the_rest"
+MOVES_TO = "a_box_the_keyboard_moves_to_types_after_what_it_holds"
+
+MUTATIONS += [
+    (
+        "a number box takes a letter",
+        "            if !text.chars().all(|c| c.is_ascii_digit()) {\n",
+        "            if false {\n",
+        [NUMBER],
+    ),
+    (
+        "a number past what the box holds is taken",
+        "            text.parse::<u32>().ok().filter(|n| *n <= max)\n",
+        "            text.parse::<u32>().ok()\n",
+        [NUMBER],
+    ),
+    (
+        "a refused edit stays in the editor",
+        "            self.editor = kept;\n",
+        "            let _ = kept;\n",
+        [NUMBER],
+    ),
+    (
+        "an edit the box refuses is kept anyway",
+        "        if typed != before && !self.set_field_text(field, &typed) {\n",
+        "        if typed != before && !self.set_field_text(field, &typed) && false {\n",
+        [NUMBER],
+    ),
+    (
+        "an emptied number box shows a 0",
+        "                3 => digits(u32::from(self.form.monthly_day)),\n",
+        "                3 => self.form.monthly_day.to_string(),\n",
+        [NUMBER],
+    ),
+    (
+        "the editor is kept for the box the keyboard moved to",
+        "        if self.editor_for != Some(field) || self.editor.text() != text {\n",
+        "        if self.editor.text() != text {\n",
+        [MOVES_TO],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [CARET],
+    ),
+    (
+        "a press puts the caret at the start",
+        "            x - rect.x - FIELD_TEXT_INSET,\n",
+        "            0.0,\n",
+        [CARET],
+    ),
+    (
+        "a press does not place the caret",
+        "            Target::Field(field) => self.press_field(field, x),\n",
+        "            Target::Field(field) => {\n                self.focus_field(field);\n                true\n            }\n",
+        [CARET],
+    ),
+    (
+        "the caret is drawn at the start",
+        "                    cursor: self.field_cursor(field, text),\n",
+        "                    cursor: TextCursor::default(),\n",
+        [CARET],
+    ),
+    (
+        "an empty box with the keyboard has no caret",
+        "        if text.is_empty() {\n            if focused {\n",
+        "        if text.is_empty() {\n            if false {\n",
+        [CARET, NUMBER],
     ),
 ]
 

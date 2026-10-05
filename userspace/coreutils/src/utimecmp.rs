@@ -354,20 +354,12 @@ mod unix {
         // whatever the filesystem does. A no-op while `SYSCALL_RESOLUTION` is
         // one nanosecond; kept because that constant is the thing that would
         // change on a platform without `utimensat`, and a reader comparing this
-        // against `utimecmp.c` should find every line of it.
-        // `clippy::modulo_one` is right that `% 1` is zero, and that is the very
-        // point the comment above makes; it is allowed rather than obeyed
-        // because deleting the line would silently make this module wrong on the
-        // day `SYSCALL_RESOLUTION` stops being 1, and the deletion would leave
-        // nothing behind to notice. It is `deny`-level under
-        // `#![deny(clippy::all)]`, and it fires only where `cfg(unix)` is true —
-        // which is the *shipping* target (`toolchain/x86_64-slateos.json` sets
-        // `"target-family": ["unix"]`) and not the Windows build host, so a
-        // clippy run on the host cannot see it.
-        #[allow(clippy::modulo_one)]
+        // against `utimecmp.c` should find every line of it. Deleting it would
+        // make this module wrong on the day the constant stops being 1, and
+        // leave nothing behind to notice.
         let src_m = Stamp {
             sec: src_m.sec,
-            nsec: src_m.nsec - src_m.nsec % SYSCALL_RESOLUTION,
+            nsec: round_down(src_m.nsec, SYSCALL_RESOLUTION),
         };
 
         // If even the *upper bound* on the truncation cannot bring the two
@@ -419,11 +411,11 @@ mod unix {
                 // A whole second of zeros. The only coarser possibility is the
                 // two-second clock, and an odd second rules that out.
                 if !odd_second {
-                    res *= 2;
+                    res = res.saturating_mul(2);
                 }
                 break;
             }
-            res *= 10;
+            res = res.saturating_mul(10);
             a /= 10;
             c /= 10;
             m /= 10;
@@ -446,7 +438,7 @@ mod unix {
         // the destination.
         let floor_sec = src_m.sec & !two_second_bit(res);
         if dst_m.sec < floor_sec
-            || (dst_m.sec == floor_sec && dst_m.nsec < src_m.nsec - src_m.nsec % res)
+            || (dst_m.sec == floor_sec && dst_m.nsec < round_down(src_m.nsec, res))
         {
             return Some(Age::Older);
         }
@@ -477,7 +469,7 @@ mod unix {
     fn measure_resolution(dst_name: &Path, dst_a: Stamp, dst_m: Stamp, res: i64) -> Option<i64> {
         let probe = Stamp {
             sec: dst_m.sec | two_second_bit(res),
-            nsec: dst_m.nsec + res / 9,
+            nsec: dst_m.nsec.saturating_add(res / 9),
         };
         let write = |m: Stamp| -> Option<()> {
             let times = Times {
@@ -506,7 +498,9 @@ mod unix {
         // two-second clock from a one-second clock.
         let read = read?;
         Some(exact_from_readback(
-            BILLION * (read.sec & 1) + read.nsec,
+            BILLION
+                .saturating_mul(read.sec & 1)
+                .saturating_add(read.nsec),
             res,
         ))
     }
@@ -520,16 +514,17 @@ mod unix {
     /// clock.
     fn exact_from_readback(readback: i64, cap: i64) -> i64 {
         let mut res = SYSCALL_RESOLUTION;
-        let mut a = readback / res;
+        // `res` starts at a positive constant, so the division always happens.
+        let mut a = readback.checked_div(res).unwrap_or(0);
         loop {
             if a % 10 != 0 {
                 break;
             }
             if res == BILLION {
-                res *= 2;
+                res = res.saturating_mul(2);
                 break;
             }
-            res *= 10;
+            res = res.saturating_mul(10);
             if res == cap {
                 break;
             }
@@ -575,8 +570,17 @@ mod unix {
             // At `res == WORST_RESOLUTION` this clears the nanoseconds
             // outright, since every nanosecond count is below two seconds — the
             // second itself was rounded by the line above instead.
-            nsec: src.nsec - src.nsec % res,
+            nsec: round_down(src.nsec, res),
         }
+    }
+
+    /// `n - n % res`: `n` rounded down to a multiple of `res`.
+    ///
+    /// Every caller's `n` is a nanosecond count, in `0..BILLION`, and every
+    /// `res` is a positive resolution, so neither step can overflow or divide
+    /// by zero and the checked forms never fall back.
+    fn round_down(n: i64, res: i64) -> i64 {
+        n.saturating_sub(n.checked_rem(res).unwrap_or(0))
     }
 
     /// The final comparison, on stamps already made comparable.
@@ -837,6 +841,13 @@ mod unix {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use crate::fsattr::{self, Link, On, Times};
@@ -888,10 +899,7 @@ mod tests {
     fn an_older_source_makes_the_destination_newer() {
         let dir = ScratchDir::new("utimecmp_older");
         let (src, dst) = pair(&dir, Duration::ZERO);
-        stamp(
-            &src,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(999_999_000),
-        );
+        stamp(&src, SystemTime::UNIX_EPOCH + Duration::new(999_999_000, 0));
         assert_eq!(utimecmp(&dst, &meta(&dst), &meta(&src), false), Age::Newer);
         assert_eq!(utimecmp(&dst, &meta(&dst), &meta(&src), true), Age::Newer);
     }
@@ -922,7 +930,7 @@ mod tests {
         // the question on a pair inside two seconds — the only pairs that can
         // reach the probe — and check the destination is unchanged.
         let dir = ScratchDir::new("utimecmp_restores");
-        let (src, dst) = pair(&dir, Duration::from_nanos(500_000_000));
+        let (src, dst) = pair(&dir, Duration::from_millis(500));
         let before = fsattr::times_of(&meta(&dst)).expect("times before");
         let _ = utimecmp(&dst, &meta(&dst), &meta(&src), true);
         let after = fsattr::times_of(&meta(&dst)).expect("times after");

@@ -1,0 +1,18 @@
+# s16_rice_order15.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 32768 32768 25850 25850 44100 1 16 17640
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 17640 1 16 44100 b5c04a03093d401c
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 17640 1 16 44100 b5c04a03093d401c
+seek 5880
+frame 5880 11760 1 16 44100 f3584aadf41e6e3c
+seek 8821
+frame 8821 8819 1 16 44100 984db9fa5560afc9
+seek 17639
+frame 17639 1 1 16 44100 f375fa1766c211f8
+seek 17645
+seek-failed

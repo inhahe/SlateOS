@@ -150,7 +150,8 @@ fn link_over(earlier: &Path, target: &Path) -> io::Result<()> {
                 let _ = fs::remove_file(&tmp);
                 return result;
             }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            // Taken: the next attempt has another name.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),
         }
     }

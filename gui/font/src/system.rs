@@ -629,7 +629,85 @@ pub enum Family {
     Ui,
     /// A fixed-pitch face, where every glyph advances the same distance.
     Mono,
+    /// A family by its name -- "Noto Serif" -- for text whose font the
+    /// drawing names rather than the user's settings: a document's runs, a
+    /// font picker's preview.
+    ///
+    /// Which face that is, is installed by the caller, which knows where the
+    /// fonts are ([`FontCache::set_face`]); a name with no face installed draws
+    /// in the [`Ui`](Self::Ui) face, the answer for a document from another
+    /// machine. Named families hold at most [`MAX_NAMED_FAMILIES`] installed
+    /// faces at a time.
+    Named(FamilyName),
 }
+
+/// A font family's name, held inline so that a [`Family`] stays `Copy`.
+///
+/// At most [`FamilyName::MAX_LEN`] bytes of UTF-8 and not empty. Inline rather
+/// than interned in a table, because a table a process fills from names other
+/// processes send -- the compositor decodes every client's -- is memory any
+/// client can grow, and an inline name costs a few dozen bytes and nothing
+/// else. Family names are short: the longest in a typical font collection is
+/// under forty bytes. A longer one is not representable, and whoever met it
+/// draws in the UI face, as for a family that is not installed.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FamilyName {
+    len: u8,
+    bytes: [u8; FamilyName::MAX_LEN],
+}
+
+impl FamilyName {
+    /// The longest name, in bytes.
+    pub const MAX_LEN: usize = 63;
+
+    /// `name` as a family name, or `None` if it is empty or longer than
+    /// [`Self::MAX_LEN`] bytes.
+    #[must_use]
+    pub fn new(name: &str) -> Option<Self> {
+        let raw = name.as_bytes();
+        if raw.is_empty() || raw.len() > Self::MAX_LEN {
+            return None;
+        }
+        let mut bytes = [0u8; Self::MAX_LEN];
+        bytes.get_mut(..raw.len())?.copy_from_slice(raw);
+        Some(Self {
+            len: u8::try_from(raw.len()).ok()?,
+            bytes,
+        })
+    }
+
+    /// The name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        // Built only from a `&str`, cut at its own length, so always UTF-8;
+        // the empty answer is unreachable.
+        self.bytes
+            .get(..usize::from(self.len))
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .unwrap_or("")
+    }
+}
+
+impl core::fmt::Debug for FamilyName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "FamilyName({:?})", self.as_str())
+    }
+}
+
+impl core::fmt::Display for FamilyName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The most named families a [`FontCache`] keeps faces for at once. Past it
+/// the one installed earliest is forgotten, faces and fonts.
+///
+/// A bound, because a font picker installs a family for each one the user
+/// moves over and a document can name many, and each face is a whole font
+/// file. Thirty-two is more than any document uses on one screen; a family
+/// forgotten is loaded again the next time it is drawn.
+pub const MAX_NAMED_FAMILIES: usize = 32;
 
 /// The fonts a UI draws with, one per distinct size, weight and family.
 ///
@@ -660,6 +738,9 @@ pub struct FontCache {
     /// How every font this cache builds rasterizes. See
     /// [`FontCache::set_rendering`].
     rendering: Rendering,
+    /// The named families with a face installed, earliest first: the order
+    /// [`MAX_NAMED_FAMILIES`] forgets them in.
+    named: alloc::collections::VecDeque<FamilyName>,
 }
 
 impl FontCache {
@@ -681,9 +762,33 @@ impl FontCache {
     /// emboldening of the real one, which is the honest answer until there is a
     /// bold face to use.
     pub fn set_face(&mut self, family: Family, weight: Weight, face: Arc<Face>) {
+        if let Family::Named(name) = family
+            && !self.named.contains(&name)
+        {
+            // Make room first, so the bound holds with this one counted.
+            while self.named.len() >= MAX_NAMED_FAMILIES {
+                let Some(oldest) = self.named.pop_front() else {
+                    break;
+                };
+                self.forget_named(oldest);
+            }
+            self.named.push_back(name);
+        }
         self.faces.insert((family, weight), face);
         self.fonts
             .retain(|(_, w, f), _| (*f, *w) != (family, weight));
+    }
+
+    /// Drop a named family's faces and every font built from them.
+    fn forget_named(&mut self, name: FamilyName) {
+        let family = Family::Named(name);
+        self.faces.retain(|(f, _), _| *f != family);
+        self.fonts.retain(|(_, _, f), _| *f != family);
+    }
+
+    /// The named families with a face installed, earliest first.
+    pub fn named_families(&self) -> impl Iterator<Item = FamilyName> + '_ {
+        self.named.iter().copied()
     }
 
     /// Parse `data` and install it for `family` at `weight`.
@@ -770,6 +875,16 @@ impl FontCache {
     /// every face can scale to, so keying and building agree and the fallback
     /// is reached only when there is genuinely no usable face.
     pub fn get(&mut self, px: f32, weight: Weight, family: Family) -> &mut SystemFont {
+        // A named family with no face installed at this weight -- not on this
+        // machine, or not loaded yet -- *is* the UI family, the answer for a
+        // document from elsewhere: the same fonts, not copies of them under
+        // its name. Copies would keep the old face when the UI font changed,
+        // and would let every name a client sends build fonts of its own,
+        // which no bound covers -- only installed faces are bounded.
+        let family = match family {
+            Family::Named(_) if !self.faces.contains_key(&(family, weight)) => Family::Ui,
+            other => other,
+        };
         let face = self.faces.get(&(family, weight)).map(Arc::clone);
         let key = round_px(px);
         let size = key_px(key);
@@ -1334,6 +1449,112 @@ mod tests {
         assert!(
             !cache.get(16.0, Weight::Bold, Family::Ui).is_scalable(),
             "a weight with no face installed must still fall back"
+        );
+    }
+
+    // -- named families -----------------------------------------------------
+
+    fn named(name: &str) -> Family {
+        Family::Named(FamilyName::new(name).unwrap())
+    }
+
+    #[test]
+    fn a_family_name_holds_one_to_sixty_three_bytes_of_any_text() {
+        assert_eq!(
+            FamilyName::new("Noto Serif").unwrap().as_str(),
+            "Noto Serif"
+        );
+        assert_eq!(
+            FamilyName::new("源ノ角ゴシック").unwrap().as_str(),
+            "源ノ角ゴシック"
+        );
+        assert!(FamilyName::new("").is_none(), "no family is called nothing");
+        let longest = "x".repeat(FamilyName::MAX_LEN);
+        assert_eq!(FamilyName::new(&longest).unwrap().as_str(), longest);
+        assert!(FamilyName::new(&"x".repeat(FamilyName::MAX_LEN + 1)).is_none());
+        assert_eq!(
+            format!("{:?}", FamilyName::new("Inter").unwrap()),
+            "FamilyName(\"Inter\")"
+        );
+    }
+
+    /// A family the drawing names and this machine does not have is drawn in
+    /// the UI face -- and as the UI's own fonts, not copies: copies would keep
+    /// the old face after the UI font changed, and every name a client sent
+    /// would build fonts of its own.
+    #[test]
+    fn a_named_family_with_no_face_is_the_ui_family() {
+        let mut cache = FontCache::new();
+        cache
+            .install_face(Family::Ui, Weight::Regular, build_test_font())
+            .unwrap();
+        assert!(
+            cache
+                .get(16.0, Weight::Regular, named("Not Installed"))
+                .is_scalable(),
+            "a missing family drew in the built-in face rather than the UI one"
+        );
+        let built = cache.len();
+        let _ = cache.get(16.0, Weight::Regular, Family::Ui);
+        for name in ["Another", "And Another", "And Yet Another"] {
+            let _ = cache.get(16.0, Weight::Regular, named(name));
+        }
+        assert_eq!(
+            cache.len(),
+            built,
+            "missing families built fonts of their own"
+        );
+    }
+
+    /// A named family whose face is installed draws in that face, apart from
+    /// the UI's.
+    #[test]
+    fn a_named_family_with_a_face_draws_in_it() {
+        let mut cache = FontCache::new();
+        cache
+            .install_face(Family::Ui, Weight::Regular, build_test_font())
+            .unwrap();
+        let serif = Arc::new(Face::parse(build_test_font_at(0x03B1, false)).unwrap());
+        cache.set_face(named("Serif"), Weight::Regular, Arc::clone(&serif));
+        let drawn = cache
+            .get(16.0, Weight::Regular, named("Serif"))
+            .as_scaled()
+            .expect("an installed face scales")
+            .shared_face();
+        assert!(Arc::ptr_eq(&drawn, &serif));
+        let ui = cache
+            .get(16.0, Weight::Regular, Family::Ui)
+            .as_scaled()
+            .expect("an installed face scales")
+            .shared_face();
+        assert!(!Arc::ptr_eq(&ui, &serif), "the UI text changed face too");
+    }
+
+    /// Named families are bounded: past the bound the one installed earliest
+    /// is forgotten, and draws in the UI face until it is installed again.
+    #[test]
+    fn the_earliest_named_family_is_forgotten_past_the_bound() {
+        let mut cache = FontCache::new();
+        let face = Arc::new(Face::parse(build_test_font()).unwrap());
+        for i in 0..=MAX_NAMED_FAMILIES {
+            cache.set_face(
+                named(&format!("Family {i}")),
+                Weight::Regular,
+                Arc::clone(&face),
+            );
+            let _ = cache.get(16.0, Weight::Regular, named(&format!("Family {i}")));
+        }
+        assert_eq!(cache.named_families().count(), MAX_NAMED_FAMILIES);
+        assert!(!cache.has_face(named("Family 0"), Weight::Regular));
+        assert!(cache.has_face(named("Family 1"), Weight::Regular));
+        assert!(cache.has_face(
+            named(&format!("Family {MAX_NAMED_FAMILIES}")),
+            Weight::Regular
+        ));
+        assert_eq!(
+            cache.len(),
+            MAX_NAMED_FAMILIES,
+            "the forgotten family's fonts were kept"
         );
     }
 

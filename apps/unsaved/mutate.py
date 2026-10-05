@@ -23,20 +23,46 @@ SRC = Path(__file__).parent / "src" / "lib.rs"
 
 KEYS = "each_key_gives_its_answer"
 BUTTONS = "each_button_gives_its_answer_where_it_is_drawn"
+APPLY = "a_question_to_apply_says_apply_and_answers_to_a"
+SAVE_NOT_A = "a_question_to_save_does_not_answer_to_a"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     (
         "S answers nothing",
-        "                (Key::S, _) | (_, Some('s')) => return Some(Choice::Save),\n",
+        "            if key.key == keep || typed == Some(letter) {\n"
+        "                return Some(Choice::Save);\n"
+        "            }\n",
         "",
-        [KEYS],
+        [KEYS, APPLY],
     ),
     (
         "D answers nothing",
-        "                (Key::D, _) | (_, Some('d')) => return Some(Choice::Discard),\n",
+        "            if key.key == Key::D || typed == Some('d') {\n"
+        "                return Some(Choice::Discard);\n"
+        "            }\n",
         "",
-        [KEYS],
+        [KEYS, APPLY],
+    ),
+    # Asked about changes to apply rather than save (2026-10-04, for
+    # netmanager's open edit).
+    (
+        "a question to apply answers to S",
+        "            if key.key == keep || typed == Some(letter) {\n",
+        "            if key.key == Key::S || typed == Some('s') {\n",
+        [APPLY],
+    ),
+    (
+        "a question to apply is worded to save",
+        "        Self::worded(&APPLY, message, prompt, pending)\n",
+        "        Self::worded(&SAVE, message, prompt, pending)\n",
+        [APPLY],
+    ),
+    (
+        "a question to save answers to A",
+        "    key: (Key::S, 's'),\n",
+        "    key: (Key::A, 'a'),\n",
+        [KEYS, SAVE_NOT_A],
     ),
     (
         "Save's button throws the changes away",

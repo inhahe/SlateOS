@@ -98,6 +98,26 @@ pub struct TrayIcon {
     pub tooltip: String,
 }
 
+impl TrayIcon {
+    /// An icon `id` of process `owner`, drawn as `glyph`, with `tooltip`.
+    ///
+    /// The way to build one outside this crate. A struct literal names every
+    /// field, so each field added to the icon (the program's name and a theme
+    /// icon's name are next: `requests/c-f-name-a-tray-icons-program.md`,
+    /// `requests/c-f-let-a-tray-icon-name-a-theme-icon.md`) would break every
+    /// literal in another lane's tree; a constructor plus a builder per new
+    /// field breaks none.
+    #[must_use]
+    pub fn new(owner: u64, id: u32, glyph: impl Into<String>, tooltip: impl Into<String>) -> Self {
+        Self {
+            owner,
+            id,
+            glyph: glyph.into(),
+            tooltip: tooltip.into(),
+        }
+    }
+}
+
 /// Everything currently in the tray, in the order the shell should draw it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrayList {
@@ -201,12 +221,21 @@ mod tests {
     use super::*;
 
     fn icon(owner: u64, id: u32, glyph: &str, tooltip: &str) -> TrayIcon {
-        TrayIcon {
-            owner,
-            id,
-            glyph: glyph.to_string(),
-            tooltip: tooltip.to_string(),
-        }
+        TrayIcon::new(owner, id, glyph, tooltip)
+    }
+
+    #[test]
+    fn the_constructor_fills_every_field_it_is_given() {
+        let built = TrayIcon::new(7, 3, "B", "Battery: 87%");
+        assert_eq!(
+            built,
+            TrayIcon {
+                owner: 7,
+                id: 3,
+                glyph: "B".to_string(),
+                tooltip: "Battery: 87%".to_string(),
+            }
+        );
     }
 
     #[test]

@@ -907,6 +907,13 @@ impl Yahtzee {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // Every binding is on the key itself, so a key is the game's only with
+        // nothing but Shift held: a chord with Ctrl, Alt or the Windows key is
+        // the window's or the desktop's and arrives carrying its key -- Alt+N
+        // threw the game in play away and Alt+Enter scored a category.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
 
         match key.key {
             Key::R => {
@@ -1791,6 +1798,62 @@ mod tests {
 
     /// The palette for a light or a dark theme, in the bordered look (the
     /// default) or the card look.
+    /// **A key held with Ctrl, Alt or the Windows key is not the game's**:
+    /// Alt+N threw the game in play away, Alt+R rolled and Alt+Enter scored
+    /// a category, each chord arriving carrying its key.
+    ///
+    /// Each key is asserted as it is pressed: Tab and the holds go round.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_games() {
+        use guitk::event::Modifiers;
+        use guitk::probe;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut game = Yahtzee::new();
+        assert_eq!(
+            game.handle_key(&probe::press(Key::R)),
+            EventResult::Consumed,
+            "control: R rolls"
+        );
+        let state = |g: &Yahtzee| {
+            (
+                (g.dice, g.held, g.roll_number, g.turn_number, g.scores),
+                (g.focus, g.selected_die, g.selected_category),
+            )
+        };
+        let before = state(&game);
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [
+                Key::N,
+                Key::R,
+                Key::Tab,
+                Key::Right,
+                Key::Space,
+                Key::Enter,
+                Key::Num1,
+            ] {
+                assert_eq!(
+                    game.handle_key(&KeyEvent {
+                        key,
+                        pressed: true,
+                        modifiers: held,
+                        text: String::new(),
+                    }),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+                assert_eq!(state(&game), before, "{held:?} {key:?} changed the game");
+            }
+        }
+    }
+
     fn palette(light: bool, cards: bool) -> Palette {
         let mut p = Palette::for_mode(light);
         p.set_surface_style(if cards {
@@ -1833,8 +1896,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let chrome = gamechrome::Chrome::of(&p);
             let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
                 .into_iter()
@@ -1859,7 +1921,7 @@ mod tests {
             for (what, f) in every_look(&p) {
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground

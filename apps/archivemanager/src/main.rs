@@ -1,8 +1,8 @@
 //! Slate OS Archive Manager
 //!
 //! Graphical archive/compressed file manager supporting multiple formats:
-//! - ZIP, TAR and TAR.GZ, read and written; TAR.BZ2, TAR.XZ and 7z
-//!   recognised -- by name or by their bytes -- and refused by name
+//! - ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ, read and written; 7z
+//!   recognised -- by name or by its bytes -- and refused by name
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
 //! - Create a new, empty archive, then add files to it
@@ -34,10 +34,11 @@
 //!
 //! Uses the guitk library for UI rendering.
 //!
-//! Reading and writing are real for ZIP, TAR and TAR.GZ, and live in
-//! [`backend`]; TAR.BZ2, TAR.XZ and 7z are modelled but not parsed, and say
-//! so rather than pretending. Their decompressors exist -- in the kernel,
-//! where a module of a binary crate cannot be reached by any program
+//! Reading and writing are real for ZIP, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ,
+//! and live in [`backend`]; 7z is modelled but not parsed, and says so
+//! rather than pretending. Its reader is being ported out
+//! of the kernel, where a module of a binary crate cannot be reached by any
+//! program, as bzip2's and xz's were
 //! (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`).
 
 mod backend;
@@ -54,6 +55,7 @@ use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::treeview::{TreeEvent, TreeItem, TreeSource, TreeView};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -103,17 +105,17 @@ impl ArchiveFormat {
         }
     }
 
-    /// Whether this build can read an archive in this format. TAR.BZ2, TAR.XZ
-    /// and 7z are recognised and refused by name: their decompressors are in
-    /// the kernel, where no program can reach them yet.
-    pub fn readable(self) -> bool {
-        matches!(self, Self::Zip | Self::Tar | Self::TarGz)
+    /// Whether this build can write an archive in this format. It reads
+    /// every format it knows, and writes all of them but 7z, which it reads
+    /// through a port of 7-Zip's reader and has no writer for.
+    pub fn writable(self) -> bool {
+        self != Self::SevenZip
     }
 
-    /// Whether this build can write an archive in this format -- today, the
-    /// same three it reads.
-    pub fn writable(self) -> bool {
-        self.readable()
+    /// Whether this is a TAR inside one compressed stream: decompressed
+    /// whole to read, rebuilt and recompressed whole to write.
+    pub fn is_compressed_tar(self) -> bool {
+        matches!(self, Self::TarGz | Self::TarBz2 | Self::TarXz)
     }
 
     /// Every pattern of every format for which `keep` holds, for a dialog's
@@ -440,8 +442,6 @@ pub struct TreeNode {
     pub name: String,
     /// Full path within the archive.
     pub path: String,
-    /// Whether this is expanded.
-    pub expanded: bool,
     /// Children (subdirectories).
     pub children: Vec<TreeNode>,
     /// Number of files directly in this directory.
@@ -456,7 +456,6 @@ impl TreeNode {
         Self {
             name: name.to_string(),
             path: path.to_string(),
-            expanded: false,
             children: Vec::new(),
             file_count: 0,
             total_size: 0,
@@ -491,53 +490,80 @@ impl TreeNode {
         #[allow(clippy::indexing_slicing)]
         &mut self.children[idx]
     }
+}
 
-    /// Toggle expansion state.
-    pub fn toggle(&mut self) {
-        self.expanded = !self.expanded;
-    }
+/// The archive's folders, as the toolkit's tree reads them.
+///
+/// One row at the top, the archive itself, keyed by the empty name; its
+/// folders beneath it by their names. So a row's key path is the empty name
+/// and then the folder names down to it, and the folder it stands for is the
+/// path after the first key, joined by `/` ([`folder_of`]). Keyed by names,
+/// never by row: opening a folder moves every row below it, and a key that was
+/// a row number would name another folder afterwards.
+///
+/// The open folders, the chosen one and the scroll are the view's
+/// ([`AppState::tree`]); this reads the archive's [`TreeNode`]s and keeps
+/// nothing. They were an `expanded` flag on each node, a flattened row list
+/// rebuilt for every frame and every click, and a scroll of their own -- with
+/// no keyboard, which the toolkit's tree has.
+struct Folders<'a>(&'a TreeNode);
 
-    /// Flip the expansion of the node whose full path is `path`.
-    ///
-    /// Returns whether such a node was found. Addressing by path rather than
-    /// by flattened row index matters because expanding a node *changes* the
-    /// flattened list: an index captured before the toggle names a different
-    /// row after it, so a second click would collapse the wrong directory.
-    pub fn toggle_path(&mut self, path: &str) -> bool {
-        if self.path == path {
-            self.toggle();
-            return true;
+impl TreeSource for Folders<'_> {
+    type Key = String;
+
+    fn children(&self, parent: &[String]) -> Option<Vec<TreeItem<String>>> {
+        let Some((top, below)) = parent.split_first() else {
+            return Some(vec![folder_item(self.0, String::new())]);
+        };
+        if !top.is_empty() {
+            return Some(Vec::new());
         }
-        self.children.iter_mut().any(|c| c.toggle_path(path))
-    }
-
-    /// Flatten the tree into a list for rendering, respecting expansion state.
-    pub fn flatten(&self, depth: u32, out: &mut Vec<FlatTreeRow>) {
-        out.push(FlatTreeRow {
-            name: self.name.clone(),
-            path: self.path.clone(),
-            depth,
-            expanded: self.expanded,
-            has_children: !self.children.is_empty(),
-            file_count: self.file_count,
-        });
-        if self.expanded {
-            for child in &self.children {
-                child.flatten(depth.saturating_add(1), out);
-            }
+        let mut node = self.0;
+        for name in below {
+            node = node.children.iter().find(|child| &child.name == name)?;
         }
+        Some(
+            node.children
+                .iter()
+                .map(|child| folder_item(child, child.name.clone()))
+                .collect(),
+        )
     }
 }
 
-/// A flattened tree row for rendering.
-#[derive(Clone, Debug)]
-pub struct FlatTreeRow {
-    pub name: String,
-    pub path: String,
-    pub depth: u32,
-    pub expanded: bool,
-    pub has_children: bool,
-    pub file_count: usize,
+/// A folder's row: its name, an arrow when it has folders in it, and how many
+/// files are in it directly.
+fn folder_item(node: &TreeNode, key: String) -> TreeItem<String> {
+    let label = format!("\u{1F4C1} {}", node.name);
+    let item = if node.children.is_empty() {
+        TreeItem::leaf(key, label)
+    } else {
+        TreeItem::branch(key, label)
+    };
+    if node.file_count > 0 {
+        item.with_detail(node.file_count.to_string())
+    } else {
+        item
+    }
+}
+
+/// The folder a tree row stands for: its key path after the archive's own
+/// key, joined by `/` -- the empty string for the archive itself.
+fn folder_of(path: &[String]) -> String {
+    path.get(1..).unwrap_or_default().join("/")
+}
+
+/// The tree row that stands for `folder`: the archive's key, then the
+/// folder's names.
+fn tree_path(folder: &str) -> Vec<String> {
+    std::iter::once(String::new())
+        .chain(
+            folder
+                .split('/')
+                .filter(|name| !name.is_empty())
+                .map(String::from),
+        )
+        .collect()
 }
 
 // ============================================================================
@@ -547,7 +573,6 @@ pub struct FlatTreeRow {
 /// Build a directory tree from archive entries.
 pub fn build_directory_tree(entries: &[ArchiveEntry], archive_name: &str) -> TreeNode {
     let mut root = TreeNode::new(archive_name, "");
-    root.expanded = true;
 
     for entry in entries {
         if entry.path.is_empty() {
@@ -1207,6 +1232,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Space", "Select or deselect the entry under the cursor"),
     ("Ctrl+A", "Select everything in the archive"),
     ("Ctrl+B", "Show or hide the sidebar"),
+    ("F6", "Move the keys between the folders and the files"),
     ("Ctrl+L", "Flat list, or one folder at a time"),
     ("Delete", "Delete the selected entries"),
 ];
@@ -1238,8 +1264,16 @@ pub struct AppState {
     pub window_height: f32,
     /// Scroll offset for the file list.
     pub list_scroll_y: f32,
-    /// Scroll offset for the tree view.
-    pub tree_scroll_y: f32,
+    /// The folder pane: which folders are open, which is chosen -- the
+    /// folder being shown -- and how far it is scrolled. The folders are the
+    /// archive's ([`Folders`]).
+    pub tree: TreeView<String>,
+    /// The archive `tree` was set up for, so a different one -- or the same
+    /// one read again -- is set up afresh ([`AppState::tree_ready`]).
+    tree_for: Option<PathBuf>,
+    /// Whether the keys move through the folder pane rather than the file
+    /// list: F6 moves them, and a click on either takes them.
+    pub tree_has_keys: bool,
     /// Currently hovered entry id, if any.
     pub hovered_entry: Option<u64>,
     /// Test results, if a test is running or completed.
@@ -1288,7 +1322,9 @@ impl Default for AppState {
             window_width: 900.0,
             window_height: 600.0,
             list_scroll_y: 0.0,
-            tree_scroll_y: 0.0,
+            tree: TreeView::new(),
+            tree_for: None,
+            tree_has_keys: false,
             hovered_entry: None,
             test_results: None,
             status_message: String::from("Ready"),
@@ -1330,6 +1366,107 @@ impl AppState {
         self.nav_history.push(dir.to_string());
         self.nav_position = self.nav_history.len().saturating_sub(1);
         self.list_scroll_y = 0.0;
+        self.show_dir_in_tree();
+    }
+
+    /// Set the folder pane up for the archive open, if it has not been:
+    /// its top open and the folder being shown chosen. An archive read again
+    /// -- after a save -- is set up afresh, since its folders may have changed.
+    fn tree_ready(&mut self) {
+        let for_archive = self.archive.as_ref().map(|a| a.path.clone());
+        if self.tree_for == for_archive {
+            return;
+        }
+        self.tree = TreeView::new();
+        self.tree_for = for_archive;
+        if let Some(archive) = &self.archive {
+            let source = Folders(&archive.tree);
+            // The events say what was asked for -- the top row, opened. There
+            // is nothing to act on.
+            drop(self.tree.refresh(&source));
+            drop(self.tree.set_expanded(&[String::new()], true, &source));
+        }
+        self.show_dir_in_tree();
+    }
+
+    /// Choose the folder being shown in the folder pane, opening the folders
+    /// above it and scrolling to it -- however it was reached: the pane, the
+    /// list, Back, Forward, Up.
+    fn show_dir_in_tree(&mut self) {
+        if self.tree_for != self.archive.as_ref().map(|a| a.path.clone()) {
+            self.tree_ready();
+            return;
+        }
+        let Some(archive) = &self.archive else {
+            return;
+        };
+        let path = tree_path(&self.current_dir);
+        // The events echo the choice just made; acting on them would navigate
+        // to where the window already is.
+        drop(self.tree.reveal(&path, &Folders(&archive.tree)));
+    }
+
+    /// Where the folder pane is in a window `height` tall: the sidebar below
+    /// its heading, or nowhere while the sidebar is hidden.
+    fn tree_bounds(&self, height: f32) -> Rect {
+        if !self.sidebar_visible {
+            return Rect::new(0.0, 0.0, 0.0, 0.0);
+        }
+        let (top, content_h) = self.content_band(height);
+        Rect::new(
+            0.0,
+            top + TREE_HEADER_H,
+            (self.sidebar_width - 1.0).max(0.0),
+            (content_h - TREE_HEADER_H).max(0.0),
+        )
+    }
+
+    /// Set the folder pane up and lay it out for a window of `size`: before
+    /// it is drawn, and before a click is found on it.
+    fn lay_out_tree(&mut self, size: (f32, f32)) {
+        self.tree_ready();
+        self.tree.set_bounds(self.tree_bounds(size.1));
+    }
+
+    /// Act on what the folder pane reports: a folder chosen there is the
+    /// folder shown. Whether anything changed.
+    fn apply_tree_events(&mut self, events: Vec<TreeEvent<String>>) -> bool {
+        let mut changed = false;
+        for event in events {
+            match event {
+                TreeEvent::Selected(path) => {
+                    let folder = folder_of(&path);
+                    if folder != self.current_dir {
+                        self.navigate_to(&folder);
+                    }
+                    changed = true;
+                }
+                TreeEvent::Expanded(_) | TreeEvent::Collapsed(_) => changed = true,
+                // Folders are only chosen and opened here: a folder with none
+                // inside it activated, a tick (this tree has none) and a menu
+                // (it offers none) ask nothing of the window.
+                _ => {}
+            }
+        }
+        changed
+    }
+
+    /// Hand a pointer event to the folder pane, which finds what of it is
+    /// under the pointer itself. Whether the window changed.
+    fn tree_mouse(&mut self, event: &MouseEvent, size: (f32, f32)) -> bool {
+        self.lay_out_tree(size);
+        let Some(archive) = &self.archive else {
+            return false;
+        };
+        let events = self.tree.handle_mouse(event, &Folders(&archive.tree));
+        self.apply_tree_events(events)
+    }
+
+    /// Whether the folder pane is what is under `(x, y)` -- not a dialog
+    /// drawn over it, and not the rest of the window.
+    fn over_tree(&mut self, x: f32, y: f32, size: (f32, f32)) -> bool {
+        self.lay_out_tree(size);
+        matches!(self.hit_test(x, y, size), Some(Target::Tree))
     }
 
     /// Navigate back in history.
@@ -1343,6 +1480,7 @@ impl AppState {
         self.nav_position = prev;
         self.current_dir = dir;
         self.list_scroll_y = 0.0;
+        self.show_dir_in_tree();
         true
     }
 
@@ -1355,6 +1493,7 @@ impl AppState {
         self.nav_position = next;
         self.current_dir = dir;
         self.list_scroll_y = 0.0;
+        self.show_dir_in_tree();
         true
     }
 
@@ -1553,10 +1692,11 @@ pub enum Target {
     NavForward,
     /// Up to the parent directory.
     NavUp,
-    /// A row in the sidebar tree, by its index in the flattened row list.
-    TreeRow(usize),
-    /// The expand/collapse arrow on a sidebar tree row.
-    TreeArrow(usize),
+    /// The folder pane. Which of its rows, arrows or scrollbar is under
+    /// the pointer the pane finds itself (`TreeView::handle_mouse`); the
+    /// frame records only that the pane is there, so a dialog drawn over it
+    /// takes the click.
+    Tree,
     /// A column header, which sorts by that column.
     ColumnHeader(Column),
     /// A row in the file list, by the entry's stable id.
@@ -1609,10 +1749,15 @@ pub fn toolbar_enabled(state: &AppState, action: ToolbarAction) -> bool {
     let has_selection = has_selection(state);
     // Writing rebuilds the archive out of the bytes it was read from, so a
     // model built by hand — the tests do that, and so does an empty model —
-    // has rows but nothing to rebuild from. Disabled rather than left to fail
-    // at the end: the two write actions are the only ones that could destroy
-    // something, and a button that cannot do its job should not look ready.
-    let can_write = state.archive.as_ref().is_some_and(|a| a.source.is_some());
+    // has rows but nothing to rebuild from; and it writes the archive's own
+    // format, which for a 7z this build does not. Disabled rather than left
+    // to fail at the end: the two write actions are the only ones that could
+    // destroy something, and a button that cannot do its job should not look
+    // ready.
+    let can_write = state
+        .archive
+        .as_ref()
+        .is_some_and(|a| a.source.is_some() && a.format.writable());
     match action {
         ToolbarAction::Open | ToolbarAction::New => true,
         ToolbarAction::ExtractAll | ToolbarAction::Test => has_archive,
@@ -1819,96 +1964,31 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
         overflow: TextOverflow::Ellipsis,
     });
 
-    if let Some(archive) = &state.archive {
-        let mut rows = Vec::new();
-        archive.tree.flatten(0, &mut rows);
-
-        let start_y = y_offset + TREE_HEADER_H;
-
-        frame.push(RenderCommand::PushClip {
-            x: 0.0,
-            y: start_y,
-            width: w,
-            height: height - TREE_HEADER_H,
-        });
-
-        for (i, row) in rows.iter().enumerate() {
-            let ry = start_y + i as f32 * ROW_H - state.tree_scroll_y;
-            if ry + ROW_H < start_y || ry > y_offset + height {
-                continue;
-            }
-
-            let indent = row.depth as f32 * 16.0 + 8.0;
-
-            // Highlight if this is the current directory.
-            if row.path == state.current_dir {
-                state
-                    .palette
-                    .push_surface(frame, 0.0, ry, w, ROW_H, 0.0, Surface::Selected);
-            }
-
-            // Expand/collapse indicator.
-            let arrow = if !row.has_children {
-                " "
-            } else if row.expanded {
-                "v"
-            } else {
-                ">"
-            };
-            frame.push(RenderCommand::Text {
-                x: indent,
-                y: ry + 4.0,
-                text: arrow.to_string(),
-                color: state.palette.subtext0,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            // Folder icon and name.
-            let display = format!("\u{1F4C1} {}", row.name);
-            frame.push(RenderCommand::Text {
-                x: indent + 12.0,
-                y: ry + 4.0,
-                text: display,
-                color: state.palette.text,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - indent - 20.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // File count badge.
-            if row.file_count > 0 {
-                let count_text = format!("{}", row.file_count);
-                frame.push(RenderCommand::Text {
-                    x: w - 30.0,
-                    y: ry + 4.0,
-                    text: count_text,
-                    color: state.palette.subtext0,
-                    font_size: 10.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
+    if state.archive.is_some() {
+        // The toolkit's tree, laid out in the sidebar (`lay_out_tree`): the
+        // chosen row is the folder shown, the arrows open and close.
+        state.tree.draw(&state.palette, frame, |_| Target::Tree);
+        if state.tree_has_keys {
+            // The keys are the pane's: say so, or Up and Down would seem to
+            // have stopped working on the list.
+            let b = state.tree.bounds();
+            let accent = state.palette.accent;
+            for (x1, y1, x2, y2) in [
+                (b.x, b.y, b.x + b.w, b.y),
+                (b.x, b.y + b.h, b.x + b.w, b.y + b.h),
+                (b.x, b.y, b.x, b.y + b.h),
+                (b.x + b.w, b.y, b.x + b.w, b.y + b.h),
+            ] {
+                frame.push(RenderCommand::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color: accent,
+                    width: 2.0,
                 });
             }
-
-            // The row navigates; the arrow expands. Recording the row first
-            // and the arrow second is what makes the arrow win where they
-            // overlap, because the hit-test reads back to front.
-            frame.hit(Target::TreeRow(i), Rect::new(0.0, ry, w, ROW_H));
-            if row.has_children {
-                // The arrow's box is the indent column it is drawn in, not the
-                // glyph's ink: a one-character target is unhittable.
-                frame.hit(
-                    Target::TreeArrow(i),
-                    Rect::new(indent - 2.0, ry, 14.0, ROW_H),
-                );
-            }
         }
-
-        frame.push(RenderCommand::PopClip);
     }
 
     // Right border.
@@ -2609,28 +2689,6 @@ impl AppState {
         (total - viewport).max(0.0)
     }
 
-    /// Largest useful `tree_scroll_y`.
-    #[must_use]
-    pub fn max_tree_scroll(&self, height: f32) -> f32 {
-        let (_, content_h) = self.content_band(height);
-        let viewport = (content_h - TREE_HEADER_H).max(0.0);
-        let total = self.tree_rows().len() as f32 * ROW_H;
-        (total - viewport).max(0.0)
-    }
-
-    /// The sidebar tree flattened to the rows currently on screen.
-    ///
-    /// The renderer computes this the same way; a click handler that guessed
-    /// at it instead would disagree the moment a node was collapsed.
-    #[must_use]
-    pub fn tree_rows(&self) -> Vec<FlatTreeRow> {
-        let mut rows = Vec::new();
-        if let Some(archive) = &self.archive {
-            archive.tree.flatten(0, &mut rows);
-        }
-        rows
-    }
-
     /// The topmost control at `(x, y)` in a window of size `size`.
     #[must_use]
     pub fn hit_test(&self, x: f32, y: f32, size: (f32, f32)) -> Option<Target> {
@@ -2757,21 +2815,28 @@ impl AppState {
             // Saying *why* it did nothing beats a click that vanishes: the
             // difference between "this button is not for now" and "this
             // program has stopped responding" is otherwise invisible.
-            self.status_message = format!(
-                "{} is unavailable — {}",
-                action.label(),
-                match action {
-                    ToolbarAction::ExtractSelected => "nothing is selected",
-                    ToolbarAction::Delete if !has_selection(self) => "nothing is selected",
-                    // Both write actions land here for the same reason, and it
-                    // is not "no archive is open" — one may well be, just not
-                    // one read from a file.
-                    ToolbarAction::Add | ToolbarAction::Delete if self.archive.is_some() => {
-                        "this archive was not read from a file"
-                    }
-                    _ => "no archive is open",
+            let format = self.archive.as_ref().map(|a| a.format);
+            let why = match action {
+                ToolbarAction::ExtractSelected => String::from("nothing is selected"),
+                ToolbarAction::Delete if !has_selection(self) => {
+                    String::from("nothing is selected")
                 }
-            );
+                // Both write actions land here for the same reasons, and
+                // neither is "no archive is open" — one is: in a format this
+                // build reads and does not write, or not read from a file.
+                ToolbarAction::Add | ToolbarAction::Delete => match format {
+                    Some(f) if !f.writable() => {
+                        format!(
+                            "this build reads {} files and does not write them",
+                            f.extension()
+                        )
+                    }
+                    Some(_) => String::from("this archive was not read from a file"),
+                    None => String::from("no archive is open"),
+                },
+                _ => String::from("no archive is open"),
+            };
+            self.status_message = format!("{} is unavailable — {why}", action.label());
             return Action::Redraw;
         }
         match action {
@@ -2873,9 +2938,8 @@ impl AppState {
     pub fn open_dialog(&mut self, purpose: DialogPurpose) {
         let start = self.last_directory.clone();
         let mut dialog = match purpose {
-            // Every name the program recognises, the ones it refuses among
-            // them: a `.tar.xz` hidden from the list reads as a file that is
-            // not there, while one chosen is told why it cannot be opened.
+            // Every name the program recognises -- which is every name it
+            // opens; a 7z among them, read-only.
             DialogPurpose::OpenArchive => FileDialog::open()
                 .with_filter("Archives", &ArchiveFormat::patterns_where(|_| true))
                 .with_initial_path(&start),
@@ -3055,11 +3119,7 @@ impl AppState {
         // Keep the user where they were: `open_path` resets the directory, the
         // history and the scroll, which is right for a different archive and
         // wrong for this one a moment older.
-        let (dir, scroll, tree_scroll) = (
-            self.current_dir.clone(),
-            self.list_scroll_y,
-            self.tree_scroll_y,
-        );
+        let (dir, scroll) = (self.current_dir.clone(), self.list_scroll_y);
         let reopened = self.open_path(&path);
         // A failed re-read leaves `open_path`'s own message in place and the
         // pre-save list on screen. Saying "Saved" over the top of that would
@@ -3068,7 +3128,7 @@ impl AppState {
         self.status_message = if reopened {
             self.current_dir = dir;
             self.list_scroll_y = scroll;
-            self.tree_scroll_y = tree_scroll;
+            self.show_dir_in_tree();
             report.summary(&path)
         } else {
             format!(
@@ -3102,7 +3162,8 @@ impl AppState {
                 self.nav_history = vec![String::new()];
                 self.nav_position = 0;
                 self.list_scroll_y = 0.0;
-                self.tree_scroll_y = 0.0;
+                // Set up afresh for this archive, even the same file read again.
+                self.tree_for = None;
                 self.hovered_entry = None;
                 // Results are about the archive that was open when they were
                 // produced. Carrying them across an open would report the old
@@ -3145,7 +3206,7 @@ impl AppState {
     }
 
     /// Perform whatever `target` names.
-    pub fn activate(&mut self, target: Target, size: (f32, f32)) -> Action {
+    pub fn activate(&mut self, target: Target) -> Action {
         match target {
             Target::Toolbar(action) => self.run_toolbar(action),
             Target::NavBack => {
@@ -3169,30 +3230,9 @@ impl AppState {
                     Action::None
                 }
             }
-            Target::TreeRow(i) => {
-                let Some(row) = self.tree_rows().get(i).cloned() else {
-                    return Action::None;
-                };
-                self.navigate_to(&row.path);
-                Action::Redraw
-            }
-            Target::TreeArrow(i) => {
-                let Some(row) = self.tree_rows().get(i).cloned() else {
-                    return Action::None;
-                };
-                let Some(archive) = &mut self.archive else {
-                    return Action::None;
-                };
-                if archive.tree.toggle_path(&row.path) {
-                    // Collapsing shortens the list, which can leave the scroll
-                    // offset past the end and the tree apparently empty.
-                    self.tree_scroll_y =
-                        self.tree_scroll_y.clamp(0.0, self.max_tree_scroll(size.1));
-                    Action::Redraw
-                } else {
-                    Action::None
-                }
-            }
+            // Handed to the pane where the click is (`handle_click`), which
+            // has the pointer event the pane needs; nothing else activates it.
+            Target::Tree => Action::None,
             Target::ColumnHeader(col) => {
                 self.toggle_sort(col);
                 Action::Redraw
@@ -3212,8 +3252,20 @@ impl AppState {
         if button != MouseButton::Left {
             return Action::None;
         }
+        if self.over_tree(x, y, size) {
+            self.tree_has_keys = true;
+            let press = MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            };
+            self.tree_mouse(&press, size);
+            return Action::Redraw;
+        }
+        // A click anywhere else gives the keys back to the list.
+        self.tree_has_keys = false;
         match self.hit_test(x, y, size) {
-            Some(target) => self.activate(target, size),
+            Some(target) => self.activate(target),
             // A click on bare background is not a mystery to report; it just
             // did not land on anything.
             None => Action::None,
@@ -3231,11 +3283,21 @@ impl AppState {
         if button != MouseButton::Left {
             return Action::None;
         }
+        if self.over_tree(x, y, size) {
+            self.tree_has_keys = true;
+            let double = MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::DoubleClick(button),
+            };
+            self.tree_mouse(&double, size);
+            return Action::Redraw;
+        }
         match self.hit_test(x, y, size) {
             Some(Target::FileRow(id)) => self.open_entry(id),
             // Anywhere else a double-click is two clicks, and the second one
             // should do what the first did rather than nothing.
-            Some(target) => self.activate(target, size),
+            Some(target) => self.activate(target),
             None => Action::None,
         }
     }
@@ -3268,6 +3330,24 @@ impl AppState {
         // see, and Escape close the window instead of the dialog.
         if let Some(action) = self.dispatch_key_to_dialog(key, size) {
             return action;
+        }
+        // F6 moves the keys between the folder pane and the file list, as it
+        // moves between a window's panes elsewhere.
+        if key.key == Key::F6 && self.sidebar_visible && self.archive.is_some() {
+            self.tree_has_keys = !self.tree_has_keys;
+            return Action::Redraw;
+        }
+        if self.tree_has_keys && self.sidebar_visible && Self::moves_in_tree(key) {
+            self.lay_out_tree(size);
+            let Some(archive) = &self.archive else {
+                return Action::None;
+            };
+            let events = self.tree.handle_key(key, &Folders(&archive.tree));
+            return if self.apply_tree_events(events) {
+                Action::Redraw
+            } else {
+                Action::None
+            };
         }
         let (_, content_h) = self.content_band(size.1);
         // A page is what the viewport can show, so Page Down lands on the row
@@ -3342,8 +3422,44 @@ impl AppState {
         }
     }
 
+    /// Whether `key` moves through the folder pane when the pane has the
+    /// keys: the arrows, Home and End, the page keys, Enter, and a letter to
+    /// jump to a folder. Others -- Delete, the shortcuts -- are the window's
+    /// wherever the keys are.
+    fn moves_in_tree(key: &KeyEvent) -> bool {
+        let chord = key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key;
+        matches!(
+            key.key,
+            Key::Up
+                | Key::Down
+                | Key::Left
+                | Key::Right
+                | Key::Home
+                | Key::End
+                | Key::PageUp
+                | Key::PageDown
+                | Key::Enter
+        ) || (!chord && key.types_text())
+    }
+
     /// Route a wheel event to whichever pane the pointer is over.
     fn handle_scroll(&mut self, mouse: &MouseEvent, dy: f32, size: (f32, f32)) -> Action {
+        // Over the folder pane, the pane scrolls itself: by its own rows, and
+        // counting a trackpad's fractions itself -- so before the list's own
+        // count of them below, which would otherwise have eaten them.
+        if self.over_tree(mouse.x, mouse.y, size) {
+            let before = self.tree.first_visible();
+            self.tree_mouse(mouse, size);
+            return if self.tree.first_visible() == before {
+                Action::None
+            } else {
+                Action::Redraw
+            };
+        }
+        // The pane's heading: nothing there scrolls.
+        if self.sidebar_visible && mouse.x < self.sidebar_width {
+            return Action::None;
+        }
         let rows = self.wheel.rows(dy);
         if rows == 0 {
             // A trackpad's fractions accumulate inside `wheel` until they add
@@ -3353,27 +3469,24 @@ impl AppState {
         }
         #[allow(clippy::cast_precision_loss)]
         let delta = rows as f32 * ROW_H;
-        let over_sidebar = self.sidebar_visible && mouse.x < self.sidebar_width;
-        if over_sidebar {
-            let max = self.max_tree_scroll(size.1);
-            let next = (self.tree_scroll_y + delta).clamp(0.0, max);
-            if (next - self.tree_scroll_y).abs() < f32::EPSILON {
-                return Action::None;
-            }
-            self.tree_scroll_y = next;
-        } else {
-            let max = self.max_list_scroll(size.1);
-            let next = (self.list_scroll_y + delta).clamp(0.0, max);
-            if (next - self.list_scroll_y).abs() < f32::EPSILON {
-                return Action::None;
-            }
-            self.list_scroll_y = next;
+        let max = self.max_list_scroll(size.1);
+        let next = (self.list_scroll_y + delta).clamp(0.0, max);
+        if (next - self.list_scroll_y).abs() < f32::EPSILON {
+            return Action::None;
         }
+        self.list_scroll_y = next;
         Action::Redraw
     }
 
     /// Track the pointer so the row under it lights up.
     fn handle_move(&mut self, mouse: &MouseEvent, size: (f32, f32)) -> Action {
+        // The pane hears every move: its row lights up under the pointer, and
+        // a drag of its scrollbar goes on wherever the pointer goes.
+        let over_tree = self.over_tree(mouse.x, mouse.y, size);
+        let tree_changed = self.tree_mouse(mouse, size);
+        if over_tree || tree_changed {
+            return Action::Redraw;
+        }
         let under = match self.hit_test(mouse.x, mouse.y, size) {
             Some(Target::FileRow(id)) => Some(id),
             _ => None,
@@ -3403,6 +3516,16 @@ impl AppState {
         }
         match event {
             Event::Mouse(mouse) => match mouse.kind {
+                // The card is modal for the pointer as it is for the keys: a
+                // press, with any button, puts it away rather than reaching
+                // the control drawn under it, and the wheel does not scroll
+                // what it covers. A move or a release still goes through, so
+                // the light stays right and a drag still ends.
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) if self.show_help => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                MouseEventKind::Scroll { .. } if self.show_help => Action::None,
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::DoubleClick(button) => {
                     self.handle_double_click(mouse.x, mouse.y, button, size)
@@ -3410,13 +3533,22 @@ impl AppState {
                 MouseEventKind::Move => self.handle_move(mouse, size),
                 MouseEventKind::Scroll { dy, .. } => self.handle_scroll(mouse, dy, size),
                 MouseEventKind::Leave => {
-                    if self.hovered_entry.is_none() {
+                    let tree_changed = self.tree_mouse(mouse, size);
+                    if self.hovered_entry.is_none() && !tree_changed {
                         return Action::None;
                     }
                     self.hovered_entry = None;
                     Action::Redraw
                 }
-                MouseEventKind::Release(_) | MouseEventKind::Enter => Action::None,
+                // The end of a drag of the pane's scrollbar.
+                MouseEventKind::Release(_) => {
+                    if self.tree_mouse(mouse, size) {
+                        Action::Redraw
+                    } else {
+                        Action::None
+                    }
+                }
+                MouseEventKind::Enter => Action::None,
             },
             Event::Key(key) => self.handle_key(key, size),
             Event::CloseRequested => Action::Quit,
@@ -3614,7 +3746,8 @@ impl App for AppState {
             // their new ends, showing blank space with no way back except
             // scrolling up blindly.
             self.list_scroll_y = self.list_scroll_y.min(self.max_list_scroll(h));
-            self.tree_scroll_y = self.tree_scroll_y.min(self.max_tree_scroll(h));
+            // The pane keeps its own scroll in range when its bounds change.
+            self.lay_out_tree((w, h));
             return Response::Redraw;
         }
         let size = (self.window_width, self.window_height);
@@ -3631,6 +3764,7 @@ impl App for AppState {
         // opening frame at the default size whatever the window really is.
         self.window_width = width;
         self.window_height = height;
+        self.lay_out_tree((width, height));
         let mut tree = build_frame(self, width, height).into_tree();
         // Drawn after the frame, and at the full window size: the widget lays
         // itself out from its own origin, and a finished list of absolute
@@ -3662,12 +3796,23 @@ impl Probe for AppState {
         build_frame(self, size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(guitk::event::MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -3799,6 +3944,7 @@ mod tests {
             "a bare name should become a ZIP"
         );
         assert!(new.contains(&"*.tar.gz"), "{new:?}");
+        assert!(new.contains(&"*.tar.bz2"), "{new:?}");
         assert!(
             !new.contains(&"*.7z"),
             "offered a format it cannot write: {new:?}"
@@ -3828,16 +3974,16 @@ mod tests {
         }
         assert!(!shows(open, "notes.txt"), "control: the filter filters");
         let new = DialogPurpose::NewArchive;
-        assert!(
-            shows(new, "old.tar.gz"),
-            "the New dialog hides a format it writes"
-        );
-        for name in ["old.7z", "old.tar.xz"] {
+        for name in ["old.tar.gz", "old.tar.bz2", "old.tar.xz"] {
             assert!(
-                !shows(new, name),
-                "the New dialog offers {name}, which it cannot write"
+                shows(new, name),
+                "the New dialog hides {name}, which it writes"
             );
         }
+        assert!(
+            !shows(new, "old.7z"),
+            "the New dialog offers a 7z, which it cannot write"
+        );
     }
 
     #[test]
@@ -4175,18 +4321,7 @@ mod tests {
         let node = TreeNode::new("src", "src");
         assert_eq!(node.name, "src");
         assert_eq!(node.path, "src");
-        assert!(!node.expanded);
         assert!(node.children.is_empty());
-    }
-
-    #[test]
-    fn test_tree_node_toggle() {
-        let mut node = TreeNode::new("a", "a");
-        assert!(!node.expanded);
-        node.toggle();
-        assert!(node.expanded);
-        node.toggle();
-        assert!(!node.expanded);
     }
 
     #[test]
@@ -4212,46 +4347,35 @@ mod tests {
         assert_eq!(root.total_descendants(), 3);
     }
 
+    /// The folders as the pane reads them: the archive at the top, keyed by
+    /// the empty name, its folders beneath it by name.
     #[test]
-    fn test_tree_node_flatten_collapsed() {
-        let mut root = TreeNode::new("root", "");
-        root.get_or_create_child("src", "src");
-        root.get_or_create_child("docs", "docs");
-        // root is not expanded, so only root is shown.
-        let mut flat = Vec::new();
-        root.flatten(0, &mut flat);
-        assert_eq!(flat.len(), 1);
-        assert_eq!(flat[0].name, "root");
-    }
-
-    #[test]
-    fn test_tree_node_flatten_expanded() {
-        let mut root = TreeNode::new("root", "");
-        root.expanded = true;
-        root.get_or_create_child("src", "src");
-        root.get_or_create_child("docs", "docs");
-        let mut flat = Vec::new();
-        root.flatten(0, &mut flat);
-        // root + 2 children = 3.
-        assert_eq!(flat.len(), 3);
-        assert_eq!(flat[1].depth, 1);
-    }
-
-    #[test]
-    fn test_tree_node_flatten_nested_expanded() {
-        let mut root = TreeNode::new("root", "");
-        root.expanded = true;
-        {
-            let src = root.get_or_create_child("src", "src");
-            src.expanded = true;
-            src.get_or_create_child("utils", "src/utils");
-        }
-        let mut flat = Vec::new();
-        root.flatten(0, &mut flat);
-        // root + src + utils = 3.
-        assert_eq!(flat.len(), 3);
-        assert_eq!(flat[2].depth, 2);
-        assert_eq!(flat[2].name, "utils");
+    fn the_folders_are_read_by_name_under_the_archive() {
+        let archive = create_sample_archive();
+        let source = Folders(&archive.tree);
+        let top = source.children(&[]).expect("the top is known");
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].key, "");
+        let under: Vec<String> = source
+            .children(&[String::new()])
+            .expect("the archive's folders are known")
+            .into_iter()
+            .map(|item| item.key)
+            .collect();
+        assert_eq!(under, ["src", "tests", "docs"]);
+        let utils = source
+            .children(&[String::new(), String::from("src")])
+            .expect("src's folders are known");
+        assert_eq!(utils.len(), 1);
+        assert_eq!(utils[0].key, "utils");
+        assert!(
+            source
+                .children(&[String::new(), String::from("nowhere")])
+                .is_none(),
+            "a folder the archive has not got was answered"
+        );
+        assert_eq!(folder_of(&tree_path("src/utils")), "src/utils");
+        assert_eq!(folder_of(&tree_path("")), "");
     }
 
     // --- build_directory_tree tests ---
@@ -5171,6 +5295,108 @@ mod tests {
         }
     }
 
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press -- or the second of
+    /// a double-click, which opens an entry -- used to go straight through
+    /// the card to the row drawn under it. The controls at the end are the
+    /// same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = SIZE;
+        let mut state = loaded();
+        // Long enough for the list to have somewhere to scroll.
+        let archive = state.archive.as_mut().expect("archive");
+        for i in 0..200 {
+            archive.add_entry(ArchiveEntry {
+                path: format!("bulk{i}.txt"),
+                name: format!("bulk{i}.txt"),
+                size: 10,
+                compressed_size: 5,
+                is_dir: false,
+                modified: 0,
+                crc32: Some(0),
+                encrypted: false,
+                method: String::from("Deflate"),
+                depth: 0,
+                expanded: false,
+                selected: false,
+                id: 0,
+            });
+        }
+        state.view_mode = ViewMode::FlatList;
+        let selected = |state: &AppState| {
+            state
+                .archive
+                .as_ref()
+                .map_or(0, |a| a.entries.iter().filter(|e| e.selected).count())
+        };
+        let card_up = |state: &AppState| {
+            build_frame(state, size.0, size.1)
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("F1 closes this")))
+        };
+        let mouse = |state: &mut AppState, (x, y): (f32, f32), kind: MouseEventKind| {
+            state.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size)
+        };
+        let row = build_frame(&state, size.0, size.1)
+            .rect_of(|t| matches!(t, Target::FileRow(_)))
+            .expect("a file row")
+            .centre();
+        let before = selected(&state);
+
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        assert!(card_up(&state));
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            state.list_scroll_y.abs() < f32::EPSILON,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(
+            mouse(&mut state, row, MouseEventKind::Press(MouseButton::Left)),
+            Action::Redraw
+        );
+        assert!(!card_up(&state), "the press did not put the card away");
+        assert_eq!(
+            selected(&state),
+            before,
+            "the press went through the card and chose a row"
+        );
+
+        // Any button, and a double-click's second press.
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        mouse(&mut state, row, MouseEventKind::Press(MouseButton::Right));
+        assert!(!card_up(&state), "a right-button press left the card up");
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        );
+        assert!(!card_up(&state), "a double-click left the card up");
+        assert_eq!(selected(&state), before, "a double-click reached the row");
+
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            state.list_scroll_y > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut state, row, MouseEventKind::Press(MouseButton::Left));
+        assert_ne!(
+            selected(&state),
+            before,
+            "control: the press chooses nothing even with the card down"
+        );
+    }
+
     /// [`loaded`], but backed by a real file, and the directory to remove.
     ///
     /// The write actions rewrite the archive on disk, so a model whose `path`
@@ -5365,45 +5591,171 @@ mod tests {
         assert_eq!(click(&mut state, back), Action::None);
     }
 
+    /// Where the folder pane draws the part `want` picks: drawn on its own,
+    /// the rectangles a click on the window lands in.
+    fn tree_spot(
+        state: &mut AppState,
+        want: impl Fn(&guitk::treeview::TreeHit<String>) -> bool,
+    ) -> (f32, f32) {
+        state.lay_out_tree(SIZE);
+        let mut frame: guitk::frame::Frame<guitk::treeview::TreeHit<String>> =
+            guitk::frame::Frame::new(SIZE.0, SIZE.1);
+        state.tree.draw(&state.palette, &mut frame, |hit| hit);
+        let (_, r) = frame
+            .hits()
+            .iter()
+            .find(|(hit, _)| want(hit))
+            .expect("the pane does not draw it");
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The row paths the folder pane shows, in order.
+    fn tree_paths(state: &mut AppState) -> Vec<Vec<String>> {
+        state.lay_out_tree(SIZE);
+        state
+            .tree
+            .rows()
+            .iter()
+            .map(|row| row.path.clone())
+            .collect()
+    }
+
+    /// **A folder's arrow opens it without showing it**, and a second click
+    /// closes it.
     #[test]
-    fn the_tree_arrow_collapses_without_navigating() {
+    fn a_folders_arrow_opens_it_without_showing_it() {
         let mut state = loaded();
-        let before = state.tree_rows().len();
-        let at = centre_of(&state, |t| matches!(t, Target::TreeArrow(_)), "tree arrow");
+        let src = tree_path("src");
+        let before = tree_paths(&mut state).len();
         let dir_before = state.current_dir.clone();
+        let at = tree_spot(&mut state, |hit| {
+            *hit == guitk::treeview::TreeHit::Disclosure(src.clone())
+        });
         assert_eq!(click(&mut state, at), Action::Redraw);
-        assert_ne!(
-            state.tree_rows().len(),
-            before,
-            "the arrow did not change the tree"
-        );
+        assert!(state.tree.is_expanded(&src), "the arrow did not open src");
+        assert!(tree_paths(&mut state).contains(&tree_path("src/utils")));
+        assert!(tree_paths(&mut state).len() > before);
         assert_eq!(
             state.current_dir, dir_before,
-            "the arrow navigated as well as expanding"
+            "the arrow showed the folder as well as opening it"
+        );
+        let at = tree_spot(&mut state, |hit| {
+            *hit == guitk::treeview::TreeHit::Disclosure(src.clone())
+        });
+        click(&mut state, at);
+        assert!(
+            !state.tree.is_expanded(&src),
+            "a second click did not close it"
         );
     }
 
+    /// **A click on a folder shows it**, leaving what is open as it was, and
+    /// gives the pane the keys.
     #[test]
-    fn the_tree_row_navigates_without_collapsing() {
+    fn a_click_on_a_folder_shows_it() {
         let mut state = loaded();
-        // Row 0 is the archive itself; find a row that names a directory.
-        let frame = build_frame(&state, SIZE.0, SIZE.1);
-        let rows = state.tree_rows();
-        let (target, rect) = frame
-            .hits()
-            .iter()
-            .find(|(t, _)| matches!(t, Target::TreeRow(i) if rows.get(*i).is_some_and(|r| !r.path.is_empty())))
-            .expect("no directory row in the tree");
-        let Target::TreeRow(i) = *target else {
-            panic!("find matched a non-row")
-        };
-        let want = rows.get(i).expect("row").path.clone();
-        let before = state.tree_rows().len();
-        // Click well right of the arrow so the arrow's box cannot claim it.
-        let at = (rect.x + rect.w - 4.0, rect.y + rect.h / 2.0);
+        let docs = tree_path("docs");
+        let before = tree_paths(&mut state).len();
+        let at = tree_spot(&mut state, |hit| {
+            *hit == guitk::treeview::TreeHit::Row(docs.clone())
+        });
         assert_eq!(click(&mut state, at), Action::Redraw);
-        assert_eq!(state.current_dir, want);
-        assert_eq!(state.tree_rows().len(), before, "navigating also collapsed");
+        assert_eq!(state.current_dir, "docs");
+        assert_eq!(state.tree.selected(), Some(docs.as_slice()));
+        assert_eq!(
+            tree_paths(&mut state).len(),
+            before,
+            "showing the folder opened or closed something"
+        );
+        assert!(
+            state.tree_has_keys,
+            "the pane clicked did not take the keys"
+        );
+    }
+
+    /// **F6 gives the folder pane the keys**: Down moves to the next folder
+    /// and shows it, Right opens it. F6 again gives them back to the list,
+    /// whose Down no longer moves the pane. The pane had no keys at all.
+    #[test]
+    fn f6_gives_the_folder_pane_the_keys() {
+        let mut state = loaded();
+        let paths = tree_paths(&mut state);
+        assert_eq!(state.tree.selected(), Some(paths[0].as_slice()));
+        assert_eq!(state.handle_key(&key(Key::F6), SIZE), Action::Redraw);
+        assert!(state.tree_has_keys);
+        assert_eq!(state.handle_key(&key(Key::Down), SIZE), Action::Redraw);
+        assert_eq!(state.current_dir, "src");
+        state.handle_key(&key(Key::Right), SIZE);
+        assert!(
+            state.tree.is_expanded(&tree_path("src")),
+            "Right did not open src"
+        );
+
+        assert_eq!(state.handle_key(&key(Key::F6), SIZE), Action::Redraw);
+        assert!(!state.tree_has_keys);
+        state.handle_key(&key(Key::Down), SIZE);
+        assert_eq!(
+            state.tree.selected(),
+            Some(tree_path("src").as_slice()),
+            "the list's Down moved the pane"
+        );
+    }
+
+    /// **A folder shown some other way is chosen in the pane**, the folders
+    /// above it opened -- and Back and Forward keep it in step.
+    #[test]
+    fn a_folder_shown_another_way_is_chosen_in_the_pane() {
+        let mut state = loaded();
+        tree_paths(&mut state);
+        state.navigate_to("src/utils");
+        assert_eq!(
+            state.tree.selected(),
+            Some(tree_path("src/utils").as_slice())
+        );
+        assert!(
+            state.tree.is_expanded(&tree_path("src")),
+            "src was not opened"
+        );
+        assert!(state.navigate_back());
+        assert_eq!(state.tree.selected(), Some(tree_path("").as_slice()));
+        assert!(state.navigate_forward());
+        assert_eq!(
+            state.tree.selected(),
+            Some(tree_path("src/utils").as_slice())
+        );
+    }
+
+    /// **The wheel over the folder pane scrolls it**, not the list: a pane
+    /// with more folders than fit.
+    #[test]
+    fn the_wheel_over_the_folder_pane_scrolls_it() {
+        let mut state = loaded();
+        let archive = state.archive.as_mut().expect("loaded");
+        for i in 0..60 {
+            archive
+                .tree
+                .get_or_create_child(&format!("more{i:02}"), &format!("more{i:02}"));
+        }
+        let paths = tree_paths(&mut state);
+        assert!(paths.len() > state.tree.capacity(), "nothing to scroll");
+        let list_before = state.list_scroll_y;
+        let at = tree_spot(&mut state, |hit| {
+            matches!(hit, guitk::treeview::TreeHit::Row(_))
+        });
+        let wheel = MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        };
+        assert_eq!(
+            state.handle_event(&Event::Mouse(wheel), SIZE),
+            Action::Redraw
+        );
+        assert!(state.tree.first_visible() > 0, "the pane did not scroll");
+        assert!(
+            (state.list_scroll_y - list_before).abs() < f32::EPSILON,
+            "the list scrolled under the pane"
+        );
     }
 
     #[test]
@@ -5929,6 +6281,43 @@ mod tests {
         );
     }
 
+    /// A 7z opens and can be extracted and tested, but this build does not
+    /// write one: Add and Delete are dead, say why, and leave the file and
+    /// its rows alone.
+    #[test]
+    fn a_7z_opens_read_only() {
+        let dir = write_scratch("7z-read-only");
+        let path = dir.join("real.7z");
+        std::fs::write(&path, include_bytes!("../tests/data/real.7z")).expect("write the fixture");
+        let mut state = AppState::default();
+        assert!(state.open_path(&path), "{}", state.status_message);
+        let rows = state.archive.as_ref().expect("archive").entries.len();
+        for entry in &mut state.archive.as_mut().expect("archive").entries {
+            entry.selected = true;
+        }
+        for action in [
+            ToolbarAction::ExtractAll,
+            ToolbarAction::ExtractSelected,
+            ToolbarAction::Test,
+        ] {
+            assert!(toolbar_enabled(&state, action), "{action:?}");
+        }
+        assert!(!toolbar_enabled(&state, ToolbarAction::Add));
+        assert!(!toolbar_enabled(&state, ToolbarAction::Delete));
+        let before = std::fs::read(&path).expect("read the fixture");
+        state.run_toolbar(ToolbarAction::Delete);
+        assert!(
+            state
+                .status_message
+                .contains("reads .7z files and does not write them"),
+            "status was {:?}",
+            state.status_message
+        );
+        assert_eq!(std::fs::read(&path).expect("read it back"), before);
+        assert_eq!(state.archive.as_ref().expect("archive").entries.len(), rows);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The file manager opens an archive here by naming it on the command
     /// line. One window holds one archive: a second named is said not to have
     /// been opened, and nothing named leaves the window empty and saying so.
@@ -6062,12 +6451,7 @@ mod tests {
         assert!(!state.sidebar_visible);
         // And the tree really stops being drawn, not just the flag flipping.
         let frame = build_frame(&state, SIZE.0, SIZE.1);
-        assert!(
-            !frame
-                .hits()
-                .iter()
-                .any(|(t, _)| matches!(t, Target::TreeRow(_)))
-        );
+        assert!(!frame.hits().iter().any(|(t, _)| matches!(t, Target::Tree)));
         state.handle_key(&ctrl(Key::B), SIZE);
         assert!(state.sidebar_visible);
     }

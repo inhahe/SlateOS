@@ -1,0 +1,12 @@
+[package]
+name = "statehistory"
+version = "0.1.0"
+edition = "2024"
+description = "An undo history of whole states, kept as the toolkit's tree"
+
+[dependencies]
+# The tree itself: `UndoHistory`, and `Travel` for its journeys in time.
+guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

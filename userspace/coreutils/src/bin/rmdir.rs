@@ -111,6 +111,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
+coreutils::guard_std_fds!();
+
 /// `rmdir`'s usage status is 1 — measured: `rmdir -q x; echo $?` prints 1.
 const RMDIR: Program = Program::new("rmdir", 1);
 
@@ -153,23 +155,29 @@ enum Request {
     Run(RmdirFlags, Vec<OsString>),
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- an output or
+/// a diagnostic that did not arrive is status 1, as `rmdir: write error:
+/// ...` for the first. The descriptor guard is what lets a closed one be seen
+/// at all; the runtime used to answer it with a quiet `/dev/null`. See
+/// [`stdfd::close_stdout`].
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout("rmdir", out, earned)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args, getopt::posixly_correct()) {
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            // Never an error: the stream records it for the funnel.
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Ok(Request::Version) => {
-            println!("rmdir (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"rmdir (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, dirs)) => {
@@ -240,9 +248,8 @@ fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, getop
             // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
             only_operands = posixly_correct;
         } else if let Some(body) = bytes.strip_prefix(b"--") {
-            match parse_long(body, &bytes, &mut flags)? {
-                Some(request) => return Ok(request),
-                None => continue,
+            if let Some(request) = parse_long(body, &bytes, &mut flags)? {
+                return Ok(request);
             }
         } else {
             // Bytes, not `char`s. `-é` is two bytes in UTF-8, and iterating

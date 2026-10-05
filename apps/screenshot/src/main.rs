@@ -16,11 +16,16 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::dialog::{FileDialog, FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::theme::with_alpha;
 #[allow(unused_imports)]
 use oswindow::app::{self, App, Response};
@@ -41,6 +46,16 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_SPACING: f32 = 8.0;
 const ANNOTATION_TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
+/// The strip a text annotation is typed in, above the status bar.
+const TEXT_STRIP_HEIGHT: f32 = 30.0;
+/// Where the text annotation's box begins, after its "Text:" label.
+const TEXT_BOX_X: f32 = 52.0;
+/// The size the text annotation's box draws its text at.
+const TEXT_BOX_SIZE: f32 = 13.0;
+/// How far the box's text sits in from its left and right edges.
+const TEXT_BOX_INSET: f32 = 6.0;
+/// The most characters a text annotation holds.
+const TEXT_CAPACITY: usize = 256;
 
 // A scrim over the captured image, and black on purpose: it darkens whatever
 // was on screen, which is not the theme's to tint. `palette_check` exempts
@@ -849,6 +864,19 @@ pub struct ScreenshotApp {
     pub pending_annotation: Option<Annotation>,
     /// Text being typed for a text annotation.
     pub annotation_text_input: String,
+    /// The text box's caret and selection, laid over
+    /// `annotation_text_input`, which stays the truth.
+    annotation_text_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the text box, for Ctrl+V.
+    annotation_text_clipboard: String,
+    /// Whether the text box has the keyboard: from choosing the text tool --
+    /// or a press on the box -- until Escape on an empty box gives the
+    /// keyboard back to the tool keys.
+    pub annotation_text_focused: bool,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
 
     /// Application settings.
     pub settings: Settings,
@@ -892,6 +920,10 @@ impl ScreenshotApp {
             annotations: Vec::new(),
             pending_annotation: None,
             annotation_text_input: String::new(),
+            annotation_text_editor: TextInput::new(),
+            annotation_text_clipboard: String::new(),
+            annotation_text_focused: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             settings: Settings::default(),
             notification: None,
             hovered_button: None,
@@ -1174,7 +1206,94 @@ impl ScreenshotApp {
         self.current_saved_path = None;
         self.annotations.clear();
         self.pending_annotation = None;
+        self.annotation_text_input.clear();
+        self.annotation_text_focused = false;
         self.view = AppView::Menu;
+    }
+
+    /// Choose annotation tool `tool`. The text tool gives its box the
+    /// keyboard, the caret after what it holds; any other takes it away.
+    pub fn choose_tool(&mut self, tool: AnnotationTool) {
+        self.annotation_tool = tool;
+        self.annotation_text_focused = tool == AnnotationTool::Text;
+        if self.annotation_text_focused {
+            let text = self.annotation_text_input.clone();
+            self.annotation_text_editor.set_text(&text);
+        }
+    }
+
+    /// Where the text annotation's box is drawn, and pressed: in the strip
+    /// above the status bar, while the text tool is chosen on a picture.
+    pub fn text_box_rect(&self) -> Option<Rect> {
+        if self.view != AppView::Preview || self.annotation_tool != AnnotationTool::Text {
+            return None;
+        }
+        let strip_y = self.window_height - STATUS_BAR_HEIGHT - TEXT_STRIP_HEIGHT;
+        Some(Rect::new(
+            TEXT_BOX_X,
+            strip_y + 3.0,
+            (self.window_width - TEXT_BOX_X - 10.0).max(0.0),
+            TEXT_STRIP_HEIGHT - 6.0,
+        ))
+    }
+
+    /// Where the text box's caret is drawn: the editor's, or the end of the
+    /// text if the text changed under the editor.
+    fn text_box_cursor(&self) -> TextCursor {
+        if self.annotation_text_editor.text() == self.annotation_text_input {
+            self.annotation_text_editor.cursor()
+        } else {
+            TextCursor::from(self.annotation_text_input.len())
+        }
+    }
+
+    /// `event` in the text box, which has the keyboard: a field's keys
+    /// (`textline::apply_key`), the text written back when the key changed
+    /// it. Returns whether the key was the box's.
+    fn edit_annotation_text(&mut self, event: &KeyEvent) -> bool {
+        if self.annotation_text_editor.text() != self.annotation_text_input {
+            let text = self.annotation_text_input.clone();
+            self.annotation_text_editor.set_text(&text);
+        }
+        let edit = textline::apply_key(
+            &mut self.annotation_text_editor,
+            event,
+            TEXT_CAPACITY,
+            &self.annotation_text_clipboard,
+            TEXT_BOX_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.annotation_text_clipboard = copied;
+        }
+        if self.annotation_text_editor.text() != self.annotation_text_input {
+            self.annotation_text_input = self.annotation_text_editor.text().to_owned();
+        }
+        edit.handled
+    }
+
+    /// A press in the text box at `x`: it takes the keyboard, the caret under
+    /// the pointer.
+    fn press_text_box(&mut self, rect: Rect, x: f32) {
+        let drawn = if self.annotation_text_focused {
+            self.text_box_cursor()
+        } else {
+            TextCursor::default()
+        };
+        self.annotation_text_focused = true;
+        if self.annotation_text_editor.text() != self.annotation_text_input {
+            let text = self.annotation_text_input.clone();
+            self.annotation_text_editor.set_text(&text);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.annotation_text_input,
+            drawn,
+            (rect.w - 2.0 * TEXT_BOX_INSET).max(0.0),
+            TEXT_BOX_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - TEXT_BOX_INSET,
+        );
+        self.annotation_text_editor.set_selection_anchor(None);
+        self.annotation_text_editor.set_cursor(cursor);
     }
 
     // ========================================================================
@@ -1235,14 +1354,15 @@ impl ScreenshotApp {
     ///
     /// `Some` when the card took the keystroke, `None` to let the view have it.
     fn handle_help_key(&mut self, event: &KeyEvent) -> Option<bool> {
-        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+        let plain = textline::is_plain(event.modifiers);
+        if plain && (event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift)) {
             self.show_help = !self.show_help;
             return Some(true);
         }
         if self.show_help {
             // Modal. Letting keys through would mean discarding an image the
             // reader cannot see.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return Some(true);
@@ -1251,6 +1371,18 @@ impl ScreenshotApp {
     }
 
     fn handle_key_menu(&mut self, event: &KeyEvent) -> bool {
+        // PrintScreen is read with what is held, as on every desktop -- but
+        // not with the Windows key, whose chord is the desktop's own.
+        if event.key == Key::PrintScreen && event.modifiers.super_key {
+            return false;
+        }
+        // The rest are keys taken plain, nothing held but Shift: a chord with
+        // Ctrl, Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+1 took a picture of the screen, and
+        // Alt+Escape closed the window.
+        if event.key != Key::PrintScreen && !textline::is_plain(event.modifiers) {
+            return false;
+        }
         // Global hotkeys for capture modes.
         match event.key {
             Key::PrintScreen => {
@@ -1300,7 +1432,7 @@ impl ScreenshotApp {
     }
 
     fn handle_key_region(&mut self, event: &KeyEvent) -> bool {
-        if event.key == Key::Escape {
+        if event.key == Key::Escape && textline::is_plain(event.modifiers) {
             self.region_selector.cancel();
             self.view = AppView::Menu;
             return true;
@@ -1309,7 +1441,7 @@ impl ScreenshotApp {
     }
 
     fn handle_key_countdown(&mut self, event: &KeyEvent) -> bool {
-        if event.key == Key::Escape {
+        if event.key == Key::Escape && textline::is_plain(event.modifiers) {
             self.countdown_remaining = 0;
             self.view = AppView::Menu;
             return true;
@@ -1318,54 +1450,88 @@ impl ScreenshotApp {
     }
 
     fn handle_key_preview(&mut self, event: &KeyEvent) -> bool {
+        // Ctrl's chords, a Ctrl chord and not Ctrl held: AltGr arrives as
+        // Ctrl+Alt, and AltGr+Z -- a Polish `ż` -- undid an annotation
+        // instead of typing into one.
+        if textline::is_ctrl_chord(event.modifiers) {
+            return match event.key {
+                Key::S => {
+                    self.save_current_notifying();
+                    true
+                }
+                Key::Z => {
+                    self.undo_annotation();
+                    true
+                }
+                // Ctrl+A, C, X and V are the text box's, while it has the
+                // keyboard.
+                _ => self.annotation_text_focused && self.edit_annotation_text(event),
+            };
+        }
+        // The text box, while it has the keyboard, takes every key it
+        // answers -- the digits among them, which choose a tool otherwise:
+        // `2nd floor` turned its `2` into the arrow tool. Escape, plain,
+        // empties a text that has something in it, and on an empty one gives
+        // the keyboard back to the tool keys: it threw the whole picture away.
+        if self.annotation_text_focused && self.annotation_tool == AnnotationTool::Text {
+            if event.key == Key::Escape && textline::is_plain(event.modifiers) {
+                if self.annotation_text_input.is_empty() {
+                    self.annotation_text_focused = false;
+                } else {
+                    self.annotation_text_input.clear();
+                }
+                return true;
+            }
+            if self.edit_annotation_text(event) {
+                return true;
+            }
+        }
+        // The other keys are taken plain; anything else held with one is the
+        // window's or the desktop's -- Alt+Escape threw the picture away --
+        // and goes on to the text being typed only if it typed.
+        let plain = textline::is_plain(event.modifiers);
         match event.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.discard_current();
                 true
             }
-            Key::S if event.modifiers.ctrl => {
-                self.save_current_notifying();
+            Key::Num1 if plain => {
+                self.choose_tool(AnnotationTool::Rectangle);
                 true
             }
-            Key::Z if event.modifiers.ctrl => {
-                self.undo_annotation();
+            Key::Num2 if plain => {
+                self.choose_tool(AnnotationTool::Arrow);
                 true
             }
-            Key::Num1 => {
-                self.annotation_tool = AnnotationTool::Rectangle;
+            Key::Num3 if plain => {
+                self.choose_tool(AnnotationTool::Text);
                 true
             }
-            Key::Num2 => {
-                self.annotation_tool = AnnotationTool::Arrow;
+            Key::Num4 if plain => {
+                self.choose_tool(AnnotationTool::Highlight);
                 true
             }
-            Key::Num3 => {
-                self.annotation_tool = AnnotationTool::Text;
-                true
-            }
-            Key::Num4 => {
-                self.annotation_tool = AnnotationTool::Highlight;
-                true
-            }
-            _ => {
-                // Capture text input for text annotation tool.
-                if self.annotation_tool == AnnotationTool::Text {
-                    if event.types_text() {
-                        self.annotation_text_input.extend(event.typed());
-                        return true;
-                    }
-                    if event.key == Key::Backspace && !self.annotation_text_input.is_empty() {
-                        self.annotation_text_input.pop();
-                        return true;
-                    }
-                }
-                false
-            }
+            _ => false,
         }
     }
 
     /// Handle mouse events.
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything but the Save dialog (which has the event
+        // first): a press with any button puts it away and does nothing else
+        // -- it used to start a capture, begin a region, or draw on the
+        // picture under it. A move or a release is not a press, and passes,
+        // so a drag begun before the list came up still ends.
+        if self.show_help
+            && matches!(
+                event.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return true;
+        }
         match self.view {
             AppView::Menu => self.handle_mouse_menu(event),
             AppView::RegionSelect => self.handle_mouse_region(event),
@@ -1435,6 +1601,12 @@ impl ScreenshotApp {
                         return true;
                     }
                     return false;
+                }
+                if let Some(rect) = self.text_box_rect()
+                    && rect.contains(event.x, event.y)
+                {
+                    self.press_text_box(rect, event.x);
+                    return true;
                 }
                 let draw_x = event.x;
                 let draw_y = event.y - content_y;
@@ -1599,7 +1771,7 @@ impl ScreenshotApp {
                 });
             }
             PreviewButton::Discard => self.discard_current(),
-            PreviewButton::Tool(tool) => self.annotation_tool = tool,
+            PreviewButton::Tool(tool) => self.choose_tool(tool),
             PreviewButton::Undo => self.undo_annotation(),
         }
     }
@@ -1862,6 +2034,63 @@ impl ScreenshotApp {
         );
     }
 
+    /// The text box's text -- what is typed, or what the box is for, faint,
+    /// while it is empty -- and, with the keyboard, its caret and selection.
+    /// An empty box with the keyboard draws the caret before what it is for,
+    /// as the toolkit's own input dialog does.
+    fn render_text_box_text(&self, tree: &mut RenderTree, rect: Rect, focused: bool) {
+        let line = text::line_height(TEXT_BOX_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + TEXT_BOX_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * TEXT_BOX_INSET).max(0.0),
+        );
+        if self.annotation_text_input.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: "Type the text, then click where it goes".to_owned(),
+                color: self.palette.subtext0,
+                font_size: TEXT_BOX_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(tree, x, y, line, self.palette.text, textedit::CARET_WIDTH);
+            }
+            return;
+        }
+        let editing = self.annotation_text_editor.text() == self.annotation_text_input;
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: &self.annotation_text_input,
+                cursor: if focused {
+                    self.text_box_cursor()
+                } else {
+                    TextCursor::default()
+                },
+                selection_anchor: if focused && editing {
+                    self.annotation_text_editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused,
+                x,
+                y,
+                width,
+                line_height: line,
+                font_size: TEXT_BOX_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+
     fn render_preview(&self, tree: &mut RenderTree) {
         // Background.
         tree.fill_rect(
@@ -1962,18 +2191,33 @@ impl ScreenshotApp {
         }
         tree.untranslate();
 
-        // Text input indicator for text tool.
-        if self.annotation_tool == AnnotationTool::Text && !self.annotation_text_input.is_empty() {
-            let input_y = self.window_height - STATUS_BAR_HEIGHT - 30.0;
+        // The text annotation's box, while the text tool is chosen: the
+        // toolkit's field, with a caret. It was a bar reading `Text: a_` that
+        // appeared only once something was typed.
+        if let Some(rect) = self.text_box_rect() {
+            let strip_y = self.window_height - STATUS_BAR_HEIGHT - TEXT_STRIP_HEIGHT;
             tree.fill_rect(
                 0.0,
-                input_y,
+                strip_y,
                 self.window_width,
-                30.0,
+                TEXT_STRIP_HEIGHT,
                 Color::rgba(0, 0, 0, 180),
             );
-            let display = format!("Text: {}_", self.annotation_text_input);
-            tree.text(10.0, input_y + 7.0, &display, self.palette.text, 13.0);
+            tree.text(
+                10.0,
+                strip_y + 8.0,
+                "Text:",
+                self.palette.text,
+                TEXT_BOX_SIZE,
+            );
+            let state = field::State {
+                hovered: false,
+                focused: self.annotation_text_focused && !self.show_help && !self.picker.is_open(),
+                disabled: false,
+                invalid: false,
+            };
+            field::draw(tree, &self.palette, rect, state, self.focus_ring_width);
+            self.render_text_box_text(tree, rect, state.focused);
         }
 
         // Status bar.
@@ -2457,6 +2701,10 @@ impl App for ScreenshotApp {
     /// Adopt the user's colours (§822).
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -2990,13 +3238,429 @@ mod tests {
         })
     }
 
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else.** On the menu it started the capture under the list; on a
+    /// picture it began an annotation there. The controls are the same presses
+    /// with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        });
+        let right = |x: f32, y: f32| {
+            Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Right),
+            })
+        };
+
+        // The menu's Region button.
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        let i = menu_modes()
+            .iter()
+            .position(|m| *m == CaptureMode::Region)
+            .expect("a Region button");
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = (
+            20.0 + i as f32 * (BUTTON_WIDTH + BUTTON_SPACING) + BUTTON_WIDTH / 2.0,
+            TOOLBAR_HEIGHT + 40.0 + BUTTON_HEIGHT / 2.0,
+        );
+        assert_eq!(app.button_hit_test(x, y), Some(i));
+        app.handle_event(&f1);
+        assert!(app.show_help);
+        assert!(app.handle_event(&click(x, y)));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.view,
+            AppView::Menu,
+            "the press started a capture under the list"
+        );
+        app.handle_event(&f1);
+        app.handle_event(&right(x, y));
+        assert!(!app.show_help, "a right-button press left the list up");
+        app.handle_event(&click(x, y));
+        assert_eq!(
+            app.view,
+            AppView::RegionSelect,
+            "control: the press starts nothing even with the list down"
+        );
+
+        // The picture.
+        let mut app = app_in_preview();
+        let below = TOOLBAR_HEIGHT + ANNOTATION_TOOLBAR_HEIGHT + 40.0;
+        app.handle_event(&f1);
+        app.handle_event(&click(40.0, below));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert!(
+            app.pending_annotation.is_none(),
+            "the press began an annotation under the list"
+        );
+        app.handle_event(&click(40.0, below));
+        assert!(
+            app.pending_annotation.is_some(),
+            "control: the press begins nothing even with the list down"
+        );
+    }
+
     /// An app sitting in the preview view with a plain blue capture loaded.
+    /// `text`, typed a character at a time.
+    fn type_text(app: &mut ScreenshotApp, text: &str) {
+        for ch in text.chars() {
+            app.handle_key(&KeyEvent {
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            });
+        }
+    }
+
+    /// **A text annotation takes a digit, and Escape abandons the text, not
+    /// the picture** (known-issues
+    /// E-the-screenshot-tools-text-annotation-cannot-take-a-digit-and-escape-throws-the-picture-away).
+    /// The digits chose a tool whatever was being typed -- `2nd floor` turned
+    /// its `2` into the arrow tool -- and Escape threw the capture away. With
+    /// the text box's keyboard given back (Escape on an empty box), the
+    /// digits and Escape mean what they did.
+    #[test]
+    fn a_text_annotation_takes_digits_and_escape_abandons_only_the_text() {
+        let mut app = app_in_preview();
+        app.handle_key(&key(Key::Num3));
+        assert_eq!(
+            app.annotation_tool,
+            AnnotationTool::Text,
+            "control: 3 is the text tool"
+        );
+        // Typed with their keys, as a keyboard sends them.
+        for (k, ch) in [(Key::Num2, '2'), (Key::N, 'n'), (Key::D, 'd')] {
+            app.handle_key(&KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            });
+        }
+        assert_eq!(app.annotation_text_input, "2nd", "a digit did not type");
+        assert_eq!(
+            app.annotation_tool,
+            AnnotationTool::Text,
+            "a digit chose a tool"
+        );
+
+        app.handle_key(&key(Key::Escape));
+        assert_eq!(
+            app.annotation_text_input, "",
+            "Escape did not abandon the text"
+        );
+        assert!(
+            app.current_capture.is_some(),
+            "Escape threw the picture away"
+        );
+        assert!(
+            app.annotation_text_focused,
+            "Escape on a text gave up the keyboard"
+        );
+
+        // On an empty box, Escape gives the keyboard back: the digits choose
+        // tools again, and Escape again discards.
+        app.handle_key(&key(Key::Escape));
+        assert!(
+            !app.annotation_text_focused,
+            "Escape on an empty box kept the keyboard"
+        );
+        assert!(
+            app.current_capture.is_some(),
+            "Escape on an empty box threw the picture away"
+        );
+        app.handle_key(&key(Key::Num2));
+        assert_eq!(
+            app.annotation_tool,
+            AnnotationTool::Arrow,
+            "control: 2 is the arrow"
+        );
+
+        // A text placed by a press on the picture empties the box, which
+        // keeps the keyboard for the next one.
+        app.handle_key(&key(Key::Num3));
+        type_text(&mut app, "a");
+        let content_y = TOOLBAR_HEIGHT + ANNOTATION_TOOLBAR_HEIGHT;
+        app.handle_event(&click(40.0, content_y + 20.0));
+        assert_eq!(
+            app.annotations.last().map(|a| a.text.as_str()),
+            Some("a"),
+            "the press placed no text"
+        );
+        assert_eq!(
+            app.annotation_text_input, "",
+            "the placed text stayed in the box"
+        );
+        assert!(
+            app.annotation_text_focused,
+            "placing a text gave up the keyboard"
+        );
+
+        app.handle_key(&key(Key::Escape));
+        app.handle_key(&key(Key::Escape));
+        assert!(
+            app.current_capture.is_none(),
+            "control: Escape discards a picture"
+        );
+    }
+
+    /// **The text annotation's box is the toolkit's field**: shown while the
+    /// text tool is chosen, with the keyboard's mark at the user's width --
+    /// not under the list of keys, and not once the keyboard is given back --
+    /// the caret before what it is for while empty and after what is typed,
+    /// a press that puts the caret under the pointer and takes the keyboard
+    /// back, and the field's keys. It was a bar reading `Text: a_`, drawn only
+    /// once something was typed.
+    #[test]
+    fn the_text_box_is_the_toolkits_field() {
+        let mut app = app_in_preview();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        assert_eq!(
+            app.text_box_rect(),
+            None,
+            "a text box without the text tool"
+        );
+        app.handle_key(&key(Key::Num3));
+        let rect = app.text_box_rect().expect("the text tool shows no box");
+        let draws = |app: &ScreenshotApp, state: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = app.render_tree().commands;
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let carets = |app: &ScreenshotApp| -> Vec<f32> {
+            app.render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { x1, y1, x2, y2, .. }
+                        if (*x1 - *x2).abs() < f32::EPSILON
+                            && rect.contains(*x1, *y1)
+                            && rect.contains(*x2, *y2) =>
+                    {
+                        Some(*x1)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        let start = rect.x + TEXT_BOX_INSET;
+        assert!(draws(&app, focused), "the text box has no keyboard mark");
+        assert_eq!(
+            carets(&app),
+            vec![start],
+            "the empty box has no caret at its start"
+        );
+
+        type_text(&mut app, "abc");
+        let end = start + text::measure("abc", TEXT_BOX_SIZE, FontWeightHint::Regular);
+        let at = carets(&app);
+        assert!(
+            at.len() == 1 && (at[0] - end).abs() < 0.5,
+            "the caret is not after what was typed: {at:?}, not {end}"
+        );
+        app.handle_event(&click(start + 1.0, rect.y + rect.h / 2.0));
+        type_text(&mut app, "X");
+        assert_eq!(
+            app.annotation_text_input, "Xabc",
+            "the caret is not where the press was"
+        );
+        app.handle_key(&ctrl(Key::A));
+        app.handle_key(&ctrl(Key::X));
+        assert_eq!(
+            app.annotation_text_input, "",
+            "Ctrl+A and Ctrl+X did not cut"
+        );
+        app.handle_key(&ctrl(Key::V));
+        assert_eq!(
+            app.annotation_text_input, "Xabc",
+            "Ctrl+V did not paste what was cut"
+        );
+
+        app.handle_key(&key(Key::F1));
+        assert!(
+            draws(&app, idle),
+            "the text box keeps its mark under the list of keys"
+        );
+        app.handle_key(&key(Key::F1));
+
+        // Given back with Escape on an empty box, the mark goes; a press on
+        // the box takes the keyboard back.
+        app.handle_key(&key(Key::Escape));
+        app.handle_key(&key(Key::Escape));
+        assert!(
+            draws(&app, idle),
+            "the box keeps its mark without the keyboard"
+        );
+        app.handle_event(&click(start + 1.0, rect.y + rect.h / 2.0));
+        assert!(
+            app.annotation_text_focused,
+            "a press on the box did not take the keyboard"
+        );
+        type_text(&mut app, "7");
+        assert_eq!(
+            app.annotation_text_input, "7",
+            "the box did not take the typing back"
+        );
+    }
+
     fn app_in_preview() -> ScreenshotApp {
         let mut app = ScreenshotApp::new(800.0, 600.0);
         app.settings.default_action = PostCaptureAction::Annotate;
         app.current_capture = Some(Capture::solid(100, 80, 0xFF0000FF));
         app.view = AppView::Preview;
         app
+    }
+
+    /// **A key held with Alt or the Windows key is not the capture tool's,
+    /// and AltGr+Z is not Ctrl+Z**: each such chord is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+3 began a capture,
+    /// Alt+Escape closed the window and, on a picture, threw it away, and
+    /// Alt+X typed an `x` into an annotation; and AltGr+Z, a Polish `ż`,
+    /// undid an annotation instead of typing.
+    ///
+    /// PrintScreen is the exception, read with Alt, Ctrl or Shift as every
+    /// desktop does -- but not with the Windows key, whose chord it is.
+    #[test]
+    fn a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+
+        // The menu.
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        for m in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [Key::Num1, Key::Num3, Key::Num5, Key::Escape, Key::F1] {
+                assert!(!app.handle_key(&chord(k, "", m)), "{m:?} {k:?} was taken");
+                assert_eq!(app.view, AppView::Menu, "{m:?} {k:?} began a capture");
+                assert!(app.notification.is_none(), "{m:?} {k:?} tried one");
+                assert!(app.running, "{m:?} {k:?} closed the window");
+                assert!(!app.show_help, "{m:?} {k:?} raised the list of keys");
+            }
+        }
+        // The list of keys goes on a plain Escape or Enter only.
+        assert!(app.handle_key(&key(Key::F1)), "control: F1 raises the list");
+        app.handle_key(&chord(Key::Escape, "", Modifiers::alt()));
+        app.handle_key(&chord(Key::Enter, "", Modifiers::super_key()));
+        assert!(app.show_help, "a chorded Escape or Enter put the list away");
+        app.handle_key(&key(Key::Escape));
+        assert!(!app.show_help, "control: Escape puts it away");
+        let print = |m: Modifiers| chord(Key::PrintScreen, "", m);
+        assert!(!app.handle_key(&print(Modifiers::super_key())));
+        assert!(
+            app.notification.is_none(),
+            "Windows+PrintScreen tried a capture"
+        );
+        assert!(app.handle_key(&print(Modifiers::ctrl())));
+        assert_eq!(
+            app.view,
+            AppView::RegionSelect,
+            "control: Ctrl+PrintScreen picks a region"
+        );
+        assert!(!app.handle_key(&chord(Key::Escape, "", Modifiers::alt())));
+        assert_eq!(app.view, AppView::RegionSelect, "Alt+Escape cancelled it");
+        assert!(app.handle_key(&key(Key::Escape)));
+
+        // A countdown.
+        app.handle_key(&key(Key::Num5));
+        assert_eq!(app.view, AppView::Countdown, "control: 5 counts down");
+        assert!(!app.handle_key(&chord(Key::Escape, "", Modifiers::alt())));
+        assert_eq!(app.view, AppView::Countdown, "Alt+Escape stopped it");
+        app.handle_key(&key(Key::Escape));
+
+        // A picture, with an annotation on it and a text being typed.
+        let mut app = app_in_preview();
+        app.annotations.push(Annotation::new(
+            AnnotationTool::Rectangle,
+            1.0,
+            1.0,
+            app.annotation_color,
+        ));
+        app.handle_key(&key(Key::Num3));
+        assert!(
+            app.annotation_text_focused,
+            "control: 3 gives the text box the keyboard"
+        );
+        app.handle_key(&chord(Key::A, "a", Modifiers::NONE));
+        // Backspace with AltGr deletes, as Ctrl+Backspace does: only Alt's
+        // and the Windows key's are not the text's.
+        let keys = |m: Modifiers| {
+            let mut keys = vec![Key::Escape, Key::Num1, Key::F1];
+            if m != altgr {
+                keys.push(Key::Backspace);
+            }
+            keys
+        };
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in keys(m) {
+                app.handle_key(&chord(k, "", m));
+                assert!(app.current_capture.is_some(), "{m:?} {k:?} threw it away");
+                assert_eq!(app.annotations.len(), 1, "{m:?} {k:?} lost one");
+                assert_eq!(
+                    app.annotation_tool,
+                    AnnotationTool::Text,
+                    "{m:?} {k:?} changed the tool"
+                );
+                assert_eq!(app.annotation_text_input, "a", "{m:?} {k:?} edited");
+                assert!(!app.show_help, "{m:?} {k:?} raised the list of keys");
+            }
+        }
+        app.handle_key(&chord(Key::X, "x", Modifiers::alt()));
+        app.handle_key(&chord(Key::X, "x", Modifiers::super_key()));
+        app.handle_key(&chord(Key::Z, "ż", altgr));
+        assert_eq!(
+            app.annotation_text_input, "aż",
+            "the text typed a command's letter, or lost AltGr's"
+        );
+        assert_eq!(app.annotations.len(), 1, "AltGr+Z undid the annotation");
+        assert!(app.handle_key(&ctrl(Key::Z)));
+        assert!(app.annotations.is_empty(), "control: Ctrl+Z undoes it");
     }
 
     // ---- Saving must not overwrite another capture's file ----

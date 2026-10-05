@@ -349,7 +349,7 @@ pub fn split_entry(path: &Path) -> (PathBuf, OsString) {
     let end = bytes
         .iter()
         .rposition(|&b| b != b'/')
-        .map_or(bytes.len(), |i| i + 1);
+        .map_or(bytes.len(), |i| i.saturating_add(1));
     let head = bytes.get(..end).unwrap_or(bytes);
     match head.iter().rposition(|&b| b == b'/') {
         Some(cut) => {
@@ -385,7 +385,7 @@ pub fn split_entry(path: &Path) -> (PathBuf, OsString) {
     let end = wide
         .iter()
         .rposition(|&c| !sep(c))
-        .map_or(wide.len(), |i| i + 1);
+        .map_or(wide.len(), |i| i.saturating_add(1));
     let head = wide.get(..end).unwrap_or(&wide);
     match head.iter().rposition(|&c| sep(c)) {
         Some(cut) => {

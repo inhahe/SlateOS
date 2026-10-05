@@ -9,6 +9,9 @@ pathtext = { path = "../pathtext" }
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# Whether a key is a Ctrl chord, or Alt's or the Windows key's: the one
+# statement of each, where this file had its own.
+textline = { path = "../textline" }
 
 # The export replaces a file the user chose. `fs::write` truncates the
 # target before writing it.

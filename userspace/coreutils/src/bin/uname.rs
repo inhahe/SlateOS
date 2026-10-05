@@ -50,15 +50,16 @@
 
 use coreutils::diag;
 use coreutils::getopt::{Opt, Program, Takes};
-use coreutils::stdfd;
+use coreutils::stdfd::{self, Stream};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, ErrorKind, Write};
+use std::io::Write;
 use std::process::ExitCode;
 
-use coreutils::errmsg::strerror;
 use coreutils::quote::{os_bytes, quote};
+
+coreutils::guard_std_fds!();
 
 /// Kernel name, matching `sys_uname`'s `sysname`.
 const DEFAULT_KERNEL_NAME: &[u8] = b"Linux";
@@ -412,25 +413,16 @@ fn render(system: &System, selection: Selection) -> Vec<u8> {
 // Output
 // ============================================================================
 
-/// Write bytes and a newline, reporting a write failure instead of panicking.
-///
-/// `println!` panics when stdout cannot be written, so `uname -a | head -1`
-/// could end in a panic message. A closed pipe is the one write error that
-/// means success.
-fn write_line(bytes: &[u8]) -> u8 {
-    let mut out = io::stdout().lock();
-    let result = out
-        .write_all(bytes)
-        .and_then(|()| out.write_all(b"\n"))
-        .and_then(|()| out.flush());
-    match result {
-        Ok(()) => 0,
-        Err(e) if e.kind() == ErrorKind::BrokenPipe => 0,
-        Err(e) => {
-            diag!("uname: write error: {}", strerror(&e));
-            1
-        }
-    }
+/// Write bytes and a newline. A failure is the stream's to record and
+/// [`stdfd::close_stdout`]'s to report, at the end, as gnulib's
+/// `close_stdout` reports it: `uname: write error: ...`, status 1 -- for a
+/// full disk and, since the descriptor guard, for a closed descriptor, which
+/// the runtime used to answer with a quiet `/dev/null`. A closed pipe is the
+/// one failure that means success.
+fn write_line(out: &mut Stream, bytes: &[u8]) {
+    // Never an error: see above.
+    let _ = out.write_all(bytes);
+    let _ = out.write_all(b"\n");
 }
 
 fn usage() -> &'static str {
@@ -454,15 +446,17 @@ fn usage() -> &'static str {
      /proc/sys/kernel, so they always match uname(2)."
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- an output or
+/// a diagnostic that did not arrive is status 1. See [`stdfd::close_stdout`].
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout("uname", out, earned)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     // `args_os`, not `args`: `env::args()` unwraps `into_string()` and so
     // panics outright on an argument that is not UTF-8. An unusable option is
     // worth a diagnostic, not a crash.
@@ -476,12 +470,12 @@ fn run_main() -> ExitCode {
         }
     };
 
-    let status = match request {
-        Request::Help => write_line(usage().as_bytes()),
-        Request::Version => write_line(b"uname (SlateOS coreutils) 0.1.0"),
-        Request::Print(selection) => write_line(&render(&read_system(), selection)),
-    };
-    ExitCode::from(status)
+    match request {
+        Request::Help => write_line(out, usage().as_bytes()),
+        Request::Version => write_line(out, b"uname (SlateOS coreutils) 0.1.0"),
+        Request::Print(selection) => write_line(out, &render(&read_system(), selection)),
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

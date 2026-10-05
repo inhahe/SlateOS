@@ -1,0 +1,19 @@
+[package]
+name = "vp8"
+version = "0.1.0"
+edition = "2024"
+description = "A VP8 video decoder: libvpx's, ported to Rust and checked against its test vectors."
+# A derivative of libvpx: its BSD licence and patent grant are in `licenses/`,
+# and every file translated from it says which of libvpx's files it came from.
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+# The test vectors' frame fingerprints, as libvpx's `test/md5_helper.h`.
+md5 = { path = "../../../md5" }
+
+[lints]
+workspace = true

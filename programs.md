@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**451 programs; 88 on the image, 6 carried inside the kernel.**
+**452 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 296
+## Userland utilities and services (`userspace/`, lane B) -- 297
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -43,7 +43,7 @@ two disagree.
 | `chmod` | Change file mode bits. | yes | `coreutils` |  |
 | `chown` | Change file owner and group. | yes | `coreutils` |  |
 | `chpasswd` | Batch password change (chpasswd/passwd) |  |  |  |
-| `chroot` | Change Root Directory Utility |  |  |  |
+| `chroot` | Run a command with its root directory changed. |  | `coreutils` |  |
 | `cksum` | Print or verify checksums, by default POSIX's 32-bit CRC. |  | `coreutils` |  |
 | `cmp` | Compare two files byte by byte. | yes | `coreutils` |  |
 | `column` | Columnate lists, or lay input out as a table. |  |  |  |
@@ -58,7 +58,6 @@ two disagree.
 | `curl` | HTTP/HTTPS Client Utility |  |  |  |
 | `cut` | Print selected parts of lines. | yes | `coreutils` |  |
 | `date` | Print or set the system date and time. | yes | `coreutils` |  |
-| `dbus` | D-Bus Message Bus Daemon |  |  |  |
 | `dc` | Desk calculator (reverse Polish notation) |  |  |  |
 | `dd` | Convert and copy a file, with the operand syntax POSIX gave it in 1970 and the conversions GNU has accumulated since. | yes | `coreutils` |  |
 | `df` | Report file system disk space usage. | yes | `coreutils` |  |
@@ -85,14 +84,14 @@ two disagree.
 | `false` | Do nothing, unsuccessfully. | yes | `coreutils` |  |
 | `fdisk` | Partition table manipulator (GPT/MBR) |  |  |  |
 | `fetch` | HTTP fetch utility (wget/curl-like). | yes | `coreutils` |  |
-| `file` | File Type Identifier |  |  |  |
+| `file` | Determine the type of a file. |  |  |  |
 | `find` | Search for files in a directory hierarchy. | yes | `coreutils` |  |
 | `findfs` | Find a filesystem by label or UUID. |  |  |  |
 | `findmnt` | Find a filesystem. |  |  |  |
 | `finger` | User information lookup |  |  |  |
 | `fio` | A flexible I/O tester for SlateOS. |  |  |  |
 | `flock` | Manage file locks from shell scripts. |  |  |  |
-| `fmt` | `fmt` Utility -- Simple Text Formatter |  |  |  |
+| `fmt` | Fill and join lines into paragraphs of a given width. |  | `coreutils` |  |
 | `fold` | Wrap each input line to fit in a given width. | yes | `coreutils` |  |
 | `free` | Report the amount of free and used memory in the system. | yes | `coreutils` |  |
 | `fsck` | Filesystem Check and Repair Utility |  |  |  |
@@ -123,7 +122,7 @@ two disagree.
 | `indexer` | Background File Indexer |  |  |  |
 | `inetd` | Internet Super-Server Daemon (inetd) |  |  |  |
 | `inotifywait` | Filesystem event monitoring utility. |  | `inotify` | `inotifywatch` *(not installed)* |
-| `install` | Copy files and set attributes |  |  |  |
+| `install` | Copy files and set their attributes. |  | `coreutils` |  |
 | `iostat` | I/O Statistics Utility |  |  |  |
 | `ip` | Network Configuration Utility |  |  |  |
 | `ipcalc` | IP Subnet Calculator (`ipcalc`) |  |  |  |
@@ -142,7 +141,7 @@ two disagree.
 | `link` | Call the link function to create a link named FILE2 to FILE1. |  | `coreutils` |  |
 | `ln` | Create links between files. | yes | `coreutils` |  |
 | `localectl` | Locale and keyboard configuration. |  |  |  |
-| `lockfile` | Create semaphore files, as procmail's `lockfile(1)` does. |  |  |  |
+| `lockfile` | Procmail 3.24's `lockfile(1)`, ported. |  |  |  |
 | `logger` | Enter messages into the system log. | yes |  |  |
 | `login` | User login program |  |  |  |
 | `loginctl` | Slate OS session and user management |  |  |  |
@@ -171,7 +170,7 @@ two disagree.
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems |  |  |  |
 | `mknod` | Make block or character special files, or FIFOs. |  | `coreutils` |  |
-| `mktemp` | Multi-Personality Utility: mktemp / id / groups / whoami |  |  |  |
+| `mktemp` | Create a temporary file or directory, safely, and print its name. |  | `coreutils` |  |
 | `monctl` | Monitor/Display Control Utility |  |  |  |
 | `more` | File perusal filter for viewing text one screen at a time. | yes | `coreutils` |  |
 | `mount` | Mount/Umount Utility |  |  |  |
@@ -199,17 +198,18 @@ two disagree.
 | `paste` | Write corresponding lines of several files side by side. | yes | `coreutils` |  |
 | `patch` | Apply a diff file to originals. | yes | `coreutils` |  |
 | `pathchk` | Check whether file names are valid or portable. |  | `coreutils` |  |
-| `pgrep` | Process Grep / Kill Utility |  |  |  |
+| `pgrep` | Look up processes by name and other attributes. |  | `coreutils` |  |
 | `ping` | ICMP Ping Utility |  |  |  |
 | `pinky` | A lightweight `finger`: who is logged in, or what is known about named users. |  | `coreutils` |  |
 | `pkg` | Slate OS package manager. |  |  |  |
+| `pkill` | Signal processes chosen by name and other attributes. |  | `coreutils` |  |
 | `polkit` | PolicyKit Authorization Framework |  |  |  |
 | `powerctl` | Power Management Utility | yes |  |  |
 | `pr` | Paginate or columnate files for printing. |  | `coreutils` |  |
 | `printenv` | Print all or part of the environment. |  | `coreutils` |  |
 | `printf` | Format and print data. | yes | `coreutils` |  |
 | `prlimit` | Get and set process resource limits. |  |  |  |
-| `ps` | Report process status. | yes | `coreutils` |  |
+| `ps` | Report a snapshot of the current processes. | yes | `coreutils` |  |
 | `pstree` | Process tree display utilities. |  |  |  |
 | `ptx` | Produce a permuted index of file contents. |  | `coreutils` |  |
 | `pv` | Monitor data flowing through a pipe (pipe viewer). |  |  |  |
@@ -240,7 +240,7 @@ two disagree.
 | `sha512sum` | Print or check SHA-512 (512-bit) checksums. |  | `coreutils` |  |
 | `shell` | Toolchain validation program — exercises key std features to verify our custom Rust target and POSIX sysroot work correctly. |  |  |  |
 | `shred` | Overwrite files so their contents are harder to recover, and optionally delete them. |  | `coreutils` |  |
-| `shuf` | Randomly permute lines, or select random lines. |  |  |  |
+| `shuf` | Write a random permutation of the input lines. |  | `coreutils` |  |
 | `sleep` | Pause for a length of time. | yes | `coreutils` |  |
 | `sort` | Sort, merge or check lines of text. | yes | `coreutils` |  |
 | `split` | Split a file into pieces. | yes | `coreutils` |  |
@@ -251,7 +251,7 @@ two disagree.
 | `stat` | Display file or filesystem status. | yes | `coreutils` |  |
 | `strace` | Syscall Trace Utility |  |  |  |
 | `strings` | Print the printable character sequences in a file. | yes | `coreutils` |  |
-| `stty` | Terminal Settings Utility |  |  |  |
+| `stty` | Change and print terminal line settings. |  | `coreutils` |  |
 | `su` | User Switching Utility (`su`) |  |  |  |
 | `sudo` | Privileged Command Execution Utility |  |  | `sudoedit` *(not installed)* |
 | `sum` | Checksum and count the blocks in a file. |  | `coreutils` |  |
@@ -262,7 +262,7 @@ two disagree.
 | `sysinfo` | System Information Utility |  |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) |  |  |  |
 | `systemctl` | Multi-personality service management utility for SlateOS. |  |  | `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-path` *(not installed)* |
-| `tac` | Reverse line printer and character reverser for Slate OS |  |  |  |
+| `tac` | Write each file to standard output, last record first. |  | `coreutils` |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
 | `tar` | Tape archive utility. | yes | `coreutils` |  |
 | `tcpdump` | Network Packet Analyzer |  |  |  |
@@ -270,7 +270,7 @@ two disagree.
 | `telnet` | `Slate OS` Telnet Client |  |  |  |
 | `test` | Evaluate a conditional expression. | yes | `coreutils` |  |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
-| `timeout` | Run a command with a time limit, for Slate OS |  |  |  |
+| `timeout` | Run a command, and stop it if it is still running after a time limit. |  | `coreutils` |  |
 | `top` | Interactive Process Monitor |  |  |  |
 | `touch` | Create files, and set their access and modification times. | yes | `coreutils` |  |
 | `tput` | Terminal capability tools |  |  | `clear` *(not installed)*, `reset` *(not installed)*, `tset` *(not installed)* |
@@ -298,12 +298,13 @@ two disagree.
 | `vi` | Modal terminal text editor for SlateOS. |  |  |  |
 | `visudo` | Edit the sudoers file with syntax checking. |  | `sudo` |  |
 | `vmstat` | Virtual Memory Statistics Utility |  |  |  |
+| `w` | Show who is logged on and what they are doing. |  | `coreutils` |  |
 | `wall` | Terminal messaging utilities for Slate OS |  |  |  |
 | `watch` | Watch Utility -- Execute a Command Periodically |  |  |  |
 | `wc` | Line, word, character, byte and display-width counts. | yes | `coreutils` |  |
 | `wget` | HTTP File Download Utility |  |  |  |
 | `which` | Locate a command, the way GNU which 2.21 does. | yes | `coreutils` |  |
-| `who` | Logged-In Users Display (`who` / `w`) |  |  | `w` *(not installed)* |
+| `who` | Print information about users who are currently logged in. |  | `coreutils` |  |
 | `whoami` | Print the user name associated with the effective user ID. | yes | `coreutils` |  |
 | `whois` | WHOIS Lookup Utility |  |  |  |
 | `wipefs` | Wipe signatures from a device. |  |  |  |

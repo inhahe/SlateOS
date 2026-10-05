@@ -5,7 +5,8 @@
 gathered from the tree into the image (`design-decisions.md` §1433), not
 compiled into one program; what lane F is asked for is two manifests,
 `requests/c-abdef-third-party-code-needs-a-notices-manifest.md`. Reply at
-the end.
+the end. **Closed 2026-10-01:** lane F's manifests are written (see the
+reply in that request).
 
 ## In short
 

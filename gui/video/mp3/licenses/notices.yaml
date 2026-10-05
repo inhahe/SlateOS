@@ -1,0 +1,18 @@
+# The third-party code gui/video/mp3 carries (design-decisions 1433), read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate.
+
+# The decoder is minimp3's, translated: its frame sync, Layer I and II
+# dequantisation, Layer III side information, scale factors, Huffman
+# decoding, stereo processing, IMDCT and bit reservoir, its synthesis
+# filterbank (the scalar code), and its tables, converted from its source by
+# tools/tables.py. minimp3 is dedicated to the public domain (CC0 1.0); the
+# text travels with it all the same, as a record of where the code came
+# from. The test streams in tests/data are this project's own
+# (tests/data/generate_fixtures.py); minimp3's own test vectors, which the
+# ignored tests read, are fetched, not carried.
+minimp3:
+  version: minimp3 ea99364f61c14656440e8d77e9c233ccf3124633 (2022-06-25)
+  licence: CC0-1.0
+  texts:
+    - minimp3-LICENSE

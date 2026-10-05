@@ -20,6 +20,10 @@ oswindow = { path = "../../gui/window" }
 # Same reasoning as `apps/editor`, which is where this pattern comes from.
 safeio = { path = "../safeio" }
 
+# Whether a key is a chord, a command or typing: AltGr arrives as Ctrl+Alt,
+# and a command carries its letter as text.
+textline = { path = "../textline" }
+
 # The library is kept in the user's settings directory
 # (`settingsfile::config_dir`), as the finance ledger and the habit tracker keep
 # theirs.

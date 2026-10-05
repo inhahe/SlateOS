@@ -54,6 +54,10 @@
 //! canonical ordering, not a place on the glyph, so they have to be mapped
 //! onto the "above/below/left/right" classes before the geometry means
 //! anything. [`attach_class`] is that map.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-ot-shape-fallback.cc`
+//! and `src/hb-ot-shaper.hh`, copyright © 2010, 2011, 2012 Google, Inc. Used
+//! under HarfBuzz's licence: see `gui/font/licenses/harfbuzz-COPYING`.
 
 use crate::norm;
 use crate::script::ScriptTags;

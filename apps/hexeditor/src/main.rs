@@ -30,6 +30,8 @@ use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use guitk::field;
+use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
 #[allow(unused_imports)]
@@ -37,6 +39,8 @@ use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextO
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
+use guitk::textedit;
+use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
@@ -131,7 +135,7 @@ const MAX_RECENT_FILES: usize = 20;
 
 /// Maximum undo stack depth (unlimited in spirit, capped at a large value to
 /// prevent unbounded memory growth).
-const MAX_UNDO_DEPTH: usize = 10_000;
+const MAX_UNDO_DEPTH: core::num::NonZeroUsize = core::num::NonZeroUsize::MIN.saturating_add(9_999);
 
 // ============================================================================
 // Data model — View configuration
@@ -424,6 +428,10 @@ pub struct SearchState {
     pub input_text: String,
     /// Text in the replace input field.
     pub replace_text: String,
+    /// What the box held when the last search ran, so the box can say that
+    /// *this* text found nothing -- and stop saying it the moment the text
+    /// changes, without a search per keystroke over a whole file.
+    pub searched: Option<String>,
 }
 
 // ============================================================================
@@ -541,7 +549,7 @@ pub struct HighlightPattern {
 // ============================================================================
 
 /// A single open document in the hex editor.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HexDocument {
     /// The raw file data.
     pub data: Vec<u8>,
@@ -557,10 +565,12 @@ pub struct HexDocument {
     pub whole_len: Option<usize>,
     /// Whether the buffer has been modified since last save.
     pub modified: bool,
-    /// Undo stack (most recent at the end).
-    pub undo_stack: Vec<UndoEntry>,
-    /// Redo stack (most recent at the end).
-    pub redo_stack: Vec<UndoEntry>,
+    /// The edits, kept as a tree: an edit made after undoing starts a branch
+    /// beside what was undone, rather than throwing it away (C-Q24,
+    /// `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go back and forth
+    /// along the branch the file is on; Alt+Z and Alt+Shift+Z walk every
+    /// version it has been in, in the order each was made.
+    pub history: UndoHistory<UndoEntry>,
     /// Bookmarks.
     pub bookmarks: Vec<Bookmark>,
     /// Current cursor position (byte offset).
@@ -589,8 +599,7 @@ impl HexDocument {
             path: None,
             whole_len: None,
             modified: false,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            history: UndoHistory::new(MAX_UNDO_DEPTH),
             bookmarks: Vec::new(),
             cursor: 0,
             selection: None,
@@ -816,73 +825,83 @@ impl HexDocument {
         self.modified = true;
     }
 
-    /// Push an undo entry, clearing redo and capping stack size.
+    /// Record an edit as the next step. One made after undoing starts a
+    /// branch, and what was undone stays in the history.
     fn push_undo(&mut self, entry: UndoEntry) {
-        self.redo_stack.clear();
-        self.undo_stack.push(entry);
-        if self.undo_stack.len() > MAX_UNDO_DEPTH {
-            self.undo_stack.remove(0);
-        }
+        self.history.record(entry);
     }
 
-    /// Undo the most recent edit.
+    /// Undo the most recent edit on the branch the file is on.
     pub fn undo(&mut self) -> bool {
-        if let Some(entry) = self.undo_stack.pop() {
-            // Reverse the operation: remove new_bytes, insert old_bytes.
-            let start = entry.offset;
-            let new_len = entry.new_bytes.len();
-            let drain_end = start.saturating_add(new_len).min(self.data.len());
-            if new_len > 0 && start < self.data.len() {
-                self.data.drain(start..drain_end);
-            }
-            for (i, &b) in entry.old_bytes.iter().enumerate() {
-                let pos = start.saturating_add(i).min(self.data.len());
-                self.data.insert(pos, b);
-            }
-            self.cursor = entry.cursor_before;
-            self.clamp_cursor();
-
-            // Move to redo stack (with swapped old/new).
-            self.redo_stack.push(UndoEntry {
-                offset: entry.offset,
-                old_bytes: entry.new_bytes,
-                new_bytes: entry.old_bytes,
-                cursor_before: entry.cursor_before,
-            });
-            self.modified = true;
-            true
-        } else {
-            false
-        }
+        let Some(entry) = self.history.undo() else {
+            return false;
+        };
+        self.revert(&entry);
+        true
     }
 
-    /// Redo the most recently undone edit.
+    /// Redo the most recently undone edit on the branch the file is on --
+    /// the one undone out of, or the one made since.
     pub fn redo(&mut self) -> bool {
-        if let Some(entry) = self.redo_stack.pop() {
-            let start = entry.offset;
-            let new_len = entry.new_bytes.len();
-            let drain_end = start.saturating_add(new_len).min(self.data.len());
-            if new_len > 0 && start < self.data.len() {
-                self.data.drain(start..drain_end);
-            }
-            for (i, &b) in entry.old_bytes.iter().enumerate() {
-                let pos = start.saturating_add(i).min(self.data.len());
-                self.data.insert(pos, b);
-            }
-            self.cursor = entry.cursor_before;
-            self.clamp_cursor();
+        let Some(entry) = self.history.redo() else {
+            return false;
+        };
+        self.reapply(&entry);
+        true
+    }
 
-            self.undo_stack.push(UndoEntry {
-                offset: entry.offset,
-                old_bytes: entry.new_bytes,
-                new_bytes: entry.old_bytes,
-                cursor_before: entry.cursor_before,
-            });
-            self.modified = true;
-            true
-        } else {
-            false
+    /// Go to the version the file was in before this one was first reached,
+    /// on whichever branch -- Alt+Z. Answers whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version first reached after this one, on whichever branch
+    /// -- Alt+Shift+Z. Answers whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<UndoEntry>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(entry) => self.revert(&entry),
+                Travel::Redo(entry) => self.reapply(&entry),
+            }
         }
+        moved
+    }
+
+    /// Put back the bytes `entry` replaced, and the cursor where it was.
+    fn revert(&mut self, entry: &UndoEntry) {
+        self.splice_bytes(entry.offset, entry.new_bytes.len(), &entry.old_bytes);
+        self.cursor = entry.cursor_before;
+        self.clamp_cursor();
+        self.modified = true;
+    }
+
+    /// Make `entry` again. The cursor goes where it was before the edit, as
+    /// redo always put it.
+    fn reapply(&mut self, entry: &UndoEntry) {
+        self.splice_bytes(entry.offset, entry.old_bytes.len(), &entry.new_bytes);
+        self.cursor = entry.cursor_before;
+        self.clamp_cursor();
+        self.modified = true;
+    }
+
+    /// Replace `remove` bytes at `offset` with `insert`, clamped to the data:
+    /// a recorded step was valid against the data it is being applied to, so
+    /// the clamps should never bite -- and an index past the end is a panic.
+    /// One splice, where the undo and the redo each inserted a byte at a time,
+    /// moving the rest of the file once per byte.
+    fn splice_bytes(&mut self, offset: usize, remove: usize, insert: &[u8]) {
+        let start = offset.min(self.data.len());
+        let end = start.saturating_add(remove).min(self.data.len());
+        self.data.splice(start..end, insert.iter().copied());
     }
 
     // ========================================================================
@@ -1460,7 +1479,7 @@ pub enum FocusedPanel {
 }
 
 /// Complete hex editor application state.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct HexEditor {
     /// Open documents (tabs).
     pub documents: Vec<HexDocument>,
@@ -1489,6 +1508,14 @@ pub struct HexEditor {
     pub goto_visible: bool,
     /// Go-to-offset input text.
     pub goto_text: String,
+    /// Whether the pointer is over the find bar's box, and over the go-to
+    /// box, which lights its edge.
+    pub query_hovered: bool,
+    pub goto_hovered: bool,
+    /// How wide the mark is round a box while it has the keyboard: the
+    /// user's focus width (`App::appearance_changed`), the toolkit's until
+    /// it is known.
+    pub focus_ring_width: f32,
     /// Whether to show byte frequency analysis.
     pub show_frequency: bool,
     /// Whether to show file info.
@@ -1601,7 +1628,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Ctrl+W",
         "Close the tab, asking first if it is not saved -- in the search bar, wrap round or not",
     ),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The version before / after this one, on any branch",
+    ),
+    ("Ctrl+F4", "Close the tab"),
     ("Ctrl+C / Ctrl+V", "Copy / paste the selection"),
     ("Ctrl+F", "Find"),
     ("Ctrl+I", "Match case, while the search bar is up"),
@@ -1631,6 +1663,9 @@ impl HexEditor {
             focused_panel: FocusedPanel::HexView,
             goto_visible: false,
             goto_text: String::new(),
+            query_hovered: false,
+            goto_hovered: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             show_frequency: false,
             show_file_info: false,
             clipboard: Vec::new(),
@@ -1918,9 +1953,31 @@ impl HexEditor {
             self.show_help = false;
             return EventResult::Consumed;
         }
+        if self.show_help {
+            // Modal: every other key is the card's while it is up. It was
+            // not -- a hex digit or a character typed with the card up was
+            // written into the file it covers, and Alt+Z undid an edit there.
+            return EventResult::Consumed;
+        }
 
-        // Global shortcuts (regardless of focus).
-        if key.modifiers.ctrl {
+        // Alt+Z and Alt+Shift+Z: every version the file has been in, in the
+        // order each was made. Alt without Ctrl: Ctrl+Alt is AltGr.
+        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key
+        {
+            let doc = self.active_doc_mut();
+            if key.modifiers.shift {
+                doc.later();
+            } else {
+                doc.earlier();
+            }
+            return EventResult::Consumed;
+        }
+
+        // Global shortcuts (regardless of focus). Ctrl without Alt: Ctrl+Alt
+        // is AltGr, which types a letter on several layouts -- one the text
+        // pane writes into the file. Nor with the Windows key, whose chords
+        // are the desktop's.
+        if textline::is_ctrl_chord(key.modifiers) {
             match key.key {
                 Key::O => {
                     self.open_file_dialog();
@@ -1940,8 +1997,18 @@ impl HexEditor {
                     self.request_close_tab(self.active_tab);
                     return EventResult::Consumed;
                 }
+                Key::Z if key.modifiers.shift => {
+                    self.active_doc_mut().redo();
+                    return EventResult::Consumed;
+                }
                 Key::Z => {
                     self.active_doc_mut().undo();
+                    return EventResult::Consumed;
+                }
+                // Ctrl+F4 closes the tab too (C-Q24, §1416) -- in the search
+                // bar as well, where Ctrl+W is taken.
+                Key::F4 => {
+                    self.request_close_tab(self.active_tab);
                     return EventResult::Consumed;
                 }
                 Key::Y => {
@@ -2119,7 +2186,7 @@ impl HexEditor {
             // ran was case-sensitive and there was no way to ask for anything
             // else -- in a tool whose whole job is finding a byte sequence
             // somebody half remembers.
-            if key.key == Key::I && key.modifiers.ctrl {
+            if key.key == Key::I && textline::is_ctrl_chord(key.modifiers) {
                 self.search.query.case_sensitive = !self.search.query.case_sensitive;
                 self.perform_search();
                 return EventResult::Consumed;
@@ -2129,12 +2196,13 @@ impl HexEditor {
             // `true` with no writer, so a search could not be asked to stop
             // at the end of the file -- which is the difference between "not
             // below here" and "not in the file".
-            if key.key == Key::W && key.modifiers.ctrl {
+            if key.key == Key::W && textline::is_ctrl_chord(key.modifiers) {
                 self.search.query.wrap_around = !self.search.query.wrap_around;
                 self.perform_search();
                 return EventResult::Consumed;
             }
-            if key.types_text() {
+            // What a key typed, AltGr's among it, and not a command's letter.
+            if textline::types_into_field(key) {
                 self.search.input_text.extend(key.typed());
                 return EventResult::Consumed;
             }
@@ -2144,7 +2212,7 @@ impl HexEditor {
             }
         }
         if self.focused_panel == FocusedPanel::GoToDialog {
-            if key.types_text() {
+            if textline::types_into_field(key) {
                 self.goto_text.extend(key.typed());
                 return EventResult::Consumed;
             }
@@ -2334,7 +2402,9 @@ impl HexEditor {
             };
 
             if let Some(nib) = nibble_val {
-                if key.modifiers.ctrl || key.modifiers.alt {
+                // A digit is the key itself, so nothing held with it but
+                // Shift: Windows+A is the desktop's, not the byte 0xA.
+                if !textline::is_plain(key.modifiers) {
                     return false;
                 }
                 let cur = doc.cursor;
@@ -2383,6 +2453,14 @@ impl HexEditor {
             // Non-ASCII is dropped per character rather than rejecting the run,
             // because the pane edits *bytes*: `é` names no single one, and
             // there is no honest byte to write for it.
+            //
+            // A command is not typing. The compositor hands a chord its letter
+            // -- Ctrl+K arrives carrying `k`, Alt+X carrying `x` -- and a chord
+            // this window does not bind fell through to here and wrote its
+            // letter into the file. AltGr, which arrives as Ctrl+Alt, types.
+            if !textline::types_into_field(key) {
+                return false;
+            }
             let mut wrote_any = false;
             for byte in key.typed().filter(char::is_ascii).map(|ch| ch as u8) {
                 let cur = doc.cursor;
@@ -2466,35 +2544,50 @@ impl HexEditor {
             self.search.last_match = Some(offset);
         }
         self.search.match_count = self.active_doc().count_matches(&self.search.query);
+        self.search.searched = Some(input);
+    }
+
+    /// The offset the go-to box names, if it names one: hex after `0x` or
+    /// `$`, decimal otherwise.
+    fn goto_offset(&self) -> Option<usize> {
+        let text = self.goto_text.trim();
+        match text
+            .strip_prefix("0x")
+            .or_else(|| text.strip_prefix("0X"))
+            .or_else(|| text.strip_prefix('$'))
+        {
+            Some(hex) => usize::from_str_radix(hex, 16).ok(),
+            None => text.parse::<usize>().ok(),
+        }
+    }
+
+    /// Whether the go-to box holds something that is not an offset, which
+    /// its edge says while it is typed.
+    fn goto_text_is_wrong(&self) -> bool {
+        !self.goto_text.trim().is_empty() && self.goto_offset().is_none()
     }
 
     /// Perform go-to-offset.
     fn perform_goto(&mut self) {
-        let text = self.goto_text.trim().to_string();
-        if text.is_empty() {
+        if self.goto_text.trim().is_empty() {
             return;
         }
-
-        let offset =
-            if let Some(stripped) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-                usize::from_str_radix(stripped, 16).ok()
-            } else if text.starts_with('$') {
-                usize::from_str_radix(text.get(1..).unwrap_or(""), 16).ok()
-            } else {
-                text.parse::<usize>().ok()
-            };
-
-        if let Some(off) = offset {
-            let vis = self.visible_lines();
-            let doc = self.active_doc_mut();
-            doc.cursor = off.min(if doc.data.is_empty() {
-                0
-            } else {
-                doc.data.len().saturating_sub(1)
-            });
-            doc.hex_nibble = 0;
-            doc.ensure_cursor_visible(vis);
-        }
+        let Some(off) = self.goto_offset() else {
+            // Not an offset: say so, and leave the box up to be corrected. It
+            // used to close, having gone nowhere and said nothing, so a typo
+            // looked exactly like the file's first byte being the answer.
+            self.status_message = format!("Not an offset: {}", self.goto_text.trim());
+            return;
+        };
+        let vis = self.visible_lines();
+        let doc = self.active_doc_mut();
+        doc.cursor = off.min(if doc.data.is_empty() {
+            0
+        } else {
+            doc.data.len().saturating_sub(1)
+        });
+        doc.hex_nibble = 0;
+        doc.ensure_cursor_visible(vis);
 
         self.goto_visible = false;
         self.focused_panel = FocusedPanel::HexView;
@@ -2935,8 +3028,73 @@ impl HexEditor {
         }
     }
 
+    /// Note whether the pointer is over the find bar's box or the go-to box
+    /// -- after a `Leave`, over neither. A change is a repaint: the box's
+    /// edge lights. The go-to dialog is drawn over the find bar, so where
+    /// the two meet the pointer is the dialog's.
+    fn point_at(&mut self, ev: &MouseEvent) -> EventResult {
+        let inside = |r: Rect| ev.kind != MouseEventKind::Leave && r.contains(ev.x, ev.y);
+        let (dialog, input) = Self::goto_rects(self.window_width, self.window_height);
+        let on_dialog = self.goto_visible && inside(dialog);
+        let goto = self.goto_visible && inside(input);
+        let query =
+            self.search.visible && !on_dialog && inside(FindBar::at(self.window_width).query);
+        if (query, goto) == (self.query_hovered, self.goto_hovered) {
+            return EventResult::Ignored;
+        }
+        self.query_hovered = query;
+        self.goto_hovered = goto;
+        EventResult::Consumed
+    }
+
+    /// A press on the go-to dialog or the find bar is theirs: on a box it
+    /// gives that box the keyboard, and nowhere on either does it reach the
+    /// byte drawn under it -- it moved the cursor there, under a bar that
+    /// still had the keyboard. `None` for a press on neither.
+    fn press_on_bars(&mut self, x: f32, y: f32) -> Option<EventResult> {
+        if self.goto_visible {
+            let (dialog, input) = Self::goto_rects(self.window_width, self.window_height);
+            if dialog.contains(x, y) {
+                if input.contains(x, y) {
+                    self.focused_panel = FocusedPanel::GoToDialog;
+                }
+                return Some(EventResult::Consumed);
+            }
+        }
+        if self.search.visible {
+            let l = FindBar::at(self.window_width);
+            if l.bar.contains(x, y) {
+                if l.query.contains(x, y) {
+                    self.focused_panel = FocusedPanel::SearchBar;
+                }
+                return Some(EventResult::Consumed);
+            }
+        }
+        None
+    }
+
     /// Apply a mouse event.
     fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // button or byte drawn under it, and the wheel scrolls nothing it
+            // covers.
+            if matches!(ev.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+        match ev.kind {
+            MouseEventKind::Move | MouseEventKind::Leave => return self.point_at(ev),
+            MouseEventKind::Press(_) => {
+                if let Some(result) = self.press_on_bars(ev.x, ev.y) {
+                    return result;
+                }
+            }
+            _ => {}
+        }
         if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             let (bw, bh, by) = TOOLBAR_BUTTON;
             if let Some(&(_, action, _)) = TOOLBAR_BUTTONS
@@ -3575,19 +3733,101 @@ impl HexEditor {
         });
     }
 
+    /// How the find bar's box is drawn now: lit under the pointer, marked
+    /// while it has the keyboard, neither while the shortcut card, the close
+    /// question or the file picker is over it -- and red while the last
+    /// search of exactly what it holds found nothing.
+    fn query_box_state(&self) -> field::State {
+        let open = self.search.visible && self.bars_reachable();
+        field::State {
+            hovered: open && self.query_hovered,
+            focused: open && self.focused_panel == FocusedPanel::SearchBar,
+            disabled: false,
+            invalid: self.search.match_count == 0
+                && self.search.searched.as_deref() == Some(self.search.input_text.as_str()),
+        }
+    }
+
+    /// How the go-to box is drawn now, as the find bar's is -- red while
+    /// what it holds is not an offset.
+    fn goto_box_state(&self) -> field::State {
+        let open = self.goto_visible && self.bars_reachable();
+        field::State {
+            hovered: open && self.goto_hovered,
+            focused: open && self.focused_panel == FocusedPanel::GoToDialog,
+            disabled: false,
+            invalid: self.goto_text_is_wrong(),
+        }
+    }
+
+    /// Whether nothing covers the find bar and the go-to box: the shortcut
+    /// card, the close question and the file picker all do.
+    fn bars_reachable(&self) -> bool {
+        !self.show_help && self.question.is_none() && !self.picker.is_open()
+    }
+
+    /// The typing in a box, with the caret after it while the box has the
+    /// keyboard and scrolled so the end being typed stays in view -- or, in
+    /// an empty box, what it is for.
+    fn render_box_text(
+        &self,
+        tree: &mut RenderTree,
+        r: Rect,
+        typed: &str,
+        placeholder: &str,
+        focused: bool,
+    ) {
+        let line = text::line_height(UI_FONT_SIZE, FontWeightHint::Regular);
+        let (x, y, w) = (
+            r.x + FIELD_INSET,
+            r.y + (r.h - line) / 2.0,
+            (r.w - FIELD_INSET * 2.0).max(0.0),
+        );
+        if typed.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: placeholder.to_string(),
+                color: self.palette.subtext0,
+                font_size: UI_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: typed,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(typed.len()),
+                selection_anchor: None,
+                focused,
+                x,
+                y,
+                width: w,
+                line_height: line,
+                font_size: UI_FONT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+
     /// Render the search bar overlay.
     fn render_search_bar(&self, tree: &mut RenderTree) {
-        let bar_width: f32 = 400.0;
-        let bar_height: f32 = 40.0;
-        let x = self.window_width - bar_width - 20.0;
-        let y = Self::content_top() + 4.0;
+        let l = FindBar::at(self.window_width);
 
         // Shadow.
         tree.push(RenderCommand::BoxShadow {
-            x,
-            y,
-            width: bar_width,
-            height: bar_height,
+            x: l.bar.x,
+            y: l.bar.y,
+            width: l.bar.w,
+            height: l.bar.h,
             offset_x: 0.0,
             offset_y: 2.0,
             blur: 8.0,
@@ -3595,72 +3835,63 @@ impl HexEditor {
             color: Color::rgba(0, 0, 0, 80),
             corner_radii: CornerRadii::all(6.0),
         });
+        // The toolkit's panel, in the theme's look: it was a grey slab with a
+        // blue edge whatever the theme said, and the box inside it is what
+        // says where the keyboard is now.
+        self.palette.push_surface(
+            tree,
+            l.bar.x,
+            l.bar.y,
+            l.bar.w,
+            l.bar.h,
+            6.0,
+            Surface::Panel,
+        );
 
-        // Background.
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: bar_width,
-            height: bar_height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        tree.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: bar_width,
-            height: bar_height,
-            color: self.palette.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        // Search icon placeholder.
+        let line = text::line_height(UI_FONT_SIZE, FontWeightHint::Regular);
         tree.push(RenderCommand::Text {
-            x: x + 10.0,
-            y: y + 12.0,
+            x: l.label.x,
+            y: l.label.y + (l.label.h - line) / 2.0,
             text: String::from("Find:"),
             color: self.palette.subtext0,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(40.0),
+            max_width: Some(l.label.w),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search input text.
-        let input_text = if self.search.input_text.is_empty() {
-            String::from("hex bytes or text...")
-        } else {
-            self.search.input_text.clone()
-        };
-        let input_color = if self.search.input_text.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        tree.push(RenderCommand::Text {
-            x: x + 50.0,
-            y: y + 12.0,
-            text: input_text,
-            color: input_color,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            // Stops where the options begin. It used to reach to
-            // `bar_width - 120`, which was clear of one option and is not
-            // clear of three.
-            max_width: Some((bar_width - 400.0).max(60.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let state = self.query_box_state();
+        field::draw(tree, &self.palette, l.query, state, self.focus_ring_width);
+        self.render_box_text(
+            tree,
+            l.query,
+            &self.search.input_text,
+            "hex bytes or text...",
+            state.focused,
+        );
 
-        // What the search will do, and the keys that change it. A search
-        // box that silently ignores case -- or silently insists on it, or
-        // silently stops at the end of the file -- turns a miss into "it is
-        // not in the file", which is a claim about the file.
+        // Match count.
+        if self.search.match_count > 0 {
+            tree.push(RenderCommand::Text {
+                x: l.count.x,
+                y: l.count.y + (l.count.h - text::line_height(11.0, FontWeightHint::Regular)) / 2.0,
+                text: format!("{} found", self.search.match_count),
+                color: self.palette.ink(self.palette.green),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(l.count.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
+        // What the search will do, and the keys that change it, on a row of
+        // their own. A search box that silently ignores case -- or silently
+        // insists on it, or silently stops at the end of the file -- turns a
+        // miss into "it is not in the file", which is a claim about the file.
         let on_off = |on: bool| if on { "on" } else { "off" };
         tree.push(RenderCommand::Text {
-            x: x + bar_width - 340.0,
-            y: y + 12.0,
+            x: l.options.x,
+            y: l.options.y,
             text: format!(
                 "Case: {} Ctrl+I   Wrap: {} Ctrl+W   Shift+Enter back",
                 on_off(self.search.query.case_sensitive),
@@ -3669,38 +3900,29 @@ impl HexEditor {
             color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(265.0),
+            max_width: Some(l.options.w),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Match count.
-        if self.search.match_count > 0 {
-            tree.push(RenderCommand::Text {
-                x: x + bar_width - 70.0,
-                y: y + 12.0,
-                text: format!("{} found", self.search.match_count),
-                color: self.palette.ink(self.palette.green),
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(65.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
     }
 
-    /// Render the go-to-offset dialog overlay.
+    /// The go-to dialog, and the box in it, in a window `width` by `height`.
+    fn goto_rects(width: f32, height: f32) -> (Rect, Rect) {
+        let (w, h) = (300.0, 80.0);
+        let dialog = Rect::new((width - w) / 2.0, (height - h) / 2.0, w, h);
+        let input = Rect::new(dialog.x + 12.0, dialog.y + 36.0, w - 24.0, 28.0);
+        (dialog, input)
+    }
+
+    /// Render goto-offset dialog.
     fn render_goto_dialog(&self, tree: &mut RenderTree) {
-        let dialog_width: f32 = 300.0;
-        let dialog_height: f32 = 80.0;
-        let x = (self.window_width - dialog_width) / 2.0;
-        let y = (self.window_height - dialog_height) / 2.0;
+        let (d, input) = Self::goto_rects(self.window_width, self.window_height);
 
         // Shadow.
         tree.push(RenderCommand::BoxShadow {
-            x,
-            y,
-            width: dialog_width,
-            height: dialog_height,
+            x: d.x,
+            y: d.y,
+            width: d.w,
+            height: d.h,
             offset_x: 0.0,
             offset_y: 4.0,
             blur: 16.0,
@@ -3711,13 +3933,13 @@ impl HexEditor {
 
         // Background.
         self.palette
-            .push_surface(tree, x, y, dialog_width, dialog_height, 8.0, Surface::Panel);
+            .push_surface(tree, d.x, d.y, d.w, d.h, 8.0, Surface::Panel);
 
         tree.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: dialog_width,
-            height: dialog_height,
+            x: d.x,
+            y: d.y,
+            width: d.w,
+            height: d.h,
             color: self.palette.lavender,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
@@ -3725,57 +3947,94 @@ impl HexEditor {
 
         // Title.
         tree.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: y + 12.0,
+            x: d.x + 12.0,
+            y: d.y + 12.0,
             text: String::from("Go to Offset"),
             color: self.palette.ink(self.palette.lavender),
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(dialog_width - 24.0),
+            max_width: Some(d.w - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Input field background.
-        tree.push(RenderCommand::FillRect {
-            x: x + 12.0,
-            y: y + 36.0,
-            width: dialog_width - 24.0,
-            height: 28.0,
-            color: self.palette.base,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        // The box: the toolkit's field, red while what it holds is not an
+        // offset -- which used to show only as the dialog closing on Enter
+        // having gone nowhere.
+        let state = self.goto_box_state();
+        field::draw(tree, &self.palette, input, state, self.focus_ring_width);
+        self.render_box_text(
+            tree,
+            input,
+            &self.goto_text,
+            "0x... or decimal",
+            state.focused,
+        );
+    }
+}
 
-        tree.push(RenderCommand::StrokeRect {
-            x: x + 12.0,
-            y: y + 36.0,
-            width: dialog_width - 24.0,
-            height: 28.0,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+/// How far a box's text sits inside its edge.
+const FIELD_INSET: f32 = 6.0;
 
-        // Input text.
-        let display_text = if self.goto_text.is_empty() {
-            String::from("0x... or decimal")
-        } else {
-            self.goto_text.clone()
-        };
-        let text_color = if self.goto_text.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        tree.push(RenderCommand::Text {
-            x: x + 20.0,
-            y: y + 42.0,
-            text: display_text,
-            color: text_color,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_width - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+/// Where the find bar's parts are, in a window `width` wide: the "Find:"
+/// label, the box the query is typed into and the match count on one row,
+/// and the line saying what the search will do on a row of its own.
+///
+/// It was one row 40 pixels high with every part at a fixed offset, and the
+/// parts did not fit: the query was given from 50 to 110 pixels in and the
+/// options line began at 60, so whatever was typed was written over it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FindBar {
+    bar: Rect,
+    label: Rect,
+    query: Rect,
+    count: Rect,
+    options: Rect,
+}
+
+impl FindBar {
+    const WIDTH: f32 = 400.0;
+    const HEIGHT: f32 = 64.0;
+    /// Room at the bar's ends, and between its parts.
+    const PAD: f32 = 10.0;
+    const GAP: f32 = 8.0;
+    /// The first row's height, and the second's.
+    const ROW: f32 = 26.0;
+    const OPTIONS_ROW: f32 = 20.0;
+    const COUNT_W: f32 = 70.0;
+
+    fn at(width: f32) -> Self {
+        let w = Self::WIDTH.min(width - 40.0).max(0.0);
+        let bar = Rect::new(
+            width - w - 20.0,
+            HexEditor::content_top() + 4.0,
+            w,
+            Self::HEIGHT,
+        );
+        let y = bar.y + 6.0;
+        let label_w = text::measure("Find:", UI_FONT_SIZE, FontWeightHint::Regular);
+        let label = Rect::new(bar.x + Self::PAD, y, label_w, Self::ROW);
+        let query_x = label.right() + Self::GAP;
+        let count_w = Self::COUNT_W.min((bar.right() - Self::PAD - query_x).max(0.0));
+        let count = Rect::new(bar.right() - Self::PAD - count_w, y, count_w, Self::ROW);
+        let query = Rect::new(
+            query_x,
+            y,
+            (count.x - Self::GAP - query_x).max(0.0),
+            Self::ROW,
+        );
+        let options = Rect::new(
+            bar.x + Self::PAD,
+            y + Self::ROW + 6.0,
+            (w - Self::PAD * 2.0).max(0.0),
+            Self::OPTIONS_ROW,
+        );
+        Self {
+            bar,
+            label,
+            query,
+            count,
+            options,
+        }
     }
 }
 
@@ -3867,6 +4126,10 @@ pub fn format_hex_line(data: &[u8], offset: usize, bytes_per_line: usize) -> Str
 impl App for HexEditor {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4506,6 +4769,75 @@ mod tests {
         );
     }
 
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// nothing typed reaches the file, the wheel scrolls nothing, and a press
+    /// puts it away and does nothing else. A hex digit typed with the card up
+    /// was written into the file it covered. The controls at the end are the
+    /// same key, turn and press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut editor = make_test_editor(vec![0; 4096]);
+        let (bw, bh, by) = TOOLBAR_BUTTON;
+        let &(_, _, sx) = TOOLBAR_BUTTONS
+            .iter()
+            .find(|b| b.1 == ToolbarAction::Save)
+            .expect("a Save button");
+        let save = |button| {
+            Event::Mouse(MouseEvent {
+                x: sx + bw / 2.0,
+                y: by + bh / 2.0,
+                kind: MouseEventKind::Press(button),
+            })
+        };
+
+        editor.handle_event(&key(Key::F1));
+        assert!(editor.show_help);
+        editor.handle_event(&key(Key::F));
+        assert_eq!(
+            editor.active_doc().data[0],
+            0,
+            "a hex digit was written into the file under the card"
+        );
+        editor.handle_event(&wheel(-3.0));
+        assert_eq!(
+            editor.active_doc().view.scroll_offset,
+            0,
+            "the wheel scrolled the file under the card"
+        );
+        assert!(
+            editor.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        assert_eq!(
+            editor.handle_event(&save(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!editor.show_help, "the press did not put the card away");
+        assert!(
+            !editor.picker.is_open(),
+            "the press went through the card to Save"
+        );
+
+        // Any button: the right one does nothing to a button, but it is
+        // still a press on the card.
+        editor.handle_event(&key(Key::F1));
+        editor.handle_event(&save(MouseButton::Right));
+        assert!(!editor.show_help, "a right-button press left the card up");
+
+        editor.handle_event(&wheel(-3.0));
+        assert!(
+            editor.active_doc().view.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        editor.handle_event(&key(Key::F));
+        assert_ne!(
+            editor.active_doc().data[0],
+            0,
+            "control: a hex digit writes nothing with the card down"
+        );
+    }
+
     #[test]
     fn every_toolbar_button_does_what_it_says() {
         let mut editor = make_test_editor(vec![0; 16]);
@@ -4968,8 +5300,8 @@ mod tests {
         assert!(!doc.modified);
         assert_eq!(doc.cursor, 0);
         assert!(doc.selection.is_none());
-        assert!(doc.undo_stack.is_empty());
-        assert!(doc.redo_stack.is_empty());
+        assert!(!doc.history.can_undo());
+        assert!(!doc.history.can_redo());
     }
 
     #[test]
@@ -5543,7 +5875,7 @@ mod tests {
         let mut doc = HexDocument::from_data(vec![0xAA]);
         doc.overwrite_byte(0, 0xAA);
         assert!(!doc.modified);
-        assert!(doc.undo_stack.is_empty());
+        assert!(!doc.history.can_undo());
     }
 
     // ====================================================================
@@ -5678,14 +6010,47 @@ mod tests {
         assert!(!doc.redo());
     }
 
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z reaches the old one --
+    /// in the order the versions were made.
     #[test]
-    fn test_redo_cleared_on_new_edit() {
+    fn a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one() {
         let mut doc = HexDocument::from_data(vec![0xAA, 0xBB]);
         doc.overwrite_byte(0, 0x11);
         doc.undo();
-        assert!(!doc.redo_stack.is_empty());
+        assert!(doc.history.can_redo());
         doc.overwrite_byte(0, 0x22);
-        assert!(doc.redo_stack.is_empty());
+        assert!(
+            !doc.history.can_redo(),
+            "redo would go onto the branch left"
+        );
+        assert!(doc.earlier());
+        assert_eq!(doc.data, vec![0x11, 0xBB], "the undone branch was lost");
+        assert!(doc.earlier());
+        assert_eq!(doc.data, vec![0xAA, 0xBB]);
+        assert!(!doc.earlier(), "before the first version");
+        assert!(doc.later());
+        assert!(doc.later());
+        assert_eq!(doc.data, vec![0x22, 0xBB]);
+        assert!(!doc.later(), "past the newest version");
+    }
+
+    /// An insert and a delete of several bytes go back and forth whole.
+    #[test]
+    fn a_several_byte_edit_goes_back_and_forth_whole() {
+        let mut doc = HexDocument::from_data(vec![1, 2, 3, 4]);
+        doc.push_undo(UndoEntry {
+            offset: 1,
+            old_bytes: vec![2, 3],
+            new_bytes: vec![9, 9, 9],
+            cursor_before: 1,
+        });
+        doc.data = vec![1, 9, 9, 9, 4];
+        assert!(doc.undo());
+        assert_eq!(doc.data, vec![1, 2, 3, 4]);
+        assert!(doc.redo());
+        assert_eq!(doc.data, vec![1, 9, 9, 9, 4]);
+        assert_eq!(doc.cursor, 1);
     }
 
     #[test]
@@ -7078,5 +7443,507 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ---- the history as a tree, and the keys (C-Q24, §1416) ------------------
+
+    fn alt_z(shift: bool) -> KeyEvent {
+        key_press(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    /// **Alt+Z reaches the version an undo left behind, and Alt+Shift+Z
+    /// comes forward again.**
+    #[test]
+    fn alt_z_reaches_the_branch_an_undo_left() {
+        let mut editor = make_test_editor(vec![0xAA]);
+        editor.active_doc_mut().overwrite_byte(0, 0x11);
+        editor.active_doc_mut().undo();
+        editor.active_doc_mut().overwrite_byte(0, 0x22);
+        editor.handle_key(&alt_z(false));
+        assert_eq!(editor.active_doc().data[0], 0x11, "Alt+Z did not go back");
+        editor.handle_key(&alt_z(true));
+        assert_eq!(
+            editor.active_doc().data[0],
+            0x22,
+            "Alt+Shift+Z did not come forward"
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut editor = make_test_editor(vec![0xAA]);
+        editor.active_doc_mut().overwrite_byte(0, 0xFF);
+        editor.active_doc_mut().undo();
+        editor.handle_key(&key_press(
+            Key::Z,
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(editor.active_doc().data[0], 0xFF);
+    }
+
+    /// **Ctrl+F4 closes the tab** -- in the search bar too, where Ctrl+W
+    /// says whether the search wraps.
+    #[test]
+    fn ctrl_f4_closes_the_tab_even_in_the_search_bar() {
+        let mut editor = make_test_editor(vec![0xAA]);
+        editor.open_tab(HexDocument::from_data(vec![0xBB]));
+        editor.handle_key(&key_press(Key::F4, Modifiers::ctrl()));
+        assert_eq!(editor.documents.len(), 1, "Ctrl+F4 did not close the tab");
+        editor.open_tab(HexDocument::from_data(vec![0xCC]));
+        editor.focused_panel = FocusedPanel::SearchBar;
+        editor.handle_key(&key_press(Key::F4, Modifiers::ctrl()));
+        assert_eq!(editor.documents.len(), 1, "not in the search bar");
+    }
+
+    /// **AltGr is not Ctrl.** AltGr arrives as Ctrl+Alt, and AltGr+Z --
+    /// Polish's ż -- undid the last edit.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut editor = make_test_editor(vec![0xAA]);
+        editor.active_doc_mut().overwrite_byte(0, 0x11);
+        editor.handle_key(&KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: "\u{17c}".to_string(),
+        });
+        assert_eq!(editor.active_doc().data[0], 0x11, "AltGr+Z undid");
+    }
+
+    /// A key with `modifiers` held that typed `text`.
+    fn chord(key: Key, text: &str, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        }
+    }
+
+    /// **A command's letter is not written into the file, nor typed into the
+    /// search or go-to box.** The compositor hands a chord its letter as
+    /// text -- Ctrl+K arrives carrying `k`, Alt+X carrying `x`, Windows+E
+    /// carrying `e` -- and a chord this window does not bind fell through to
+    /// the ASCII pane, which wrote the letter into the file, and to the two
+    /// boxes, which typed it; Windows+A wrote the nibble 0xA in the hex pane.
+    /// AltGr -- Ctrl+Alt -- types, and still does: German `@` is AltGr+Q.
+    #[test]
+    fn a_commands_letter_is_not_written_into_the_file_or_a_box() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let win = Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let commands = [(Key::K, "k", ctrl), (Key::X, "x", alt), (Key::E, "e", win)];
+
+        // The ASCII pane, overwriting.
+        let mut editor = make_test_editor(vec![0x00; 4]);
+        editor.active_doc_mut().edit_mode = EditMode::Overwrite;
+        editor.active_doc_mut().cursor_in_hex = false;
+        for (k, t, m) in commands {
+            editor.handle_key(&chord(k, t, m));
+            assert_eq!(
+                editor.active_doc().data,
+                vec![0x00; 4],
+                "{m:?}+{k:?} wrote its letter into the file"
+            );
+        }
+        editor.handle_key(&chord(Key::Q, "@", altgr));
+        assert_eq!(
+            editor.active_doc().data.first().copied(),
+            Some(b'@'),
+            "AltGr+Q did not type its @ into the file"
+        );
+
+        // The hex pane: a digit with the Windows key is the desktop's.
+        let mut editor = make_test_editor(vec![0x00; 4]);
+        editor.active_doc_mut().edit_mode = EditMode::Overwrite;
+        editor.handle_key(&chord(Key::A, "a", win));
+        assert_eq!(
+            editor.active_doc().data,
+            vec![0x00; 4],
+            "Windows+A wrote a nibble"
+        );
+
+        // The search box and the go-to box.
+        for panel in [FocusedPanel::SearchBar, FocusedPanel::GoToDialog] {
+            let mut editor = make_test_editor(vec![0x00; 4]);
+            editor.focused_panel = panel;
+            for (k, t, m) in commands {
+                editor.handle_key(&chord(k, t, m));
+            }
+            editor.handle_key(&chord(Key::Q, "@", altgr));
+            let typed = match panel {
+                FocusedPanel::SearchBar => editor.search.input_text.clone(),
+                _ => editor.goto_text.clone(),
+            };
+            assert_eq!(typed, "@", "{panel:?}: a command's letter was typed");
+        }
+
+        // AltGr+I and AltGr+W type in the search box rather than setting
+        // whether case matters and whether the search wraps: `í` is AltGr+I
+        // on a US-International layout.
+        let mut editor = make_test_editor(vec![0x00; 4]);
+        editor.focused_panel = FocusedPanel::SearchBar;
+        let (case, wrap) = (
+            editor.search.query.case_sensitive,
+            editor.search.query.wrap_around,
+        );
+        editor.handle_key(&chord(Key::I, "\u{ed}", altgr));
+        editor.handle_key(&chord(Key::W, "\u{e5}", altgr));
+        assert_eq!(editor.search.input_text, "\u{ed}\u{e5}");
+        assert_eq!(
+            (
+                editor.search.query.case_sensitive,
+                editor.search.query.wrap_around
+            ),
+            (case, wrap),
+            "AltGr+I or AltGr+W changed the search instead of typing"
+        );
+
+        // A chord with the Windows key is the desktop's, Ctrl or not:
+        // Ctrl+Windows+B is not Ctrl+B's bookmark.
+        let mut editor = make_test_editor(vec![0x00; 4]);
+        let ctrl_win = Modifiers {
+            ctrl: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        editor.handle_key(&chord(Key::B, "b", ctrl_win));
+        assert!(
+            editor.active_doc().bookmarks.is_empty(),
+            "Ctrl+Windows+B set a bookmark"
+        );
+    }
+
+    // -- The find bar's box and the go-to box are the toolkit's fields (lane
+    //    C, c-e-a-theme-can-shape-the-controls)
+
+    fn pointer_at(editor: &mut HexEditor, kind: MouseEventKind, (x, y): (f32, f32)) -> EventResult {
+        editor.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// An editor over some text whose theme marks a field with the keyboard
+    /// by a ring, with the user's focus width two and a half times the
+    /// toolkit's.
+    fn ringed_editor() -> (HexEditor, Palette) {
+        let mut editor = make_test_editor(b"hello world".to_vec());
+        let mut p = editor.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut editor, &p);
+        App::appearance_changed(
+            &mut editor,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        assert!(
+            editor.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        (editor, p)
+    }
+
+    /// Whether the editor draws exactly the toolkit's field for `rect` in
+    /// `state` -- and, unless `state` has the keyboard, not the focused one
+    /// as well: a box without the mark is the first part of the same box
+    /// with it.
+    fn draws_box(editor: &HexEditor, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, editor.focus_ring_width);
+            v
+        };
+        let cmds = editor.render_tree().commands;
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// **The find bar's box is the toolkit's field**: lit under the pointer
+    /// and dark again when it leaves, given the keyboard by a press, marked
+    /// as the theme marks a field in the user's width, red once a search of
+    /// exactly what it holds has found nothing -- and not before, nor after
+    /// the text changes -- and neither lit nor marked under the card. There
+    /// was no box: the query was written on a grey slab with a blue edge.
+    #[test]
+    fn the_find_bars_box_is_the_toolkits_field() {
+        let (mut editor, p) = ringed_editor();
+        editor.search.visible = true;
+        editor.focused_panel = FocusedPanel::HexView;
+        let rect = FindBar::at(editor.window_width).query;
+        let rest = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..rest
+        };
+        assert!(draws_box(&editor, &p, rect, rest), "at rest");
+
+        let centre = rect.centre();
+        assert_eq!(
+            pointer_at(&mut editor, MouseEventKind::Move, centre),
+            EventResult::Consumed
+        );
+        assert!(
+            draws_box(
+                &editor,
+                &p,
+                rect,
+                field::State {
+                    hovered: true,
+                    ..rest
+                }
+            ),
+            "the pointer does not light the box"
+        );
+        assert_eq!(
+            pointer_at(&mut editor, MouseEventKind::Move, centre),
+            EventResult::Ignored,
+            "moving within the box changed something"
+        );
+        pointer_at(&mut editor, MouseEventKind::Leave, centre);
+        assert!(
+            draws_box(&editor, &p, rect, rest),
+            "the light stays after the pointer leaves"
+        );
+
+        pointer_at(
+            &mut editor,
+            MouseEventKind::Press(MouseButton::Left),
+            centre,
+        );
+        assert_eq!(
+            editor.focused_panel,
+            FocusedPanel::SearchBar,
+            "a press on the box did not give it the keyboard"
+        );
+        assert!(draws_box(&editor, &p, rect, focused), "not marked");
+
+        for c in "zzz".chars() {
+            editor.handle_key(&typed_key(c));
+        }
+        assert!(
+            draws_box(&editor, &p, rect, focused),
+            "the box is red before its text has been searched for"
+        );
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(editor.search.match_count, 0);
+        assert!(
+            draws_box(
+                &editor,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a search that found nothing does not turn the box red"
+        );
+        editor.handle_key(&typed_key('y'));
+        assert!(
+            draws_box(&editor, &p, rect, focused),
+            "the box is still red for text that has not been searched for"
+        );
+
+        pointer_at(&mut editor, MouseEventKind::Move, centre);
+        editor.show_help = true;
+        assert!(
+            draws_box(&editor, &p, rect, rest),
+            "the box is lit or marked under the shortcut card"
+        );
+    }
+
+    /// **The find bar's parts never overlap.** It was one row with every
+    /// part at a fixed offset: the query from 50 to 110 pixels in, the
+    /// options line from 60 -- so whatever was typed was written over it.
+    #[test]
+    fn the_find_bars_parts_never_overlap_at_any_width() {
+        for width in [1920.0, 1200.0, 800.0, 600.0, 460.0, 400.0, 300.0] {
+            let l = FindBar::at(width);
+            for r in [l.label, l.query, l.count, l.options] {
+                assert!(
+                    r.x >= l.bar.x - 0.01
+                        && r.right() <= l.bar.right() + 0.01
+                        && r.y >= l.bar.y - 0.01
+                        && r.bottom() <= l.bar.bottom() + 0.01,
+                    "at {width}: {r:?} is outside the bar {:?}",
+                    l.bar
+                );
+            }
+            assert!(
+                l.label.right() <= l.query.x + 0.01,
+                "at {width}: Find: runs into the box"
+            );
+            assert!(
+                l.query.right() <= l.count.x + 0.01,
+                "at {width}: the box runs into the count"
+            );
+            for r in [l.label, l.query, l.count] {
+                assert!(
+                    r.bottom() <= l.options.y + 0.01,
+                    "at {width}: {r:?} runs into the options line"
+                );
+            }
+        }
+        // At full width the box has room for a query.
+        assert!(FindBar::at(1200.0).query.w >= 150.0);
+    }
+
+    /// **A press on the find bar or the go-to dialog does not reach the
+    /// byte drawn under it.** It moved the cursor there, under a bar that
+    /// kept the keyboard.
+    #[test]
+    fn a_press_on_a_bar_does_not_reach_the_byte_under_it() {
+        let press = |editor: &mut HexEditor, at| {
+            pointer_at(editor, MouseEventKind::Press(MouseButton::Left), at)
+        };
+        // The cursor starts on the last byte, which no press near the top of
+        // the view can name: a press that reaches a byte moves it.
+        const LAST: usize = 4095;
+
+        let mut editor = make_test_editor(vec![0; LAST + 1]);
+        editor.show_inspector = false;
+        editor.window_width = 700.0;
+        let l = FindBar::at(editor.window_width);
+        // The bar's left end, over the hex column, on its second row: off the
+        // box, and on a byte.
+        let at = (l.bar.x + 20.0, l.options.centre().1);
+        editor.active_doc_mut().cursor = LAST;
+        // Control: with the bar down, a press there lands on a byte.
+        press(&mut editor, at);
+        assert_ne!(
+            editor.active_doc().cursor,
+            LAST,
+            "control: no byte is drawn where the bar goes"
+        );
+        editor.active_doc_mut().cursor = LAST;
+
+        editor.search.visible = true;
+        editor.focused_panel = FocusedPanel::SearchBar;
+        assert_eq!(press(&mut editor, at), EventResult::Consumed);
+        assert_eq!(
+            editor.active_doc().cursor,
+            LAST,
+            "a press on the find bar moved the cursor under it"
+        );
+        assert_eq!(editor.focused_panel, FocusedPanel::SearchBar);
+
+        let mut editor = make_test_editor(vec![0; LAST + 1]);
+        editor.show_inspector = false;
+        let (dialog, _) = HexEditor::goto_rects(editor.window_width, editor.window_height);
+        let at = (dialog.x + 6.0, dialog.y + 20.0);
+        editor.active_doc_mut().cursor = LAST;
+        press(&mut editor, at);
+        assert_ne!(
+            editor.active_doc().cursor,
+            LAST,
+            "control: no byte is drawn where the dialog goes"
+        );
+        editor.active_doc_mut().cursor = LAST;
+        editor.toolbar(ToolbarAction::GoTo);
+        assert_eq!(press(&mut editor, at), EventResult::Consumed);
+        assert_eq!(
+            editor.active_doc().cursor,
+            LAST,
+            "a press on the go-to dialog moved the cursor under it"
+        );
+    }
+
+    /// **The go-to box is red while it is not an offset, and Enter leaves it
+    /// up to be corrected.** It closed on Enter having gone nowhere and said
+    /// nothing, so a typo looked exactly like the answer being the start of
+    /// the file.
+    #[test]
+    fn the_go_to_box_is_red_while_it_is_not_an_offset_and_enter_leaves_it_up() {
+        let (mut editor, p) = ringed_editor();
+        editor.toolbar(ToolbarAction::GoTo);
+        let (_, rect) = HexEditor::goto_rects(editor.window_width, editor.window_height);
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&editor, &p, rect, focused),
+            "the box does not have the keyboard"
+        );
+        for c in "0xZZ".chars() {
+            editor.handle_key(&typed_key(c));
+        }
+        assert!(
+            draws_box(
+                &editor,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "what is not an offset does not turn the box red"
+        );
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert!(
+            editor.goto_visible,
+            "Enter on what is not an offset closed the box"
+        );
+        assert!(
+            editor.status_message.contains("0xZZ"),
+            "nothing said what was wrong: {:?}",
+            editor.status_message
+        );
+        assert_eq!(editor.active_doc().cursor, 0);
+
+        editor.handle_key(&key_press(Key::Backspace, Modifiers::NONE));
+        editor.handle_key(&key_press(Key::Backspace, Modifiers::NONE));
+        editor.handle_key(&typed_key('4'));
+        assert!(draws_box(&editor, &p, rect, focused), "0x4 is still red");
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(editor.active_doc().cursor, 4);
+        assert!(!editor.goto_visible);
+    }
+
+    /// The shortcut list names the new keys.
+    #[test]
+    fn the_shortcut_list_names_the_history_keys() {
+        for key in ["Alt+Z / Alt+Shift+Z", "Ctrl+F4"] {
+            assert!(
+                SHORTCUTS.iter().any(|(k, _)| *k == key),
+                "{key} is not listed"
+            );
+        }
     }
 }

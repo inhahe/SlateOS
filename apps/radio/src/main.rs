@@ -21,12 +21,17 @@ use appearance::Surface;
 // `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::listview::ListViewport;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
@@ -50,6 +55,17 @@ const SIDEBAR_TAB_HEIGHT: f32 = 24.0;
 const GENRE_ROW_HEIGHT: f32 = 20.0;
 /// Height of the "[/] Search" hint pinned to the bottom of the sidebar.
 const SEARCH_HINT_HEIGHT: f32 = 20.0;
+
+/// The search card's width and its top.
+const SEARCH_CARD_W: f32 = 400.0;
+const SEARCH_CARD_Y: f32 = 40.0;
+
+/// The size the search is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 14.0;
+
+/// The most characters the search holds: far more than any station's name,
+/// and a stop for a paste of something that is not one.
+const SEARCH_CAPACITY: usize = 128;
 /// Vertical space a list keeps for its "N more" line.
 ///
 /// Reserved whether or not the line is drawn, so that how many rows fit does
@@ -540,6 +556,9 @@ struct RadioApp {
     /// read by the renderer and written by nobody, so Down past the tenth
     /// station moved a selection that stayed off screen for good.
     station_view: ListViewport,
+    /// The wheel's unspent fraction of a station row, so that a touchpad's
+    /// small turns add up to rows rather than each counting as one.
+    station_wheel: wheel::Accumulator,
 
     // Playback
     play_state: PlayState,
@@ -569,6 +588,16 @@ struct RadioApp {
     /// Whether the shortcut card is up.
     show_help: bool,
     search_active: bool,
+    /// The search box's caret and selection, laid over `search_query`,
+    /// which stays the truth: reloaded whenever the query has changed under
+    /// it (`/` opens the search empty).
+    search_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
+    search_clipboard: String,
+    /// How wide the mark is round the search box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    focus_ring_width: f32,
 
     // UI
     screen: Screen,
@@ -616,6 +645,7 @@ impl RadioApp {
             genre_filter: None,
             genre_view: ListViewport::new(0),
             station_view: ListViewport::new(0),
+            station_wheel: wheel::Accumulator::default(),
             play_state: PlayState::Stopped,
             current_station: None,
             volume: 75,
@@ -632,6 +662,9 @@ impl RadioApp {
             search_selected: 0,
             show_help: false,
             search_active: false,
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             screen: Screen::Browse,
             status_message: "Select a station and press Enter to play".into(),
             tick_carry_ms: 0,
@@ -712,7 +745,7 @@ impl RadioApp {
         self.genre_view.select(index, Genre::ALL.len());
         // The filter decides which stations exist, so a position into the old
         // list would name a different station or none at all.
-        self.select_station(0);
+        self.restart_station_list();
         let label = genre.map_or("All", Genre::label);
         self.status_message = format!("Genre: {label}");
     }
@@ -1068,6 +1101,20 @@ impl RadioApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything: a press with any button puts it away and does
+        // nothing else -- a press on the picked station used to start its
+        // stream under the list -- and the wheel scrolls nothing it covers.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return true;
+                }
+                MouseEventKind::Scroll { .. } => return false,
+                _ => {}
+            }
+        }
         let (x, y) = (event.x, event.y);
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
@@ -1098,17 +1145,19 @@ impl RadioApp {
                 if !self.station_list_rect().contains(x, y) {
                     return false;
                 }
+                // The view scrolls and the picked station stays picked, as
+                // `ListViewport::scroll_by` -- the toolkit's door for the
+                // wheel -- has it: any key that moves the selection brings the
+                // view back to it. The wheel used to move the selection, one
+                // station per event whatever the event's size, so a six-notch
+                // flick moved one row and a touchpad's every fifth of a notch
+                // moved a whole one. Now it moves by the distance turned, three
+                // rows a notch, the fractions added up.
+                let rows = self.station_wheel.rows(dy);
                 let len = self.filtered_stations().len();
-                // `dy` is in notches, positive away from the user, which
-                // scrolls towards the start of the list.
-                if dy > 0.0 {
-                    self.station_view.select_prev(len);
-                } else if dy < 0.0 {
-                    self.station_view.select_next(len);
-                } else {
-                    return false;
-                }
-                true
+                let before = self.station_view.first_visible();
+                self.station_view.scroll_by(rows, len);
+                self.station_view.first_visible() != before
             }
             _ => false,
         }
@@ -1135,55 +1184,46 @@ impl RadioApp {
         // overlay is up and returns. `?` is Shift and Slash, and plain Slash
         // is what opens the search, so the two do not collide -- but only
         // because this is checked before the typed path reads the character.
-        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+        // Every binding here is on a key itself, so a chord is none of them:
+        // Alt's chords are the window's and the Windows key's the desktop's,
+        // and each arrives carrying its key -- Alt+S stopped the station.
+        let plain = textline::is_plain(event.modifiers);
+        if plain && (event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift)) {
             self.show_help = !self.show_help;
             return true;
         }
         if self.show_help {
             // Modal. R starts a recording and S stops the station; neither
             // should happen from behind a list somebody is reading.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return true;
         }
 
-        let ctrl = event.modifiers.ctrl;
-
-        // Search mode
+        // Search mode: Escape and Enter are the search's, plain; every other
+        // key is the box's editor's.
         if self.search_active {
             match event.key {
-                Key::Escape => {
+                Key::Escape if plain => {
                     self.search_active = false;
                     self.search_query.clear();
                     self.search_results.clear();
                     self.screen = Screen::Browse;
                     return true;
                 }
-                Key::Enter if !self.search_results.is_empty() => {
+                Key::Enter if plain && !self.search_results.is_empty() => {
                     self.screen = Screen::Search;
                     self.search_active = false;
                     return true;
                 }
-                Key::Backspace => {
-                    if self.search_query.pop().is_none() {
-                        return false;
-                    }
-                    self.perform_search();
-                    return true;
-                }
-                _ => {
-                    let typed: String = event.typed().collect();
-                    if typed.is_empty() || ctrl {
-                        return false;
-                    }
-                    self.search_query.push_str(&typed);
-                    self.perform_search();
-                    return true;
-                }
+                _ => return self.edit_search(event),
             }
         }
 
+        if !plain {
+            return false;
+        }
         match event.key {
             // Playback
             Key::Space | Key::Enter => {
@@ -1232,9 +1272,7 @@ impl RadioApp {
             _ => {}
         }
 
-        if ctrl {
-            return false;
-        }
+        // A plain key's character, Shift's among them: `+` is Shift and `=`.
         let Some(ch) = event.typed().next() else {
             return false;
         };
@@ -1284,7 +1322,15 @@ impl RadioApp {
     /// Show a screen, starting at the top of the list it puts up.
     pub fn show_screen(&mut self, screen: Screen) {
         self.screen = screen;
+        self.restart_station_list();
+    }
+
+    /// Back to the first station of a list that has just been replaced -- by
+    /// another screen or another genre -- forgetting with the old position any
+    /// fraction of a notch the wheel had banked over the old list.
+    fn restart_station_list(&mut self) {
         self.select_station(0);
+        self.station_wheel.reset();
     }
 
     /// Render the whole window to a list of render commands.
@@ -1911,39 +1957,136 @@ impl RadioApp {
         });
     }
 
+    /// Apply an editing key to the search box: the caret keys, Backspace and
+    /// Delete, Ctrl+A, C, X and V, and typing, which knows a command from
+    /// AltGr (`textline::apply_key`). Polish `ś` is AltGr+S, which arrives as
+    /// Ctrl+Alt -- and was refused as Ctrl -- while Alt+X searched for `x`.
+    /// The box had no caret: Backspace from the end was its only edit.
+    fn edit_search(&mut self, event: &KeyEvent) -> bool {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let before = (
+            self.search_editor.cursor(),
+            self.search_editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.search_editor,
+            event,
+            SEARCH_CAPACITY,
+            &self.search_clipboard,
+            SEARCH_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.search_clipboard = copied;
+        }
+        if !edit.handled {
+            return false;
+        }
+        if self.search_editor.text() != self.search_query {
+            self.search_query = self.search_editor.text().to_owned();
+            self.perform_search();
+            return true;
+        }
+        (
+            self.search_editor.cursor(),
+            self.search_editor.selection_anchor(),
+        ) != before
+    }
+
+    /// The search box, in the search card at `(sx, sy)`, `sw` wide.
+    fn search_box_rect(&self) -> Rect {
+        let sw = SEARCH_CARD_W;
+        Rect::new(
+            (self.width - sw) / 2.0 + 8.0,
+            SEARCH_CARD_Y + 8.0,
+            sw - 16.0,
+            28.0,
+        )
+    }
+
+    /// How the search box is drawn: with the keyboard while the search is
+    /// open -- every key that types goes to it -- unless the list of keys is
+    /// over it, and red while the search finds no station. Never lit under
+    /// the pointer: it has no press of its own.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.search_active && !self.show_help,
+            disabled: false,
+            invalid: !self.search_query.trim().is_empty() && self.search_results.is_empty(),
+        }
+    }
+
     fn render_search_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        let sw: f32 = 400.0;
-        let sh: f32 = 44.0;
+        let sw: f32 = SEARCH_CARD_W;
+        let sh: f32 = 60.0;
         let sx = (self.width - sw) / 2.0;
-        let sy: f32 = 40.0;
+        let sy: f32 = SEARCH_CARD_Y;
 
         self.palette
             .push_surface(cmds, sx, sy, sw, sh, 8.0, Surface::Card);
 
-        let display = if self.search_query.is_empty() {
-            "Type to search stations...".to_string()
+        // The box: the toolkit's field, holding the search with the editor's
+        // caret and selection -- or a grey hint while it is empty. It was the
+        // card itself, with the search and an `|` typed onto it.
+        let rect = self.search_box_rect();
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
+        let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            rect.x + 8.0,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 16.0).max(0.0),
+        );
+        if self.search_query.is_empty() && !state.focused {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "Type to search stations...".to_string(),
+                font_size: SEARCH_TEXT_SIZE,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
         } else {
-            format!("{}|", self.search_query)
-        };
-        cmds.push(RenderCommand::Text {
-            x: sx + 12.0,
-            y: sy + 8.0,
-            text: display,
-            font_size: 14.0,
-            color: if self.search_query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(sw - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            let editing = self.search_editor.text() == self.search_query;
+            let mut typed = RenderTree::new();
+            textedit::draw(
+                &mut typed,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: if editing {
+                        self.search_editor.cursor()
+                    } else {
+                        text::TextCursor::from(self.search_query.len())
+                    },
+                    selection_anchor: if editing {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused: state.focused,
+                    x: tx,
+                    y: ty,
+                    width: tw,
+                    line_height: line,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            cmds.extend(typed.commands);
+        }
 
         if !self.search_results.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: sx + 12.0,
-                y: sy + 28.0,
+                y: sy + 42.0,
                 text: format!("{} results — Enter to view", self.search_results.len()),
                 font_size: 10.0,
                 color: self.palette.ink(self.palette.green),
@@ -1958,6 +2101,10 @@ impl RadioApp {
 impl App for RadioApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -3053,21 +3200,143 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_wheel_moves_the_selection() {
-        let mut app = sized();
+    /// A turn of the wheel over the middle of the station list.
+    fn turn(app: &RadioApp, dy: f32) -> Event {
         let pane = app.station_list_rect();
-        let (x, y) = (pane.x + 40.0, pane.y + pane.h / 2.0);
-        app.handle_key(&key(Key::Down));
-        let before = app.selected_station();
-        assert!(app.handle_event(&Event::Mouse(MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
-        })));
+        Event::Mouse(MouseEvent {
+            x: pane.x + 40.0,
+            y: pane.y + pane.h / 2.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })
+    }
+
+    /// **The wheel scrolls the station list by the distance turned, and the
+    /// picked station stays picked.** It moved the selection, one station per
+    /// event whatever the event's size: a six-notch flick moved one row, and a
+    /// touchpad's every fifth of a notch a whole one. A key that moves the
+    /// selection brings the view back to it.
+    #[test]
+    fn the_wheel_scrolls_the_list_by_the_distance_turned() {
+        let mut app = RadioApp::new();
+        // Short, so that the list scrolls at least six rows.
+        app.set_size(900.0, 400.0);
+        let len = app.filtered_stations().len();
+        let first = |app: &RadioApp| app.station_view.first_visible();
+        let picked = app.selected_station();
         assert!(
-            app.selected_station() < before,
-            "a notch away from the user goes towards the start of the list"
+            app.station_view.visible_range(len).len() + 6 <= len,
+            "the fixture must scroll six rows: {len} stations"
+        );
+
+        assert!(
+            app.handle_event(&turn(&app, -1.0)),
+            "a notch towards the reader moved nothing"
+        );
+        assert_eq!(first(&app), 3, "a notch is three rows");
+        assert_eq!(
+            app.selected_station(),
+            picked,
+            "the wheel moved the selection"
+        );
+        app.handle_event(&turn(&app, -0.5));
+        assert_eq!(first(&app), 4, "half a notch is a row and a half");
+        app.handle_event(&turn(&app, -0.5));
+        assert_eq!(first(&app), 6, "and the other half adds up");
+        app.handle_event(&turn(&app, 2.0));
+        assert_eq!(
+            first(&app),
+            0,
+            "a notch away from the reader is three rows back"
+        );
+        assert!(!app.handle_event(&turn(&app, 1.0)), "moved above the top");
+
+        app.handle_event(&turn(&app, -3.0));
+        assert!(
+            !app.station_view
+                .visible_range(len)
+                .contains(&app.selected_station()),
+            "the fixture must scroll the selection out of view"
+        );
+        app.handle_key(&key(Key::Down));
+        assert!(
+            app.station_view
+                .visible_range(len)
+                .contains(&app.selected_station()),
+            "a key that moved the selection left it out of view"
+        );
+    }
+
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press on the picked
+    /// station started its stream under the list. The controls are the same
+    /// turn and press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = RadioApp::new();
+        app.set_size(900.0, 400.0);
+        assert_eq!(
+            app.selected_station(),
+            0,
+            "the fixture picks the first station"
+        );
+        let (x, y) = station_row_point(&app, 0);
+        let mouse = |kind| Event::Mouse(MouseEvent { x, y, kind });
+
+        app.handle_key(&key(Key::F1));
+        assert!(app.show_help);
+        assert!(app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left))));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_ne!(
+            app.play_state,
+            PlayState::Playing,
+            "the press started the station under the list"
+        );
+
+        app.handle_key(&key(Key::F1));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        app.handle_key(&key(Key::F1));
+        app.handle_event(&turn(&app, -1.0));
+        assert_eq!(
+            app.station_view.first_visible(),
+            0,
+            "the wheel scrolled the list under it"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_key(&key(Key::Escape));
+
+        // The controls.
+        app.handle_event(&turn(&app, -1.0));
+        assert!(
+            app.station_view.first_visible() > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.handle_event(&turn(&app, 1.0));
+        app.handle_event(&mouse(MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            app.play_state,
+            PlayState::Playing,
+            "control: a press on the picked station plays nothing"
+        );
+    }
+
+    /// **A fraction of a notch belongs to the list it was turned over.** Half
+    /// a notch is a row and a half; another genre, and the next half notch is
+    /// a row and a half again, not the two rows the leftover half would make
+    /// of it.
+    #[test]
+    fn a_fraction_of_a_notch_does_not_outlive_the_list() {
+        let mut app = RadioApp::new();
+        app.set_size(900.0, 400.0);
+        app.handle_event(&turn(&app, -0.5));
+        assert_eq!(app.station_view.first_visible(), 1);
+        app.set_genre_filter(None);
+        app.handle_event(&turn(&app, -0.5));
+        assert_eq!(
+            app.station_view.first_visible(),
+            1,
+            "half a notch over the old list moved the new one"
         );
     }
 
@@ -3128,6 +3397,40 @@ mod tests {
         };
         assert!(!app.handle_key(&ctrl_m));
         assert!(!app.muted, "Ctrl+M is not Mute");
+    }
+
+    /// **Alt's chords and the Windows key's are no shortcut either**: each
+    /// arrives carrying its key, and they are the window's and the
+    /// desktop's. Windows+M muted, Alt+Down moved the selection, and Ctrl+F1
+    /// raised the list of keys.
+    #[test]
+    fn an_alt_or_windows_chord_is_no_shortcut() {
+        let mut app = sized();
+        let held = |key: Key, text: &str, alt: bool, super_key: bool, ctrl: bool| KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers {
+                alt,
+                super_key,
+                ctrl,
+                ..Modifiers::NONE
+            },
+            text: text.to_string(),
+        };
+        assert!(!app.handle_key(&held(Key::M, "m", false, true, false)));
+        assert!(!app.muted, "Windows+M muted");
+        let selected = app.station_view.selected();
+        assert!(!app.handle_key(&held(Key::Down, "", true, false, false)));
+        assert_eq!(
+            app.station_view.selected(),
+            selected,
+            "Alt+Down moved the selection"
+        );
+        assert!(!app.handle_key(&held(Key::F1, "", false, false, true)));
+        assert!(!app.show_help, "Ctrl+F1 raised the list of keys");
+        // Control: the keys themselves.
+        assert!(app.handle_key(&held(Key::M, "m", false, false, false)));
+        assert!(app.muted);
     }
 
     #[test]
@@ -3452,19 +3755,144 @@ mod tests {
         let mut app = sized();
         app.handle_key(&typed(Key::Slash, '/'));
         assert!(app.search_active);
-        let ctrl_a = KeyEvent {
-            key: Key::A,
+        let ctrl = |key: Key, text: &str| KeyEvent {
+            key,
             pressed: true,
             modifiers: Modifiers {
                 ctrl: true,
                 ..Modifiers::NONE
             },
-            text: "a".to_string(),
+            text: text.to_string(),
         };
-        assert!(!app.handle_key(&ctrl_a));
+        assert!(!app.handle_key(&ctrl(Key::K, "k")));
         assert_eq!(
             app.search_query, "",
-            "Ctrl+A is a command nobody has bound, not the letter A"
+            "Ctrl+K is a command nobody has bound, not the letter K"
+        );
+        // Ctrl+A is the box's -- it selects everything -- and still no letter.
+        app.handle_key(&ctrl(Key::A, "a"));
+        assert_eq!(app.search_query, "", "Ctrl+A typed the letter A");
+    }
+
+    /// **The search box is the toolkit's field, and edits like one**: with
+    /// the keyboard in the theme's mark at the user's width while the search
+    /// is open -- not under the list of keys -- red while it finds no
+    /// station, the search drawn with a caret after it; the caret keys,
+    /// Delete, Ctrl+A and typing over a selection; AltGr types, Alt+X does
+    /// not. It was the card itself, with an `|` typed onto the search.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        let mut app = sized();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.handle_key(&typed(Key::Slash, '/'));
+        let rect = app.search_box_rect();
+        let draws = |app: &RadioApp, s: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = app.render_commands();
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(draws(&app, focused), "the open search has no keyboard mark");
+
+        let held = |key: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        };
+        for c in "jazz".chars() {
+            app.handle_key(&typed(Key::Unknown(0), c));
+        }
+        app.handle_key(&held(
+            Key::X,
+            "x",
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(app.search_query, "jazz", "Alt+X searched for x");
+        let cmds = app.render_commands();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "jazz"))
+            .expect("the search is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the search: {other:?}"),
+        };
+        let end = rect.x + 8.0 + text::measure("jazz", SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the search at {end}"
+        );
+
+        app.handle_key(&held(Key::Home, "", Modifiers::NONE));
+        app.handle_key(&held(Key::Delete, "", Modifiers::NONE));
+        assert_eq!(
+            app.search_query, "azz",
+            "Home and Delete did not edit the start"
+        );
+        app.handle_key(&held(
+            Key::S,
+            "\u{15b}",
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(app.search_query, "\u{15b}azz", "AltGr did not type");
+
+        app.handle_key(&held(
+            Key::A,
+            "a",
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+        ));
+        for c in "zzq".chars() {
+            app.handle_key(&typed(Key::Unknown(0), c));
+        }
+        assert_eq!(
+            app.search_query, "zzq",
+            "typing did not replace the selection"
+        );
+        assert!(app.search_results.is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(draws(&app, red), "a search that finds nothing is not red");
+        app.show_help = true;
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the box keeps its mark under the list of keys"
         );
     }
 

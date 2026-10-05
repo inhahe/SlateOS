@@ -72,6 +72,7 @@ use appearance::{Edge, Palette, Surface};
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 #[cfg(test)]
 use guitk::probe;
@@ -81,7 +82,10 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
 use guitk::textfind;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use printjob::{ColorMode, PageRange, PrintJob, ScaleMode};
@@ -383,6 +387,76 @@ impl PrintDialog {
             RangeChoice::CurrentPage => PageRange::CurrentPage,
             RangeChoice::Custom => PageRange::parse(&self.range_text),
         }
+    }
+}
+
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 13.0;
+
+/// The size the page range box's text is drawn at.
+const PRINT_RANGE_SIZE: f32 = 13.0;
+
+/// How far a box's text sits in from either side of the box.
+const BOX_TEXT_INSET: f32 = 8.0;
+
+/// The most characters a box holds: far more than any search or range, and
+/// a stop for a paste of something that is neither.
+const BOX_CAPACITY: usize = 512;
+
+/// What one key did to a box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Edited {
+    /// The text changed.
+    text: bool,
+    /// The caret or the selection moved.
+    caret: bool,
+}
+
+/// Apply an editing key to a box whose text is `text`, with `editor` laid
+/// over it: the caret keys, Backspace and Delete, Ctrl+A, C, X and V, and
+/// typing, which knows a command from AltGr (`textline::apply_key`). The
+/// editor is reloaded first if the text has changed under it.
+///
+/// `None` when the key is not the box's. Each box had no caret: Backspace
+/// from the end was the only edit.
+fn edit_box(
+    editor: &mut TextInput,
+    text: &mut String,
+    clipboard: &mut String,
+    key: &KeyEvent,
+    size: f32,
+) -> Option<Edited> {
+    if editor.text() != text.as_str() {
+        editor.set_text(text);
+    }
+    let before = (editor.cursor(), editor.selection_anchor());
+    let edit = textline::apply_key(editor, key, BOX_CAPACITY, clipboard.as_str(), size);
+    if let Some(copied) = edit.copied {
+        *clipboard = copied;
+    }
+    if !edit.handled {
+        return None;
+    }
+    let changed = editor.text() != text.as_str();
+    if changed {
+        *text = editor.text().to_owned();
+    }
+    Some(Edited {
+        text: changed,
+        caret: (editor.cursor(), editor.selection_anchor()) != before,
+    })
+}
+
+/// Where a box's caret is drawn: the editor's while the box has the
+/// keyboard (its end, if the text changed under the editor), the start of
+/// the text otherwise. One answer for the drawing and for a press.
+fn drawn_cursor(editor: &TextInput, text: &str, focused: bool) -> TextCursor {
+    if !focused {
+        TextCursor::default()
+    } else if editor.text() == text {
+        editor.cursor()
+    } else {
+        TextCursor::from(text.len())
     }
 }
 
@@ -1412,6 +1486,19 @@ pub struct PdfViewerApp {
     pub search_focused: bool,
     /// The print dialog, open or not.
     pub print_dialog: PrintDialog,
+    /// The search box's caret and selection, laid over `search.query`,
+    /// which stays the truth: reloaded whenever the query has changed under
+    /// it (Escape clears it).
+    search_editor: TextInput,
+    /// The page range box's caret and selection, laid over
+    /// `print_dialog.range_text`, the same way.
+    range_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from either box, for Ctrl+V.
+    clipboard: String,
+    /// How wide the mark is round a box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
     pub recent_files: RecentFilesList,
     /// The open dialog, up or not.
     pub picker: FilePicker,
@@ -1476,6 +1563,10 @@ impl std::fmt::Debug for PdfViewerApp {
             .field("can_print", &self.print.is_some())
             .field("palette", &self.palette)
             .field("wheel", &self.wheel)
+            .field("search_editor", &self.search_editor)
+            .field("range_editor", &self.range_editor)
+            .field("clipboard", &self.clipboard)
+            .field("focus_ring_width", &self.focus_ring_width)
             .finish()
     }
 }
@@ -1491,6 +1582,10 @@ impl PdfViewerApp {
             search: SearchState::new(),
             search_focused: false,
             print_dialog: PrintDialog::default(),
+            search_editor: TextInput::new(),
+            range_editor: TextInput::new(),
+            clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             recent_files: RecentFilesList::default(),
             print_job: PrintJob::default(),
             dark_mode: true,
@@ -3137,50 +3232,30 @@ impl PdfViewerApp {
         // The custom range box, always drawn so the dialog does not change
         // height, and lit only when it is the choice in force.
         let custom = self.print_dialog.choice == RangeChoice::Custom;
+        // The range box: the toolkit's field, which has the keyboard while
+        // the dialog is up -- every key that types goes to it. Its text is
+        // dimmed while another choice than the range is in force. It was a
+        // box whose edge turned blue for the range choice, with no caret.
         let box_rect = Rect::new(value_x, y, value_w, row_h - 4.0);
-        frame.push(RenderCommand::FillRect {
-            x: box_rect.x,
-            y: box_rect.y,
-            width: box_rect.w,
-            height: box_rect.h,
-            color: self.palette.base,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        frame.push(RenderCommand::StrokeRect {
-            x: box_rect.x,
-            y: box_rect.y,
-            width: box_rect.w,
-            height: box_rect.h,
-            color: if custom {
-                self.palette.blue
-            } else {
-                self.palette.surface1
-            },
-            line_width: if custom { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(6.0),
-        });
-        let (range_text, range_color) = if self.print_dialog.range_text.is_empty() {
-            ("e.g. 1-3, 5, 7-9".to_string(), self.palette.overlay0)
-        } else {
+        self.render_box(
+            frame,
+            box_rect,
+            self.range_box_state(),
             (
-                self.print_dialog.range_text.clone(),
+                &self.range_editor,
+                &self.print_dialog.range_text,
+                self.print_dialog.open,
+            ),
+            (
+                "e.g. 1-3, 5, 7-9",
+                PRINT_RANGE_SIZE,
                 if custom {
                     self.palette.text
                 } else {
                     self.palette.overlay0
                 },
-            )
-        };
-        frame.push(RenderCommand::Text {
-            x: box_rect.x + 8.0,
-            y: box_rect.y + 7.0,
-            text: range_text,
-            color: range_color,
-            font_size: 13.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some((value_w - 16.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
+            ),
+        );
         frame.hit(Target::PrintRangeField, box_rect);
         y += row_h;
 
@@ -3284,6 +3359,144 @@ impl PdfViewerApp {
         frame.hit(target, rect);
     }
 
+    /// The box the search is typed into, in the bar at `(bar_x, bar_y)`,
+    /// `bar_h` tall: between the bar's icon and its match count.
+    fn search_box_rect(bar_x: f32, bar_y: f32, bar_h: f32) -> Rect {
+        Rect::new(bar_x + 28.0, bar_y + 6.0, 188.0, bar_h - 12.0)
+    }
+
+    /// How the search box is drawn: with the keyboard while it has it --
+    /// not under the list of keys or the print dialog, which cover it -- and
+    /// red while the query finds nothing in the document. Never lit under
+    /// the pointer: nothing in this window is.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.search_focused && !self.show_help && !self.print_dialog.open,
+            disabled: false,
+            invalid: !self.search.query.is_empty() && self.search.results.is_empty(),
+        }
+    }
+
+    /// How the page range box is drawn: with the keyboard while the print
+    /// dialog is up, unless the list of keys is over it, and red while the
+    /// range is in force and nothing in it is a page -- such a range prints
+    /// nothing.
+    fn range_box_state(&self) -> field::State {
+        let custom = self.print_dialog.choice == RangeChoice::Custom;
+        field::State {
+            hovered: false,
+            focused: self.print_dialog.open && !self.show_help,
+            disabled: false,
+            invalid: custom
+                && !self.print_dialog.range_text.trim().is_empty()
+                && self.print_dialog.range() == PageRange::Custom(Vec::new()),
+        }
+    }
+
+    /// A box at `rect` in `state`: the toolkit's field, holding `text` --
+    /// with `editor`'s caret and selection while `has_keys` -- drawn in
+    /// `color` at `size`, scrolled to keep the caret in view; or
+    /// `placeholder`, grey, while it is empty and idle.
+    fn render_box(
+        &self,
+        frame: &mut Frame,
+        rect: Rect,
+        state: field::State,
+        (editor, text, has_keys): (&TextInput, &str, bool),
+        (placeholder, size, color): (&str, f32, Color),
+    ) {
+        field::draw(frame, &self.palette, rect, state, self.focus_ring_width);
+        let line = text::line_height(size, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            rect.x + BOX_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+        );
+        if text.is_empty() && !state.focused {
+            frame.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: placeholder.to_string(),
+                color: self.palette.subtext0,
+                font_size: size,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+        let editing = has_keys && editor.text() == text;
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text,
+                cursor: drawn_cursor(editor, text, has_keys),
+                selection_anchor: if editing {
+                    editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: size,
+                weight: FontWeightHint::Regular,
+                color,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        for command in tree.commands {
+            frame.push(command);
+        }
+    }
+
+    /// Put the caret of the box a press landed in under the pointer at `x`
+    /// -- the search box or the page range box, as `target` says -- measured
+    /// against the box as it was drawn before the press (`drawn`), in the
+    /// frame that answered the press (`frame`).
+    fn place_caret(&mut self, target: Target, frame: &Frame, drawn: TextCursor, x: f32) {
+        let (rect, size) = match target {
+            Target::SearchField => {
+                let Some(hit) = frame.rect_of(|t| *t == Target::SearchField) else {
+                    return;
+                };
+                // The hit box is the bar's left part, as tall as the bar; the
+                // box is inside it.
+                (Self::search_box_rect(hit.x, hit.y, hit.h), SEARCH_TEXT_SIZE)
+            }
+            Target::PrintRangeField => {
+                let Some(rect) = frame.rect_of(|t| *t == Target::PrintRangeField) else {
+                    return;
+                };
+                (rect, PRINT_RANGE_SIZE)
+            }
+            _ => return,
+        };
+        let (editor, text) = match target {
+            Target::SearchField => (&mut self.search_editor, &self.search.query),
+            _ => (&mut self.range_editor, &self.print_dialog.range_text),
+        };
+        if editor.text() != text.as_str() {
+            editor.set_text(text);
+        }
+        let cursor = textedit::cursor_at_click(
+            text,
+            drawn,
+            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+            size,
+            FontWeightHint::Regular,
+            x - rect.x - BOX_TEXT_INSET,
+        );
+        editor.set_selection_anchor(None);
+        editor.set_cursor(cursor);
+    }
+
     /// Render the search bar overlay.
     ///
     /// This floats over the document rather than displacing it, and it is drawn
@@ -3327,20 +3540,17 @@ impl PdfViewerApp {
             corner_radii: CornerRadii::all(8.0),
         });
 
-        // The focus ring is the only thing that distinguishes "typing goes
-        // here" from "typing pages the document", and both states are reachable
-        // with the bar on screen, so it has to be visible rather than implied.
+        // The bar's own edge. Whether typing goes to the box or pages the
+        // document is the box's keyboard mark to say, below: both states are
+        // reachable with the bar on screen. (The bar's edge used to say it,
+        // blue and thick, with no caret in the box at all.)
         frame.push(RenderCommand::StrokeRect {
             x: bar_x,
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: if self.search_focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
-            },
-            line_width: if self.search_focused { 2.0 } else { 1.0 },
+            color: self.palette.surface1,
+            line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -3364,27 +3574,15 @@ impl PdfViewerApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Search query text
-        let query_display = if self.search.query.is_empty() {
-            "Search...".to_string()
-        } else {
-            self.search.query.clone()
-        };
-        let query_color = if self.search.query.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        frame.push(RenderCommand::Text {
-            x: bar_x + 32.0,
-            y: bar_y + 14.0,
-            text: query_display,
-            color: query_color,
-            font_size: 13.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(180.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // The query, in the toolkit's field.
+        let search_box = Self::search_box_rect(bar_x, bar_y, bar_h);
+        self.render_box(
+            frame,
+            search_box,
+            self.search_box_state(),
+            (&self.search_editor, &self.search.query, self.search_focused),
+            ("Search...", SEARCH_TEXT_SIZE, self.palette.text),
+        );
 
         // Match count
         let count_label = self.search.match_count_label();
@@ -4111,6 +4309,27 @@ impl PdfViewerApp {
             return false;
         }
 
+        // Every key but Ctrl+O and what is typed is taken plain: a chord with
+        // Alt or the Windows key is the window's or the desktop's and arrives
+        // carrying its key -- Alt+D turned the reading mode on and Alt+Space
+        // turned the page.
+        let plain = textline::is_plain(event.modifiers);
+
+        // The shortcut list before anything else, the print dialog included,
+        // because it is drawn over everything else: a plain F1, `?` or Escape
+        // puts it away, and no other key reaches what it covers. The page keys
+        // turned the page under it, `D` the reading mode, and Ctrl+O opened a
+        // file dialog behind it.
+        if self.show_help {
+            let closes = plain
+                && (matches!(event.key, Key::F1 | Key::Escape)
+                    || event.key == Key::Slash && event.modifiers.shift);
+            if closes {
+                self.show_help = false;
+            }
+            return closes;
+        }
+
         // The dialog is modal, so it takes every key before anything else --
         // including the page keys, which would otherwise walk the document
         // behind a dialog the user is typing a page range into.
@@ -4118,17 +4337,10 @@ impl PdfViewerApp {
             return self.handle_print_key(event);
         }
 
-        // Escape closes the shortcut list before anything else, because it is
-        // drawn over everything else: Escape closes the topmost thing.
-        if event.key == Key::Escape && self.show_help {
-            self.show_help = false;
-            return true;
-        }
-
         // Escape closes the search bar from anywhere, focused or not, because
         // the whole point of Escape on an overlay is that you do not have to
         // find it first.
-        if event.key == Key::Escape && self.search.active {
+        if event.key == Key::Escape && plain && self.search.active {
             self.search.clear();
             self.search_focused = false;
             return true;
@@ -4138,11 +4350,16 @@ impl PdfViewerApp {
             return self.handle_search_key(event);
         }
 
+        // A Ctrl chord, not Ctrl held: AltGr+O is a Polish `ó`.
+        if event.key == Key::O && textline::is_ctrl_chord(event.modifiers) {
+            self.picker.open_to_read();
+            return true;
+        }
+        if !plain {
+            return false;
+        }
+
         match event.key {
-            Key::O if event.modifiers.ctrl => {
-                self.picker.open_to_read();
-                true
-            }
             Key::Right | Key::Down | Key::PageDown | Key::Space => {
                 self.step_page(true);
                 true
@@ -4214,68 +4431,84 @@ impl PdfViewerApp {
     /// press Print, and get every page -- the exact failure this dialog was
     /// built to remove, reintroduced one control along.
     fn handle_print_key(&mut self, event: &KeyEvent) -> bool {
+        // The dialog's own keys are plain: Alt+Enter printed. Every other key
+        // is the range box's editor's, which types what a key typed -- AltGr's
+        // among it, and not a command's letter, which a chord carries: Ctrl+P
+        // typed a `p` into the range.
+        let plain = textline::is_plain(event.modifiers);
         match event.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.print_dialog.open = false;
                 true
             }
-            Key::Enter => self.commit_print(),
-            Key::Backspace => {
-                // `pop` removes a `char`, not a byte, as the search box does.
-                if self.print_dialog.range_text.pop().is_none() {
-                    return false;
+            Key::Enter if plain => self.commit_print(),
+            _ => match edit_box(
+                &mut self.range_editor,
+                &mut self.print_dialog.range_text,
+                &mut self.clipboard,
+                event,
+                PRINT_RANGE_SIZE,
+            ) {
+                Some(edited) => {
+                    if edited.text {
+                        self.print_dialog.choice = RangeChoice::Custom;
+                    }
+                    edited.text || edited.caret
                 }
-                self.print_dialog.choice = RangeChoice::Custom;
-                true
-            }
-            _ => {
-                let typed: String = event.typed().collect();
-                if typed.is_empty() {
-                    return false;
-                }
-                self.print_dialog.range_text.push_str(&typed);
-                self.print_dialog.choice = RangeChoice::Custom;
-                true
-            }
+                None => false,
+            },
         }
     }
 
     fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
-        match event.key {
-            Key::Enter => {
-                self.search.next_match();
-                self.follow_current_match();
-                true
-            }
-            Key::Backspace => {
-                // `pop` removes a `char`, not a byte, so a query ending in a
-                // multi-byte character loses the character rather than half of
-                // it -- which would panic the next time the string was sliced.
-                if self.search.query.pop().is_none() {
-                    return false;
+        // Enter is the bar's, plain: the next match. Every other key is the
+        // box's editor's, which types every character a key typed -- a
+        // compose sequence or an IME commit hands over several in one event
+        // -- drops the control characters Tab and Enter produce, and types no
+        // command's letter: Alt+X typed an `x`.
+        if event.key == Key::Enter && textline::is_plain(event.modifiers) {
+            self.search.next_match();
+            self.follow_current_match();
+            return true;
+        }
+        match edit_box(
+            &mut self.search_editor,
+            &mut self.search.query,
+            &mut self.clipboard,
+            event,
+            SEARCH_TEXT_SIZE,
+        ) {
+            Some(edited) => {
+                if edited.text {
+                    self.refresh_search();
                 }
-                self.refresh_search();
-                true
+                edited.text || edited.caret
             }
-            _ => {
-                // `typed()` rather than `single_char()`: a compose sequence or
-                // an IME commit hands over several characters in one event, and
-                // taking only the first silently drops the rest. It also drops
-                // control characters, which is what keeps Tab and Enter from
-                // being typed into the box.
-                let typed: String = event.typed().collect();
-                if typed.is_empty() {
-                    return false;
-                }
-                self.search.query.push_str(&typed);
-                self.refresh_search();
-                true
-            }
+            None => false,
         }
     }
 
     /// Route one window event.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The shortcut list is drawn over everything, the open dialog
+        // included, so it has the pointer first: a press with any button puts
+        // it away and does nothing else -- it used to reach the toolbar button
+        // or the tab drawn under it -- and the wheel scrolls nothing it covers.
+        // A move or a release is not a press, and passes. Its keys are in
+        // `handle_key`.
+        if self.show_help {
+            if let Event::Mouse(MouseEvent { kind, .. }) = event {
+                match kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return true;
+                    }
+                    MouseEventKind::Scroll { .. } => return false,
+                    _ => {}
+                }
+            }
+        }
+
         // The picker takes input first while it is up. It does not take `Tick`
         // or `Resize`, so the clock keeps running behind the dialog --
         // `gui/toolkit`'s `a_tick_and_a_resize_still_reach_the_application`
@@ -4301,6 +4534,26 @@ impl PdfViewerApp {
             }
             Event::Mouse(MouseEvent { kind, x, y, .. }) => match kind {
                 MouseEventKind::Press(MouseButton::Left) => match self.target_at(*x, *y) {
+                    // A press in a box puts its caret under the pointer,
+                    // measured against the box as it was drawn before it.
+                    Some(target @ (Target::SearchField | Target::PrintRangeField)) => {
+                        let frame = self.frame(self.window_width, self.window_height);
+                        let drawn = match target {
+                            Target::SearchField => drawn_cursor(
+                                &self.search_editor,
+                                &self.search.query,
+                                self.search_focused,
+                            ),
+                            _ => drawn_cursor(
+                                &self.range_editor,
+                                &self.print_dialog.range_text,
+                                self.print_dialog.open,
+                            ),
+                        };
+                        self.handle_target(target);
+                        self.place_caret(target, &frame, drawn, *x);
+                        true
+                    }
                     Some(target) => self.handle_target(target),
                     None => {
                         // A press on bare background is still a press away from
@@ -4387,6 +4640,10 @@ impl App for PdfViewerApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         match self.active_tab() {
             Some(tab) if tab.document.is_some() => format!("{} - PDF Viewer", tab.title()),
@@ -4408,9 +4665,15 @@ impl App for PdfViewerApp {
             return Response::Exit;
         }
         if let Event::Key(key) = event {
-            if key.pressed && key.modifiers.ctrl {
+            // Ctrl chords, not Ctrl held: AltGr arrives as Ctrl+Alt and
+            // types, and AltGr+Q -- a German `@` -- closed the window.
+            if key.pressed && textline::is_ctrl_chord(key.modifiers) {
                 match key.key {
                     Key::Q => return Response::Exit,
+                    // The rest act on what the shortcut list covers -- Ctrl+W
+                    // closed the tab under it -- so while it is up they go on
+                    // to `handle_key`, which swallows them.
+                    _ if self.show_help => {}
                     // Ctrl+F is the find shortcut everywhere else, and going
                     // through `handle_target` rather than setting the flags
                     // here means the shortcut and the button cannot drift.
@@ -6590,6 +6853,187 @@ mod tests {
         true
     }
 
+    /// **The list of keys is modal for the keys and the pointer alike.** It is
+    /// drawn over everything, yet a page key turned the page under it, `D`
+    /// turned the reading mode over, Ctrl+O opened a file dialog behind it and
+    /// Ctrl+W closed the tab it covers; a press reached the toolbar button
+    /// under it, and the wheel scrolled the document. The controls are the
+    /// same keys, press and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on() {
+        let mut app = wired();
+        let page = |app: &PdfViewerApp| app.active_tab().map(|t| t.current_page);
+        let offset = |app: &PdfViewerApp| app.active_tab().map(|t| t.scroll_offset_y);
+        let key = |app: &mut PdfViewerApp, event: KeyEvent| app.on_event(&Event::Key(event));
+        let (start, dark, tabs) = (page(&app), app.dark_mode, app.tabs.len());
+
+        // The keys.
+        key(&mut app, probe::press(Key::F1));
+        assert!(app.show_help);
+        for k in [Key::Right, Key::Space, Key::End, Key::D] {
+            key(&mut app, probe::press(k));
+        }
+        for k in [Key::O, Key::W, Key::T, Key::F] {
+            key(&mut app, probe::ctrl(k));
+        }
+        assert!(
+            app.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(
+            page(&app),
+            start,
+            "a page key turned the page under the list"
+        );
+        assert_eq!(
+            app.dark_mode, dark,
+            "D turned the reading mode over under the list"
+        );
+        assert!(
+            !app.picker.is_open(),
+            "Ctrl+O opened a file dialog behind the list"
+        );
+        assert_eq!(
+            app.tabs.len(),
+            tabs,
+            "a Ctrl chord changed the tabs under the list"
+        );
+        assert!(
+            !app.search.active,
+            "Ctrl+F opened the search bar under the list"
+        );
+        assert_eq!(
+            key(&mut app, probe::ctrl(Key::Q)),
+            Response::Exit,
+            "the list swallowed the quit"
+        );
+        key(&mut app, probe::shift(Key::Slash));
+        assert!(!app.show_help, "? left the list up");
+        key(&mut app, probe::press(Key::F1));
+        key(&mut app, probe::press(Key::F1));
+        assert!(!app.show_help, "F1 left the list up");
+
+        // A press, with either button, on the next-page button under it.
+        key(&mut app, probe::press(Key::F1));
+        probe::click(&mut app, Target::Nav(Nav::Next));
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            page(&app),
+            start,
+            "the press went through the list to the button"
+        );
+        key(&mut app, probe::press(Key::F1));
+        probe::click_with(&mut app, Target::Nav(Nav::Next), MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The wheel, over a document that scrolls rather than turns pages.
+        probe::click(&mut app, Target::ViewModeToggle);
+        let wheel = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+            x: WINDOW_WIDTH / 2.0,
+            y: WINDOW_HEIGHT / 2.0,
+        });
+        key(&mut app, probe::press(Key::F1));
+        app.handle_event(&wheel);
+        assert_eq!(
+            offset(&app),
+            Some(0.0),
+            "the wheel scrolled the document under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        key(&mut app, probe::press(Key::Escape));
+        assert!(!app.show_help, "Escape left the list up");
+
+        // The controls.
+        app.handle_event(&wheel);
+        assert!(
+            offset(&app).is_some_and(|y| y > 0.0),
+            "control: the wheel scrolls nothing at all"
+        );
+        probe::click(&mut app, Target::ViewModeToggle);
+        probe::click(&mut app, Target::Nav(Nav::Next));
+        let next = page(&app);
+        assert_ne!(next, start, "control: the next-page button turns no page");
+        key(&mut app, probe::press(Key::Right));
+        assert_ne!(page(&app), next, "control: Right turns no page");
+        key(&mut app, probe::press(Key::D));
+        assert_ne!(app.dark_mode, dark, "control: D does nothing");
+        key(&mut app, probe::ctrl(Key::T));
+        assert_eq!(app.tabs.len(), tabs + 1, "control: Ctrl+T opens no tab");
+    }
+
+    /// **A chord is neither a viewer key nor typing, and AltGr is not Ctrl**:
+    /// Alt+D turned the reading mode over and Alt+Space turned the page, each
+    /// chord carrying its key; Ctrl+P typed a `p` into the print range and
+    /// Alt+X an `x` into the search; and AltGr+Q -- a German `@` -- closed
+    /// the window as Ctrl+Q does.
+    #[test]
+    fn a_chord_is_neither_a_viewer_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = wired();
+        let (dark, page) = (app.dark_mode, app.active_tab().map(|t| t.current_page));
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::D, Key::Space, Key::Right, Key::End, Key::F1, Key::O] {
+                assert!(!app.handle_key(&key(k, "", m)), "{m:?} {k:?} was taken");
+            }
+        }
+        assert_eq!(app.dark_mode, dark, "a chord turned the reading mode over");
+        assert_eq!(
+            app.active_tab().map(|t| t.current_page),
+            page,
+            "a chord turned the page"
+        );
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(!app.picker.is_open(), "AltGr+O opened a file");
+        assert_ne!(
+            app.on_event(&Event::Key(key(Key::Q, "@", altgr))),
+            Response::Exit,
+            "AltGr+Q closed the window"
+        );
+        // The list of keys goes on a plain Escape only.
+        app.handle_key(&key(Key::F1, "", Modifiers::NONE));
+        app.handle_key(&key(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put the list of keys away");
+        app.handle_key(&key(Key::Escape, "", Modifiers::NONE));
+
+        // The print dialog's range types what a key typed.
+        app.print_dialog.open = true;
+        app.print_dialog.range_text.clear();
+        app.handle_key(&key(Key::P, "p", Modifiers::ctrl()));
+        app.handle_key(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_key(&key(Key::Num2, "2", Modifiers::NONE));
+        app.handle_key(&key(Key::Enter, "", Modifiers::alt()));
+        assert_eq!(
+            app.print_dialog.range_text, "2",
+            "the range typed a command's letter"
+        );
+        assert!(app.print_dialog.open, "Alt+Enter printed");
+        app.print_dialog.open = false;
+
+        // So does the search.
+        app.search.active = true;
+        app.search_focused = true;
+        app.handle_key(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_key(&key(Key::S, "ś", altgr));
+        app.handle_key(&key(Key::Escape, "", Modifiers::alt()));
+        app.handle_key(&key(Key::Backspace, "", Modifiers::alt()));
+        assert_eq!(
+            app.search.query, "ś",
+            "the search typed a command or lost AltGr's ś"
+        );
+        assert!(app.search.active, "Alt+Escape closed the search");
+    }
+
     #[test]
     fn every_control_the_renderer_draws_can_be_clicked() {
         let mut app = wired();
@@ -7264,6 +7708,195 @@ mod tests {
             "a find bar you have to click after summoning wasted the summon"
         );
         assert!(probe::rect_of(&app, Target::SearchField).is_some());
+    }
+
+    /// Whether `app` draws exactly the toolkit's field for `rect` in `state`
+    /// -- and, unless `state` has the keyboard, not the focused one as well.
+    fn draws_box(app: &PdfViewerApp, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, app.focus_ring_width);
+            v
+        };
+        let frame = app.frame(app.window_width, app.window_height);
+        let cmds = frame.commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// A window whose theme marks a box with the keyboard by a ring, at two
+    /// and a half times the toolkit's focus width.
+    fn ringed() -> (PdfViewerApp, Palette) {
+        let mut app = wired();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        (app, p)
+    }
+
+    /// The search box, where the bar draws it.
+    fn search_box(app: &PdfViewerApp) -> Rect {
+        let hit = probe::rect_of(app, Target::SearchField).expect("the search bar is up");
+        PdfViewerApp::search_box_rect(hit.x, hit.y, hit.h)
+    }
+
+    /// **The search box is the toolkit's field**: with the keyboard in the
+    /// theme's mark at the user's width while it has it -- not under the list
+    /// of keys or the print dialog -- red while the query finds nothing, and
+    /// the query drawn with a caret after it. The bar's edge turned blue
+    /// with the keyboard, and the box had no caret at all.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        let (mut app, p) = ringed();
+        probe::click(&mut app, Target::SearchToggle);
+        let rect = search_box(&app);
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&app, &p, rect, focused),
+            "the search box has no keyboard mark"
+        );
+
+        typed(&mut app, "Lorem");
+        let frame = app.frame(app.window_width, app.window_height);
+        let cmds = frame.commands();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "Lorem"))
+            .expect("the query is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the query: {other:?}"),
+        };
+        let end = rect.x
+            + BOX_TEXT_INSET
+            + text::measure("Lorem", SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the query at {end}"
+        );
+
+        typed(&mut app, "zzqx");
+        assert!(app.search.results.is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(
+            draws_box(&app, &p, rect, red),
+            "a query that finds nothing is not red"
+        );
+        app.show_help = true;
+        let covered = field::State {
+            focused: false,
+            ..red
+        };
+        assert!(
+            draws_box(&app, &p, rect, covered),
+            "the box keeps its mark under the card"
+        );
+        app.show_help = false;
+        app.print_dialog.open = true;
+        assert!(
+            draws_box(&app, &p, rect, covered),
+            "the box keeps its mark under Print"
+        );
+    }
+
+    /// **The search box edits like a field**: the caret keys and Delete,
+    /// Ctrl+A and typing over the selection, and a press that puts the caret
+    /// under the pointer. Backspace from the end was its only edit.
+    #[test]
+    fn the_search_box_edits_like_a_field() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        typed(&mut app, "orem");
+        app.handle_key(&probe::press(Key::Home));
+        app.handle_key(&probe::press(Key::Delete));
+        assert_eq!(
+            app.search.query, "rem",
+            "Home and Delete did not edit the start"
+        );
+        app.handle_key(&probe::ctrl(Key::A));
+        typed(&mut app, "orem");
+        assert_eq!(
+            app.search.query, "orem",
+            "typing did not replace the selection"
+        );
+
+        let rect = search_box(&app);
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: rect.x + BOX_TEXT_INSET + 1.0,
+            y: rect.centre().1,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        typed(&mut app, "L");
+        assert_eq!(
+            app.search.query, "Lorem",
+            "the caret did not go where the press was"
+        );
+        assert!(
+            !app.search.results.is_empty(),
+            "the search was not run again"
+        );
+    }
+
+    /// **The page range box is the toolkit's field**: with the keyboard while
+    /// the print dialog is up, red while the range is chosen and nothing in
+    /// it is a page -- it would print nothing -- and edited like a field.
+    #[test]
+    fn the_page_range_box_is_the_toolkits_field() {
+        let (mut app, p) = ringed();
+        app.print_dialog.open = true;
+        app.print_dialog.range_text.clear();
+        let rect = probe::rect_of(&app, Target::PrintRangeField).expect("the range box");
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&app, &p, rect, focused),
+            "the range box has no keyboard mark"
+        );
+        typed(&mut app, "x-y");
+        assert_eq!(
+            app.print_dialog.choice,
+            RangeChoice::Custom,
+            "typing chose no range"
+        );
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(
+            draws_box(&app, &p, rect, red),
+            "a range of no pages is not red"
+        );
+        app.handle_key(&probe::ctrl(Key::A));
+        typed(&mut app, "2-4");
+        assert_eq!(app.print_dialog.range_text, "2-4");
+        assert!(draws_box(&app, &p, rect, focused), "a good range is red");
+        app.handle_key(&probe::press(Key::Home));
+        typed(&mut app, "1,");
+        assert_eq!(
+            app.print_dialog.range_text, "1,2-4",
+            "Home did not move the caret"
+        );
     }
 
     #[test]

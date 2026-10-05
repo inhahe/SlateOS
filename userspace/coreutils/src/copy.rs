@@ -64,7 +64,7 @@ use crate::fsattr::{
 };
 use crate::hardlink;
 use crate::overwrite::{self, Interactive};
-use crate::quote::{escape_os, quoteaf_os, quotef_os};
+use crate::quote::{escape_os, os_bytes, quoteaf_os, quotef_os};
 use crate::yesno::Answers;
 use std::fs;
 use std::io;
@@ -323,6 +323,16 @@ pub struct Opts<'a> {
     /// effect is not "leave the mode alone" but "give a newly created
     /// destination the mode it would have had if nobody had asked".
     pub explicit_no_preserve_mode: bool,
+    /// GNU's `set_mode` and `mode` (`copy.h:246`, `:130`), which only `install` sets:
+    /// a copy is created with this mode rather than one derived from its
+    /// source, and is given it again once the bytes are written
+    /// (`copy.c:1678`). `None` for `cp` and `mv`.
+    ///
+    /// It is `install`'s *working* mode, `0600` (`install.c:289`), and not the
+    /// `-m` mode: the copy has to stay writable by its owner until the strip
+    /// program has been at it, and `install` gives it the user's mode itself,
+    /// after its owner, because a chown can clear the set-user-ID bit.
+    pub set_mode: Option<u32>,
     /// GNU's `move_mode` (`copy.h:169`): this engine is standing in for
     /// `rename(2)`, not performing a copy the user asked for. `mv` sets it,
     /// `cp` never does.
@@ -1679,6 +1689,24 @@ fn settle_mode<E: Write>(
         return true;
     }
 
+    if let Some(mode) = run.opts.set_mode {
+        // GNU's `else if (x->set_mode) set_acl (dst_name, dest_desc, x->mode)`
+        // (`copy.c:1678`, and `copy.c:3296` for the other kinds): exactly this
+        // mode, the umask and the source both out of it. For `install` the copy
+        // was created at this mode a moment ago, so this matters only where the
+        // name already held a file the copy was written through.
+        if let Err(e) = fsattr::set_mode_exactly(on, mode) {
+            let why = strerror(&e);
+            let _ = writeln!(
+                run.err,
+                "{prog}: setting permissions for {}: {why}",
+                quotef_os(dst)
+            );
+            return false;
+        }
+        return true;
+    }
+
     if run.opts.explicit_no_preserve_mode && new_dst {
         // GNU's `MODE_RW_UGO` for a file and `S_IRWXUGO` for a directory
         // (`copy.c:3303`). A socket gets the directory's answer there too; this
@@ -2272,8 +2300,14 @@ pub fn place_entity<E: Write>(
     // Computed here, before the kind is dispatched, because GNU computes it
     // here — one expression covering all three kinds (`copy.c:2899`), read by
     // whichever of them creates the destination and settled by the tail they
-    // share. See [`ModeDebt`].
-    let debt = ModeDebt::new(run.opts.preserve_ownership, src_mode, metadata.is_dir());
+    // share. See [`ModeDebt`]. Upstream's `dst_mode_bits` is the source's mode
+    // unless a mode was set (`x->set_mode ? x->mode : src_mode`).
+    let dst_mode_bits = run.opts.set_mode.unwrap_or(src_mode);
+    let debt = ModeDebt::new(
+        run.opts.preserve_ownership,
+        dst_mode_bits,
+        metadata.is_dir(),
+    );
     let mut dest_exists = dest.exists();
 
     // Clearing the way, before anything is said or written. GNU's one unlink
@@ -2664,8 +2698,17 @@ fn copy_tree<E: Write>(
                 // asymmetry is upstream's and is worth reading twice — a moved
                 // *file* is announced as `copied 'a' -> 'b'`, naming both ends,
                 // while a moved *directory* names only the end that was made.
+                //
+                // Under `-v` only, as both are upstream (`if (x->verbose)`
+                // wraps the pair). The `else` arm's [`announce`] checks for
+                // itself; this one printed regardless until 2026-10-03, so a
+                // plain `mv` of a directory across filesystems listed each
+                // directory it made -- found by `mv-diff.sh`'s first such case
+                // without `-v`.
                 if run.opts.move_mode {
-                    let _ = writeln!(run.out, "created directory {}", quoteaf_os(dest));
+                    if run.opts.verbose {
+                        let _ = writeln!(run.out, "created directory {}", quoteaf_os(dest));
+                    }
                 } else {
                     announce(run, src, dest, None);
                 }
@@ -2942,35 +2985,53 @@ fn copy_regular_file<E: Write>(
     // `Result<Opened, DestError>` borrows from it. Verified by compiling it
     // both ways rather than by reasoning about it.
     let dest = if dest_exists { Dest::Exists } else { Dest::New };
-    let (mut output, new_dst) =
-        match open_destination(dst, permission_bits(src_meta), dest, run, &mut debt) {
-            Ok(Opened { file, new }) => (file, new),
-            Err(DestError::Dangling(_)) => {
-                // The `EEXIST` is dropped: GNU's sentence for this names no error
-                // at all, because the failure is not the open's — the name resolved
-                // to nothing and writing through it would be a race.
-                let _ = writeln!(
-                    run.err,
-                    "{prog}: not writing through dangling symlink {}",
-                    quoteaf_os(dst)
-                );
-                return false;
-            }
-            Err(DestError::Remove(e)) => {
-                let why = strerror(&e);
-                let _ = writeln!(run.err, "{prog}: cannot remove {}: {why}", quoteaf_os(dst));
-                return false;
-            }
-            Err(DestError::Io(e)) => {
-                let why = strerror(&e);
-                let _ = writeln!(
-                    run.err,
-                    "{prog}: cannot create regular file {}: {why}",
-                    quoteaf_os(dst)
-                );
-                return false;
-            }
-        };
+    // `copy_reg`'s `dst_mode`, which is the source's mode unless a mode was
+    // set: `install` creates every copy at its working mode, whatever the
+    // source's was. See [`Opts::set_mode`].
+    let dst_mode = run
+        .opts
+        .set_mode
+        .unwrap_or_else(|| permission_bits(src_meta));
+    let (mut output, new_dst) = match open_destination(dst, dst_mode, dest, run, &mut debt) {
+        Ok(Opened { file, new }) => (file, new),
+        Err(DestError::Dangling(_)) => {
+            // The `EEXIST` is dropped: GNU's sentence for this names no error
+            // at all, because the failure is not the open's — the name resolved
+            // to nothing and writing through it would be a race.
+            let _ = writeln!(
+                run.err,
+                "{prog}: not writing through dangling symlink {}",
+                quoteaf_os(dst)
+            );
+            return false;
+        }
+        Err(DestError::Remove(e)) => {
+            let why = strerror(&e);
+            let _ = writeln!(run.err, "{prog}: cannot remove {}: {why}", quoteaf_os(dst));
+            return false;
+        }
+        Err(DestError::Io(e)) => {
+            // "Improve quality of diagnostic when a nonexistent dst_name
+            // ends in a slash and open fails with errno == EISDIR"
+            // (`copy.c:1491`): Linux answers `EISDIR` for creating `x/`,
+            // and what is wrong with the name is that `x` is not a
+            // directory.
+            let e = if e.kind() == io::ErrorKind::IsADirectory
+                && os_bytes(dst.as_os_str()).last() == Some(&b'/')
+            {
+                io::Error::from(io::ErrorKind::NotADirectory)
+            } else {
+                e
+            };
+            let why = strerror(&e);
+            let _ = writeln!(
+                run.err,
+                "{prog}: cannot create regular file {}: {why}",
+                quoteaf_os(dst)
+            );
+            return false;
+        }
+    };
 
     // The engine's body rather than a loop here, which is what makes this arm
     // and `mv`'s cross-device arm the same code. The gain is not only the
@@ -3024,6 +3085,7 @@ fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
 /// what POSIX is asking for; doing nothing is the honest answer. The target OS
 /// is the `#[cfg(unix)]` arm above.
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // The signature is the unix arm's.
 fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
 }

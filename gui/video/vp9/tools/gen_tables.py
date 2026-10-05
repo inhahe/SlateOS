@@ -1,0 +1,215 @@
+"""Write gui/video/vp9/src/tables.rs from libvpx's own source.
+
+The VP9 decoder needs a few thousand numbers that are libvpx's and nobody
+else's -- default probabilities, scan orders, quantiser steps, filter
+kernels. Typing them would be the one part of the port nobody could check, so
+this reads them out of a libvpx checkout and writes them as Rust:
+
+    git clone --depth 1 --branch v1.17.0 https://github.com/webmproject/libvpx
+    python tools/gen_tables.py path/to/libvpx > src/tables.rs
+
+How each array is read -- by its C name, filled by C's own initializer rules,
+and checked against the shape declared here -- is `gui/video/tools/ctables.py`,
+which gui/video/vp8's generator shares.
+"""
+
+import os
+import sys
+
+# The C-initializer reader both codecs' generators share.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools"))
+import ctables  # noqa: E402
+
+#: C names the initializers use, by value.
+SYMBOLS = {
+    **{name: i for i, name in enumerate([
+        "BLOCK_4X4", "BLOCK_4X8", "BLOCK_8X4", "BLOCK_8X8", "BLOCK_8X16",
+        "BLOCK_16X8", "BLOCK_16X16", "BLOCK_16X32", "BLOCK_32X16",
+        "BLOCK_32X32", "BLOCK_32X64", "BLOCK_64X32", "BLOCK_64X64",
+        "BLOCK_INVALID"])},
+    "TX_4X4": 0, "TX_8X8": 1, "TX_16X16": 2, "TX_32X32": 3,
+    "PARTITION_NONE": 0, "PARTITION_HORZ": 1, "PARTITION_VERT": 2,
+    "PARTITION_SPLIT": 3, "PARTITION_INVALID": 4,
+    "BOTH_ZERO": 0, "ZERO_PLUS_PREDICTED": 1, "BOTH_PREDICTED": 2, "NEW_PLUS_NON_INTRA": 3,
+    "BOTH_NEW": 4, "INTRA_PLUS_NON_INTRA": 5, "BOTH_INTRA": 6, "INVALID_CASE": 9,
+}
+
+#: (C file, C name, Rust name, element type, shape, what it is).
+TABLES = [
+    ("vp9/common/vp9_common_data.c", "num_4x4_blocks_wide_lookup", "NUM_4X4_WIDE", "u8", [13],
+     "a block size's width in 4x4 units"),
+    ("vp9/common/vp9_common_data.c", "num_4x4_blocks_high_lookup", "NUM_4X4_HIGH", "u8", [13],
+     "a block size's height in 4x4 units"),
+    ("vp9/common/vp9_common_data.c", "num_8x8_blocks_wide_lookup", "NUM_8X8_WIDE", "u8", [13],
+     "a block size's width in 8x8 units, at least one"),
+    ("vp9/common/vp9_common_data.c", "num_8x8_blocks_high_lookup", "NUM_8X8_HIGH", "u8", [13],
+     "a block size's height in 8x8 units, at least one"),
+    ("vp9/common/vp9_common_data.c", "size_group_lookup", "SIZE_GROUP", "u8", [13],
+     "which of the four y-mode probability sets a block size uses"),
+    ("vp9/common/vp9_common_data.c", "subsize_lookup", "SUBSIZE", "u8", [4, 13],
+     "the block size a partition type splits a block size into (13 = invalid)"),
+    ("vp9/common/vp9_common_data.c", "max_txsize_lookup", "MAX_TXSIZE", "u8", [13],
+     "the largest transform a block size can use"),
+    ("vp9/common/vp9_common_data.c", "tx_mode_to_biggest_tx_size", "TX_MODE_TO_BIGGEST_TX_SIZE",
+     "u8", [5], "the largest transform a frame's transform mode allows"),
+    ("vp9/common/vp9_common_data.c", "ss_size_lookup", "SS_SIZE", "u8", [13, 2, 2],
+     "a block size subsampled by `[x][y]` (13 = invalid)"),
+    ("vp9/common/vp9_common_data.c", "uv_txsize_lookup", "UV_TXSIZE", "u8", [13, 4, 2, 2],
+     "a chroma plane's transform size, by block size, luma transform size and `[x][y]` subsampling"),
+    ("vp9/common/vp9_common_data.c", "partition_context_lookup", "PARTITION_CONTEXT_LOOKUP",
+     "u8", [13, 2], "the partition context a block size leaves: [above, left]"),
+    ("vp9/common/vp9_common_data.c", "txsize_to_bsize", "TXSIZE_TO_BSIZE", "u8", [4],
+     "the block size a transform covers"),
+    ("vp9/common/vp9_common_data.c", "b_width_log2_lookup", "B_WIDTH_LOG2", "u8", [13],
+     "log2 of a block size's width in 4x4 units"),
+    ("vp9/common/vp9_common_data.c", "b_height_log2_lookup", "B_HEIGHT_LOG2", "u8", [13],
+     "log2 of a block size's height in 4x4 units"),
+    ("vp9/common/vp9_common_data.c", "mi_width_log2_lookup", "MI_WIDTH_LOG2", "u8", [13],
+     "log2 of a block size's width in 8x8 cells (0 below 8x8)"),
+    ("vp9/common/vp9_common_data.c", "num_pels_log2_lookup", "NUM_PELS_LOG2", "u8", [13],
+     "log2 of a block size's pixel count"),
+    ("vp9/common/vp9_common_data.c", "partition_lookup", "PARTITION_LOOKUP", "u8", [5, 13],
+     "the partition that cuts a square of each size (4x4 to 64x64) into a block size"
+     " (4 = none can)"),
+
+    ("vp9/common/vp9_entropy.c", "vp9_coefband_trans_8x8plus", "COEFBAND_TRANS_8X8PLUS", "u8",
+     [1024], "the coefficient band of each scan position, 8x8 transforms and larger"),
+    ("vp9/common/vp9_entropy.c", "vp9_coefband_trans_4x4", "COEFBAND_TRANS_4X4", "u8", [16],
+     "the coefficient band of each scan position of a 4x4 transform"),
+    ("vp9/common/vp9_entropy.c", "vp9_cat6_prob_high12", "CAT6_PROB_HIGH12", "u8", [18],
+     "the probabilities of category 6's extra bits at 12 bits; 10 and 8 bits use its tail"),
+    ("vp9/common/vp9_entropy.c", "vp9_pareto8_full", "PARETO8_FULL", "u8", [255, 8],
+     "the model's probabilities for the nodes after the pivot, by the pivot's probability"),
+    ("vp9/common/vp9_entropy.c", "default_coef_probs_4x4", "DEFAULT_COEF_PROBS_4X4", "u8",
+     [2, 2, 6, 6, 3], "the default coefficient probabilities, 4x4 transforms"),
+    ("vp9/common/vp9_entropy.c", "default_coef_probs_8x8", "DEFAULT_COEF_PROBS_8X8", "u8",
+     [2, 2, 6, 6, 3], "the default coefficient probabilities, 8x8 transforms"),
+    ("vp9/common/vp9_entropy.c", "default_coef_probs_16x16", "DEFAULT_COEF_PROBS_16X16", "u8",
+     [2, 2, 6, 6, 3], "the default coefficient probabilities, 16x16 transforms"),
+    ("vp9/common/vp9_entropy.c", "default_coef_probs_32x32", "DEFAULT_COEF_PROBS_32X32", "u8",
+     [2, 2, 6, 6, 3], "the default coefficient probabilities, 32x32 transforms"),
+
+    ("vp9/common/vp9_entropymode.c", "vp9_kf_y_mode_prob", "KF_Y_MODE_PROB", "u8", [10, 10, 9],
+     "key-frame luma mode probabilities, by the above and left blocks' modes"),
+    ("vp9/common/vp9_entropymode.c", "vp9_kf_uv_mode_prob", "KF_UV_MODE_PROB", "u8", [10, 9],
+     "key-frame chroma mode probabilities, by the luma mode"),
+    ("vp9/common/vp9_entropymode.c", "default_if_y_probs", "DEFAULT_IF_Y_PROBS", "u8", [4, 9],
+     "inter-frame luma intra mode probabilities, by size group"),
+    ("vp9/common/vp9_entropymode.c", "default_if_uv_probs", "DEFAULT_IF_UV_PROBS", "u8", [10, 9],
+     "inter-frame chroma mode probabilities, by the luma mode"),
+    ("vp9/common/vp9_entropymode.c", "vp9_kf_partition_probs", "KF_PARTITION_PROBS", "u8",
+     [16, 3], "key-frame partition probabilities, by partition context"),
+    ("vp9/common/vp9_entropymode.c", "default_partition_probs", "DEFAULT_PARTITION_PROBS", "u8",
+     [16, 3], "inter-frame partition probabilities, by partition context"),
+    ("vp9/common/vp9_entropymode.c", "default_inter_mode_probs", "DEFAULT_INTER_MODE_PROBS",
+     "u8", [7, 3], "inter mode probabilities, by mode context"),
+    ("vp9/common/vp9_entropymode.c", "default_intra_inter_p", "DEFAULT_INTRA_INTER_P", "u8", [4],
+     "the probabilities that a block is intra, by context"),
+    ("vp9/common/vp9_entropymode.c", "default_comp_inter_p", "DEFAULT_COMP_INTER_P", "u8", [5],
+     "the probabilities that a block has one reference, by context"),
+    ("vp9/common/vp9_entropymode.c", "default_comp_ref_p", "DEFAULT_COMP_REF_P", "u8", [5],
+     "compound reference probabilities, by context"),
+    ("vp9/common/vp9_entropymode.c", "default_single_ref_p", "DEFAULT_SINGLE_REF_P", "u8",
+     [5, 2], "single reference probabilities, by context"),
+    ("vp9/common/vp9_entropymode.c", "default_skip_probs", "DEFAULT_SKIP_PROBS", "u8", [3],
+     "the probabilities that a block has no coefficients, by context"),
+    ("vp9/common/vp9_entropymode.c", "default_switchable_interp_prob",
+     "DEFAULT_SWITCHABLE_INTERP_PROB", "u8", [4, 2],
+     "interpolation filter probabilities, by context"),
+
+    ("vp9/common/vp9_entropymv.c", "log_in_base_2", "LOG_IN_BASE_2", "u8", [1025],
+     "floor(log2(n)) for the motion vector class of n"),
+
+    ("vp9/common/vp9_quant_common.c", "dc_qlookup", "DC_QLOOKUP", "i16", [256],
+     "the DC quantiser step for each index, 8 bits"),
+    ("vp9/common/vp9_quant_common.c", "dc_qlookup_10", "DC_QLOOKUP_10", "i16", [256],
+     "the DC quantiser step for each index, 10 bits"),
+    ("vp9/common/vp9_quant_common.c", "dc_qlookup_12", "DC_QLOOKUP_12", "i16", [256],
+     "the DC quantiser step for each index, 12 bits"),
+    ("vp9/common/vp9_quant_common.c", "ac_qlookup", "AC_QLOOKUP", "i16", [256],
+     "the AC quantiser step for each index, 8 bits"),
+    ("vp9/common/vp9_quant_common.c", "ac_qlookup_10", "AC_QLOOKUP_10", "i16", [256],
+     "the AC quantiser step for each index, 10 bits"),
+    ("vp9/common/vp9_quant_common.c", "ac_qlookup_12", "AC_QLOOKUP_12", "i16", [256],
+     "the AC quantiser step for each index, 12 bits"),
+
+    ("vp9/common/vp9_filter.c", "bilinear_filters", "BILINEAR_FILTERS", "i16", [16, 8],
+     "the bilinear interpolation kernels, by sixteenth-pixel position"),
+    ("vp9/common/vp9_filter.c", "sub_pel_filters_8", "SUB_PEL_FILTERS_8", "i16", [16, 8],
+     "the regular 8-tap interpolation kernels"),
+    ("vp9/common/vp9_filter.c", "sub_pel_filters_8lp", "SUB_PEL_FILTERS_8LP", "i16", [16, 8],
+     "the smooth 8-tap interpolation kernels"),
+    ("vp9/common/vp9_filter.c", "sub_pel_filters_8s", "SUB_PEL_FILTERS_8S", "i16", [16, 8],
+     "the sharp 8-tap interpolation kernels"),
+
+    ("vp9/decoder/vp9_dsubexp.c", "inv_map_table", "INV_MAP_TABLE", "u8", [255],
+     "how a probability update's coded index maps to a distance from the old probability"),
+    ("vp9/common/vp9_mvref_common.h", "mv_ref_blocks", "MV_REF_BLOCKS", "i8", [13, 8, 2],
+     "the neighbours searched for candidate motion vectors, as [row, col] offsets in 8x8 units, by block size"),
+    ("vp9/common/vp9_mvref_common.h", "mode_2_counter", "MODE_2_COUNTER", "u8", [14],
+     "what a neighbour's mode adds to the inter-mode context count"),
+    ("vp9/common/vp9_mvref_common.h", "counter_to_context", "COUNTER_TO_CONTEXT", "u8", [19],
+     "the inter-mode context for a neighbour count (9 marks a count no stream can produce)"),
+    ("vp9/common/vp9_mvref_common.h", "idx_n_column_to_subblock", "IDX_N_COLUMN_TO_SUBBLOCK",
+     "u8", [4, 2], "which sub-block of a neighbour a sub-8x8 block takes its candidate from"),
+    ("vp9/common/vp9_scan.c", "default_scan_4x4", "DEFAULT_SCAN_4X4", "i16", [16], ""),
+    ("vp9/common/vp9_scan.c", "col_scan_4x4", "COL_SCAN_4X4", "i16", [16], ""),
+    ("vp9/common/vp9_scan.c", "row_scan_4x4", "ROW_SCAN_4X4", "i16", [16], ""),
+    ("vp9/common/vp9_scan.c", "default_scan_8x8", "DEFAULT_SCAN_8X8", "i16", [64], ""),
+    ("vp9/common/vp9_scan.c", "col_scan_8x8", "COL_SCAN_8X8", "i16", [64], ""),
+    ("vp9/common/vp9_scan.c", "row_scan_8x8", "ROW_SCAN_8X8", "i16", [64], ""),
+    ("vp9/common/vp9_scan.c", "default_scan_16x16", "DEFAULT_SCAN_16X16", "i16", [256], ""),
+    ("vp9/common/vp9_scan.c", "col_scan_16x16", "COL_SCAN_16X16", "i16", [256], ""),
+    ("vp9/common/vp9_scan.c", "row_scan_16x16", "ROW_SCAN_16X16", "i16", [256], ""),
+    ("vp9/common/vp9_scan.c", "default_scan_32x32", "DEFAULT_SCAN_32X32", "i16", [1024], ""),
+    ("vp9/common/vp9_scan.c", "default_scan_4x4_neighbors", "DEFAULT_SCAN_4X4_NEIGHBORS",
+     "i16", [34], ""),
+    ("vp9/common/vp9_scan.c", "col_scan_4x4_neighbors", "COL_SCAN_4X4_NEIGHBORS", "i16", [34],
+     ""),
+    ("vp9/common/vp9_scan.c", "row_scan_4x4_neighbors", "ROW_SCAN_4X4_NEIGHBORS", "i16", [34],
+     ""),
+    ("vp9/common/vp9_scan.c", "default_scan_8x8_neighbors", "DEFAULT_SCAN_8X8_NEIGHBORS",
+     "i16", [130], ""),
+    ("vp9/common/vp9_scan.c", "col_scan_8x8_neighbors", "COL_SCAN_8X8_NEIGHBORS", "i16", [130],
+     ""),
+    ("vp9/common/vp9_scan.c", "row_scan_8x8_neighbors", "ROW_SCAN_8X8_NEIGHBORS", "i16", [130],
+     ""),
+    ("vp9/common/vp9_scan.c", "default_scan_16x16_neighbors", "DEFAULT_SCAN_16X16_NEIGHBORS",
+     "i16", [514], ""),
+    ("vp9/common/vp9_scan.c", "col_scan_16x16_neighbors", "COL_SCAN_16X16_NEIGHBORS", "i16",
+     [514], ""),
+    ("vp9/common/vp9_scan.c", "row_scan_16x16_neighbors", "ROW_SCAN_16X16_NEIGHBORS", "i16",
+     [514], ""),
+    ("vp9/common/vp9_scan.c", "default_scan_32x32_neighbors", "DEFAULT_SCAN_32X32_NEIGHBORS",
+     "i16", [2050], ""),
+
+    # The encoder's.
+    ("vp9/encoder/vp9_cost.c", "vp9_prob_cost", "PROB_COST", "u16", [256],
+     "the cost of coding a 0 at each probability, in 1/512 bits (0 is a placeholder)"),
+    ("vp9/encoder/vp9_subexp.c", "update_bits", "UPDATE_BITS", "u8", [255],
+     "how many bits a probability update's remapped delta takes"),
+    ("vp9/encoder/vp9_subexp.c", "map_table", "MAP_TABLE", "u8", [254],
+     "a recentred probability delta's code: the inverse of the decoder's `inv_map_table`"),
+]
+
+HEADER = [
+    "//! libvpx's constant tables, written by `tools/gen_tables.py` from libvpx",
+    "//! v1.17.0's source (copyright the WebM project authors): do not edit;",
+    "//! regenerate. Used under libvpx's BSD licence and patent grant",
+    "//! (`licenses/libvpx-LICENSE`, `licenses/libvpx-PATENTS`).",
+    "//!",
+    "//! Each table is read by its C name, filled by C's initializer rules and",
+    "//! checked against the shape declared here, so a table that does not fit",
+    "//! fails the generator instead of being cut short.",
+    "",
+]
+
+
+def main() -> int:
+    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    sys.stdout.buffer.write(ctables.generate(root, TABLES, SYMBOLS, HEADER))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

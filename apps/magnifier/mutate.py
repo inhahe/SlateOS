@@ -115,31 +115,22 @@ MUTATIONS = [
         ["luma_runs_the_whole_range_because_its_weights_sum_to_one"],
     ),
     (
-        "inverting a pixel loses a channel",
-        "                u8::MAX.saturating_sub(g),",
-        "                g,",
-        ["inverting_twice_gives_the_pixel_back"],
+        "the lens inverts with the greyscale filter",
+        "            Self::Inverted => Self::system(appearance::ColorFilter::Inverted, r, g, b),",
+        "            Self::Inverted => Self::system(appearance::ColorFilter::Grayscale, r, g, b),",
+        ["inverting_twice_gives_the_pixel_back", "the_lens_agrees_with_the_system_filter_it_names"],
     ),
     (
-        "greyscale puts the luma on one channel only",
-        "                let l = Self::luma(r, g, b);\n                (l, l, l)",
-        "                let l = Self::luma(r, g, b);\n                (l, g, b)",
-        ["greyscale_puts_the_luma_on_all_three_channels"],
+        "the lens greys with the inverting filter",
+        "            Self::Greyscale => Self::system(appearance::ColorFilter::Grayscale, r, g, b),",
+        "            Self::Greyscale => Self::system(appearance::ColorFilter::Inverted, r, g, b),",
+        ["greyscale_puts_the_luma_on_all_three_channels", "the_lens_agrees_with_the_system_filter_it_names"],
     ),
     (
-        # A dichromacy matrix whose rows do not sum to one is simulating
-        # something nobody has: it changes the brightness of every pixel,
-        # including the ones that carry no colour at all.
-        #
-        # Note which test catches this and which cannot. The corners of the
-        # colour cube cannot: black is the zero vector and survives any matrix,
-        # and white saturates, so a row summing to 1.4 still comes back 255. It
-        # takes a grey in between, which is the whole point of the separate
-        # `a_simulation_filter_leaves_a_grey_exactly_as_grey_as_it_was`.
-        "a colour-blindness matrix has an offset in it",
-        "                [0.0, 0.475, 0.525],",
-        "                [0.4, 0.475, 0.525],",
-        ["a_simulation_filter_leaves_a_grey_exactly_as_grey_as_it_was"],
+        "the lens shows protanopia as deuteranopia",
+        "            Self::Protanopia => Self::system(appearance::ColorFilter::Protanopia, r, g, b),",
+        "            Self::Protanopia => Self::system(appearance::ColorFilter::Deuteranopia, r, g, b),",
+        ["the_lens_agrees_with_the_system_filter_it_names"],
     ),
     (
         "the filter cycle skips one",
@@ -161,8 +152,8 @@ MUTATIONS = [
         # The old drawing took min_x, max_x and min_y and never read end_y, so
         # every measurement was drawn as a flat bar however it had been taken.
         "a measurement is drawn flat whatever it was taken across",
-        "        line(f, x1, y1, x2, y2, YELLOW, 2.0);",
-        "        line(f, x1, y1, x2, y1, YELLOW, 2.0);",
+        "        line(f, x1, y1, x2, y2, self.palette.yellow, 2.0);",
+        "        line(f, x1, y1, x2, y1, self.palette.yellow, 2.0);",
         ["a_diagonal_measurement_is_drawn_as_a_diagonal"],
     ),
     (
@@ -300,12 +291,13 @@ MUTATIONS = [
         ["switching_smoothing_off_mid_pan_does_not_strand_the_view"],
     ),
     (
-        # The readout is here so someone who cannot make out a colour can be
-        # told what it is, and what they are looking at is the filtered picture.
-        "the colour readout reports the unfiltered pixel as what is shown",
-        "        let shown = self.filter.apply(r, g, b);\n        self.picked = Some(shown);",
-        "        let shown = self.filter.apply(r, g, b);\n        self.picked = Some((r, g, b));",
-        ["the_readout_gives_the_filtered_colour_and_the_unfiltered_one_beside_it"],
+        "a pick names a colour nothing sampled",
+        "        self.picked = None;\n        self.status = format!(\n            \"Cannot read the colour",
+        "        self.picked = Some((0, 0, 0));\n        self.status = format!(\n            \"Cannot read the colour",
+        [
+            "the_picker_refuses_rather_than_naming_a_colour_nothing_sampled",
+            "the_pick_button_refuses_exactly_as_the_key_does",
+        ],
     ),
     (
         "a screenshot is not counted",
@@ -565,7 +557,7 @@ MUTATIONS = [
         # false nowhere, so the readout could never be dismissed -- and it
         # overlapped the toolbar exactly.
         "the picked colour cannot be shown at all",
-        "        if let Some((r, g, b)) = self.picked {\n            fill(f, swatch_rect, Color::rgb(r, g, b), swatch * 0.2);\n            stroke(f, swatch_rect, SURFACE1, 1.0, swatch * 0.2);\n        }",
+        "        if let Some((r, g, b)) = self.picked {\n            fill(f, swatch_rect, Color::rgb(r, g, b), swatch * 0.2);\n            stroke(f, swatch_rect, self.palette.surface1, 1.0, swatch * 0.2);\n        }",
         "",
         ["a_picked_colour_puts_a_swatch_in_the_info_band"],
     ),
@@ -617,7 +609,7 @@ MUTATIONS = [
         "the filter never reaches the pixels that are drawn",
         "                let (fr, fg, fb) = self.filter.apply(r, g, b);",
         "                let (fr, fg, fb) = (r, g, b);",
-        ["the_filter_reaches_the_pixels_the_window_draws"],
+        ["the_magnification_pass_draws_and_the_filter_reaches_it"],
     ),
     (
         "the sheet lists no shortcuts",

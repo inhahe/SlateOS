@@ -24,5 +24,9 @@ yamldoc = { path = "../../yamldoc" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
 
+# Whether a key types into a node or the search box, or is a command: AltGr
+# arrives as Ctrl+Alt, and a command carries its letter as text.
+textline = { path = "../textline" }
+
 [lints]
 workspace = true

@@ -45,10 +45,12 @@ use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FileDialog, FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
 use guitk::wheel;
 use oswindow::app::{self, Response};
 use pathtext::ShowPath;
@@ -1201,6 +1203,10 @@ struct App {
     search_focused: bool,
     /// Whether the shortcut list is up.
     show_help: bool,
+    /// How wide the mark is round the search box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    focus_ring_width: f32,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1268,6 +1274,7 @@ impl App {
     fn new() -> Self {
         Self {
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             files: Vec::new(),
             active_file: 0,
@@ -1520,13 +1527,19 @@ impl App {
         if !key.pressed {
             return EventResult::Ignored;
         }
-        // The shortcut list, whatever has the keyboard.
+        // The shortcut list, whatever has the keyboard -- and modal while it
+        // is up: F1 or Escape puts it away, and no other key reaches the log
+        // it covers. It took only those two, so a letter moved the severity
+        // floor under it, an arrow the selection, and a letter typed into a
+        // search box the list was covering.
         if key.key == Key::F1 {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
-        if key.key == Key::Escape && self.show_help {
-            self.show_help = false;
+        if self.show_help {
+            if key.key == Key::Escape {
+                self.show_help = false;
+            }
             return EventResult::Consumed;
         }
         // Chords first, and apart. This match reads `key.key` and nothing
@@ -1534,12 +1547,20 @@ impl App {
         // chord nobody bound quietly raised the level floor. A chord means
         // something here or nothing at all, and the same thing while the
         // search box has the keyboard -- where `Ctrl+R` is exactly what
-        // someone typing a pattern reaches for.
-        if key.modifiers.ctrl {
+        // someone typing a pattern reaches for. Ctrl without Alt: AltGr
+        // arrives as Ctrl+Alt and types a letter -- `ł` is AltGr+L on a
+        // Polish keyboard -- which is no chord, and goes to the search box.
+        if textline::is_ctrl_chord(key.modifiers) {
             return self.handle_chord(key);
         }
         if self.search_focused {
             return self.handle_key_search(key);
+        }
+        // Any other key held with Alt or the Windows key is not this
+        // window's: the Windows key's are the desktop's, and Alt+W is not
+        // the Warn floor any more than Ctrl+W is.
+        if key.modifiers.alt || key.modifiers.super_key {
+            return EventResult::Ignored;
         }
         match key.key {
             // Only this entry's source, or every source again.
@@ -1652,10 +1673,12 @@ impl App {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // What AltGr types goes in; a command's letter, which it
+                // carries as text, does not (`textline::types_into_field`).
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                self.filter.search_query.push_str(&key.text);
+                self.filter.search_query.extend(key.typed());
                 self.update_search();
                 self.reanchor_selection();
                 EventResult::Consumed
@@ -2081,6 +2104,26 @@ impl App {
     /// expression switch, the bookmarked-only switch, and a chip for each of
     /// the source and time filters while one is set -- a press on a chip
     /// clears it.
+    /// The search box, after level pills that end at `lx`, in a filter bar
+    /// whose top is `y`.
+    fn search_box_rect(lx: f32, y: f32) -> Rect {
+        Rect::new(lx + 12.0, y + 6.0, 250.0, 24.0)
+    }
+
+    /// How the search box is drawn now: lit under the pointer, marked while
+    /// it has the keyboard, neither under the shortcut list or the file
+    /// picker; and red while what is typed is not a pattern the search can
+    /// use -- a regular expression that does not compile.
+    fn search_box_state(&self) -> field::State {
+        let open = !self.show_help && !self.picker.is_open();
+        field::State {
+            hovered: open && self.hover == Some(Target::SearchBox),
+            focused: open && self.search_focused,
+            disabled: false,
+            invalid: matches!(self.filter.pattern(), Some(Err(_))),
+        }
+    }
+
     fn render_filter_bar(&self, cmds: &mut Frame<Target>) {
         let y = TOOLBAR_HEIGHT;
 
@@ -2133,70 +2176,55 @@ impl App {
             lx += w + 4.0;
         }
 
-        // Search box
-        let search = Rect::new(lx + 12.0, y + 6.0, 250.0, 24.0);
-        self.palette.push_surface(
-            cmds,
-            search.x,
-            search.y,
-            search.w,
-            search.h,
-            12.0,
-            Surface::Card,
+        // Search box: the toolkit's field. It was a card whose edge turned
+        // blue with the keyboard whatever the theme said, and whose caret
+        // stopped at the box's end while the query ran on under an ellipsis.
+        let search = Self::search_box_rect(lx, y);
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, search, state, self.focus_ring_width);
+        let line = text::line_height(SMALL_TEXT, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            search.x + 10.0,
+            search.y + (search.h - line) / 2.0,
+            (search.w - 20.0).max(0.0),
         );
-        let broken = matches!(self.filter.pattern(), Some(Err(_)));
-        if self.search_focused || broken {
-            cmds.push(RenderCommand::StrokeRect {
-                x: search.x,
-                y: search.y,
-                width: search.w,
-                height: search.h,
-                color: if broken {
-                    self.palette.red
-                } else {
-                    self.palette.blue
-                },
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(12.0),
+        if self.filter.search_query.is_empty() && !state.focused {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "Search logs...  /".into(),
+                font_size: SMALL_TEXT,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
             });
         }
-        let search_text = if self.filter.search_query.is_empty() && !self.search_focused {
-            "Search logs...  /"
-        } else {
-            &self.filter.search_query
-        };
-        cmds.push(RenderCommand::Text {
-            x: search.x + 10.0,
-            y: y + 11.0,
-            text: search_text.into(),
-            font_size: SMALL_TEXT,
-            color: if self.filter.search_query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(search.w - 20.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        if self.search_focused {
-            let caret = (search.x
-                + 10.0
-                + text::measure(
-                    &self.filter.search_query,
-                    SMALL_TEXT,
-                    FontWeightHint::Regular,
-                ))
-            .min(search.right() - 10.0);
-            cmds.push(RenderCommand::FillRect {
-                x: caret,
-                y: search.y + 5.0,
-                width: 1.0,
-                height: search.h - 10.0,
+        // The query and its caret, scrolled so the end being typed stays in
+        // view.
+        let mut typed = RenderTree::new();
+        textedit::draw(
+            &mut typed,
+            &textedit::SingleLine {
+                text: &self.filter.search_query,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(self.filter.search_query.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: SMALL_TEXT,
+                weight: FontWeightHint::Regular,
                 color: self.palette.text,
-                corner_radii: CornerRadii::ZERO,
-            });
-        }
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(typed.commands);
         cmds.hit(Target::SearchBox, search);
 
         // The regular-expression switch, and the bookmarked-only switch.
@@ -3861,6 +3889,10 @@ impl oswindow::app::App for App {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         self.active_log().map_or_else(
             || "Log Viewer".to_owned(),
@@ -4264,6 +4296,90 @@ mod tests {
         // And now the same key is a shortcut again.
         app.handle_event(&press(Key::W));
         assert_eq!(app.filter.min_level, LogLevel::Warn);
+    }
+
+    fn held(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report `AltGr`.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **`AltGr` types into the search box and runs no chord.** `AltGr`
+    /// arrives as Ctrl+Alt -- `ł` is `AltGr`+L and `ś` `AltGr`+S on a Polish
+    /// keyboard, `|` `AltGr`+W on a Hungarian one -- and every key held with
+    /// Ctrl went to the chords: `AltGr`+S hid the sources, `AltGr`+L the line
+    /// numbers, `AltGr`+W closed the tab, and the search box saw none of
+    /// them.
+    #[test]
+    fn altgr_types_into_the_search_box_and_runs_no_chord() {
+        let mut app = App::with_sample();
+        let tabs = app.files.len();
+        let shown = (app.show_source, app.show_line_numbers);
+        app.handle_event(&press(Key::Slash));
+        for (k, text) in [(Key::L, "\u{142}"), (Key::S, "\u{15b}"), (Key::W, "|")] {
+            assert_eq!(
+                app.handle_event(&held(k, ALTGR, text)),
+                EventResult::Consumed,
+                "AltGr+{k:?} was not typed"
+            );
+        }
+        assert_eq!(app.filter.search_query, "\u{142}\u{15b}|");
+        assert_eq!(app.files.len(), tabs, "AltGr+W closed a tab");
+        assert_eq!(
+            (app.show_source, app.show_line_numbers),
+            shown,
+            "AltGr ran a display chord"
+        );
+        // Outside the box it is nothing at all.
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(
+            app.handle_event(&held(Key::W, ALTGR, "|")),
+            EventResult::Ignored
+        );
+        assert_eq!(app.files.len(), tabs, "AltGr+W closed a tab");
+    }
+
+    /// **A command types nothing into the search box, and a key held with
+    /// Alt or the Windows key is no shortcut.** A command carries its letter
+    /// as text on a real machine -- Ctrl+K arrives as `k`, Alt+F as `f` --
+    /// and the box typed Alt's and the Windows key's; outside it, Alt+W and
+    /// Windows+W raised the floor to Warn, as W does.
+    #[test]
+    fn a_command_types_nothing_and_alt_or_windows_is_no_shortcut() {
+        let mut app = App::with_sample();
+        let floor = app.filter.min_level;
+        assert_ne!(floor, LogLevel::Warn, "the test needs W to move the floor");
+        for modifiers in [Modifiers::alt(), Modifiers::super_key()] {
+            assert_eq!(
+                app.handle_event(&held(Key::W, modifiers, "w")),
+                EventResult::Ignored,
+                "{modifiers:?}+W"
+            );
+            assert_eq!(
+                app.filter.min_level, floor,
+                "{modifiers:?}+W moved the floor"
+            );
+        }
+        app.handle_event(&press(Key::Slash));
+        for (k, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            app.handle_event(&held(k, modifiers, text));
+        }
+        assert_eq!(app.filter.search_query, "", "a command's letter was typed");
     }
 
     #[test]
@@ -6299,6 +6415,73 @@ mod tests {
         );
     }
 
+    /// **The shortcut list is modal for the keys.** It took only F1 and
+    /// Escape: with it up, `W` moved the severity floor under it, `L` turned
+    /// wrapping over, Ctrl+L the line numbers, and a letter was typed into a
+    /// search box it covered. The controls are the same keys with it down.
+    #[test]
+    fn the_shortcut_list_takes_every_key_while_it_is_up() {
+        let mut app = App::with_sample();
+        let (floor, wrap, numbers) = (app.filter.min_level, app.wrap_lines, app.show_line_numbers);
+        assert_ne!(
+            floor,
+            LogLevel::Warn,
+            "the fixture starts at the Warn floor"
+        );
+
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&press(Key::W));
+        app.handle_event(&press(Key::L));
+        app.handle_event(&ctrl(Key::L));
+        assert!(
+            app.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(
+            app.filter.min_level, floor,
+            "W moved the floor under the list"
+        );
+        assert_eq!(
+            app.wrap_lines, wrap,
+            "L turned wrapping over under the list"
+        );
+        assert_eq!(
+            app.show_line_numbers, numbers,
+            "Ctrl+L reached the log under it"
+        );
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_help, "Escape left the list up");
+
+        // With the search box holding the keyboard under it.
+        app.handle_event(&press(Key::Slash));
+        assert!(app.search_focused);
+        let query = app.filter.search_query.clone();
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::X,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("x"),
+        }));
+        assert_eq!(
+            app.filter.search_query, query,
+            "a letter was typed under the list"
+        );
+        app.handle_event(&press(Key::F1));
+        assert!(!app.show_help, "F1 left the list up");
+        app.handle_event(&press(Key::Escape));
+
+        // The controls.
+        app.search_focused = false;
+        app.handle_event(&press(Key::W));
+        assert_eq!(
+            app.filter.min_level,
+            LogLevel::Warn,
+            "control: W moves nothing"
+        );
+    }
+
     #[test]
     fn o_and_the_brackets_filter_by_the_selected_entry() {
         let mut app = App::with_sample();
@@ -6331,6 +6514,137 @@ mod tests {
         assert_eq!(
             app.selected_entry,
             app.search_results.get(app.current_search_result).copied()
+        );
+    }
+    // -- The search box is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// **The search box is the toolkit's field**: lit under the pointer and
+    /// dark again when it leaves, marked as the theme marks a field in the
+    /// user's width once a press gives it the keyboard, red while a regular
+    /// expression in it does not compile, and neither lit nor marked under
+    /// the shortcut list. It was a card whose edge turned blue.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        use oswindow::app::App as _;
+
+        let mut app = App::with_sample();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        let ring = app.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = probe::rect_of(&app, Target::SearchBox).expect("the search box is drawn");
+        let draws = |app: &App, s: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, ring);
+                v
+            };
+            let f = app.frame();
+            let has = |want: &[RenderCommand]| f.commands().windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let rest = field::State::default();
+        assert!(draws(&app, rest), "at rest");
+
+        let (cx, cy) = rect.centre();
+        app.handle_event(&mouse(cx, cy, MouseEventKind::Move));
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    hovered: true,
+                    ..rest
+                }
+            ),
+            "the pointer does not light the box"
+        );
+        app.handle_event(&mouse(cx, cy, MouseEventKind::Leave));
+        assert!(
+            draws(&app, rest),
+            "the light stays after the pointer leaves"
+        );
+
+        probe::click(&mut app, Target::SearchBox);
+        assert!(app.search_focused);
+        let focused = field::State {
+            focused: true,
+            ..rest
+        };
+        assert!(
+            draws(&app, focused),
+            "the box with the keyboard is not marked"
+        );
+
+        app.filter.regex = true;
+        app.filter.search_query = String::from("([");
+        assert!(matches!(app.filter.pattern(), Some(Err(_))));
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a pattern that does not compile does not turn the box red"
+        );
+
+        app.show_help = true;
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..rest
+                }
+            ),
+            "the box is lit or marked under the shortcut list"
+        );
+    }
+
+    /// **The caret follows the query, and a long one scrolls under it**
+    /// rather than running on under an ellipsis while the caret stopped at
+    /// the box's end.
+    #[test]
+    fn the_search_caret_follows_the_query() {
+        let mut app = App::with_sample();
+        probe::click(&mut app, Target::SearchBox);
+        let rect = probe::rect_of(&app, Target::SearchBox).expect("the search box is drawn");
+        let caret_after = |app: &App| -> f32 {
+            let f = app.frame();
+            let cmds = f.commands();
+            let at = cmds
+                .iter()
+                .position(|c| {
+                    matches!(c, RenderCommand::RichText { text, .. } if *text == app.filter.search_query)
+                })
+                .expect("the query is not drawn in its box");
+            match cmds.get(at + 1) {
+                Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+                other => panic!("no caret after the query: {other:?}"),
+            }
+        };
+        app.filter.search_query = String::from("error");
+        let end = rect.x + 10.0 + text::measure("error", SMALL_TEXT, FontWeightHint::Regular);
+        let caret = caret_after(&app);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the query at {end}"
+        );
+        app.filter.search_query = "w".repeat(200);
+        let caret = caret_after(&app);
+        assert!(
+            caret > rect.x && caret < rect.right(),
+            "the caret of a long query is at {caret}, outside the box {rect:?}"
         );
     }
 }

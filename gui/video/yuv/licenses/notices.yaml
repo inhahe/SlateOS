@@ -1,0 +1,22 @@
+# The third-party code gui/video/yuv carries (design-decisions 1433), read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate.
+#
+# Not an entry here: src/reformat.rs is libavif 1.3.0's (src/reformat.c,
+# src/reformat_libyuv.c, src/alpha.c and the chromaticity arithmetic of
+# src/colr.c), BSD-2-Clause. gather-notices.py requires each project to be
+# named once for the tree, and libavif is named in gui/imagecodec's manifest,
+# beside its licence text (libavif-LICENSE.txt), for the much larger part of
+# libavif that crate ports.
+
+# libyuv, at the revision libavif 1.4.2 pins,
+# 644251f252a84bf8ce91ff0aca86a9b16b069ab8, whose include/libyuv/version.h
+# says 1924: src/convert.rs and src/scale.rs. This entry also covers
+# gui/video/vp9's src/rgb.rs (ARGBToI420), whose manifest does not name
+# libyuv again, as gather-notices.py requires each project named once.
+libyuv:
+  version: 1924
+  licence: BSD-3-Clause
+  texts:
+    - libyuv-LICENSE
+    - libyuv-PATENTS

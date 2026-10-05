@@ -14,6 +14,8 @@ oswindow = { path = "../../gui/window" }
 # Export writes through `safeio::write_str_atomically`, not `fs::write`,
 # which truncates the target before writing it.
 safeio = { path = "../safeio" }
+# `is_plain` and `is_ctrl_chord`: Alt's and the Windows key's chords, and AltGr, are not the window's keys.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `appearance::palette_check`.

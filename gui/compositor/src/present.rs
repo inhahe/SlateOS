@@ -330,6 +330,28 @@ pub trait Present {
     /// The default does nothing, which is right for a display that keeps
     /// nothing.
     fn reset(&mut self) {}
+
+    /// Power the display down, because the user asked for the displays to
+    /// sleep (`Compositor::sleep_displays`).
+    ///
+    /// Answers whether it did. A display that cannot -- a host window, a
+    /// framebuffer with no scanout to turn off -- answers `false`, and the
+    /// server shows it one black frame instead. Either way nothing more is
+    /// shown until [`Self::wake`].
+    ///
+    /// The default answers `false`.
+    fn sleep(&mut self) -> bool {
+        false
+    }
+
+    /// Power the display back up after [`Self::sleep`]. The next
+    /// [`Self::show`] must put the whole frame up, as after [`Self::reset`].
+    ///
+    /// The default is [`Self::reset`], which is exactly that for a display
+    /// that never powered down.
+    fn wake(&mut self) {
+        self.reset();
+    }
 }
 
 /// A display server with no display.

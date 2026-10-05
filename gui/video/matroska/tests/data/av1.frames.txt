@@ -1,0 +1,11 @@
+# av1.webm: each frame's MD5 as ffmpeg's libdav1d decodes it (generate_fixtures.py).
+frame 4608 9fbf47aa36c385b5a39c0a4f08666aa8
+frame 4608 33110d21510263f8086792c561ff93d0
+frame 4608 2f90e73a3048dde1e9e92f3ff1c84449
+frame 4608 8a3cf8c881e41e8b4060412a1bff82b0
+frame 4608 ede5a384b6bd2a0ed4cbbcaec5194a49
+frame 4608 2ee3cb9c416934ff19be3906e6d919db
+frame 4608 88cf0e061bba08428cdfbb6bb74715e1
+frame 4608 575e5409a79ceb847e0dc6000f2f230d
+frame 4608 5df30fadf9a6d94c1c1786e711361c6c
+frame 4608 647feb285531755d23df0f75df0bbd5d

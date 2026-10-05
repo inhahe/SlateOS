@@ -1,0 +1,19 @@
+[package]
+name = "mp4"
+version = "0.1.0"
+edition = "2024"
+description = "MP4 files taken apart into their tracks' packets, as FFmpeg's demuxer does."
+# Translated from FFmpeg's libavformat/mov.c (see licenses/notices.yaml and
+# open-questions/F-Q7.md).
+license = "LGPL-2.1-or-later"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+# The packets' fingerprints, as `ffprobe -show_data_hash MD5` prints them.
+md5 = { path = "../../../md5" }
+
+[lints]
+workspace = true

@@ -88,6 +88,7 @@ fn snapshots<'a>(
                 opacity: w.opacity,
                 commands: &w.tree,
                 images: Vec::new(),
+                video: None,
             })
         })
         .collect()
@@ -399,6 +400,7 @@ fn frame_over_the_wire(
             opacity: w.opacity,
             commands: &w.tree,
             images: pictures.snapshots(id),
+            video: None,
         })
         .collect();
     let frame = session.build_frame(640, 480, &snaps);

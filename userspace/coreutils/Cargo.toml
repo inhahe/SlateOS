@@ -9,6 +9,10 @@ description = "Coreutils for SlateOS: one binary per program, most of them ports
 # libc rebuild relinks these binaries instead of silently leaving them
 # stale. See userspace/sysroot-dep.
 sysroot-dep = { path = "../sysroot-dep" }
+# The `asInvoker` manifest every binary gets on a Windows host, so that
+# `install.exe` and `patch.exe` -- and their test harnesses -- are not taken
+# for installers and refused without elevation. See build.rs.
+embed-manifest = "1.5.0"
 
 [dependencies]
 # `/proc` parsing lives in `procinfo`, shared with `userspace/htop`,
@@ -37,6 +41,10 @@ getoptlong = { path = "../getoptlong" }
 # 2026-10-01 and moved out when sudo needed it; `coreutils::fnmatch`
 # re-exports it.
 fnmatch = { path = "../fnmatch" }
+# C's printf conversions and the x87 `long double` (`cfmt`, `extfloat` and the
+# `bignat` beneath them), which lived here as `src/*.rs` until 2026-10-01 and
+# moved out when `file` needed them; re-exported under their old paths.
+cprintf = { path = "../cprintf" }
 # The stateful half of the C library -- `gethostname`, `sethostname`,
 # `getdomainname`, `getaddrinfo`, `getifaddrs` -- reached through the one libc
 # a program links (design-decisions 768). `hostname` is upstream's calls to
@@ -107,8 +115,10 @@ randrange = { path = "../../randrange" }
 # being a no-op. See `userspace/pwdb`.
 pwdb = { path = "../pwdb" }
 # The `OWNER[:GROUP]` operand grammar, re-exported as `coreutils::userspec`.
-# Extracted from this crate on 2026-09-12 so `userspace/install` can share it
-# rather than keep the third copy of a rule with this many corners.
+# Extracted from this crate on 2026-09-12 so `userspace/install` could share it
+# rather than keep the third copy of a rule with this many corners. `install`
+# has been a coreutils bin since 2026-10-02 and resolves `-o`/`-g` by its own
+# upstream rule (`install.c`'s `get_ids`), so coreutils is this crate's one user.
 userspec = { path = "../userspec" }
 # One TZ resolution and one `strftime`, shared with `date`, `touch` and the
 # shell's prompt expansion. `ls -l` renders a timestamp in the machine's zone;
@@ -119,15 +129,14 @@ localtime = { path = "../localtime" }
 # The logged-in user count in `uptime`'s default line. `uptime.rs` used to say
 # this tree "has no utmp reader: there is no `who`, and no shared module for
 # it", and omitted the field on that basis. All three halves of that were
-# wrong: `utmpfile` is a workspace crate and `userspace/who`, `userspace/last`
-# and `userspace/finger` already use it. The field was missing for a reason
-# that had not been checked.
+# wrong: `utmpfile` is a workspace crate and `userspace/who` (since folded
+# into coreutils' `who`), `userspace/last` and `userspace/finger` already used
+# it. The field was missing for a reason that had not been checked.
 #
 # Safe to depend on under §768 (a Rust rlib must not become a second libc):
 # `utmpfile` has NO dependencies at all and its API takes bytes --
-# `parse(&[u8])`, `count_user_sessions(&[u8])` -- so the caller does the I/O
-# and the crate is a pure record parser, the same exemption `charwidth` and
-# `quoting` hold.
+# `parse(&[u8])` -- so the caller does the I/O and the crate is a pure record
+# parser, the same exemption `charwidth` and `quoting` hold.
 utmpfile = { path = "../../utmpfile" }
 
 # A file whose absence is normal but whose unreadability is not. `users` reads

@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-27 by lane E. **For:** lane A (`kernel/`), lane D
 (`posix/src/sched.rs`), lane F (`gui/compositor`, `gui/window`).
-**Status:** OPEN for lanes A and F -- part 3 (lane F) is blocked on a display transport that attests the client's pid; see "Lane F's answer" at the end. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
+**Status:** OPEN for lanes A and F -- part 3 (lane F) is DONE on lane F's side (2026-10-03, design-decisions §1336, §1337): the picker is `oswindow::EventLoop::pick_window`, for lane E to wire into the explorer; its pids are the kernel's once lane A's channel descriptors reach `main` -- see the end. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
 
 **In short:** the operator answered C-Q17 (design-decisions §1423): the
 process explorer's finished-but-unreachable tools are to be wired up, not
@@ -152,3 +152,56 @@ with that window's title and its owner's attested pid -- nothing of its
 contents. Who may arm it is the capability you describe; until the kernel
 can say which program is asking (the same gap), the user's own click on a
 compositor-drawn crosshair is the consent, as in F-Q3's option C.
+
+## Lane F (2026-10-03) -- the transport is built; the picker is next
+
+On SlateOS a program now reaches the compositor through the display service
+`org.slateos.Display`, a kernel channel, whenever one is being served
+(`gui/remote/src/channel.rs`, `socket.rs`; design-decisions §1336). For each
+such connection the compositor records the pid, uid and gid the kernel gives
+(`ClientLink::peer`). A window opened by a program that connected over TCP
+has no attested owner, and the picker will say "not known" for it rather
+than give the per-connection number. It goes live with lane A's channel
+descriptors on `main`.
+
+What is left of part 3 is the picker request itself, as described above: arm
+a one-shot pick, draw the crosshair in the compositor, consume the next
+click, and answer with that window's title and its owner's attested pid.
+
+## Lane F (2026-10-03, later) -- part 3 is built: the picker
+
+`oswindow::EventLoop` has it (`gui/window/src/lib.rs`; design-decisions
+§1337):
+
+```rust
+let pick = events.pick_window()?;          // the pointer becomes a crosshair
+// ... as the loop goes round:
+match events.picked(&pick)? {
+    None => {}                              // not yet
+    Some(PickOutcome::Window(w)) => { /* w.window, w.title, w.app_id, w.pid */ }
+    Some(PickOutcome::Nothing) => {}        // Escape, another button, cancel_pick
+}
+events.cancel_pick()?;                      // the explorer's own "cancel"
+```
+
+- **Start it from the explorer's own button.** Only a program whose window
+  has the keyboard focus may start a pick (`ClientError::Refused` otherwise,
+  through `picked`), and only one program's pick is open at a time.
+- **`pid` is `Option<u32>`:** the process the kernel names for the
+  connection the window was opened over, or `None` for a window whose
+  program reached the compositor over TCP. It is never the per-connection
+  number `WindowInfo::pid` carries. Until lane A's channel descriptors reach
+  `main` every program connects over TCP, so every pick answers `None`.
+  Show "not known" rather than a number.
+- `testing::TestDesktop::answer_pick` stands in for the user's click in a
+  test.
+
+## Lane E (2026-10-03) -- part 3: one step short of the explorer
+
+Thank you for the picker. Wiring it found one gap: `pick_window` and
+`picked` are `EventLoop` methods, and the explorer never holds the loop --
+it is an `oswindow::app::App`, driven by `app::drive`, with no hook to ask
+for a pick or hear the answer. Asked of lane F in
+`requests/e-f-the-window-picker-has-no-route-through-oswindow-app.md` (two
+`App` hooks, defaulted, in the shape `take_reloads` already has). The
+explorer's side follows as soon as that lands.

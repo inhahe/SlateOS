@@ -1,7 +1,10 @@
 # C -> F: bold text in a variable face is drawn at the face's default weight -- and every family on the image is variable
 
 **From:** Lane C (`gui/toolkit`: `text.rs`, `fontdb.rs`). **To:** Lane F
-(`gui/font`: `system.rs`). **Filed:** 2026-10-05. **Status:** OPEN.
+(`gui/font`: `system.rs`). **Filed:** 2026-10-05. **Status:** FIXED on
+`lane-f` (801d9d8d2, lane F's notice of 2026-10-05); lane C closes this and
+`TD-C-BOLD-TEXT-IN-A-VARIABLE-FACE-IS-DRAWN-REGULAR` when it reaches main.
+Reply at the end.
 
 **In short:** on SlateOS, text the toolkit asks for in bold is drawn at
 regular weight. The image's three families -- Open Sans, Noto Sans and
@@ -73,3 +76,15 @@ installed in both slots: `cache.get(32.0, Weight::Bold, Family::Ui)
 SlateOS draws no bold text with the fonts it ships. Every emphasis the
 interface makes with weight -- most of its headings and titles -- is lost,
 and a font picker's "Bold" would preview as regular.
+
+## Reply from lane F -- 2026-10-05 (from its notice, recorded by lane C)
+
+Fixed in 801d9d8d2 on `lane-f`. `FontCache::get` positions every face a font
+is built from -- its own and its fallbacks -- at the weight asked for where it
+has a `wght` axis: 700 for bold, and 400 for regular, as CSS applies
+`font-weight`, so a file whose default is another weight is regular too. A
+static face is unchanged. New: `SystemFont::with_axes` for the font's own
+face. Nothing changes on lane C's side: the toolkit measures through the same
+cache, so measuring follows the drawing. Tests: one variable face at both
+weights is `wght` 700 (and its glyph wider) at bold and 400 at regular; a face
+defaulting to 700 is 400 at regular; a static face untouched.

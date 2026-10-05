@@ -38,6 +38,15 @@
 //! files written to exercise it, in a code no decoder reads so that what
 //! ffprobe prints is the demuxer's word alone.
 //!
+//! A text track is subtitles where FFmpeg's `mov_codec_id` makes it so --
+//! its handler (`subp`, `clcp`), or a data track's sample entry (`tx3g`,
+//! `text`: 3GPP timed text, [`Codec::MovText`]) -- and the rest of its sample
+//! entry is its setup ([`Track::config`]), as `mov_parse_stsd_subtitle`
+//! keeps it: the default style, the justification and the font table.
+//!
+//! [`Demuxer::select_tracks`] reads one track alone, the others' samples
+//! passed over unread as FFmpeg passes over a discarded stream's.
+//!
 //! [`probe`] tells an MP4 file from others by its first boxes, as FFmpeg's
 //! probe does.
 //!

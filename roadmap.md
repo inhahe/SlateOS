@@ -4007,19 +4007,20 @@ lane C's `guitk`.
           libopus's samples, with seeks. design-decisions §1351.
         - `[ ]` AAC, which most MP4 files carry: a decoder of its own. Waits on open-questions F-Q9 (whether to include one, and from which code).
   - `[x]` Subtitles (2026-10-05, design-decisions §1360):
-    `videocodec::Subtitles`, a Matroska or WebM film's text subtitles cue by
-    cue -- start, end, and the text as SRT markup whatever the format, in
-    the form `ffmpeg -c:s srt` writes, which lane E's player draws (agreed
-    with lane E). SubRip as ffmpeg reads it; ASS and SSA as libass shows
-    them -- styles from the script, sizes scaled to SRT's 288 lines,
-    libass's resets, weights and alignments, drawings and comments hidden;
-    WebVTT, WebM's and Matroska's, as its specification reads it, its cue
-    settings placing the cue. Eight fixtures (ffmpeg and mkvmerge muxing;
-    347 cues) held to ffmpeg's SRT cue for cue but for 69 departures, each
-    checked against libass, HTML or the specification; seeks give the cues
-    still showing. Pictures of text are refused by name. Not yet: MP4's
-    text tracks
-    (`known-issues/F-subtitles-leave-out-mp4s-text-tracks-and-pictures-of-text.md`).
+    `videocodec::Subtitles`, a Matroska, WebM or MP4 film's text subtitles
+    cue by cue -- start, end, and the text as SRT markup whatever the
+    format, in the form `ffmpeg -c:s srt` writes, which lane E's player
+    draws (agreed with lane E). SubRip as ffmpeg reads it; ASS and SSA as
+    libass shows them -- styles from the script, sizes scaled to SRT's 288
+    lines, libass's resets, weights and alignments, drawings and comments
+    hidden; WebVTT, WebM's and Matroska's, as its specification reads it,
+    its cue settings placing the cue; MP4's 3GPP timed text (`tx3g`) as
+    ffmpeg's `mov_text` decoder reads it. Twelve fixtures (ffmpeg- and
+    mkvmerge-muxed, and timed text written box by box; 387 cues) held to
+    ffmpeg's SRT cue for cue but for 72 departures, each checked against
+    libass, HTML or the specification; seeks give the cues still showing.
+    Pictures of text are refused by name. Not yet: MP4's WebVTT and TTML
+    (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

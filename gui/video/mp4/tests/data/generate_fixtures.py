@@ -88,12 +88,21 @@ def made_by_ffmpeg():
         # QuickTime with uncompressed sound, a sample a tick: FFmpeg reads it
         # in packets of up to 1024 samples a chunk.
         "pcm.mov": [*LAVFI, PICTURE, *LAVFI, SOUND, "-c:v", "mpeg4", "-q:v", "5", "-c:a", "pcm_s16le", "-f", "mov"],
+        # 3GPP timed text beside the pictures: a `tx3g` sample entry in an
+        # `sbtl` track, which its sample entry makes subtitles, each gap
+        # between cues an empty sample.
+        "mov_text.mp4": [*LAVFI, PICTURE, "-i", "mov_text.source.srt", *av1, "-c:s", "mov_text"],
     }
+    with open("mov_text.source.srt", "w", encoding="utf-8", newline="\n") as f:
+        f.write("1\n00:00:00,100 --> 00:00:00,400\nPlain\n\n"
+                "2\n00:00:00,500 --> 00:00:00,900\n<b>Bold</b> and <i>italic</i>\n\n"
+                "3\n00:00:00,900 --> 00:00:01,100\nTouching the one before\n\n")
     out = {}
     for name, args in files.items():
         ffmpeg(name, *args)
         with open(name, "rb") as f:
             out[name] = f.read()
+    os.remove("mov_text.source.srt")
     return out
 
 

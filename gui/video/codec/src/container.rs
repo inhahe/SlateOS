@@ -410,8 +410,8 @@ impl<R: Read + Seek> Container<R> {
     }
 
     /// The file's subtitle tracks, in the file's order: Matroska's, its
-    /// encrypted ones aside. MP4's text tracks are not read yet; Ogg's
-    /// (Kate) are not read, and the other files have none.
+    /// encrypted ones aside, and MP4's. Ogg's (Kate) are not read, and the
+    /// other files have none.
     pub(crate) fn subtitles(&self) -> Vec<SubtitleTrack> {
         match self {
             Self::Matroska(d) => d
@@ -432,7 +432,30 @@ impl<R: Read + Seek> Container<R> {
                     })
                 })
                 .collect(),
-            Self::Mp4(_) | Self::Ogg(_) | Self::Flac(_) | Self::Mp3(_) => Vec::new(),
+            Self::Mp4(d) => d
+                .tracks()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.kind == mp4::TrackKind::Subtitle)
+                .filter_map(|(i, t)| {
+                    Some(SubtitleTrack {
+                        number: u64::from(t.id),
+                        key: u64::try_from(i).ok()?,
+                        format: if t.codec == mp4::Codec::MovText {
+                            SubtitleFormat::MovText
+                        } else {
+                            SubtitleFormat::Other
+                        },
+                        codec_id: t.codec_tag.to_vec(),
+                        config: t.config.clone(),
+                        enabled: true,
+                        default: t.default,
+                        forced: false,
+                        time_base: (1, u64::from(t.timescale.max(1))),
+                    })
+                })
+                .collect(),
+            Self::Ogg(_) | Self::Flac(_) | Self::Mp3(_) => Vec::new(),
         }
     }
 

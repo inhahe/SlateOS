@@ -1,5 +1,5 @@
 //! A video file's text subtitles, cue by cue: SubRip, ASS and SSA, and
-//! WebVTT, in Matroska and WebM.
+//! WebVTT, in Matroska and WebM; 3GPP timed text in MP4.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,8 +17,9 @@
 //! `<u>`, `<s>`, `<font>` with `color="#rrggbb"`, `face="…"` and
 //! `size="N"`, `{\anN}` for where on the picture it goes (a numeric keypad's
 //! layout: 8 is top centre; none is bottom centre), and line breaks as `\n`.
-//! A size is in 1/288 of the picture's height, 16 being SRT's usual size. It is written as `ffmpeg -c:s srt` writes it, and is ffmpeg's text
-//! for the track wherever ffmpeg's says what the format's own renderer shows
+//! A size is in 1/288 of the picture's height, 16 being SRT's usual size.
+//! It is written as `ffmpeg -c:s srt` writes it, and is ffmpeg's text for
+//! the track wherever ffmpeg's says what the format's own renderer shows
 //! (`srt.rs`, and each format's module for where this departs):
 //!
 //! - SubRip (`S_TEXT/UTF8`) is SRT already; its markup is read as ffmpeg's
@@ -28,25 +29,30 @@
 //!   them: positions, rotation, karaoke and the like are dropped (`ass.rs`).
 //! - WebVTT (WebM's `D_WEBVTT/SUBTITLES`, Matroska's `S_TEXT/WEBVTT`) is read
 //!   as its specification reads it (`webvtt.rs`).
+//! - 3GPP timed text (MP4's `tx3g`) is read as ffmpeg's `mov_text` decoder
+//!   reads it, its default style, place and style runs said in SRT
+//!   (`movtext.rs`).
 //!
 //! A track of pictures of text -- Blu-ray's PGS, DVD's VobSub, DVB's -- is
-//! refused by its format's name ([`crate::Error::SubtitleFormat`]). MP4's
-//! text tracks are not read yet.
+//! refused by its format's name ([`crate::Error::SubtitleFormat`]).
 //!
 //! **Time** is in nanoseconds on the file's clock, the clock [`crate::Video`]
 //! and [`crate::Sound`] give theirs on. A cue whose packet the file gives no
-//! time, whose text is not UTF-8 (as Matroska requires it to be), or which is
-//! not an ASS event, is passed over and counted ([`Subtitles::damaged`]).
+//! time, whose text is not UTF-8 (as Matroska requires it to be), which is
+//! not an ASS event, or a timed-text sample too damaged to read, is passed
+//! over and counted ([`Subtitles::damaged`]). A timed-text sample with no
+//! text clears the screen, and is no cue.
 
 mod ass;
 mod colours;
+mod movtext;
 mod srt;
 mod subrip;
 mod webvtt;
 
 use std::io::{Read, Seek};
 
-use crate::container::{Container, SubtitleTrack};
+use crate::container::{Container, Sample, SubtitleTrack};
 use crate::{Error, SubtitleFormat, time};
 
 /// A file's subtitle track, as [`Subtitles::info`] describes it.
@@ -85,6 +91,7 @@ enum Reader {
     WebVtt {
         webm: bool,
     },
+    MovText(movtext::Setup),
 }
 
 /// A file's subtitle track, read cue by cue.
@@ -102,7 +109,7 @@ pub struct Subtitles<R> {
 }
 
 impl<R: Read + Seek> Subtitles<R> {
-    /// The subtitles of `source` -- a Matroska or WebM file -- from its best
+    /// The subtitles of `source` -- a Matroska, WebM or MP4 file -- from its best
     /// track: one read here before one that is not, then an enabled one,
     /// then one marked default, the file's order among equals.
     ///
@@ -145,6 +152,7 @@ impl<R: Read + Seek> Subtitles<R> {
             SubtitleFormat::WebVtt => Reader::WebVtt {
                 webm: chosen.codec_id.starts_with(b"D_WEBVTT/"),
             },
+            SubtitleFormat::MovText => Reader::MovText(movtext::Setup::parse(&chosen.config)),
             format => return Err(Error::SubtitleFormat(format)),
         };
         // The track's own packets only, a film's pictures and sound passed
@@ -197,40 +205,12 @@ impl<R: Read + Seek> Subtitles<R> {
                     continue;
                 }
             }
-            // Matroska's text is UTF-8; a cue that is not cannot be read
-            // without guessing at what it was.
-            let Ok(text) = core::str::from_utf8(&sample.data) else {
-                self.damaged = self.damaged.saturating_add(1);
-                continue;
-            };
-            // A muxer that ends a cue as C ends a string.
-            let text = text.trim_end_matches('\0');
-            let text = match &self.reader {
-                Reader::SubRip => write(subrip::ops(text)),
-                Reader::WebVtt { webm } => {
-                    let cue = if *webm {
-                        webm_cue(text)
-                    } else {
-                        // Matroska's settings are the first line of the
-                        // block's addition, where it has one; one that is
-                        // not UTF-8 places nothing.
-                        let addition = sample.addition.as_deref().unwrap_or_default();
-                        let settings = core::str::from_utf8(addition)
-                            .map_or("", |a| a.split('\n').next().unwrap_or(""));
-                        Some((settings, text))
-                    };
-                    let Some((settings, cue)) = cue else {
-                        self.damaged = self.damaged.saturating_add(1);
-                        continue;
-                    };
-                    write(webvtt::ops(cue.trim_end_matches(['\r', '\n']), settings))
-                }
-                Reader::Ass(script) => {
-                    let Some(text) = ass::cue(script, text) else {
-                        self.damaged = self.damaged.saturating_add(1);
-                        continue;
-                    };
-                    text
+            let text = match said(&self.reader, &sample) {
+                Said::Cue(text) => text,
+                Said::Nothing => continue,
+                Said::Damaged => {
+                    self.damaged = self.damaged.saturating_add(1);
+                    continue;
                 }
             };
             return Ok(Some(Cue { start, end, text }));
@@ -256,6 +236,59 @@ impl<R: Read + Seek> Subtitles<R> {
     /// ASS event.
     pub fn damaged(&self) -> u64 {
         self.damaged
+    }
+}
+
+/// What a packet says.
+enum Said {
+    /// A cue: its text as SRT markup.
+    Cue(String),
+    /// Nothing to show: a timed-text sample that clears the screen.
+    Nothing,
+    /// A packet that cannot be read.
+    Damaged,
+}
+
+/// What `sample` says, read by `reader`.
+fn said(reader: &Reader, sample: &Sample) -> Said {
+    if let Reader::MovText(setup) = reader {
+        return match movtext::cue(setup, &sample.data) {
+            Some(text) if text.is_empty() => Said::Nothing,
+            Some(text) => Said::Cue(text),
+            None => Said::Damaged,
+        };
+    }
+    // Matroska's text is UTF-8; a cue that is not cannot be read without
+    // guessing at what it was.
+    let Ok(text) = core::str::from_utf8(&sample.data) else {
+        return Said::Damaged;
+    };
+    // A muxer that ends a cue as C ends a string.
+    let text = text.trim_end_matches('\0');
+    match reader {
+        Reader::SubRip => Said::Cue(write(subrip::ops(text))),
+        Reader::WebVtt { webm } => {
+            let cue = if *webm {
+                webm_cue(text)
+            } else {
+                // Matroska's settings are the first line of the block's
+                // addition, where it has one; one that is not UTF-8 places
+                // nothing.
+                let addition = sample.addition.as_deref().unwrap_or_default();
+                let settings = core::str::from_utf8(addition)
+                    .map_or("", |a| a.split('\n').next().unwrap_or(""));
+                Some((settings, text))
+            };
+            cue.map_or(Said::Damaged, |(settings, cue)| {
+                Said::Cue(write(webvtt::ops(
+                    cue.trim_end_matches(['\r', '\n']),
+                    settings,
+                )))
+            })
+        }
+        Reader::Ass(script) => ass::cue(script, text).map_or(Said::Damaged, Said::Cue),
+        // Read above, as bytes.
+        Reader::MovText(_) => Said::Damaged,
     }
 }
 

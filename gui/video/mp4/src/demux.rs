@@ -434,10 +434,10 @@ fn track(s: &Stream, d: &Description) -> Track {
     Track {
         id: u32::try_from(s.id).unwrap_or(0),
         kind: s.kind,
-        codec: if s.kind == Kind::Audio || s.kind == Kind::Video {
-            d.codec
-        } else {
+        codec: if s.kind == Kind::Data {
             Codec::Other
+        } else {
+            d.codec
         },
         codec_tag: d.codec_tag,
         config: s.extradata.first().cloned().unwrap_or_default(),

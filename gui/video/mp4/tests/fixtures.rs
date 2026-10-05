@@ -359,6 +359,22 @@ fn packets_of_pcm() {
 }
 
 #[test]
+fn packets_of_mov_text() {
+    demuxes_as_ffmpeg_does("mov_text.mp4");
+    // A `tx3g` entry in an `sbtl` track is subtitles, its setup the rest of
+    // the entry: FFmpeg's `mov_codec_id` and `mov_parse_stsd_subtitle`.
+    let d = Demuxer::open(File::open(data("mov_text.mp4")).unwrap()).unwrap();
+    let text = &d.tracks()[1];
+    assert_eq!(
+        (text.kind, text.codec, &text.codec_tag),
+        (TrackKind::Subtitle, mp4::Codec::MovText, b"tx3g")
+    );
+    // Display flags, justification, background, text box, default style.
+    assert!(text.config.len() >= 30);
+    assert_eq!(&text.config[30 + 4..30 + 8], b"ftab");
+}
+
+#[test]
 fn packets_of_two_edits() {
     demuxes_as_ffmpeg_does("two_edits.mp4");
 }

@@ -34,8 +34,22 @@ pub enum Codec {
     Flac,
     Ac3,
     Eac3,
+    /// 3GPP timed text (`tx3g`; QuickTime's `text`): MP4's subtitles, what
+    /// `ffmpeg -c:s mov_text`, HandBrake and phones write.
+    MovText,
     #[default]
     Other,
+}
+
+/// What FFmpeg's subtitle table (`ff_codec_movsubtitle_tags`) makes of a
+/// sample entry's code, for a track no handler made video or sound.
+pub(crate) fn subtitle_codec(tag: [u8; 4]) -> Option<Codec> {
+    match &tag {
+        b"tx3g" | b"text" => Some(Codec::MovText),
+        // CEA-608 closed captions, which no player here reads.
+        b"c608" => Some(Codec::Other),
+        _ => None,
+    }
 }
 
 /// What FFmpeg's sound table (`ff_codec_movaudio_tags`) makes of a sample

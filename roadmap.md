@@ -2218,6 +2218,15 @@ live.
   that chooses it and offers to install what is missing
   (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`).
 
+- `[x]` `[C]` **A disabled control says why** (`design-decisions.md` §1473;
+  `roadmap-detailed.md` §3.5 *Enable/disable controls API*) -- done
+  2026-10-05. Rest the pointer on a greyed button or menu row and, after the
+  tooltip delay, its reason appears: `ContextMenu::explain` for a menu's
+  rows, `guitk::disabled::WhyDisabled` for a window's controls. The text
+  fields' menus explain theirs ("Select some text first", "Nothing has
+  been copied"), the desktop's included. **Lane E:** the programs' own
+  (`requests/c-e-say-why-a-control-is-disabled.md`).
+
 - `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
   -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
   pictures -- the folder the start menu's Pictures place opens -- in name

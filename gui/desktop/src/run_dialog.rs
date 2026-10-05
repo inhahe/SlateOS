@@ -782,10 +782,11 @@ impl RunDialog {
         )
     }
 
-    /// The rows of the command field's right-click menu: Cut, Copy, Paste,
-    /// Delete and Select all, each dimmed when it would do nothing.
+    /// The command field's right-click menu: Cut, Copy, Paste, Delete and
+    /// Select all, each dimmed when it would do nothing and saying why while
+    /// the pointer rests on it.
     #[must_use]
-    pub fn edit_menu(&self) -> Vec<guitk::menu::MenuItem> {
+    pub fn edit_menu(&self) -> guitk::menu::ContextMenu {
         self.input.edit_menu()
     }
 

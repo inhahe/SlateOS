@@ -28,7 +28,7 @@
 
 use crate::editmenu::{EditCommand, EditState};
 use crate::event::{Key, KeyEvent};
-use crate::menu::{MenuItem, MenuItemId};
+use crate::menu::{ContextMenu, MenuItemId};
 use crate::render::FontWeightHint;
 use crate::text;
 use crate::text::TextCursor;
@@ -425,12 +425,13 @@ impl TextInput {
         }
     }
 
-    /// The rows of the menu a right-click on this field offers
-    /// ([`crate::editmenu`]): Cut, Copy, Paste, Delete and Select all, each
-    /// dimmed when it would do nothing.
+    /// The menu a right-click on this field offers ([`crate::editmenu`]):
+    /// Cut, Copy, Paste, Delete and Select all, each dimmed when it would do
+    /// nothing and saying why while the pointer rests on it. The window shows
+    /// it where the click landed.
     #[must_use]
-    pub fn edit_menu(&self) -> Vec<MenuItem> {
-        crate::editmenu::rows(EditState {
+    pub fn edit_menu(&self) -> ContextMenu {
+        crate::editmenu::menu(EditState {
             selected: self.has_selection(),
             editable: true,
             has_text: !self.text.is_empty(),
@@ -836,13 +837,14 @@ mod tests {
         let lit = |input: &TextInput| -> Vec<String> {
             input
                 .edit_menu()
-                .into_iter()
+                .items()
+                .iter()
                 .filter_map(|r| match r {
                     crate::menu::MenuItem::Action {
                         label,
                         enabled: true,
                         ..
-                    } => Some(label),
+                    } => Some(label.clone()),
                     _ => None,
                 })
                 .collect()
@@ -879,7 +881,7 @@ mod tests {
         );
         assert_eq!(input.edit_command(42), KeyEdit::Unhandled);
         assert!(
-            !input.edit_menu().iter().any(
+            !input.edit_menu().items().iter().any(
                 |r| matches!(r, crate::menu::MenuItem::Action { label, .. } if label == "Undo")
             ),
             "a field with no history offers Undo"

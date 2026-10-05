@@ -185,6 +185,21 @@ pub struct ContextMenu {
     /// about where the bottom of the screen is. Set only by
     /// [`show`](Self::show), which is the only thing that positions a menu.
     viewport: (f32, f32),
+    /// Why a greyed row is greyed, by the row's id, as the menu's owner says
+    /// ([`explain`](Self::explain)). Handed down to a submenu when it opens,
+    /// so a row is explained wherever in the menu it sits.
+    reasons: Vec<(MenuItemId, String)>,
+    /// The greyed row the pointer rests on, when it has a reason to show.
+    resting: Option<Resting>,
+}
+
+/// The pointer resting on a greyed row that has a reason: which row, where
+/// the pointer came to rest, and -- once [`ContextMenu::tick`] has seen it,
+/// which is when the wait starts -- the tooltip saying the reason.
+struct Resting {
+    index: usize,
+    at: (f32, f32),
+    tooltip: Option<Tooltip>,
 }
 
 impl ContextMenu {
@@ -201,7 +216,120 @@ impl ContextMenu {
             width,
             scroll: 0.0,
             viewport: FALLBACK_VIEWPORT,
+            reasons: Vec::new(),
+            resting: None,
         }
+    }
+
+    /// Add `items` below the rows the menu has -- a window's own rows below
+    /// a field's, say. Before [`show`](Self::show): the width is measured
+    /// again, and a menu already up is laid out as it was shown.
+    pub fn extend(&mut self, items: impl IntoIterator<Item = MenuItem>) {
+        self.items.extend(items);
+        self.width = Self::calculate_width(&self.items);
+    }
+
+    /// Say why the row `id` is greyed, to be shown while the pointer rests on
+    /// it -- what `design.txt` asks of every disabled control: "explaining why
+    /// it's disabled/how to enable it". Shown only while the row *is* greyed,
+    /// so a reason can be given whatever the row's state, and saying it again
+    /// replaces what was said. A row in a submenu is explained here too.
+    ///
+    /// Shown by a menu whose owner lets time pass ([`tick`](Self::tick)); one
+    /// that never does shows no reasons and behaves as it always did.
+    pub fn explain(&mut self, id: MenuItemId, why: impl Into<String>) {
+        let why = why.into();
+        match self.reasons.iter_mut().find(|(said, _)| *said == id) {
+            Some((_, reason)) => *reason = why,
+            None => self.reasons.push((id, why)),
+        }
+    }
+
+    /// What [`explain`](Self::explain) was told for the row `id`.
+    #[must_use]
+    pub fn reason(&self, id: MenuItemId) -> Option<&str> {
+        self.reasons
+            .iter()
+            .find(|(said, _)| *said == id)
+            .map(|(_, why)| why.as_str())
+    }
+
+    /// Let time pass, at `now_ms`: the reason a greyed row gives appears once
+    /// the pointer has rested on the row for the toolkit's tooltip delay,
+    /// counted from the first `tick` after it came to rest. Returns whether a
+    /// reason appeared now -- the moment to repaint.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let mut appeared = false;
+        if let Some((_, ref mut submenu)) = self.open_submenu {
+            appeared |= submenu.tick(now_ms);
+        }
+        let viewport = self.viewport;
+        let why = self
+            .resting
+            .as_ref()
+            .and_then(|resting| self.reason_at(resting.index))
+            .map(str::to_owned);
+        if let (Some(resting), Some(why)) = (self.resting.as_mut(), why) {
+            let at = resting.at;
+            let tooltip = resting.tooltip.get_or_insert_with(|| {
+                let mut tooltip = Tooltip::new(&why);
+                tooltip.start_hover(at.0, at.1, now_ms, viewport);
+                tooltip
+            });
+            let was = tooltip.is_visible();
+            tooltip.tick(now_ms);
+            appeared |= !was && tooltip.is_visible();
+        }
+        appeared
+    }
+
+    /// How long until a reason appears, in milliseconds from `now_ms` --
+    /// `Some(0)` when the pointer has come to rest on a greyed row and no
+    /// [`tick`](Self::tick) has started the wait yet -- or `None` when none is
+    /// waiting. For an owner that sleeps while nothing moves: a deadline with
+    /// no wake-up behind it never comes.
+    #[must_use]
+    pub fn due_in(&self, now_ms: u64) -> Option<u64> {
+        if !self.visible {
+            return None;
+        }
+        let own = self
+            .resting
+            .as_ref()
+            .and_then(|resting| match &resting.tooltip {
+                Some(tooltip) => tooltip.due_in(now_ms),
+                None => Some(0),
+            });
+        let submenu = self
+            .open_submenu
+            .as_ref()
+            .and_then(|(_, submenu)| submenu.due_in(now_ms));
+        match (own, submenu) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// The reason showing now, if one is: the greyed row's the pointer rests
+    /// on, in this menu or the submenu open from it.
+    #[must_use]
+    pub fn showing_reason(&self) -> Option<&str> {
+        if !self.visible {
+            return None;
+        }
+        let own = self
+            .resting
+            .as_ref()
+            .filter(|resting| resting.tooltip.as_ref().is_some_and(Tooltip::is_visible))
+            .and_then(|resting| self.reason_at(resting.index));
+        own.or_else(|| {
+            self.open_submenu
+                .as_ref()
+                .and_then(|(_, submenu)| submenu.showing_reason())
+        })
     }
 
     /// Show the menu at the given position, adjusting for viewport edges.
@@ -240,6 +368,7 @@ impl ContextMenu {
         self.visible = true;
         self.hover_index = None;
         self.open_submenu = None;
+        self.resting = None;
     }
 
     /// Scroll the rows by `dy` wheel notches, if `(mx, my)` is over this menu
@@ -272,6 +401,10 @@ impl ContextMenu {
         // Consumed even when there is nothing to scroll: the wheel must not
         // fall through a popup to whatever it is covering.
         self.set_scroll(self.scroll + crate::wheel::pixels(dy, ITEM_HEIGHT));
+        // The rows moved under a pointer that did not: a reason waiting, or
+        // showing, would now be about some other row. The next move finds
+        // the row it is over.
+        self.resting = None;
         true
     }
 
@@ -280,6 +413,7 @@ impl ContextMenu {
         self.visible = false;
         self.hover_index = None;
         self.open_submenu = None;
+        self.resting = None;
     }
 
     /// The rows the menu was built with, in order -- for a caller that
@@ -400,10 +534,7 @@ impl ContextMenu {
                 ..
             }) => {
                 // Clicking a submenu item opens it (same as hover).
-                let mut sub = ContextMenu::new(children.clone());
-                let sub_x = self.x + self.width;
-                let sub_y = self.y + self.y_offset_for_index(idx);
-                sub.show(sub_x, sub_y, self.viewport);
+                let sub = self.submenu(idx, children);
                 self.open_submenu = Some((idx, Box::new(sub)));
                 None
             }
@@ -417,15 +548,18 @@ impl ContextMenu {
             return;
         }
 
-        // Delegate to submenu if mouse is within it.
+        // Delegate to submenu if mouse is within it. The pointer has left
+        // this menu's rows, so whatever reason it was resting on goes.
         if let Some((_, ref mut submenu)) = self.open_submenu
             && submenu.point_in_bounds(mx, my)
         {
             submenu.handle_mouse_move(mx, my);
+            self.resting = None;
             return;
         }
 
         if !self.point_in_bounds(mx, my) {
+            self.resting = None;
             // Don't clear hover if mouse moved to a submenu.
             if self
                 .open_submenu
@@ -440,6 +574,7 @@ impl ContextMenu {
 
         let new_index = self.index_at_y(my);
         self.hover_index = new_index;
+        self.rest_on(new_index, mx, my);
 
         // Open submenu if hovering over a submenu item.
         if let Some(idx) = new_index {
@@ -452,10 +587,7 @@ impl ContextMenu {
                     // Only open if not already open for this index.
                     let already_open = self.open_submenu.as_ref().is_some_and(|(i, _)| *i == idx);
                     if !already_open {
-                        let mut sub = ContextMenu::new(children.clone());
-                        let sub_x = self.x + self.width;
-                        let sub_y = self.y + self.y_offset_for_index(idx);
-                        sub.show(sub_x, sub_y, self.viewport);
+                        let sub = self.submenu(idx, children);
                         self.open_submenu = Some((idx, Box::new(sub)));
                     }
                 }
@@ -518,10 +650,7 @@ impl ContextMenu {
                             children,
                             ..
                         }) => {
-                            let mut sub = ContextMenu::new(children.clone());
-                            let sub_x = self.x + self.width;
-                            let sub_y = self.y + self.y_offset_for_index(idx);
-                            sub.show(sub_x, sub_y, self.viewport);
+                            let sub = self.submenu(idx, children);
                             self.open_submenu = Some((idx, Box::new(sub)));
                             Some(MenuAction::None)
                         }
@@ -540,10 +669,7 @@ impl ContextMenu {
                         ..
                     }) = self.items.get(idx)
                 {
-                    let mut sub = ContextMenu::new(children.clone());
-                    let sub_x = self.x + self.width;
-                    let sub_y = self.y + self.y_offset_for_index(idx);
-                    sub.show(sub_x, sub_y, self.viewport);
+                    let sub = self.submenu(idx, children);
                     self.open_submenu = Some((idx, Box::new(sub)));
                 }
                 Some(MenuAction::None)
@@ -851,10 +977,71 @@ impl ContextMenu {
             cmds.extend(submenu.render_with_icons(palette, icons));
         }
 
+        // Over everything, why the greyed row the pointer rests on is greyed.
+        if let Some(Resting {
+            tooltip: Some(tooltip),
+            ..
+        }) = &self.resting
+        {
+            cmds.extend(tooltip.render(palette));
+        }
+
         cmds
     }
 
     // ─── Private helpers ────────────────────────────────────────────────────
+
+    /// The submenu of row `idx`, built from `children` and shown beside the
+    /// row -- with this menu's reasons handed down, so a greyed row in it
+    /// is explained as one here is. The one place a submenu is made: there
+    /// were four copies of these lines, a click's, a hover's and two keys'.
+    fn submenu(&self, idx: usize, children: &[MenuItem]) -> ContextMenu {
+        let mut sub = ContextMenu::new(children.to_vec());
+        sub.reasons.clone_from(&self.reasons);
+        sub.show(
+            self.x + self.width,
+            self.y + self.y_offset_for_index(idx),
+            self.viewport,
+        );
+        sub
+    }
+
+    /// The reason the row at `index` gives: a greyed row's, if the owner
+    /// explained it.
+    fn reason_at(&self, index: usize) -> Option<&str> {
+        let id = match self.items.get(index)? {
+            MenuItem::Action {
+                id, enabled: false, ..
+            }
+            | MenuItem::Submenu {
+                id, enabled: false, ..
+            } => *id,
+            _ => return None,
+        };
+        self.reason(id)
+    }
+
+    /// The pointer is at `(x, y)` over row `index`, or over none: resting on
+    /// a greyed row with a reason begins the wait for it -- unless it was
+    /// resting on that row already, when the wait goes on -- and anywhere
+    /// else ends it, the reason hidden with it.
+    fn rest_on(&mut self, index: Option<usize>, x: f32, y: f32) {
+        match index.filter(|&i| self.reason_at(i).is_some()) {
+            Some(i)
+                if self
+                    .resting
+                    .as_ref()
+                    .is_some_and(|resting| resting.index == i) => {}
+            Some(i) => {
+                self.resting = Some(Resting {
+                    index: i,
+                    at: (x, y),
+                    tooltip: None,
+                });
+            }
+            None => self.resting = None,
+        }
+    }
 
     /// Draw the picture `icon` names, if `icons` can, in the row at `row_y`'s
     /// picture column.
@@ -2531,6 +2718,159 @@ mod tests {
 
         tooltip.end_hover();
         assert_eq!(tooltip.due_in(1300), None);
+    }
+
+    // ─── Why a greyed row is greyed ─────────────────────────────────────────
+
+    /// `sample_items` shown at the screen's corner, with Paste (row 3, id 3)
+    /// greyed and explained; and the middle of row `index`.
+    fn explained_menu() -> ContextMenu {
+        let mut menu = ContextMenu::new(sample_items());
+        menu.explain(3, "Nothing has been copied");
+        menu.show(10.0, 10.0, SCREEN);
+        menu
+    }
+
+    fn middle(menu: &ContextMenu, index: usize) -> (f32, f32) {
+        let rect = menu.item_rect(index).expect("the row is on screen");
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+    }
+
+    fn texts(commands: &[RenderCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A greyed row says why, once the pointer has rested on it** for the
+    /// tooltip delay -- counted from the first tick after it came to rest,
+    /// which `due_in` asks for at once -- and the reason is drawn over the
+    /// menu.
+    #[test]
+    fn a_greyed_row_says_why_once_the_pointer_rests_on_it() {
+        let mut menu = explained_menu();
+        assert_eq!(menu.reason(3), Some("Nothing has been copied"));
+        assert_eq!(menu.due_in(0), None, "nothing rests on a row");
+
+        let (x, y) = middle(&menu, 3);
+        menu.handle_mouse_move(x, y);
+        assert_eq!(
+            menu.due_in(1000),
+            Some(0),
+            "the wait starts at the next tick"
+        );
+        assert!(!menu.tick(1000));
+        assert_eq!(menu.due_in(1000), Some(u64::from(DEFAULT_TOOLTIP_DELAY_MS)));
+        assert_eq!(menu.showing_reason(), None);
+
+        let due = 1000 + u64::from(DEFAULT_TOOLTIP_DELAY_MS);
+        assert!(menu.tick(due), "the reason appeared");
+        assert_eq!(menu.showing_reason(), Some("Nothing has been copied"));
+        assert_eq!(menu.due_in(due), None, "showing is not waiting");
+        assert!(!menu.tick(due + 100), "it appears once");
+        let palette = Palette::for_mode(false);
+        assert!(texts(&menu.render(&palette)).contains(&"Nothing has been copied".to_owned()));
+
+        // Moving within the row keeps it; leaving the row hides it.
+        menu.handle_mouse_move(x + 5.0, y);
+        assert_eq!(menu.showing_reason(), Some("Nothing has been copied"));
+        let (x0, y0) = middle(&menu, 0);
+        menu.handle_mouse_move(x0, y0);
+        assert_eq!(menu.showing_reason(), None);
+        assert_eq!(menu.due_in(due), None);
+        assert!(!texts(&menu.render(&palette)).contains(&"Nothing has been copied".to_owned()));
+    }
+
+    /// **Only a greyed row with a reason says anything**: a row that can be
+    /// chosen is not explained, whatever it was told, and a greyed row no
+    /// one explained shows nothing; nor does a menu whose owner never ticks.
+    #[test]
+    fn only_a_greyed_row_with_a_reason_says_anything() {
+        let mut menu = ContextMenu::new(sample_items());
+        menu.explain(1, "Cut is on");
+        menu.show(10.0, 10.0, SCREEN);
+        for row in [0, 3] {
+            let (x, y) = middle(&menu, row);
+            menu.handle_mouse_move(x, y);
+            assert_eq!(menu.due_in(0), None, "row {row}");
+            assert!(!menu.tick(10_000));
+            assert_eq!(menu.showing_reason(), None);
+        }
+    }
+
+    /// **Saying why again replaces what was said**, and the pointer leaving
+    /// the menu, the menu hiding, or its rows scrolling under the pointer
+    /// ends the wait.
+    #[test]
+    fn the_wait_ends_when_the_row_is_no_longer_under_the_pointer() {
+        let mut menu = explained_menu();
+        menu.explain(3, "The clipboard is empty");
+        assert_eq!(menu.reason(3), Some("The clipboard is empty"));
+
+        let (x, y) = middle(&menu, 3);
+        menu.handle_mouse_move(x, y);
+        menu.handle_mouse_move(SCREEN.0 - 1.0, SCREEN.1 - 1.0);
+        assert_eq!(menu.due_in(0), None, "the pointer left the menu");
+
+        menu.handle_mouse_move(x, y);
+        assert!(menu.handle_scroll(x, y, 1.0));
+        assert_eq!(menu.due_in(0), None, "the rows moved under the pointer");
+
+        menu.handle_mouse_move(x, y);
+        menu.hide();
+        assert_eq!(menu.due_in(0), None);
+        assert!(!menu.tick(10_000));
+    }
+
+    /// **A greyed row in a submenu is explained too**: the reasons go down
+    /// with the submenu, and its wait is the menu's to report.
+    #[test]
+    fn a_greyed_row_in_a_submenu_says_why() {
+        let mut menu = ContextMenu::new(vec![
+            action(1, true),
+            MenuItem::Submenu {
+                id: 2,
+                label: "More".to_string(),
+                icon: None,
+                enabled: true,
+                children: vec![action(21, true), action(22, false)],
+            },
+        ]);
+        menu.explain(22, "Not on this machine");
+        menu.show(10.0, 10.0, SCREEN);
+        let (x, y) = middle(&menu, 1);
+        menu.handle_mouse_move(x, y);
+        let (sx, sy) = {
+            let (_, submenu) = menu.open_submenu.as_ref().expect("hover opened it");
+            middle(submenu, 1)
+        };
+        menu.handle_mouse_move(sx, sy);
+        assert_eq!(menu.due_in(0), Some(0));
+        menu.tick(0);
+        assert!(menu.tick(u64::from(DEFAULT_TOOLTIP_DELAY_MS)));
+        assert_eq!(menu.showing_reason(), Some("Not on this machine"));
+    }
+
+    /// **Rows added below the menu's own are drawn, and widen it** -- a
+    /// window's rows below a field's.
+    #[test]
+    fn rows_added_below_widen_the_menu() {
+        let mut menu = ContextMenu::new(vec![action(1, true)]);
+        let narrow = menu.width();
+        menu.extend([MenuItem::Action {
+            id: 2,
+            label: "A row much longer than the menu it was added to".to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        }]);
+        assert_eq!(menu.items().len(), 2);
+        assert!(menu.width() > narrow);
     }
 
     #[test]

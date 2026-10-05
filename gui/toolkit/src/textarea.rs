@@ -736,12 +736,13 @@ impl TextArea {
         }
     }
 
-    /// The rows of the menu a right-click on this field offers
-    /// ([`crate::editmenu`]): Undo and Redo, then Cut, Copy, Paste, Delete
-    /// and Select all, each dimmed when it would do nothing.
+    /// The menu a right-click on this field offers ([`crate::editmenu`]):
+    /// Undo and Redo, then Cut, Copy, Paste, Delete and Select all, each
+    /// dimmed when it would do nothing and saying why while the pointer
+    /// rests on it. The window shows it where the click landed.
     #[must_use]
-    pub fn edit_menu(&self) -> Vec<crate::menu::MenuItem> {
-        crate::editmenu::rows(crate::editmenu::EditState {
+    pub fn edit_menu(&self) -> crate::menu::ContextMenu {
+        crate::editmenu::menu(crate::editmenu::EditState {
             selected: self.has_selection(),
             editable: true,
             has_text: !self.text.is_empty(),

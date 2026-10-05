@@ -1053,15 +1053,13 @@ impl DesktopWidgetManager {
         NoteKey::Changed
     }
 
-    /// The rows of the open note's right-click menu (`guitk::editmenu`):
-    /// Undo and Redo, Cut, Copy, Paste, Delete and Select all, each dimmed
-    /// when it would do nothing. Empty when no note is open.
+    /// The open note's right-click menu (`guitk::editmenu`): Undo and Redo,
+    /// Cut, Copy, Paste, Delete and Select all, each dimmed when it would do
+    /// nothing and saying why while the pointer rests on it. `None` when no
+    /// note is open.
     #[must_use]
-    pub fn note_edit_menu(&self) -> Vec<guitk::menu::MenuItem> {
-        self.note
-            .as_ref()
-            .map(|note| note.area.edit_menu())
-            .unwrap_or_default()
+    pub fn note_edit_menu(&self) -> Option<guitk::menu::ContextMenu> {
+        self.note.as_ref().map(|note| note.area.edit_menu())
     }
 
     /// Do what a row of [`note_edit_menu`](Self::note_edit_menu) says to the

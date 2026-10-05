@@ -70,7 +70,7 @@ use crate::editmenu::{EditCommand, EditState};
 use crate::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::Rect;
 use crate::highlight::{Brackets, HighlightSpan, Highlighter};
-use crate::menu::{MenuItem, MenuItemId};
+use crate::menu::{ContextMenu, MenuItemId};
 use crate::palette::Palette;
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow, TextSpan};
 use crate::scrollbar;
@@ -354,14 +354,15 @@ impl CodeView {
         self.after_edit();
     }
 
-    /// The rows of the menu a right-click on the text offers
-    /// ([`crate::editmenu`]): Undo and Redo, Cut, Copy, Paste, Delete and
-    /// Select all, each greyed when it would do nothing. Cut and Copy are lit
-    /// with nothing selected, as their keys work then: they take the caret's
-    /// line. The host puts the menu up -- see the module docs.
+    /// The menu a right-click on the text offers ([`crate::editmenu`]):
+    /// Undo and Redo, Cut, Copy, Paste, Delete and Select all, each greyed
+    /// when it would do nothing and saying why while the pointer rests on
+    /// it. Cut and Copy are lit with nothing selected, as their keys work
+    /// then: they take the caret's line. The host puts the menu up -- see
+    /// the module docs.
     #[must_use]
-    pub fn edit_menu(&self) -> Vec<MenuItem> {
-        crate::editmenu::rows(EditState {
+    pub fn edit_menu(&self) -> ContextMenu {
+        crate::editmenu::menu(EditState {
             selected: self.editor.selections().iter().any(|s| !s.is_empty()),
             editable: true,
             has_text: !self.editor.buffer().is_empty(),
@@ -1637,6 +1638,7 @@ fn signed(n: usize) -> isize {
 )]
 mod tests {
     use super::*;
+    use crate::menu::MenuItem;
 
     const BOUNDS: Rect = Rect {
         x: 10.0,
@@ -2477,9 +2479,10 @@ mod tests {
     /// The labels of a view's right-click menu and whether each is lit.
     fn menu_lit(v: &CodeView) -> Vec<(String, bool)> {
         v.edit_menu()
-            .into_iter()
+            .items()
+            .iter()
             .filter_map(|r| match r {
-                MenuItem::Action { label, enabled, .. } => Some((label, enabled)),
+                MenuItem::Action { label, enabled, .. } => Some((label.clone(), *enabled)),
                 _ => None,
             })
             .collect()

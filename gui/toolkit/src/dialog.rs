@@ -590,6 +590,31 @@ impl FileDialog {
         PathBuf::from(join_path(self.current_path.as_os_str(), name))
     }
 
+    /// The name in the field: the exact bytes it was given, if nothing has
+    /// been typed since, and otherwise what was typed -- the name
+    /// [`confirm`](Self::confirm) saves to, before any filter's extension is
+    /// added.
+    #[must_use]
+    pub fn filename(&self) -> OsString {
+        self.filename_exact
+            .clone()
+            .unwrap_or_else(|| OsString::from(&self.filename_input))
+    }
+
+    /// The file type filters as the dialog offers them: the caller's, and
+    /// "All files" after them unless one of them already is that. What
+    /// [`filter_index`](Self::filter_index) counts in.
+    #[must_use]
+    pub fn filters(&self) -> Vec<FileFilter> {
+        self.effective_filters()
+    }
+
+    /// The filter in force, an index into [`filters`](Self::filters).
+    #[must_use]
+    pub const fn filter_index(&self) -> usize {
+        self.active_filter_index
+    }
+
     /// Change the active file type filter by index.
     pub fn set_filter_index(&mut self, index: usize) {
         let max_index = self.effective_filters().len().saturating_sub(1);

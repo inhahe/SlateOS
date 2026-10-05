@@ -1213,6 +1213,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "filechooser"
+version = "0.1.0"
+dependencies = [
+ "guiremote",
+ "guitk",
+]
+
+[[package]]
 name = "filediff"
 version = "0.1.0"
 dependencies = [

@@ -6049,7 +6049,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [ ] Theme color API for applications — **was marked `[x]` on the strength of a `ThemeColors` helper no application ever held**, deleted 2026-09-03 with the rest (§810). Unchecked 2026-09-03: applications do *not* get their colours from an API, they each write out their own copy of the dark palette — 2,258 `const NAME: Color` across 135 files, tracked as `TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO`, which is what actually has to be done for this item to be true. The API it should be built on is `appearance::Palette`, not a toolkit type.
 
 ### 3.5 GUI toolkit / widget API
-- [x] Advanced features:
+- [-] `[C]` Advanced features:
   - [x] Clipboard (multi-format: text, HTML, image, structured data, history)
     - [x] System clipboard service with 7 formats (PlainText/RichText/Html/ImagePng/ImageBmp/FilePaths/Custom)
     - [x] History (50 entries), pinning, search, format conversion (HTML→text, RTF→text)
@@ -6059,7 +6059,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
     - [x] DragDropManager state machine (Idle→Dragging→OverTarget)
     - [x] Drop target registration, hit testing, format compatibility, effect negotiation
     - [x] Drag threshold, cancel support, DragEvent lifecycle events
-  - [-] File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. Decided 2026-09-27 (`design-decisions.md` §1415): the explorer will show the window for every program and hand back only the file chosen.*
+  - [-] `[C]` File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. Decided 2026-09-27 (`design-decisions.md` §1415): the explorer will show the window for every program and hand back only the file chosen.* **Lane C's half done 2026-10-05** (§1463): `gui/filechooser` -- a program asks the service `org.slateos.FileChooser` through `filechooser::Picker` (the toolkit picker's calls), the explorer answers through `filechooser::service`, and where nothing serves the name the toolkit's dialog is drawn as before. **Remaining, other lanes':** the explorer serving it and the applications asking through it (lane E, `requests/c-e-serve-every-programs-open-and-save-window.md`), the chooser kept above the asking window (lane F, `requests/c-f-the-file-choosers-window-belongs-to-the-program-that-asked.md`), the file handed open rather than named (lanes A and D, `requests/c-ad-hand-a-program-the-file-it-chose-not-its-name.md`).
     - [x] Open/Save/SelectFolder modes with builder API
     - [x] Directory navigation (back/forward/up), quick-access sidebar
     - [x] Sortable file list, extension filters, auto-extension append

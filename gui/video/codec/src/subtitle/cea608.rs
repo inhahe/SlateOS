@@ -862,7 +862,12 @@ mod tests {
 
     #[test]
     fn another_channel_and_text_mode_show_nothing() {
+        // In the middle of loading channel 1's caption: channel 2's commands
+        // and characters, then text mode's characters, none of them into it.
         let s = Script::default()
+            .rcl()
+            .pac15()
+            .text("ours")
             .code(0x1C, 0x20)
             .code(0x1C, 0x60)
             .text("channel two")
@@ -870,8 +875,6 @@ mod tests {
             .code(0x14, 0x2A)
             .text("text mode")
             .rcl()
-            .pac15()
-            .text("ours")
             .eoc()
             .wait(2)
             .edm();

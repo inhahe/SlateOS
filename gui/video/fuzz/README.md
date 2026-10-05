@@ -3,10 +3,10 @@
 Coverage-guided fuzzing (libFuzzer, through `cargo fuzz`) of everything in
 lane F that reads a file a stranger made: every picture format `imagecodec`
 opens, every video and sound file `videocodec` plays, the subtitles it reads
-(SubRip, ASS, SSA, WebVTT; MP4's timed text; Blu-ray's and DVD's pictures),
-the Matroska and MP4 demuxers on their own, and the VP8 and VP9 decoders on
-raw packets. A decoder here must
-return an error for any input it cannot use. A panic, a hang or a runaway
+(SubRip, ASS, SSA, WebVTT; MP4's timed text; Blu-ray's, DVD's and DVB's
+pictures), the Matroska and MP4 demuxers on their own, and the VP8 and VP9
+decoders on raw packets. A decoder here must return an error for any input
+it cannot use. A panic, a hang or a runaway
 allocation is a bug: the program that opened the file goes down with it,
 whether that is a thumbnailer, the image viewer or the video player.
 
@@ -35,8 +35,9 @@ In WSL, with a nightly toolchain (`rustup toolchain install nightly`) and
   length-prefixed packets with `ffmpeg`; the subtitle target from
   `videocodec`'s subtitle fixtures -- text, timed text, PGS and VobSub
   pictures -- with `subtitles.dict`'s markup -- ASS override tags, SRT and
-  WebVTT tags, cue settings -- and PGS's segment headers and VobSub's control
-  commands for its mutations; the MP4 target from the `mp4` crate's
+  WebVTT tags, cue settings -- PGS's segment headers, VobSub's control
+  commands, and DVB's segment headers and pixel codes for its mutations; the
+  MP4 target from the `mp4` crate's
   fixtures, ffmpeg's files and the hand-written ones that exercise each
   table, with `mp4.dict`'s box types and the counts at the edges of FFmpeg's
   arithmetic.

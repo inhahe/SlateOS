@@ -300,7 +300,7 @@ pub enum SubtitleFormat {
     Pgs,
     /// DVD's pictures of text (`S_VOBSUB`), read as images.
     VobSub,
-    /// DVB's pictures of text (`S_DVBSUB`). Not read here.
+    /// DVB's pictures of text (`S_DVBSUB`): digital television's.
     Dvb,
     /// Any other.
     Other,
@@ -318,7 +318,7 @@ impl SubtitleFormat {
     /// Whether [`Subtitles`] reads it: text, or pictures it gives as
     /// images.
     pub const fn is_read(self) -> bool {
-        self.is_text() || matches!(self, Self::Pgs | Self::VobSub)
+        self.is_text() || matches!(self, Self::Pgs | Self::VobSub | Self::Dvb)
     }
 }
 

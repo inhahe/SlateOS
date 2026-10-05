@@ -66,6 +66,31 @@ VOBSUB_GREY = "vobsub_without_a_palette"
 VOBSUB_PAL = "vobsub_without_a_size"
 VOBSUB_DAMAGE = "vobsub_damage_taken_as_ffmpeg_takes_it"
 VOB_SEEK = "a_seek_in_dvd_pictures_finds_one_still_showing"
+# dvb.rs's own.
+DVB_SHOWS = "a_display_set_shows_its_regions_through_their_clut"
+DVB_VERSION = "a_page_of_its_own_version_changes_nothing_and_afresh_forgets"
+DVB_ORDER = "the_first_region_listed_is_on_top_and_a_repeat_ends_the_list"
+DVB_DRAWN = "an_object_is_drawn_where_its_region_places_it_when_its_data_comes"
+DVB_KNOWN = "an_object_is_known_from_its_naming_until_no_region_places_it"
+DVB_NON_MOD = "the_non_modifying_colour_leaves_its_pixels_and_the_next_in_place"
+DVB_ENTRIES = "an_entry_for_several_tables_goes_into_each"
+DVB_SERVICE = "only_the_services_pages_are_read"
+DVB_DAMAGED = "damage_shows_nothing_new_and_is_counted"
+DVB_LAST = "of_several_display_sets_in_a_block_the_last_shows"
+DVB_EPOCH = "an_epoch_begins_at_an_acquisition_point_or_a_mode_change"
+DVB_SHORT = "a_block_of_six_bytes_or_not_of_segments_is_damage"
+DVB_BACKGROUND = "a_new_region_is_filled_with_its_background_and_shown"
+DVB_END_CODE = "a_line_as_wide_as_its_region_ends_on_its_end_code"
+DVB_BOUNDS = "regions_hold_ffmpegs_largest_four_times_and_place_1024_objects"
+DVB_RESET = "a_reset_forgets_the_page_held_but_not_the_settled_size"
+# The DVB fixtures'.
+DVB = "dvb"
+DVB_RECEIVER = "dvb_as_a_receiver_shows_it"
+DVB_HD = "dvb_on_a_high_definition_display_with_a_window"
+DVB_PAGES = "dvb_reads_its_own_services_pages"
+DVB_DAMAGE = "dvb_damage_taken_as_ffmpeg_takes_it"
+DVB_SEEK = "a_seek_in_dvb_pictures_reads_from_where_they_begin_afresh"
+DVB_FORGETS = "a_seek_in_dvb_pictures_forgets_what_was_read"
 
 # (name, old, new, [tests that must fail])
 PICTURES = [
@@ -217,20 +242,20 @@ PICTURES = [
 READER = [
     (
         "a seek reads pictures from the set it lands on",
-        "            self.back_to_epoch_start(ticks)?;",
-        "            let _ = ticks;",
+        "            Reader::Pgs(_) => self.back_to_epoch_start(ticks, pgs::begins_epoch)?,",
+        "            Reader::Pgs(_) => {}",
         [SEEK],
     ),
     (
         "any set begins an epoch for a seek",
-        "            if pgs::begins_epoch(&sample.data) {",
+        "            if begins(&sample.data) {",
         "            if true {",
-        [SEEK],
+        [SEEK, DVB_SEEK],
     ),
     (
         "a seek keeps the decoder's epoch",
-        "            decoder.reset();",
-        "            let _ = decoder;",
+        "            Reader::Pgs(decoder) => decoder.reset(),",
+        "            Reader::Pgs(_) => {}",
         [SEEK_BACK],
     ),
     (
@@ -280,8 +305,8 @@ READER = [
     ),
     (
         "a seek in DVD pictures reads from the SPU it lands on",
-        "            self.back_one(ticks)?;",
-        "            let _ = ticks;",
+        "            Reader::VobSub(_) => self.back_one(ticks)?,",
+        "            Reader::VobSub(_) => {}",
         [VOB_SEEK],
     ),
     (
@@ -295,6 +320,30 @@ READER = [
         "let duration = (length > 0).then(|| i64::try_from(length).unwrap_or(i64::MAX));",
         "let duration = (length > 0).then(|| i64::MAX).filter(|_| false);",
         [VOBSUB_DAMAGE],
+    ),
+    (
+        "a DVB page's timeout clears nothing",
+        "                    vec![(start, images), (gone, Vec::new())]",
+        "                    vec![(start, images)]",
+        [DVB],
+    ),
+    (
+        "a seek in DVB pictures reads from the set it lands on",
+        "                self.back_to_epoch_start(ticks, |block| dvb::begins_epoch(block, pages))?;",
+        "                let _ = (pages, ticks);",
+        [DVB_SEEK],
+    ),
+    (
+        "a seek keeps what DVB pictures were read",
+        "            Reader::Dvb(decoder) => decoder.reset(),",
+        "            Reader::Dvb(_) => {}",
+        [DVB_FORGETS],
+    ),
+    (
+        "damage in DVB pictures is not counted",
+        "            Reader::Dvb(decoder) => decoder.damaged(),",
+        "            Reader::Dvb(_) => 0,",
+        [DVB_DAMAGE],
     ),
 ]
 
@@ -415,6 +464,331 @@ DVD = [
     ),
 ]
 
+LIB = [
+    (
+        "DVB's pictures are not read",
+        "        self.is_text() || matches!(self, Self::Pgs | Self::VobSub | Self::Dvb)",
+        "        self.is_text() || matches!(self, Self::Pgs | Self::VobSub)",
+        [OPENED],
+    ),
+]
+
+DVB_ROWS = [
+    # Blocks and segments.
+    (
+        "a block of six bytes is read",
+        "        if len <= 6 || data.at(0) != 0x0F {",
+        "        if len < 6 || data.at(0) != 0x0F {",
+        [DVB_SHORT, DVB_DAMAGE],
+    ),
+    (
+        "a block not starting with the sync byte is read",
+        "        if len <= 6 || data.at(0) != 0x0F {",
+        "        if len <= 6 {",
+        [DVB_SHORT],
+    ),
+    (
+        "another service's segments are read",
+        "            if self.pages.is_none_or(|(c, a)| id == c || id == a) {",
+        "            if true {",
+        [DVB_SERVICE, DVB_PAGES],
+    ),
+    (
+        "a setup does not name the service",
+        "        let named = config.len() >= 4 && (config.len().is_multiple_of(5) || config.len() == 4);",
+        "        let named = false;",
+        [DVB_SERVICE, DVB_PAGES],
+    ),
+    (
+        "of several display sets in a block, the first shows",
+        "                    END => {\n                        shown = Some(self.show());",
+        "                    END => {\n                        shown = shown.or_else(|| Some(self.show()));",
+        [DVB_LAST, DVB_RECEIVER],
+    ),
+    (
+        "a page, a region and an object with no end are not shown",
+        "            if !end {\n                shown = Some(self.show());",
+        "            if false && !end {\n                shown = Some(self.show());",
+        [DVB_DAMAGED, DVB_DAMAGE],
+    ),
+    (
+        "a display set of no display definition does not settle the size",
+        "            if !display {\n                self.sized = true;",
+        "            if !display {\n                self.sized = false;",
+        [DVB_RESET],
+    ),
+    # Pages.
+    (
+        "a page of the version held is read again",
+        "        if self.page_version == Some(version) {",
+        "        if false && self.page_version == Some(version) {",
+        [DVB_VERSION, DVB],
+    ),
+    (
+        "an acquisition point does not begin afresh",
+        "        if state == 1 || state == 2 {",
+        "        if state == 2 {",
+        [DVB_VERSION],
+    ),
+    (
+        "a mode change does not begin afresh",
+        "        if state == 1 || state == 2 {",
+        "        if state == 1 {",
+        [DVB],
+    ),
+    (
+        "a page lists a region twice",
+        "            if self.shown.iter().any(|&(r, _, _)| r == id) {",
+        "            if false && self.shown.iter().any(|&(r, _, _)| r == id) {",
+        [DVB_ORDER, DVB],
+    ),
+    (
+        "the last region listed is on top",
+        "        for &(id, x, y) in self.shown.iter().rev() {",
+        "        for &(id, x, y) in self.shown.iter() {",
+        [DVB_ORDER, DVB, DVB_HD],
+    ),
+    # Regions.
+    (
+        "a region of no size is held",
+        "        if count == 0 || count > MAX_REGION || held - region.pixels.len() + count > MAX_HELD {",
+        "        if count > MAX_REGION || held - region.pixels.len() + count > MAX_HELD {",
+        [DVB_DAMAGED, DVB_DAMAGE],
+    ),
+    (
+        "a region past FFmpeg's largest is held",
+        "        if count == 0 || count > MAX_REGION || held - region.pixels.len() + count > MAX_HELD {",
+        "        if count == 0 || held - region.pixels.len() + count > MAX_HELD {",
+        [DVB_BOUNDS],
+    ),
+    (
+        "regions past four of FFmpeg's largest are held",
+        "        if count == 0 || count > MAX_REGION || held - region.pixels.len() + count > MAX_HELD {",
+        "        if count == 0 || count > MAX_REGION {",
+        [DVB_BOUNDS],
+    ),
+    (
+        "a new region is not filled",
+        "            fill = true;",
+        "            fill |= false;",
+        [DVB_BACKGROUND],
+    ),
+    (
+        "a region's fill is not made",
+        "        if fill {\n            region.pixels.fill(background);",
+        "        if false && fill {\n            region.pixels.fill(background);",
+        [DVB, DVB_RECEIVER, DVB_BACKGROUND],
+    ),
+    (
+        "an 8-bit region's background is its 4-bit code",
+        "            8 => data.at(at + 8),",
+        "            8 => data.at(at + 9) >> 4,",
+        [DVB],
+    ),
+    (
+        "a 4-bit region's background is its 2-bit code",
+        "            4 => data.at(at + 9) >> 4,",
+        "            4 => (data.at(at + 9) >> 2) & 3,",
+        [DVB, DVB_RECEIVER, DVB_BACKGROUND],
+    ),
+    (
+        "a 2-bit region's background is its 4-bit code",
+        "            _ => (data.at(at + 9) >> 2) & 3,",
+        "            _ => data.at(at + 9) >> 4,",
+        [DVB],
+    ),
+    (
+        "an object placed outside its region is placed",
+        "            if x >= width || y >= height || self.placements.len() >= MAX_PLACED {",
+        "            if self.placements.len() >= MAX_PLACED {",
+        [DVB_DAMAGED, DVB_DAMAGE],
+    ),
+    (
+        "objects past 1024 are placed",
+        "            if x >= width || y >= height || self.placements.len() >= MAX_PLACED {",
+        "            if x >= width || y >= height {",
+        [DVB_BOUNDS],
+    ),
+    (
+        "an object named outside its region is not known",
+        "            if !self.objects.contains(&object) {\n                self.objects.push(object);\n            }\n",
+        "",
+        [DVB_KNOWN],
+    ),
+    (
+        "an object no region places is still known",
+        "                self.objects.retain(|&o| o != object);",
+        "                let _ = object;",
+        [DVB_KNOWN],
+    ),
+    # CLUTs.
+    (
+        "a CLUT of the version held is read again",
+        "        if clut.version == Some(version) {",
+        "        if false && clut.version == Some(version) {",
+        [DVB],
+    ),
+    (
+        "a reduced-range entry is read as a full-range one",
+        "            let (y, cr, cb, t) = if flags & 1 == 1 {",
+        "            let (y, cr, cb, t) = if true {",
+        [DVB],
+    ),
+    (
+        "a Y of 0 is not transparent",
+        "            let alpha = if y == 0 { 0 } else { 255 - t };",
+        "            let alpha = 255 - t;",
+        [DVB],
+    ),
+    (
+        "an entry for the 2- and 4-bit tables goes into the 2-bit alone",
+        "            if flags & 0x40 != 0",
+        "            if flags & 0x40 != 0 && flags & 0x80 == 0",
+        [DVB_ENTRIES, DVB_RECEIVER],
+    ),
+    (
+        "the 2-bit table takes no entries",
+        "            if flags & 0x80 != 0",
+        "            if false && flags & 0x80 != 0",
+        [DVB],
+    ),
+    (
+        "the 8-bit table takes no entries",
+        "            if flags & 0x20 != 0",
+        "            if false && flags & 0x20 != 0",
+        [DVB],
+    ),
+    # Objects.
+    (
+        "data for an object not known is read",
+        "        if !self.objects.contains(&id) {",
+        "        if false && !self.objects.contains(&id) {",
+        [DVB_DRAWN, DVB_DAMAGE],
+    ),
+    (
+        "characters are taken for pixels",
+        "        if coding != 0 {",
+        "        if coding > 1 {",
+        [DVB_DAMAGE],
+    ),
+    (
+        "field lengths past their segment are read",
+        "        if first + top + bottom > at + size {",
+        "        if false && first + top + bottom > at + size {",
+        [DVB_DAMAGE],
+    ),
+    (
+        "a bottom field of no bytes draws nothing",
+        "            let (start, len) = if bottom > 0 {",
+        "            let (start, len) = if true {",
+        [DVB],
+    ),
+    (
+        "the bottom field draws on the top field's lines",
+        "        let (mut x, mut y) = (usize::from(p.x), usize::from(p.y) + field);",
+        "        let (mut x, mut y) = (usize::from(p.x), usize::from(p.y) + field * 0);",
+        [DVB, DVB_SHOWS],
+    ),
+    (
+        "a field's 2-to-4 map is passed over",
+        "                    map24 = [a >> 4, a & 0xF, b >> 4, b & 0xF];",
+        "                    let _ = (a, b);",
+        [DVB],
+    ),
+    (
+        "a field's 2-to-8 map is passed over",
+        "                    for (i, m) in map28.iter_mut().enumerate() {\n                        *m = data.at(at + i);",
+        "                    for (i, m) in map28.iter_mut().enumerate() {\n                        let _ = (i, m);",
+        [DVB],
+    ),
+    (
+        "a field's 4-to-8 map is passed over",
+        "                    for (i, m) in map48.iter_mut().enumerate() {\n                        *m = data.at(at + i);",
+        "                    for (i, m) in map48.iter_mut().enumerate() {\n                        let _ = (i, m);",
+        [DVB],
+    ),
+    (
+        "2-bit data in a 4-bit region is not mapped",
+        "                        4 => Some(&map24[..]),",
+        "                        4 => None,",
+        [DVB],
+    ),
+    (
+        "2-bit data in an 8-bit region is not mapped",
+        "                        8 => Some(&map28[..]),",
+        "                        8 => None,",
+        [DVB],
+    ),
+    (
+        "4-bit data in an 8-bit region is not mapped",
+        "                    let map = (region.depth == 8).then_some(&map48[..]);",
+        "                    let map: Option<&[u8]> = None;",
+        [DVB],
+    ),
+    (
+        "4-bit data is drawn in a 2-bit region",
+        "                    if region.depth < 4 {",
+        "                    if region.depth < 2 {",
+        [DVB],
+    ),
+    (
+        "8-bit data is drawn in a 4-bit region",
+        "                    if region.depth < 8 {",
+        "                    if region.depth < 4 {",
+        [DVB],
+    ),
+    (
+        "a line's end code after the row's end is read as the next line's",
+        "    if p < end && data.at(p) == 0 {",
+        "    if false && p < end && data.at(p) == 0 {",
+        [DVB_END_CODE, DVB],
+    ),
+    (
+        "the non-modifying colour is drawn",
+        "        if self.non_mod && code == 1 {",
+        "        if false && self.non_mod && code == 1 {",
+        [DVB_NON_MOD, DVB_RECEIVER],
+    ),
+    (
+        "a pixel of the non-modifying colour holds no place",
+        "        if self.non_mod && code == 1 {\n            self.x += n;",
+        "        if self.non_mod && code == 1 {\n            let _ = n;",
+        [DVB_NON_MOD, DVB_RECEIVER],
+    ),
+    # Display definitions.
+    (
+        "a display definition of the version held is read again",
+        "        if self.display.version == Some(version) {",
+        "        if false && self.display.version == Some(version) {",
+        [DVB_HD],
+    ),
+    (
+        "the window does not move the regions across",
+        "            self.display.x = data.be16(at + 5);",
+        "            let _ = data.be16(at + 5);",
+        [DVB_HD],
+    ),
+    (
+        "the window does not move the regions down",
+        "            self.display.y = data.be16(at + 9);",
+        "            let _ = data.be16(at + 9);",
+        [DVB_HD],
+    ),
+    (
+        "a first display definition too large is taken",
+        "            if u64::from(width + 128) * 8 * u64::from(height + 128)",
+        "            if false && u64::from(width + 128) * 8 * u64::from(height + 128)",
+        [DVB_RESET],
+    ),
+    # Seeking.
+    (
+        "an acquisition point begins no epoch",
+        "            return matches!((data.at(at + 1) >> 2) & 3, 1 | 2);",
+        "            return matches!((data.at(at + 1) >> 2) & 3, 2);",
+        [DVB_EPOCH],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
@@ -422,7 +796,9 @@ if __name__ == "__main__":
     tables = [
         (SRC / "subtitle" / "pgs.rs", PICTURES),
         (SRC / "subtitle" / "vobsub.rs", DVD),
+        (SRC / "subtitle" / "dvb.rs", DVB_ROWS),
         (SRC / "subtitle.rs", READER),
+        (SRC / "lib.rs", LIB),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

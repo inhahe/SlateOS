@@ -93,6 +93,7 @@
 "D_WEBVTT/SUBTITLES"
 "S_HDMV/PGS"
 "S_VOBSUB"
+"S_DVBSUB"
 "size: 720x480"
 "palette: "
 
@@ -121,3 +122,32 @@
 "\x05\x00\x00\x2f\x00\x00\x1f"
 "\x06\x00\x04\x00\x20"
 "\x00\x03"
+
+# DVB segment headers (the sync byte, a type, page 1, a 16-bit length): an
+# end of display set whole; a page, region, CLUT, object and display
+# definition header each of a short length; page states (acquisition point,
+# mode change); a region of each depth; a CLUT entry for each table, full
+# range; pixel data types (2-, 4-, 8-bit strings, map tables, end of line)
+# and the strings' end codes.
+"\x0f\x80\x00\x01\x00\x00"
+"\x0f\x10\x00\x01\x00\x08"
+"\x0f\x11\x00\x01\x00\x10"
+"\x0f\x12\x00\x01\x00\x08"
+"\x0f\x13\x00\x01\x00\x10"
+"\x0f\x14\x00\x01\x00\x05"
+"\x0a\x07"
+"\x0a\x0b"
+"\x27\x01\x00\x00"
+"\x4b\x01\x00\x00"
+"\x6f\x01\x00\x00"
+"\x01\x81\xeb\x80\x80\x00"
+"\x01\x41\xeb\x80\x80\x00"
+"\x01\x21\xeb\x80\x80\x00"
+"\x10"
+"\x11"
+"\x12"
+"\x20\x07\x8f"
+"\x21\x00\x77\x88\xff"
+"\x22"
+"\xf0"
+"\x00\x00"

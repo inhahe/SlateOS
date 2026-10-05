@@ -1,0 +1,9 @@
+# dvb_damage.mkv: the picture at each change, as an MD5 of the RGBA canvas (generate_subtitle_fixtures.py)
+canvas 720 576
+state 1000 307cee85ebb0de6124534c47da5ab21c
+state 2000 d71d7568936cebcc06016cb7a03b2702
+state 3500 0253baca0ca6ad0c1fec30e60f216e07
+state 6000 4e58fb0b18e20ad105ea2bca86ef828b
+state 10000 cb742556db59a12ed6e6468325ba9d4a
+state 13000 cf5cfea92d52b9ffdea79372f133d9fb
+state 15000 560a6eb7189cef2e710e7ceab48d97dc

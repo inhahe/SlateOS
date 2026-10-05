@@ -4043,7 +4043,18 @@ lane C's `guitk`.
       new block superseding an old one's later changes; a seek steps back
       one subpicture. Five fixtures written subpicture by subpicture (an
       MPEG program stream and its index), held to FFmpeg's pictures.
-    - `[ ]` DVB's pictures, refused by name; MP4's WebVTT and TTML
+    - `[x]` DVB's subtitles, TV recordings' pictures (2026-10-05,
+      design-decisions §1365): the same cues of images, a receiver's as
+      FFmpeg's `dvbsub` draws them read as a receiver reads -- the
+      service's own pages, the standard's default CLUT -- its rules read
+      off its output probe by probe (pages, regions kept between sets,
+      objects drawn when their data comes, CLUT and display versions, map
+      tables, the display window, timeouts, damage), but four departures
+      where FFmpeg's drawing is not a receiver's: an entry for several
+      CLUTs, a region's background before its objects, the non-modifying
+      colour, several display sets in a block. Five fixtures written
+      segment by segment, in a Matroska file of the generator's own.
+    - `[ ]` MP4's WebVTT and TTML
       (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,

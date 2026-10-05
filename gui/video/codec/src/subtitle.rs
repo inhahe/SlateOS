@@ -1,6 +1,7 @@
 //! A video file's subtitles, cue by cue: SubRip, ASS and SSA, and WebVTT, in
-//! Matroska and WebM; 3GPP timed text in MP4 -- and Blu-ray's PGS and DVD's
-//! VobSub, which are pictures of text.
+//! Matroska and WebM; 3GPP timed text in MP4 -- and Blu-ray's PGS, DVD's
+//! VobSub and digital television's DVB subtitles, which are pictures of
+//! text.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,31 +35,33 @@
 //!   reads it, its default style, place and style runs said in SRT
 //!   (`movtext.rs`).
 //!
-//! **A cue of pictures** -- Blu-ray's PGS (`S_HDMV/PGS`) and DVD's VobSub
-//! (`S_VOBSUB`), subtitles stored as pictures of their text -- has no text
-//! and gives [`Cue::images`] instead: each image's pixels, as RGBA, placed
-//! on the picture the subtitles were made for (its *canvas*), which a
-//! player scales as it scales the film; each marked when it is *forced*,
-//! shown even with subtitles off. They are what FFmpeg's decoders show, to
-//! the bit, but where the format's player shows otherwise: a PGS crop is
-//! cropped (`pgs.rs`); a DVD subpicture's later control sequences --
-//! colours changed, a fade, a second start -- take effect at their dates,
-//! and one wholly transparent clears the screen (`vobsub.rs`). Pictures
-//! last until a later change replaces or clears them; the last of a track
-//! that nothing ends, until the film ends (its end is `i64::MAX`). DVB's
-//! subtitles, pictures too, are refused by their format's name
-//! ([`crate::Error::SubtitleFormat`]).
+//! **A cue of pictures** -- Blu-ray's PGS (`S_HDMV/PGS`), DVD's VobSub
+//! (`S_VOBSUB`) and DVB's (`S_DVBSUB`), subtitles stored as pictures of
+//! their text -- has no text and gives [`Cue::images`] instead: each
+//! image's pixels, as RGBA, placed on the picture the subtitles were made
+//! for (its *canvas*), which a player scales as it scales the film; each
+//! marked when it is *forced*, shown even with subtitles off. They are what
+//! FFmpeg's decoders show, to the bit, but where the format's player shows
+//! otherwise: a PGS crop is cropped (`pgs.rs`); a DVD subpicture's later
+//! control sequences -- colours changed, a fade, a second start -- take
+//! effect at their dates, and one wholly transparent clears the screen
+//! (`vobsub.rs`); DVB's pictures are a receiver's -- the service's own
+//! pages, the standard's default colours, and four more (`dvb.rs`).
+//! Pictures last until a later change replaces or clears them -- a DVB
+//! page's timeout clears it -- the last of a track that nothing ends,
+//! until the film ends (its end is `i64::MAX`).
 //!
 //! **Time** is in nanoseconds on the file's clock, the clock [`crate::Video`]
 //! and [`crate::Sound`] give theirs on. A cue whose packet the file gives no
 //! time, whose text is not UTF-8 (as Matroska requires it to be), which is
 //! not an ASS event, or a timed-text sample too damaged to read, is passed
-//! over and counted ([`Subtitles::damaged`]), as is a PGS display set that
-//! met damage, or a DVD subpicture that cannot be read. A timed-text sample
-//! with no text clears the screen, and is no cue.
+//! over and counted ([`Subtitles::damaged`]), as is a PGS display set or a
+//! DVB block that met damage, or a DVD subpicture that cannot be read. A
+//! timed-text sample with no text clears the screen, and is no cue.
 
 mod ass;
 mod colours;
+mod dvb;
 mod movtext;
 mod pgs;
 mod srt;
@@ -94,8 +97,8 @@ pub struct Cue {
     /// When it goes, in nanoseconds: for text, `start` plus its block's
     /// duration, or `start` itself where the file gives none; for pictures,
     /// when a later change replaces or clears them -- the next display set,
-    /// a subpicture's stop or the next subpicture -- or `i64::MAX`, the end
-    /// of the film, where none does.
+    /// a subpicture's stop or the next subpicture, a DVB page's timeout --
+    /// or `i64::MAX`, the end of the film, where none does.
     pub end: i64,
     /// What it shows, as SRT markup (see the module documentation); empty
     /// for a cue of pictures.
@@ -141,6 +144,8 @@ enum Reader {
     Pgs(pgs::Decoder),
     /// DVD's pictures, a subpicture unit a block.
     VobSub(vobsub::Setup),
+    /// DVB's pictures, display sets in blocks.
+    Dvb(dvb::Decoder),
 }
 
 /// A change to the pictures on screen: from a time on the file's clock,
@@ -222,7 +227,8 @@ impl<R: Read + Seek> Subtitles<R> {
             SubtitleFormat::MovText => Reader::MovText(movtext::Setup::parse(&chosen.config)),
             SubtitleFormat::Pgs => Reader::Pgs(pgs::Decoder::default()),
             SubtitleFormat::VobSub => Reader::VobSub(vobsub::Setup::parse(&chosen.config)),
-            format => return Err(Error::SubtitleFormat(format)),
+            SubtitleFormat::Dvb => Reader::Dvb(dvb::Decoder::new(&chosen.config)),
+            format @ SubtitleFormat::Other => return Err(Error::SubtitleFormat(format)),
         };
         // The track's own packets only, a film's pictures and sound passed
         // over unread: a few kilobytes of cues do not read the film again.
@@ -334,6 +340,16 @@ impl<R: Read + Seek> Subtitles<R> {
                         .collect(),
                 )
             }
+            Reader::Dvb(decoder) => Some(match decoder.block(&sample.data) {
+                // Shown until its timeout clears it -- a page of no time on
+                // screen for none, a cue lasting no time.
+                dvb::Shown::Images { images, timeout } => {
+                    let gone =
+                        start.saturating_add(i64::from(timeout).saturating_mul(1_000_000_000));
+                    vec![(start, images), (gone, Vec::new())]
+                }
+                dvb::Shown::Unchanged => Vec::new(),
+            }),
             _ => None,
         }
     }
@@ -398,10 +414,10 @@ impl<R: Read + Seek> Subtitles<R> {
     /// first still showing then, or the first after it.
     ///
     /// Pictures are read from far enough back that what is on screen at the
-    /// time is known: Blu-ray's from the start of the epoch the time falls
-    /// in -- the display set that defines afresh what the ones after it
-    /// show -- up to [`EPOCH_STEPS`] display sets back; DVD's from the SPU
-    /// before the one at the time, which may still show.
+    /// time is known: Blu-ray's and DVB's from the start of the epoch the
+    /// time falls in -- the display set that defines afresh what the ones
+    /// after it show -- up to [`EPOCH_STEPS`] display sets back; DVD's from
+    /// the SPU before the one at the time, which may still show.
     ///
     /// # Errors
     ///
@@ -410,14 +426,19 @@ impl<R: Read + Seek> Subtitles<R> {
     pub fn seek(&mut self, time: i64) -> Result<(), Error> {
         let ticks = time::to_ticks(time, self.time_base);
         self.demuxer.seek(self.key, ticks)?;
-        if let Reader::Pgs(_) = self.reader {
-            self.back_to_epoch_start(ticks)?;
+        match &self.reader {
+            Reader::Pgs(_) => self.back_to_epoch_start(ticks, pgs::begins_epoch)?,
+            Reader::Dvb(decoder) => {
+                let pages = decoder.pages();
+                self.back_to_epoch_start(ticks, |block| dvb::begins_epoch(block, pages))?;
+            }
+            Reader::VobSub(_) => self.back_one(ticks)?,
+            _ => {}
         }
-        if let Reader::VobSub(_) = self.reader {
-            self.back_one(ticks)?;
-        }
-        if let Reader::Pgs(decoder) = &mut self.reader {
-            decoder.reset();
+        match &mut self.reader {
+            Reader::Pgs(decoder) => decoder.reset(),
+            Reader::Dvb(decoder) => decoder.reset(),
+            _ => {}
         }
         self.showing = None;
         self.coming.clear();
@@ -441,11 +462,16 @@ impl<R: Read + Seek> Subtitles<R> {
     }
 
     /// From the display set a seek to `ticks` found, back to the start of
-    /// its epoch -- an epoch start or an acquisition point -- a set at a
-    /// time found by seeking to it, the one before by seeking a tick
+    /// its epoch -- a set that `begins` one: Blu-ray's epoch start or
+    /// acquisition point, DVB's acquisition point or mode change -- a set at
+    /// a time found by seeking to it, the one before by seeking a tick
     /// earlier; no further than the track's first set, nor than
     /// [`EPOCH_STEPS`] sets.
-    fn back_to_epoch_start(&mut self, ticks: i64) -> Result<(), Error> {
+    fn back_to_epoch_start(
+        &mut self,
+        ticks: i64,
+        begins: impl Fn(&[u8]) -> bool,
+    ) -> Result<(), Error> {
         // The time the demuxer was last sent to: it is at the set at or
         // before it.
         let mut at = ticks;
@@ -464,7 +490,7 @@ impl<R: Read + Seek> Subtitles<R> {
                 at = first;
                 break;
             }
-            if pgs::begins_epoch(&sample.data) {
+            if begins(&sample.data) {
                 at = t;
                 break;
             }
@@ -493,11 +519,12 @@ impl<R: Read + Seek> Subtitles<R> {
     }
 
     /// How many cues were passed over -- given no time, not UTF-8, or not
-    /// an ASS event -- and pictures that met damage: PGS display sets, and
-    /// DVD SPUs that could not be read.
+    /// an ASS event -- and pictures that met damage: PGS display sets, DVB
+    /// blocks, and DVD SPUs that could not be read.
     pub fn damaged(&self) -> u64 {
         let pictures = match &self.reader {
             Reader::Pgs(decoder) => decoder.damaged(),
+            Reader::Dvb(decoder) => decoder.damaged(),
             _ => 0,
         };
         self.damaged.saturating_add(pictures)
@@ -557,7 +584,7 @@ fn said(reader: &Reader, sample: &Sample) -> Said {
         }
         Reader::Ass(script) => ass::cue(script, text).map_or(Said::Damaged, Said::Cue),
         // Read above, as bytes; pictures are not read here.
-        Reader::MovText(_) | Reader::Pgs(_) | Reader::VobSub(_) => Said::Damaged,
+        Reader::MovText(_) | Reader::Pgs(_) | Reader::VobSub(_) | Reader::Dvb(_) => Said::Damaged,
     }
 }
 

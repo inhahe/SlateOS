@@ -498,7 +498,7 @@ fn byte(codes: &[u8], at: &mut usize) -> u8 {
     clippy::arithmetic_side_effects,
     reason = "every term is under 300 000 in size: no sum nears i32's bounds"
 )]
-fn rgb(y: u8, cr: u8, cb: u8, sd: bool) -> [u8; 3] {
+pub(crate) fn rgb(y: u8, cr: u8, cb: u8, sd: bool) -> [u8; 3] {
     // In 1024ths: 1.5747, 0.1873, 0.4682 and 1.8556 (BT.709), or 1.402,
     // 0.34414, 0.71414 and 1.772 (BT.601), each times 255/224.
     let (r_cr, g_cb, g_cr, b_cb) = if sd {

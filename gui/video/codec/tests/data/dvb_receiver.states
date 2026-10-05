@@ -1,0 +1,9 @@
+# dvb_receiver.mkv: the picture at each change, as an MD5 of the RGBA canvas (generate_subtitle_fixtures.py)
+canvas 720 576
+state 1000 a2e23d75b2d2bea6d7a4cc08df696831
+state 2000 1c2b74fcf7265e76e329883d788c5a30
+state 3000 99bf707c9f2da488ed93b86a44cbf055
+state 4000 f25ae766b716f02d3cdbd84fd5d795eb
+state 5000 560a6eb7189cef2e710e7ceab48d97dc
+state 6000 d6b089c4d3aee3d32256aa0f7ac28ce7
+state 7000 560a6eb7189cef2e710e7ceab48d97dc

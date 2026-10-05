@@ -4,10 +4,11 @@
 //! ffmpeg's SRT of the track (`NAME.ffmpeg.srt`) but for the cues where this
 //! follows the format's own renderer instead, which
 //! `tests/data/generate_subtitle_fixtures.py` lists and says why of, one by
-//! one. The pictures of Blu-ray's PGS (`pgs*`) and DVD's VobSub (`vobsub*`)
-//! are held to `NAME.states`: the picture FFmpeg's sub2video shows at each
-//! change, every subtitle shown and the forced alone, but where the disc's
-//! player shows otherwise (the generator's drawing there).
+//! one. The pictures of Blu-ray's PGS (`pgs*`), DVD's VobSub (`vobsub*`) and
+//! DVB's (`dvb*`) are held to `NAME.states`: the picture FFmpeg's sub2video
+//! shows at each change, every subtitle shown and the forced alone, but
+//! where the format's player shows otherwise (the generator's drawing
+//! there).
 
 #![allow(
     clippy::unwrap_used,
@@ -527,20 +528,136 @@ fn a_seek_in_dvd_pictures_finds_one_still_showing() {
 }
 
 #[test]
+fn dvb() {
+    let (cues, subtitles) = pictures_held_to_their_answer("dvb", SubtitleFormat::Dvb);
+    assert_eq!(subtitles.damaged(), 0);
+    // A page's ten seconds end it where nothing replaces it sooner: the
+    // last, at 28 s, cleared at 29 s by the next; the one at 12 s gone after
+    // its own two.
+    let at = |s: i64| cues.iter().find(|c| c.start == s * 1_000_000_000).unwrap();
+    assert_eq!(at(12).end, 14_000_000_000);
+    assert_eq!(at(28).end, 29_000_000_000);
+}
+
+#[test]
+fn dvb_as_a_receiver_shows_it() {
+    let (_, subtitles) = pictures_held_to_their_answer("dvb_receiver", SubtitleFormat::Dvb);
+    assert_eq!(subtitles.damaged(), 0);
+}
+
+#[test]
+fn dvb_on_a_high_definition_display_with_a_window() {
+    let (cues, _) = pictures_held_to_their_answer("dvb_hd", SubtitleFormat::Dvb);
+    // The window's corner moves the regions.
+    let places: Vec<(u32, u32)> = cues[0].images.iter().map(|i| (i.x, i.y)).collect();
+    assert_eq!(places, [(1240, 835), (240, 135)]);
+}
+
+#[test]
+fn dvb_reads_its_own_services_pages() {
+    let (_, subtitles) = pictures_held_to_their_answer("dvb_pages", SubtitleFormat::Dvb);
+    assert_eq!(subtitles.damaged(), 0);
+}
+
+#[test]
+fn dvb_damage_taken_as_ffmpeg_takes_it() {
+    let (_, subtitles) = pictures_held_to_their_answer("dvb_damage", SubtitleFormat::Dvb);
+    // A segment past its block, data for an object no region places, an
+    // object of characters, field lengths past their segment, a region of
+    // no width, one placing an object outside it, and a block of six bytes:
+    // seven blocks.
+    assert_eq!(subtitles.damaged(), 7);
+}
+
+#[test]
+fn a_seek_in_dvb_pictures_reads_from_where_they_begin_afresh() {
+    let answer = pictures("dvb");
+    let at = |t: i64| {
+        answer
+            .all
+            .iter()
+            .rev()
+            .find(|(s, _)| *s <= t)
+            .unwrap()
+            .1
+            .clone()
+    };
+    // The page at 20 s moves what the mode change at 18 s drew.
+    assert_eq!(
+        first_after_seek("dvb", 21_000),
+        (20_000, 22_000, at(20_000))
+    );
+    // From the mode change at 10 s: regions drawn at 11 s, shown again at 12.
+    assert_eq!(
+        first_after_seek("dvb", 13_000),
+        (12_000, 14_000, at(12_000))
+    );
+    // Between pictures: the next; one whose page lasts no time is none.
+    assert_eq!(
+        first_after_seek("dvb", 14_500),
+        (15_000, 16_000, at(15_000))
+    );
+}
+
+#[test]
+fn a_seek_in_dvb_pictures_forgets_what_was_read() {
+    // The track read through, its last page of the version of the one at
+    // 18 s: a seek back to 19 s reads that page afresh, not as the page
+    // held.
+    let answer = pictures("dvb");
+    let file = File::open(data("dvb.mkv")).unwrap();
+    let mut subtitles = Subtitles::open(file).unwrap();
+    read_all(&mut subtitles);
+    subtitles.seek(19_000_000_000).unwrap();
+    let cue = subtitles.next_cue().unwrap().unwrap();
+    let images: Vec<&CueImage> = cue.images.iter().collect();
+    let shown = answer
+        .all
+        .iter()
+        .rev()
+        .find(|(s, _)| *s <= 18_000)
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!((cue.start, cue.end), (18_000_000_000, 20_000_000_000));
+    assert_eq!(drawn(answer.canvas, &images), shown);
+}
+
+#[test]
 fn text_is_opened_before_pictures_and_pictures_read_before_those_not() {
     // Blu-ray pictures marked default, text beside them: the text.
     let file = File::open(data("pgs_and_text.mkv")).unwrap();
     let info = Subtitles::open(file).unwrap().info().clone();
     assert_eq!((info.format, info.default), (SubtitleFormat::SubRip, false));
-    // DVB pictures, not read here, marked default, Blu-ray's beside them:
-    // Blu-ray's.
+    // DVB pictures marked default, Blu-ray's beside them: both read, the
+    // default.
     let file = File::open(data("dvb_and_pgs.mkv")).unwrap();
     let info = Subtitles::open(file).unwrap().info().clone();
-    assert_eq!((info.format, info.default), (SubtitleFormat::Pgs, false));
-    // The DVB track asked for by its number: refused by its format's name.
-    let file = File::open(data("dvb_and_pgs.mkv")).unwrap();
+    assert_eq!((info.format, info.default), (SubtitleFormat::Dvb, true));
+    // Kate, not read here, marked default, DVB's beside it: DVB's.
+    let file = File::open(data("kate_and_dvb.mkv")).unwrap();
+    let info = Subtitles::open(file).unwrap().info().clone();
+    assert_eq!((info.format, info.default), (SubtitleFormat::Dvb, false));
+    // The Kate track asked for by its number: refused by its format.
+    let file = File::open(data("kate_and_dvb.mkv")).unwrap();
     assert!(matches!(
         Subtitles::open_track(file, 1),
-        Err(Error::SubtitleFormat(SubtitleFormat::Dvb))
+        Err(Error::SubtitleFormat(SubtitleFormat::Other))
     ));
+}
+
+#[test]
+fn ffmpegs_own_dvb_subtitles_are_read() {
+    // ffmpeg's dvbsub encoder's pictures of pgs_sd's: every cue read, none
+    // damaged, each on the canvas its display definition gives.
+    let file = File::open(data("dvb_and_pgs.mkv")).unwrap();
+    let mut subtitles = Subtitles::open_track(file, 1).unwrap();
+    let cues = read_all(&mut subtitles);
+    assert!(!cues.is_empty());
+    assert_eq!(subtitles.damaged(), 0);
+    for cue in &cues {
+        for i in &cue.images {
+            assert_eq!((i.canvas_width, i.canvas_height), (720, 480));
+        }
+    }
 }

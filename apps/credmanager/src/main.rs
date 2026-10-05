@@ -119,10 +119,6 @@ const AUTO_LOCK_MINUTES: (u32, u32) = (1, 60);
 /// The settings panel's padding.
 const SETTINGS_PAD: f32 = 24.0;
 
-/// Where the settings panel draws the auto-lock slider in a window `width`
-/// wide: below the heading (36 pixels), the SECURITY label (24) and the
-/// auto-lock row (32), across the panel inside its padding.
-///
 /// An auto-lock slider value as the whole minutes it stands for, in the
 /// slider's range.
 fn whole_minutes(value: f64) -> u32 {
@@ -136,6 +132,10 @@ fn whole_minutes(value: f64) -> u32 {
     minutes
 }
 
+/// Where the settings panel draws the auto-lock slider in a window `width`
+/// wide: below the heading (36 pixels), the SECURITY label (24) and the
+/// auto-lock row (32), across the panel inside its padding.
+///
 /// One function, read by the drawing and by the pointer, so a press lands
 /// on the value the thumb is drawn at.
 fn auto_lock_placement(width: f32) -> guitk::slider::Placement {
@@ -143,6 +143,58 @@ fn auto_lock_placement(width: f32) -> guitk::slider::Placement {
     let y = TOOLBAR_HEIGHT + SETTINGS_PAD + 36.0 + 24.0 + 32.0;
     let w = (width - SIDEBAR_WIDTH - ENTRY_LIST_WIDTH - SETTINGS_PAD * 2.0).max(0.0);
     guitk::slider::Placement::horizontal(Rect::new(x, y, w, 4.0), 12.0)
+}
+
+/// The password lengths the generator's slider offers -- the generator's
+/// own bounds ([`PasswordGenerator::set_length`]).
+const GENERATOR_LENGTHS: (usize, usize) = (8, 128);
+
+/// The generator panel's padding.
+const GENERATOR_PAD: f32 = 24.0;
+
+/// How far below the generator panel's top its length slider's track is:
+/// the heading (36 pixels), the password's box (56), the strength row (40,
+/// kept while there is no password so that the slider never moves under a
+/// press), the Generate and Copy row (48), the separator (16), the mode
+/// label (24) and buttons (40), and the length label (8 + 12).
+const GENERATOR_LENGTH_Y: f32 = 36.0 + 56.0 + 40.0 + 48.0 + 16.0 + 24.0 + 40.0 + 8.0 + 12.0;
+
+/// Where the generator panel draws its length slider in a window `width`
+/// wide. One function, read by the drawing and by the pointer, as
+/// [`auto_lock_placement`] is.
+fn length_placement(width: f32) -> guitk::slider::Placement {
+    let x = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH + GENERATOR_PAD;
+    let y = TOOLBAR_HEIGHT + GENERATOR_PAD + GENERATOR_LENGTH_Y;
+    let w = (width - SIDEBAR_WIDTH - ENTRY_LIST_WIDTH - GENERATOR_PAD * 2.0).max(0.0);
+    guitk::slider::Placement::horizontal(Rect::new(x, y, w, 4.0), 12.0)
+}
+
+/// A length slider value as the whole length it stands for, in the
+/// generator's range.
+fn whole_length(value: f64) -> usize {
+    let (lo, hi) = GENERATOR_LENGTHS;
+    if !value.is_finite() {
+        return lo;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "rounded and clamped into the generator's own small range first"
+    )]
+    let length = value.round().clamp(lo as f64, hi as f64) as usize;
+    length
+}
+
+/// The generator's length slider, at rest at `length`.
+fn length_slider(length: usize) -> guitk::slider::Slider {
+    let (lo, hi) = GENERATOR_LENGTHS;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "lengths up to 128, which an f64 holds exactly"
+    )]
+    let slider = guitk::slider::Slider::new(lo as f64, hi as f64, length as f64).with_step(1.0);
+    slider
 }
 const PASSWORD_OLD_DAYS: u64 = 90;
 const WEAK_PASSWORD_LEN: usize = 8;
@@ -171,6 +223,19 @@ enum Target {
     Sort,
     /// Toolbar: open the password generator.
     Generator,
+    /// Generator: draw a new password, as Enter does.
+    GeneratorGenerate,
+    /// Generator: copy the password -- refused, as every copy is
+    /// ([`NOT_COPIED`]), and said so.
+    GeneratorCopy,
+    /// Generator: one of the three kinds of password.
+    GeneratorMode(GeneratorMode),
+    /// Generator: one character-set box, as its Ctrl key ticks it.
+    GeneratorBox(CharsetBox),
+    /// Generator: the length slider. Its press, drag and release go to the
+    /// slider itself ([`AppState::length_mouse`]); this target is its place
+    /// in the hit boxes.
+    GeneratorLength,
     /// Toolbar: lock the vault.
     LockVault,
     /// Toolbar: open settings.
@@ -1441,9 +1506,12 @@ impl PasswordGenerator {
         Self::with_rng(CredRandom::Unavailable)
     }
 
+    /// The length a new generator makes passwords at.
+    const DEFAULT_LENGTH: usize = 20;
+
     fn with_rng(rng: CredRandom) -> Self {
         Self {
-            length: 20,
+            length: Self::DEFAULT_LENGTH,
             mode: GeneratorMode::Random,
             charset: CharsetOptions::default(),
             passphrase: PassphraseOptions::default(),
@@ -1451,12 +1519,10 @@ impl PasswordGenerator {
         }
     }
 
-    /// Set the generated password's length.
-    ///
-    /// The generator panel shows the length and offers no way to change it, so
-    /// nothing calls this. See `todo.txt`.
+    /// Set the generated password's length, held to [`GENERATOR_LENGTHS`].
+    /// Left and Right call it, and the panel's length slider.
     fn set_length(&mut self, len: usize) {
-        self.length = len.clamp(8, 128);
+        self.length = len.clamp(GENERATOR_LENGTHS.0, GENERATOR_LENGTHS.1);
     }
 
     /// Generate a password from the current settings, or `None` if the system
@@ -3127,6 +3193,14 @@ impl NewEntryForm {
 const NOT_COPIED: &str =
     "no other program could paste it -- applications have no clipboard yet; reveal it to read it";
 
+/// The generator's password, as a Copy refusal names it.
+const GENERATED_LABEL: &str = "Generated password";
+
+/// [`NOT_COPIED`] for the generator's password, which is shown already and
+/// has nothing to reveal.
+const GENERATED_NOT_COPIED: &str =
+    "no other program could paste it -- applications have no clipboard yet";
+
 // =============================================================================
 // Application state
 // =============================================================================
@@ -3382,14 +3456,22 @@ struct AppState {
     height: f32,
     /// Settings: the auto-lock slider, the toolkit's, from one minute to an
     /// hour. Its value is the vault's own `auto_lock_minutes` whenever no
-    /// drag is moving it ([`Self::sync_auto_lock`]); a drag shows its minutes
-    /// as it goes and writes them to the vault only when let go.
+    /// drag is moving it ([`Self::auto_lock_shown`]); a drag shows its
+    /// minutes as it goes and writes them to the vault only when let go.
     ///
     /// It was `settings_auto_lock`, a number set to the default once and
     /// read by nothing but its own picture: the panel said "15 minutes" of a
     /// vault restored with five, and the knob drawn under it moved for
     /// nothing.
     auto_lock: guitk::slider::Slider,
+    /// The generator panel's length slider, the toolkit's. Its value is the
+    /// generator's own length whenever no drag is moving it
+    /// ([`Self::length_shown`]); a drag sets the length as it goes, and the
+    /// password is drawn again at each new length.
+    ///
+    /// Until 2026-10-04 the panel drew a track and a knob of its own that
+    /// only Left and Right could move.
+    length: guitk::slider::Slider,
     /// The credential being written, while [`DetailView::NewEntry`] is up.
     ///
     /// `None` at every other moment rather than a form kept warm between
@@ -3475,6 +3557,7 @@ impl AppState {
                 f64::from(DEFAULT_AUTO_LOCK_MINUTES),
             )
             .with_step(1.0),
+            length: length_slider(PasswordGenerator::DEFAULT_LENGTH),
             new_entry: None,
             copy_refused: None,
             pointer: None,
@@ -3732,6 +3815,7 @@ impl AppState {
     /// times for one decision.
     fn auto_lock_mouse(&mut self, mouse: &MouseEvent) -> Option<EventResult> {
         if !self.settings_live() {
+            self.drop_auto_lock_drag();
             return None;
         }
         self.auto_lock = self.auto_lock_shown();
@@ -3750,6 +3834,7 @@ impl AppState {
     /// a drag Escape takes the drag back. Up and Down stay the entry list's.
     fn auto_lock_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
         if !self.settings_live() {
+            self.drop_auto_lock_drag();
             return None;
         }
         let its_key = matches!(
@@ -3765,6 +3850,97 @@ impl AppState {
             self.set_auto_lock(minutes);
         }
         response.is_taken().then_some(EventResult::Consumed)
+    }
+
+    /// A drag of the auto-lock slider whose panel went -- the vault locked
+    /// under it -- taken back, as the toolkit asks of a drag that loses its
+    /// pointer. A slider left holding its drag would follow the pointer,
+    /// button up, when the panel came back. Nothing to write: the vault takes
+    /// the minutes only when a drag is let go.
+    fn drop_auto_lock_drag(&mut self) {
+        // Whatever the cancel says, the vault has not moved: a drag never
+        // wrote to it.
+        let _not_written = self.auto_lock.cancel();
+    }
+
+    /// Whether the generator panel is up and answering.
+    fn generator_live(&self) -> bool {
+        self.vault.is_unlocked()
+            && self.detail_view == DetailView::PasswordGenerator
+            && self.dialog.is_none()
+    }
+
+    /// The length slider as it is drawn: at the generator's own length,
+    /// unless a drag is moving it.
+    fn length_shown(&self) -> guitk::slider::Slider {
+        let mut shown = self.length.clone();
+        if !shown.is_dragging() {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "lengths up to 128, which an f64 holds exactly"
+            )]
+            shown.set_value(self.password_generator.length as f64);
+        }
+        shown
+    }
+
+    /// Take the length a slider event names. A new length draws the password
+    /// again, as Left and Right do: the panel would otherwise show a password
+    /// made at the old one beside the new number. The same length draws
+    /// nothing -- a drag's release names the length it already set.
+    fn set_generated_length(&mut self, value: f64) {
+        let length = whole_length(value);
+        if length == self.password_generator.length {
+            return;
+        }
+        self.password_generator.set_length(length);
+        if self.vault.is_unlocked() {
+            regenerate_password(self);
+        }
+    }
+
+    /// The length slider's share of a pointer event while the generator
+    /// panel is up, or `None` for an event that is not the slider's.
+    fn length_mouse(&mut self, mouse: &MouseEvent) -> Option<EventResult> {
+        if !self.generator_live() {
+            self.drop_length_drag();
+            return None;
+        }
+        self.length = self.length_shown();
+        let lit = self.length.is_hovered();
+        let response = self
+            .length
+            .handle_mouse(&length_placement(self.width), mouse);
+        if let Some(event) = response.event() {
+            self.set_generated_length(event.value());
+        }
+        (response.is_taken() || lit != self.length.is_hovered()).then_some(EventResult::Consumed)
+    }
+
+    /// The length slider's share of a key: during its drag, Escape takes the
+    /// drag back and every other key waits for the button. Left and Right
+    /// outside a drag are `generator_key`'s, as they were.
+    fn length_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        if !self.generator_live() {
+            self.drop_length_drag();
+            return None;
+        }
+        if !self.length.is_dragging() {
+            return None;
+        }
+        let response = self.length.handle_key(key);
+        if let Some(event) = response.event() {
+            self.set_generated_length(event.value());
+        }
+        response.is_taken().then_some(EventResult::Consumed)
+    }
+
+    /// A drag of the length slider whose panel went, taken back as
+    /// [`Self::drop_auto_lock_drag`] takes the auto-lock's.
+    fn drop_length_drag(&mut self) {
+        if let Some(event) = self.length.cancel().event() {
+            self.set_generated_length(event.value());
+        }
     }
 
     /// The text box under the pointer in what is drawn now, if any.
@@ -3850,6 +4026,10 @@ impl AppState {
     fn lock_vault(&mut self) {
         self.keep_if_changed();
         self.vault.lock();
+        // A generated password is a secret too, and one the vault does not
+        // hold: locked, it stayed in memory and came back on the panel with
+        // the next unlock.
+        self.generated_password.clear();
         self.show_help = false;
         self.saved = None;
         self.dialog = None;
@@ -4577,11 +4757,16 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     // is true.
     if let Some(label) = state.copy_refused.as_deref() {
         let notice_x = x + TOOLBAR_GAP;
+        let why = if label == GENERATED_LABEL {
+            GENERATED_NOT_COPIED
+        } else {
+            NOT_COPIED
+        };
         draw_text(
             frame,
             notice_x,
             (TOOLBAR_HEIGHT - DEFAULT_FONT_SIZE) / 2.0,
-            &format!("{label} not copied: {NOT_COPIED}"),
+            &format!("{label} not copied: {why}"),
             state.palette.ink(state.palette.yellow),
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
@@ -5933,7 +6118,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         0.0,
     );
 
-    let pad = 24.0;
+    let pad = GENERATOR_PAD;
     let mut y = y_start + pad;
 
     draw_text(
@@ -5964,9 +6149,11 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
     let (display_pw, pw_color) = match (&state.generator_error, state.generated_password.is_empty())
     {
         (Some(message), _) => (message.as_str(), state.palette.red),
+        // A placeholder in subtext0, the palette's quietest colour that
+        // still reads as text; overlay0 is for borders.
         (None, true) => (
             "Click Generate to create a password",
-            state.palette.overlay0,
+            state.palette.subtext0,
         ),
         (None, false) => (state.generated_password.as_str(), state.palette.green),
     };
@@ -5982,7 +6169,10 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
     );
     y += 56.0;
 
-    // Strength bar for generated password
+    // Strength bar for generated password. Its 40 pixels are kept while
+    // there is no password, so that nothing below moves when the first one
+    // is drawn -- a drag on the length slider draws one.
+    let strength_top = y;
     if !state.generated_password.is_empty() {
         let (strength, entropy) = evaluate_password_strength(&state.generated_password);
         draw_strength_bar(
@@ -5995,20 +6185,19 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             strength.fraction(),
             strength.color(&state.palette),
         );
-        y += 16.0;
         let label = format!("{} - {:.0} bits entropy", strength.label(), entropy);
         draw_text(
             frame,
             x_start + pad,
-            y,
+            y + 16.0,
             &label,
             state.palette.ink(strength.color(&state.palette)),
             SMALL_FONT_SIZE,
             FontWeightHint::Regular,
             None,
         );
-        y += 24.0;
     }
+    y = strength_top + 40.0;
 
     // Buttons row
     draw_button(
@@ -6022,6 +6211,10 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         state.palette.base,
         false,
     );
+    frame.hit(
+        Target::GeneratorGenerate,
+        Rect::new(x_start + pad, y, 100.0, 32.0),
+    );
     draw_button(
         frame,
         x_start + pad + 112.0,
@@ -6032,6 +6225,10 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         state.palette.surface1,
         state.palette.text,
         false,
+    );
+    frame.hit(
+        Target::GeneratorCopy,
+        Rect::new(x_start + pad + 112.0, y, 80.0, 32.0),
     );
     y += 48.0;
 
@@ -6077,11 +6274,19 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         };
         let btn_w = button_width(label, 10.0);
         draw_button(frame, mode_x, y, btn_w, 28.0, label, bg, fg, false);
+        frame.hit(
+            Target::GeneratorMode(*mode),
+            Rect::new(mode_x, y, btn_w, 28.0),
+        );
         mode_x += btn_w + 8.0;
     }
     y += 40.0;
 
-    // Length setting
+    // Length: the toolkit's slider, at the place the pointer is read
+    // against (`length_placement`), under its label. The walk down the panel
+    // and that function must agree -- the label's top is the track's less
+    // 20 -- which `the_length_slider_is_drawn_under_its_label` holds.
+    let placement = length_placement(width);
     draw_text(
         frame,
         x_start + pad,
@@ -6103,34 +6308,18 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         FontWeightHint::Bold,
         None,
     );
-    y += 8.0;
-
-    // Length slider track
-    let slider_x = x_start + pad;
-    let slider_w = panel_width - pad * 2.0;
-    let slider_y = y + 12.0;
-    draw_rect(
+    // No focus ring, as the auto-lock slider has none: Left and Right move
+    // it while the panel is up, but what is typed goes to the search box.
+    state.length_shown().draw(
         frame,
-        slider_x,
-        slider_y,
-        slider_w,
-        4.0,
-        state.palette.surface1,
-        2.0,
+        &state.palette,
+        &placement,
+        guitk::slider::Look::accent(&state.palette, state.palette.surface1),
+        false,
+        state.focus_ring_width,
     );
-
-    let frac = (state.password_generator.length as f32 - 8.0) / 120.0;
-    let knob_x = slider_x + slider_w * frac.clamp(0.0, 1.0);
-    draw_rect(
-        frame,
-        knob_x - 6.0,
-        slider_y - 4.0,
-        12.0,
-        12.0,
-        state.palette.blue,
-        6.0,
-    );
-    y += 32.0;
+    frame.hit(Target::GeneratorLength, placement.hit());
+    y += 40.0;
 
     // Character set toggles (for random mode)
     if state.password_generator.mode == GeneratorMode::Random {
@@ -6155,6 +6344,10 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
                 state.palette.surface2
             };
             let check_char = if enabled { "[x]" } else { "[ ]" };
+            frame.hit(
+                Target::GeneratorBox(box_),
+                Rect::new(x_start + pad, y - 6.0, panel_width - pad * 2.0, 26.0),
+            );
             draw_text(
                 frame,
                 x_start + pad,
@@ -7802,6 +7995,10 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
     // highlighted, a slider with a knob, four ticked boxes -- and none could
     // be operated. Ahead of the match because the catch-all below would
     // otherwise type them into the search box behind the panel.
+    if let Some(result) = state.length_key(key) {
+        state.vault.touch(state.now);
+        return result;
+    }
     if state.detail_view == DetailView::PasswordGenerator && generator_key(state, key) {
         state.vault.touch(state.now);
         return EventResult::Consumed;
@@ -7944,6 +8141,14 @@ fn generator_key(state: &mut AppState, key: &KeyEvent) -> bool {
         return false;
     }
 
+    toggle_charset_box(state, box_);
+    true
+}
+
+/// Tick or clear one character-set box -- its Ctrl key or a press on it --
+/// and draw the password again under the new set. The last box ticked
+/// stays ticked, and says why.
+fn toggle_charset_box(state: &mut AppState, box_: CharsetBox) {
     let opts = &mut state.password_generator.charset;
     let on = box_.is_on(opts);
     if on && CharsetBox::ALL.iter().filter(|b| b.is_on(opts)).count() <= 1 {
@@ -7952,11 +8157,10 @@ fn generator_key(state: &mut AppState, key: &KeyEvent) -> bool {
         // nothing about why.
         state.generator_error = Some(NEEDS_ONE_CHARACTER_SET.to_owned());
         state.generated_password.clear();
-        return true;
+        return;
     }
     box_.set(opts, !on);
     regenerate_password(state);
-    true
 }
 
 /// Why the last box cannot be cleared.
@@ -7989,10 +8193,15 @@ fn navigate_entry_list(state: &mut AppState, direction: i32) {
 }
 
 fn handle_mouse(state: &mut AppState, mouse: &MouseEvent) -> EventResult {
-    // The auto-lock slider's press, drag and release, and its thumb's light.
-    // The press and the release are use of the vault; the pointer moving is
-    // not.
-    if let Some(result) = state.auto_lock_mouse(mouse) {
+    // The two sliders' press, drag and release, and their thumbs' light: the
+    // settings panel's auto-lock and the generator's length, each live only
+    // while its panel is up. The press and the release are use of the vault;
+    // the pointer moving is not.
+    let slider = match state.auto_lock_mouse(mouse) {
+        Some(result) => Some(result),
+        None => state.length_mouse(mouse),
+    };
+    if let Some(result) = slider {
         if matches!(
             mouse.kind,
             MouseEventKind::Press(_) | MouseEventKind::Release(_)
@@ -8084,7 +8293,33 @@ fn act_on(state: &mut AppState, target: Target) -> EventResult {
         // The slider takes its own presses, where on it they land, before
         // a press reaches here (`handle_mouse`); a target with no point has
         // nothing to set it to.
-        Target::AutoLock => EventResult::Ignored,
+        Target::AutoLock | Target::GeneratorLength => EventResult::Ignored,
+        Target::GeneratorGenerate => {
+            regenerate_password(state);
+            EventResult::Consumed
+        }
+        // Refused and said, as a Copy press on an entry's field is.
+        Target::GeneratorCopy => {
+            if state.generated_password.is_empty() {
+                EventResult::Ignored
+            } else {
+                state.copy_refused = Some(GENERATED_LABEL.to_owned());
+                EventResult::Consumed
+            }
+        }
+        // The kind already chosen is left as it is: a press on the lit
+        // button is not a request for a new password.
+        Target::GeneratorMode(mode) => {
+            if state.password_generator.mode != mode {
+                state.password_generator.mode = mode;
+                regenerate_password(state);
+            }
+            EventResult::Consumed
+        }
+        Target::GeneratorBox(box_) => {
+            toggle_charset_box(state, box_);
+            EventResult::Consumed
+        }
         Target::ExportAnyway => {
             state.dialog = None;
             state.open_picker(PickFor::Export);
@@ -12901,6 +13136,221 @@ mod tests {
     }
 
     // == The auto-lock slider ==================================================
+
+    /// A made vault with the generator panel up.
+    fn generator_up(tag: &str) -> (scratchdir::ScratchDir, AppState) {
+        let (scratch, mut state) = first_run(tag);
+        make_vault(&mut state, MASTER, MASTER);
+        assert!(state.vault.is_unlocked(), "control: the vault must be made");
+        // The host's random device is not this system's; a seed stands in.
+        state.password_generator = seeded(11);
+        press_on(&mut state, Target::Generator);
+        assert_eq!(state.detail_view, DetailView::PasswordGenerator);
+        (scratch, state)
+    }
+
+    /// The point on the length slider's track that stands for `len`.
+    fn length_point(state: &AppState, len: f32) -> (f32, f32) {
+        let t = length_placement(state.width).track;
+        (t.x + t.w * (len - 8.0) / 120.0, t.y + t.h / 2.0)
+    }
+
+    /// **The generator's length slider answers the pointer.** It was a track
+    /// and a knob of the panel's own that only Left and Right could move. A
+    /// press sets the length and a drag carries it, each new length drawing
+    /// the password again; letting go keeps the password last drawn.
+    #[test]
+    fn the_length_slider_sets_the_length_and_draws_the_password_again() {
+        let (_scratch, mut state) = generator_up("length_slider");
+        assert_eq!(state.generated_password.chars().count(), 20);
+        assert!(probe::is_visible(&state, Target::GeneratorLength));
+
+        let (x, y) = length_point(&state, 40.0);
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(state.password_generator.length, 40);
+        assert_eq!(state.generated_password.chars().count(), 40);
+
+        let (x, _) = length_point(&state, 64.0);
+        pointer_at(&mut state, x, y + 100.0, MouseEventKind::Move);
+        assert_eq!(
+            state.password_generator.length, 64,
+            "the drag did not carry it"
+        );
+        assert_eq!(state.generated_password.chars().count(), 64);
+        let dragged = state.generated_password.clone();
+        pointer_at(
+            &mut state,
+            x,
+            y + 100.0,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(
+            state.generated_password, dragged,
+            "letting go drew the password again"
+        );
+        assert!(!state.length.is_dragging());
+
+        // Let go means let go: the pointer passing moves nothing.
+        let (x, y) = length_point(&state, 10.0);
+        pointer_at(&mut state, x, y, MouseEventKind::Move);
+        assert_eq!(state.password_generator.length, 64);
+    }
+
+    /// **Escape takes a length drag back**, and the keys wait for the button
+    /// meanwhile -- Left would otherwise move the length under the drag.
+    #[test]
+    fn escape_takes_a_length_drag_back() {
+        let (_scratch, mut state) = generator_up("length_escape");
+        let (x, y) = length_point(&state, 100.0);
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(state.password_generator.length, 100);
+        handle_event(&mut state, &key(Key::Left));
+        assert_eq!(
+            state.password_generator.length, 100,
+            "a key moved it mid-drag"
+        );
+        handle_event(&mut state, &key(Key::Escape));
+        assert_eq!(state.password_generator.length, 20);
+        assert_eq!(state.generated_password.chars().count(), 20);
+        assert_eq!(
+            state.detail_view,
+            DetailView::PasswordGenerator,
+            "the Escape that took the drag back also left the panel"
+        );
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        assert_eq!(state.password_generator.length, 20);
+    }
+
+    /// **A length drag the lock takes away is taken back**, and the slider
+    /// that comes back with the panel does not follow a pointer whose
+    /// button is up.
+    #[test]
+    fn a_length_drag_the_lock_takes_away_is_taken_back() {
+        let (_scratch, mut state) = generator_up("length_lock");
+        let (x, y) = length_point(&state, 100.0);
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(state.password_generator.length, 100);
+        state.lock_vault();
+        pointer_at(&mut state, 5.0, 5.0, MouseEventKind::Move);
+        assert!(!state.length.is_dragging(), "the slider kept its drag");
+        assert_eq!(state.password_generator.length, 20);
+
+        type_in(&mut state, MASTER);
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(state.vault.is_unlocked(), "control: the vault must open");
+        press_on(&mut state, Target::Generator);
+        let (x, y) = length_point(&state, 70.0);
+        pointer_at(&mut state, x, y, MouseEventKind::Move);
+        assert_eq!(
+            state.password_generator.length, 20,
+            "the slider came back following a pointer whose button is up"
+        );
+    }
+
+    /// **The length slider follows Left and Right**, which move the length
+    /// without it: drawn from the generator's own length, not from where it
+    /// was last dragged.
+    #[test]
+    fn the_length_slider_follows_left_and_right() {
+        let (_scratch, mut state) = generator_up("length_keys");
+        for _ in 0..3 {
+            handle_event(&mut state, &key(Key::Right));
+        }
+        assert_eq!(state.password_generator.length, 23);
+        let frac = state.length_shown().fraction();
+        assert!(
+            (frac - 15.0 / 120.0).abs() < 1e-4,
+            "the slider is drawn {frac} along for a length of 23"
+        );
+    }
+
+    /// **Locking forgets the generated password.** It is a secret the vault
+    /// does not hold, and it came back on the panel with the next unlock.
+    #[test]
+    fn locking_forgets_the_generated_password() {
+        let (_scratch, mut state) = generator_up("generated_lock");
+        assert!(!state.generated_password.is_empty());
+        state.lock_vault();
+        assert!(state.generated_password.is_empty());
+    }
+
+    /// **The generator's buttons and boxes answer the pointer.** All of them
+    /// were drawn and none recorded a place to be pressed: the mode row, the
+    /// four boxes, Generate and Copy worked from the keyboard or not at all.
+    #[test]
+    fn the_generator_panels_buttons_and_boxes_answer_the_pointer() {
+        let (_scratch, mut state) = generator_up("generator_buttons");
+
+        let before = state.generated_password.clone();
+        press_on(&mut state, Target::GeneratorGenerate);
+        assert_ne!(state.generated_password, before, "Generate drew nothing");
+
+        press_on(&mut state, Target::GeneratorMode(GeneratorMode::Passphrase));
+        assert_eq!(state.password_generator.mode, GeneratorMode::Passphrase);
+        let phrase = state.generated_password.clone();
+        press_on(&mut state, Target::GeneratorMode(GeneratorMode::Passphrase));
+        assert_eq!(
+            state.generated_password, phrase,
+            "a press on the lit kind drew a new password"
+        );
+        press_on(&mut state, Target::GeneratorMode(GeneratorMode::Random));
+        assert_eq!(state.password_generator.mode, GeneratorMode::Random);
+
+        for box_ in CharsetBox::ALL {
+            let was = box_.is_on(&state.password_generator.charset);
+            press_on(&mut state, Target::GeneratorBox(box_));
+            assert_ne!(
+                box_.is_on(&state.password_generator.charset),
+                was,
+                "a press on {} did not tick it",
+                box_.label()
+            );
+            press_on(&mut state, Target::GeneratorBox(box_));
+            assert_eq!(box_.is_on(&state.password_generator.charset), was);
+        }
+
+        press_on(&mut state, Target::GeneratorCopy);
+        assert_eq!(state.copy_refused.as_deref(), Some(GENERATED_LABEL));
+        let shown = drawn(&state);
+        assert!(
+            shown.contains(&format!(
+                "{GENERATED_LABEL} not copied: {GENERATED_NOT_COPIED}"
+            )),
+            "the refusal is not said: {shown}"
+        );
+        assert!(
+            !shown.contains("reveal it"),
+            "a password already shown is said to need revealing"
+        );
+    }
+
+    /// **The length slider is drawn under its label**, wherever the walk
+    /// down the panel puts the label: with a password and without one.
+    /// `length_placement` and the panel's drawing are two descriptions of
+    /// one place.
+    #[test]
+    fn the_length_slider_is_drawn_under_its_label() {
+        let (_scratch, mut state) = generator_up("length_label");
+        let track = length_placement(state.width).track;
+        for empty in [false, true] {
+            if empty {
+                state.generated_password.clear();
+            }
+            let frame = state.frame(state.width, state.height);
+            let label = frame.commands().iter().find_map(|c| match c {
+                RenderCommand::Text { y, text, .. } if text == "Length (Left/Right)" => Some(*y),
+                _ => None,
+            });
+            let Some(label) = label else {
+                panic!("no length label with empty = {empty}");
+            };
+            assert!(
+                (label + 20.0 - track.y).abs() < 0.01,
+                "the label is at {label} and the track at {} (empty = {empty})",
+                track.y
+            );
+        }
+    }
 
     /// **The auto-lock setting is the vault's own, and the slider sets it.**
     /// It was a number set to the default once and a knob drawn for nothing:

@@ -56718,8 +56718,9 @@ In rough order of how much a user would miss it:
   **tags** (`add_tag`/`remove_tag`, and the sidebar's tag list) and
   **folders** (`Folder`, `add_folder`/`remove_folder`/`rename_folder`/
   `set_folder`).
-* **Generator length** — `PasswordGenerator::set_length`. The panel shows the
-  length and offers no way to change it.
+* ~~**Generator length**~~ — DONE (lane E): Left and Right, and since
+  2026-10-04 the toolkit's slider on the panel, which a press moves and a
+  drag carries; the panel's buttons and boxes answer the pointer too.
 * **Jump from an audit issue to its entry** — `AuditIssue::entry_id` is carried
   and never read.
 * **Breach flagging** — `Vault::set_compromised`, which needs a feed to learn

@@ -484,8 +484,10 @@ MAIN = [
     ),
     (
         "a drag's minutes are not shown as it goes",
-        '        if !shown.is_dragging() {\n',
-        '        if true {\n',
+        '        if !shown.is_dragging() {\n'
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n',
+        '        if true {\n'
+        '            shown.set_value(f64::from(self.vault.auto_lock_minutes));\n',
         [SLIDER_SETS],
     ),
     (
@@ -534,8 +536,10 @@ MAIN = [
     ),
     (
         'the slider is moved through a vault dialog',
+        '            && self.detail_view == DetailView::Settings\n'
         '            && self.dialog.is_none()\n'
         '    }\n',
+        '            && self.detail_view == DetailView::Settings\n'
         '    }\n',
         [SLIDER_GUARDED],
     ),
@@ -672,8 +676,8 @@ MAIN += [
     ),
     (
         "the list outlives a lock",
-        "        self.vault.lock();\n        self.show_help = false;\n",
-        "        self.vault.lock();\n",
+        "        self.generated_password.clear();\n        self.show_help = false;\n",
+        "        self.generated_password.clear();\n",
         [LOCKS],
     ),
     (
@@ -770,6 +774,116 @@ MAIN += [
         "            said = error.take().is_some();\n",
         "            said = error.is_some();\n",
         [RESTORE],
+    ),
+]
+
+# The generator panel answers the pointer (2026-10-04): its length bar was a
+# track and a knob only Left and Right could move, and its mode buttons,
+# boxes, Generate and Copy recorded no place to be pressed. A generated
+# password also outlived a lock.
+LENGTH_SETS = "the_length_slider_sets_the_length_and_draws_the_password_again"
+LENGTH_ESCAPE = "escape_takes_a_length_drag_back"
+LENGTH_LOCK = "a_length_drag_the_lock_takes_away_is_taken_back"
+LENGTH_KEYS = "the_length_slider_follows_left_and_right"
+LENGTH_LABEL = "the_length_slider_is_drawn_under_its_label"
+PANEL_PRESSES = "the_generator_panels_buttons_and_boxes_answer_the_pointer"
+
+MAIN += [
+    (
+        "locking keeps the generated password",
+        "        self.generated_password.clear();\n        self.show_help = false;\n",
+        "        self.show_help = false;\n",
+        ["locking_forgets_the_generated_password"],
+    ),
+    (
+        "the length slider is drawn where it was last dragged",
+        "        if !shown.is_dragging() {\n            #[allow(\n",
+        "        if false {\n            #[allow(\n",
+        [LENGTH_KEYS],
+    ),
+    (
+        "a new length draws no new password",
+        "        if self.vault.is_unlocked() {\n            regenerate_password(self);\n        }\n",
+        "",
+        [LENGTH_SETS],
+    ),
+    (
+        "a drag's release draws the password again",
+        "        if length == self.password_generator.length {\n            return;\n        }\n",
+        "",
+        [LENGTH_SETS],
+    ),
+    (
+        "the length slider never hears the pointer",
+        "        None => state.length_mouse(mouse),\n",
+        "        None => None,\n",
+        [LENGTH_SETS],
+    ),
+    (
+        "a length drag outlives its panel",
+        "        if !self.generator_live() {\n"
+        "            self.drop_length_drag();\n"
+        "            return None;\n"
+        "        }\n"
+        "        self.length = self.length_shown();\n",
+        "        if !self.generator_live() {\n"
+        "            return None;\n"
+        "        }\n"
+        "        self.length = self.length_shown();\n",
+        [LENGTH_LOCK],
+    ),
+    (
+        "a key mid-drag is not the length slider's",
+        "    if let Some(result) = state.length_key(key) {\n"
+        "        state.vault.touch(state.now);\n"
+        "        return result;\n"
+        "    }\n",
+        "",
+        [LENGTH_ESCAPE],
+    ),
+    (
+        "Generate draws nothing",
+        "        Target::GeneratorGenerate => {\n            regenerate_password(state);\n",
+        "        Target::GeneratorGenerate => {\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "a press on the lit kind draws a new password",
+        "            if state.password_generator.mode != mode {\n"
+        "                state.password_generator.mode = mode;\n"
+        "                regenerate_password(state);\n"
+        "            }\n",
+        "            state.password_generator.mode = mode;\n"
+        "            regenerate_password(state);\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "every mode button is Random's",
+        "            Target::GeneratorMode(*mode),\n",
+        "            Target::GeneratorMode(GeneratorMode::Random),\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "every box row is the first box's",
+        "                Target::GeneratorBox(box_),\n",
+        "                Target::GeneratorBox(CharsetBox::Uppercase),\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "the generator's password is said to need revealing",
+        "        let why = if label == GENERATED_LABEL {\n",
+        "        let why = if false {\n",
+        [PANEL_PRESSES],
+    ),
+    (
+        "the strength row's room goes with the password",
+        "    y = strength_top + 40.0;\n",
+        "    y = if state.generated_password.is_empty() {\n"
+        "        strength_top\n"
+        "    } else {\n"
+        "        strength_top + 40.0\n"
+        "    };\n",
+        [LENGTH_LABEL],
     ),
 ]
 

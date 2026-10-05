@@ -103,3 +103,19 @@ fn what_would_break_a_bound_is_not_written() {
     big.bytes(&[0; 60], 60).unwrap();
     assert_eq!(big.finish(), Err(TooLarge));
 }
+
+/// **A writer given room writes its message without growing**: the frame
+/// comes back in the buffer reserved for it -- header, length and all -- and
+/// reads as any other.
+#[test]
+fn a_writer_given_room_does_not_grow() {
+    let mut w = Writer::with_capacity(TEST, 7, 40);
+    w.bytes(&[7; 30], 30).unwrap();
+    let frame = w.finish().unwrap();
+    // Header (length, mark, version, kind) and the room asked for.
+    assert!(frame.capacity() >= 4 + 3 + 2 + 40, "{}", frame.capacity());
+    assert_eq!(
+        decode(&frame, TEST, 7, |r| r.bytes(30).map(<[u8]>::to_vec)),
+        Decoded::Complete(vec![7; 30], frame.len())
+    );
+}

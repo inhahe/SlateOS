@@ -57,6 +57,10 @@ pub enum Decoded<T> {
 
 /// A message being written: its fields after the header, and the frame's
 /// length put in front when it is finished.
+///
+/// A writer dropped unfinished -- given up when a field broke its bound --
+/// overwrites what it was given, so a secret in a message never sent is not
+/// left in memory as it was. A finished frame is the caller's to treat so.
 #[derive(Debug)]
 pub struct Writer {
     protocol: Protocol,
@@ -67,7 +71,19 @@ impl Writer {
     /// A message of `kind` in `protocol`.
     #[must_use]
     pub fn new(protocol: Protocol, kind: u8) -> Self {
-        let mut out = vec![0; 4];
+        Self::with_capacity(protocol, kind, 0)
+    }
+
+    /// [`new`](Self::new), with room for `capacity` bytes of fields before
+    /// its buffer has to grow -- for a message carrying a secret. A buffer
+    /// that grows moves its bytes and frees the old ones as they were, so a
+    /// secret written into one that grows leaves a copy behind, out of reach
+    /// of whoever would overwrite it.
+    #[must_use]
+    pub fn with_capacity(protocol: Protocol, kind: u8, capacity: usize) -> Self {
+        let header = protocol.mark.len().saturating_add(6);
+        let mut out = Vec::with_capacity(header.saturating_add(capacity));
+        out.extend_from_slice(&[0; 4]);
         out.extend_from_slice(protocol.mark);
         out.push(protocol.version);
         out.push(kind);
@@ -127,7 +143,16 @@ impl Writer {
         if let Some(prefix) = self.out.get_mut(..4) {
             prefix.copy_from_slice(&length.to_le_bytes());
         }
-        Ok(self.out)
+        Ok(std::mem::take(&mut self.out))
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        self.out.fill(0);
+        // So the overwrite is not taken for a store nothing reads and left
+        // out: the zeros are observed.
+        std::hint::black_box(&self.out);
     }
 }
 

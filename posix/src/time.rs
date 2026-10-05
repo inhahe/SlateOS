@@ -4930,6 +4930,11 @@ mod tests {
 
     #[test]
     fn test_strftime_epoch_seconds() {
+        // `%s` is `mktime` of the broken-down time, which reads the zone:
+        // without the guard, a neighbour's `TzGuard::set` moved the answer
+        // by its offset, and the order gate refused pushes over it
+        // (requests/b-d-strftime-epoch-seconds-test-races-the-time-zone.md).
+        let _tz = TzGuard::utc();
         // %s = seconds since epoch (GNU extension).
         let mut tm = zero_tm();
         tm.tm_year = 70;

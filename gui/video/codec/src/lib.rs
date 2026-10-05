@@ -60,10 +60,11 @@
 //! ffmpeg's text for the track wherever that says what the format's own
 //! renderer shows (libass's for ASS, the specification's for WebVTT); where
 //! it does not, the renderer is followed (`subtitle.rs`,
-//! `tests/subtitles.rs`). Blu-ray's PGS, pictures of the text, come as
-//! images ([`Cue::images`], [`CueImage`]): FFmpeg's pixels, to the bit, but
-//! that a crop is cropped as a Blu-ray player crops it. DVD's VobSub and
-//! DVB's pictures are refused by their format's name.
+//! `tests/subtitles.rs`). Blu-ray's PGS and DVD's VobSub, pictures of the
+//! text, come as images ([`Cue::images`], [`CueImage`]): FFmpeg's pixels, to
+//! the bit, but where the disc's player shows otherwise -- a PGS crop made, a
+//! DVD subpicture's later colours, fades and starts taking effect when they
+//! say. DVB's pictures are refused by their format's name.
 //!
 //! # Colour
 //!
@@ -297,7 +298,7 @@ pub enum SubtitleFormat {
     MovText,
     /// Blu-ray's pictures of text (`S_HDMV/PGS`), read as images.
     Pgs,
-    /// DVD's pictures of text (`S_VOBSUB`). Not read here.
+    /// DVD's pictures of text (`S_VOBSUB`), read as images.
     VobSub,
     /// DVB's pictures of text (`S_DVBSUB`). Not read here.
     Dvb,
@@ -317,7 +318,7 @@ impl SubtitleFormat {
     /// Whether [`Subtitles`] reads it: text, or pictures it gives as
     /// images.
     pub const fn is_read(self) -> bool {
-        self.is_text() || matches!(self, Self::Pgs)
+        self.is_text() || matches!(self, Self::Pgs | Self::VobSub)
     }
 }
 
@@ -381,8 +382,8 @@ pub enum Error {
     Mp3,
     /// The file has no subtitle track, or not the one asked for.
     NoSubtitles,
-    /// The subtitles are in a format this does not read: DVD's or DVB's
-    /// pictures of text, or one it does not know.
+    /// The subtitles are in a format this does not read: DVB's pictures of
+    /// text, or one it does not know.
     SubtitleFormat(SubtitleFormat),
 }
 

@@ -44,6 +44,15 @@ are where the crate crops as a Blu-ray player does and ffmpeg does not, and
 there the answer is the generator's drawing. `pgs_damage` is display sets
 no muxer writes, and its answer is ffmpeg's alone.
 
+DVD's VobSub, pictures too, which ffmpeg writes only from other pictures
+(dropping their clears and quantising their colours): `vobsub*.mkv` are
+written here SPU by SPU (`VobSpu`, `vob_write`, an MPEG program stream and
+its index) and muxed by mkvmerge, their answers made as PGS's are
+(`make_vobsub`). `vobsub_dvd`'s departures are where a DVD player shows
+otherwise -- a later control sequence's colours, fade or second start taking
+effect at its date, a transparent SPU clearing the screen -- and there the
+answer is the generator's drawing; `vobsub_damage`'s is ffmpeg's alone.
+
 Run from this directory, on Windows, with gyan.dev's ffmpeg (2026-03-09, git
 9b7439c31b) and MKVToolNix's mkvmerge 99.0 on PATH (or in the MKVMERGE
 environment variable): `python generate_subtitle_fixtures.py`.
@@ -639,9 +648,9 @@ def ffmpeg(*args):
         sys.exit(f"ffmpeg {' '.join(args)} failed:\n{r.stderr}")
 
 
-def mkvmerge(out, src):
+def mkvmerge(out, src, *options):
     # Deterministic: no date, and the same UIDs each run.
-    r = subprocess.run([MKVMERGE, "--quiet", "--deterministic", "subtitles", "-o", out, src],
+    r = subprocess.run([MKVMERGE, "--quiet", "--deterministic", "subtitles", *options, "-o", out, src],
                        capture_output=True, text=True, encoding="utf-8")
     if r.returncode != 0:
         sys.exit(f"mkvmerge {out} {src} failed:\n{r.stdout}{r.stderr}")
@@ -1091,12 +1100,423 @@ def pgs_damage():
     ]
 
 
+# --- DVD's VobSub: pictures of text, written here SPU by SPU ----------------
+#
+# ffmpeg writes VobSub only from other pictures, and drops their clears and
+# quantises their colours on the way, so these are written here as the
+# probes that found FFmpeg's rules were: each subtitle an SPU of two-bit
+# run-length fields and control sequences (`VobSpu`), in an MPEG program
+# stream (`.sub`) with its index (`.idx`), muxed by mkvmerge. The answer is
+# FFmpeg's pictures, as for PGS (`make_pgs`); for the well-formed fixtures
+# the generator draws every change itself and stops unless FFmpeg agrees,
+# but for the times VOB departures name -- where a DVD player shows
+# otherwise -- where the answer is the drawing.
+
+VOB_FORCED_START, VOB_START, VOB_STOP = 0x00, 0x01, 0x02
+VOB_COLOURS, VOB_ALPHAS, VOB_AREA, VOB_FIELDS, VOB_END = 0x03, 0x04, 0x05, 0x06, 0xFF
+
+
+def vob_field(rows):
+    """Rows of two-bit colours, each run in the fewest nibbles, each line
+    ending on a byte; a run reaching the line's end, if longer than 63, as
+    the fill-to-the-end code."""
+    nib = []
+    for row in rows:
+        i = 0
+        while i < len(row):
+            c, n = row[i], 1
+            while i + n < len(row) and row[i + n] == c and n < 255:
+                n += 1
+            if i + n == len(row) and n > 63:
+                nib += [0, 0, 0, c]
+            else:
+                v = (n << 2) | c
+                count = 1 if n < 4 else 2 if n < 16 else 3 if n < 64 else 4
+                nib += [(v >> (4 * k)) & 0xF for k in range(count - 1, -1, -1)]
+            i += n
+        if len(nib) % 2:
+            nib.append(0)
+    return bytes((nib[k] << 4) | nib[k + 1] for k in range(0, len(nib), 2))
+
+
+class VobSpu:
+    """One SPU: `rows` placed at (x, y) with `colours` and `alphas`, and its
+    control sequences, each (date, [commands]): a command is "place" (all of
+    the above), "start", "forced", "stop", ("colours", c) or ("alphas", a)."""
+
+    def __init__(self, ms_time, rows, x, y, sequences, colours=(0, 1, 2, 3), alphas=(0, 15, 15, 15)):
+        self.ms, self.rows, self.x, self.y = ms_time, rows, x, y
+        self.sequences, self.colours, self.alphas = sequences, colours, alphas
+
+    def fields(self):
+        return vob_field(self.rows[0::2]), vob_field(self.rows[1::2])
+
+    def bytes(self):
+        top, bottom = self.fields()
+        data = top + bottom
+        h, w = len(self.rows), len(self.rows[0])
+        x2, y2 = self.x + w - 1, self.y + h - 1
+
+        def four(v):
+            return bytes([(v[3] << 4) | v[2], (v[1] << 4) | v[0]])
+
+        def command(c):
+            if c == "place":
+                return (bytes([VOB_COLOURS]) + four(self.colours) + bytes([VOB_ALPHAS]) + four(self.alphas)
+                        + bytes([VOB_AREA, self.x >> 4, ((self.x & 0xF) << 4) | (x2 >> 8), x2 & 0xFF,
+                                 self.y >> 4, ((self.y & 0xF) << 4) | (y2 >> 8), y2 & 0xFF, VOB_FIELDS])
+                        + struct.pack(">HH", 4, 4 + len(top)))
+            if c == "start":
+                return bytes([VOB_START])
+            if c == "forced":
+                return bytes([VOB_FORCED_START])
+            if c == "stop":
+                return bytes([VOB_STOP])
+            kind, value = c
+            return bytes([VOB_COLOURS if kind == "colours" else VOB_ALPHAS]) + four(value)
+
+        bodies = [b"".join(command(c) for c in cmds) + bytes([VOB_END]) for _, cmds in self.sequences]
+        first = 4 + len(data)
+        offsets, at = [], first
+        for b in bodies:
+            offsets.append(at)
+            at += 4 + len(b)
+        out = struct.pack(">HH", at, first) + data
+        for k, ((date, _), body) in enumerate(zip(self.sequences, bodies)):
+            nxt = offsets[k + 1] if k + 1 < len(self.sequences) else offsets[k]
+            out += struct.pack(">HH", date, nxt) + body
+        return out
+
+
+def vob_pack_header(scr):
+    """An MPEG-2 pack header, its clock from a 90 kHz count."""
+    return bytes([0, 0, 1, 0xBA, 0x44 | ((scr >> 27) & 0x38) | ((scr >> 28) & 0x03), (scr >> 20) & 0xFF,
+                  0x04 | ((scr >> 12) & 0xF8) | ((scr >> 13) & 0x03), (scr >> 5) & 0xFF,
+                  0x04 | ((scr << 3) & 0xF8), 0x01, 0x01, 0x89, 0xC3, 0xF8])
+
+
+def vob_packs(spu, ms_time):
+    """An SPU in 2048-byte packs: PES private stream 1, sub-stream 0x20, its
+    first packet timed."""
+    pts = ms_time * 90
+    out, rest, first = b"", spu, True
+    while rest:
+        head = vob_pack_header(pts)
+        room = 2048 - len(head) - 6 - 3 - (5 if first else 0) - 1
+        chunk, rest = rest[:room], rest[room:]
+        stamp = bytes([0x21 | ((pts >> 29) & 0x0E), (pts >> 22) & 0xFF, 0x01 | ((pts >> 14) & 0xFE),
+                       (pts >> 7) & 0xFF, 0x01 | ((pts << 1) & 0xFE)]) if first else b""
+        payload = bytes([0x81, 0x80 if first else 0, len(stamp)]) + stamp + bytes([0x20]) + chunk
+        pack = head + b"\x00\x00\x01\xbd" + struct.pack(">H", len(payload)) + payload
+        pad = 2048 - len(pack)
+        if pad >= 6:
+            pack += b"\x00\x00\x01\xbe" + struct.pack(">H", pad - 6) + b"\xff" * (pad - 6)
+        else:
+            pack += b"\xff" * pad
+        out += pack
+        first = False
+    return out
+
+
+def vob_write(base, canvas, palette, spus, raw=()):
+    """base.idx and base.sub: `palette` sixteen RGB ints or None, `canvas`
+    (w, h) or None; `raw` (ms, bytes) SPUs written as they are."""
+    sub, lines = b"", []
+    items = [(s.ms, s.bytes()) for s in spus] + list(raw)
+    for ms_time, data in sorted(items, key=lambda i: i[0]):
+        lines.append("timestamp: %02d:%02d:%02d:%03d, filepos: %09x" % (
+            ms_time // 3_600_000, ms_time // 60_000 % 60, ms_time // 1000 % 60, ms_time % 1000, len(sub)))
+        sub += vob_packs(data, ms_time)
+    idx = "# VobSub index file, v7 (do not modify this line!)\n"
+    if canvas:
+        idx += f"size: {canvas[0]}x{canvas[1]}\n"
+    if palette:
+        idx += "palette: " + ", ".join(f"{c:06x}" for c in palette) + "\n"
+    idx += "\nid: en, index: 0\n" + "\n".join(lines) + "\n"
+    with open(base + ".idx", "w", encoding="ascii", newline="\n") as f:
+        f.write(idx)
+    with open(base + ".sub", "wb") as f:
+        f.write(sub)
+
+
+def vob_rgba(palette, colours, alphas):
+    """The four colours as FFmpeg makes them: from the palette, or greys."""
+    if palette:
+        return [((palette[colours[i]] >> 16) & 0xFF, (palette[colours[i]] >> 8) & 0xFF,
+                 palette[colours[i]] & 0xFF, alphas[i] * 17) for i in range(4)]
+    given = []
+    for i in range(4):
+        if alphas[i] and colours[i] not in given:
+            given.append(colours[i])
+    ramp = {1: [0xFF], 2: [0, 0xFF], 3: [0, 0x80, 0xFF]}.get(len(given), [0, 0x55, 0xAA, 0xFF])
+    out = []
+    for i in range(4):
+        if not alphas[i]:
+            out.append((0, 0, 0, 0))
+        else:
+            g = ramp[given.index(colours[i])] * 255 >> 8
+            out.append((g, g, g, alphas[i] * 17))
+    return out
+
+
+def vob_changes(spu, palette, duration_ms):
+    """An SPU's changes, (ms after its time, picture or None for a clear),
+    as the crate makes them: each sequence at its own date."""
+    colours, alphas, placed = None, None, False
+    seqs = []
+    for date, cmds in spu.sequences:
+        start = forced = stop = False
+        for c in cmds:
+            if c == "place":
+                colours, alphas, placed = list(spu.colours), list(spu.alphas), True
+            elif c in ("start", "forced"):
+                start, forced = True, c == "forced"
+            elif c == "stop":
+                stop = True
+            elif c[0] == "colours":
+                colours = list(c[1])
+            else:
+                alphas = list(c[1])
+        seqs.append([date * 1024 // 90, start, forced, stop, (tuple(colours or ()), tuple(alphas or ()), placed)])
+    if not any(s[1] for s in seqs):
+        for s in seqs:
+            if s[4][2]:
+                s[0], s[1] = 0, True
+                break
+    shown, out = None, []
+    for ms_after, start, forced, stop, (c, a, placed) in seqs:
+        now = None if stop else (c, a, forced) if start else ((c, a, shown[2]) if shown else None)
+        if now == shown and not start:
+            continue
+        out.append((max(ms_after, out[-1][0] if out else 0), now))
+        shown = now
+    if shown is not None and duration_ms is not None and duration_ms > (out[-1][0] if out else 0):
+        out.append((duration_ms, None))
+    return out
+
+
+def vob_frame(spu, palette, canvas, picture):
+    """The canvas with an SPU's picture drawn as sub2video draws it: the
+    transparent edges cut away -- but of a forced picture, which FFmpeg
+    keeps whole -- a transparent inside kept."""
+    w, h = canvas
+    frame = bytearray(w * h * 4)
+    if picture is None:
+        return frame
+    colours, alphas, forced = picture
+    rgba = vob_rgba(palette, colours, alphas)
+    rows = spu.rows
+    if forced:
+        seen = [(0, 0), (len(rows) - 1, len(rows[0]) - 1)]
+    else:
+        seen = [(r, c) for r, row in enumerate(rows) for c, v in enumerate(row) if rgba[v][3]]
+    if not seen:
+        return frame
+    top, bottom = min(r for r, _ in seen), max(r for r, _ in seen)
+    left, right = min(c for _, c in seen), max(c for _, c in seen)
+    for r in range(top, bottom + 1):
+        for c in range(left, right + 1):
+            at = ((spu.y + r) * w + spu.x + c) * 4
+            frame[at:at + 4] = bytes(rgba[rows[r][c]])
+    return frame
+
+
+def vob_draw(spus, palette, canvas, durations):
+    """Every change, as the crate shows it: [(ms, md5)], a later SPU's first
+    change superseding what an earlier one had still to change."""
+    events = []
+    for spu in spus:
+        changes = [(spu.ms + at, spu, picture) for at, picture in vob_changes(spu, palette, durations.get(spu.ms))]
+        if not changes:
+            continue
+        first = changes[0][0]
+        events = [e for e in events if e[0] < first] + changes
+    return [(t, hashlib.md5(vob_frame(s, palette, canvas, p)).hexdigest()) for t, s, p in events]
+
+
+def mkv_durations(mkv):
+    """Each block's duration as mkvmerge wrote it, by its time in ms."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time,duration_time",
+                        "-of", "csv=p=0", mkv], capture_output=True, text=True, encoding="utf-8")
+    out = {}
+    for line in r.stdout.split():
+        t, d = line.split(",")
+        out[round(float(t) * 1000)] = round(float(d) * 1000) if d not in ("N/A", "") else None
+    return out
+
+
+def make_vobsub(name, canvas, palette, spus, departures=(), drawn=True, raw=()):
+    """Write NAME.mkv of `spus` (and `raw` SPUs), and NAME.states: FFmpeg's
+    pictures, all and the forced alone; with `drawn`, each checked against
+    the generator's drawing, the times in `departures` taking the drawing's."""
+    base = os.path.join(HERE, f"{name}.source")
+    out = os.path.join(HERE, f"{name}.mkv")
+    vob_write(base, canvas, palette, spus, raw)
+    # A cluster a block: a seek lands on the block it names, not on a
+    # cluster that begins earlier -- whose subtitles a demuxer gives from
+    # its start, as FFmpeg's does -- so that the subpicture before must be
+    # gone back for (`a_seek_in_dvd_pictures_finds_one_still_showing`).
+    mkvmerge(out, base + ".idx", "--cluster-length", "1")
+    os.remove(base + ".idx")
+    os.remove(base + ".sub")
+    shown_canvas = canvas or (720, 576)
+    states = sub2video_states(out, shown_canvas)
+    forced = sub2video_states(out, shown_canvas, forced=True)
+    if drawn:
+        drawing = vob_draw(spus, palette, shown_canvas, mkv_durations(out))
+        # Departures are times where the two differ either way: FFmpeg
+        # showing something else, or changing where the crate does not.
+        for t, md5 in dict(drawing).items():
+            if t not in departures and shown_at(states, t) != md5:
+                sys.exit(f"{name}: at {t} ms FFmpeg shows {shown_at(states, t)}, the drawing {md5}")
+        times = {t for t, _ in drawing}
+        for t, _ in states:
+            if t not in times and t not in departures:
+                sys.exit(f"{name}: FFmpeg's picture changes at {t} ms, where nothing was written")
+        if departures and any("forced" in cmds for s in spus for _, cmds in s.sequences):
+            sys.exit(f"{name}: forced subtitles and departures in one fixture: the forced"
+                     " answer would be FFmpeg's")
+        blank = hashlib.md5(bytes(shown_canvas[0] * shown_canvas[1] * 4)).hexdigest()
+        states = dedup(drawing)
+        while states and states[0][1] == blank:
+            states.pop(0)
+    answer = os.path.join(HERE, f"{name}.states")
+    write(answer, f"# {name}.mkv: the picture at each change, as an MD5 of the RGBA canvas;"
+                  f" `forced` lines with only forced subtitles shown"
+                  f" (generate_subtitle_fixtures.py)\ncanvas {shown_canvas[0]} {shown_canvas[1]}\n"
+                  + "".join(f"state {t} {md5}\n" for t, md5 in states)
+                  + "".join(f"forced {t} {md5}\n" for t, md5 in forced))
+    print("wrote", out, answer)
+
+
+VOB_CANVAS = (720, 480)
+# Colour 0 a dark grey: transparent, but not black, so that a picture's
+# transparent edges cut away and its transparent inside kept show.
+VOB_PALETTE = [0x404040, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0x808080, 0x00FFFF,
+               0xFF00FF, 0x800000, 0x008000, 0x000080, 0x808000, 0x800080, 0x008080, 0xC0C0C0]
+
+
+def vob_shape(w, h, k):
+    """A picture like a line of text: strokes of 1 outlined in 2, on 0."""
+    rows = []
+    for r in range(h):
+        row = []
+        for c in range(w):
+            on = (c // 6 + k) % 3 != 0
+            ink = on and 3 <= r % 12 < 9 and c % 6 < 4
+            edge = on and (r % 12 in (2, 9) or c % 6 == 4) and 2 <= r % 12 <= 9
+            row.append(1 if ink else 2 if edge else 0)
+        rows.append(row)
+    return rows
+
+
+def vob_scenes():
+    line = vob_shape(240, 24, 0)
+    two = vob_shape(300, 36, 1)
+    # A box inside a two-pixel border of colour 0, a hole of 0 inside it.
+    framed = [[0] * 44 for _ in range(24)]
+    for r in range(2, 22):
+        for c in range(2, 42):
+            framed[r][c] = 0 if 10 <= r < 14 and 18 <= c < 26 else 2 if r in (2, 21) or c in (2, 41) else 1
+    # An odd width, and runs to the line's end longer than 63.
+    wide = [[1] * 3 + [2] * 70 for _ in range(5)]
+    start_stop = [(0, ["place", "start"]), (88, ["stop"])]
+    main = [
+        VobSpu(1000, line, 100, 400, start_stop),
+        VobSpu(3000, line, 200, 300, [(0, ["place", "forced"]), (176, ["stop"])],
+               colours=(4, 5, 6, 7), alphas=(0, 8, 15, 4)),
+        # No stop: until the next.
+        VobSpu(6000, line, 300, 100, [(0, ["place", "start"])]),
+        VobSpu(8000, framed, 100, 100, start_stop),
+        VobSpu(10000, wide, 101, 201, start_stop),
+        # Placed at 0, started at 22: shown from a quarter second on.
+        VobSpu(12000, line, 100, 400, [(0, ["place"]), (22, ["start"]), (88, ["stop"])]),
+        VobSpu(14000, two, 200, 380, [(0, ["place", "start"]), (132, ["stop"])]),
+        # No start: shown from its time.
+        VobSpu(17000, line, 100, 400, [(0, ["place"]), (88, ["stop"])]),
+        # No stop: mkvmerge's duration -- to the next -- ends it.
+        VobSpu(19000, line, 100, 400, [(0, ["place", "start"])]),
+        # Stopped five seconds on, but replaced before then by the next,
+        # which starts a quarter second after its time: a seek between the
+        # two finds this one still showing.
+        VobSpu(20000, line, 100, 400, [(0, ["place", "start"]), (440, ["stop"])]),
+        VobSpu(22000, two, 200, 380, [(0, ["place"]), (22, ["start"]), (88, ["stop"])]),
+        # Colours changed and the picture stopped at one date: the new
+        # colours are never seen -- no cue lasting no time.
+        VobSpu(25000, line, 100, 400, [(0, ["place", "start"]), (88, [("colours", (0, 5, 6, 7))]),
+                                       (88, ["stop"])]),
+    ]
+    dvd = [
+        # A colour change at half a second, a fade at three quarters.
+        VobSpu(1000, line, 100, 400, [(0, ["place", "start"]), (44, [("colours", (0, 5, 6, 7))]),
+                                      (66, [("alphas", (0, 8, 8, 8))]), (88, ["stop"])]),
+        # Started, stopped, started again, stopped.
+        VobSpu(3000, line, 100, 400, [(0, ["place", "start"]), (44, ["stop"]), (88, ["start"]),
+                                      (132, ["stop"])]),
+        # Shown for four seconds, a transparent SPU after one.
+        VobSpu(5000, line, 100, 400, [(0, ["place", "start"]), (352, ["stop"])]),
+        VobSpu(6000, line, 100, 400, start_stop, alphas=(0, 0, 0, 0)),
+    ]
+    # Where a DVD player shows otherwise: the colour change and the fade
+    # (1.5, 1.75 s); the first of two starts and its stop (3, 3.5 s); the
+    # transparent SPU's clear and its own stop (6, 7.001 s), and the stop of
+    # the picture it replaced, which FFmpeg shows on until (9.004 s).
+    dvd_departures = {1500, 1750, 3000, 3500, 6000, 7001, 9004}
+    grey = [
+        VobSpu(1000, line, 100, 400, start_stop, alphas=(0, 15, 12, 8)),
+        VobSpu(3000, framed, 100, 100, start_stop, colours=(0, 1, 2, 3), alphas=(15, 15, 15, 15)),
+        VobSpu(5000, line, 100, 400, start_stop, colours=(5, 5, 7, 5), alphas=(15, 15, 15, 15)),
+    ]
+    pal = [VobSpu(1000, line, 100, 500, start_stop)]
+    return main, dvd, dvd_departures, grey, pal
+
+
+def vob_damage():
+    """SPUs no muxer writes, each as FFmpeg takes it: the answer FFmpeg's."""
+    line = vob_shape(240, 24, 0)
+    good = VobSpu(0, line, 100, 400, [(0, ["place", "start"]), (352, ["stop"])])
+
+    def patched(ms_time, fix):
+        b = bytearray(good.bytes())
+        fix(b)
+        return (ms_time, bytes(b))
+
+    first = lambda b: struct.unpack(">H", bytes(b[2:4]))[0]  # noqa: E731
+
+    def fields_past(b):
+        f = first(b) + 4 + bytes(b[first(b) + 4:]).index(bytes([VOB_FIELDS]))
+        b[f + 3:f + 5] = struct.pack(">H", 0x7FF0)
+
+    def taller(b):
+        a = first(b) + 4 + bytes(b[first(b) + 4:]).index(bytes([VOB_AREA]))
+        # y2's top four bits, 1 (y2 is 0x1A7): 3 makes the area 512 rows
+        # taller than its codes.
+        b[a + 5] = (b[a + 5] & 0xF0) | 0x03
+
+    def loops(b):
+        b[first(b) + 2:first(b) + 4] = struct.pack(">H", 4)
+
+    def short(b):
+        del b[12:]
+
+    raw = [
+        # Each while a picture shows: it stays.
+        (1000, good.bytes()),
+        patched(2000, fields_past),
+        patched(3000, taller),
+        patched(4000, short),
+        # A sequence naming an earlier one next: read once, shown.
+        patched(6000, loops),
+    ]
+    return raw
+
+
 def make_mixed():
     """Films with subtitle tracks of several kinds, for which one Subtitles
     opens: `pgs_and_text.mkv`, Blu-ray pictures marked default beside SubRip
-    text; `vobsub_and_pgs.mkv`, DVD pictures (ffmpeg's dvdsub encoder's,
-    from pgs_sd's) marked default beside Blu-ray's. Made from fixtures
-    made already."""
+    text; `dvb_and_pgs.mkv`, DVB pictures -- not read here -- (ffmpeg's
+    dvbsub encoder's, from pgs_sd's) marked default beside Blu-ray's. Made
+    from fixtures made already."""
     def path(name):
         return os.path.join(HERE, name)
 
@@ -1110,11 +1530,16 @@ def make_mixed():
         print("wrote", path(out))
 
     merge("pgs_and_text.mkv", ("pgs_sd.mkv", True), ("subrip.mkv", False))
-    vob = path("vobsub.tmp.mkv")
-    ffmpeg("-copyts", "-i", path("pgs_sd.mkv"), "-map", "0", "-c:s", "dvdsub",
-           "-fflags", "+bitexact", "-flags", "+bitexact", vob)
-    merge("vobsub_and_pgs.mkv", ("vobsub.tmp.mkv", True), ("pgs_sd.mkv", False))
-    os.remove(vob)
+    # mkvmerge takes no DVB track of ffmpeg's (its setup is not what
+    # mkvmerge looks for), so ffmpeg muxes the two.
+    dvb = path("dvb.tmp.mkv")
+    ffmpeg("-copyts", "-i", path("pgs_sd.mkv"), "-map", "0", "-c:s", "dvbsub",
+           "-fflags", "+bitexact", "-flags", "+bitexact", dvb)
+    ffmpeg("-copyts", "-i", dvb, "-i", path("pgs_sd.mkv"), "-map", "0:0", "-map", "1:0", "-c", "copy",
+           "-disposition:0", "default", "-disposition:1", "0",
+           "-fflags", "+bitexact", "-flags", "+bitexact", path("dvb_and_pgs.mkv"))
+    os.remove(dvb)
+    print("wrote", path("dvb_and_pgs.mkv"))
 
 
 def main():
@@ -1165,6 +1590,12 @@ def main():
     make_pgs("pgs_sd", (720, 480), sd)
     make_pgs("pgs_cropped", PGS_CANVAS, cropped, departures={1000, 2000, 4000})
     make_pgs("pgs_damage", PGS_CANVAS, pgs_damage(), drawn=False)
+    main_spus, dvd, dvd_departures, grey, pal = vob_scenes()
+    make_vobsub("vobsub", VOB_CANVAS, VOB_PALETTE, main_spus)
+    make_vobsub("vobsub_dvd", (720, 576), VOB_PALETTE, dvd, departures=dvd_departures)
+    make_vobsub("vobsub_grey", VOB_CANVAS, None, grey)
+    make_vobsub("vobsub_pal", None, VOB_PALETTE, pal)
+    make_vobsub("vobsub_damage", VOB_CANVAS, VOB_PALETTE, [], drawn=False, raw=vob_damage())
     make_mixed()
 
 

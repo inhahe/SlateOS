@@ -1,5 +1,5 @@
-"""Mutation test for videocodec's subtitles: Blu-ray's PGS pictures and the
-reader that gives their cues.
+"""Mutation test for videocodec's subtitles: Blu-ray's PGS and DVD's VobSub
+pictures, and the reader that gives their cues.
 
 Each row puts back one way of not showing what FFmpeg shows -- a rule of its
 `pgssub` decoder dropped, a colour rounded otherwise, a crop made as FFmpeg
@@ -50,6 +50,22 @@ PGS_DAMAGE = "pgs_damage_taken_as_ffmpeg_takes_it"
 SEEK = "a_seek_in_pictures_lands_on_the_picture_showing_then"
 SEEK_BACK = "a_seek_back_forgets_what_was_read_after_it"
 OPENED = "text_is_opened_before_pictures_and_pictures_read_before_those_not"
+# vobsub.rs's own.
+SETUP = "a_setup_gives_the_canvas_and_the_palette"
+STARTED = "a_picture_shows_from_its_start_until_its_stop"
+DVD_CODES = "the_run_length_codes_read_as_a_dvd_codes_them"
+EDGES = "transparent_edges_are_cut_and_a_transparent_inside_is_kept"
+SEQUENCES = "each_sequence_takes_effect_at_its_date"
+LENIENT = "forced_no_start_and_no_stop_are_ffmpegs"
+GREYS = "without_a_palette_the_greys_are_ffmpegs"
+DVD_DAMAGE = "damage_changes_nothing_and_a_transparent_picture_clears"
+# The VobSub fixtures'.
+VOBSUB = "vobsub"
+VOBSUB_DVD = "vobsub_as_a_dvd_player_shows_it"
+VOBSUB_GREY = "vobsub_without_a_palette"
+VOBSUB_PAL = "vobsub_without_a_size"
+VOBSUB_DAMAGE = "vobsub_damage_taken_as_ffmpeg_takes_it"
+VOB_SEEK = "a_seek_in_dvd_pictures_finds_one_still_showing"
 
 # (name, old, new, [tests that must fail])
 PICTURES = [
@@ -138,7 +154,8 @@ PICTURES = [
         "        let fits = others",
         # The fixture's is wider than the canvas, and a picture past the
         # canvas's edge is left out by sub2video and by the test's drawing
-        # alike: only the module's own test sees it held.
+        # alike: the module's own test sees it held (and the fixture's count
+        # of damage one set short).
         [SEGMENTS],
     ),
     (
@@ -218,14 +235,17 @@ READER = [
     ),
     (
         "pictures replaced at the time they came are given",
-        "                if start > cue.start && self.kept(cue.start, start) {",
-        "                if self.kept(cue.start, start) {",
-        [PGS],
+        "            if at > cue.start && self.kept(cue.start, at) {",
+        "            if self.kept(cue.start, at) {",
+        # A PGS display set's picture replaced at its own time never shows
+        # (the next set supersedes it before it is made); a subpicture's
+        # colour change and stop at one date make one that would.
+        [VOBSUB],
     ),
     (
         "the last picture ends where it begins",
-        "                        end: i64::MAX,",
-        "                        end: start,",
+        "                end: i64::MAX,",
+        "                end: at,",
         [PGS],
     ),
     (
@@ -246,6 +266,153 @@ READER = [
         "",
         [OPENED],
     ),
+    (
+        "a block's changes drop what the last had still to make before them",
+        "        self.make_until(first);\n        self.coming.clear();",
+        "        self.coming.clear();",
+        [PGS, VOBSUB],
+    ),
+    (
+        "a block's changes supersede nothing of the last's",
+        "        self.coming.clear();\n        self.coming.extend(changes);",
+        "        self.coming.extend(changes);",
+        [VOBSUB, VOBSUB_DVD],
+    ),
+    (
+        "a seek in DVD pictures reads from the SPU it lands on",
+        "            self.back_one(ticks)?;",
+        "            let _ = ticks;",
+        [VOB_SEEK],
+    ),
+    (
+        "a seek's step back stays where it is",
+        "        if self.demuxer.seek(self.key, at.saturating_sub(1)).is_err() {",
+        "        if self.demuxer.seek(self.key, at).is_err() {",
+        [VOB_SEEK],
+    ),
+    (
+        "a block's duration ends no picture",
+        "let duration = (length > 0).then(|| i64::try_from(length).unwrap_or(i64::MAX));",
+        "let duration = (length > 0).then(|| i64::MAX).filter(|_| false);",
+        [VOBSUB_DAMAGE],
+    ),
+]
+
+DVD = [
+    (
+        "a setup with no size is on NTSC's canvas",
+        "const DEFAULT_CANVAS: (u32, u32) = (720, 576);",
+        "const DEFAULT_CANVAS: (u32, u32) = (720, 480);",
+        [SETUP, VOBSUB_PAL],
+    ),
+    (
+        "a picture never started is never shown",
+        "    if !sequences.iter().any(|s| s.start) {",
+        "    if false {",
+        [LENIENT, VOBSUB],
+    ),
+    (
+        "a picture never started shows from its sequence's date",
+        "            (first.start, first.ms) = (true, 0);",
+        "            first.start = true;",
+        [LENIENT],
+    ),
+    (
+        "a later colour or fade changes nothing, as in FFmpeg",
+        "            shown.map(|(_, forced)| (s.picture, forced))",
+        "            shown",
+        [SEQUENCES, VOBSUB_DVD],
+    ),
+    (
+        "changes go back in time with their dates",
+        "        let at = s.ms.saturating_mul(1_000_000).max(last);",
+        "        let at = s.ms.saturating_mul(1_000_000);",
+        [DVD_DAMAGE],
+    ),
+    (
+        "a picture never stopped is not ended by its block",
+        "        if let Some(end) = duration.filter(|&d| d > last) {",
+        "        if let Some(end) = duration.filter(|_| false) {",
+        [LENIENT, VOBSUB_DAMAGE],
+    ),
+    (
+        "a sequence naming an earlier one next is followed",
+        "        if next <= at {",
+        "        if next == at {",
+        [DVD_DAMAGE],
+    ),
+    (
+        "dates are hundredths of a second",
+        "    i64::from(u32::from(date) * 1024 / 90)",
+        "    i64::from(u32::from(date) * 10)",
+        [STARTED, VOBSUB],
+    ),
+    (
+        "a forced picture's transparent edges are cut",
+        "    let kept = |&index: &u8| forced || rgba",
+        "    let kept = |&index: &u8| rgba",
+        [EDGES, VOBSUB],
+    ),
+    (
+        "no picture's transparent edges are cut",
+        "    let kept = |&index: &u8| forced || rgba",
+        "    let kept = |&index: &u8| true || rgba",
+        [EDGES, VOBSUB],
+    ),
+    (
+        "alpha is sixteen times its nibble",
+        "a.saturating_mul(17)",
+        "a.saturating_mul(16)",
+        [STARTED, VOBSUB],
+    ),
+    (
+        "two greys are FFmpeg's ramp of three",
+        "        2 => &[0x00, 0xFF],",
+        "        2 => &[0x00, 0x80],",
+        [GREYS, VOBSUB_GREY],
+    ),
+    (
+        "greys are their levels unscaled",
+        "u8::try_from(level.saturating_mul(255) / 256)",
+        "u8::try_from(level)",
+        [GREYS, VOBSUB_GREY],
+    ),
+    (
+        "a run of no count fills nothing",
+        "                0 => left,",
+        "                0 => 0,",
+        [DVD_CODES, VOBSUB],
+    ),
+    (
+        "a run past the line's end runs on",
+        "                n => n.min(left),",
+        "                n => n,",
+        [DVD_CODES],
+    ),
+    (
+        "a line does not end on a byte",
+        "        self.at = self.at.saturating_add(self.at % 2);\n",
+        "",
+        [DVD_CODES, VOBSUB],
+    ),
+    (
+        "a forced start is not forced",
+        "                FORCED_START => (s.start, s.forced) = (true, true),",
+        "                FORCED_START => s.start = true,",
+        [LENIENT, VOBSUB],
+    ),
+    (
+        "the four colours are read the other way round",
+        "let four = [b & 0x0F, b >> 4, a & 0x0F, a >> 4];",
+        "let four = [a >> 4, a & 0x0F, b >> 4, b & 0x0F];",
+        [STARTED, VOBSUB],
+    ),
+    (
+        "a code of three nibbles reads a fourth",
+        "            for floor in [0x4, 0x10, 0x40] {",
+        "            for floor in [0x4, 0x10, 0x100] {",
+        [DVD_CODES],
+    ),
 ]
 
 if __name__ == "__main__":
@@ -254,6 +421,7 @@ if __name__ == "__main__":
     only = sys.argv[1:]
     tables = [
         (SRC / "subtitle" / "pgs.rs", PICTURES),
+        (SRC / "subtitle" / "vobsub.rs", DVD),
         (SRC / "subtitle.rs", READER),
     ]
     names = [name for _, rows in tables for name, *_ in rows]

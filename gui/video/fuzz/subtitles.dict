@@ -92,6 +92,9 @@
 "S_TEXT/WEBVTT"
 "D_WEBVTT/SUBTITLES"
 "S_HDMV/PGS"
+"S_VOBSUB"
+"size: 720x480"
+"palette: "
 
 # PGS segment headers (type, then a 16-bit length): an end segment whole;
 # a composition, palette, object and window header each of a short length;
@@ -106,3 +109,15 @@
 "\x40\x00\x00\x00"
 "\xc0\x00"
 "\x00\xc1\x00\x01"
+
+# VobSub control commands: a forced start, a start, a stop, colours,
+# alphas, an area, field offsets, the end of a sequence; a run filling the
+# rest of a line.
+"\x00"
+"\x01\xff"
+"\x02\xff"
+"\x03\x32\x10"
+"\x04\xff\xf0"
+"\x05\x00\x00\x2f\x00\x00\x1f"
+"\x06\x00\x04\x00\x20"
+"\x00\x03"

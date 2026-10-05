@@ -4028,8 +4028,16 @@ lane C's `guitk`.
       the start of the epoch the time falls in. Four fixtures written
       segment by segment, held to FFmpeg's sub2video pictures at every
       change, with every subtitle and with the forced alone.
-    - `[ ]` DVD's VobSub and DVB's pictures, refused by name; MP4's WebVTT
-      and TTML
+    - `[x]` DVD's VobSub (2026-10-05, design-decisions §1363): the same cues
+      of images, FFmpeg's pixels to the bit (its trimming, its grey ramps
+      without a palette, its leniency without a start or a stop), but each
+      control sequence takes effect at its date -- fades, colour changes, a
+      second start -- and a transparent subpicture clears, as a DVD player
+      shows them. One reader for both kinds of pictures: timed changes, a
+      new block superseding an old one's later changes; a seek steps back
+      one subpicture. Five fixtures written subpicture by subpicture (an
+      MPEG program stream and its index), held to FFmpeg's pictures.
+    - `[ ]` DVB's pictures, refused by name; MP4's WebVTT and TTML
       (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,

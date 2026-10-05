@@ -146,11 +146,11 @@ counts["matroska"] = add_files("matroska", "gui/video/matroska/tests/data") + ad
     "matroska", "gui/video/vp9/tests/data", (".webm",))
 
 # The subtitle fixtures: SubRip, ASS, SSA and WebVTT tracks, ffmpeg's and
-# mkvmerge's; MP4's timed text; Blu-ray's PGS pictures.
+# mkvmerge's; MP4's timed text; Blu-ray's PGS and DVD's VobSub pictures.
 n = 0
 codec_data = os.path.join(SRC, "gui/video/codec/tests/data")
 for name in sorted(os.listdir(codec_data)):
-    if name.startswith(("subrip", "ass", "ssa", "webvtt", "overlap", "movtext", "pgs")) and name.endswith(
+    if name.startswith(("subrip", "ass", "ssa", "webvtt", "overlap", "movtext", "pgs", "vobsub", "dvb")) and name.endswith(
             (".mkv", ".webm", ".mp4")):
         shutil.copy2(os.path.join(codec_data, name), os.path.join(seed_dir("subtitles"), name))
         n += 1

@@ -32,9 +32,10 @@ In WSL, with a nightly toolchain (`rustup toolchain install nightly`) and
 - It builds seed corpora from the crates' own test fixtures. The VP8 and VP9
   packet targets take their seeds from the test vectors, remuxed to runs of
   length-prefixed packets with `ffmpeg`; the subtitle target from
-  `videocodec`'s subtitle fixtures -- text, timed text and PGS pictures --
-  with `subtitles.dict`'s markup -- ASS override tags, SRT and WebVTT tags,
-  cue settings -- and PGS's segment headers for its mutations.
+  `videocodec`'s subtitle fixtures -- text, timed text, PGS and VobSub
+  pictures -- with `subtitles.dict`'s markup -- ASS override tags, SRT and
+  WebVTT tags, cue settings -- and PGS's segment headers and VobSub's control
+  commands for its mutations.
 
 `run.sh` runs each target at low priority for the given time. It builds with
 `-O` and no debug assertions, as a release build runs, so anything it finds

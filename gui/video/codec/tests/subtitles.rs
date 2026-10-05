@@ -4,9 +4,10 @@
 //! ffmpeg's SRT of the track (`NAME.ffmpeg.srt`) but for the cues where this
 //! follows the format's own renderer instead, which
 //! `tests/data/generate_subtitle_fixtures.py` lists and says why of, one by
-//! one. The pictures of Blu-ray's PGS (`pgs*`) are held to `NAME.states`:
-//! the picture FFmpeg's sub2video shows at each change, every subtitle shown
-//! and the forced alone, but for the crops it does not make.
+//! one. The pictures of Blu-ray's PGS (`pgs*`) and DVD's VobSub (`vobsub*`)
+//! are held to `NAME.states`: the picture FFmpeg's sub2video shows at each
+//! change, every subtitle shown and the forced alone, but where the disc's
+//! player shows otherwise (the generator's drawing there).
 
 #![allow(
     clippy::unwrap_used,
@@ -354,11 +355,14 @@ fn shown(cues: &[Cue], canvas: (u32, u32)) -> [Vec<(i64, String)>; 2] {
 
 /// Every picture of `NAME.mkv` against `NAME.states`; the cues of pictures
 /// alone, on the answer's canvas. The cues, for more to be asked of them.
-fn pictures_held_to_their_answer(name: &str) -> (Vec<Cue>, Subtitles<File>) {
+fn pictures_held_to_their_answer(
+    name: &str,
+    format: SubtitleFormat,
+) -> (Vec<Cue>, Subtitles<File>) {
     let answer = pictures(name);
     let file = File::open(data(&format!("{name}.mkv"))).unwrap();
     let mut subtitles = Subtitles::open(file).unwrap();
-    assert_eq!(subtitles.info().format, SubtitleFormat::Pgs, "{name}");
+    assert_eq!(subtitles.info().format, format, "{name}");
     let cues = read_all(&mut subtitles);
     for cue in &cues {
         assert!(cue.text.is_empty(), "{name}: pictures have no text");
@@ -375,7 +379,7 @@ fn pictures_held_to_their_answer(name: &str) -> (Vec<Cue>, Subtitles<File>) {
 
 #[test]
 fn pgs() {
-    let (cues, subtitles) = pictures_held_to_their_answer("pgs");
+    let (cues, subtitles) = pictures_held_to_their_answer("pgs", SubtitleFormat::Pgs);
     assert_eq!(subtitles.damaged(), 0);
     // The last picture is never cleared: it shows until the film ends. The
     // one set at the same time before it was never seen, and is no cue:
@@ -387,19 +391,19 @@ fn pgs() {
 
 #[test]
 fn pgs_on_a_standard_definition_canvas() {
-    let (_, subtitles) = pictures_held_to_their_answer("pgs_sd");
+    let (_, subtitles) = pictures_held_to_their_answer("pgs_sd", SubtitleFormat::Pgs);
     assert_eq!(subtitles.damaged(), 0);
 }
 
 #[test]
 fn pgs_cropped_as_a_blu_ray_player_crops() {
-    let (_, subtitles) = pictures_held_to_their_answer("pgs_cropped");
+    let (_, subtitles) = pictures_held_to_their_answer("pgs_cropped", SubtitleFormat::Pgs);
     assert_eq!(subtitles.damaged(), 0);
 }
 
 #[test]
 fn pgs_damage_taken_as_ffmpeg_takes_it() {
-    let (_, subtitles) = pictures_held_to_their_answer("pgs_damage");
+    let (_, subtitles) = pictures_held_to_their_answer("pgs_damage", SubtitleFormat::Pgs);
     // Ten palettes, sixty-five objects, one wider than the canvas, codes a
     // line short, a composition cut short: five sets met damage.
     assert_eq!(subtitles.damaged(), 5);
@@ -459,20 +463,84 @@ fn a_seek_back_forgets_what_was_read_after_it() {
     assert_eq!(subtitles.next_cue().unwrap().unwrap().start, 1_000_000_000);
 }
 
+// --- Pictures of text: DVD's VobSub ----------------------------------------
+
+#[test]
+fn vobsub() {
+    let (cues, subtitles) = pictures_held_to_their_answer("vobsub", SubtitleFormat::VobSub);
+    assert_eq!(subtitles.damaged(), 0);
+    // The forced subtitle, and no other, is marked.
+    let forced: Vec<i64> = cues
+        .iter()
+        .filter(|c| c.images.iter().any(|i| i.forced))
+        .map(|c| c.start / 1_000_000)
+        .collect();
+    assert_eq!(forced, [3000]);
+}
+
+#[test]
+fn vobsub_as_a_dvd_player_shows_it() {
+    let (_, subtitles) = pictures_held_to_their_answer("vobsub_dvd", SubtitleFormat::VobSub);
+    assert_eq!(subtitles.damaged(), 0);
+}
+
+#[test]
+fn vobsub_without_a_palette() {
+    let (_, subtitles) = pictures_held_to_their_answer("vobsub_grey", SubtitleFormat::VobSub);
+    assert_eq!(subtitles.damaged(), 0);
+}
+
+#[test]
+fn vobsub_without_a_size() {
+    let (cues, _) = pictures_held_to_their_answer("vobsub_pal", SubtitleFormat::VobSub);
+    assert_eq!(cues[0].images[0].canvas_height, 576);
+}
+
+#[test]
+fn vobsub_damage_taken_as_ffmpeg_takes_it() {
+    let (_, subtitles) = pictures_held_to_their_answer("vobsub_damage", SubtitleFormat::VobSub);
+    // Fields past the data, an area taller than its codes, an SPU cut short.
+    assert_eq!(subtitles.damaged(), 3);
+}
+
+#[test]
+fn a_seek_in_dvd_pictures_finds_one_still_showing() {
+    let answer = pictures("vobsub");
+    let at = |t: i64| {
+        answer
+            .all
+            .iter()
+            .rev()
+            .find(|(s, _)| *s <= t)
+            .unwrap()
+            .1
+            .clone()
+    };
+    // At 22.1 s the SPU there has not started (it starts at 22.25 s), and
+    // the one before still shows -- found by going back one.
+    let (start, end, picture) = first_after_seek("vobsub", 22_100);
+    assert_eq!((start, end), (20_000, 22_250));
+    assert_eq!(picture, at(20_000));
+    // A picture its own SPU shows; between pictures, the next.
+    assert_eq!(first_after_seek("vobsub", 8_500), (8_000, 9_001, at(8_000)));
+    assert_eq!(first_after_seek("vobsub", 2_500), (3_000, 5_002, at(3_000)));
+}
+
 #[test]
 fn text_is_opened_before_pictures_and_pictures_read_before_those_not() {
     // Blu-ray pictures marked default, text beside them: the text.
     let file = File::open(data("pgs_and_text.mkv")).unwrap();
     let info = Subtitles::open(file).unwrap().info().clone();
     assert_eq!((info.format, info.default), (SubtitleFormat::SubRip, false));
-    // DVD pictures marked default, Blu-ray's beside them: Blu-ray's.
-    let file = File::open(data("vobsub_and_pgs.mkv")).unwrap();
+    // DVB pictures, not read here, marked default, Blu-ray's beside them:
+    // Blu-ray's.
+    let file = File::open(data("dvb_and_pgs.mkv")).unwrap();
     let info = Subtitles::open(file).unwrap().info().clone();
     assert_eq!((info.format, info.default), (SubtitleFormat::Pgs, false));
-    // The DVD track asked for by its number: refused by its format's name.
-    let file = File::open(data("vobsub_and_pgs.mkv")).unwrap();
+    // The DVB track asked for by its number: refused by its format's name.
+    let file = File::open(data("dvb_and_pgs.mkv")).unwrap();
     assert!(matches!(
         Subtitles::open_track(file, 1),
-        Err(Error::SubtitleFormat(SubtitleFormat::VobSub))
+        Err(Error::SubtitleFormat(SubtitleFormat::Dvb))
     ));
 }

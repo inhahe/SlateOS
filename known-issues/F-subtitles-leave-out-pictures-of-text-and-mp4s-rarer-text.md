@@ -6,16 +6,17 @@ with what doing it would take.
 **In short:** `videocodec::Subtitles` reads a film's text subtitles --
 SubRip, ASS, SSA and WebVTT in Matroska and WebM, 3GPP timed text in MP4 --
 into SRT markup for lane E's player (design-decisions §1360), and Blu-ray's
-pictures of text as images (§1362). DVD's and DVB's pictures are refused by
-name, and two text formats MP4 can hold are not read.
+and DVD's pictures of text as images (§1362, §1363). DVB's pictures are
+refused by name, and two text formats MP4 can hold are not read.
 
 | What | Today | To do it |
 |---|---|---|
-| Pictures of text: DVD's VobSub, DVB's | refused by name (`Error::SubtitleFormat`) | a decoder each beside `subtitle/pgs.rs`, giving the same `CueImage`s: VobSub's 2-bit run-length fields, its palette from the track's `.idx` setup and its own display and stop times; DVB's regions, CLUTs and 2/4/8-bit pixel codes. ffmpeg's `dvdsub` and `dvbsub` encoders can write the fixtures from the PGS ones, but drop their clears and quantise their colours, so the fixtures want writers of their own as PGS's have |
+| Pictures of text: DVB's (TV recordings) | refused by name (`Error::SubtitleFormat`) | a decoder beside `subtitle/pgs.rs` and `vobsub.rs`, giving the same `CueImage`s: DVB's pages, regions, CLUTs and 2/4/8-bit pixel codes. ffmpeg's `dvbsub` encoder can write fixtures from the PGS ones (as `dvb_and_pgs.mkv` is made), but drops clears and quantises colours, so the fixtures want a writer of their own as PGS's and VobSub's have |
+| DVD subtitles' `custom colors` (VSFilter's recolouring, in the `.idx`) | ignored, as FFmpeg ignores it | the four colours the line gives in place of the palette's, `tridx` marking the transparent -- if a real rip needs it |
 | MP4's WebVTT (`wvtt`, ISO 14496-30, what DASH and HLS segments carry) and TTML (`stpp`) | not subtitles to `gui/video/mp4`, which makes `tx3g` and `text` subtitles as FFmpeg's table does; a film with only these has "no subtitles" | `wvtt`: its `vttc` boxes (`payl` the cue text, `sttg` its settings, `iden`) into the WebVTT reader; `stpp`: an XML reader for TTML's `<p>` and `<span>`, a larger task |
 | CEA-608 captions in MP4 (`c608`) | a subtitle track of format `Other`, refused | a 608 decoder (byte pairs, roll-up and pop-on captions) |
 
-**Where.** `gui/video/codec/src/subtitle.rs` and `subtitle/`;
+**Where.** `gui/video/codec/src/subtitle.rs` and `subtitle/` (`pgs.rs`, `vobsub.rs`);
 `gui/video/codec/src/container.rs` (`subtitles`); `gui/video/mp4/src/track.rs`
 (`subtitle_codec`).
 
@@ -33,6 +34,12 @@ third of the picture each way its text's anchor falls in, the anchor where
 the specification lays the cue out (`webvtt::placement`): WebM's settings
 from the block's second line, Matroska's from its addition, both held to
 hand-checked answers in the fixtures.
+
+**Was here, fixed 2026-10-05:** DVD's subtitles (VobSub) were refused, and
+a film ripped from a DVD usually has no others. They now come as images
+too, FFmpeg's pixels to the bit but where a DVD player shows otherwise --
+each control sequence taking effect at its date, a transparent subpicture
+clearing the screen (`subtitle/vobsub.rs`, design-decisions §1363).
 
 **Was here, fixed 2026-10-05:** Blu-ray's subtitles (PGS), pictures of the
 text, were refused, and a film ripped from a Blu-ray usually has no others.

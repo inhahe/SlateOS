@@ -1,8 +1,9 @@
 //! A film's subtitles as the player opens them: Matroska's and WebM's text
 //! tracks and MP4's timed text, and the SubRip, ASS, SSA, WebVTT and timed
 //! text readers behind them -- markup, override blocks, script headers and
-//! cue settings from a stranger -- and Blu-ray's PGS pictures: display
-//! sets, run-length codes, and the seek back to an epoch's start.
+//! cue settings from a stranger -- and Blu-ray's PGS and DVD's VobSub
+//! pictures: display sets, subpicture units, run-length codes, control
+//! sequences, and the seeks back to what is showing.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;

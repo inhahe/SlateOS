@@ -2199,8 +2199,13 @@ live.
   is no longer drawn in black; and masks, the shine glossy icons fade
   through a gradient; and (2026-10-05) patterns, a tile repeated to paint a
   shape -- the checkerboard behind an image editor's picture -- and XML
-  namespaces, so a document written `<svg:rect>` is drawn. Still not drawn:
-  filters.
+  namespaces, so a document written `<svg:rect>` is drawn. And (2026-10-05,
+  §1466) filters -- every Filter Effects 1 primitive, from the soft shadow
+  under an icon to lighting and turbulence, and CSS's `blur()`,
+  `drop-shadow()`, `grayscale()` and the rest -- with a faded group now
+  faded as a whole, its overlapping parts no darker where they overlap.
+  Still not drawn: text, markers and embedded pictures
+  (`TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES`).
 
 - `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
   §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's

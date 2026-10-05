@@ -33,7 +33,15 @@
 //!   the `<mask>` it names says (the `mask` module)
 //! - Patterns: a fill or stroke of `url(#id)` naming a `<pattern>` paints
 //!   with its tile, repeated and carried by its transform (the `pattern`
-//!   module says what of them is drawn). Filters are not applied
+//!   module says what of them is drawn)
+//! - `filter`: every Filter Effects 1 primitive, and CSS's filter functions,
+//!   applied to what an element draws before its clip, mask and opacity (the
+//!   `filter` module says what of them is drawn; `effects` how each
+//!   primitive computes)
+//! - Opacity of the whole: a group, a `use`, or a shape with a stroke over
+//!   its fill is drawn on a layer of its own and faded whole, so what it
+//!   overlaps of itself does not show through; a shape with one paint is
+//!   that paint faded, with no layer
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
 //!   viewport of its own; g (with inheritance)
@@ -64,6 +72,10 @@ use std::collections::HashMap;
 
 mod clip;
 mod css;
+mod effects;
+mod filter;
+#[cfg(test)]
+mod layer_tests;
 mod mask;
 #[cfg(test)]
 mod namespace_tests;
@@ -76,6 +88,7 @@ mod viewport_tests;
 
 pub use clip::Clip;
 use clip::{ClipPath, MAX_CLIP_DEPTH, Mask, Referable, clip_path_frame, may_clip};
+use filter::{FilterDef, FilterLists, MAX_FILTER_PIXELS, Target};
 use mask::{MaskDef, kept, mask_frame};
 use paint::{Defs, Gradient};
 use pattern::{MAX_TILE_SIDE, PatternDef, Tile};
@@ -1174,6 +1187,9 @@ pub struct SvgStyle {
     /// The `<mask>` the element is masked by, by its place among the
     /// document's: not inherited.
     pub mask: Option<usize>,
+    /// The filters the element's `filter` applies, by the place of that
+    /// list among the document's: not inherited.
+    pub filter: Option<usize>,
 }
 
 impl Default for SvgStyle {
@@ -1192,6 +1208,7 @@ impl Default for SvgStyle {
             clip_rule: None,
             clip: None,
             mask: None,
+            filter: None,
         }
     }
 }
@@ -1301,6 +1318,12 @@ pub struct SvgDocument {
     masks: Vec<MaskDef>,
     /// Its `<pattern>`s, at the places [`SvgPaint::Pattern`] gives.
     patterns: Vec<PatternDef>,
+    /// Its filters: its `<filter>` elements, then the filter functions its
+    /// `filter` properties hold.
+    filters: Vec<FilterDef>,
+    /// What each `filter` value applies -- places among [`Self::filters`],
+    /// in order -- at the places [`SvgStyle::filter`] gives.
+    filter_lists: Vec<Vec<usize>>,
 }
 
 /// The user-space rectangle an `<svg>` element shows, `(x, y, width,
@@ -1366,12 +1389,16 @@ impl SvgDocument {
         let clip_ids = Referable::collect(first, &by_id, "clipPath");
         let mask_ids = Referable::collect(first, &by_id, "mask");
         let pattern_ids = Referable::collect(first, &by_id, "pattern");
+        // Every `filter` value read once, against the `<filter>`s by `id`.
+        let filter_ids = Referable::collect(first, &by_id, "filter");
+        let filter_lists = FilterLists::collect(first, &filter_ids);
         let tables = Tables {
             defs: &defs,
             reusable: &reusable,
             clips: &clip_ids,
             masks: &mask_ids,
             patterns: &pattern_ids,
+            filter_lists: &filter_lists,
         };
         let builder = Builder {
             tables: &tables,
@@ -1397,7 +1424,19 @@ impl SvgDocument {
         let patterns = (0..pattern_ids.elements.len())
             .map(|place| build_pattern(place, &pattern_ids, builder.inner()))
             .collect();
+        // The `<filter>` elements, then the filter functions, at the places
+        // the lists give them. An `feImage` draws what a `<use>` would.
+        let content_of = |id: &str| reusable.find(id).map(|(place, _)| place);
+        let mut filters: Vec<FilterDef> = filter_ids
+            .elements
+            .iter()
+            .map(|elem| filter::build_filter(elem, (view_w, view_h), &content_of))
+            .collect();
         let root = build_node(first, builder)?;
+        let FilterLists {
+            lists, functions, ..
+        } = filter_lists;
+        filters.extend(functions);
         Ok(Self {
             root,
             defs,
@@ -1405,6 +1444,8 @@ impl SvgDocument {
             clips,
             masks,
             patterns,
+            filters,
+            filter_lists: lists,
         })
     }
 
@@ -1500,6 +1541,17 @@ impl ResolvedStyle {
             fill_opacity: style.fill_opacity.unwrap_or(self.fill_opacity),
             stroke_opacity: style.stroke_opacity.unwrap_or(self.stroke_opacity),
         }
+    }
+
+    /// [`with_overrides`](Self::with_overrides), but with the element's own
+    /// opacity left out where `own_opacity` is false: the layer the element
+    /// is drawn on applies it, to the whole.
+    fn with_own(&self, style: &SvgStyle, own_opacity: bool) -> Self {
+        let mut resolved = self.with_overrides(style);
+        if !own_opacity {
+            resolved.opacity = self.opacity;
+        }
+        resolved
     }
 
     /// The fill's paint and how opaque it is drawn, or `None` for no fill.
@@ -1630,6 +1682,89 @@ impl Extent {
         let (x0, y0) = (clamp(x.floor(), width), clamp(y.floor(), height));
         let (x1, y1) = (clamp((x + w).ceil(), width), clamp((y + h).ceil(), height));
         (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+    }
+}
+
+/// Whether what `node` draws can lay one part of itself over another -- so
+/// that an opacity on the whole is not the same as one on each part: a
+/// container's children can, and a shape's stroke its fill, where it has
+/// both. A shape with one paint, faded, is exactly that paint faded, and
+/// needs no layer.
+fn overlaps_itself(node: &SvgNode, parent_style: &ResolvedStyle) -> bool {
+    match node {
+        SvgNode::Svg { .. } | SvgNode::Group { .. } | SvgNode::Use { .. } => true,
+        _ => style_of(node).is_some_and(|style| {
+            let resolved = parent_style.with_overrides(style);
+            resolved.fill_paint().is_some()
+                && resolved.stroke_paint().is_some()
+                && resolved.stroke_width > 0.0
+        }),
+    }
+}
+
+/// A layer's pixels -- straight `[r, g, b, a]` bytes, row by row -- read as
+/// premultiplied colour, 0 to 1, for laying the layer on the surface.
+struct LayerPixels<'p> {
+    pixels: &'p [u8],
+    width: u32,
+    height: u32,
+}
+
+impl LayerPixels<'_> {
+    /// The pixel at whole coordinates `(x, y)`; transparent outside.
+    fn pixel(&self, x: f32, y: f32) -> [f32; 4] {
+        if !(x >= 0.0 && y >= 0.0) {
+            return [0.0; 4];
+        }
+        // Whole and not negative, held to the layer below.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "whole, not negative, and checked against the layer's size next"
+        )]
+        let (xi, yi) = (x.min(u32::MAX as f32) as u32, y.min(u32::MAX as f32) as u32);
+        if xi >= self.width || yi >= self.height {
+            return [0.0; 4];
+        }
+        let start = u64::from(yi)
+            .checked_mul(u64::from(self.width))
+            .and_then(|row| row.checked_add(u64::from(xi)))
+            .and_then(|at| at.checked_mul(4))
+            .and_then(|at| usize::try_from(at).ok());
+        let px = start.and_then(|s| self.pixels.get(s..s.checked_add(4)?));
+        match px {
+            Some(&[r, g, b, a]) => {
+                let alpha = f32::from(a) / 255.0;
+                [
+                    f32::from(r) / 255.0 * alpha,
+                    f32::from(g) / 255.0 * alpha,
+                    f32::from(b) / 255.0 * alpha,
+                    alpha,
+                ]
+            }
+            _ => [0.0; 4],
+        }
+    }
+
+    /// The layer between its pixels at `(x, y)` -- their centres at whole
+    /// numbers -- mixed from the four nearest, premultiplied, so a
+    /// transparent neighbour does not darken an edge.
+    fn sample(&self, x: f32, y: f32) -> [f32; 4] {
+        if !(x.is_finite() && y.is_finite()) {
+            return [0.0; 4];
+        }
+        let (x0, y0) = (x.floor(), y.floor());
+        let (tx, ty) = (x - x0, y - y0);
+        let p00 = self.pixel(x0, y0);
+        let p10 = self.pixel(x0 + 1.0, y0);
+        let p01 = self.pixel(x0, y0 + 1.0);
+        let p11 = self.pixel(x0 + 1.0, y0 + 1.0);
+        core::array::from_fn(|i| {
+            let at = |p: [f32; 4]| p.get(i).copied().unwrap_or(0.0);
+            let top = at(p00) + (at(p10) - at(p00)) * tx;
+            let bottom = at(p01) + (at(p11) - at(p01)) * tx;
+            top + (bottom - top) * ty
+        })
     }
 }
 
@@ -2252,6 +2387,8 @@ struct Tables<'b> {
     masks: &'b Referable<'b>,
     /// The document's `<pattern>`s, by `id`, for a paint that names one.
     patterns: &'b Referable<'b>,
+    /// What each `filter` value in the document applies.
+    filter_lists: &'b FilterLists,
 }
 
 /// What building an element's node needs beyond the element: what the whole
@@ -2330,7 +2467,9 @@ impl<'x> Reusable<'x> {
     }
 
     fn gather(&mut self, elem: &'x XmlElement, by_id: &HashMap<&'x str, &'x XmlElement>) {
-        if elem.tag == "use"
+        // An `feImage` naming an element draws it as a `<use>` would, so
+        // what it names is kept the same way.
+        if (elem.tag == "use" || elem.tag == "feImage")
             && let Some((&id, &target)) = reference(elem).and_then(|id| by_id.get_key_value(id))
             && !self.places.contains_key(id)
         {
@@ -2573,12 +2712,14 @@ fn inheriting(elem: &XmlElement, b: Builder<'_>, children: Vec<SvgNode>) -> SvgN
 }
 
 /// What `elem`'s own style passes down to what it holds: all of it but its
-/// opacity, clip and mask, which are the element's own and not inherited.
+/// opacity, clip, mask and filter, which are the element's own and not
+/// inherited.
 fn inherited_style(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgError> {
     Ok(SvgStyle {
         opacity: 1.0,
         clip: None,
         mask: None,
+        filter: None,
         ..parse_style_attrs(elem, b)?
     })
 }
@@ -3064,9 +3205,13 @@ fn parse_style_attrs(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgE
     let stroke = paint_property(elem, "stroke", b.tables.defs, b.tables.patterns)?;
     let stroke_width = property(elem, "stroke-width").and_then(length);
     let number = |name: &str| property(elem, name).and_then(|v| v.parse::<f32>().ok());
-    let opacity = number("opacity").unwrap_or(1.0);
-    let fill_opacity = number("fill-opacity").map(|o| o.clamp(0.0, 1.0));
-    let stroke_opacity = number("stroke-opacity").map(|o| o.clamp(0.0, 1.0));
+    // An opacity is a number or a percentage, held to 0 to 1; one that is
+    // neither -- or not a number at all, which `"NaN"` parses to -- is not
+    // said.
+    let share = |name: &str| property(elem, name).and_then(alpha_value);
+    let opacity = share("opacity").unwrap_or(1.0);
+    let fill_opacity = share("fill-opacity");
+    let stroke_opacity = share("stroke-opacity");
     // Keywords a renderer does not know are ignored, as browsers ignore them:
     // the property is then not said here and is inherited.
     let fill_rule = keyword(
@@ -3111,7 +3256,19 @@ fn parse_style_attrs(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgE
         clip_rule: clip::clip_rule(elem),
         clip: property(elem, "clip-path").and_then(|value| b.tables.clips.clip(value)),
         mask: property(elem, "mask").and_then(|value| b.tables.masks.place(value)),
+        filter: property(elem, "filter").and_then(|value| b.tables.filter_lists.place(value)),
     })
+}
+
+/// An opacity: a number or a percentage, held to 0 to 1; `None` for
+/// anything else.
+fn alpha_value(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let n = match value.strip_suffix('%') {
+        Some(percent) => percent.trim().parse::<f32>().ok()? / 100.0,
+        None => value.parse::<f32>().ok()?,
+    };
+    n.is_finite().then(|| n.clamp(0.0, 1.0))
 }
 
 /// The value `table` gives the keyword `value` names, if it names one.
@@ -4042,8 +4199,12 @@ struct SvgRenderer<'d> {
     /// content is painted with itself ends at [`MAX_CLIP_DEPTH`].
     pattern_depth: usize,
     /// How many more pixels of scratch surface -- masks' content, patterns'
-    /// tiles -- may be drawn on, in all ([`SCRATCH_PER_PIXEL`]).
+    /// tiles, layers, filters' work -- may be drawn on, in all
+    /// ([`SCRATCH_PER_PIXEL`]).
     scratch_budget: usize,
+    /// The most pixels one filter is computed over: [`MAX_FILTER_PIXELS`],
+    /// but for a test of a smaller cap.
+    filter_pixels: usize,
     /// What the clips and masks around the node being drawn leave of each
     /// pixel: coverage is multiplied by it. `None` where nothing is clipped.
     mask: Option<Rc<Mask>>,
@@ -4110,15 +4271,16 @@ impl<'d> SvgRenderer<'d> {
             mask_depth: 0,
             pattern_depth: 0,
             scratch_budget,
+            filter_pixels: MAX_FILTER_PIXELS,
             mask: None,
         }
     }
 
-    /// A surface of its own, `width` by `height`, for a mask's content or a
-    /// pattern's tile: drawing the same document, inside this drawing's depth
-    /// and on its budgets, which [`absorb`](Self::absorb) takes back what it
-    /// spent of. `None` where the budget for scratch surfaces cannot pay for
-    /// it -- which then stands empty.
+    /// A surface of its own, `width` by `height`, for a mask's content, a
+    /// pattern's tile or a layer: drawing the same document, inside this
+    /// drawing's depth and on its budgets, which [`absorb`](Self::absorb)
+    /// takes back what it spent of. `None` where the budget for scratch
+    /// surfaces cannot pay for it -- which then stands empty.
     fn scratch(&mut self, width: u32, height: u32) -> Option<SvgRenderer<'d>> {
         let area = usize::try_from(u64::from(width).saturating_mul(u64::from(height))).ok();
         let Some(left) = area.and_then(|area| self.scratch_budget.checked_sub(area)) else {
@@ -4133,6 +4295,7 @@ impl<'d> SvgRenderer<'d> {
         scratch.scratch_budget = self.scratch_budget;
         scratch.mask_depth = self.mask_depth;
         scratch.pattern_depth = self.pattern_depth;
+        scratch.filter_pixels = self.filter_pixels;
         Some(scratch)
     }
 
@@ -4166,8 +4329,30 @@ impl<'d> SvgRenderer<'d> {
             self.reuse_budget = left;
         }
         self.depth = self.depth.saturating_add(1);
-        // A clipped element is drawn under its clip, all it holds with it.
+        // A clipped element is drawn under its clip, all it holds with it --
+        // onto the surface, or onto a layer of its own where its opacity or a
+        // filter must see it whole before it is shown.
         let outer_mask = self.enter_clip(node, transform);
+        if !self.render_layered(node, transform, parent_style) {
+            self.render_content(node, transform, parent_style, true);
+        }
+        if let Some(OuterMask(outer)) = outer_mask {
+            self.mask = outer;
+        }
+        self.depth = self.depth.saturating_sub(1);
+    }
+
+    /// Draw what `node` draws -- a container's children, or a shape --
+    /// under whatever clip is in force, its own opacity on each paint where
+    /// `own_opacity`, and not at all where it is left to the layer the node
+    /// is drawn on ([`render_layered`](Self::render_layered)).
+    fn render_content(
+        &mut self,
+        node: &SvgNode,
+        transform: Transform,
+        parent_style: &ResolvedStyle,
+        own_opacity: bool,
+    ) {
         match node {
             SvgNode::Svg { children, .. } => {
                 for child in children {
@@ -4180,7 +4365,7 @@ impl<'d> SvgRenderer<'d> {
                 children,
             } => {
                 let combined = transform.then(*local_xf);
-                let resolved = parent_style.with_overrides(style);
+                let resolved = parent_style.with_own(style, own_opacity);
                 for child in children {
                     self.render_node(child, combined, &resolved);
                 }
@@ -4200,7 +4385,7 @@ impl<'d> SvgRenderer<'d> {
                     && let Some(shown) = reused.get(*content)
                 {
                     let combined = transform.then(*local_xf);
-                    let resolved = parent_style.with_overrides(style);
+                    let resolved = parent_style.with_own(style, own_opacity);
                     // A symbol shown is cut to its viewport.
                     let outer = (*viewport).and_then(|clip| self.push_clip(clip, node, combined));
                     self.drawing.push(*content);
@@ -4211,12 +4396,373 @@ impl<'d> SvgRenderer<'d> {
                     }
                 }
             }
-            _ => self.render_shape(node, transform, parent_style),
+            _ => self.render_shape(node, transform, parent_style, own_opacity),
         }
-        if let Some(OuterMask(outer)) = outer_mask {
-            self.mask = outer;
+    }
+
+    /// Draw `node` on a layer of its own and lay the layer on the surface,
+    /// where what it draws must be seen whole first: under a filter, which
+    /// works on the whole of it; and under an opacity, where what it draws
+    /// overlaps itself -- two children, or a stroke over its fill -- and
+    /// the opacity is of the whole, not of each part, so an overlap does
+    /// not show through. Answers whether it did: `false` where neither
+    /// applies, and the node is drawn as it stands.
+    ///
+    /// The node's own clip and mask, already in force, are laid over the
+    /// layer as it goes onto the surface -- after the filter, as the order
+    /// SVG gives them has it: filter, clip, mask, opacity.
+    fn render_layered(
+        &mut self,
+        node: &SvgNode,
+        transform: Transform,
+        parent_style: &ResolvedStyle,
+    ) -> bool {
+        let Some(style) = style_of(node) else {
+            return false;
+        };
+        let doc = self.doc;
+        let filters = style.filter.and_then(|place| doc.filter_lists.get(place));
+        let opacity = style.opacity.clamp(0.0, 1.0);
+        if filters.is_none() && !(opacity < 1.0 && overlaps_itself(node, parent_style)) {
+            return false;
         }
-        self.depth = self.depth.saturating_sub(1);
+        if opacity <= 0.0 {
+            // Nothing of it is seen, filtered or not.
+            return true;
+        }
+        match filters {
+            Some(places) => self.render_filtered(node, transform, parent_style, places, opacity),
+            None => self.render_faded(node, transform, parent_style, opacity),
+        }
+        true
+    }
+
+    /// Draw `node` on a layer covering what it draws, and lay it on the
+    /// surface at `opacity`. Where the drawing's budget for scratch surfaces
+    /// cannot pay for the layer, each paint is drawn at the opacity instead,
+    /// as it was before layers: an overlap shows through, but nothing is
+    /// lost.
+    fn render_faded(
+        &mut self,
+        node: &SvgNode,
+        transform: Transform,
+        parent_style: &ResolvedStyle,
+        opacity: f32,
+    ) {
+        let Some((x0, y0, x1, y1)) = self.layer_pixels(node, transform, parent_style) else {
+            return;
+        };
+        let Some(mut layer) = self.scratch(x1.saturating_sub(x0), y1.saturating_sub(y0)) else {
+            self.render_content(node, transform, parent_style, true);
+            return;
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a pixel coordinate on the surface, far inside f32's exact range"
+        )]
+        let origin = (x0 as f32, y0 as f32);
+        let shift = Transform::translate(-origin.0, -origin.1);
+        layer.render_content(node, shift.then(transform), parent_style, false);
+        self.absorb(&layer);
+        let (width, height) = (layer.width, layer.height);
+        self.lay(&layer.buffer, (width, height), origin, 1.0, opacity);
+    }
+
+    /// Draw `node` on a layer covering its filters' regions, apply them, and
+    /// lay the result on the surface at `opacity`. Nothing is drawn where
+    /// the filters say the element is not ([`filter`] says when), or where
+    /// the budget for scratch surfaces cannot pay for the layer or the
+    /// filters' work.
+    fn render_filtered(
+        &mut self,
+        node: &SvgNode,
+        transform: Transform,
+        parent_style: &ResolvedStyle,
+        places: &[usize],
+        opacity: f32,
+    ) {
+        // Under a clip or mask that leaves nothing, nothing is seen.
+        if self
+            .mask
+            .as_ref()
+            .is_some_and(|mask| mask.region().is_none())
+        {
+            return;
+        }
+        let doc = self.doc;
+        let local = transform.then(local_transform(node));
+        let bbox = self.bounds(node);
+        // Where the filters can draw: their regions, on the surface.
+        let mut extent = Extent::default();
+        let mut reach = 0.0f32;
+        for &place in places {
+            let Some(def) = doc.filters.get(place) else {
+                return;
+            };
+            let Some([x, y, w, h]) = filter::region(def, bbox) else {
+                return;
+            };
+            for (cx, cy) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
+                let (px, py) = local.apply(cx, cy);
+                extent.add(px, py);
+            }
+            reach += filter::reach(def, local, bbox);
+        }
+        let Some((x, y, w, h)) = extent.rect() else {
+            return;
+        };
+        // The regions cut to the surface grown by as far as the filters read
+        // from: what lies further out can reach nothing that is shown.
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a surface's side, far inside f32's exact range"
+        )]
+        let (sw, sh) = (self.width as f32, self.height as f32);
+        let reach = reach.min(sw.max(sh)).max(0.0);
+        let x0 = x.max(-reach).floor();
+        let y0 = y.max(-reach).floor();
+        let x1 = (x + w).min(sw + reach).ceil();
+        let y1 = (y + h).min(sh + reach).ceil();
+        if !(x1 > x0 && y1 > y0) {
+            return;
+        }
+        // At most MAX_FILTER_PIXELS: a larger region is filtered at a lower
+        // resolution and scaled up as it is laid down.
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a pixel count; the cap is far inside f32's exact range"
+        )]
+        let cap = self.filter_pixels.max(1) as f32;
+        let scale = (cap / ((x1 - x0) * (y1 - y0))).sqrt().min(1.0);
+        // Held to 1..=the cap's side first.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "positive, and at most MAX_FILTER_PIXELS along a side"
+        )]
+        let side = |v: f32| (v * scale).ceil().clamp(1.0, cap) as u32;
+        let (lw, lh) = (side(x1 - x0), side(y1 - y0));
+        let to_layer = Transform::scale(scale, scale).then(Transform::translate(-x0, -y0));
+        let Some(mut layer) = self.scratch(lw, lh) else {
+            return;
+        };
+        layer.render_content(node, to_layer.then(transform), parent_style, false);
+        self.absorb(&layer);
+        let (Ok(width), Ok(height)) = (usize::try_from(lw), usize::try_from(lh)) else {
+            return;
+        };
+        let target = Target {
+            to_layer: to_layer.then(local),
+            bbox,
+            width,
+            height,
+        };
+        let mut pixels = core::mem::take(&mut layer.buffer);
+        if !self.apply_filters(places, &mut pixels, &target) {
+            return;
+        }
+        self.lay(&pixels, (lw, lh), (x0, y0), scale, opacity);
+    }
+
+    /// The pixels of the surface what `node` draws can reach -- its shapes
+    /// and their strokes, `transform` carrying its parent's user space to
+    /// the pixels -- and the clips and masks in force leave anything of, as
+    /// columns `x0..x1` and rows `y0..y1`; `None` where that is nothing.
+    fn layer_pixels(
+        &self,
+        node: &SvgNode,
+        transform: Transform,
+        parent_style: &ResolvedStyle,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let mut extent = Extent::default();
+        let mut budget = MAX_REUSED_NODES;
+        let bounded = self.add_ink(node, transform, parent_style, &mut extent, 0, &mut budget);
+        let (mut x0, mut y0, mut x1, mut y1) = if bounded {
+            // A pixel more on every side for the edges' anti-aliasing.
+            let (x, y, w, h) = extent.rect()?;
+            let mut grown = Extent::default();
+            grown.add(x - 1.0, y - 1.0);
+            grown.add(x + w + 1.0, y + h + 1.0);
+            grown.pixels(self.width, self.height)?
+        } else {
+            (0, 0, self.width, self.height)
+        };
+        if let Some(mask) = &self.mask {
+            let (mx0, my0, mx1, my1) = mask.region()?;
+            x0 = x0.max(mx0);
+            y0 = y0.max(my0);
+            x1 = x1.min(mx1);
+            y1 = y1.min(my1);
+        }
+        (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+    }
+
+    /// Add what `node` can draw on -- `transform` carrying its parent's user
+    /// space to the pixels -- to `extent`: each shape's outline, grown by as
+    /// far as its stroke can reach past it. Answers `false` where that
+    /// cannot be bounded so: a filter, which can draw anywhere in its region,
+    /// or more of the drawing than `budget` nodes or [`MAX_DRAWN_DEPTH`]
+    /// levels.
+    fn add_ink(
+        &self,
+        node: &SvgNode,
+        transform: Transform,
+        parent_style: &ResolvedStyle,
+        extent: &mut Extent,
+        depth: usize,
+        budget: &mut usize,
+    ) -> bool {
+        let Some(left) = budget.checked_sub(1) else {
+            return false;
+        };
+        *budget = left;
+        if depth >= MAX_DRAWN_DEPTH {
+            return false;
+        }
+        if style_of(node).is_some_and(|style| style.filter.is_some()) {
+            return false;
+        }
+        let deeper = depth.saturating_add(1);
+        match node {
+            SvgNode::Svg { children, .. } => children
+                .iter()
+                .all(|child| self.add_ink(child, transform, parent_style, extent, deeper, budget)),
+            SvgNode::Group {
+                transform: local,
+                style,
+                children,
+            } => {
+                let combined = transform.then(*local);
+                let resolved = parent_style.with_overrides(style);
+                children
+                    .iter()
+                    .all(|child| self.add_ink(child, combined, &resolved, extent, deeper, budget))
+            }
+            SvgNode::Use {
+                transform: local,
+                placement,
+                style,
+                content,
+                ..
+            } => {
+                let doc = self.doc;
+                let Some(shown) = doc.reused.get(*content) else {
+                    return true;
+                };
+                let combined = transform.then(*local).then(*placement);
+                let resolved = parent_style.with_overrides(style);
+                self.add_ink(shown, combined, &resolved, extent, deeper, budget)
+            }
+            _ => {
+                let Some(style) = style_of(node) else {
+                    return true;
+                };
+                let combined = transform.then(local_transform(node));
+                let resolved = parent_style.with_overrides(style);
+                // Half the stroke's width, as far as a miter or a square cap
+                // can carry it -- along the axis the transform stretches most.
+                let margin = if resolved.stroke_paint().is_some() {
+                    let (sx, sy) = combined.axis_scales();
+                    let reach = match resolved.line_join {
+                        LineJoin::Miter => resolved.miter_limit.max(core::f32::consts::SQRT_2),
+                        LineJoin::Round | LineJoin::Bevel => core::f32::consts::SQRT_2,
+                    };
+                    0.5 * resolved.stroke_width.abs() * sx.max(sy) * reach
+                } else {
+                    0.0
+                };
+                if !margin.is_finite() {
+                    return false;
+                }
+                for subpath in shape_outline(node, combined) {
+                    for &(x, y) in &subpath.points {
+                        extent.add(x - margin, y - margin);
+                        extent.add(x + margin, y + margin);
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    /// Lay `pixels` -- a layer `size` wide and high, straight `[r, g, b,
+    /// a]` -- on the surface, its corner at `origin` and `scale` of its
+    /// pixels to one of the surface's, at `opacity` and under the clips and
+    /// masks in force. A layer at the surface's own scale on whole pixels is
+    /// copied pixel for pixel; any other is sampled between its pixels.
+    fn lay(
+        &mut self,
+        pixels: &[u8],
+        size: (u32, u32),
+        origin: (f32, f32),
+        scale: f32,
+        opacity: f32,
+    ) {
+        let (lw, lh) = size;
+        if lw == 0 || lh == 0 || scale <= 0.0 {
+            return;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a layer's side, far inside f32's exact range"
+        )]
+        let (span_x, span_y) = (lw as f32 / scale, lh as f32 / scale);
+        let (ox, oy) = origin;
+        let mut covered = Extent::default();
+        covered.add(ox, oy);
+        covered.add(ox + span_x, oy + span_y);
+        let Some((x0, y0, x1, y1)) = covered.pixels(self.width, self.height) else {
+            return;
+        };
+        // A scale within a rounding of one is one: the layer's pixels are the
+        // surface's, and sampling between them would only blur.
+        let exact = (scale - 1.0).abs() <= f32::EPSILON && ox.fract() == 0.0 && oy.fract() == 0.0;
+        let mask = self.mask.clone();
+        let layer = LayerPixels {
+            pixels,
+            width: lw,
+            height: lh,
+        };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let share = opacity * mask.as_ref().map_or(1.0, |mask| mask.share(x, y));
+                if share <= 0.0 {
+                    continue;
+                }
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a pixel coordinate on the surface, far inside f32's exact range"
+                )]
+                let (fx, fy) = (x as f32, y as f32);
+                let [r, g, b, a] = if exact {
+                    layer.pixel(fx - ox, fy - oy)
+                } else {
+                    layer.sample((fx + 0.5 - ox) * scale - 0.5, (fy + 0.5 - oy) * scale - 0.5)
+                };
+                let alpha = (a * share).clamp(0.0, 1.0);
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let channel = |c: f32| (c / a).clamp(0.0, 1.0);
+                // Each held to 0..=255 by the clamp, rounded first.
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "held to 0..=255 and rounded first"
+                )]
+                let byte = |share: f32| (share * 255.0 + 0.5) as u8;
+                self.blend_pixel(
+                    x,
+                    y,
+                    Color::rgba(
+                        byte(channel(r)),
+                        byte(channel(g)),
+                        byte(channel(b)),
+                        byte(alpha),
+                    ),
+                );
+            }
+        }
     }
 
     /// Lay `node`'s clip, if it has one, over what is already clipped round
@@ -4502,13 +5048,21 @@ impl<'d> SvgRenderer<'d> {
     }
 
     /// Draw the shape `node` -- anything but a container -- in the space
-    /// `transform` carries its parent's user space to the pixels.
-    fn render_shape(&mut self, node: &SvgNode, transform: Transform, parent_style: &ResolvedStyle) {
+    /// `transform` carries its parent's user space to the pixels; its own
+    /// opacity on each paint where `own_opacity`, and not where the layer it
+    /// is drawn on applies it.
+    fn render_shape(
+        &mut self,
+        node: &SvgNode,
+        transform: Transform,
+        parent_style: &ResolvedStyle,
+        own_opacity: bool,
+    ) {
         let Some(style) = style_of(node) else {
             return;
         };
         let combined = transform.then(local_transform(node));
-        let resolved = parent_style.with_overrides(style);
+        let resolved = parent_style.with_own(style, own_opacity);
         let outline = shape_outline(node, combined);
         self.paint(&outline, &resolved, combined);
     }

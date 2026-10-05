@@ -238,6 +238,19 @@ impl Mask {
         usize::try_from(at).ok()
     }
 
+    /// The pixels it could leave anything of, as columns `x0..x1` and rows
+    /// `y0..y1`; `None` where it leaves nothing anywhere.
+    pub(super) fn region(&self) -> Option<(u32, u32, u32, u32)> {
+        (self.width > 0 && self.height > 0).then(|| {
+            (
+                self.x0,
+                self.y0,
+                self.x0.saturating_add(self.width),
+                self.y0.saturating_add(self.height),
+            )
+        })
+    }
+
     /// What it leaves of the pixel `(x, y)`: 0 to 1.
     pub(super) fn share(&self, x: u32, y: u32) -> f32 {
         self.index(x, y)

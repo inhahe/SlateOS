@@ -68,7 +68,15 @@
 //! # A hostile file
 //!
 //! Errors, never a panic. Every table is bounded by the file's length
-//! before anything is allocated for it, and every box by its parent.
+//! before anything is allocated for it, and every box by its parent. What a
+//! table claims is bounded too: a file's tracks index at most one sample a
+//! byte of it between them, as every sample of a real file is at least a
+//! byte of it (design-decisions §1364). A track whose tables claim more --
+//! every sample one size and billions of them, a fragment's run of samples
+//! that take none of its bytes, an edit list giving the same samples again
+//! -- is held to that, and what is read of it is FFmpeg's still: the
+//! samples the file holds, then its end. FFmpeg's own ceilings -- the
+//! entries its allocator lets it index -- are kept exactly.
 
 mod demux;
 mod index;

@@ -20,7 +20,8 @@ FUZZ = os.path.join(HOME, "fuzz")
 TREE = os.path.join(FUZZ, "tree")
 
 # The harness's own dependencies, and every crate they reach by `path`.
-ROOTS = ["gui/imagecodec", "gui/video/codec", "gui/video/matroska", "gui/video/vp8", "gui/video/vp9"]
+ROOTS = ["gui/imagecodec", "gui/video/codec", "gui/video/matroska", "gui/video/mp4", "gui/video/vp8",
+         "gui/video/vp9"]
 PATH_DEP = re.compile(r'path\s*=\s*"([^"]+)"')
 
 
@@ -144,13 +145,18 @@ counts["sound"] = sum(add_files("sound", s) for s in (
 ))
 counts["matroska"] = add_files("matroska", "gui/video/matroska/tests/data") + add_files(
     "matroska", "gui/video/vp9/tests/data", (".webm",))
+# MP4 and QuickTime: the demuxer's own fixtures -- ffmpeg's files and the
+# hand-written ones that exercise each table -- and videocodec's.
+counts["mp4"] = add_files("mp4", "gui/video/mp4/tests/data", (".mp4", ".mov")) + add_files(
+    "mp4", "gui/video/codec/tests/data", (".mp4", ".mov", ".m4a"))
 
 # The subtitle fixtures: SubRip, ASS, SSA and WebVTT tracks, ffmpeg's and
-# mkvmerge's.
+# mkvmerge's; MP4's timed text; Blu-ray's PGS and DVD's VobSub pictures.
 n = 0
 codec_data = os.path.join(SRC, "gui/video/codec/tests/data")
 for name in sorted(os.listdir(codec_data)):
-    if name.startswith(("subrip", "ass", "ssa", "webvtt", "overlap")) and name.endswith((".mkv", ".webm")):
+    if name.startswith(("subrip", "ass", "ssa", "webvtt", "overlap", "movtext", "pgs", "vobsub", "dvb")) and name.endswith(
+            (".mkv", ".webm", ".mp4")):
         shutil.copy2(os.path.join(codec_data, name), os.path.join(seed_dir("subtitles"), name))
         n += 1
 counts["subtitles"] = n

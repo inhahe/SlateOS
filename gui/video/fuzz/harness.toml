@@ -16,6 +16,7 @@ libfuzzer-sys = "0.4"
 imagecodec = { path = "../gui/imagecodec" }
 videocodec = { path = "../gui/video/codec" }
 matroska = { path = "../gui/video/matroska" }
+mp4 = { path = "../gui/video/mp4" }
 vp8 = { path = "../gui/video/vp8" }
 vp9 = { path = "../gui/video/vp9" }
 
@@ -56,6 +57,13 @@ bench = false
 [[bin]]
 name = "matroska"
 path = "fuzz_targets/matroska.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mp4"
+path = "fuzz_targets/mp4.rs"
 test = false
 doc = false
 bench = false

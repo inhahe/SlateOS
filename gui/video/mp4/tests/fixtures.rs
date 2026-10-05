@@ -86,7 +86,12 @@ fn answers(name: &str) -> Answers {
                 stream: w[1].parse().unwrap(),
                 pts: w[2].parse().unwrap(),
                 dts: w[3].parse().unwrap(),
-                duration: w[4].parse().unwrap(),
+                // ffprobe prints a duration of 0 as N/A.
+                duration: if w[4] == "N/A" {
+                    0
+                } else {
+                    w[4].parse().unwrap()
+                },
                 size: w[5].parse().unwrap(),
                 pos: w[6].parse().unwrap(),
                 flags: w[7].to_owned(),
@@ -637,6 +642,102 @@ fn packets_of_vpcc_short() {
 #[test]
 fn packets_of_vpcc_version_0() {
     demuxes_as_ffmpeg_does("vpcc_version_0.mp4");
+}
+
+// Tables claiming more samples than the file has bytes for, or than FFmpeg
+// can index. The crate holds an index to what the file's length allows,
+// FFmpeg to what it can allocate: what either reads is the same.
+
+#[test]
+fn packets_of_claims_a_million() {
+    demuxes_as_ffmpeg_does("claims_a_million.mp4");
+}
+
+#[test]
+fn packets_of_claims_ffmpeg_whole_index() {
+    demuxes_as_ffmpeg_does("claims_ffmpeg_whole_index.mp4");
+}
+
+#[test]
+fn packets_of_claims_past_ffmpeg_index() {
+    demuxes_as_ffmpeg_does("claims_past_ffmpeg_index.mp4");
+}
+
+#[test]
+fn packets_of_trun_claims_a_million() {
+    demuxes_as_ffmpeg_does("trun_claims_a_million.mp4");
+}
+
+#[test]
+fn packets_of_trun_ffmpeg_whole_index() {
+    demuxes_as_ffmpeg_does("trun_ffmpeg_whole_index.mp4");
+}
+
+#[test]
+fn packets_of_trun_past_ffmpeg_index() {
+    demuxes_as_ffmpeg_does("trun_past_ffmpeg_index.mp4");
+}
+
+#[test]
+fn packets_of_trun_runs_claim_millions() {
+    demuxes_as_ffmpeg_does("trun_runs_claim_millions.mp4");
+}
+
+#[test]
+fn packets_of_trun_time_overflows() {
+    demuxes_as_ffmpeg_does("trun_time_overflows.mp4");
+}
+
+#[test]
+fn packets_of_trun_run_of_no_size() {
+    demuxes_as_ffmpeg_does("trun_run_of_no_size.mp4");
+}
+
+#[test]
+fn packets_of_chunked_below_ffmpeg_tts_limit() {
+    demuxes_as_ffmpeg_does("chunked_below_ffmpeg_tts_limit.mp4");
+}
+
+#[test]
+fn packets_of_chunked_at_ffmpeg_tts_limit() {
+    demuxes_as_ffmpeg_does("chunked_at_ffmpeg_tts_limit.mp4");
+}
+
+#[test]
+fn packets_of_chunked_ffmpeg_whole_tts() {
+    demuxes_as_ffmpeg_does("chunked_ffmpeg_whole_tts.mp4");
+}
+
+#[test]
+fn packets_of_chunked_past_ffmpeg_tts() {
+    demuxes_as_ffmpeg_does("chunked_past_ffmpeg_tts.mp4");
+}
+
+#[test]
+fn packets_of_chunked_total_wraps() {
+    demuxes_as_ffmpeg_does("chunked_total_wraps.mp4");
+}
+
+#[test]
+fn packets_of_chunked_misaligned_frames() {
+    demuxes_as_ffmpeg_does("chunked_misaligned_frames.mp4");
+}
+
+#[test]
+fn packets_of_stsc_count_negative() {
+    demuxes_as_ffmpeg_does("stsc_count_negative.mp4");
+}
+
+#[test]
+fn packets_of_edits_repeat() {
+    demuxes_as_ffmpeg_does("edits_repeat.mp4");
+}
+
+// Files the fuzzer found.
+
+#[test]
+fn packets_of_found_tx3g_claims_billions() {
+    demuxes_as_ffmpeg_does("found_tx3g_claims_billions.mp4");
 }
 
 /// One seek's answer: where to, in milliseconds, and each packet after it

@@ -4203,6 +4203,12 @@ lane C's `guitk`.
         turn; and what a track says of its picture (colour, pixel shape,
         display matrix, clean aperture), held to ffprobe over 28 files more.
         It carries FFmpeg's licence (LGPL): open-questions F-Q7.
+      - `[x]` A file's claims held to its length: its tracks index at most a
+        sample a byte of it between them, FFmpeg's own ceilings kept exactly
+        -- after the fuzzer found a 734-byte file that asked for 46 GB.
+        Eighteen files claiming more than they hold or FFmpeg can index,
+        each read as ffprobe reads it; a fuzz target of the demuxer's own.
+        design-decisions §1364.
       - `[x]` In `videocodec`: a file opened by what it is -- EBML's magic,
         or FFmpeg's MP4 probe -- and played the same way through one
         container layer: MP4's edit lists obeyed (frames before a cut
@@ -4319,8 +4325,37 @@ lane C's `guitk`.
     mkvmerge-muxed, and timed text written box by box; 387 cues) held to
     ffmpeg's SRT cue for cue but for 72 departures, each checked against
     libass, HTML or the specification; seeks give the cues still showing.
-    Pictures of text are refused by name. Not yet: MP4's WebVTT and TTML
-    (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
+    - `[x]` Blu-ray's PGS, pictures of text (2026-10-05, design-decisions
+      §1362): cues of images (`Cue::images`, `CueImage`) -- RGBA on the
+      film's canvas, forced ones marked -- FFmpeg's pixels to the bit, its
+      rules read off its output probe by probe (epochs, palettes, the first
+      two objects, run-length damage, its 10-bit fixed-point colours), but
+      that a crop is made as a Blu-ray player makes it. A seek reads from
+      the start of the epoch the time falls in. Four fixtures written
+      segment by segment, held to FFmpeg's sub2video pictures at every
+      change, with every subtitle and with the forced alone.
+    - `[x]` DVD's VobSub (2026-10-05, design-decisions §1363): the same cues
+      of images, FFmpeg's pixels to the bit (its trimming, its grey ramps
+      without a palette, its leniency without a start or a stop), but each
+      control sequence takes effect at its date -- fades, colour changes, a
+      second start -- and a transparent subpicture clears, as a DVD player
+      shows them. One reader for both kinds of pictures: timed changes, a
+      new block superseding an old one's later changes; a seek steps back
+      one subpicture. Five fixtures written subpicture by subpicture (an
+      MPEG program stream and its index), held to FFmpeg's pictures.
+    - `[x]` DVB's subtitles, TV recordings' pictures (2026-10-05,
+      design-decisions §1365): the same cues of images, a receiver's as
+      FFmpeg's `dvbsub` draws them read as a receiver reads -- the
+      service's own pages, the standard's default CLUT -- its rules read
+      off its output probe by probe (pages, regions kept between sets,
+      objects drawn when their data comes, CLUT and display versions, map
+      tables, the display window, timeouts, damage), but four departures
+      where FFmpeg's drawing is not a receiver's: an entry for several
+      CLUTs, a region's background before its objects, the non-modifying
+      colour, several display sets in a block. Five fixtures written
+      segment by segment, in a Matroska file of the generator's own.
+    - `[ ]` MP4's WebVTT and TTML
+      (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

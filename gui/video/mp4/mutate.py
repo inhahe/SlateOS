@@ -40,6 +40,11 @@ def seeks(name):
 ALONE = "a_track_selected_alone_gives_the_packets_it_gives_among_the_others"
 ALONE_READS_OWN = "a_track_selected_alone_reads_its_own_samples_alone"
 
+# The room the file's length leaves the indexes, and FFmpeg's ceilings.
+ROOM = "a_track_takes_no_more_entries_than_the_room_left"
+FILE_ROOM = "a_files_tracks_take_no_more_entries_than_it_has_bytes"
+CUT_EDITED = "an_index_held_to_the_room_is_edited_as_a_whole_one_would_be"
+
 
 INDEX = [
     (
@@ -137,6 +142,90 @@ INDEX = [
         "        self.start_pad = self.skip_samples;",
         "        self.start_pad = 0;",
         [packets("aac"), seeks("vp9_opus")],
+    ),
+    (
+        "a track's index takes nothing from the room",
+        "        *room = room.saturating_sub(taken);",
+        "        let _ = taken;",
+        [ROOM, FILE_ROOM],
+    ),
+    (
+        "an index is not held to the room",
+        "        let samples = self.sample_count.min(limit);",
+        "        let samples = self.sample_count;",
+        [ROOM, FILE_ROOM],
+    ),
+    (
+        "an index held to the room is left unedited",
+        "                if current_sample >= samples {\n                    // The rest",
+        "                if current_sample >= samples {\n                    finished = false;\n                    // The rest",
+        [CUT_EDITED],
+    ),
+    (
+        "an index FFmpeg cannot allocate is built",
+        "        if self.sample_count > INDEX_ALLOC {",
+        "        if false && self.sample_count > INDEX_ALLOC {",
+        [packets("claims_past_ffmpeg_index"), "an_index_ffmpeg_cannot_allocate_is_none"],
+    ),
+    (
+        "times are spread out past FFmpeg's ceiling",
+        "        if self.sample_count == 0 || self.sample_count >= TTS_LIMIT {",
+        "        if self.sample_count == 0 {",
+        [packets("chunked_at_ffmpeg_tts_limit")],
+    ),
+    (
+        "times are spread out past what FFmpeg can allocate",
+        "        if (ctts || stts) && self.sample_count > TTS_ALLOC {",
+        "        if false && (ctts || stts) && self.sample_count > TTS_ALLOC {",
+        [packets("chunked_past_ffmpeg_tts")],
+    ),
+    (
+        "a table of times is allocated though nothing is spread into it",
+        "        let mut tts = vec![Tts::default(); len];",
+        "        let mut tts = vec![Tts::default(); if ctts || stts { len } else { samples }];",
+        ["sound_in_chunks_keeps_no_table_of_times_it_does_not_merge"],
+    ),
+    (
+        "times are spread out past the room",
+        "        let samples = usize::try_from(self.sample_count.min(limit)).unwrap_or(0);",
+        "        let samples = usize::try_from(self.sample_count).unwrap_or(0);",
+        [ROOM],
+    ),
+    (
+        "sound in chunks is indexed past what FFmpeg can allocate",
+        "        if total > INDEX_ALLOC {",
+        "        if false && total > INDEX_ALLOC {",
+        ["packets_ffmpeg_cannot_index_in_chunks_are_none"],
+    ),
+    (
+        "the count of sound's packets does not wrap as FFmpeg's",
+        "            total = total.wrapping_add(chunk_count.wrapping_mul(count));",
+        "            total = total.saturating_add(chunk_count.saturating_mul(count));",
+        [packets("chunked_total_wraps")],
+    ),
+    (
+        "sound in chunks is not held to the room",
+        "                if self.index.len() >= packets {",
+        "                if false && self.index.len() >= packets {",
+        [ROOM],
+    ),
+    (
+        "sound in chunks held to the room is left unedited",
+        "                if self.index.len() >= packets {\n                    // The rest",
+        "                if self.index.len() >= packets {\n                    finished = false;\n                    // The rest",
+        [CUT_EDITED],
+    ),
+    (
+        "a frame count left below zero ends its chunk",
+        "                chunk_samples = chunk_samples.wrapping_sub(samples);",
+        "                chunk_samples = chunk_samples.saturating_sub(samples);",
+        [packets("chunked_misaligned_frames")],
+    ),
+    (
+        "edits giving samples again take more than the room",
+        "                if self.index.len() >= room {",
+        "                if false && self.index.len() >= room {",
+        ["edits_giving_samples_again_take_no_more_than_the_room"],
     ),
 ]
 
@@ -296,6 +385,54 @@ PARSE = [
         "        let read = self.r.pos().saturating_sub(start);",
         "        let read = 0;",
         [packets("mov_text")],
+    ),
+    (
+        "the room is not the file's length",
+        "        let entries_left = r.len();",
+        "        let entries_left = u64::MAX;",
+        [FILE_ROOM],
+    ),
+    (
+        "an stsc's numbers are unsigned, not FFmpeg's ints",
+        "            || count < 1\n",
+        "            || count == 0\n",
+        ["an_stsc_is_repaired_as_ffmpeg_repairs_it", packets("stsc_count_negative")],
+    ),
+    (
+        "a run FFmpeg cannot index is read",
+        "        if indexed.saturating_add(u64::from(entries)) > u64::from(INDEX_ALLOC) {",
+        "        if false && indexed.saturating_add(u64::from(entries)) > u64::from(INDEX_ALLOC) {",
+        [packets("trun_past_ffmpeg_index")],
+    ),
+    (
+        "a run is indexed past the room",
+        "        let kept = entries.min(u32::try_from(self.entries_left).unwrap_or(u32::MAX));",
+        "        let kept = entries;",
+        [FILE_ROOM],
+    ),
+    (
+        "a run's samples past the room do not move its time on",
+        "                dts = i64::try_from(end).unwrap_or(i64::MAX);",
+        "                let _ = end;",
+        [packets("trun_claims_a_million"), packets("trun_runs_claim_millions")],
+    ),
+    (
+        "a run's samples past the room are not refused as FFmpeg refuses them",
+        "                if frag.size == 0 || end > i128::from(i64::MAX) {",
+        "                if false {",
+        [packets("trun_time_overflows"), packets("trun_run_of_no_size")],
+    ),
+    (
+        "a run's samples giving their fields are indexed past the room",
+        "            if n < kept {",
+        "            if true {",
+        [FILE_ROOM],
+    ),
+    (
+        "a run's samples take nothing from the room",
+        "                self.entries_left = self.entries_left.saturating_sub(1);\n",
+        "",
+        [FILE_ROOM],
     ),
 ]
 

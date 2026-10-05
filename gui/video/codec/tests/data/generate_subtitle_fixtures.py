@@ -32,11 +32,33 @@ that encoder never writes -- a styled default, justification, colours,
 fonts, style runs out of order. ffmpeg's SRT of each is the answer, as for
 the rest.
 
+Blu-ray's PGS, pictures of text, which ffmpeg cannot write: `pgs*.mkv` are
+written here segment by segment (`PgsSet`, `make_pgs`) and muxed by
+mkvmerge. Their answer, NAME.states, is a list of pictures: the canvas
+FFmpeg's sub2video draws the track on, at each change, as an MD5 of its
+RGBA bytes -- with every subtitle shown, and (`forced` lines) with only the
+forced ones (ffmpeg's `-forced_subs_only`). For the well-formed fixtures the
+generator draws every display set itself, from what it wrote, and stops
+unless ffmpeg agrees at every one, colours to the bit; `pgs_cropped`'s crops
+are where the crate crops as a Blu-ray player does and ffmpeg does not, and
+there the answer is the generator's drawing. `pgs_damage` is display sets
+no muxer writes, and its answer is ffmpeg's alone.
+
+DVD's VobSub, pictures too, which ffmpeg writes only from other pictures
+(dropping their clears and quantising their colours): `vobsub*.mkv` are
+written here SPU by SPU (`VobSpu`, `vob_write`, an MPEG program stream and
+its index) and muxed by mkvmerge, their answers made as PGS's are
+(`make_vobsub`). `vobsub_dvd`'s departures are where a DVD player shows
+otherwise -- a later control sequence's colours, fade or second start taking
+effect at its date, a transparent SPU clearing the screen -- and there the
+answer is the generator's drawing; `vobsub_damage`'s is ffmpeg's alone.
+
 Run from this directory, on Windows, with gyan.dev's ffmpeg (2026-03-09, git
 9b7439c31b) and MKVToolNix's mkvmerge 99.0 on PATH (or in the MKVMERGE
 environment variable): `python generate_subtitle_fixtures.py`.
 """
 
+import hashlib
 import os
 import shutil
 import struct
@@ -626,9 +648,9 @@ def ffmpeg(*args):
         sys.exit(f"ffmpeg {' '.join(args)} failed:\n{r.stderr}")
 
 
-def mkvmerge(out, src):
+def mkvmerge(out, src, *options):
     # Deterministic: no date, and the same UIDs each run.
-    r = subprocess.run([MKVMERGE, "--quiet", "--deterministic", "subtitles", "-o", out, src],
+    r = subprocess.run([MKVMERGE, "--quiet", "--deterministic", "subtitles", *options, "-o", out, src],
                        capture_output=True, text=True, encoding="utf-8")
     if r.returncode != 0:
         sys.exit(f"mkvmerge {out} {src} failed:\n{r.stdout}{r.stderr}")
@@ -680,6 +702,1581 @@ def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, 
     print("wrote", out, raw, answer)
 
 
+# --- Blu-ray's PGS: pictures of text, written here segment by segment -------
+#
+# ffmpeg writes no PGS, so these are written here, as the probes that found
+# FFmpeg's rules were: a display set a block, each a list of segments. The
+# answer, NAME.states, is FFmpeg's: the picture its sub2video shows at each
+# change, as an MD5 of the canvas's RGBA bytes. For the well-formed fixtures
+# the generator also draws every state itself (`pgs_draw`, from what it
+# wrote) and stops unless FFmpeg agrees -- but for the states PGS_DEPARTURES
+# names, where the crate crops an object as a Blu-ray player does and FFmpeg
+# does not; there the answer is the generator's drawing.
+
+PGS_PDS, PGS_ODS, PGS_PCS, PGS_WDS, PGS_END = 0x14, 0x15, 0x16, 0x17, 0x80
+
+
+def pgs_segment(kind, ms_time, body):
+    """A .sup segment: "PG", the time at 90 kHz twice (PTS, DTS 0), the type,
+    the length, the body."""
+    return b"PG" + struct.pack(">IIBH", ms_time * 90, 0, kind, len(body)) + body
+
+
+def pgs_pcs(canvas, number, state, palette, objects):
+    """objects: (id, x, y, forced, crop or None)."""
+    body = struct.pack(">HHBHBBBB", *canvas, 0x10, number, state, 0, palette, len(objects))
+    for oid, x, y, forced, crop in objects:
+        body += struct.pack(">HBBHH", oid, 0, (0x80 if crop else 0) | (0x40 if forced else 0), x, y)
+        if crop:
+            body += struct.pack(">HHHH", *crop)
+    return body
+
+
+def pgs_rle(rows):
+    """Rows of palette indexes, coded as PGS codes them: the shortest code
+    for each run."""
+    out = bytearray()
+    for row in rows:
+        i = 0
+        while i < len(row):
+            c, n = row[i], 1
+            while i + n < len(row) and row[i + n] == c and n < 16383:
+                n += 1
+            if c == 0:
+                out += bytes([0, n]) if n < 64 else bytes([0, 0x40 | n >> 8, n & 0xFF])
+            elif n < 3:
+                out += bytes([c]) * n
+            elif n < 64:
+                out += bytes([0, 0x80 | n, c])
+            else:
+                out += bytes([0, 0xC0 | n >> 8, n & 0xFF, c])
+            i += n
+        out += b"\x00\x00"
+    return bytes(out)
+
+
+def pgs_ods(oid, rows, pieces=1):
+    """An object's segments' bodies: whole, or its codes cut into `pieces`."""
+    codes = pgs_rle(rows)
+    head = struct.pack(">HB", oid, 0)
+    size = (len(codes) + 4).to_bytes(3, "big") + struct.pack(">HH", len(rows[0]), len(rows))
+    cuts = [len(codes) * k // pieces for k in range(pieces + 1)]
+    bodies = []
+    for k in range(pieces):
+        flags = (0x80 if k == 0 else 0) | (0x40 if k == pieces - 1 else 0)
+        bodies.append(head + bytes([flags]) + (size if k == 0 else b"") + codes[cuts[k]:cuts[k + 1]])
+    return bodies
+
+
+class PgsSet:
+    """One display set: at `ms`, composing `objects` (id, x, y, forced, crop)
+    in `palette`, after defining `palettes` ((id, [(entry, Y, Cr, Cb, A)]))
+    and `shapes` ((id, rows, pieces)). `raw` replaces the segments' bodies
+    with these (type, body) pairs, for damage the writer would not make."""
+
+    def __init__(self, ms_time, state=0x80, objects=(), palette=0, palettes=(), shapes=(),
+                 raw=None):
+        self.ms, self.state, self.objects, self.palette = ms_time, state, list(objects), palette
+        self.palettes, self.shapes, self.raw = list(palettes), list(shapes), raw
+
+    def segments(self, canvas, number):
+        if self.raw is not None:
+            return b"".join(pgs_segment(kind, self.ms, body) for kind, body in self.raw)
+        out = pgs_segment(PGS_PCS, self.ms, pgs_pcs(canvas, number, self.state, self.palette, self.objects))
+        windows = [(i, x, y, 1, 1) for i, (_, x, y, _, _) in enumerate(self.objects[:2])]
+        out += pgs_segment(PGS_WDS, self.ms, bytes([len(windows)]) + b"".join(
+            struct.pack(">BHHHH", *w) for w in windows))
+        for pid, entries in self.palettes:
+            out += pgs_segment(PGS_PDS, self.ms, bytes([pid, 0]) + b"".join(bytes(e) for e in entries))
+        for oid, rows, pieces in self.shapes:
+            for body in pgs_ods(oid, rows, pieces):
+                out += pgs_segment(PGS_ODS, self.ms, body)
+        return out + pgs_segment(PGS_END, self.ms, b"")
+
+
+def pgs_colour(y, cr, cb, sd):
+    """FFmpeg's conversion: BT.709's or (sd) BT.601's matrix on the studio
+    range, in 10-bit fixed point (found by probing; design-decisions §1362)."""
+    def fix(x):
+        return int(x * 1024 + 0.5)
+    kr, gb, gr, kb = (1.402, 0.34414, 0.71414, 1.772) if sd else (1.5747, 0.1873, 0.4682, 1.8556)
+    cb, cr = cb - 128, cr - 128
+    yy = (y - 16) * fix(255 / 219)
+    return tuple(max(0, min(255, (yy + v + 512) >> 10)) for v in (
+        fix(kr * 255 / 224) * cr,
+        -fix(gb * 255 / 224) * cb - fix(gr * 255 / 224) * cr,
+        fix(kb * 255 / 224) * cb))
+
+
+def pgs_draw(sets, canvas):
+    """Each display set's picture as the crate shows it -- for the sets the
+    generator wrote whole: [(ms, md5)] for those that change it."""
+    w, h = canvas
+    sd = 0 < h <= 576
+    objects, palettes, states = {}, {}, []
+    for s in sets:
+        if s.state & 0xC0:
+            objects.clear()
+            palettes.clear()
+        for pid, entries in s.palettes:
+            p = palettes.setdefault(pid, [(0, 0, 0, 0)] * 256)
+            for e, y, cr, cb, a in entries:
+                p[e] = (*pgs_colour(y, cr, cb, sd), a)
+        for oid, rows, _ in s.shapes:
+            objects[oid] = rows
+        if s.objects and s.palette not in palettes:
+            continue
+        frame = bytearray(w * h * 4)
+        for oid, x, y, _, crop in s.objects[:2]:
+            rows = objects.get(oid)
+            if rows is None:
+                continue
+            left, top, cw, ch = crop or (0, 0, len(rows[0]), len(rows))
+            for r in range(top, min(top + ch, len(rows))):
+                for c in range(left, min(left + cw, len(rows[0]))):
+                    at = ((y + r - top) * w + x + c - left) * 4
+                    frame[at:at + 4] = bytes(palettes[s.palette][rows[r][c]])
+        states.append((s.ms, hashlib.md5(frame).hexdigest()))
+    return states
+
+
+def dedup(states):
+    """[(ms, md5)] with each repeat of the picture before it dropped, and of
+    pictures at one time the last alone -- what shows."""
+    out = []
+    for t, md5 in states:
+        if out and out[-1][0] == t:
+            out.pop()
+        if not out or out[-1][1] != md5:
+            out.append((t, md5))
+    return out
+
+
+def sub2video_states(mkv, canvas, forced=False, extra=()):
+    """FFmpeg's picture at each change -- of the forced subtitles alone with
+    `forced` -- as [(ms, md5)], the blank it shows before the first
+    subtitle's dropped. `extra`: the decoder's options."""
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", *(["-forced_subs_only", "1"] if forced else []), *extra, "-copyts",
+         "-i", mkv, "-filter_complex", "[0:s:0]format=rgba[v]", "-map", "[v]", "-fps_mode",
+         "passthrough", "-copyts", "-f", "framemd5", "-"],
+        capture_output=True, text=True, encoding="utf-8")
+    if r.returncode != 0:
+        sys.exit(f"sub2video of {mkv} failed:\n{r.stderr}")
+    blank = hashlib.md5(bytes(canvas[0] * canvas[1] * 4)).hexdigest()
+    states = []
+    for line in r.stdout.splitlines():
+        if line.startswith("#"):
+            continue
+        _, _, pts, _, _, md5 = (f.strip() for f in line.split(","))
+        t = int(pts)
+        if t % 1000:
+            continue  # the frame sub2video shows a microsecond before a change
+        if states and states[-1][0] == t // 1000:
+            states[-1] = (t // 1000, md5)  # the last frame at a time is what shows
+        elif not states or states[-1][1] != md5:
+            states.append((t // 1000, md5))
+    while states and states[0][1] == blank:
+        states.pop(0)
+    # sub2video's last frame, at a time past every subtitle's end.
+    if states and states[-1][0] > 4_000_000:
+        states.pop()
+    return dedup(states)
+
+
+def shown_at(states, t):
+    """The picture `states` shows at `t` ms: the last change at or before."""
+    md5 = None
+    for st, m in states:
+        if st <= t:
+            md5 = m
+    return md5
+
+
+def make_pgs(name, canvas, sets, departures=(), drawn=True):
+    """Write NAME.mkv of `sets`, and NAME.states: FFmpeg's pictures, all of
+    them and the forced alone. With `drawn` they are checked against the
+    generator's drawing of every display set, and the sets at the times in
+    `departures` show the drawing's instead."""
+    sup = os.path.join(HERE, f"{name}.source.sup")
+    out = os.path.join(HERE, f"{name}.mkv")
+    with open(sup, "wb") as f:
+        for n, s in enumerate(sets):
+            f.write(s.segments(canvas, n))
+    mkvmerge(out, sup)
+    os.remove(sup)
+    states = sub2video_states(out, canvas)
+    forced = sub2video_states(out, canvas, forced=True)
+    if drawn:
+        drawing = pgs_draw(sets, canvas)
+        # Of sets at one time, the last is what shows.
+        for t, md5 in dict(drawing).items():
+            if t not in departures and shown_at(states, t) != md5:
+                sys.exit(f"{name}: at {t} ms FFmpeg shows {shown_at(states, t)}, the drawing {md5}")
+        times = {t for t, _ in drawing}
+        for t, _ in states:
+            if t not in times:
+                sys.exit(f"{name}: FFmpeg's picture changes at {t} ms, where nothing was written")
+        blank = hashlib.md5(bytes(canvas[0] * canvas[1] * 4)).hexdigest()
+        states = dedup(drawing)
+        while states and states[0][1] == blank:
+            states.pop(0)
+        if departures and any(s.objects and any(o[3] for o in s.objects) for s in sets):
+            sys.exit(f"{name}: forced subtitles and departures in one fixture: the forced"
+                     " answer would be FFmpeg's, uncropped")
+    answer = os.path.join(HERE, f"{name}.states")
+    write(answer, f"# {name}.mkv: the picture at each change, as an MD5 of the RGBA canvas;"
+                  f" `forced` lines with only forced subtitles shown"
+                  f" (generate_subtitle_fixtures.py)\ncanvas {canvas[0]} {canvas[1]}\n"
+                  + "".join(f"state {t} {md5}\n" for t, md5 in states)
+                  + "".join(f"forced {t} {md5}\n" for t, md5 in forced))
+    print("wrote", out, answer)
+
+
+PGS_CANVAS = (1280, 720)
+# White, black, a half-transparent red, a green at 200.
+PGS_PALETTE = [(1, 235, 128, 128, 255), (2, 16, 128, 128, 255), (3, 81, 240, 90, 128),
+               (4, 145, 34, 54, 200)]
+# Entries 1 and 2 again, blue and yellow: 3 and 4 kept.
+PGS_UPDATE = [(1, 41, 110, 240, 255), (2, 210, 146, 16, 255)]
+# Alpha from 0 (its colour kept, unseen) to 255.
+PGS_ALPHAS = [(1, 235, 128, 128, 0), (2, 81, 240, 90, 1), (3, 145, 34, 54, 127),
+              (4, 41, 110, 240, 254), (5, 210, 146, 16, 255)]
+# Colours across the cube, for the 601 matrix.
+PGS_SD_PALETTE = [(i, 16 + 27 * i, 255 - 20 * i, 30 * i % 256, 255) for i in range(1, 9)]
+
+
+def pgs_shape(w, h, k):
+    """A picture like a line of text: strokes of 1, outlined in 2, on 0."""
+    rows = []
+    for r in range(h):
+        row = []
+        for c in range(w):
+            ink = (c // 7 + k) % 3 != 0 and 3 <= r % 12 < 10 and c % 7 < 5
+            edge = (c // 7 + k) % 3 != 0 and (r % 12 in (2, 10) or c % 7 == 5) and 2 <= r % 12 <= 10
+            row.append(1 if ink else 2 if edge else 0)
+        rows.append(row)
+    return rows
+
+
+def pgs_scenes():
+    line = pgs_shape(300, 40, 0)
+    line2 = pgs_shape(200, 30, 1)
+    # Runs of 64 and more: the long codes.
+    wide = [[1] * 1000 + [0] * 100 + [3] * 70 for _ in range(10)]
+    alphas = [[1, 2, 3, 4, 5] * 8 for _ in range(8)]
+    pal = [(0, PGS_PALETTE)]
+    shown = [
+        # A line, then cleared.
+        PgsSet(1000, objects=[(0, 490, 620, False, None)], palettes=pal, shapes=[(0, line, 1)]),
+        PgsSet(2000, state=0),
+        # Two objects at once.
+        PgsSet(3000, objects=[(0, 100, 50, False, None), (1, 700, 600, False, None)], palettes=pal,
+               shapes=[(0, line, 1), (1, line2, 1)]),
+        PgsSet(4000, state=0),
+        # Within an epoch: shown, its palette changed, moved, its picture
+        # replaced -- each set naming what the epoch holds.
+        PgsSet(5000, objects=[(0, 200, 300, False, None)], palettes=pal, shapes=[(0, line, 1)]),
+        PgsSet(6000, state=0, objects=[(0, 200, 300, False, None)], palettes=[(0, PGS_UPDATE)]),
+        PgsSet(7000, state=0, objects=[(0, 400, 350, False, None)]),
+        PgsSet(8000, state=0, objects=[(0, 400, 350, False, None)], shapes=[(0, line2, 1)]),
+        PgsSet(9000, state=0),
+        # An object in three segments.
+        PgsSet(10000, objects=[(3, 10, 10, False, None)], palettes=pal, shapes=[(3, line, 3)]),
+        PgsSet(11000, state=0),
+        # Forced; then replaced by the next epoch with no clear between.
+        PgsSet(12000, objects=[(0, 300, 500, True, None)], palettes=pal, shapes=[(0, line2, 1)]),
+        PgsSet(13000, objects=[(1, 50, 650, False, None)], palettes=pal, shapes=[(1, wide, 1)]),
+        PgsSet(14000, state=0),
+        # Every alpha.
+        PgsSet(15000, objects=[(0, 0, 0, False, None)], palettes=[(0, PGS_ALPHAS)], shapes=[(0, alphas, 1)]),
+        PgsSet(16000, state=0),
+        # An acquisition point bringing what it shows; a palette numbered 5.
+        PgsSet(17000, state=0x40, objects=[(0, 640, 360, False, None)], palettes=pal, shapes=[(0, line, 1)]),
+        PgsSet(18000, state=0),
+        PgsSet(19000, objects=[(0, 640, 360, True, None)], palette=5, palettes=[(5, PGS_PALETTE)],
+               shapes=[(0, line, 1)]),
+        PgsSet(20000, state=0),
+        # Two sets at one time: the first never seen. The second is never
+        # cleared, and shows until the film ends.
+        PgsSet(21000, objects=[(0, 100, 100, False, None)], palettes=pal, shapes=[(0, line2, 1)]),
+        PgsSet(21000, objects=[(0, 500, 100, False, None)], palettes=pal, shapes=[(0, line, 1)]),
+    ]
+    sd = [
+        PgsSet(1000, objects=[(0, 20, 400, False, None)], palettes=[(0, PGS_SD_PALETTE)],
+               shapes=[(0, [[(c // 8) % 9 for c in range(72)] for _ in range(16)], 1)]),
+        PgsSet(2000, state=0),
+    ]
+    cropped = [
+        # A crop of the line; one reaching past it, cut to it; the whole
+        # again; one wholly outside it, showing nothing.
+        PgsSet(1000, objects=[(0, 100, 100, False, (10, 5, 100, 20))], palettes=pal, shapes=[(0, line, 1)]),
+        PgsSet(2000, state=0, objects=[(0, 100, 100, False, (250, 30, 200, 200))]),
+        PgsSet(3000, state=0, objects=[(0, 100, 100, False, None)]),
+        PgsSet(4000, state=0, objects=[(0, 100, 100, False, (400, 0, 10, 10))]),
+        PgsSet(5000, state=0),
+    ]
+    return shown, sd, cropped
+
+
+def pgs_damage():
+    """Display sets a muxer would not write, each as FFmpeg's rules take it:
+    the answer is FFmpeg's pictures alone."""
+    tile = pgs_shape(40, 24, 0)
+    pal = [(0, PGS_PALETTE)]
+    end = (PGS_END, b"")
+
+    def palette(pid):
+        return (PGS_PDS, bytes([pid, 0]) + b"".join(bytes(e) for e in PGS_PALETTE))
+
+    def obj(oid, rows):
+        return (PGS_ODS, pgs_ods(oid, rows)[0])
+
+    def comp(state, palette_id, objects):
+        return (PGS_PCS, pgs_pcs(PGS_CANVAS, 0, state, palette_id, objects))
+
+    def raw(ms_time, *segments):
+        return PgsSet(ms_time, raw=list(segments))
+
+    def show(ms_time, x, y):
+        return PgsSet(ms_time, objects=[(0, x, y, False, None)], palettes=pal, shapes=[(0, tile, 1)])
+
+    # Codes a line short of the height they declare.
+    codes = pgs_rle(tile[:-1])
+    short = (PGS_ODS, struct.pack(">HBB", 0, 0, 0xC0) + (len(codes) + 4).to_bytes(3, "big")
+             + struct.pack(">HH", 40, 24) + codes)
+    # Lines a pixel longer than the 60 they declare: each line's extra pixel
+    # pushes the next along, and the last line's run of 2s, which would pass
+    # the end, is skipped -- so the codes still fill the object.
+    codes = pgs_rle([[1] * 30 + [2] * 30 + [1] for _ in range(30)])
+    long = (PGS_ODS, struct.pack(">HBB", 0, 0, 0xC0) + (len(codes) + 4).to_bytes(3, "big")
+            + struct.pack(">HH", 60, 30) + codes)
+    return [
+        # A first set naming an object and a palette no set has defined:
+        # nothing shows. (A reader that read on to the last epoch, and seeks
+        # back here, must have forgotten that epoch's.)
+        raw(500, comp(0x00, 0, [(0, 600, 100, False, None)]), end),
+        # A palette never defined: the picture shown stays.
+        show(1000, 100, 100),
+        raw(2000, comp(0x80, 7, [(0, 200, 100, False, None)]), palette(0), obj(0, tile), end),
+        PgsSet(3000, state=0),
+        # Three objects: the first two shown.
+        PgsSet(4000, objects=[(i, 100 + 60 * i, 200, False, None) for i in range(3)], palettes=pal,
+               shapes=[(i, tile, 1) for i in range(3)]),
+        PgsSet(5000, state=0),
+        # Ten palettes: the ninth and tenth not held, the eighth shown.
+        raw(6000, comp(0x80, 9, [(0, 100, 300, False, None)]), *[palette(p) for p in range(10)],
+            obj(0, tile), end),
+        raw(7000, comp(0x00, 7, [(0, 100, 300, False, None)]), end),
+        PgsSet(8000, state=0),
+        # Sixty-five objects: the last not held, and object 3 replaced.
+        raw(9000, comp(0x80, 0, [(64, 0, 400, False, None), (3, 100, 400, False, None)]), palette(0),
+            *[obj(i, tile) for i in range(65)], obj(3, pgs_shape(80, 12, 2)), end),
+        PgsSet(10000, state=0),
+        # Wider than the canvas: not shown.
+        PgsSet(11000, objects=[(0, 0, 500, False, None)], palettes=pal, shapes=[(0, [[1] * 1300] * 4, 1)]),
+        # Codes a line short: not shown, and the object they replace goes too.
+        show(13000, 300, 300),
+        raw(14000, comp(0x00, 0, [(0, 300, 300, False, None)]), short, end),
+        # Lines longer than the width: the codes run on into the next line.
+        raw(15000, comp(0x80, 0, [(0, 500, 300, False, None)]), palette(0), long, end),
+        PgsSet(16000, state=0),
+        # An epoch start naming the last epoch's object: gone.
+        show(17000, 100, 600),
+        raw(18000, comp(0x80, 0, [(0, 200, 600, False, None)]), palette(0), end),
+        # An acquisition point bringing nothing, then a normal set bringing
+        # nothing: neither has a palette, and the picture shown stays.
+        show(19000, 100, 600),
+        raw(20000, comp(0x40, 0, [(0, 200, 600, False, None)]), end),
+        raw(21000, comp(0x00, 0, [(0, 300, 600, False, None)]), end),
+        PgsSet(22000, state=0),
+        # A composition cut short clears.
+        show(23000, 100, 600),
+        raw(24000, (PGS_PCS, pgs_pcs(PGS_CANVAS, 0, 0, 0, [])[:5]), end),
+        # A state of neither top bit keeps the epoch.
+        show(25000, 100, 600),
+        raw(26000, comp(0x20, 0, [(0, 400, 600, False, None)]), end),
+        PgsSet(27000, state=0),
+    ]
+
+
+# --- DVD's VobSub: pictures of text, written here SPU by SPU ----------------
+#
+# ffmpeg writes VobSub only from other pictures, and drops their clears and
+# quantises their colours on the way, so these are written here as the
+# probes that found FFmpeg's rules were: each subtitle an SPU of two-bit
+# run-length fields and control sequences (`VobSpu`), in an MPEG program
+# stream (`.sub`) with its index (`.idx`), muxed by mkvmerge. The answer is
+# FFmpeg's pictures, as for PGS (`make_pgs`); for the well-formed fixtures
+# the generator draws every change itself and stops unless FFmpeg agrees,
+# but for the times VOB departures name -- where a DVD player shows
+# otherwise -- where the answer is the drawing.
+
+VOB_FORCED_START, VOB_START, VOB_STOP = 0x00, 0x01, 0x02
+VOB_COLOURS, VOB_ALPHAS, VOB_AREA, VOB_FIELDS, VOB_END = 0x03, 0x04, 0x05, 0x06, 0xFF
+
+
+def vob_field(rows):
+    """Rows of two-bit colours, each run in the fewest nibbles, each line
+    ending on a byte; a run reaching the line's end, if longer than 63, as
+    the fill-to-the-end code."""
+    nib = []
+    for row in rows:
+        i = 0
+        while i < len(row):
+            c, n = row[i], 1
+            while i + n < len(row) and row[i + n] == c and n < 255:
+                n += 1
+            if i + n == len(row) and n > 63:
+                nib += [0, 0, 0, c]
+            else:
+                v = (n << 2) | c
+                count = 1 if n < 4 else 2 if n < 16 else 3 if n < 64 else 4
+                nib += [(v >> (4 * k)) & 0xF for k in range(count - 1, -1, -1)]
+            i += n
+        if len(nib) % 2:
+            nib.append(0)
+    return bytes((nib[k] << 4) | nib[k + 1] for k in range(0, len(nib), 2))
+
+
+class VobSpu:
+    """One SPU: `rows` placed at (x, y) with `colours` and `alphas`, and its
+    control sequences, each (date, [commands]): a command is "place" (all of
+    the above), "start", "forced", "stop", ("colours", c) or ("alphas", a)."""
+
+    def __init__(self, ms_time, rows, x, y, sequences, colours=(0, 1, 2, 3), alphas=(0, 15, 15, 15)):
+        self.ms, self.rows, self.x, self.y = ms_time, rows, x, y
+        self.sequences, self.colours, self.alphas = sequences, colours, alphas
+
+    def fields(self):
+        return vob_field(self.rows[0::2]), vob_field(self.rows[1::2])
+
+    def bytes(self):
+        top, bottom = self.fields()
+        data = top + bottom
+        h, w = len(self.rows), len(self.rows[0])
+        x2, y2 = self.x + w - 1, self.y + h - 1
+
+        def four(v):
+            return bytes([(v[3] << 4) | v[2], (v[1] << 4) | v[0]])
+
+        def command(c):
+            if c == "place":
+                return (bytes([VOB_COLOURS]) + four(self.colours) + bytes([VOB_ALPHAS]) + four(self.alphas)
+                        + bytes([VOB_AREA, self.x >> 4, ((self.x & 0xF) << 4) | (x2 >> 8), x2 & 0xFF,
+                                 self.y >> 4, ((self.y & 0xF) << 4) | (y2 >> 8), y2 & 0xFF, VOB_FIELDS])
+                        + struct.pack(">HH", 4, 4 + len(top)))
+            if c == "start":
+                return bytes([VOB_START])
+            if c == "forced":
+                return bytes([VOB_FORCED_START])
+            if c == "stop":
+                return bytes([VOB_STOP])
+            kind, value = c
+            return bytes([VOB_COLOURS if kind == "colours" else VOB_ALPHAS]) + four(value)
+
+        bodies = [b"".join(command(c) for c in cmds) + bytes([VOB_END]) for _, cmds in self.sequences]
+        first = 4 + len(data)
+        offsets, at = [], first
+        for b in bodies:
+            offsets.append(at)
+            at += 4 + len(b)
+        out = struct.pack(">HH", at, first) + data
+        for k, ((date, _), body) in enumerate(zip(self.sequences, bodies)):
+            nxt = offsets[k + 1] if k + 1 < len(self.sequences) else offsets[k]
+            out += struct.pack(">HH", date, nxt) + body
+        return out
+
+
+def vob_pack_header(scr):
+    """An MPEG-2 pack header, its clock from a 90 kHz count."""
+    return bytes([0, 0, 1, 0xBA, 0x44 | ((scr >> 27) & 0x38) | ((scr >> 28) & 0x03), (scr >> 20) & 0xFF,
+                  0x04 | ((scr >> 12) & 0xF8) | ((scr >> 13) & 0x03), (scr >> 5) & 0xFF,
+                  0x04 | ((scr << 3) & 0xF8), 0x01, 0x01, 0x89, 0xC3, 0xF8])
+
+
+def vob_packs(spu, ms_time):
+    """An SPU in 2048-byte packs: PES private stream 1, sub-stream 0x20, its
+    first packet timed."""
+    pts = ms_time * 90
+    out, rest, first = b"", spu, True
+    while rest:
+        head = vob_pack_header(pts)
+        room = 2048 - len(head) - 6 - 3 - (5 if first else 0) - 1
+        chunk, rest = rest[:room], rest[room:]
+        stamp = bytes([0x21 | ((pts >> 29) & 0x0E), (pts >> 22) & 0xFF, 0x01 | ((pts >> 14) & 0xFE),
+                       (pts >> 7) & 0xFF, 0x01 | ((pts << 1) & 0xFE)]) if first else b""
+        payload = bytes([0x81, 0x80 if first else 0, len(stamp)]) + stamp + bytes([0x20]) + chunk
+        pack = head + b"\x00\x00\x01\xbd" + struct.pack(">H", len(payload)) + payload
+        pad = 2048 - len(pack)
+        if pad >= 6:
+            pack += b"\x00\x00\x01\xbe" + struct.pack(">H", pad - 6) + b"\xff" * (pad - 6)
+        else:
+            pack += b"\xff" * pad
+        out += pack
+        first = False
+    return out
+
+
+def vob_write(base, canvas, palette, spus, raw=()):
+    """base.idx and base.sub: `palette` sixteen RGB ints or None, `canvas`
+    (w, h) or None; `raw` (ms, bytes) SPUs written as they are."""
+    sub, lines = b"", []
+    items = [(s.ms, s.bytes()) for s in spus] + list(raw)
+    for ms_time, data in sorted(items, key=lambda i: i[0]):
+        lines.append("timestamp: %02d:%02d:%02d:%03d, filepos: %09x" % (
+            ms_time // 3_600_000, ms_time // 60_000 % 60, ms_time // 1000 % 60, ms_time % 1000, len(sub)))
+        sub += vob_packs(data, ms_time)
+    idx = "# VobSub index file, v7 (do not modify this line!)\n"
+    if canvas:
+        idx += f"size: {canvas[0]}x{canvas[1]}\n"
+    if palette:
+        idx += "palette: " + ", ".join(f"{c:06x}" for c in palette) + "\n"
+    idx += "\nid: en, index: 0\n" + "\n".join(lines) + "\n"
+    with open(base + ".idx", "w", encoding="ascii", newline="\n") as f:
+        f.write(idx)
+    with open(base + ".sub", "wb") as f:
+        f.write(sub)
+
+
+def vob_rgba(palette, colours, alphas):
+    """The four colours as FFmpeg makes them: from the palette, or greys."""
+    if palette:
+        return [((palette[colours[i]] >> 16) & 0xFF, (palette[colours[i]] >> 8) & 0xFF,
+                 palette[colours[i]] & 0xFF, alphas[i] * 17) for i in range(4)]
+    given = []
+    for i in range(4):
+        if alphas[i] and colours[i] not in given:
+            given.append(colours[i])
+    ramp = {1: [0xFF], 2: [0, 0xFF], 3: [0, 0x80, 0xFF]}.get(len(given), [0, 0x55, 0xAA, 0xFF])
+    out = []
+    for i in range(4):
+        if not alphas[i]:
+            out.append((0, 0, 0, 0))
+        else:
+            g = ramp[given.index(colours[i])] * 255 >> 8
+            out.append((g, g, g, alphas[i] * 17))
+    return out
+
+
+def vob_changes(spu, palette, duration_ms):
+    """An SPU's changes, (ms after its time, picture or None for a clear),
+    as the crate makes them: each sequence at its own date."""
+    colours, alphas, placed = None, None, False
+    seqs = []
+    for date, cmds in spu.sequences:
+        start = forced = stop = False
+        for c in cmds:
+            if c == "place":
+                colours, alphas, placed = list(spu.colours), list(spu.alphas), True
+            elif c in ("start", "forced"):
+                start, forced = True, c == "forced"
+            elif c == "stop":
+                stop = True
+            elif c[0] == "colours":
+                colours = list(c[1])
+            else:
+                alphas = list(c[1])
+        seqs.append([date * 1024 // 90, start, forced, stop, (tuple(colours or ()), tuple(alphas or ()), placed)])
+    if not any(s[1] for s in seqs):
+        for s in seqs:
+            if s[4][2]:
+                s[0], s[1] = 0, True
+                break
+    shown, out = None, []
+    for ms_after, start, forced, stop, (c, a, placed) in seqs:
+        now = None if stop else (c, a, forced) if start else ((c, a, shown[2]) if shown else None)
+        if now == shown and not start:
+            continue
+        out.append((max(ms_after, out[-1][0] if out else 0), now))
+        shown = now
+    if shown is not None and duration_ms is not None and duration_ms > (out[-1][0] if out else 0):
+        out.append((duration_ms, None))
+    return out
+
+
+def vob_frame(spu, palette, canvas, picture):
+    """The canvas with an SPU's picture drawn as sub2video draws it: the
+    transparent edges cut away -- but of a forced picture, which FFmpeg
+    keeps whole -- a transparent inside kept."""
+    w, h = canvas
+    frame = bytearray(w * h * 4)
+    if picture is None:
+        return frame
+    colours, alphas, forced = picture
+    rgba = vob_rgba(palette, colours, alphas)
+    rows = spu.rows
+    if forced:
+        seen = [(0, 0), (len(rows) - 1, len(rows[0]) - 1)]
+    else:
+        seen = [(r, c) for r, row in enumerate(rows) for c, v in enumerate(row) if rgba[v][3]]
+    if not seen:
+        return frame
+    top, bottom = min(r for r, _ in seen), max(r for r, _ in seen)
+    left, right = min(c for _, c in seen), max(c for _, c in seen)
+    for r in range(top, bottom + 1):
+        for c in range(left, right + 1):
+            at = ((spu.y + r) * w + spu.x + c) * 4
+            frame[at:at + 4] = bytes(rgba[rows[r][c]])
+    return frame
+
+
+def vob_draw(spus, palette, canvas, durations):
+    """Every change, as the crate shows it: [(ms, md5)], a later SPU's first
+    change superseding what an earlier one had still to change."""
+    events = []
+    for spu in spus:
+        changes = [(spu.ms + at, spu, picture) for at, picture in vob_changes(spu, palette, durations.get(spu.ms))]
+        if not changes:
+            continue
+        first = changes[0][0]
+        events = [e for e in events if e[0] < first] + changes
+    return [(t, hashlib.md5(vob_frame(s, palette, canvas, p)).hexdigest()) for t, s, p in events]
+
+
+def mkv_durations(mkv):
+    """Each block's duration as mkvmerge wrote it, by its time in ms."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time,duration_time",
+                        "-of", "csv=p=0", mkv], capture_output=True, text=True, encoding="utf-8")
+    out = {}
+    for line in r.stdout.split():
+        t, d = line.split(",")
+        out[round(float(t) * 1000)] = round(float(d) * 1000) if d not in ("N/A", "") else None
+    return out
+
+
+def make_vobsub(name, canvas, palette, spus, departures=(), drawn=True, raw=()):
+    """Write NAME.mkv of `spus` (and `raw` SPUs), and NAME.states: FFmpeg's
+    pictures, all and the forced alone; with `drawn`, each checked against
+    the generator's drawing, the times in `departures` taking the drawing's."""
+    base = os.path.join(HERE, f"{name}.source")
+    out = os.path.join(HERE, f"{name}.mkv")
+    vob_write(base, canvas, palette, spus, raw)
+    # A cluster a block: a seek lands on the block it names, not on a
+    # cluster that begins earlier -- whose subtitles a demuxer gives from
+    # its start, as FFmpeg's does -- so that the subpicture before must be
+    # gone back for (`a_seek_in_dvd_pictures_finds_one_still_showing`).
+    mkvmerge(out, base + ".idx", "--cluster-length", "1")
+    os.remove(base + ".idx")
+    os.remove(base + ".sub")
+    shown_canvas = canvas or (720, 576)
+    states = sub2video_states(out, shown_canvas)
+    forced = sub2video_states(out, shown_canvas, forced=True)
+    if drawn:
+        drawing = vob_draw(spus, palette, shown_canvas, mkv_durations(out))
+        # Departures are times where the two differ either way: FFmpeg
+        # showing something else, or changing where the crate does not.
+        for t, md5 in dict(drawing).items():
+            if t not in departures and shown_at(states, t) != md5:
+                sys.exit(f"{name}: at {t} ms FFmpeg shows {shown_at(states, t)}, the drawing {md5}")
+        times = {t for t, _ in drawing}
+        for t, _ in states:
+            if t not in times and t not in departures:
+                sys.exit(f"{name}: FFmpeg's picture changes at {t} ms, where nothing was written")
+        if departures and any("forced" in cmds for s in spus for _, cmds in s.sequences):
+            sys.exit(f"{name}: forced subtitles and departures in one fixture: the forced"
+                     " answer would be FFmpeg's")
+        blank = hashlib.md5(bytes(shown_canvas[0] * shown_canvas[1] * 4)).hexdigest()
+        states = dedup(drawing)
+        while states and states[0][1] == blank:
+            states.pop(0)
+    answer = os.path.join(HERE, f"{name}.states")
+    write(answer, f"# {name}.mkv: the picture at each change, as an MD5 of the RGBA canvas;"
+                  f" `forced` lines with only forced subtitles shown"
+                  f" (generate_subtitle_fixtures.py)\ncanvas {shown_canvas[0]} {shown_canvas[1]}\n"
+                  + "".join(f"state {t} {md5}\n" for t, md5 in states)
+                  + "".join(f"forced {t} {md5}\n" for t, md5 in forced))
+    print("wrote", out, answer)
+
+
+VOB_CANVAS = (720, 480)
+# Colour 0 a dark grey: transparent, but not black, so that a picture's
+# transparent edges cut away and its transparent inside kept show.
+VOB_PALETTE = [0x404040, 0xFFFFFF, 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0x808080, 0x00FFFF,
+               0xFF00FF, 0x800000, 0x008000, 0x000080, 0x808000, 0x800080, 0x008080, 0xC0C0C0]
+
+
+def vob_shape(w, h, k):
+    """A picture like a line of text: strokes of 1 outlined in 2, on 0."""
+    rows = []
+    for r in range(h):
+        row = []
+        for c in range(w):
+            on = (c // 6 + k) % 3 != 0
+            ink = on and 3 <= r % 12 < 9 and c % 6 < 4
+            edge = on and (r % 12 in (2, 9) or c % 6 == 4) and 2 <= r % 12 <= 9
+            row.append(1 if ink else 2 if edge else 0)
+        rows.append(row)
+    return rows
+
+
+def vob_scenes():
+    line = vob_shape(240, 24, 0)
+    two = vob_shape(300, 36, 1)
+    # A box inside a two-pixel border of colour 0, a hole of 0 inside it.
+    framed = [[0] * 44 for _ in range(24)]
+    for r in range(2, 22):
+        for c in range(2, 42):
+            framed[r][c] = 0 if 10 <= r < 14 and 18 <= c < 26 else 2 if r in (2, 21) or c in (2, 41) else 1
+    # An odd width, and runs to the line's end longer than 63.
+    wide = [[1] * 3 + [2] * 70 for _ in range(5)]
+    start_stop = [(0, ["place", "start"]), (88, ["stop"])]
+    main = [
+        VobSpu(1000, line, 100, 400, start_stop),
+        VobSpu(3000, line, 200, 300, [(0, ["place", "forced"]), (176, ["stop"])],
+               colours=(4, 5, 6, 7), alphas=(0, 8, 15, 4)),
+        # No stop: until the next.
+        VobSpu(6000, line, 300, 100, [(0, ["place", "start"])]),
+        VobSpu(8000, framed, 100, 100, start_stop),
+        VobSpu(10000, wide, 101, 201, start_stop),
+        # Placed at 0, started at 22: shown from a quarter second on.
+        VobSpu(12000, line, 100, 400, [(0, ["place"]), (22, ["start"]), (88, ["stop"])]),
+        VobSpu(14000, two, 200, 380, [(0, ["place", "start"]), (132, ["stop"])]),
+        # No start: shown from its time.
+        VobSpu(17000, line, 100, 400, [(0, ["place"]), (88, ["stop"])]),
+        # No stop: mkvmerge's duration -- to the next -- ends it.
+        VobSpu(19000, line, 100, 400, [(0, ["place", "start"])]),
+        # Stopped five seconds on, but replaced before then by the next,
+        # which starts a quarter second after its time: a seek between the
+        # two finds this one still showing.
+        VobSpu(20000, line, 100, 400, [(0, ["place", "start"]), (440, ["stop"])]),
+        VobSpu(22000, two, 200, 380, [(0, ["place"]), (22, ["start"]), (88, ["stop"])]),
+        # Colours changed and the picture stopped at one date: the new
+        # colours are never seen -- no cue lasting no time.
+        VobSpu(25000, line, 100, 400, [(0, ["place", "start"]), (88, [("colours", (0, 5, 6, 7))]),
+                                       (88, ["stop"])]),
+    ]
+    dvd = [
+        # A colour change at half a second, a fade at three quarters.
+        VobSpu(1000, line, 100, 400, [(0, ["place", "start"]), (44, [("colours", (0, 5, 6, 7))]),
+                                      (66, [("alphas", (0, 8, 8, 8))]), (88, ["stop"])]),
+        # Started, stopped, started again, stopped.
+        VobSpu(3000, line, 100, 400, [(0, ["place", "start"]), (44, ["stop"]), (88, ["start"]),
+                                      (132, ["stop"])]),
+        # Shown for four seconds, a transparent SPU after one.
+        VobSpu(5000, line, 100, 400, [(0, ["place", "start"]), (352, ["stop"])]),
+        VobSpu(6000, line, 100, 400, start_stop, alphas=(0, 0, 0, 0)),
+    ]
+    # Where a DVD player shows otherwise: the colour change and the fade
+    # (1.5, 1.75 s); the first of two starts and its stop (3, 3.5 s); the
+    # transparent SPU's clear and its own stop (6, 7.001 s), and the stop of
+    # the picture it replaced, which FFmpeg shows on until (9.004 s).
+    dvd_departures = {1500, 1750, 3000, 3500, 6000, 7001, 9004}
+    grey = [
+        VobSpu(1000, line, 100, 400, start_stop, alphas=(0, 15, 12, 8)),
+        VobSpu(3000, framed, 100, 100, start_stop, colours=(0, 1, 2, 3), alphas=(15, 15, 15, 15)),
+        VobSpu(5000, line, 100, 400, start_stop, colours=(5, 5, 7, 5), alphas=(15, 15, 15, 15)),
+    ]
+    pal = [VobSpu(1000, line, 100, 500, start_stop)]
+    return main, dvd, dvd_departures, grey, pal
+
+
+def vob_damage():
+    """SPUs no muxer writes, each as FFmpeg takes it: the answer FFmpeg's."""
+    line = vob_shape(240, 24, 0)
+    good = VobSpu(0, line, 100, 400, [(0, ["place", "start"]), (352, ["stop"])])
+
+    def patched(ms_time, fix):
+        b = bytearray(good.bytes())
+        fix(b)
+        return (ms_time, bytes(b))
+
+    first = lambda b: struct.unpack(">H", bytes(b[2:4]))[0]  # noqa: E731
+
+    def fields_past(b):
+        f = first(b) + 4 + bytes(b[first(b) + 4:]).index(bytes([VOB_FIELDS]))
+        b[f + 3:f + 5] = struct.pack(">H", 0x7FF0)
+
+    def taller(b):
+        a = first(b) + 4 + bytes(b[first(b) + 4:]).index(bytes([VOB_AREA]))
+        # y2's top four bits, 1 (y2 is 0x1A7): 3 makes the area 512 rows
+        # taller than its codes.
+        b[a + 5] = (b[a + 5] & 0xF0) | 0x03
+
+    def loops(b):
+        b[first(b) + 2:first(b) + 4] = struct.pack(">H", 4)
+
+    def short(b):
+        del b[12:]
+
+    raw = [
+        # Each while a picture shows: it stays.
+        (1000, good.bytes()),
+        patched(2000, fields_past),
+        patched(3000, taller),
+        patched(4000, short),
+        # A sequence naming an earlier one next: read once, shown.
+        patched(6000, loops),
+    ]
+    return raw
+
+
+# --- DVB's subtitles: digital television's pictures, written here segment
+# by segment --------------------------------------------------------------
+#
+# A block is segments -- 0x0F, a type, a page, a length, the body -- with no
+# PES header around them (Matroska's S_DVBSUB). FFmpeg's dvbsub decoder is
+# the oracle under `-dvb_substream 0 -compute_clut 0`, which make it read the
+# service's pages alone and give a region of no CLUT the standard's default
+# one, as a receiver does. mkvmerge takes no DVB stream of its own, so the
+# generator writes the Matroska file too.
+
+DVB_PAGE, DVB_REGION, DVB_CLUT, DVB_OBJECT, DVB_DISPLAY, DVB_END = 0x10, 0x11, 0x12, 0x13, 0x14, 0x80
+DVB_ORACLE = ["-dvb_substream", "0", "-compute_clut", "0"]
+DVB_MAP_2_TO_4 = [0x0, 0x7, 0x8, 0xF]
+DVB_MAP_2_TO_8 = [0x00, 0x77, 0x88, 0xFF]
+DVB_MAP_4_TO_8 = [v * 0x11 for v in range(16)]
+
+
+def dvb_seg(kind, body, page=1):
+    return bytes([0x0F, kind]) + struct.pack(">HH", page, len(body)) + body
+
+
+class DvbBits:
+    def __init__(self):
+        self.bits = []
+
+    def put(self, value, n):
+        self.bits += [(value >> k) & 1 for k in range(n - 1, -1, -1)]
+
+    def bytes(self):
+        bits = self.bits + [0] * (-len(self.bits) % 8)
+        return bytes(int("".join(map(str, bits[i:i + 8])), 2) for i in range(0, len(bits), 8))
+
+
+def dvb_runs(row, longest):
+    """A line as runs of one value, none longer than `longest`."""
+    runs, i = [], 0
+    while i < len(row):
+        n = 1
+        while i + n < len(row) and row[i + n] == row[i] and n < longest:
+            n += 1
+        runs.append((row[i], n))
+        i += n
+    return runs
+
+
+def dvb_two_bit(row):
+    """A 2-bit/pixel code string (EN 300 743 7.2.5.2), ended."""
+    b = DvbBits()
+    for c, n in dvb_runs(row, 284):
+        while n:
+            if c == 0 and n == 1:
+                b.put(0, 2); b.put(0b01, 2); k = 1
+            elif c == 0 and n == 2:
+                b.put(0, 2); b.put(0b0001, 4); k = 2
+            elif n < 3:
+                b.put(c, 2); k = 1
+            elif n <= 10:
+                b.put(0, 2); b.put(1, 1); b.put(n - 3, 3); b.put(c, 2); k = n
+            elif n == 11:
+                b.put(0, 2); b.put(1, 1); b.put(7, 3); b.put(c, 2); k = 10
+            elif n <= 27:
+                b.put(0, 2); b.put(0b0010, 4); b.put(n - 12, 4); b.put(c, 2); k = n
+            elif n == 28:
+                b.put(0, 2); b.put(0b0010, 4); b.put(15, 4); b.put(c, 2); k = 27
+            else:
+                b.put(0, 2); b.put(0b0011, 4); b.put(n - 29, 8); b.put(c, 2); k = n
+            n -= k
+    b.put(0, 2); b.put(0b0000, 4)
+    return b.bytes()
+
+
+def dvb_four_bit(row):
+    """A 4-bit/pixel code string, ended."""
+    b = DvbBits()
+    for c, n in dvb_runs(row, 280):
+        while n:
+            if c == 0 and n == 1:
+                b.put(0, 4); b.put(0b1100, 4); k = 1
+            elif c == 0 and n == 2:
+                b.put(0, 4); b.put(0b1101, 4); k = 2
+            elif c == 0 and n <= 9:
+                b.put(0, 4); b.put(0, 1); b.put(n - 2, 3); k = n
+            elif n < 4:
+                b.put(c, 4); k = 1
+            elif n <= 7:
+                b.put(0, 4); b.put(0b10, 2); b.put(n - 4, 2); b.put(c, 4); k = n
+            elif n == 8:
+                b.put(0, 4); b.put(0b10, 2); b.put(3, 2); b.put(c, 4); k = 7
+            elif n <= 24:
+                b.put(0, 4); b.put(0b1110, 4); b.put(n - 9, 4); b.put(c, 4); k = n
+            else:
+                b.put(0, 4); b.put(0b1111, 4); b.put(n - 25, 8); b.put(c, 4); k = n
+            n -= k
+    b.put(0, 4); b.put(0, 4)
+    return b.bytes()
+
+
+def dvb_eight_bit(row):
+    """An 8-bit/pixel code string, ended."""
+    out = b""
+    for c, n in dvb_runs(row, 127):
+        while n:
+            if c == 0:
+                out += bytes([0, n]); k = n
+            elif n < 3:
+                out += bytes([c]); k = 1
+            else:
+                out += bytes([0, 0x80 | n, c]); k = n
+            n -= k
+    return out + bytes([0, 0])
+
+
+DVB_STRINGS = {2: (0x10, dvb_two_bit), 4: (0x11, dvb_four_bit), 8: (0x12, dvb_eight_bit)}
+
+
+class DvbObject:
+    """An object's pixels, `bits` a pixel, coded in fields: the even lines
+    the top field, the odd the bottom -- or, with `top_only`, no bottom
+    field, which the top's lines are drawn again for. `maps`, (code, table),
+    replace the standard map tables in each field."""
+
+    def __init__(self, oid, rows, bits=4, non_mod=False, maps=(), top_only=False):
+        self.oid, self.rows, self.bits = oid, rows, bits
+        self.non_mod, self.maps, self.top_only = non_mod, maps, top_only
+
+    def field(self, lines):
+        kind, code = DVB_STRINGS[self.bits]
+        out = b""
+        for map_kind, table in self.maps:
+            out += bytes([map_kind]) + (bytes([(table[0] << 4) | table[1], (table[2] << 4) | table[3]])
+                                        if map_kind == 0x20 else bytes(table))
+        for line in lines:
+            out += bytes([kind]) + code(line) + bytes([0xF0])
+        return out
+
+    def segment(self, version=0):
+        top = self.field(self.rows[0::2])
+        bottom = b"" if self.top_only else self.field(self.rows[1::2])
+        flags = (version << 4) | (int(self.non_mod) << 1) | 0x01
+        return dvb_seg(DVB_OBJECT, struct.pack(">HBHH", self.oid, flags, len(top), len(bottom)) + top + bottom)
+
+
+class DvbSet:
+    """What a block holds, in order: segments as descriptions --
+    ("display", w, h, version, window), ("page", timeout, version, state,
+    regions), ("region", id, version, w, h, depth, clut, fill, objects),
+    ("clut", id, version, entries), ("object", DvbObject), ("end",) -- and
+    raw bytes as ("raw", bytes), drawn as nothing."""
+
+    def __init__(self, ms_time, *segments):
+        self.ms, self.segments = ms_time, segments
+
+    def bytes(self):
+        out = b""
+        for s in self.segments:
+            kind = s[0]
+            if kind == "display":
+                _, w, h, version, window = s
+                body = bytes([(version << 4) | (0x08 if window else 0) | 0x07]) + struct.pack(">HH", w - 1, h - 1)
+                if window:
+                    body += struct.pack(">HHHH", *window)
+                out += dvb_seg(DVB_DISPLAY, body)
+            elif kind == "page":
+                _, timeout, version, state, regions = s
+                body = bytes([timeout, (version << 4) | (state << 2) | 0x03])
+                for rid, x, y in regions:
+                    body += bytes([rid, 0xFF]) + struct.pack(">HH", x, y)
+                out += dvb_seg(DVB_PAGE, body)
+            elif kind == "region":
+                _, rid, version, w, h, depth, clut, fill, objects = s
+                d = {2: 1, 4: 2, 8: 3}[depth]
+                f = fill or 0
+                body = bytes([rid, (version << 4) | ((fill is not None) << 3) | 0x07]) + struct.pack(">HH", w, h)
+                body += bytes([(d << 5) | (d << 2) | 0x03, clut, f if depth == 8 else 0,
+                               ((f if depth == 4 else 0) << 4) | ((f if depth == 2 else 0) << 2) | 0x03])
+                for oid, x, y in objects:
+                    body += struct.pack(">HHH", oid, x, 0xF000 | y)
+                out += dvb_seg(DVB_REGION, body)
+            elif kind == "clut":
+                _, cid, version, entries = s
+                body = bytes([cid, (version << 4) | 0x0F])
+                for eid, flags, y, cr, cb, t in entries:
+                    body += bytes([eid, flags])
+                    if flags & 1:
+                        body += bytes([y, cr, cb, t])
+                    else:
+                        body += struct.pack(">H", (y << 10) | (cr << 6) | (cb << 2) | t)
+                out += dvb_seg(DVB_CLUT, body)
+            elif kind == "object":
+                out += s[1].segment()
+            elif kind == "end":
+                out += dvb_seg(DVB_END, b"")
+            elif kind == "raw":
+                out += s[1]
+        return out
+
+
+def dvb_ebml(eid, body):
+    return eid + bytes([0x01]) + len(body).to_bytes(7, "big") + body
+
+
+def dvb_uint(eid, v):
+    return dvb_ebml(eid, v.to_bytes(8, "big"))
+
+
+def mkv_tracks(path, tracks):
+    """A Matroska file of subtitle tracks, each (codec ID, setup, default,
+    [(ms, bytes)]), numbered from 1: a cluster at each time, holding the
+    blocks of every track at it, with cues for the first track's -- a seek
+    lands on the block it names."""
+    header = dvb_ebml(b"\x1A\x45\xDF\xA3", dvb_ebml(b"\x42\x82", b"matroska") + dvb_uint(b"\x42\x87", 4)
+                      + dvb_uint(b"\x42\x85", 2))
+    info = dvb_ebml(b"\x15\x49\xA9\x66", dvb_uint(b"\x2A\xD7\xB1", 1_000_000) + dvb_ebml(b"\x4D\x80", b"lanef")
+                    + dvb_ebml(b"\x57\x41", b"lanef"))
+    entries = b""
+    for n, (codec, private, default, _) in enumerate(tracks, 1):
+        entry = (dvb_uint(b"\xD7", n) + dvb_uint(b"\x73\xC5", n) + dvb_uint(b"\x83", 0x11)
+                 + dvb_uint(b"\x88", int(default)) + dvb_ebml(b"\x86", codec) + dvb_ebml(b"\x63\xA2", private))
+        entries += dvb_ebml(b"\xAE", entry)
+    track_list = dvb_ebml(b"\x16\x54\xAE\x6B", entries)
+    times = sorted({t for *_, blocks in tracks for t, _ in blocks})
+    clusters, cues = b"", []
+    for ms_time in times:
+        body = dvb_uint(b"\xE7", ms_time)
+        for n, (*_, blocks) in enumerate(tracks, 1):
+            for t, data in blocks:
+                if t == ms_time:
+                    body += dvb_ebml(b"\xA3", bytes([0x80 | n]) + struct.pack(">h", 0) + bytes([0x80]) + data)
+                    if n == 1:
+                        cues.append((ms_time, len(info) + len(track_list) + len(clusters)))
+        clusters += dvb_ebml(b"\x1F\x43\xB6\x75", body)
+    cue = dvb_ebml(b"\x1C\x53\xBB\x6B", b"".join(
+        dvb_ebml(b"\xBB", dvb_uint(b"\xB3", t) + dvb_ebml(b"\xB7", dvb_uint(b"\xF7", 1) + dvb_uint(b"\xF1", pos)))
+        for t, pos in cues))
+    with open(path, "wb") as f:
+        f.write(header + dvb_ebml(b"\x18\x53\x80\x67", info + track_list + clusters + cue))
+
+
+def dvb_mkv(path, blocks, private):
+    """A Matroska file of one S_DVBSUB track of `blocks`, (ms, bytes)."""
+    mkv_tracks(path, [(b"S_DVBSUB", private, True, blocks)])
+
+
+def dvb_colour(y, cr, cb, t):
+    """A CLUT entry's RGBA: FFmpeg's BT.601 studio-range conversion (PGS's),
+    alpha 255 - T, Y of 0 transparent."""
+    r, g, b = pgs_colour(y, cr, cb, True)
+    return (r, g, b, 0 if y == 0 else 255 - t)
+
+
+def dvb_default_clut():
+    """The standard's default CLUTs (EN 300 743 section 10): 2-, 4- and 8-bit."""
+    def lv(on, full):
+        return full if on else 0
+    two = [(0, 0, 0, 0), (255, 255, 255, 255), (0, 0, 0, 255), (127, 127, 127, 255)]
+    four = [(0, 0, 0, 0)] + [(lv(i & 1, f), lv(i & 2, f), lv(i & 4, f), 255)
+                             for i in range(1, 16) for f in [255 if i < 8 else 127]]
+    eight = [(0, 0, 0, 0)]
+    for i in range(1, 256):
+        if i < 8:
+            eight.append((lv(i & 1, 255), lv(i & 2, 255), lv(i & 4, 255), 63))
+            continue
+        a, b = (85, 170) if i & 0x88 in (0x00, 0x08) else (43, 85)
+        base = 127 if i & 0x88 == 0x80 else 0
+        alpha = 127 if i & 0x88 == 0x08 else 255
+        eight.append(tuple(base + lv(i & (1 << lo), a) + lv(i & (1 << hi), b) for lo, hi in ((0, 4), (1, 5), (2, 6)))
+                     + (alpha,))
+    return {2: two, 4: four, 8: eight}
+
+
+def dvb_frame(display, page, regions, cluts, canvas):
+    """The page's picture: its regions, the first it lists drawn last, each
+    pixel through its CLUT's table for its depth (the standard's default
+    for a CLUT not defined), copied over what is there as sub2video copies."""
+    w, h = canvas
+    frame = bytearray(w * h * 4)
+    default = dvb_default_clut()
+    for rid, x, y in reversed(page["regions"]):
+        r = regions.get(rid)
+        if not r or not r["w"] or not r["h"]:
+            continue
+        table = cluts[r["clut"]][r["depth"]] if r["clut"] in cluts else default[r["depth"]]
+        for j in range(r["h"]):
+            for i in range(r["w"]):
+                v = r["pixels"][j * r["w"] + i]
+                px, py = x + display["x"] + i, y + display["y"] + j
+                if px < w and py < h:
+                    frame[(py * w + px) * 4:(py * w + px) * 4 + 4] = bytes(table[v] if v < len(table) else (0, 0, 0, 0))
+    return bytes(frame)
+
+
+def dvb_draw_object(o, r, x0, y0):
+    """Object `o`'s pixels drawn into region `r` at (x0, y0), as a receiver
+    draws them: through the map table from its depth to the region's, a
+    pixel of the non-modifying colour left as it was, the top field's lines
+    again where there is no bottom field, no further than the region."""
+    if o.bits > r["depth"]:
+        return
+    tables = {(2, 4): list(DVB_MAP_2_TO_4), (2, 8): list(DVB_MAP_2_TO_8), (4, 8): list(DVB_MAP_4_TO_8)}
+    for map_kind, table in o.maps:
+        tables[{0x20: (2, 4), 0x21: (2, 8), 0x22: (4, 8)}[map_kind]] = list(table)
+    table = tables.get((o.bits, r["depth"]))
+    lines = list(enumerate(o.rows))
+    if o.top_only:
+        lines = [(i + f, row) for i, row in lines[0::2] for f in (0, 1)]
+    for i, row in lines:
+        y = y0 + i
+        if y >= r["h"]:
+            continue
+        for j, v in enumerate(row):
+            x = x0 + j
+            if x >= r["w"]:
+                break
+            if not (o.non_mod and v == 1):
+                r["pixels"][y * r["w"] + x] = table[v] if table else v
+
+
+def dvb_states(sets, canvas):
+    """What a receiver shows of `sets` -- the crate's rules written here
+    again, from the descriptions -- as [(ms, md5)] at each change: a block's
+    display set shown for its page's timeout, a later block's change
+    superseding what the last had still to make. Of several display sets
+    in a block, the last."""
+    display = {"version": None, "x": 0, "y": 0}
+    page = {"version": None, "timeout": 0, "regions": []}
+    regions, cluts, placed = {}, {}, []
+    blank = hashlib.md5(bytes(canvas[0] * canvas[1] * 4)).hexdigest()
+    made, pending = [], []
+    for s in sets:
+        shown, seen = None, 0
+        for seg in s.segments:
+            kind = seg[0]
+            if kind == "display":
+                _, w, h, version, window = seg
+                if display["version"] != version:
+                    display.update(version=version, x=window[0] if window else 0, y=window[2] if window else 0)
+            elif kind == "page":
+                _, timeout, version, state, listed = seg
+                seen |= 1
+                if page["version"] == version:
+                    continue
+                page.update(version=version, timeout=timeout, regions=[])
+                if state in (1, 2):
+                    regions.clear()
+                    cluts.clear()
+                    placed.clear()
+                for rid, x, y in listed:
+                    if any(r == rid for r, _, _ in page["regions"]):
+                        break
+                    page["regions"].append((rid, x, y))
+            elif kind == "region":
+                _, rid, version, w, h, depth, clut, fill, objects = seg
+                seen |= 2
+                r = regions.setdefault(rid, {"pixels": []})
+                fresh = len(r["pixels"]) != w * h
+                r.update(w=w, h=h, depth=depth, clut=clut)
+                if fill is not None or fresh:
+                    r["pixels"] = [fill or 0] * (w * h)
+                placed[:] = [p for p in placed if p[1] != rid] + [(oid, rid, x, y) for oid, x, y in objects]
+            elif kind == "clut":
+                _, cid, version, entries = seg
+                seen |= 4
+                c = cluts.setdefault(cid, {"version": None, **{k: list(v) for k, v in dvb_default_clut().items()}})
+                if c["version"] == version:
+                    continue
+                c["version"] = version
+                for eid, flags, y, cr, cb, t in entries:
+                    if not flags & 1:
+                        y, cr, cb, t = y << 2, cr << 4, cb << 4, t << 6
+                    for flag, depth, size in ((0x80, 2, 4), (0x40, 4, 16), (0x20, 8, 256)):
+                        if flags & flag and eid < size:
+                            c[depth][eid] = dvb_colour(y, cr, cb, t)
+            elif kind == "object":
+                seen |= 8
+                for oid, rid, x0, y0 in reversed(placed):
+                    if oid == seg[1].oid and rid in regions:
+                        dvb_draw_object(seg[1], regions[rid], x0, y0)
+            elif kind == "end":
+                seen |= 16
+                shown = dvb_frame(display, page, regions, cluts, canvas)
+        # A page, a region and an object with no end segment: shown all the
+        # same.
+        if seen & 11 == 11 and not seen & 16:
+            shown = dvb_frame(display, page, regions, cluts, canvas)
+        if shown is None:
+            continue
+        timeout = page["timeout"]
+        changes = [(s.ms, hashlib.md5(shown).hexdigest() if timeout else blank)]
+        if timeout:
+            changes.append((s.ms + 1000 * timeout, blank))
+        made += [c for c in pending if c[0] < s.ms]
+        pending = changes
+    made += pending
+    states = dedup(made)
+    while states and states[0][1] == blank:
+        states.pop(0)
+    return states
+
+
+def make_dvb(name, sets, canvas=(720, 576), private=b"\x00\x01\x00\x01\x10", departures=(), drawn=True):
+    """Write NAME.mkv of `sets`, a block each, and NAME.states: the pictures a
+    receiver shows -- FFmpeg's under DVB_ORACLE, each checked against the
+    generator's drawing, the times in `departures` taking the drawing's; or,
+    not `drawn`, FFmpeg's alone."""
+    out = os.path.join(HERE, f"{name}.mkv")
+    dvb_mkv(out, [(s.ms, s.bytes()) for s in sets], private)
+    extra = DVB_ORACLE + (["-canvas_size", f"{canvas[0]}x{canvas[1]}"] if canvas != (720, 576) else [])
+    states = sub2video_states(out, canvas, extra=extra)
+    if drawn:
+        drawing = dvb_states(sets if drawn is True else drawn, canvas)
+        for t, md5 in drawing:
+            if t not in departures and shown_at(states, t) != md5:
+                sys.exit(f"{name}: at {t} ms FFmpeg shows {shown_at(states, t)}, the drawing {md5}")
+        times = {t for t, _ in drawing}
+        for t, _ in states:
+            if t not in times and t not in departures:
+                sys.exit(f"{name}: FFmpeg's picture changes at {t} ms, where the drawing's does not")
+        states = drawing
+    answer = os.path.join(HERE, f"{name}.states")
+    write(answer, f"# {name}.mkv: the picture at each change, as an MD5 of the RGBA canvas"
+                  f" (generate_subtitle_fixtures.py)\ncanvas {canvas[0]} {canvas[1]}\n"
+                  + "".join(f"state {t} {md5}\n" for t, md5 in states))
+    print("wrote", out, answer)
+
+
+# A CLUT's entries: (entry, flags, Y, Cr, Cb, T); flags 0x80/0x40/0x20 the
+# 2-, 4- and 8-bit tables, 0x01 full range (else Y in 6 bits, Cr and Cb in
+# 4, T in 2).
+DVB_FOUR = [(1, 0x41, 235, 128, 128, 0),    # white
+            (2, 0x40, 4, 8, 8, 0),          # black, reduced range
+            (3, 0x41, 81, 240, 90, 128),    # red, half transparent
+            (4, 0x41, 145, 34, 54, 55),     # green
+            (5, 0x41, 0, 128, 128, 0)]      # Y of 0: transparent
+DVB_YELLOW = [(1, 0x41, 210, 146, 16, 0)]
+DVB_BLUE = [(1, 0x41, 41, 110, 240, 0)]
+DVB_TWO = [(1, 0x81, 235, 128, 128, 0), (2, 0x81, 81, 240, 90, 0), (3, 0x81, 41, 110, 240, 64)]
+DVB_EIGHT = [(v, 0x21, 16 + v * 219 // 255, 255 - v, v, 0) for v in range(1, 256)]
+
+
+def dvb_scenes():
+    """The well-formed fixtures: what a receiver shows, FFmpeg agreeing."""
+    line = vob_shape(200, 24, 0)
+    short = vob_shape(120, 20, 2)
+    two = [[(c // 5 + r) % 4 for c in range(100)] for r in range(16)]
+    eight = [[(c * 2 + r * 8) % 256 for c in range(128)] for r in range(16)]
+    gradient = [[(c // 8) % 16 for c in range(128)] for r in range(12)]
+    # Runs of every length the 4-bit codes have, and of entry 5, whose Y of
+    # 0 makes it transparent.
+    runs = [[1] * 3 + [2] * 9 + [3] * 25 + [0] * 1 + [1] * 2 + [0] * 7 + [2] * 280 + [3] * 4 + [1] * 8
+            + [5] * 6 + [1] * 2]
+    # Runs of every length the 2-bit codes have.
+    runs2 = [[1] * 3 + [2] * 12 + [3] * 29 + [0] * 2 + [1] * 1 + [0] * 1 + [2] * 284 + [3] * 10 + [1] * 27]
+    v = iter(range(1, 10_000))
+
+    def page(timeout, state, regions):
+        return ("page", timeout, next(v) % 16, state, regions)
+
+    # The page at 18 s; the track's last is of its version, so that a seek
+    # back to 18 s after reading the track meets the page held, and must
+    # have forgotten it.
+    afresh = ("page", 10, 9, 2, [(1, 200, 400)])
+    main = [
+        DvbSet(500, ("display", 720, 576, 0, None)),
+        # A line: a 4-bit region of a 4-bit object, the CLUT's colours full
+        # range and reduced, half transparent, transparent by Y.
+        DvbSet(1000, page(10, 2, [(1, 100, 400)]), ("region", 1, 0, 200, 24, 4, 1, None, [(1, 0, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("object", DvbObject(1, line)), ("end",)),
+        # Moved by the page alone: its pixels kept.
+        DvbSet(2000, page(10, 0, [(1, 100, 300)]), ("end",)),
+        # A new version of the CLUT recolours them; the same version again
+        # changes nothing.
+        DvbSet(3000, page(10, 0, [(1, 100, 300)]), ("clut", 1, 1, DVB_YELLOW), ("end",)),
+        DvbSet(4000, page(10, 0, [(1, 100, 300)]), ("clut", 1, 1, DVB_BLUE), ("end",)),
+        # A 2-bit region and an 8-bit one beside it, each its own CLUT.
+        DvbSet(5000, page(10, 0, [(1, 100, 300), (2, 100, 100), (3, 300, 100)]),
+               ("region", 2, 0, 100, 16, 2, 2, None, [(2, 0, 0)]),
+               ("region", 3, 0, 128, 16, 8, 3, None, [(3, 0, 0)]),
+               ("clut", 2, 0, DVB_TWO), ("clut", 3, 0, DVB_EIGHT),
+               ("object", DvbObject(2, two, bits=2)), ("object", DvbObject(3, eight, bits=8)), ("end",)),
+        # The page listing one: the others hidden, and back again with
+        # their pixels -- region 2 filled again, its object gone ...
+        DvbSet(6000, page(10, 0, [(3, 300, 100)]), ("end",)),
+        DvbSet(7000, page(10, 0, [(1, 100, 300), (2, 100, 100), (3, 300, 100)]),
+               ("region", 2, 1, 100, 16, 2, 2, 2, [(2, 0, 0)]), ("end",)),
+        # ... until its data comes again.
+        DvbSet(8000, page(10, 0, [(1, 100, 300), (2, 100, 100), (3, 300, 100)]),
+               ("object", DvbObject(2, two, bits=2)), ("end",)),
+        # One object placed in two regions, drawn in each when it comes.
+        DvbSet(9000, page(10, 0, [(1, 100, 300), (2, 100, 100)]),
+               ("region", 1, 1, 200, 24, 4, 1, None, [(4, 150, 4)]),
+               ("region", 2, 2, 100, 16, 2, 2, None, [(4, 60, 2)]),
+               ("object", DvbObject(4, [[1, 2, 3, 1, 2, 3, 1, 2]] * 6, bits=2)), ("end",)),
+        # Objects of fewer bits than their regions: the standard's maps, and
+        # a field's own.
+        DvbSet(10000, page(10, 2, [(4, 50, 50), (5, 50, 100), (6, 50, 150), (7, 50, 200), (13, 300, 50),
+                                   (14, 300, 100)]),
+               ("region", 4, 0, 100, 16, 4, 1, None, [(5, 0, 0)]),
+               ("region", 5, 0, 128, 12, 8, 3, None, [(6, 0, 0)]),
+               ("region", 6, 0, 100, 16, 8, 3, None, [(7, 0, 0)]),
+               ("region", 7, 0, 100, 16, 4, 1, None, [(8, 0, 0)]),
+               ("region", 13, 0, 128, 12, 8, 3, None, [(14, 0, 0)]),
+               ("region", 14, 0, 60, 10, 2, 2, 1, [(15, 0, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("clut", 3, 0, DVB_EIGHT),
+               ("object", DvbObject(5, two, bits=2)), ("object", DvbObject(6, gradient, bits=4)),
+               ("object", DvbObject(7, two, bits=2, maps=[(0x21, [0x10, 0x50, 0x90, 0xD0])])),
+               ("object", DvbObject(8, two, bits=2, maps=[(0x20, [4, 3, 2, 1])])),
+               ("object", DvbObject(14, gradient, bits=4, maps=[(0x22, [255 - 16 * v for v in range(16)])])),
+               # 4-bit data in a 2-bit region: nothing drawn over its fill.
+               ("object", DvbObject(15, [[9] * 10] * 4, bits=4)), ("end",)),
+        # No bottom field: the top's lines again; runs of every length the
+        # codes have; an 8-bit region filled; 8-bit data in a 4-bit region,
+        # which draws nothing over its fill.
+        DvbSet(11000, page(10, 0, [(8, 100, 100), (9, 100, 200), (10, 100, 250), (11, 450, 100), (12, 450, 150)]),
+               ("region", 8, 0, 200, 24, 4, 1, None, [(9, 0, 0)]),
+               ("region", 9, 0, 350, 1, 4, 1, None, [(10, 0, 0)]),
+               ("region", 10, 0, 370, 1, 4, 1, None, [(11, 0, 0)]),
+               ("region", 11, 0, 60, 20, 8, 3, 200, [(12, 0, 0)]),
+               ("region", 12, 0, 60, 20, 4, 1, 3, [(13, 0, 0)]),
+               ("object", DvbObject(9, line, top_only=True)), ("object", DvbObject(10, runs)),
+               ("object", DvbObject(11, runs2, bits=2)),
+               ("object", DvbObject(12, [[9] * 10] * 4, bits=8)), ("object", DvbObject(13, [[9] * 10] * 4, bits=8)),
+               ("end",)),
+        # Gone after its page's two seconds.
+        DvbSet(12000, page(2, 0, [(8, 100, 100)]), ("end",)),
+        # A page of no time: never shown, but what showed goes.
+        DvbSet(15000, page(10, 0, [(8, 100, 300)]), ("end",)),
+        DvbSet(16000, page(0, 0, [(9, 100, 300)]), ("end",)),
+        # A seek pair: a mode change at 18 s, its page changed at 20 s -- a
+        # seek to 21 s must read from 18 s.
+        DvbSet(18000, afresh, ("region", 1, 0, 120, 20, 4, 1, None, [(1, 0, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("object", DvbObject(1, short)), ("end",)),
+        DvbSet(20000, page(10, 0, [(1, 300, 400)]), ("end",)),
+        # A CLUT never defined: the standard's default.
+        DvbSet(22000, page(10, 2, [(1, 100, 100)]), ("region", 1, 0, 120, 20, 4, 9, None, [(1, 0, 0)]),
+               ("object", DvbObject(1, short)), ("end",)),
+        # Regions overlapping: the first listed on top; one listed twice,
+        # shown at its first place.
+        DvbSet(24000, page(10, 2, [(1, 100, 100), (2, 110, 108), (1, 400, 400)]),
+               ("region", 1, 0, 40, 20, 4, 1, 1, [(1, 0, 0)]), ("region", 2, 0, 40, 20, 4, 1, 4, [(1, 0, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("object", DvbObject(1, [[2] * 4] * 2)), ("end",)),
+    ]
+    # A page of the version held changes nothing: the second lists the
+    # regions again, and the screen stays clear.
+    cleared = page(10, 0, [])
+    main += [
+        DvbSet(26000, cleared, ("end",)),
+        DvbSet(27000, ("page", 10, cleared[2], 0, [(1, 100, 100)]), ("end",)),
+        DvbSet(28000, page(10, 0, [(2, 100, 100)]), ("end",)),
+        DvbSet(29000, ("page", 10, afresh[2], 0, []), ("end",)),
+    ]
+    # Each of those two pages is read: the page before it is of another
+    # version.
+    pages = {s.ms: seg[2] for s in main for seg in s.segments if seg[0] == "page"}
+    if pages[16000] == pages[18000] or pages[28000] == pages[29000]:
+        sys.exit("dvb: a page meant to be read is of the version before it")
+    return main
+
+
+def dvb_receiver():
+    """Where a receiver shows otherwise than FFmpeg: [sets], {departures}."""
+    line = vob_shape(200, 24, 1)
+    v = iter(range(1, 10_000))
+
+    def page(timeout, state, regions):
+        return ("page", timeout, next(v) % 16, state, regions)
+
+    # Entries for the 2- and the 4-bit table at once: FFmpeg's 4-bit table
+    # keeps its defaults.
+    both = [(e, 0xC1, y, cr, cb, t) for e, _, y, cr, cb, t in DVB_FOUR[:3]]
+    stripes = [[2, 2, 2, 2, 1, 1, 1, 1] * 25] * 8
+    sets = [
+        DvbSet(1000, page(10, 2, [(1, 100, 400)]), ("region", 1, 0, 200, 24, 4, 1, None, [(1, 0, 0)]),
+               ("clut", 1, 0, both), ("object", DvbObject(1, line)), ("end",)),
+        # A region filled, no object drawn in it yet: FFmpeg shows nothing.
+        DvbSet(2000, page(10, 2, [(2, 100, 100)]), ("region", 2, 0, 80, 20, 4, 1, 3, []),
+               ("clut", 1, 0, DVB_FOUR), ("end",)),
+        # The non-modifying colour over a fill: FFmpeg draws what follows a
+        # run of it that many pixels to the left.
+        DvbSet(3000, page(10, 2, [(3, 100, 200)]), ("region", 3, 0, 200, 8, 4, 1, 4, [(3, 0, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("object", DvbObject(3, stripes, non_mod=True)), ("end",)),
+        # Two display sets in one block, each showing: the last shows
+        # (FFmpeg: the first) ...
+        DvbSet(4000, page(10, 2, [(1, 100, 400)]), ("region", 1, 0, 200, 24, 4, 1, None, [(1, 0, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("object", DvbObject(1, line)), ("end",),
+               page(10, 0, [(1, 300, 300)]), ("end",)),
+        # ... and showing, then clearing: cleared (FFmpeg: shown).
+        DvbSet(5000, page(10, 0, [(1, 100, 100)]), ("end",), page(10, 0, []), ("end",)),
+        DvbSet(6000, page(10, 0, [(1, 200, 200)]), ("end",)),
+        DvbSet(7000, page(10, 0, []), ("end",)),
+    ]
+    return sets, {1000, 2000, 3000, 4000, 5000}
+
+
+def dvb_hd():
+    """A 1920 x 1080 display with a window: the regions placed in it."""
+    line = vob_shape(300, 30, 0)
+    return [
+        DvbSet(1000, ("display", 1920, 1080, 0, (240, 1679, 135, 944)), ("page", 10, 1, 2, [(1, 0, 0), (2, 1000, 700)]),
+               ("region", 1, 0, 300, 30, 4, 1, None, [(1, 0, 0)]), ("region", 2, 0, 300, 30, 4, 1, None, [(1, 0, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("object", DvbObject(1, line)), ("end",)),
+        # A display definition of the version held, another size and no
+        # window: changes nothing.
+        DvbSet(2000, ("display", 1280, 720, 0, None), ("page", 10, 3, 0, [(1, 0, 0)]), ("end",)),
+        DvbSet(3000, ("page", 10, 2, 0, []), ("end",)),
+    ]
+
+
+def dvb_pages():
+    """A service's page beside another's: the setup names pages 1 and 2 --
+    the composition page, and the ancillary page whose CLUT and object it
+    shares -- and page 3's sets, another service's, are not read."""
+    line = vob_shape(200, 24, 0)
+
+    def on(page_id, segment):
+        return ("raw", segment[:2] + struct.pack(">H", page_id) + segment[4:])
+
+    clut = DvbSet(0, ("clut", 1, 0, DVB_FOUR)).bytes()
+    obj = DvbObject(1, line).segment()
+    other = DvbSet(0, ("page", 10, 7, 2, [(5, 0, 0)]), ("region", 5, 0, 40, 40, 4, 1, 4, []), ("end",)).bytes()
+    other = b"".join(dvb_seg(s[1], s[6:], 3) for s in [other[i:i + 6 + struct.unpack(">H", other[i + 4:i + 6])[0]]
+                                                       for i in dvb_offsets(other)])
+    return [
+        DvbSet(1000, ("page", 10, 1, 2, [(1, 100, 400)]), ("region", 1, 0, 200, 24, 4, 1, None, [(1, 0, 0)]),
+               ("raw", clut[:2] + struct.pack(">H", 2) + clut[4:]), ("raw", obj[:2] + struct.pack(">H", 2) + obj[4:]),
+               ("end",)),
+        DvbSet(2000, ("raw", other)),
+        DvbSet(3000, ("page", 10, 2, 0, [(1, 100, 300)]), ("end",)),
+        DvbSet(4000, ("raw", other)),
+        DvbSet(5000, ("page", 10, 3, 0, []), ("end",)),
+    ]
+
+
+def dvb_offsets(data):
+    """Where each segment of `data` starts."""
+    at, out = 0, []
+    while at + 6 <= len(data):
+        out.append(at)
+        at += 6 + struct.unpack(">H", data[at + 4:at + 6])[0]
+    return out
+
+
+def dvb_drawn_pages(sets):
+    """`dvb_pages`'s sets as the receiver reads them, for the drawing: the
+    raw segments on pages 1 and 2 put back as descriptions, page 3's gone."""
+    line = vob_shape(200, 24, 0)
+    out = []
+    for s in sets:
+        segs = []
+        for seg in s.segments:
+            if seg[0] != "raw":
+                segs.append(seg)
+            elif seg[1][1] == DVB_CLUT:
+                segs.append(("clut", 1, 0, DVB_FOUR))
+            elif seg[1][1] == DVB_OBJECT:
+                segs.append(("object", DvbObject(1, line)))
+        out.append(DvbSet(s.ms, *segs))
+    return out
+
+
+def dvb_damage():
+    """Blocks no muxer writes, each as FFmpeg takes it: the answer FFmpeg's.
+    A good display set shows a line at 1 s; each later block moves it, and
+    meets damage."""
+    line = vob_shape(200, 24, 0)
+    v = iter(range(1, 10_000))
+
+    def page(x, y=400, state=0, timeout=30):
+        return ("page", timeout, next(v) % 16, state, [(1, x, y)])
+
+    def raw(*segments):
+        return ("raw", b"".join(segments))
+
+    good = [("region", 1, 0, 200, 24, 4, 1, None, [(1, 0, 0)]), ("clut", 1, 0, DVB_FOUR),
+            ("object", DvbObject(1, line))]
+    unplaced = DvbObject(9, line).segment()
+    chars = dvb_seg(DVB_OBJECT, struct.pack(">HB", 1, 0x05) + bytes([2]) + b"\x00A\x00B")
+    fields_past = dvb_seg(DVB_OBJECT, struct.pack(">HBHH", 1, 0x01, 400, 400) + bytes(20))
+    clut_cut = DvbSet(0, ("clut", 1, 5, DVB_BLUE)).bytes()[:-2]
+    clut_cut = clut_cut[:4] + struct.pack(">H", len(clut_cut) - 6) + clut_cut[6:]
+    # A line of runs longer than the region, in several codes: the rest of
+    # the string read as what follows.
+    long_line = DvbObject(1, [[1] * 150 + [2] * 150 + [3] * 3 + [1] * 2] * 2)
+    return [
+        DvbSet(1000, page(100, state=2), *good, ("end",)),
+        # Every kind of segment but the end: shown all the same.
+        DvbSet(2000, page(110), *good),
+        # A page alone, no end: not shown.
+        DvbSet(3000, page(120)),
+        DvbSet(3500, page(130), ("end",)),
+        # A segment running past the block.
+        DvbSet(4000, page(140), raw(bytes([0x0F, DVB_END, 0, 1, 0, 9]))),
+        # A byte other than the sync byte, then an end segment never read.
+        DvbSet(5000, page(150), raw(b"\x0E"), ("end",)),
+        # Unknown segments and stuffing passed over.
+        DvbSet(6000, page(160), raw(dvb_seg(0x40, b"\x01\x02\x03"), dvb_seg(0xFF, b"\xFF\xFF")), ("end",)),
+        # Data for an object no region places.
+        DvbSet(7000, page(170), raw(unplaced), ("end",)),
+        # An object of characters.
+        DvbSet(8000, page(180), raw(chars), ("end",)),
+        # Field lengths past the segment.
+        DvbSet(9000, page(190), raw(fields_past), ("end",)),
+        # A CLUT whose last entry is cut short.
+        DvbSet(10000, page(200), raw(clut_cut), ("end",)),
+        # A region of no width; one placing an object outside it.
+        DvbSet(11000, page(210), ("region", 1, 1, 0, 24, 4, 1, None, []), ("end",)),
+        DvbSet(12000, page(220, state=2), ("region", 1, 0, 200, 24, 4, 1, None, [(1, 300, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("end",)),
+        # A line longer than its region, in several codes.
+        DvbSet(13000, page(230, state=2), ("region", 1, 0, 200, 24, 4, 1, 2, [(1, 0, 0)]),
+               ("clut", 1, 0, DVB_FOUR), ("object", long_line), ("end",)),
+        # A page moving the line, no end; then a block of an end segment
+        # alone, six bytes, which FFmpeg refuses: the move never shown.
+        DvbSet(14000, page(240)),
+        DvbSet(14500, ("end",)),
+        DvbSet(15000, ("page", 30, next(v) % 16, 0, []), ("end",)),
+    ]
+
+
+def dvb_main():
+    """The DVB fixtures (`python generate_subtitle_fixtures.py --dvb` makes
+    them alone)."""
+    make_dvb("dvb", dvb_scenes())
+    receiver, receiver_departures = dvb_receiver()
+    make_dvb("dvb_receiver", receiver, departures=receiver_departures)
+    make_dvb("dvb_hd", dvb_hd(), canvas=(1920, 1080))
+    pages = dvb_pages()
+    make_dvb("dvb_pages", pages, private=b"\x00\x01\x00\x02\x10", drawn=dvb_drawn_pages(pages))
+    make_dvb("dvb_damage", dvb_damage(), drawn=False)
+    # Kate -- not read here -- marked default beside DVB pictures.
+    kate = os.path.join(HERE, "kate_and_dvb.mkv")
+    mkv_tracks(kate, [(b"S_KATE", b"", True, [(1000, b"kate")]),
+                      (b"S_DVBSUB", b"\x00\x01\x00\x01\x10", False, [(s.ms, s.bytes()) for s in dvb_hd()])])
+    print("wrote", kate)
+
+
+def make_mixed():
+    """Films with subtitle tracks of several kinds, for which one Subtitles
+    opens: `pgs_and_text.mkv`, Blu-ray pictures marked default beside SubRip
+    text; `dvb_and_pgs.mkv`, DVB pictures (ffmpeg's dvbsub encoder's, from
+    pgs_sd's) marked default beside Blu-ray's. Made from fixtures made
+    already. (`kate_and_dvb.mkv` is `dvb_main`'s.)"""
+    def path(name):
+        return os.path.join(HERE, name)
+
+    def merge(out, *sources):
+        args = [MKVMERGE, "--quiet", "--deterministic", "mixed", "-o", path(out)]
+        for name, default in sources:
+            args += ["--default-track-flag", f"0:{'yes' if default else 'no'}", path(name)]
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0:
+            sys.exit(f"mkvmerge {out} failed:\n{r.stdout}{r.stderr}")
+        print("wrote", path(out))
+
+    merge("pgs_and_text.mkv", ("pgs_sd.mkv", True), ("subrip.mkv", False))
+    # mkvmerge takes no DVB track of ffmpeg's (its setup is not what
+    # mkvmerge looks for), so ffmpeg muxes the two.
+    dvb = path("dvb.tmp.mkv")
+    ffmpeg("-copyts", "-i", path("pgs_sd.mkv"), "-map", "0", "-c:s", "dvbsub",
+           "-fflags", "+bitexact", "-flags", "+bitexact", dvb)
+    ffmpeg("-copyts", "-i", dvb, "-i", path("pgs_sd.mkv"), "-map", "0:0", "-map", "1:0", "-c", "copy",
+           "-disposition:0", "default", "-disposition:1", "0",
+           "-fflags", "+bitexact", "-flags", "+bitexact", path("dvb_and_pgs.mkv"))
+    os.remove(dvb)
+    print("wrote", path("dvb_and_pgs.mkv"))
+
+
 def main():
     # One cue a second and a half apart, a second long.
     def srt_of(texts):
@@ -723,6 +2320,23 @@ def main():
     make("movtext_justified", "", lambda out: tx3g_mp4(out, right_middle, [tx3g_sample("right and middle")]),
          "mp4", muxer="written")
 
+    shown, sd, cropped = pgs_scenes()
+    make_pgs("pgs", PGS_CANVAS, shown)
+    make_pgs("pgs_sd", (720, 480), sd)
+    make_pgs("pgs_cropped", PGS_CANVAS, cropped, departures={1000, 2000, 4000})
+    make_pgs("pgs_damage", PGS_CANVAS, pgs_damage(), drawn=False)
+    main_spus, dvd, dvd_departures, grey, pal = vob_scenes()
+    make_vobsub("vobsub", VOB_CANVAS, VOB_PALETTE, main_spus)
+    make_vobsub("vobsub_dvd", (720, 576), VOB_PALETTE, dvd, departures=dvd_departures)
+    make_vobsub("vobsub_grey", VOB_CANVAS, None, grey)
+    make_vobsub("vobsub_pal", None, VOB_PALETTE, pal)
+    make_vobsub("vobsub_damage", VOB_CANVAS, VOB_PALETTE, [], drawn=False, raw=vob_damage())
+    dvb_main()
+    make_mixed()
+
 
 if __name__ == "__main__":
-    main()
+    if "--dvb" in sys.argv:
+        dvb_main()
+    else:
+        main()

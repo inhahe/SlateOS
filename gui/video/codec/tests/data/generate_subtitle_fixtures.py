@@ -69,6 +69,7 @@ WSL (MP4BOX): `python generate_subtitle_fixtures.py`, or `--webvtt` or
 import hashlib
 import json
 import os
+from fractions import Fraction
 import shutil
 import struct
 import subprocess
@@ -2769,9 +2770,8 @@ def ttml_cues(samples):
     return [(ns(start), ns(stop), key[1], key[2]) for start, stop, _, key in cues], damaged
 
 
-def write_cues(path, name, cues, damaged):
-    lines = [f"# {name}: ttconv's reading of its samples, said as videocodec says it "
-             "(generate_subtitle_fixtures.py)."]
+def write_cues(path, name, cues, damaged, whose="ttconv's reading of its samples"):
+    lines = [f"# {name}: {whose}, said as videocodec says it (generate_subtitle_fixtures.py)."]
     if damaged:
         lines.append(f"damaged {damaged}")
     for start, end, an, runs in cues:
@@ -2830,6 +2830,627 @@ def ttml_main():
     make_ttml("ttml_default", TTML_DEFAULT)
 
 
+# --- CEA-608 captions in MP4 (`c608`) ------------------------------------
+#
+# Television's closed captions, as QuickTime and broadcast recorders keep
+# them: each sample a frame's byte pairs for field 1 (a `cdat` atom), the
+# decoder's screen built from them command by command. Neither external
+# reader is right throughout, so the answers come from `Cea608` below, a
+# decoder written from the rules -- 47 CFR 79.101, the FCC's, for the
+# commands; CTA-608-E's extended characters as McPoodle's SCC tools document
+# them, Unicode name by name -- and each fixture is checked against the
+# reader that is right about what it holds:
+#
+#   - ffmpeg's ccaption_dec (the gyan.dev build above) on pop-on and roll-up
+#     timing and text. It also mixes CC2's commands into CC1's screen,
+#     ignores Backspace, lets a PAC's indent wipe the row, drops a character
+#     of bad parity, swaps the broken bar and the vertical bar, puts every
+#     caption at the top left, and starts a roll-up or paint-on caption at
+#     the command before it even with nothing on the screen.
+#   - CCExtractor 0.94 (Ubuntu's package, unpacked in WSL without
+#     installing: CCEXTRACTOR) on Backspace, Delete to End of Row, indents,
+#     tab offsets and channels. It groups roll-up lines otherwise, ignores
+#     parity, and ignores a control code repeated even pairs apart.
+#
+# A cue is one stretch the screen shows: from a command that changes it --
+# End of Caption, Erase Displayed Memory, a roll-up Carriage Return, a
+# Roll-Up command erasing a caption -- or from the first character on a
+# blank screen, to the next such command, or to typing that leaves the
+# screen blank; its text the screen's at the stretch's end (ffmpeg's
+# grouping, but no stretch before there is anything to show). A command
+# that leaves the screen as it was ends nothing.
+
+CCEXTRACTOR = os.environ.get("CCEXTRACTOR", "~/ccx/ccextractor.sh")
+C608_SCALE, C608_FRAME = 30000, 1001
+
+C608_BASIC = {0x2A: "á", 0x5C: "é", 0x5E: "í", 0x5F: "ó", 0x60: "ú",
+              0x7B: "ç", 0x7C: "÷", 0x7D: "Ñ", 0x7E: "ñ", 0x7F: "█"}
+# 0x11 0x30-0x3F. 0x39 is the transparent space: a cell showing no
+# character and no background, said as a no-break space.
+C608_SPECIAL = ("®°½¿™¢£♪"
+                "à èâêîôû")
+# 0x12 0x20-0x3F, Spanish, miscellaneous and French; 0x13, Portuguese,
+# German and Danish -- McPoodle's tables. 0x12 0x2D is drawn there as a
+# bullet and named "middle dot": the bullet, as CCExtractor reads it.
+C608_EXTENDED = (
+    "ÁÉÓÚÜü‘¡*’—©℠•“”"
+    "ÀÂÇÈÊËëÎÏïÔÙùÛ«»",
+    "ÃãÍÌìÒòÕõ{}\\^_¦~"
+    "ÄäÖöß¥¤|ÅåØø┌┐└┘",
+)
+C608_COLOURS = ["ffffff", "00ff00", "0000ff", "00ffff", "ff0000", "ffff00", "ff00ff"]
+# A PAC's row, by its first byte (channel 1) and its second byte's 0x20 bit.
+C608_ROWS = {(0x11, 0): 1, (0x11, 1): 2, (0x12, 0): 3, (0x12, 1): 4, (0x15, 0): 5, (0x15, 1): 6,
+             (0x16, 0): 7, (0x16, 1): 8, (0x17, 0): 9, (0x17, 1): 10, (0x10, 0): 11, (0x13, 0): 12,
+             (0x13, 1): 13, (0x14, 0): 14, (0x14, 1): 15}
+WHITE = ("ffffff", False, False)
+
+
+def odd_parity(b):
+    b &= 0x7F
+    return b | (0x80 if bin(b).count("1") % 2 == 0 else 0)
+
+
+class Cea608:
+    """CC1 of field 1, decoded pair by pair: `pair(b1, b2, t)`, then
+    `finish(t)` for the cues -- (start, end, rows), each row (row, runs),
+    each run (text, colour, italic, underline)."""
+
+    ROWS, COLS = 15, 32
+
+    def __init__(self):
+        self.displayed = self.blank()
+        self.hidden = self.blank()
+        self.mode = None  # "pop", "paint", "roll" or "text"
+        self.roll = 2
+        self.row, self.col = self.ROWS - 1, 0
+        self.style = WHITE
+        self.ours = True  # the last control code was channel 1's
+        self.last = None  # the pair before, if it was a control code
+        self.since = None
+        self.cues = []
+
+    def blank(self):
+        return [[None] * self.COLS for _ in range(self.ROWS)]
+
+    def target(self):
+        return self.hidden if self.mode == "pop" else self.displayed
+
+    def screen(self):
+        return c608_render(self.displayed)
+
+    # -- a pair at time t
+
+    def pair(self, b1, b2, t):
+        before = self.screen()
+        flushed = self.apply(b1, b2, t)
+        after = self.screen()
+        if after != before:
+            if flushed or not after:
+                # A command changing the screen, or typing leaving it blank:
+                # the stretch so far ends.
+                if self.since is not None and before:
+                    self.cues.append((self.since, t, before))
+                self.since = t if after else None
+            elif self.since is None:
+                self.since = t
+
+    def apply(self, b1, b2, t):
+        """The pair's effect; whether it was a command that ends a stretch."""
+        if (b1, b2) == (0x80, 0x80):
+            self.last = None
+            return False
+        c1, c2 = b1 & 0x7F, b2 & 0x7F
+        if 0x10 <= c1 <= 0x1F:
+            # A control code, or a character of two bytes: each byte must pass
+            # parity, and the same pair again in the very next frame is the
+            # redundant copy.
+            if bin(b1).count("1") % 2 == 0 or bin(b2).count("1") % 2 == 0:
+                self.last = None
+                return False
+            if self.last == (b1, b2):
+                self.last = None
+                return False
+            self.last = (b1, b2)
+            self.ours = c1 < 0x18
+            if not self.ours:
+                return False
+            if self.mode == "text" and not (c1 == 0x14 and 0x20 <= c2 <= 0x2F):
+                return False
+            return self.control(c1, c2)
+        self.last = None
+        if not self.ours or self.mode in (None, "text"):
+            return False
+        for b in (b1, b2):
+            c = b & 0x7F
+            if c == 0:
+                continue
+            if bin(b).count("1") % 2 == 0:
+                self.put("█")
+            elif c >= 0x20:
+                self.put(C608_BASIC.get(c, chr(c)))
+        return False
+
+    def put(self, char):
+        self.target()[self.row][self.col] = (char,) + self.style
+        if self.col < self.COLS - 1:
+            self.col += 1
+
+    def control(self, c1, c2):
+        if c1 == 0x11 and 0x20 <= c2 <= 0x2F:
+            # Mid-row: a space, then the new style. A colour turns italics
+            # off; italics keeps the colour.
+            code, underline = (c2 >> 1) & 7, bool(c2 & 1)
+            self.style = (self.style[0], True, underline) if code == 7 else (C608_COLOURS[code], False, underline)
+            self.put(" ")
+            return False
+        if c1 == 0x11 and 0x30 <= c2 <= 0x3F:
+            self.put(C608_SPECIAL[c2 - 0x30])
+            return False
+        if c1 in (0x12, 0x13) and 0x20 <= c2 <= 0x3F:
+            # An extended character takes the place of the character before
+            # it, sent for a decoder without extended characters.
+            if self.col > 0:
+                self.col -= 1
+            self.put(C608_EXTENDED[c1 - 0x12][c2 - 0x20])
+            return False
+        if c2 >= 0x40:
+            return self.pac(c1, c2)
+        if c1 == 0x17 and 0x21 <= c2 <= 0x23:
+            # A tab offset: the cells passed over as they are.
+            self.col = min(self.col + c2 - 0x20, self.COLS - 1)
+            return False
+        if c1 == 0x14 and 0x20 <= c2 <= 0x2F:
+            return self.command(c2)
+        return False
+
+    def pac(self, c1, c2):
+        """A PAC; whether it moved roll-up's window, which ends a stretch."""
+        row = C608_ROWS.get((c1, (c2 >> 5) & 1))
+        if row is None:
+            return False
+        row -= 1
+        moved = self.mode == "roll" and row != self.row
+        if moved:
+            # The window moves, intact, to its new base row.
+            window = [self.displayed[r] for r in self.window()]
+            for r in self.window():
+                self.displayed[r] = [None] * self.COLS
+            for i, r in enumerate(range(row - len(window) + 1, row + 1)):
+                if r >= 0:
+                    self.displayed[r] = window[i]
+        self.row = row
+        code, underline = (c2 >> 1) & 0xF, bool(c2 & 1)
+        if code & 0x8:
+            self.col, self.style = (code & 7) * 4, ("ffffff", False, underline)
+        else:
+            self.col = 0
+            self.style = ("ffffff", True, underline) if code == 7 else (C608_COLOURS[code], False, underline)
+        return moved
+
+    def window(self):
+        return range(max(0, self.row - self.roll + 1), self.row + 1)
+
+    def command(self, c2):
+        if c2 == 0x20:  # Resume Caption Loading
+            self.mode = "pop"
+        elif c2 == 0x21:  # Backspace
+            if self.col > 0:
+                self.col -= 1
+                self.target()[self.row][self.col] = None
+        elif c2 == 0x24:  # Delete to End of Row
+            row = self.target()[self.row]
+            for c in range(self.col, self.COLS):
+                row[c] = None
+        elif c2 in (0x25, 0x26, 0x27):  # Roll-Up Captions, 2 to 4 rows
+            rows = c2 - 0x23
+            if self.mode != "roll":
+                self.displayed, self.hidden = self.blank(), self.blank()
+                self.row, self.col, self.style = self.ROWS - 1, 0, WHITE
+            self.mode, self.roll = "roll", rows
+            for r in range(0, max(0, self.row - rows + 1)):
+                self.displayed[r] = [None] * self.COLS
+            return True
+        elif c2 == 0x28:  # Flash On: a space, flashing -- said as a space
+            self.put(" ")
+        elif c2 == 0x29:  # Resume Direct Captioning
+            self.mode = "paint"
+        elif c2 in (0x2A, 0x2B):  # Text Restart, Resume Text Display
+            self.mode = "text"
+        elif c2 == 0x2C:  # Erase Displayed Memory
+            self.displayed = self.blank()
+            return True
+        elif c2 == 0x2D:  # Carriage Return
+            if self.mode == "roll":
+                window = list(self.window())
+                for a, b in zip(window, window[1:]):
+                    self.displayed[a] = self.displayed[b]
+                self.displayed[self.row] = [None] * self.COLS
+                self.col, self.style = 0, WHITE
+                return True
+        elif c2 == 0x2E:  # Erase Non-Displayed Memory
+            self.hidden = self.blank()
+        elif c2 == 0x2F:  # End of Caption
+            self.displayed, self.hidden = self.hidden, self.displayed
+            self.mode = "pop"
+            return True
+        return False
+
+    def finish(self, t):
+        if self.since is not None and self.screen():
+            self.cues.append((self.since, t, self.screen()))
+        return self.cues
+
+
+def c608_render(memory):
+    """A memory's rows as runs, top to bottom, the empty rows left out: an
+    empty cell before or between characters a no-break space."""
+    rows = []
+    for r, row in enumerate(memory):
+        last = max((c for c in range(len(row)) if row[c] is not None), default=None)
+        if last is None:
+            continue
+        runs = []
+        for cell in row[:last + 1]:
+            text, *style = cell if cell is not None else (" ",) + WHITE
+            if runs and runs[-1][1:] == tuple(style):
+                runs[-1] = (runs[-1][0] + text,) + runs[-1][1:]
+            else:
+                runs.append((text,) + tuple(style))
+        rows.append((r, tuple(runs)))
+    return tuple(rows)
+
+
+def c608_cue(start, end, rows):
+    """A cue as the crate says it: (start_ns, end_ns, an, runs) -- placed at
+    the left of the third of the picture its rows' middle falls in, each row
+    a line of runs ("text", text, flags, colour). Times are in whole
+    nanoseconds rounded down, as the crate gives every sample's."""
+    ns = lambda t: int(t * 10**9 // 1)
+    middle = Fraction(rows[0][0] + rows[-1][0], 2)
+    an = 7 if middle < 5 else (4 if middle < 10 else 1)
+    runs = []
+    for i, (_, row) in enumerate(rows):
+        if i:
+            runs.append(("break",))
+        for text, colour, italic, underline in row:
+            flags = "0" + ("1" if italic else "0") + ("1" if underline else "0") + "0"
+            runs.append(("text", text, flags, "-" if colour == "ffffff" else colour))
+    return ns(start), ns(end), an, runs
+
+
+def c608_mp4(path, frames):
+    """An MP4 (QuickTime) of one caption track, `c608`, written box by box:
+    each frame's byte pair a sample of one `cdat` atom, at 29.97 frames a
+    second."""
+    samples = [tx3g_box(b"cdat", bytes(f)) for f in frames]
+    total = C608_FRAME * len(samples)
+    identity = struct.pack(">9i", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+    ftyp = tx3g_box(b"ftyp", b"qt  ", struct.pack(">I", 0x200), b"qt  ")
+    mdat = tx3g_box(b"mdat", b"".join(samples))
+    full = lambda kind, *parts: tx3g_box(kind, b"\0\0\0\0", *parts)
+    offsets, at = [], len(ftyp) + 8
+    for s in samples:
+        offsets.append(at)
+        at += len(s)
+    stbl = tx3g_box(
+        b"stbl",
+        full(b"stsd", struct.pack(">I", 1), tx3g_box(b"c608", b"\0" * 6, struct.pack(">H", 1))),
+        full(b"stts", struct.pack(">III", 1, len(samples), C608_FRAME)),
+        full(b"stsc", struct.pack(">IIII", 1, 1, 1, 1)),
+        full(b"stsz", struct.pack(">II", 0, len(samples)), *[struct.pack(">I", len(s)) for s in samples]),
+        full(b"stco", struct.pack(">I", len(offsets)), *[struct.pack(">I", o) for o in offsets]),
+    )
+    mdia = tx3g_box(
+        b"mdia",
+        full(b"mdhd", struct.pack(">IIIIHH", 0, 0, C608_SCALE, total, 0x55C4, 0)),
+        full(b"hdlr", struct.pack(">I4s", 0, b"clcp"), b"\0" * 12, b"ClosedCaptionHandler\0"),
+        tx3g_box(b"minf", tx3g_box(b"gmhd"),
+                 tx3g_box(b"dinf", full(b"dref", struct.pack(">I", 1), tx3g_box(b"url ", b"\0\0\0\1"))), stbl),
+    )
+    duration = total * 600 // C608_SCALE
+    tkhd = tx3g_box(b"tkhd", b"\0\0\0\3", struct.pack(">IIIII", 0, 0, 1, 0, duration), b"\0" * 8,
+                    struct.pack(">hhhH", 0, 0, 0, 0), identity, struct.pack(">II", 0, 0))
+    mvhd = full(b"mvhd", struct.pack(">IIII", 0, 0, 600, duration), struct.pack(">IH", 0x10000, 0x100),
+                b"\0" * 10, identity, b"\0" * 24, struct.pack(">I", 2))
+    with open(path, "wb") as f:
+        f.write(ftyp + mdat + tx3g_box(b"moov", mvhd, tx3g_box(b"trak", tkhd, mdia)))
+
+
+class C608Script:
+    """Byte pairs a frame, written as a captioner's encoder sends them:
+    every control code twice, text two characters a pair."""
+
+    def __init__(self):
+        self.frames = []
+
+    def pairs(self, *pairs):
+        self.frames.extend((odd_parity(a), odd_parity(b)) for a, b in pairs)
+        return self
+
+    def raw(self, a, b):
+        self.frames.append((a, b))
+        return self
+
+    def wait(self, n):
+        self.frames.extend([(0x80, 0x80)] * n)
+        return self
+
+    def code(self, c1, c2, twice=True):
+        return self.pairs(*[(c1, c2)] * (2 if twice else 1))
+
+    def text(self, s):
+        for i in range(0, len(s), 2):
+            a = ord(s[i])
+            b = ord(s[i + 1]) if i + 1 < len(s) else 0
+            self.pairs((a, b))
+        return self
+
+    # Commands, CC1.
+    def rcl(self): return self.code(0x14, 0x20)
+    def bs(self, twice=True): return self.code(0x14, 0x21, twice)
+    def der(self): return self.code(0x14, 0x24)
+    def ru(self, n): return self.code(0x14, 0x23 + n)
+    def fon(self): return self.code(0x14, 0x28)
+    def rdc(self): return self.code(0x14, 0x29)
+    def tr(self): return self.code(0x14, 0x2A)
+    def edm(self): return self.code(0x14, 0x2C)
+    def cr(self): return self.code(0x14, 0x2D)
+    def enm(self): return self.code(0x14, 0x2E)
+    def eoc(self): return self.code(0x14, 0x2F)
+    def to(self, n): return self.code(0x17, 0x20 + n)
+
+    def pac(self, row, indent=None, colour=None, italic=False, underline=False):
+        first, base = {1: (0x11, 0x40), 2: (0x11, 0x60), 3: (0x12, 0x40), 4: (0x12, 0x60), 5: (0x15, 0x40),
+                       6: (0x15, 0x60), 7: (0x16, 0x40), 8: (0x16, 0x60), 9: (0x17, 0x40), 10: (0x17, 0x60),
+                       11: (0x10, 0x40), 12: (0x13, 0x40), 13: (0x13, 0x60), 14: (0x14, 0x40),
+                       15: (0x14, 0x60)}[row]
+        if indent is not None:
+            code = 0x10 + (indent // 4) * 2
+        elif italic:
+            code = 0x0E
+        else:
+            code = C608_COLOURS.index(colour or "ffffff") * 2
+        return self.code(first, base + code + (1 if underline else 0))
+
+    def midrow(self, colour=None, italic=False, underline=False):
+        code = 7 if italic else C608_COLOURS.index(colour or "ffffff")
+        return self.code(0x11, 0x20 + code * 2 + (1 if underline else 0))
+
+    def special(self, i): return self.code(0x11, 0x30 + i)
+
+    def extended(self, table, i, fallback="-"):
+        return self.text(fallback).code(0x12 + table, 0x20 + i)
+
+    def popon(self, *rows):
+        """A pop-on caption: (pac arguments, text) for each row, loaded
+        into the memory not shown, then shown."""
+        self.rcl().enm()
+        for args, text in rows:
+            self.pac(**args)
+            text(self) if callable(text) else self.text(text)
+        return self.eoc()
+
+
+def c608_model(frames):
+    d = Cea608()
+    for i, (a, b) in enumerate(frames):
+        d.pair(a, b, Fraction(i * C608_FRAME, C608_SCALE))
+    return [c608_cue(*c) for c in d.finish(Fraction(len(frames) * C608_FRAME, C608_SCALE))]
+
+
+def c608_plain(cues):
+    """Cues as (start_ms, end_ms, rows of plain text): what both external
+    readers can be compared on. Leading and trailing white space of each row
+    is dropped -- ffmpeg drops the one, CCExtractor pads the other -- and
+    no-break spaces are spaces."""
+    out = []
+    for start, end, _, runs in cues:
+        rows, row = [], ""
+        for r in runs:
+            if r[0] == "break":
+                rows.append(row)
+                row = ""
+            else:
+                row += r[1]
+        rows.append(row)
+        out.append((round(start / 1e6), round(end / 1e6),
+                    tuple(x.replace(" ", " ").strip() for x in rows)))
+    return out
+
+
+def c608_srt_plain(srt_text):
+    """An SRT file's cues as `c608_plain` gives them, tags, ASS's `\\h` and
+    `{\\anN}` dropped."""
+    import re
+    out = []
+    for block in srt_text.replace("\r", "").split("\n\n"):
+        lines = block.split("\n")
+        if len(lines) < 3:
+            continue
+        a, b = lines[1].split(" --> ")
+        ms = lambda s: ((int(s[0:2]) * 60 + int(s[3:5])) * 60 + int(s[6:8])) * 1000 + int(s[9:12])
+        rows = [re.sub(r"<[^>]*>|\{\\an\d\}", "", x).replace("\\h", " ").replace(" ", " ").strip()
+                for x in lines[2:]]
+        out.append((ms(a), ms(b), tuple(rows)))
+    return out
+
+
+def c608_ffmpeg(path):
+    r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path, "-map", "0:s:0", "-c:s", "srt", "-f", "srt", "-"],
+                       capture_output=True)
+    if r.returncode != 0:
+        sys.exit(f"ffmpeg {path} failed:\n{r.stderr.decode('utf-8', 'replace')}")
+    return c608_srt_plain(r.stdout.decode("utf-8"))
+
+
+def c608_ccextractor(frames):
+    """CCExtractor's reading of the same pairs, as McPoodle's broadcast raw
+    form (a header, then a pair a frame) -- its MP4 reader crashes on every
+    caption track tried. Its times end a millisecond before the next."""
+    scratch = tempfile.mkdtemp(prefix="ccx")
+    try:
+        with open(os.path.join(scratch, "in.raw"), "wb") as f:
+            f.write(b"\xff\xff\xff\xff" + b"".join(bytes(p) for p in frames))
+        drive, rest = os.path.splitdrive(scratch)
+        where = "/mnt/" + drive.rstrip(":").lower() + rest.replace(os.sep, "/")
+        r = subprocess.run(["wsl", "-d", "Ubuntu", "--", "bash", "-c",
+                            f"cd '{where}' && {CCEXTRACTOR} -quiet -in=raw in.raw -o out.srt"],
+                           capture_output=True)
+        made = os.path.join(scratch, "out.srt")
+        if not os.path.exists(made):
+            sys.exit(f"CCExtractor failed:\n{r.stdout.decode('utf-8', 'replace')}{r.stderr.decode('utf-8', 'replace')}")
+        with open(made, encoding="utf-8-sig") as f:
+            return c608_srt_plain(f.read())
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+# Where each reader's characters are not the tables' (McPoodle's Unicode
+# names): each of ours as the reader writes it, compared so.
+C608_THEIR_CHARACTERS = {
+    # Plain apostrophes for the curly quotes; the corner brackets (quine
+    # corners) for the box-drawing corners.
+    "CCExtractor": str.maketrans("‘’┌┐└┘", "''⌜⌝⌞⌟"),
+    # An acute accent and a left quote for the two quotes, a hyphen for the
+    # em dash, a middle dot for the bullet, the two bars swapped.
+    "ffmpeg": str.maketrans("‘’—•¦|", "´‘-·|¦"),
+}
+
+
+def c608_check(name, mine, theirs, who, departures):
+    """`theirs` must be `mine` but for `departures` -- {cue index: reason},
+    the reference's own cue at that index left out of the comparison and
+    the reason printed -- and for the characters it writes otherwise
+    (`C608_THEIR_CHARACTERS`). ffmpeg's times to the millisecond;
+    CCExtractor's to the frame, as it ends a cue a millisecond or two early
+    -- its texts are what it is here for."""
+    table = C608_THEIR_CHARACTERS[who]
+    differing = {c for _, _, rows in mine for row in rows for c in row if ord(c) in table}
+    if differing:
+        print(f"  {name}: {who} writes {''.join(sorted(differing))} otherwise: "
+              f"{''.join(sorted(differing)).translate(table)}")
+    mine = [(a, b, tuple(row.translate(table) for row in rows)) for a, b, rows in mine]
+    slack = 1 if who == "ffmpeg" else 34
+    want = [c for i, c in enumerate(mine) if i not in departures]
+    got = [c for i, c in enumerate(theirs) if i not in departures]
+    close = lambda x, y: abs(x[0] - y[0]) <= slack and abs(x[1] - y[1]) <= slack and x[2] == y[2]
+    if len(want) != len(got) or not all(close(x, y) for x, y in zip(want, got)):
+        lines = [f"{name}: {who} reads it otherwise than the rules:"]
+        for i in range(max(len(mine), len(theirs))):
+            m = mine[i] if i < len(mine) else None
+            t = theirs[i] if i < len(theirs) else None
+            mark = "  (departure)" if i in departures else ("" if m and t and close(m, t) else "  <--")
+            lines.append(f"  {i}: mine {m}\n     {who} {t}{mark}")
+        sys.exit("\n".join(lines))
+    for i, why in departures.items():
+        print(f"  {name}: cue {i} departs from {who}: {why}")
+
+
+def make_cea608(name, script, checks=()):
+    """NAME.mp4 of `script`'s pairs and NAME.cues, the rules' reading of
+    them, checked against each (reader, departures) of `checks`."""
+    frames = script.frames
+    out = os.path.join(HERE, f"{name}.mp4")
+    c608_mp4(out, frames)
+    cues = c608_model(frames)
+    mine = c608_plain(cues)
+    for who, departures in checks:
+        theirs = c608_ffmpeg(out) if who == "ffmpeg" else c608_ccextractor(frames)
+        c608_check(f"{name}.mp4", mine, theirs, who, departures)
+    write_cues(os.path.join(HERE, f"{name}.cues"), f"{name}.mp4", cues, 0, "the rules' reading (Cea608)")
+    print("wrote", out, f"{len(cues)} cues")
+    return cues
+
+
+def cea608_main():
+    """The CEA-608 fixtures (`python generate_subtitle_fixtures.py --cea608`
+    makes them alone)."""
+    # Pop-on: captions loaded out of sight and shown whole, in the three
+    # thirds of the picture, replaced, erased, and one loaded and thrown away.
+    s = C608Script().wait(5)
+    s.popon(({"row": 14}, "second row"), ({"row": 15, "indent": 4}, "Hello pop-on"))
+    s.wait(40).popon(({"row": 1}, "at the top"), ({"row": 2, "indent": 8}, "of the picture")).wait(40)
+    s.popon(({"row": 8, "indent": 12}, "in the middle")).wait(40)
+    s.rcl().enm().pac(14).text("never shown").enm().pac(15).text("shown instead").eoc().wait(40)
+    s.edm().wait(20).popon(({"row": 15}, "after a blank")).wait(30).edm().wait(10)
+    make_cea608("cea608_popon", s, [
+        ("ffmpeg", {3: "ffmpeg leaves the row loaded before Erase Non-Displayed Memory, and shows it"}),
+        ("CCExtractor", {}),
+    ])
+
+    # Styles: each colour, italics and underline from a PAC; mid-row codes,
+    # each a space, a colour turning italics off and italics keeping it.
+    s = C608Script().wait(5).rcl().enm()
+    for row, colour in zip(range(9, 16), C608_COLOURS):
+        s.pac(row, colour=colour, underline=row % 2 == 0).text(f"{colour} row")
+    s.eoc().wait(40).rcl().enm().pac(13, italic=True).text("italic")
+    s.pac(14).text("a").midrow(italic=True).text("b").midrow(colour="ff0000").text("c")
+    s.midrow(colour="00ffff", underline=True).text("d").midrow(italic=True).text("e")
+    s.pac(15).text("plain").eoc().wait(40).edm().wait(10)
+    make_cea608("cea608_styles", s, [("ffmpeg", {})])
+
+    # Characters: the standard set where it is not ASCII, every special
+    # character, and every extended one in each set, each after the
+    # character a decoder without them would show.
+    # Sixteen to a row, the extended ones each taking its fallback's cell.
+    s = C608Script().wait(5).rcl().enm().pac(10).text("*\\^_`{|}~")
+    s.pac(11)
+    for i in range(16):
+        s.special(i)
+    for row, (table, first) in enumerate([(0, 0), (0, 16), (1, 0), (1, 16)], 12):
+        s.pac(row)
+        for i in range(first, first + 16):
+            s.extended(table, i)
+    s.eoc().wait(40).edm().wait(10)
+    make_cea608("cea608_characters", s, [("CCExtractor", {})])
+
+    # Roll-up: lines rolling up a window of two, then three and four rows,
+    # the top one off it; Roll-Up sent again before each line, as
+    # captioners' encoders do; erased, and rolling on after it.
+    blank_start = "ffmpeg begins it at the Carriage Return before, the screen blank till its first characters"
+    s = C608Script().wait(5).ru(2).cr().pac(15).text("line one").wait(30)
+    s.ru(2).cr().pac(15).text("line two").wait(30).ru(2).cr().pac(15).text("line three").wait(30)
+    s.ru(3).cr().pac(15).text("now three rows").wait(30).ru(4).cr().pac(15).text("and four").wait(30)
+    s.cr().text("line two rolls off").wait(30).edm().wait(20).cr().text("after the erase").wait(30)
+    s.edm().wait(10)
+    make_cea608("cea608_rollup", s, [("ffmpeg", {0: blank_start, 6: blank_start})])
+
+    # Switching style, and a window moved: roll-up's window moved up by a
+    # PAC naming another base row, intact; a pop-on caption loaded and shown
+    # over it; Roll-Up erasing that; paint-on after.
+    s = C608Script().wait(5).ru(3).cr().pac(15).text("one").wait(20).cr().text("two").wait(20)
+    s.pac(10).wait(20).cr().text("three, up a window").wait(30)
+    s.popon(({"row": 15}, "pop-on over it")).wait(30).ru(2).wait(20).cr().text("rolling again").wait(30)
+    # Still showing at the end: until the track ends.
+    s.rdc().pac(13).text("painted").wait(30)
+    make_cea608("cea608_modes", s)
+
+    # Paint-on: characters straight to the screen, corrected by Backspace,
+    # Delete to End of Row and a PAC that moves without erasing; tab
+    # offsets passing cells over.
+    s = C608Script().wait(5).rdc().pac(15).text("paint on").wait(20).bs().bs().text("ON").wait(20)
+    s.pac(13).text("abc").to(3).text("def").wait(20)
+    s.pac(14).text("keep this").wait(20).pac(14, indent=4).der().wait(20).pac(14).text("K").wait(20)
+    s.edm().wait(20)
+    make_cea608("cea608_painton", s, [("CCExtractor", {})])
+
+    # The rules no reader here keeps: a character failing parity a solid
+    # block, a control code failing it ignored; a control code repeated
+    # pairs apart acted on twice; channel 2's commands and characters, and
+    # text mode's, not shown; Backspace in the first column ignored; a row
+    # full to its last column, the last column overwritten; Flash On a space.
+    s = C608Script().wait(5).rcl().enm().pac(15).text("ok").raw(0x41, 0x42).text("ok")
+    s.raw(0x14, 0x2F).text("!")  # EOC failing parity: ignored
+    s.pac(14).text("abcd").bs(twice=False).wait(1).bs(twice=False)
+    s.code(0x1C, 0x20).code(0x1C, 0x2E).code(0x1C, 0x70).text("channel two").code(0x1C, 0x2F)
+    s.code(0x14, 0x2A).text("text mode").rcl()
+    s.pac(13).bs().text("x").fon().text("y")
+    s.pac(12).text("0123456789012345678901234567890123456")
+    s.eoc().wait(40).edm().wait(10)
+    make_cea608("cea608_rules", s)
+
+
 def webvtt_main():
     """The WebVTT fixtures, in WebM, Matroska and MP4 (`python
     generate_subtitle_fixtures.py --webvtt` makes them alone)."""
@@ -2878,6 +3499,7 @@ def main():
 
     webvtt_main()
     ttml_main()
+    cea608_main()
 
     overlap = "".join(f"{i + 1}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n\n"
                       for i, (start, end, text) in enumerate(OVERLAP))
@@ -2915,5 +3537,7 @@ if __name__ == "__main__":
         webvtt_main()
     elif "--ttml" in sys.argv:
         ttml_main()
+    elif "--cea608" in sys.argv:
+        cea608_main()
     else:
         main()

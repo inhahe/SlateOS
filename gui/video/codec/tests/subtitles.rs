@@ -8,7 +8,11 @@
 //! DVB's (`dvb*`) are held to `NAME.states`: the picture FFmpeg's sub2video
 //! shows at each change, every subtitle shown and the forced alone, but
 //! where the format's player shows otherwise (the generator's drawing
-//! there).
+//! there). TTML (`ttml*`) and CEA-608 captions (`cea608*`), which FFmpeg
+//! does not read as their own readers do, are held to `NAME.cues`: ttconv's
+//! reading of each sample, and the FCC's rules' (checked against FFmpeg and
+//! CCExtractor where either is right), each cue as runs of styled text that
+//! the crate's markup is read back into.
 
 #![allow(
     clippy::unwrap_used,
@@ -279,7 +283,9 @@ fn runs_of(markup: &str) -> (u8, Vec<Run>) {
         _ => (2, markup),
     };
     let (mut b, mut i, mut u, mut s) = (0, 0, 0, 0);
-    let mut colours: Vec<String> = Vec::new();
+    // Each `<font>` open, innermost last: its colour, or `None` for one
+    // naming a face (CEA-608's grid's), which says no colour.
+    let mut fonts: Vec<Option<String>> = Vec::new();
     let mut runs: Vec<Run> = Vec::new();
     while let Some(c) = rest.chars().next() {
         if c == '<' && !rest[1..].starts_with('\u{2060}') {
@@ -296,14 +302,15 @@ fn runs_of(markup: &str) -> (u8, Vec<Run>) {
                 "s" => s += 1,
                 "/s" => s -= 1,
                 "/font" => {
-                    colours.pop();
+                    fonts.pop();
                 }
+                "font face=\"Monospace\"" => fonts.push(None),
                 _ => {
                     let colour = tag
                         .strip_prefix("font color=\"#")
                         .and_then(|t| t.strip_suffix('"'))
                         .unwrap_or_else(|| panic!("a tag this test does not know: {tag}"));
-                    colours.push(colour.to_owned());
+                    fonts.push(Some(colour.to_owned()));
                 }
             }
             continue;
@@ -315,7 +322,11 @@ fn runs_of(markup: &str) -> (u8, Vec<Run>) {
             c => {
                 let flag = |n: i32| if n > 0 { '1' } else { '0' };
                 let flags: String = [flag(b), flag(i), flag(u), flag(s)].iter().collect();
-                let colour = colours.last().cloned().unwrap_or_else(|| "-".to_owned());
+                let colour = fonts
+                    .iter()
+                    .rev()
+                    .find_map(Clone::clone)
+                    .unwrap_or_else(|| "-".to_owned());
                 match runs.last_mut() {
                     Some(Run::Text {
                         text,
@@ -338,9 +349,15 @@ fn runs_of(markup: &str) -> (u8, Vec<Run>) {
 /// reading of its samples, said as this crate says it -- and the samples
 /// that are no document counted, as ttconv cannot read them either.
 fn ttml_held_to_its_answer(name: &str) {
+    runs_held_to_their_answer(name, SubtitleFormat::Ttml);
+}
+
+/// Every cue of `NAME.mp4`, a track of `format`, against `NAME.cues`, each
+/// cue's markup read back into runs; and the samples counted as damaged.
+fn runs_held_to_their_answer(name: &str, format: SubtitleFormat) {
     let file = format!("{name}.mp4");
     let mut subtitles = Subtitles::open(File::open(data(&file)).unwrap()).unwrap();
-    assert_eq!(subtitles.info().format, SubtitleFormat::Ttml, "{file}");
+    assert_eq!(subtitles.info().format, format, "{file}");
     let got: Vec<TtmlCue> = read_all(&mut subtitles)
         .into_iter()
         .map(|c| {
@@ -404,8 +421,8 @@ fn ttml_shows_each_sample_only_in_its_own_stretch() {
     ttml_held_to_its_answer("ttml_timing");
 }
 
-/// The TTML cues of `file` from a seek to `time` on.
-fn ttml_after_seek(file: &str, time: i64) -> Vec<TtmlCue> {
+/// The cues of `file`, as runs, from a seek to `time` on.
+fn runs_after_seek(file: &str, time: i64) -> Vec<TtmlCue> {
     let mut subtitles = Subtitles::open(File::open(data(file)).unwrap()).unwrap();
     subtitles.seek(time).unwrap();
     read_all(&mut subtitles)
@@ -445,7 +462,7 @@ fn a_seek_in_ttml_gives_the_cues_showing_then() {
     ] {
         let showing: Vec<TtmlCue> = one.iter().filter(|c| c.1 > time).cloned().collect();
         assert_eq!(
-            ttml_after_seek("ttml_timing_one.mp4", time),
+            runs_after_seek("ttml_timing_one.mp4", time),
             showing,
             "the one sample, from {time} ns"
         );
@@ -455,7 +472,7 @@ fn a_seek_in_ttml_gives_the_cues_showing_then() {
             .map(|c| (c.0.max(landed), c.1, c.2, c.3.clone()))
             .collect();
         assert_eq!(
-            ttml_after_seek("ttml_timing_split.mp4", time),
+            runs_after_seek("ttml_timing_split.mp4", time),
             from_sample,
             "samples of 1.5 s, from {time} ns"
         );
@@ -479,14 +496,128 @@ fn ttml_without_regions() {
 /// what the choice of a film's track to show goes by, text first.
 #[test]
 fn which_formats_are_text_which_pictures_and_which_read() {
-    use SubtitleFormat::{Ass, Dvb, MovText, Other, Pgs, Ssa, SubRip, Ttml, VobSub, WebVtt};
-    for format in [SubRip, Ass, Ssa, WebVtt, MovText, Ttml] {
+    use SubtitleFormat::{
+        Ass, Cea608, Dvb, MovText, Other, Pgs, Ssa, SubRip, Ttml, VobSub, WebVtt,
+    };
+    for format in [SubRip, Ass, Ssa, WebVtt, MovText, Ttml, Cea608] {
         assert!(format.is_text() && format.is_read(), "{format}");
     }
     for format in [Pgs, VobSub, Dvb] {
         assert!(!format.is_text() && format.is_read(), "{format}");
     }
     assert!(!Other.is_text() && !Other.is_read());
+}
+
+/// Every cue of `NAME.mp4`, a CEA-608 track, against `NAME.cues`: the
+/// rules' reading (`Cea608` in the generator, itself checked against ffmpeg
+/// or CCExtractor where either is right about what the fixture holds), each
+/// cue in the caption grid's face.
+fn captions_held_to_their_answer(name: &str) {
+    runs_held_to_their_answer(name, SubtitleFormat::Cea608);
+    let file = format!("{name}.mp4");
+    let mut subtitles = Subtitles::open(File::open(data(&file)).unwrap()).unwrap();
+    for cue in read_all(&mut subtitles) {
+        assert!(
+            cue.text.contains("<font face=\"Monospace\">"),
+            "{file}: {:?}",
+            cue.text
+        );
+    }
+}
+
+/// Pop-on captions, loaded out of sight and shown whole: in each third of
+/// the picture, replaced, erased, one loaded and thrown away.
+#[test]
+fn cea608_pop_on() {
+    captions_held_to_their_answer("cea608_popon");
+}
+
+/// Each colour, italics and underline from a PAC; mid-row codes, a space
+/// each, a colour turning italics off.
+#[test]
+fn cea608_styles() {
+    captions_held_to_their_answer("cea608_styles");
+}
+
+/// The standard characters that are not ASCII's, every special one, and
+/// every extended one taking its fallback's place.
+#[test]
+fn cea608_characters() {
+    captions_held_to_their_answer("cea608_characters");
+}
+
+/// Roll-up's window of two, three and four rows; Roll-Up sent before every
+/// line; erased, and rolling on.
+#[test]
+fn cea608_roll_up() {
+    captions_held_to_their_answer("cea608_rollup");
+}
+
+/// From roll-up to pop-on and back, paint-on after; roll-up's window moved
+/// by a PAC, intact.
+#[test]
+fn cea608_switching_style_and_a_window_moved() {
+    captions_held_to_their_answer("cea608_modes");
+}
+
+/// Paint-on: corrected by Backspace, Delete to End of Row and a PAC that
+/// erases nothing; tab offsets passing cells over.
+#[test]
+fn cea608_paint_on() {
+    captions_held_to_their_answer("cea608_painton");
+}
+
+/// What neither ffmpeg nor CCExtractor keeps: parity, a repeat pairs apart,
+/// another channel, text mode, the first column's Backspace, a full row.
+#[test]
+fn cea608_the_rules_no_reader_keeps() {
+    captions_held_to_their_answer("cea608_rules");
+}
+
+/// A seek into CEA-608 captions gives what the screen shows then -- built
+/// from the pairs before the time -- and the rest: each cue as a read from
+/// the start gives it.
+#[test]
+fn a_seek_in_cea608_gives_the_screen_showing_then() {
+    for name in ["cea608_rollup", "cea608_popon"] {
+        let (all, _) = cue_answers(&format!("{name}.cues"));
+        let mid = |c: &TtmlCue| c.0 + (c.1 - c.0) / 2;
+        let times = all.iter().map(mid).chain([0, all.last().unwrap().1 + 1]);
+        for time in times {
+            let showing: Vec<TtmlCue> = all.iter().filter(|c| c.1 > time).cloned().collect();
+            assert_eq!(
+                runs_after_seek(&format!("{name}.mp4"), time),
+                showing,
+                "{name}, from {time} ns"
+            );
+        }
+    }
+}
+
+/// A seek back after reading builds the screen afresh: the cues read again
+/// are the same, from part way through and from the end.
+#[test]
+fn a_seek_in_cea608_forgets_the_screen_read_before() {
+    let said = |cues: Vec<Cue>| -> Vec<(i64, i64, String)> {
+        cues.into_iter().map(|c| (c.start, c.end, c.text)).collect()
+    };
+    for name in ["cea608_popon", "cea608_rollup", "cea608_modes"] {
+        let file = format!("{name}.mp4");
+        let mut subtitles = Subtitles::open(File::open(data(&file)).unwrap()).unwrap();
+        let all = said(read_all(&mut subtitles));
+        for read in [2, all.len()] {
+            subtitles.seek(0).unwrap();
+            for _ in 0..read {
+                subtitles.next_cue().unwrap();
+            }
+            subtitles.seek(0).unwrap();
+            assert_eq!(
+                said(read_all(&mut subtitles)),
+                all,
+                "{file}, after {read} cues"
+            );
+        }
+    }
 }
 
 /// A seek back after reading forgets what was read: the cues read again are

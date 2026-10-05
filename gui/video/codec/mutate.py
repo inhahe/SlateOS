@@ -1,11 +1,12 @@
 """Mutation test for videocodec's subtitles: Blu-ray's PGS, DVD's VobSub and
-DVB's pictures; WebVTT and TTML in MP4, with the XML TTML is read from and
-the joining of their cues' pieces; and the reader that gives every format's
-cues.
+DVB's pictures; WebVTT, TTML and CEA-608 captions in MP4, with the XML TTML
+is read from and the joining of their cues' pieces; and the reader that
+gives every format's cues.
 
 Each row puts back one way of not showing what the reference shows -- a rule
 of FFmpeg's `pgssub` decoder dropped, a colour rounded otherwise, a crop made
-as FFmpeg makes it, a TTML time read otherwise than ttconv reads it -- or of
+as FFmpeg makes it, a TTML time read otherwise than ttconv reads it, a
+caption command done otherwise than the FCC's rules say -- or of
 not giving the cues a player needs, and names the tests that have to notice:
 the fixtures' (`tests/subtitles.rs`, held to their references' answers by
 `tests/data/generate_subtitle_fixtures.py`) and the module's own.
@@ -151,6 +152,36 @@ TTML_DEFAULT = "ttml_without_regions"
 TTML_SEEK = "a_seek_in_ttml_gives_the_cues_showing_then"
 TTML_FORGETS = "a_seek_in_ttml_forgets_what_was_read"
 FORMATS = "which_formats_are_text_which_pictures_and_which_read"
+
+# CEA-608 captions (cea608.rs): the module's own.
+C_POPON = "a_pop_on_caption_shows_from_end_of_caption_to_the_erase"
+C_REPLACED = "a_caption_replaced_ends_where_the_next_begins"
+C_SAME = "the_same_caption_shown_again_ends_nothing"
+C_EXTENDED = "an_extended_character_takes_the_place_of_the_one_before"
+C_PARITY = "a_character_failing_parity_is_a_solid_block"
+C_PARITY_CODE = "a_control_code_failing_parity_is_ignored"
+C_REDUNDANT = "a_control_code_is_redundant_only_in_the_very_next_pair"
+C_CHANNEL = "another_channel_and_text_mode_show_nothing"
+C_FIRST_COLUMN = "backspace_in_the_first_column_is_nothing_and_a_full_row_overwrites_its_last"
+C_MIDROW = "mid_row_codes_are_spaces_and_a_colour_turns_italics_off"
+C_ROLL = "roll_up_rolls_its_window_and_a_line_shows_from_its_first_character"
+C_ROLL_AGAIN = "roll_up_sent_again_before_each_line_ends_nothing"
+C_ROLL_ERASES = "roll_up_erases_a_pop_on_caption"
+C_WINDOW = "a_pac_naming_another_base_row_moves_the_window_intact"
+C_BLANKED = "typing_that_leaves_the_screen_blank_ends_a_stretch"
+C_PAINT = "paint_on_shows_from_its_first_character_to_the_erase"
+C_COLUMN = "a_row_keeps_its_column_and_the_caption_its_third"
+C_ATOMS = "a_samples_pairs_are_its_field_1_atoms"
+# The CEA-608 fixtures'.
+CEA_POPON = "cea608_pop_on"
+CEA_STYLES = "cea608_styles"
+CEA_CHARS = "cea608_characters"
+CEA_ROLLUP = "cea608_roll_up"
+CEA_MODES = "cea608_switching_style_and_a_window_moved"
+CEA_PAINT = "cea608_paint_on"
+CEA_RULES = "cea608_the_rules_no_reader_keeps"
+CEA_SEEK = "a_seek_in_cea608_gives_the_screen_showing_then"
+CEA_FORGETS = "a_seek_in_cea608_forgets_the_screen_read_before"
 
 # (name, old, new, [tests that must fail])
 PICTURES = [
@@ -448,6 +479,31 @@ READER = [
         "            Reader::Ttml(joined) => joined.clear(),",
         "            Reader::Ttml(_) => {}",
         [TTML_FORGETS],
+    ),
+    # CEA-608 captions in MP4.
+    (
+        "CEA-608 samples are not read as captions",
+        "                || self.captions(&sample, ticks)",
+        "                || false",
+        [CEA_POPON],
+    ),
+    (
+        "the screen still showing at the track's end is lost",
+        "            let last = decoder.finish(*end);\n            self.give_caption(last);",
+        "            let _ = decoder.finish(*end);\n            self.give_caption(None);",
+        [CEA_MODES],
+    ),
+    (
+        "a seek in CEA-608 reads from the time, not before it",
+        "            ticks = time::to_ticks(time.saturating_sub(CAPTION_LOOKBACK), self.time_base);",
+        "            ticks = time::to_ticks(time, self.time_base);",
+        [CEA_SEEK],
+    ),
+    (
+        "a seek in CEA-608 keeps the screen read before it",
+        "                **decoder = cea608::Decoder::default();",
+        "                let _ = &decoder;",
+        [CEA_FORGETS],
     ),
     (
         "TTML's cues are given without a seek's time",
@@ -776,6 +832,190 @@ TTML = [
     ),
 ]
 
+# CEA-608 captions: the FCC's rules for each command, the characters, what a
+# cue is, and how it is said.
+CEA608 = [
+    # Pairs.
+    (
+        "a character failing parity is shown as sent",
+        "            if !odd(b) {\n                self.put('\\u{2588}');",
+        "            if false && !odd(b) {\n                self.put('\\u{2588}');",
+        [C_PARITY, CEA_RULES],
+    ),
+    (
+        "a control code failing parity is acted on",
+        "            if !odd(b1) || !odd(b2) || self.last == Some([b1, b2]) {",
+        "            if self.last == Some([b1, b2]) {",
+        [C_PARITY_CODE, CEA_RULES],
+    ),
+    (
+        "every control code acted on twice",
+        "            if !odd(b1) || !odd(b2) || self.last == Some([b1, b2]) {",
+        "            if !odd(b1) || !odd(b2) {",
+        [C_POPON, C_REDUNDANT, CEA_POPON],
+    ),
+    (
+        "a control code repeated pairs apart is ignored",
+        "        if [b1, b2] == [0x80, 0x80] {\n            self.last = None;",
+        "        if [b1, b2] == [0x80, 0x80] {\n            let _ = self.last;",
+        [C_REDUNDANT, CEA_RULES],
+    ),
+    (
+        "another channel's captions are shown",
+        "            self.ours = c1 < 0x18;",
+        "            self.ours = true;",
+        [C_CHANNEL, CEA_RULES],
+    ),
+    (
+        "text mode's characters are captions",
+        "        if !self.ours || matches!(self.mode, Mode::Unset | Mode::Text) {",
+        "        if !self.ours || matches!(self.mode, Mode::Unset) {",
+        [C_CHANNEL, CEA_RULES],
+    ),
+    (
+        "a pop-on caption is loaded on the screen",
+        "        if self.mode == Mode::PopOn {",
+        "        if false {",
+        [C_POPON, CEA_POPON],
+    ),
+    (
+        "the samples' second field read as the first",
+        '            if kind == b"cdat" {',
+        '            if kind == b"cdat" || kind == b"cdt2" {',
+        [C_ATOMS],
+    ),
+    # Characters.
+    (
+        "a mid-row code is no space",
+        "                };\n                self.put(' ');\n                false",
+        "                };\n                false",
+        [C_MIDROW, CEA_STYLES],
+    ),
+    (
+        "a colour mid-row code keeps italics",
+        "                    Style {\n                        colour: code,\n                        italic: false,\n                        underline,\n                    }\n                };\n                self.put(' ');",
+        "                    Style {\n                        colour: code,\n                        italic: self.style.italic,\n                        underline,\n                    }\n                };\n                self.put(' ');",
+        [C_MIDROW, CEA_STYLES],
+    ),
+    (
+        "a special character is the next one along",
+        "                if let Some(&ch) = SPECIAL.get(usize::from(c2 & 0x0F)) {",
+        "                if let Some(&ch) = SPECIAL.get(usize::from(c2.wrapping_add(1) & 0x0F)) {",
+        [CEA_CHARS],
+    ),
+    (
+        "an extended character backs over nothing",
+        "                self.col = self.col.saturating_sub(1);\n                let table",
+        "                let table",
+        [C_EXTENDED, CEA_CHARS],
+    ),
+    (
+        "the two extended sets swapped",
+        "                let table = EXTENDED.get(usize::from(c1 & 1));",
+        "                let table = EXTENDED.get(usize::from(!c1 & 1));",
+        [C_EXTENDED, CEA_CHARS],
+    ),
+    # Commands.
+    (
+        "a PAC's indent is not kept",
+        "            self.col = usize::from(code & 7).saturating_mul(4);",
+        "            self.col = 0;",
+        [C_COLUMN, CEA_POPON, CEA_PAINT],
+    ),
+    (
+        "a tab offset is one column short",
+        "                    .saturating_add(usize::from(c2 & 0x03))",
+        "                    .saturating_add(usize::from(c2 & 0x02))",
+        [CEA_PAINT],
+    ),
+    (
+        "a PAC in roll-up leaves the window where it was",
+        "        let moved = self.mode == Mode::RollUp && row != self.row;",
+        "        let moved = false;",
+        [C_WINDOW, CEA_MODES],
+    ),
+    (
+        "Backspace in the first column erases it",
+        "                if self.col > 0 {\n                    self.col = self.col.saturating_sub(1);",
+        "                if true {\n                    self.col = self.col.saturating_sub(1);",
+        [C_FIRST_COLUMN],
+    ),
+    (
+        "Delete to End of Row spares the cursor's column",
+        ".and_then(|r| r.get_mut(col..))",
+        ".and_then(|r| r.get_mut(col.saturating_add(1)..))",
+        [CEA_PAINT],
+    ),
+    (
+        "Roll-Up keeps a pop-on caption",
+        "                if self.mode != Mode::RollUp {\n                    *self.displayed = BLANK;",
+        "                if self.mode != Mode::RollUp {\n                    let _ = BLANK;",
+        [C_ROLL_ERASES, CEA_MODES],
+    ),
+    (
+        "a Carriage Return brings the top line back to the base row",
+        "                    rows.rotate_left(1);\n                    if let Some(last) = rows.last_mut() {\n                        *last = BLANK_ROW;\n                    }",
+        "                    rows.rotate_left(1);",
+        [C_ROLL, CEA_ROLLUP],
+    ),
+    (
+        "End of Caption shows nothing",
+        "                core::mem::swap(&mut self.displayed, &mut self.hidden);",
+        "                let _ = (&self.displayed, &self.hidden);",
+        [C_POPON, CEA_POPON],
+    ),
+    (
+        "Erase Displayed Memory erases nothing",
+        "            0x2C => {\n                *self.displayed = BLANK;",
+        "            0x2C => {\n                let _ = BLANK;",
+        [C_POPON, CEA_POPON],
+    ),
+    (
+        "Erase Non-Displayed Memory erases nothing",
+        "            0x2E => *self.hidden = BLANK,",
+        "            0x2E => {}",
+        [CEA_POPON],
+    ),
+    # What a cue is.
+    (
+        "a command that changes nothing ends the stretch",
+        "        if after == self.screen {",
+        "        if false {",
+        [C_SAME, C_ROLL_AGAIN, CEA_ROLLUP],
+    ),
+    (
+        "typing that blanks the screen ends nothing",
+        "        if flushed || self.screen.is_empty() {",
+        "        if flushed {",
+        [C_BLANKED],
+    ),
+    (
+        "a stretch begins at the command, the screen still blank",
+        "            if !self.screen.is_empty() {\n                self.since = Some(t);\n            }",
+        "            self.since = Some(t);",
+        [CEA_ROLLUP],
+    ),
+    # How it is said.
+    (
+        "an empty cell before a character is a space SRT may drop",
+        "cell.map_or(('\\u{a0}', WHITE)",
+        "cell.map_or((' ', WHITE)",
+        [C_COLUMN, CEA_POPON],
+    ),
+    (
+        "the middle third is the bottom's",
+        "        } else if twice < 20 {\n            4",
+        "        } else if twice < 20 {\n            1",
+        [C_WINDOW, CEA_POPON, CEA_MODES],
+    ),
+    (
+        "the grid's face is not named",
+        '        w.op(Op::Face(Some("Monospace".to_owned())));',
+        "",
+        [C_COLUMN, CEA_POPON],
+    ),
+]
+
 # What TTML needs of XML.
 XML = [
     (
@@ -848,6 +1088,12 @@ CONTAINER = [
         [WEBVTT_MP4],
     ),
     (
+        "MP4's CEA-608 is offered as a format not read",
+        "                        } else if t.codec == mp4::Codec::Cea608 {",
+        "                        } else if false {",
+        [CEA_POPON],
+    ),
+    (
         "MP4's TTML is offered as a format not read",
         "                        } else if t.codec == mp4::Codec::Ttml {",
         "                        } else if false {",
@@ -863,9 +1109,15 @@ LIB = [
         [OPENED],
     ),
     (
+        "CEA-608 is not text",
+        "                | Self::Cea608\n",
+        "",
+        [FORMATS],
+    ),
+    (
         "TTML is not text",
-        "            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText | Self::Ttml",
-        "            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText",
+        "                | Self::Ttml\n",
+        "",
         [FORMATS],
     ),
 ]
@@ -1198,6 +1450,7 @@ if __name__ == "__main__":
         (SRC / "subtitle" / "joined.rs", JOINED),
         (SRC / "subtitle" / "ttml.rs", TTML),
         (SRC / "subtitle" / "xml.rs", XML),
+        (SRC / "subtitle" / "cea608.rs", CEA608),
         (SRC / "subtitle.rs", READER),
         (SRC / "container.rs", CONTAINER),
         (SRC / "lib.rs", LIB),

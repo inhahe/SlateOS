@@ -1,0 +1,15 @@
+# cea608_popon.mp4: the rules' reading (Cea608), said as videocodec says it (generate_subtitle_fixtures.py).
+cue 800800000 2869533333 1
+text 0000 - "second row"
+break
+text 0000 - "    Hello pop-on"
+cue 2869533333 4704700000 7
+text 0000 - "at the top"
+break
+text 0000 - "        of the picture"
+cue 4704700000 6873533333 4
+text 0000 - "            in the middle"
+cue 6873533333 8274933333 1
+text 0000 - "shown instead"
+cue 9442766666 10510500000 1
+text 0000 - "after a blank"

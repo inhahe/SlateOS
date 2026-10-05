@@ -40,6 +40,10 @@ pub enum Codec {
     /// TTML (`stpp`, ISO/IEC 14496-30): a TTML document a sample, what
     /// broadcasters' DASH segments carry.
     Ttml,
+    /// CEA-608 closed captions (`c608`): television's captions as
+    /// QuickTime and broadcast recorders keep them, each sample a frame's
+    /// byte pairs.
+    Cea608,
     #[default]
     Other,
 }
@@ -50,8 +54,7 @@ pub(crate) fn subtitle_codec(tag: [u8; 4]) -> Option<Codec> {
     match &tag {
         b"tx3g" | b"text" => Some(Codec::MovText),
         b"stpp" => Some(Codec::Ttml),
-        // CEA-608 closed captions, which no player here reads.
-        b"c608" => Some(Codec::Other),
+        b"c608" => Some(Codec::Cea608),
         _ => None,
     }
 }
@@ -287,8 +290,8 @@ mod tests {
         assert_eq!(subtitle_codec(*b"text"), Some(Codec::MovText));
         // TTML, which FFmpeg's table names though it has no decoder.
         assert_eq!(subtitle_codec(*b"stpp"), Some(Codec::Ttml));
-        // Subtitles, but none read here.
-        assert_eq!(subtitle_codec(*b"c608"), Some(Codec::Other));
+        // CEA-608 captions.
+        assert_eq!(subtitle_codec(*b"c608"), Some(Codec::Cea608));
         // Not in FFmpeg's table: a data track with these stays one.
         assert_eq!(subtitle_codec(*b"wvtt"), None);
         assert_eq!(subtitle_codec(*b"avc1"), None);

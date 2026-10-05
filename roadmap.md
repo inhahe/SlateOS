@@ -4071,8 +4071,17 @@ lane C's `guitk`.
       thousands of random documents; a document made to be slow given up
       on. Held to ttconv's reading of each fixture's samples: MP4Box's, and
       written box by box in samples of 2 s, 1.5 s and one, and a seek.
-    - `[ ]` CEA-608 captions in MP4 (`c608`)
-      (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
+    - `[x]` CEA-608 captions in MP4 (`c608`, 2026-10-05, design-decisions
+      §1369): television's captions, which FFmpeg's and CCExtractor's
+      readers each show otherwise than a television in places. Decoded by
+      the FCC's rules (47 CFR 79.101), channel CC1: pop-on, roll-up and
+      paint-on, every command, the extended characters by McPoodle's
+      tables; a cue for each stretch the screen shows the same, each row a
+      line in the grid's face, placed by its third. Seven fixtures written
+      box by box, each checked against FFmpeg or CCExtractor where either
+      is right, two against the rules alone; seeks. What a caption track's
+      other channels and CEA-708 would take:
+      `known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`.
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

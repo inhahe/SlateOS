@@ -1,0 +1,23 @@
+# cea608_modes.mp4: the rules' reading (Cea608), said as videocodec says it (generate_subtitle_fixtures.py).
+cue 367033333 1101100000 1
+text 0000 - "one"
+cue 1101100000 1901900000 1
+text 0000 - "one"
+break
+text 0000 - "two"
+cue 1901900000 2635966666 4
+text 0000 - "one"
+break
+text 0000 - "two"
+cue 2635966666 4437766666 4
+text 0000 - "one"
+break
+text 0000 - "two"
+break
+text 0000 - "three, up a window"
+cue 4437766666 5505500000 1
+text 0000 - "pop-on over it"
+cue 6306300000 8808800000 1
+text 0000 - "painted"
+break
+text 0000 - "rolling again"

@@ -7275,6 +7275,70 @@ fn an_edit_to_the_chosen_theme_reaches_the_shell() {
     });
 }
 
+/// **A wallpaper saved over under the same name is read again at the next
+/// announcement**, though no setting changed -- a new image is asked for --
+/// and an announcement with nothing saved over asks for nothing.
+#[test]
+fn a_wallpaper_saved_over_under_the_same_name_is_read_again() {
+    settingsfile::testing::with_scratch_config("session-wallpaper-replaced", |root| {
+        let picture = root.join("wall.png");
+        std::fs::write(&picture, b"the first picture").expect("write the picture");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.wallpaper = Some(picture.clone());
+        file.save().expect("save");
+
+        let (mut session, desktop, _turn) = session();
+        session.load_appearance();
+        let first = session.wallpaper.current_image_id();
+        assert_ne!(first, 0, "the wallpaper was not set");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        assert_eq!(
+            session.wallpaper.current_image_id(),
+            first,
+            "read again with nothing changed"
+        );
+
+        std::fs::write(&picture, b"a second picture, saved over the first").expect("save over it");
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        assert_ne!(
+            session.wallpaper.current_image_id(),
+            first,
+            "the picture saved over it was not read again"
+        );
+    });
+}
+
+/// **And the login screen's picture**: one saved over under the same name is
+/// asked for again at the next announcement.
+#[test]
+fn a_login_picture_saved_over_under_the_same_name_is_read_again() {
+    settingsfile::testing::with_scratch_config("session-login-picture-replaced", |root| {
+        let picture = root.join("greeter.png");
+        std::fs::write(&picture, b"the first picture").expect("write the picture");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.login_background = appearance::LoginBackground::CustomImage(picture.clone());
+        file.save().expect("save");
+
+        let (mut session, desktop, _dir, _turn) = session_with_login();
+        session.load_appearance();
+        session.repaint().expect("paint");
+        let asked = |session: &Session| session.login_image.as_ref().map(|(id, _)| *id);
+        let first = asked(&session).expect("the greeter asked for its picture");
+
+        std::fs::write(&picture, b"a second picture, saved over the first").expect("save over it");
+        session.adopt_appearance_change();
+        session.repaint().expect("paint");
+        let again = asked(&session).expect("the greeter asked for its picture again");
+        assert_ne!(
+            again, first,
+            "the picture saved over it was not asked for again"
+        );
+    });
+}
+
 // ---- the automatic light/dark mode ------------------------------------------
 
 /// **At the automatic mode's edge the desktop turns dark, and tells the

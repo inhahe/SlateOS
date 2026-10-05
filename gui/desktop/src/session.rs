@@ -177,6 +177,20 @@ fn app_dir_stamps(dirs: &desktopentry::scan::DataDirs) -> Vec<AppStamp> {
 /// One desktop entry file as last seen: where, how big, when written.
 type AppStamp = (PathBuf, u64, Option<std::time::SystemTime>);
 
+/// A picture file as last seen: how big, and when it was last written --
+/// what changes when a picture is saved over under the same name, which its
+/// path alone does not show.
+type FileStamp = (u64, Option<std::time::SystemTime>);
+
+/// `path`'s [`FileStamp`], or `None` for a file that cannot be looked at --
+/// itself a state a later look can differ from, as when a missing picture
+/// is put back.
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| (meta.len(), meta.modified().ok()))
+}
+
 /// Where service menus are looked for: the XDG data directories -- and in
 /// this crate's own tests none, for [`default_app_dirs`]' reason.
 fn default_service_dirs() -> servicemenus::Dirs {
@@ -454,6 +468,11 @@ pub struct ShellSession<T: Transport> {
     /// The picture the background surface does hold: the id it was uploaded
     /// under, released before the next is uploaded.
     wallpaper_uploaded: Option<u64>,
+    /// What the fixed, scheduled or theme picture's file was when
+    /// `sync_wallpaper` last set it: how one saved over under the same name
+    /// is told from the one up. `None` while the wallpaper is none of those
+    /// -- no picture, or a rotation folder's.
+    wallpaper_stamp: Option<FileStamp>,
     /// What each photo frame on the desktop has asked the decoding thread
     /// for, by the frame's widget id: the file and the image id. How an
     /// answer is known to be still wanted -- and, kept after a failure as the
@@ -561,6 +580,9 @@ pub struct ShellSession<T: Transport> {
     /// has its own surface, so `SameAsDesktop` is two uploads of one picture
     /// rather than one upload shown twice.
     login_image: Option<(u64, PathBuf)>,
+    /// What `login_image`'s file was when it was asked for, for the reason
+    /// `wallpaper_stamp` is kept.
+    login_image_stamp: Option<FileStamp>,
     /// The picture the greeter's surface does hold, with its size: kept so a
     /// greeter built afresh -- logging out builds one -- can be shown it again
     /// without decoding it again.
@@ -907,6 +929,7 @@ impl<T: Transport> ShellSession<T> {
             rotation_loaded: None,
             wallpaper_image: None,
             wallpaper_uploaded: None,
+            wallpaper_stamp: None,
             frame_requests: BTreeMap::new(),
             frame_uploaded: std::collections::BTreeSet::new(),
             next_frame_picture: 1,
@@ -926,6 +949,7 @@ impl<T: Transport> ShellSession<T> {
             save_errors: BTreeMap::new(),
             focus_left_shell: false,
             login_image: None,
+            login_image_stamp: None,
             login_uploaded: None,
             login_image_next: 1,
             login_background_error: None,
@@ -2059,6 +2083,7 @@ impl<T: Transport> ShellSession<T> {
         let Some(path) = want else {
             self.release_login_image()?;
             self.login_image = None;
+            self.login_image_stamp = None;
             self.clear_login_picture();
             self.login_background_error = None;
             return Ok(());
@@ -2086,6 +2111,9 @@ impl<T: Transport> ShellSession<T> {
         // picture and uploads this one when it is ready, as the wallpaper's.
         let id = self.alloc_login_image_id();
         self.login_image = Some((id, path.clone()));
+        // What the file is as it is asked for, so one saved over it later is
+        // asked for again (`sync_login_background`).
+        self.login_image_stamp = file_stamp(&path);
         self.pictures.request(Slot::Greeter, id, path);
         Ok(())
     }
@@ -2785,6 +2813,15 @@ impl<T: Transport> ShellSession<T> {
             if !self.anything_moving() {
                 self.arm_next_frame();
             }
+        } else {
+            // No setting changed -- but a picture they name may have been
+            // saved over under the same name, which changes no setting and
+            // no byte of `appearance.yaml`. Looked at again at each
+            // announcement, the one moment anything says a file may have
+            // changed; both are guarded on the file's stamp, so a picture
+            // that did not change is not read again.
+            self.sync_wallpaper();
+            self.sync_login_background();
         }
     }
 
@@ -3029,6 +3066,16 @@ impl<T: Transport> ShellSession<T> {
                 self.dirty = true;
             }
         }
+        // The greeter's picture saved over under the same name -- its own, or
+        // the desktop's it shares: forgotten, so its next paint asks for it
+        // again as the new picture it is (`refresh_login_image`). The one up
+        // stays until the new one is decoded, as for any other change.
+        if let Some((_, path)) = &self.login_image
+            && file_stamp(path) != self.login_image_stamp
+        {
+            self.login_image = None;
+            self.dirty = true;
+        }
     }
 
     /// Adopt the wallpaper named in the appearance settings.
@@ -3038,7 +3085,8 @@ impl<T: Transport> ShellSession<T> {
     /// tree -- all four in this file's tests. Nothing in production had ever
     /// set a wallpaper, because there was nowhere for a user to say which one.
     ///
-    /// **Guarded on the path, and that is not an optimisation.** `set_image`
+    /// **Guarded on the path and the file's stamp, and that is not an
+    /// optimisation.** `set_image`
     /// issues a fresh image id every time it is called, and `paint_background`
     /// has whatever id it has not seen before read and decoded again. This runs
     /// on every `load_appearance`, which the shell calls whenever
@@ -3081,6 +3129,7 @@ impl<T: Transport> ShellSession<T> {
         if scheduled.is_none()
             && let Some(folder) = self.shell.appearance.wallpaper_folder.clone()
         {
+            self.wallpaper_stamp = None;
             self.sync_rotation(&folder);
             return;
         }
@@ -3109,13 +3158,22 @@ impl<T: Transport> ShellSession<T> {
                 // Only a new picture is a new image: the placement was applied
                 // above, through `set_fit` and `set_position`, which issue no
                 // new id -- re-reading the file to move it would decode a
-                // full-screen photograph to learn nothing new about it.
-                if self.wallpaper.current_image_path() != Some(path) {
+                // full-screen photograph to learn nothing new about it. A
+                // picture saved over under the same name *is* a new picture,
+                // told by its file's stamp (`TD-C-A-WALLPAPER-REPLACED-UNDER-
+                // THE-SAME-NAME-IS-NOT-READ-AGAIN`); a greeter sharing it is
+                // told by its own (`sync_login_background`).
+                let stamp = file_stamp(path);
+                if self.wallpaper.current_image_path() != Some(path)
+                    || self.wallpaper_stamp != stamp
+                {
                     self.wallpaper.set_image(path, fit);
+                    self.wallpaper_stamp = stamp;
                     self.dirty = true;
                 }
             }
             None => {
+                self.wallpaper_stamp = None;
                 if self.wallpaper.current_image_path().is_some() {
                     self.wallpaper.follow_desktop_base();
                     self.dirty = true;

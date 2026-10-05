@@ -1,6 +1,17 @@
 ## TD-C-A-WALLPAPER-REPLACED-UNDER-THE-SAME-NAME-IS-NOT-READ-AGAIN (lane C, 2026-10-05) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN — repaired on lane C's branch 2026-10-05 (`lane-c-wip`);
+closes when that change reaches main after a boot test. The session keeps
+each picture's file stamp -- its length and when it was written -- beside
+the request (`wallpaper_stamp`, `login_image_stamp`), and asks again when
+it differs: `sync_wallpaper` for the desktop's fixed, scheduled or theme
+picture, `sync_login_background` for the greeter's own or the one it
+shares. Both run at every appearance announcement, also when no setting
+changed (`adopt_appearance_change`), so the watcher needed no stamp of
+its own. Tests: `a_wallpaper_saved_over_under_the_same_name_is_read_again`,
+`a_login_picture_saved_over_under_the_same_name_is_read_again`. A file
+replaced with nothing announcing it is still noticed only at the next
+announcement -- the trigger below stands for that part.
 
 **In short:** if you save a new picture over the one the desktop is showing
 -- the same file name, new contents -- the desktop goes on showing the old

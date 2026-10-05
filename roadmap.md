@@ -3751,10 +3751,12 @@ lane C's `guitk`.
     lines. Every frame size now makes `vpxenc`'s frames.
     `[x]` Threads (§1342): each tile column on a thread of its own, into a
     strip with its own copy of the decisions' state, put together in column
-    order -- the same bytes on any number of threads, and `vpxenc`'s with
-    the same `--tile-columns` (two more reference encodes, four columns at
-    1280x720 and two at 651x357, match on one to four threads). By default a
-    picture has as many columns as its width allows, as `vpxenc`'s does.
+    order, and its bitstream written on a thread of its own as libvpx's
+    realtime `encode_tiles_mt` writes it -- the same bytes on any number of
+    threads, and `vpxenc`'s with the same `--tile-columns` (two more
+    reference encodes, four columns at 1280x720 and two at 651x357, match on
+    one to four threads). By default a picture has as many columns as its
+    width allows, as `vpxenc`'s does.
     `[-]` Speed: the hot paths rewritten to vectorise for SSE2, exactly --
     the sub-pixel variance, the quantisers (raster order and inverse scans),
     the 8x8 DCT (eight columns at once in 32 bits), the block measures; 2.3x

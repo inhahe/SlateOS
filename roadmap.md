@@ -3905,6 +3905,16 @@ lane C's `guitk`.
         delay played, as FFmpeg plays it); three fixtures held to ffprobe's
         blocks and Tremor's samples; damage concealed with silence; a seek
         pre-rolled a long block. design-decisions §1351.
+      - `[x]` Ogg files' sound: `gui/video/ogg`, a demuxer of its own (pages,
+        CRCs, packets across pages, each stream's codec and headers, chained
+        files found by bisection and played as one timeline, seeks by
+        bisection on granule positions), timed as FFmpeg times Ogg packets
+        but where FFmpeg is wrong (a mid-page Vorbis packet it puts 10 ms
+        late, a one-page Vorbis stream it starts a packet late, a lost page
+        it splices, a chained file's restarting clock). 26 demuxer fixtures
+        held to ffprobe with each correction checked against Tremor, seeks
+        held to a read-through; seven `Sound` fixtures (Opus, Vorbis, one
+        page, chained). design-decisions §1353, §1351.
       - `[ ]` Out to the speakers: the kernel's PCM interface
         (`kernel/src/audio_alsa.rs`) reachable from a program, which is
         lane A's (`requests/e-ad-no-application-can-reach-the-sound-device.md`,

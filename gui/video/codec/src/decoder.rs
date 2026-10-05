@@ -120,7 +120,7 @@ impl Decoder {
                 alpha: None,
             },
             Codec::Av1 => Inner::Av1(Av1::new(config, max_pixels)?),
-            Codec::H264 | Codec::Hevc | Codec::Mpeg4 | Codec::Other => {
+            Codec::H264 | Codec::Hevc | Codec::Mpeg4 | Codec::Theora | Codec::Other => {
                 return Err(Error::Codec(codec));
             }
         };

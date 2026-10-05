@@ -4519,6 +4519,7 @@ dependencies = [
  "matroska",
  "md5",
  "mp4",
+ "ogg",
  "opus",
  "rav1d",
  "vorbis",

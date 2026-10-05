@@ -32,7 +32,8 @@
 //! asks to be turned or mirrored -- MP4's display matrix, Matroska's
 //! projection -- comes out turned, as ffmpeg's autorotate turns it
 //! ([`Orientation`]). Not yet: H.264 and
-//! HEVC, which most MP4 files hold (`roadmap.md`, "Video files").
+//! HEVC, which most MP4 files hold (`roadmap.md`, "Video files"). An Ogg
+//! film's pictures are Theora, refused by name; its sound plays ([`Sound`]).
 //!
 //! # Sound
 //!
@@ -40,11 +41,13 @@
 //! same file (a second handle to it), it gives back each packet's samples
 //! decoded, with their time on the same clock, for the program to play and
 //! to show the pictures by. Opus and Vorbis, in Matroska and WebM -- WebM's
-//! sound -- and Opus in MP4, through `gui/video/opus`, libopus's decoder,
-//! and `gui/video/vorbis`, Tremor, each ported and held to its reference
-//! sample for sample; the codec delay, an MP4 edit list's priming and each
-//! packet's discard padding dropped, and the blocks timed, as FFmpeg drops
-//! and times them (`tests/sound.rs`).
+//! sound --, Opus in MP4, and Ogg files' (`.opus`, `.ogg`, `.oga`, and an
+//! `.ogv` film's sound; chained files played as one), through
+//! `gui/video/opus`, libopus's decoder, and `gui/video/vorbis`, Tremor, each
+//! ported and held to its reference sample for sample; the codec delay, an
+//! MP4 edit list's priming and each packet's discard padding dropped, and
+//! the blocks timed, as FFmpeg drops and times them (`tests/sound.rs`).
+//! A file whose sound is AAC, FLAC or MP3 is refused by the codec's name.
 //!
 //! # Colour
 //!
@@ -106,6 +109,8 @@ pub enum Codec {
     Hevc,
     /// MPEG-4 Part 2 (DivX, Xvid). Not decoded here.
     Mpeg4,
+    /// Theora, Ogg's video codec. Not decoded here.
+    Theora,
     /// Any other.
     Other,
 }
@@ -119,6 +124,7 @@ impl fmt::Display for Codec {
             Self::H264 => "H.264",
             Self::Hevc => "HEVC",
             Self::Mpeg4 => "MPEG-4 Part 2",
+            Self::Theora => "Theora",
             Self::Other => "a codec this does not know",
         })
     }
@@ -182,15 +188,18 @@ pub enum ContainerError {
     Matroska(matroska::Error),
     /// An MP4 file that could not be read.
     Mp4(mp4::Error),
+    /// An Ogg file that could not be read.
+    Ogg(ogg::Error),
 }
 
 impl fmt::Display for ContainerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown => f.write_str("the file is not a Matroska, WebM or MP4 file"),
+            Self::Unknown => f.write_str("the file is not a Matroska, WebM, MP4 or Ogg file"),
             Self::Io(kind) => write!(f, "the file cannot be read: {kind}"),
             Self::Matroska(e) => write!(f, "{e}"),
             Self::Mp4(e) => write!(f, "{e}"),
+            Self::Ogg(e) => write!(f, "{e}"),
         }
     }
 }
@@ -209,6 +218,12 @@ impl From<mp4::Error> for ContainerError {
     }
 }
 
+impl From<ogg::Error> for ContainerError {
+    fn from(e: ogg::Error) -> Self {
+        Self::Ogg(e)
+    }
+}
+
 /// A sound codec: those decoded here, and the commonest of the rest, so that
 /// a file in one is refused by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +232,10 @@ pub enum SoundCodec {
     Vorbis,
     /// Not decoded here yet.
     Aac,
+    /// Not decoded here yet.
+    Flac,
+    /// Not decoded here yet.
+    Mp3,
     /// Any other.
     Other,
 }
@@ -227,6 +246,8 @@ impl fmt::Display for SoundCodec {
             Self::Opus => "Opus",
             Self::Vorbis => "Vorbis",
             Self::Aac => "AAC",
+            Self::Flac => "FLAC",
+            Self::Mp3 => "MP3",
             Self::Other => "a codec this does not know",
         })
     }
@@ -238,8 +259,8 @@ impl fmt::Display for SoundCodec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// The file could not be read: the source failed, the file is neither
-    /// Matroska (WebM) nor MP4, or its headers are damaged.
+    /// The file could not be read: the source failed, the file is not
+    /// Matroska (WebM), MP4 or Ogg, or its headers are damaged.
     Container(ContainerError),
     /// The file has no video track, or not the one asked for.
     NoVideo,
@@ -314,5 +335,11 @@ impl From<matroska::Error> for Error {
 impl From<mp4::Error> for Error {
     fn from(e: mp4::Error) -> Self {
         Self::Container(ContainerError::Mp4(e))
+    }
+}
+
+impl From<ogg::Error> for Error {
+    fn from(e: ogg::Error) -> Self {
+        Self::Container(ContainerError::Ogg(e))
     }
 }

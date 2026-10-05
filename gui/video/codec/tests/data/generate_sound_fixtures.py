@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate videocodec's sound fixtures and their answers.
 
-Each fixture NAME.EXT (.webm, .mka or .mp4; no two of the same NAME) gets
-NAME.sound.txt: its sound as a player should be given it --
+Each fixture NAME.EXT (.webm, .mka, .mp4, .opus or .ogg; no two of the same
+NAME) gets NAME.sound.txt: its sound as a player should be given it --
 
     track N channels C rate R
     block TIME_NS SAMPLES          one a decoded block, in order
@@ -16,7 +16,19 @@ Where the answers come from -- none of it from the crate itself:
   decoder, which drop the codec delay's samples from the stream's start and
   each packet's discard padding from its end, and time each frame as its
   packet's time plus the samples dropped from its start, rounded to the
-  file's tick (libavcodec's `decode.c`).
+  file's tick (libavcodec's `decode.c`). Two exceptions, where FFmpeg's Ogg
+  demuxer is wrong and `videocodec` does not follow it (gui/video/ogg's
+  `src/stream.rs` and `src/demux.rs` say why): a short Vorbis block in the
+  middle of an Ogg page after a long one, which FFmpeg times (long - short)
+  / 4 samples late, is timed by the samples Tremor decodes from it -- each
+  such packet checked to be that case and no other (`retime_vorbis`); a
+  Vorbis stream of one Ogg page, which FFmpeg starts a packet late and cuts
+  wrongly at its end, is Tremor's samples from 0 cut at the page's granule
+  position, as the Vorbis I specification has it (`one_page_vorbis`), FFmpeg's
+  frames checked to be those a packet late; and a chained Ogg file, whose
+  times FFmpeg starts again at every link, is each link's answer made from
+  that link alone, its times moved on to follow the last link's end
+  (`chain_answer`).
 - **Their samples.** For Opus, libopus 1.5.2's fixed-point decoder
   (gui/video/opus's `tools/reference.c`, built in WSL as its header says,
   the decoder `gui/video/opus` is held to bit for bit) decodes the packets
@@ -89,7 +101,41 @@ FIXTURES = [
      "libopus", 48000, ["-b:a", "192k", "-mapping_family", "1"]),
     ("opus_mp4_long_priming.mp4", [SINE.format(a=0.3, f=440), SINE.format(a=0.25, f=660)], 1.11,
      "libopus", 48000, ["-b:a", "64k"]),
+    # Ogg: Opus files (.opus), the commonest Vorbis kind (.ogg), with clicks
+    # for short blocks in the middle of pages -- which FFmpeg mistimes --,
+    # and a chained file (CHAINS).
+    ("opus_ogg_stereo.opus", [SINE.format(a=0.3, f=330) + "+0.05*sin(2*PI*2900*t)",
+                              SINE.format(a=0.3, f=550)], 1.93, "libopus", 48000, ["-b:a", "64k"]),
+    ("opus_ogg_51.opus", [SINE.format(a=0.2, f=200 + 110 * c) for c in range(6)], 0.87,
+     "libopus", 48000, ["-b:a", "192k", "-mapping_family", "1"]),
+    ("vorbis_ogg_stereo.ogg", [SINE.format(a=0.3, f=330) + "+" + CLICKS,
+                               SINE.format(a=0.25, f=495) + "+0.05*sin(2*PI*5100*t)"], 1.73,
+     "libvorbis", 44100, ["-q:a", "3"]),
+    ("vorbis_ogg_mono_22k.ogg", ["0.4*sin(2*PI*180*t)*(0.5+0.5*sin(2*PI*3*t))+" + CLICKS], 1.29,
+     "libvorbis", 22050, ["-q:a", "1"]),
+    # A stream of one page, whose end FFmpeg does not cut at all: the cut it
+    # reckons from a start a packet late is more than the last packet holds.
+    ("vorbis_ogg_one_page.ogg", [SINE.format(a=0.3, f=330), SINE.format(a=0.3, f=495)], 0.71,
+     "libvorbis", 44100, ["-q:a", "3"]),
 ]
+
+# Chained Ogg files: each link made as a file of its own (name, signal,
+# seconds, encoder, rate, options, as above), with serial numbers of its own,
+# then the links joined.
+CHAINS = {
+    "opus_ogg_chained.opus": [
+        ("opus_ogg_chained_link0.opus", [SINE.format(a=0.3, f=440), SINE.format(a=0.3, f=660)], 0.81,
+         "libopus", 48000, ["-b:a", "64k"]),
+        ("opus_ogg_chained_link1.opus", [SINE.format(a=0.25, f=523), SINE.format(a=0.25, f=784) + "+" + CLICKS],
+         0.67, "libopus", 48000, ["-b:a", "48k"]),
+    ],
+    "vorbis_ogg_chained.ogg": [
+        ("vorbis_ogg_chained_link0.ogg", [SINE.format(a=0.3, f=330) + "+" + CLICKS, SINE.format(a=0.3, f=495)],
+         0.71, "libvorbis", 44100, ["-q:a", "3"]),
+        ("vorbis_ogg_chained_link1.ogg", [SINE.format(a=0.25, f=392), SINE.format(a=0.25, f=587)], 0.63,
+         "libvorbis", 44100, ["-q:a", "6"]),
+    ],
+}
 
 
 def patch_edit_list(name, media_time):
@@ -190,6 +236,12 @@ def packet_discarded(p):
 def opus_answer(name, ffprobe, reference):
     """An Opus fixture's answer: FFmpeg's blocks, libopus's samples trimmed
     as FFmpeg trims them."""
+    write_answer(name, *opus_blocks(name, ffprobe, reference))
+
+
+def opus_blocks(name, ffprobe, reference):
+    """An Opus fixture's stream, FFmpeg's blocks, and libopus's samples
+    trimmed as FFmpeg trims them."""
     info = json.loads(run([ffprobe, "-hide_banner", "-loglevel", "error", "-select_streams", "a",
                            "-show_streams", "-show_packets", "-of", "json", name]))
     # The packets' bytes from WSL's ffprobe (6.1): this ffprobe's data
@@ -239,7 +291,7 @@ def opus_answer(name, ffprobe, reference):
     total = sum(int(f["nb_samples"]) for f in frames)
     if total * 2 * channels != len(out):
         sys.exit(f"{name}: FFmpeg keeps {total} samples, the trimming here {len(out) // (2 * channels)}")
-    write_answer(name, stream, frames, out)
+    return stream, frames, out
 
 
 def skip_data(packet):
@@ -291,6 +343,13 @@ def ffmpeg_trim(pcm, packets, channels, initial_skip):
 def vorbis_answer(name, ffmpeg, ffprobe, reference):
     """A Vorbis fixture's answer: FFmpeg's blocks, Tremor's samples trimmed
     as FFmpeg trims them."""
+    write_answer(name, *vorbis_blocks(name, ffmpeg, ffprobe, reference))
+
+
+def vorbis_blocks(name, ffmpeg, ffprobe, reference):
+    """A Vorbis fixture's stream, FFmpeg's blocks (retimed where FFmpeg's Ogg
+    demuxer mistimes them), and Tremor's samples trimmed as FFmpeg trims
+    them."""
     info = json.loads(run([ffprobe, "-hide_banner", "-loglevel", "error", "-select_streams", "a",
                            "-show_streams", "-show_packets", "-of", "json", name]))
     stream = info["streams"][0]
@@ -316,7 +375,143 @@ def vorbis_answer(name, ffmpeg, ffprobe, reference):
     total = sum(int(f["nb_samples"]) for f in frames)
     if total * 2 * channels != len(kept):
         sys.exit(f"{name}: FFmpeg keeps {total} samples a channel, the trimming here {len(kept) // (2 * channels)}")
-    write_answer(name, stream, frames, kept)
+    if name.endswith(".ogg"):
+        with open(name, "rb") as f:
+            data = f.read()
+        if one_page(data):
+            frames, kept = one_page_vorbis(name, data, counts, pcm, channels, frames, info["packets"])
+        else:
+            retime_vorbis(name, info["packets"], counts, frames)
+    return stream, frames, kept
+
+
+def one_page(data):
+    """Whether an Ogg file's stream is of one data page: one page past its
+    headers' (whose granule positions are 0), and that page its last."""
+    timed, at = [], 0
+    while True:
+        at = data.find(b"OggS", at)
+        if at < 0:
+            break
+        flags = data[at + 5]
+        granule = int.from_bytes(data[at + 6:at + 14], "little", signed=True)
+        if granule > 0:
+            timed.append(flags)
+        at += 4
+    return len(timed) == 1 and timed[0] & 4 != 0
+
+
+def one_page_vorbis(name, data, counts, pcm, channels, ff_frames, ff_packets):
+    """A one-page Vorbis stream's blocks, as the Vorbis I specification
+    (A.2) and libvorbis have it: the first sound at 0, each packet's samples
+    after the last's, the end cut at the page's granule position. FFmpeg's
+    are checked to be the same blocks a first packet's length late (its
+    first packet started at 0), the last cut differently or not at all."""
+    granule = last_granule(data)
+    frame_bytes = 2 * channels
+    blocks, out, t, at = [], bytearray(), 0, 0
+    for n in counts:
+        samples = pcm[at:at + n * frame_bytes]
+        at += n * frame_bytes
+        if n == 0:
+            continue
+        keep = min(n, granule - t)
+        if 0 < keep < n and t + n != sum(counts):
+            sys.exit(f"{name}: the granule cuts a packet before the last")
+        if keep > 0:
+            blocks.append({"pts": t, "nb_samples": keep})
+            out += samples[:keep * frame_bytes]
+        t += n
+    late = int(ff_packets[0]["duration"])
+    if len(ff_frames) != len(blocks) or any(int(f["pts"]) != b["pts"] + late
+                                            for f, b in zip(ff_frames, blocks)):
+        sys.exit(f"{name}: FFmpeg's blocks are not these, {late} samples late")
+    ff_total = sum(int(f["nb_samples"]) for f in ff_frames)
+    print(f"{name}: one page; {sum(b['nb_samples'] for b in blocks)} samples to its granule, "
+          f"FFmpeg's {ff_total} from {late} late")
+    return blocks, bytes(out)
+
+
+def retime_vorbis(name, packets, counts, frames):
+    """The frames of the Ogg Vorbis packets FFmpeg mistimes, retimed: a short
+    block in the middle of a page after a long one, which FFmpeg's demuxer
+    makes (long + short) / 4 - short / 2 samples late and as much short --
+    its end right. Each packet whose length is not what Tremor decodes from
+    it (the first, which decodes to nothing, and the last, which its page
+    trims, aside) must be that case: the block sizes are the identification
+    header's. Its frame takes its end less what Tremor decodes."""
+    with open(name, "rb") as f:
+        data = f.read()
+    at = data.find(b"\x01vorbis")
+    short, long = 1 << (data[at + 28] & 15), 1 << (data[at + 28] >> 4)
+    # Which frame each packet makes: one for each that decodes to samples
+    # (FFmpeg trims none of them away whole here).
+    frame_of, k = {}, 0
+    for i, n in enumerate(counts):
+        if n > 0:
+            frame_of[i] = k
+            k += 1
+    if k != len(frames):
+        sys.exit(f"{name}: {k} packets decode to samples, ffprobe has {len(frames)} frames")
+    retimed = 0
+    for i, (p, n) in enumerate(zip(packets, counts)):
+        if i == 0 or i == len(packets) - 1 or int(p["duration"]) == n:
+            continue
+        if (n, int(p["duration"])) != ((short + long) // 4, short // 2):
+            sys.exit(f"{name} packet {i}: FFmpeg {p['duration']}, Tremor {n}: not the mistiming corrected")
+        f = frames[frame_of[i]]
+        f["pts"] = int(f["pts"]) + int(p["duration"]) - n
+        retimed += 1
+    print(f"{name}: {retimed} Vorbis blocks retimed")
+
+
+def encode(ffmpeg, name, chans, seconds, encoder, rate, opts):
+    """`name`, made by ffmpeg from `chans` (an aevalsrc expression each)."""
+    expr = "|".join(chans)
+    layout = LAYOUT[len(chans)]
+    run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+bitexact",
+         "-f", "lavfi", "-i", f"aevalsrc={expr}:s={rate}:d={seconds}:c={layout}",
+         "-c:a", encoder, "-threads", "1", *opts, "-flags", "+bitexact",
+         # The muxer's too (before `-i` it is the input's): no random
+         # UIDs or dates, so that a run writes the same file as the last.
+         "-fflags", "+bitexact", name])
+
+
+def last_granule(data):
+    """An Ogg file's last page's granule position."""
+    at = data.rfind(b"OggS")
+    return int.from_bytes(data[at + 6:at + 14], "little", signed=True)
+
+
+def chain_answer(name, links, ffmpeg, ffprobe, args):
+    """A chained Ogg file's answer: each link's blocks and samples as that
+    link alone gives them, its times moved so that its first sound follows
+    the last link's last -- the link's end its last granule, less Opus's
+    pre-skip -- and its samples after the last link's."""
+    stream, frames, pcm, offset = None, [], b"", 0
+    previous_end = None
+    for link, _chans, _seconds, encoder, _rate, _opts in links:
+        if encoder == "libvorbis":
+            s, f, out = vorbis_blocks(link, ffmpeg, ffprobe, args.vorbis_reference)
+        else:
+            s, f, out = opus_blocks(link, ffprobe, args.reference)
+        with open(link, "rb") as fh:
+            data = fh.read()
+        pre_skip = 0
+        if data.find(b"OpusHead") >= 0:
+            head = data.find(b"OpusHead")
+            pre_skip = int.from_bytes(data[head + 10:head + 12], "little")
+        # Where this link's sound starts, alone: its first frame.
+        first = int(f[0]["pts"])
+        if previous_end is not None:
+            offset = previous_end - first
+        for fr in f:
+            fr["pts"] = int(fr["pts"]) + offset
+        stream = stream or s
+        frames += f
+        pcm += out
+        previous_end = last_granule(data) - pre_skip + offset
+    write_answer(name, stream, frames, pcm)
 
 
 def main():
@@ -329,6 +524,8 @@ def main():
     ap.add_argument("names", nargs="*", help="the fixtures to make (all, if none)")
     args = ap.parse_args()
     stems = [os.path.splitext(f[0])[0] for f in FIXTURES]
+    stems += [os.path.splitext(n)[0] for n in CHAINS]
+    stems += [os.path.splitext(link[0])[0] for links in CHAINS.values() for link in links]
     if len(set(stems)) != len(stems):
         sys.exit("two fixtures share a name, and so would an answer file")
     exe = ".exe" if os.name == "nt" else ""
@@ -338,20 +535,24 @@ def main():
         if args.names and name not in args.names:
             continue
         if not args.answers_only:
-            expr = "|".join(chans)
-            layout = LAYOUT[len(chans)]
-            run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+bitexact",
-                 "-f", "lavfi", "-i", f"aevalsrc={expr}:s={rate}:d={seconds}:c={layout}",
-                 "-c:a", encoder, "-threads", "1", *opts, "-flags", "+bitexact",
-                 # The muxer's too (before `-i` it is the input's): no random
-                 # UIDs or dates, so that a run writes the same file as the last.
-                 "-fflags", "+bitexact", name])
+            encode(ffmpeg, name, chans, seconds, encoder, rate, opts)
             if name in PATCHES:
                 PATCHES[name](name)
         if encoder == "libvorbis":
             vorbis_answer(name, ffmpeg, ffprobe, args.vorbis_reference)
         else:
             opus_answer(name, ffprobe, args.reference)
+    for name, links in CHAINS.items():
+        if args.names and name not in args.names:
+            continue
+        if not args.answers_only:
+            for k, (link, chans, seconds, encoder, rate, opts) in enumerate(links):
+                encode(ffmpeg, link, chans, seconds, encoder, rate, [*opts, "-serial_offset", str(1000 * k)])
+            with open(name, "wb") as out:
+                for link, *_ in links:
+                    with open(link, "rb") as f:
+                        out.write(f.read())
+        chain_answer(name, links, ffmpeg, ffprobe, args)
 
 
 main()

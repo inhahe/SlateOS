@@ -117,8 +117,25 @@ out 2000 samples -- two whole packets and the start of the third) are held
 to ffprobe's blocks and libopus's samples, with seeks; the generator's
 trimming is one model of FFmpeg's now, for every fixture.
 
+**Ogg, 2026-10-04.** Ogg files' sound plays too -- `.opus`, `.ogg`,
+`.oga`, an `.ogv` film's -- through `gui/video/ogg`, a demuxer of its own
+(§1353), by the rules above as FFmpeg's Ogg demuxer gives them their side
+data: Opus's pre-skip with the first packet (replacing the decoder's own,
+as MP4's priming does), what the last page leaves out as the last packet's
+discard padding, in samples. Untimed packets (after the first on a
+stream's last page) are timed as libavformat times them, from the last
+packet's time and length. Three things are not FFmpeg's, because FFmpeg's
+are wrong (§1353 says how each is checked): a short Vorbis block FFmpeg
+mistimes in the middle of a page, a one-page Vorbis stream FFmpeg starts a
+packet late (0.71 s plays as 0.71 s, where FFmpeg plays 0.73 s of it, the
+last 23 ms the encoder's padding), and a chained file, whose links play on
+one clock, the decoder made afresh at each link from the link's headers.
+Seven fixtures (Opus stereo and 5.1, Vorbis with mistimed packets at 44.1
+and 22.05 kHz, a one-page Vorbis stream, chained Opus and chained Vorbis)
+are held to their answers, with seeks.
+
 **What it does not do yet.** AAC (MP4's commonest codec) is refused by
-name; and nothing plays the samples: the speakers need the kernel's PCM
+name, as are FLAC and MP3; and nothing plays the samples: the speakers need the kernel's PCM
 interface (`kernel/src/audio_alsa.rs`, lane A's) reachable from a
 program.
 

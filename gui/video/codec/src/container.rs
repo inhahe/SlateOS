@@ -1,13 +1,20 @@
-//! The file's container -- Matroska (WebM among them) or MP4 -- told apart by
-//! its first bytes as FFmpeg tells them, and read through one face: its video
-//! tracks described alike ([`Track`]), its sound tracks ([`SoundTrack`]), its
-//! packets given alike ([`Sample`]), and a seek.
+//! The file's container -- Matroska (WebM among them), MP4 or Ogg -- told
+//! apart by its first bytes as FFmpeg tells them, and read through one face:
+//! its video tracks described alike ([`Track`]), its sound tracks
+//! ([`SoundTrack`]), its packets given alike ([`Sample`]), and a seek.
 //!
 //! **Telling them apart.** A Matroska file begins with EBML's magic, and
-//! FFmpeg's Matroska probe asks for it at the very start; anything else is
-//! MP4 when FFmpeg's MP4 probe would take it for one (`mp4::probe`, over as
+//! FFmpeg's Matroska probe asks for it at the very start; an Ogg file with a
+//! page, as FFmpeg's Ogg probe asks (`ogg::probe`); anything else is MP4
+//! when FFmpeg's MP4 probe would take it for one (`mp4::probe`, over as
 //! much of the file as FFmpeg reads to decide, a mebibyte), and otherwise
 //! not a file this plays.
+//!
+//! **Ogg's times** are its demuxer's, which leaves a packet untimed where
+//! the file does (after the first on a stream's last page); those are
+//! filled in here as libavformat fills them in for every player built on
+//! it -- the last packet's time and length -- so that what plays is timed
+//! as FFmpeg times it.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -26,6 +33,15 @@ const EBML: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 pub(crate) enum Container<R> {
     Matroska(Box<matroska::Demuxer<R>>),
     Mp4(Box<mp4::Demuxer<R>>),
+    Ogg(Box<OggFile<R>>),
+}
+
+/// An Ogg file, and the times libavformat would fill in for its packets.
+pub(crate) struct OggFile<R> {
+    demuxer: ogg::Demuxer<R>,
+    /// Each stream's next packet's time, in its ticks, where the last
+    /// packet's time and length give it (libavformat's `cur_dts`).
+    next: Vec<Option<i64>>,
 }
 
 /// A video track, as either container describes it.
@@ -99,12 +115,17 @@ pub(crate) struct Sample {
     pub new_config: Option<Vec<u8>>,
     /// Sound to discard, in nanoseconds: from the end of the packet's if
     /// positive, its start if negative (Matroska's `DiscardPadding`; 0 in
-    /// MP4).
+    /// MP4 and Ogg).
     pub discard_padding: i64,
+    /// Sound to discard from the end of what the packet decodes to, in
+    /// samples (Ogg's: what its stream's last page says runs past the end;
+    /// 0 in Matroska and MP4).
+    pub discard_samples: u64,
     /// Sound to drop from the start of what this packet decodes to, in
     /// samples (MP4's: the priming its edit list leaves out, given with the
-    /// first packet and with the first after a seek into it; 0 in Matroska,
-    /// whose codec delay is the track's).
+    /// first packet and with the first after a seek into it; Ogg's: an Opus
+    /// stream's pre-skip, with its first packet and each chained link's; 0
+    /// in Matroska, whose codec delay is the track's).
     pub skip_samples: u64,
     /// Where the packet's bytes begin in the file: what tells one packet
     /// from another.
@@ -152,6 +173,10 @@ impl<R: Read + Seek> Container<R> {
             .map_err(|e| ContainerError::Io(e.kind()))?;
         if head.starts_with(&EBML) {
             Ok(Self::Matroska(Box::new(matroska::Demuxer::open(source)?)))
+        } else if ogg::probe(&head) {
+            let demuxer = ogg::Demuxer::open(source)?;
+            let next = vec![None; demuxer.streams().len()];
+            Ok(Self::Ogg(Box::new(OggFile { demuxer, next })))
         } else if mp4::probe(&head) {
             Ok(Self::Mp4(Box::new(mp4::Demuxer::open(source)?)))
         } else {
@@ -174,6 +199,14 @@ impl<R: Read + Seek> Container<R> {
                 .enumerate()
                 .filter_map(|(i, t)| mp4_track(i, t))
                 .collect(),
+            Self::Ogg(f) => f
+                .demuxer
+                .streams()
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.codec == ogg::Codec::Theora)
+                .filter_map(|(i, s)| theora_track(i, s))
+                .collect(),
         }
     }
 
@@ -192,6 +225,8 @@ impl<R: Read + Seek> Container<R> {
                             matroska::Codec::Opus => SoundCodec::Opus,
                             matroska::Codec::Vorbis => SoundCodec::Vorbis,
                             _ if t.codec_id.starts_with(b"A_AAC") => SoundCodec::Aac,
+                            _ if t.codec_id == b"A_FLAC" => SoundCodec::Flac,
+                            _ if t.codec_id == b"A_MPEG/L3" => SoundCodec::Mp3,
                             _ => SoundCodec::Other,
                         },
                         config: t.codec_private.clone(),
@@ -214,6 +249,8 @@ impl<R: Read + Seek> Container<R> {
                         // 80 ms of pre-roll.
                         mp4::Codec::Opus => (SoundCodec::Opus, opus_head(&t.config), 80_000_000),
                         mp4::Codec::Aac => (SoundCodec::Aac, t.config.clone(), 0),
+                        mp4::Codec::Flac => (SoundCodec::Flac, t.config.clone(), 0),
+                        mp4::Codec::Mp3 => (SoundCodec::Mp3, t.config.clone(), 0),
                         _ => (SoundCodec::Other, t.config.clone(), 0),
                     };
                     Some(SoundTrack {
@@ -232,6 +269,13 @@ impl<R: Read + Seek> Container<R> {
                     })
                 })
                 .collect(),
+            Self::Ogg(f) => f
+                .demuxer
+                .streams()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| ogg_sound(&f.demuxer, i, s))
+                .collect(),
         }
     }
 
@@ -247,6 +291,13 @@ impl<R: Read + Seek> Container<R> {
                 .filter_map(|t| {
                     let ticks = u64::try_from(t.duration).ok().filter(|&n| n > 0)?;
                     Some(time::duration_to_ns(ticks, (1, u64::from(t.timescale))))
+                })
+                .max(),
+            // Each stream's sound, from its first to its last page's end.
+            Self::Ogg(f) => (0..f.demuxer.streams().len())
+                .filter_map(|i| {
+                    let ticks = f.demuxer.duration(i).filter(|&n| n > 0)?;
+                    Some(time::duration_to_ns(ticks, f.demuxer.time_base(i)?))
                 })
                 .max(),
         }
@@ -275,6 +326,7 @@ impl<R: Read + Seek> Container<R> {
                     alpha,
                     new_config: None,
                     discard_padding: p.discard_padding,
+                    discard_samples: 0,
                     skip_samples: 0,
                     position: p.position,
                 }
@@ -293,10 +345,12 @@ impl<R: Read + Seek> Container<R> {
                     alpha: None,
                     new_config: p.new_config,
                     discard_padding: 0,
+                    discard_samples: 0,
                     skip_samples: u64::from(p.skip_samples),
                     position: p.position,
                 }))
             }
+            Self::Ogg(f) => Ok(f.next_sample()?),
         }
     }
 
@@ -318,8 +372,147 @@ impl<R: Read + Seek> Container<R> {
                 })?;
                 Ok(d.seek(index, ticks)?)
             }
+            Self::Ogg(f) => {
+                let index = usize::try_from(key).map_err(|_| {
+                    ContainerError::Ogg(ogg::Error::Invalid(
+                        "a seek in a stream the file does not have",
+                    ))
+                })?;
+                f.demuxer.seek(index, ticks)?;
+                // What libavformat knew of the times before is forgotten.
+                f.next.iter_mut().for_each(|n| *n = None);
+                Ok(())
+            }
         }
     }
+}
+
+impl<R: Read + Seek> OggFile<R> {
+    /// The next packet, its time filled in as libavformat fills it in: the
+    /// last packet's time and length, where the file gives none and the
+    /// packet has a length.
+    fn next_sample(&mut self) -> Result<Option<Sample>, ContainerError> {
+        let Some(p) = self.demuxer.next_packet()? else {
+            return Ok(None);
+        };
+        let next = self.next.get_mut(p.stream);
+        let duration = i64::try_from(p.duration).unwrap_or(i64::MAX);
+        let time = match (p.pts, &next) {
+            (Some(t), _) => Some(t),
+            (None, Some(Some(n))) if p.duration > 0 => Some(*n),
+            _ => None,
+        };
+        if let (Some(slot), Some(t)) = (next, time) {
+            *slot = Some(t.saturating_add(duration));
+        }
+        let stream = self.demuxer.streams().get(p.stream);
+        let new_config = match (p.new_headers, stream.map(|s| s.codec)) {
+            (Some(h), Some(codec)) => Some(sound_config(codec, &h)),
+            _ => None,
+        };
+        Ok(Some(Sample {
+            track: u64::try_from(p.stream).unwrap_or(u64::MAX),
+            time,
+            duration: p.duration,
+            keyframe: true,
+            discard: false,
+            data: p.data,
+            alpha: None,
+            new_config,
+            discard_padding: 0,
+            discard_samples: u64::from(p.discard_padding),
+            skip_samples: u64::from(p.skip_samples),
+            position: p.position,
+        }))
+    }
+}
+
+/// An Ogg stream's sound track, where it is one: numbered as ffprobe numbers
+/// streams, from 1.
+fn ogg_sound<R: Read + Seek>(
+    demuxer: &ogg::Demuxer<R>,
+    index: usize,
+    s: &ogg::Stream,
+) -> Option<SoundTrack> {
+    let codec = match s.codec {
+        ogg::Codec::Opus => SoundCodec::Opus,
+        ogg::Codec::Vorbis => SoundCodec::Vorbis,
+        ogg::Codec::Flac => SoundCodec::Flac,
+        ogg::Codec::Speex => SoundCodec::Other,
+        _ => return None,
+    };
+    Some(SoundTrack {
+        number: u64::try_from(index).ok()?.checked_add(1)?,
+        key: u64::try_from(index).ok()?,
+        codec,
+        config: sound_config(s.codec, &s.headers),
+        enabled: true,
+        default: true,
+        time_base: demuxer.time_base(index).unwrap_or((1, 1)),
+        // Opus's pre-skip comes with the first packet (`Sample::skip_samples`),
+        // as FFmpeg's demuxer gives it.
+        codec_delay: 0,
+        // FFmpeg's Ogg demuxer gives Opus 80 ms of pre-roll.
+        seek_pre_roll: if codec == SoundCodec::Opus {
+            80_000_000
+        } else {
+            0
+        },
+    })
+}
+
+/// A stream's headers as the codec setup `Sound` takes: Opus's `OpusHead`;
+/// Vorbis's three headers, Xiph-laced as a Matroska track's private data
+/// holds them (empty where there are not three).
+fn sound_config(codec: ogg::Codec, headers: &[Vec<u8>]) -> Vec<u8> {
+    match (codec, headers) {
+        (ogg::Codec::Vorbis, [id, comments, setup]) => {
+            let mut laced = vec![2u8];
+            for h in [id, comments] {
+                let mut n = h.len();
+                while n >= 255 {
+                    laced.push(255);
+                    n = n.saturating_sub(255);
+                }
+                laced.push(u8::try_from(n).unwrap_or(0));
+            }
+            for h in [id, comments, setup] {
+                laced.extend_from_slice(h);
+            }
+            laced
+        }
+        (ogg::Codec::Vorbis, _) => Vec::new(),
+        _ => headers.first().cloned().unwrap_or_default(),
+    }
+}
+
+/// An Ogg Theora stream, as a video track: refused by its codec, which is not
+/// decoded here, so that a film's pictures are refused by name.
+fn theora_track(index: usize, s: &ogg::Stream) -> Option<Track> {
+    // The identification header's picture size: 24 bits each, at 14 and 17.
+    let header = s.headers.first()?;
+    let field = |at: usize| -> u64 {
+        header
+            .get(at..at.saturating_add(3))
+            .map_or(0, |b| b.iter().fold(0u64, |v, &x| v << 8 | u64::from(x)))
+    };
+    Some(Track {
+        number: u64::try_from(index).ok()?.checked_add(1)?,
+        key: u64::try_from(index).ok()?,
+        codec: Codec::Theora,
+        config: header.clone(),
+        enabled: true,
+        default: true,
+        width: field(14),
+        height: field(17),
+        crop: [0; 4],
+        aspect: Aspect::Square,
+        orientation: Orientation::Upright,
+        alpha: false,
+        hint: ColourHint::default(),
+        frame_duration: None,
+        time_base: (1, 1000),
+    })
 }
 
 impl Track {
@@ -619,15 +812,31 @@ mod tests {
     }
 
     #[test]
+    fn vorbis_headers_are_laced_as_matroska_holds_them() {
+        let headers = [vec![1u8; 30], vec![3u8; 300], vec![5u8; 7]];
+        let laced = sound_config(ogg::Codec::Vorbis, &headers);
+        assert_eq!(laced[..4], [2, 30, 255, 45]);
+        assert_eq!(laced.len(), 4 + 30 + 300 + 7);
+        assert!(sound_config(ogg::Codec::Vorbis, &headers[..2]).is_empty());
+        assert_eq!(
+            sound_config(ogg::Codec::Opus, &[b"OpusHead".to_vec()]),
+            b"OpusHead"
+        );
+    }
+
+    #[test]
     fn a_file_is_told_by_its_first_bytes() {
         use std::io::Cursor;
         let refused = Container::open(Cursor::new(b"not a video at all".to_vec()));
         assert!(matches!(refused, Err(ContainerError::Unknown)));
         let refused = Container::open(Cursor::new(Vec::new()));
         assert!(matches!(refused, Err(ContainerError::Unknown)));
-        // EBML's magic is Matroska, whatever follows; an ftyp box is MP4.
+        // EBML's magic is Matroska, whatever follows; an Ogg page's start is
+        // Ogg; an ftyp box is MP4.
         let mkv = Container::open(Cursor::new(vec![0x1A, 0x45, 0xDF, 0xA3, 0x80]));
         assert!(matches!(mkv, Err(ContainerError::Matroska(_))));
+        let ogg = Container::open(Cursor::new(b"OggS\0\x02 and no more".to_vec()));
+        assert!(matches!(ogg, Err(ContainerError::Ogg(_))));
         let mut mp4 = 16u32.to_be_bytes().to_vec();
         mp4.extend_from_slice(b"ftypisom\0\0\0\0");
         assert!(matches!(

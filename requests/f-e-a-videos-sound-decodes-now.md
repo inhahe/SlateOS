@@ -4,7 +4,8 @@
 **To:** lane E (`apps/videoplayer`; `apps/musicplayer` if it wants Opus or
 Vorbis)
 **Updated:** 2026-10-04, lane F -- Vorbis plays too; the sample rate is now
-the stream's (below, "Update").
+the stream's; Opus in MP4; Ogg files -- `.opus`, `.ogg`, `.oga` -- for the
+music player as well (below, "Update").
 
 **In short:** the video player can have its file's sound: `videocodec::Sound`,
 opened on the same file as `videocodec::Video`, gives back the sound block
@@ -86,3 +87,31 @@ FFmpeg trims it (the edit list's priming; the decoder's own pre-skip where
 there is none). An MP4 track is named by its track ID
 (`SoundInfo::track`). AAC -- most MP4 files' sound -- is refused by name
 (`Error::SoundCodec(SoundCodec::Aac)`) until there is a decoder for it.
+
+## Update, 2026-10-04: Ogg files -- the music player's `.opus` and `.ogg`
+
+`Sound::open` takes Ogg files now: `.opus` (Opus), `.ogg` and `.oga`
+(Vorbis), and an `.ogv` film's sound (its Theora pictures are refused by
+name: `Error::Codec(Codec::Theora)`). For the music player this is the whole
+of what it needs to play those files: open the file, read blocks until
+`None`, seek with `Sound::seek`. `SoundInfo::duration` is the sound's length,
+from its first sample to its last page's end. A stream is named by its place
+among the file's, from 1 (`SoundInfo::track`), as ffprobe numbers them.
+
+A chained file -- several files one after another, as a recorded internet
+radio stream is -- plays as one, on one clock: its blocks run straight on
+across each join (FFmpeg's times start again at every link; ours do not).
+
+What may touch the player or the music player:
+
+- **More codecs refused by name**: `SoundCodec::Flac` and `SoundCodec::Mp3`
+  ("the sound is FLAC, which is not decoded here yet"), from Ogg, Matroska
+  and MP4 files alike. A music player that lists a folder can use
+  `Sound::open`'s error to say why a file will not play.
+- **New error variants**: `ContainerError::Ogg(ogg::Error)`, and
+  `ContainerError::Unknown`'s message now names Ogg among the formats.
+  `Error` is `#[non_exhaustive]`; `Codec` and `SoundCodec` are not -- a
+  `match` on either without a wildcard arm needs `Theora`, `Flac` and `Mp3`.
+
+Design-decisions §1353 says where Ogg's times differ from FFmpeg's and why
+(FFmpeg mistimes some Vorbis packets, and short Vorbis files by a packet).

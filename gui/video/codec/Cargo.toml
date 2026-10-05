@@ -6,9 +6,10 @@ description = "Video files for SlateOS programs: a file's pictures in order, eac
 publish = false
 
 [dependencies]
-# The containers: Matroska (and WebM), and MP4.
+# The containers: Matroska (and WebM), MP4, and Ogg.
 matroska = { path = "../matroska" }
 mp4 = { path = "../mp4" }
+ogg = { path = "../ogg" }
 # The codecs: VP8 and VP9, libvpx's decoders ported; AV1, rav1d vendored.
 vp8 = { path = "../vp8" }
 vp9 = { path = "../vp9" }

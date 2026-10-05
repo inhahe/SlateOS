@@ -1,6 +1,9 @@
 //! The sound fixtures (`tests/data/opus_*`, `tests/data/vorbis_*`, in
-//! Matroska, WebM and MP4) played through [`videocodec::Sound`]: every block's time and length held to
-//! FFmpeg's (`ffprobe -show_frames`), and every sample to libopus's
+//! Matroska, WebM, MP4 and Ogg) played through [`videocodec::Sound`]: every
+//! block's time and length held to FFmpeg's (`ffprobe -show_frames`) -- but
+//! where FFmpeg's Ogg demuxer is wrong (a Vorbis packet it mistimes, a
+//! one-page Vorbis stream, a chained file's restarting times), there to
+//! Tremor and the Vorbis I specification -- and every sample to libopus's
 //! fixed-point decoder's or Tremor's with FFmpeg's trimming
 //! (`tests/data/generate_sound_fixtures.py`, which says where each answer
 //! comes from).
@@ -23,7 +26,7 @@ use std::path::PathBuf;
 
 use videocodec::{Error, Sound, SoundCodec};
 
-const FIXTURES: [&str; 11] = [
+const FIXTURES: [&str; 18] = [
     "opus_stereo.webm",
     "opus_mono_voip.webm",
     "opus_short_frames.mka",
@@ -35,6 +38,13 @@ const FIXTURES: [&str; 11] = [
     "opus_mp4_no_edit_list.mp4",
     "opus_mp4_51.mp4",
     "opus_mp4_long_priming.mp4",
+    "opus_ogg_stereo.opus",
+    "opus_ogg_51.opus",
+    "vorbis_ogg_stereo.ogg",
+    "vorbis_ogg_mono_22k.ogg",
+    "vorbis_ogg_one_page.ogg",
+    "opus_ogg_chained.opus",
+    "vorbis_ogg_chained.ogg",
 ];
 
 fn data(name: &str) -> PathBuf {
@@ -199,6 +209,11 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
         "opus_mp4_stereo.mp4",
         "opus_mp4_no_edit_list.mp4",
         "opus_mp4_long_priming.mp4",
+        "opus_ogg_stereo.opus",
+        "vorbis_ogg_stereo.ogg",
+        "vorbis_ogg_mono_22k.ogg",
+        "opus_ogg_chained.opus",
+        "vorbis_ogg_chained.ogg",
     ] {
         let e = expected(name);
         let channels = e.channels;

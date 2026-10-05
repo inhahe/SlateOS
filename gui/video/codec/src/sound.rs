@@ -57,8 +57,17 @@
 //! edit decoded and dropped), replacing the decoder's own pre-skip, which
 //! drops it in a file with no edit list.
 //!
-//! What plays: Opus and Vorbis, in Matroska and WebM; Opus in MP4. A file
-//! whose sound is AAC is refused by the codec's name
+//! **Ogg.** An Ogg file's sound plays as FFmpeg's Ogg demuxer gives it --
+//! Opus's pre-skip with its first packet, what the last page leaves out as
+//! the last packet's discard padding -- except where that demuxer is wrong
+//! (`gui/video/ogg`): a short Vorbis block in the middle of a page after a
+//! long one is timed by the samples it decodes to, where FFmpeg's comes
+//! `(long - short) / 4` samples late; and a chained file's links play one
+//! after another on one clock, the decoder made afresh at each link from its
+//! headers (FFmpeg's times start again at every link).
+//!
+//! What plays: Opus and Vorbis, in Matroska, WebM and Ogg; Opus in MP4. A
+//! file whose sound is AAC, FLAC or MP3 is refused by the codec's name
 //! ([`crate::Error::SoundCodec`]).
 
 use std::io::{Read, Seek};
@@ -189,8 +198,8 @@ fn xiph_headers(config: &[u8]) -> Option<[&[u8]; 3]> {
 }
 
 impl<R: Read + Seek> Sound<R> {
-    /// The sound of `source` -- a Matroska or WebM file -- from its best
-    /// track (see the module documentation).
+    /// The sound of `source` -- a Matroska, WebM, MP4 or Ogg file -- from
+    /// its best track (see the module documentation).
     ///
     /// # Errors
     ///
@@ -375,6 +384,45 @@ impl<R: Read + Seek> Sound<R> {
         self.last_damage.as_ref()
     }
 
+    /// A chained file's next link (or a seek into one): the decoder made
+    /// afresh from the link's setup, which the demuxer plays on only where
+    /// it is the same codec and channels -- checked here too, for headers
+    /// given again in band. A setup that makes no decoder, or one of another
+    /// shape, is damage: the decoder in hand goes on.
+    fn reconfigure(&mut self, config: &[u8]) {
+        let made = match &self.decoder {
+            Decoder::Opus(_) => opus::Head::parse(config)
+                .ok_or(Error::Opus(opus::Error::BadArgument))
+                .and_then(|h| h.decoder(OPUS_RATE as u32).map_err(Error::Opus))
+                .map(|d| (d.channels(), OPUS_RATE, OPUS_MAX_PACKET, Decoder::Opus(d))),
+            Decoder::Vorbis(_) => xiph_headers(config)
+                .ok_or(Error::Vorbis(vorbis::Error::BadHeader))
+                .and_then(|[id, _, setup]| vorbis::Decoder::new(id, setup).map_err(Error::Vorbis))
+                .map(|d| {
+                    let (channels, rate, max) =
+                        (d.info().channels, u64::from(d.info().rate), d.max_samples());
+                    (channels, rate, max, Decoder::Vorbis(Box::new(d)))
+                }),
+        };
+        match made {
+            Ok((channels, rate, max, decoder))
+                if channels == self.info.channels && rate == self.rate =>
+            {
+                self.decoder = decoder;
+                self.pcm = vec![0; max.saturating_mul(channels)];
+                self.last_samples = 0;
+            }
+            Ok(_) => {
+                self.damaged = self.damaged.saturating_add(1);
+                self.last_damage = Some(Error::SoundCodec(self.info.codec));
+            }
+            Err(e) => {
+                self.damaged = self.damaged.saturating_add(1);
+                self.last_damage = Some(e);
+            }
+        }
+    }
+
     /// One packet's samples a channel, into `self.pcm`: decoded, or
     /// concealed when it does not decode.
     fn decode_packet(&mut self, data: &[u8]) -> usize {
@@ -427,6 +475,9 @@ impl<R: Read + Seek> Sound<R> {
     /// One packet decoded and trimmed: its block, or `None` where nothing of
     /// it is left.
     fn decode(&mut self, sample: &Sample) -> Option<Block> {
+        if let Some(config) = &sample.new_config {
+            self.reconfigure(config);
+        }
         let channels = self.info.channels;
         let rate = self.rate;
         let decoded = self.decode_packet(&sample.data);
@@ -454,6 +505,11 @@ impl<R: Read + Seek> Sound<R> {
         }
         let padding = sample.discard_padding;
         let mut discard = 0u64;
+        // Ogg's, in samples: what the stream's last page leaves out.
+        if sample.discard_samples > 0 {
+            discard = sample.discard_samples;
+            side_skip.get_or_insert(0);
+        }
         if padding > 0 {
             discard = rescale(padding.unsigned_abs(), (1, 1_000_000_000), (1, rate));
             side_skip.get_or_insert(0);

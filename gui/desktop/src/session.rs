@@ -1147,8 +1147,10 @@ impl<T: Transport> ShellSession<T> {
 
     /// Deliver an event to the login screen and act on what it asks for.
     ///
-    /// Returns `true` if a login screen was up, which is what tells `dispatch`
-    /// to stop: while the machine is locked, nothing reaches the desktop.
+    /// Returns `true` if a login screen was up and the event was the user's,
+    /// which is what tells `dispatch` to stop: while the machine is locked,
+    /// nothing the user does reaches the desktop. What the system says -- a
+    /// resize, the clock, a settings change -- answers `false` and goes on.
     fn login_event(&mut self, event: &Event) -> Result<bool, Error<T>> {
         let Some(screen) = &mut self.login else {
             return Ok(false);
@@ -1176,7 +1178,18 @@ impl<T: Transport> ShellSession<T> {
             _ => LoginAction::Ignored,
         };
         self.apply_login_action(action)?;
-        Ok(!matches!(event, Event::Resize { .. } | Event::Tick { .. }))
+        // What the system says falls through to the desktop -- the display's
+        // size, the clock, a settings file rewritten -- and nothing the user
+        // does. A settings change used to stop here with the keys and clicks,
+        // so a theme, a rule or a lock delay changed while the screen was up
+        // was not adopted until the next announcement after someone signed
+        // in. Each settings arm only re-reads a file. Not `SessionIdle`,
+        // which would launch the lock screen over a login screen, nor a
+        // modifier chord, which is the user's.
+        Ok(!matches!(
+            event,
+            Event::Resize { .. } | Event::Tick { .. } | Event::SettingsChanged { .. }
+        ))
     }
 
     fn apply_login_action(&mut self, action: LoginAction) -> Result<(), Error<T>> {
@@ -3342,9 +3355,10 @@ impl<T: Transport> ShellSession<T> {
             if self.login_event(&localized)? {
                 return Ok(());
             }
-            // A resize or a tick falls through: the display can change size
-            // and the clock can advance while the screen is up, and both are
-            // handled below exactly as they would be otherwise.
+            // A resize, a tick or a settings change falls through: the display
+            // can change size, the clock advance and a settings file be
+            // rewritten while the screen is up, and each is handled below
+            // exactly as it would be otherwise.
             return self.dispatch_unlocked(window, localized, surface);
         }
         self.dispatch_unlocked(window, event, surface)

@@ -7596,6 +7596,31 @@ fn the_login_screen_a_log_out_brings_back_has_the_chosen_background() {
     );
 }
 
+/// **A settings change announced while the login screen is up is adopted** --
+/// it used to stop at the screen with the keys and clicks, and was taken up
+/// only at the first announcement after someone signed in -- while a key
+/// still reaches nothing but the screen.
+#[test]
+fn a_settings_change_while_the_login_screen_is_up_is_adopted() {
+    settingsfile::testing::with_scratch_config("session-locked-settings", |_root| {
+        let (mut session, desktop, _dir, _turn) = session_with_login();
+        assert!(session.is_locked());
+        let mut look = appearance::AppearanceFile::load();
+        assert_ne!(look.settings.accent_color, AccentColor::Teal);
+        look.settings.accent_color = AccentColor::Teal;
+        look.save().expect("save");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        assert_eq!(
+            session.shell().appearance.accent_color,
+            AccentColor::Teal,
+            "the change stopped at the login screen"
+        );
+        assert!(session.is_locked(), "a settings change let someone in");
+    });
+}
+
 /// **Signing in and out are heard**: `desktop-login` when a password lets
 /// someone in, `desktop-logout` when they leave -- and nothing while the
 /// login screen waits, nor for a password it refuses.

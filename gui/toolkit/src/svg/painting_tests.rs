@@ -344,3 +344,48 @@ fn half_transparent_layers_mix_by_their_cover() {
         assert!(got.abs_diff(want) <= 1, "{px:?}");
     }
 }
+
+// ─── Crisp edges ────────────────────────────────────────────────────────────
+
+/// **`crispEdges` fills each pixel whole whose centre is inside a shape, and
+/// leaves the rest**; smoothed, an edge across a pixel covers part of it.
+#[test]
+fn crisp_edges_are_whole_pixels() {
+    let rect = |rendering: &str| {
+        draw(&format!(
+            r#"<rect x="2.3" y="2.3" width="5.3" height="5.3" fill="blue" {rendering}/>"#
+        ))
+    };
+    let crisp = rect(r#"shape-rendering="crispEdges""#);
+    // 2.3 to 7.6: the centres 2.5 to 7.5 are inside, 1.5 and 8.5 not.
+    for x in 2..=7 {
+        assert_eq!(at(&crisp, x, 5), BLUE, "{x}");
+    }
+    assert_eq!(at(&crisp, 1, 5), CLEAR);
+    assert_eq!(at(&crisp, 8, 5), CLEAR);
+    assert!(
+        crisp.iter().all(|px| px[3] == 0 || px[3] == 255),
+        "nothing part-covered"
+    );
+    let smooth = rect("");
+    assert!(at(&smooth, 2, 5)[3] < 255, "smoothed, the edge covers part");
+    // optimizeSpeed draws as crispEdges; geometricPrecision as auto.
+    assert_eq!(rect(r#"shape-rendering="optimizeSpeed""#), crisp);
+    assert_eq!(rect(r#"shape-rendering="geometricPrecision""#), smooth);
+}
+
+/// **Crisp edges are inherited, a child may smooth its own again, and a
+/// stroke is drawn crisp as a fill is.**
+#[test]
+fn crisp_edges_are_inherited() {
+    let image = draw(
+        r#"<g shape-rendering="crispEdges">
+             <line x1="1" y1="1" x2="19" y2="7" stroke="blue" stroke-width="1.5"/>
+             <rect x="2.3" y="12.3" width="5.3" height="5.3" fill="red" shape-rendering="auto"/>
+           </g>"#,
+    );
+    let top: Vec<[u8; 4]> = image[..20 * 10].to_vec();
+    assert!(top.iter().any(|px| px[3] == 255), "the line is drawn");
+    assert!(top.iter().all(|px| px[3] == 0 || px[3] == 255), "crisp");
+    assert!(at(&image, 2, 15)[3] < 255, "the child smooths its own");
+}

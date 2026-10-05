@@ -72,6 +72,26 @@ const MAX_OCTAVES: u32 = 32;
 /// is computed at a lower resolution and scaled up -- 2048 by 2048.
 pub(super) const MAX_FILTER_PIXELS: usize = 1 << 22;
 
+/// How much filter work a drawing may do for each of its pixels, in passes
+/// of the cheapest primitive (`Kind::cost`), in all its filters together --
+/// and at least [`MIN_FILTER_WORK`].
+///
+/// The scratch budget bounds the *surfaces* a filter fills, and was all that
+/// bounded its work: each primitive paid one region's area. But a primitive
+/// can cost far more than its area -- turbulence 32 octaves of noise a pixel,
+/// a convolution a thousand multiplications -- and a document chaining
+/// enough of them made one drawing a minute's work (found by the fuzz test,
+/// `tests/svg_fuzz.rs`). Thirty-two passes a pixel is a dozen ordinary
+/// primitives over the whole drawing, or a full-size turbulence of sixteen
+/// octaves; past it, a filter is not drawn, as past the scratch budget.
+pub(super) const FILTER_WORK_PER_PIXEL: usize = 32;
+
+/// The least filter work a drawing may do: a small icon may still be
+/// filtered over a region larger than itself. An icon's drop shadow -- a
+/// blur, an offset and a merge over 64 by 64 pixels -- is some 25 000; this
+/// is a few seconds of a debug build's work, a fraction of one in release.
+pub(super) const MIN_FILTER_WORK: usize = 1 << 22;
+
 // ─── The model ──────────────────────────────────────────────────────────────
 
 /// A `<filter>`, or one filter function, built.
@@ -231,6 +251,43 @@ pub(super) enum Kind {
 }
 
 impl Kind {
+    /// What it costs a pixel, in passes of the cheapest primitives -- a
+    /// colour matrix, a composite -- so that a drawing's [`filter work`]
+    /// is charged for what each does rather than for its area alone:
+    /// turbulence by its octaves, a convolution by its kernel, a blur by its
+    /// box passes.
+    ///
+    /// [`filter work`]: MIN_FILTER_WORK
+    fn cost(&self) -> usize {
+        match self {
+            // Four channels of noise an octave, each about two passes' work.
+            Self::Turbulence { octaves, .. } => usize::try_from(*octaves)
+                .unwrap_or(usize::MAX)
+                .max(1)
+                .saturating_mul(2),
+            // A multiply-add a value a channel: about eight to a pass.
+            Self::Convolve {
+                kernel: Some(kernel),
+                ..
+            } => (kernel.values.len() / 8).max(1),
+            // Three box passes each way, or a shadow's blur and its flood.
+            Self::Blur { .. } | Self::DropShadow { .. } => 3,
+            // A normal from nine samples, and the light.
+            Self::Lighting { .. } | Self::Morphology { .. } => 2,
+            Self::Merge { inputs } => inputs.len().max(1),
+            Self::Blend { .. }
+            | Self::ColorMatrix { .. }
+            | Self::ComponentTransfer { .. }
+            | Self::Composite { .. }
+            | Self::Convolve { kernel: None, .. }
+            | Self::Displace { .. }
+            | Self::Flood { .. }
+            | Self::Image { .. }
+            | Self::Offset { .. }
+            | Self::Tile { .. } => 1,
+        }
+    }
+
     /// What it reads.
     fn inputs(&self) -> Vec<Input> {
         match self {
@@ -1469,6 +1526,14 @@ impl SvgRenderer<'_> {
             self.scratch_budget = left;
             let rect = self.subregion(p, region, &measure, &results);
             let area = measure.area(rect).intersect(region_area);
+            // And for the work it does there, out of the drawing's budget
+            // for filter work.
+            let work = area.pixels().saturating_mul(p.kind.cost());
+            let Some(left) = self.filter_work.checked_sub(work) else {
+                self.filter_work = 0;
+                return false;
+            };
+            self.filter_work = left;
             let image = self.evaluate(p, area, rect, &source, &results, &measure);
             results.push(Some(Done {
                 image,

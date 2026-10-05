@@ -40,3 +40,15 @@ a file path or a URL rather than carried in a `data:` URL -- including an
 `known-issues/TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES.md`.
 (Markers and `data:` pictures followed the same day.) `BackgroundImage` and
 `BackgroundAlpha`, which no browser draws either, are transparent.
+
+### Added later the same day: filters' work is budgeted too
+
+The scratch budget charged each primitive its region's area, which bounds
+the surfaces a filter fills but not the work: turbulence of 32 octaves is
+64 passes a pixel and a convolution up to 128, so a document chaining them
+up to the scratch budget made one drawing a minute's work. The fuzz test
+(`gui/toolkit/tests/svg_fuzz.rs`) found it on its first long run.
+
+| Choice | Instead of | For | Against |
+|---|---|---|---|
+| **A second budget, of work: each primitive charges its area times its cost in passes of the cheapest primitive** (`Kind::cost`: turbulence two a octave, a convolution one per eight kernel values, a blur three) -- 32 a pixel of the drawing, and at least 2^22 | charging expensive primitives more of the scratch budget | Memory and time are different limits and fail differently; one budget for both would make a large flood starve a small turbulence or the reverse. 32 passes a pixel is a dozen ordinary primitives over the whole drawing, or a full-size turbulence of sixteen octaves. | The costs are estimates, not measurements of each primitive; a primitive whose work grows past its estimate escapes. Past the budget a filtered element is not drawn, as past the scratch budget. |

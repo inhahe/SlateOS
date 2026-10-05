@@ -673,6 +673,83 @@ fn past_the_budget_a_filtered_element_is_not_drawn() {
     assert!(image.iter().all(|px| *px == CLEAR));
 }
 
+/// **Past the budget for filter work a filtered element is not drawn** --
+/// the work charged as each primitive costs, not by its area alone: the
+/// same area of turbulence costs its octaves twice over, where a flood
+/// costs one pass.
+#[test]
+fn past_the_work_budget_a_filtered_element_is_not_drawn() {
+    let svg = |primitive: &str| {
+        format!(
+            r#"<svg viewBox="0 0 20 20">
+                 <filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="20" height="20">{primitive}</filter>
+                 <rect x="5" y="5" width="10" height="10" fill="red" filter="url(#f)"/>
+               </svg>"#
+        )
+    };
+    // 400 pixels: a flood costs 400, turbulence of 8 octaves 6400.
+    let draw = |primitive: &str, work: usize| {
+        let doc = SvgDocument::parse(&svg(primitive)).unwrap();
+        let mut renderer = SvgRenderer::new(20, 20, &doc);
+        renderer.filter_work = work;
+        pixels(&doc.draw(renderer))
+    };
+    let flood = r#"<feFlood flood-color="blue"/>"#;
+    let noise = r#"<feTurbulence baseFrequency="0.1" numOctaves="8"/>"#;
+    assert_eq!(at(&draw(flood, 400), 10, 10), [0, 0, 255, 255]);
+    assert!(draw(flood, 399).iter().all(|px| *px == CLEAR));
+    assert!(draw(noise, 6400).iter().any(|px| *px != CLEAR));
+    assert!(draw(noise, 6399).iter().all(|px| *px == CLEAR));
+}
+
+/// **The work budget is the drawing's, across its filters**: the second of
+/// two filtered elements the budget pays one of is not drawn.
+#[test]
+fn the_work_budget_is_shared_by_a_drawings_filters() {
+    let svg = r#"<svg viewBox="0 0 20 20">
+                   <filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="10" height="20">
+                     <feFlood flood-color="blue"/>
+                   </filter>
+                   <filter id="g" filterUnits="userSpaceOnUse" x="10" y="0" width="10" height="20">
+                     <feFlood flood-color="lime"/>
+                   </filter>
+                   <rect width="10" height="20" filter="url(#f)"/>
+                   <rect x="10" width="10" height="20" filter="url(#g)"/>
+                 </svg>"#;
+    let doc = SvgDocument::parse(svg).unwrap();
+    let mut renderer = SvgRenderer::new(20, 20, &doc);
+    renderer.filter_work = 300;
+    let image = pixels(&doc.draw(renderer));
+    assert_eq!(at(&image, 5, 10), [0, 0, 255, 255], "the first paid for");
+    assert_eq!(at(&image, 15, 10), CLEAR, "the second not");
+}
+
+/// **Work done on a layer is the drawing's too**: a filter inside a faded
+/// group spends the budget the element after the group would have drawn
+/// with.
+#[test]
+fn work_on_a_layer_counts_against_the_drawing() {
+    let svg = r#"<svg viewBox="0 0 20 20">
+                   <filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="10" height="20">
+                     <feFlood flood-color="blue"/>
+                   </filter>
+                   <filter id="g" filterUnits="userSpaceOnUse" x="10" y="0" width="10" height="20">
+                     <feFlood flood-color="lime"/>
+                   </filter>
+                   <g opacity="0.5">
+                     <rect width="10" height="20" filter="url(#f)"/>
+                     <rect width="1" height="1"/>
+                   </g>
+                   <rect x="10" width="10" height="20" filter="url(#g)"/>
+                 </svg>"#;
+    let doc = SvgDocument::parse(svg).unwrap();
+    let mut renderer = SvgRenderer::new(20, 20, &doc);
+    renderer.filter_work = 300;
+    let image = pixels(&doc.draw(renderer));
+    assert!(at(&image, 5, 10)[2] > 0, "the group's filter paid for");
+    assert_eq!(at(&image, 15, 10), CLEAR, "and the rest spent");
+}
+
 /// **A region larger than the cap is filtered at a lower resolution and
 /// scaled up**: a flood still fills it, to within the sampling of its edge.
 #[test]

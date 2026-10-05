@@ -56,6 +56,9 @@
 //! - `visibility` (a hidden group's child may show again), `paint-order`,
 //!   and `vector-effect: non-scaling-stroke` -- a stroke measured in the
 //!   outermost `<svg>`'s CSS pixels, however the shape is transformed
+//! - `shape-rendering`: `crispEdges` (and `optimizeSpeed`, as browsers draw
+//!   it) fills each pixel whole whose centre is inside a shape, and leaves
+//!   the rest -- the pixel-exact edges icon sets ask for at small sizes
 //! - Blending: `mix-blend-mode` mixes what an element draws with what is
 //!   under it, by any of Compositing and Blending's sixteen modes, and
 //!   `isolation: isolate` -- or a layer an opacity or a filter already makes
@@ -116,7 +119,9 @@ mod viewport_tests;
 pub use clip::Clip;
 use clip::{ClipPath, MAX_CLIP_DEPTH, Mask, Referable, clip_path_frame, may_clip};
 pub use effects::BlendMode;
-use filter::{FilterDef, FilterLists, MAX_FILTER_PIXELS, Target};
+use filter::{
+    FILTER_WORK_PER_PIXEL, FilterDef, FilterLists, MAX_FILTER_PIXELS, MIN_FILTER_WORK, Target,
+};
 use image::{Picture, Pictures};
 use marker::{MarkerDef, Orient, Reference};
 use mask::{MaskDef, kept, mask_frame};
@@ -1251,6 +1256,10 @@ pub struct SvgStyle {
     /// Whether what the element draws is mixed among itself before it is
     /// laid on what is under it (`isolation: isolate`): its own.
     pub isolate: bool,
+    /// Whether a shape's edges are drawn crisp -- each pixel whole where its
+    /// centre is inside, none where it is not -- rather than smoothed
+    /// (`shape-rendering: crispEdges` or `optimizeSpeed`): inherited.
+    pub crisp_edges: Option<bool>,
 }
 
 /// One of the three things a shape paints.
@@ -1367,6 +1376,7 @@ impl Default for SvgStyle {
             non_scaling_stroke: false,
             mix_blend_mode: BlendMode::Normal,
             isolate: false,
+            crisp_edges: None,
         }
     }
 }
@@ -1742,6 +1752,8 @@ struct ResolvedStyle {
     visible: bool,
     /// The order a shape paints its fill, stroke and markers in.
     paint_order: PaintOrder,
+    /// Whether a shape's edges are drawn crisp (`shape-rendering`).
+    crisp: bool,
 }
 
 impl Default for ResolvedStyle {
@@ -1763,6 +1775,7 @@ impl Default for ResolvedStyle {
             dash_offset: 0.0,
             visible: true,
             paint_order: PaintOrder::NORMAL,
+            crisp: false,
         }
     }
 }
@@ -1780,6 +1793,7 @@ impl ResolvedStyle {
             dash_offset: style.stroke_dashoffset.unwrap_or(self.dash_offset),
             visible: style.visibility.unwrap_or(self.visible),
             paint_order: style.paint_order.unwrap_or(self.paint_order),
+            crisp: style.crisp_edges.unwrap_or(self.crisp),
             fill: style.fill.unwrap_or(self.fill),
             fill_rule: style.fill_rule.unwrap_or(self.fill_rule),
             stroke: style.stroke.unwrap_or(self.stroke),
@@ -3654,6 +3668,16 @@ fn parse_style_attrs(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgE
             .and_then(BlendMode::named)
             .unwrap_or(BlendMode::Normal),
         isolate: property(elem, "isolation") == Some("isolate"),
+        crisp_edges: keyword(
+            property(elem, "shape-rendering"),
+            &[
+                ("auto", false),
+                ("geometricPrecision", false),
+                ("crispEdges", true),
+                // Browsers draw it as they draw crisp edges.
+                ("optimizeSpeed", true),
+            ],
+        ),
     })
 }
 
@@ -4686,6 +4710,9 @@ struct SvgRenderer<'d> {
     /// The most pixels one filter is computed over: [`MAX_FILTER_PIXELS`],
     /// but for a test of a smaller cap.
     filter_pixels: usize,
+    /// How much more filter work -- pixels times each primitive's cost --
+    /// this drawing may do, in all its filters ([`FILTER_WORK_PER_PIXEL`]).
+    filter_work: usize,
     /// The `<marker>`s being drawn now, outermost first: one met again
     /// inside itself is drawn once, and not again inside itself. While any
     /// is, nodes drawn count toward [`MAX_REUSED_NODES`], as inside a
@@ -4758,6 +4785,9 @@ impl<'d> SvgRenderer<'d> {
         let scratch_budget = (size / 4)
             .saturating_mul(SCRATCH_PER_PIXEL)
             .max(MIN_SCRATCH_PIXELS);
+        let filter_work = (size / 4)
+            .saturating_mul(FILTER_WORK_PER_PIXEL)
+            .max(MIN_FILTER_WORK);
         Self {
             width,
             height,
@@ -4771,6 +4801,7 @@ impl<'d> SvgRenderer<'d> {
             pattern_depth: 0,
             scratch_budget,
             filter_pixels: MAX_FILTER_PIXELS,
+            filter_work,
             marking: Vec::new(),
             mask: None,
             // Until a document is drawn on it (`SvgDocument::draw`).
@@ -4798,17 +4829,19 @@ impl<'d> SvgRenderer<'d> {
         scratch.mask_depth = self.mask_depth;
         scratch.pattern_depth = self.pattern_depth;
         scratch.filter_pixels = self.filter_pixels;
+        scratch.filter_work = self.filter_work;
         scratch.marking.clone_from(&self.marking);
         scratch.host = self.host;
         Some(scratch)
     }
 
     /// Take back what `scratch`, from [`scratch`](Self::scratch), spent of
-    /// this drawing's budgets: what it drew through `<use>`s and on surfaces
-    /// of its own.
+    /// this drawing's budgets: what it drew through `<use>`s, on surfaces
+    /// of its own, and in filters.
     fn absorb(&mut self, scratch: &SvgRenderer<'_>) {
         self.reuse_budget = scratch.reuse_budget;
         self.scratch_budget = scratch.scratch_budget;
+        self.filter_work = scratch.filter_work;
     }
 
     /// Draw `node` and everything in it, in the space `transform` carries to
@@ -5510,7 +5543,7 @@ impl<'d> SvgRenderer<'d> {
             scan_shape(
                 self.width,
                 self.height,
-                self.ss_factor,
+                Sampling::Smooth(self.ss_factor),
                 &outlines,
                 *rule,
                 |row, first_col, coverage| mask.add_row(row, first_col, coverage),
@@ -5686,7 +5719,13 @@ impl<'d> SvgRenderer<'d> {
             alpha: style.opacity.clamp(0.0, 1.0),
             smooth,
         };
-        self.fill_shape(&[outline.points.as_slice()], FillRule::NonZero, &fill);
+        // A picture's edges are smoothed: `shape-rendering` is a shape's.
+        self.fill_shape(
+            &[outline.points.as_slice()],
+            FillRule::NonZero,
+            &fill,
+            false,
+        );
     }
 
     /// Draw the markers `style` puts on the vertices of the shape `node`,
@@ -5797,7 +5836,7 @@ impl<'d> SvgRenderer<'d> {
         {
             let outlines: Vec<&[(f32, f32)]> =
                 subpaths.iter().map(|s| s.points.as_slice()).collect();
-            self.fill_shape(&outlines, style.fill_rule, &fill);
+            self.fill_shape(&outlines, style.fill_rule, &fill, style.crisp);
         }
     }
 
@@ -5862,7 +5901,7 @@ impl<'d> SvgRenderer<'d> {
             });
         let polygons = stroke_polygons(dashed.as_deref().unwrap_or(subpaths), geometry);
         let outlines: Vec<&[(f32, f32)]> = polygons.iter().map(Vec::as_slice).collect();
-        self.fill_shape(&outlines, FillRule::NonZero, &stroke);
+        self.fill_shape(&outlines, FillRule::NonZero, &stroke, style.crisp);
     }
 
     /// What `paint` at `alpha` of itself draws on the shape whose device
@@ -6020,7 +6059,14 @@ impl<'d> SvgRenderer<'d> {
     /// the rule makes it one, and a pixel two outlines overlap is covered once
     /// rather than blended twice. Each sub-scanline's crossings are found from
     /// the edges it passes through, which a list sorted by top keeps short.
-    fn fill_shape(&mut self, outlines: &[&[(f32, f32)]], rule: FillRule, fill: &Fill<'_>) {
+    /// `crisp` draws its edges crisp (`shape-rendering: crispEdges`).
+    fn fill_shape(
+        &mut self,
+        outlines: &[&[(f32, f32)]],
+        rule: FillRule,
+        fill: &Fill<'_>,
+        crisp: bool,
+    ) {
         let invisible = match fill {
             Fill::Solid(color) => color.a == 0,
             Fill::Gradient { alpha, .. }
@@ -6032,11 +6078,16 @@ impl<'d> SvgRenderer<'d> {
         }
         // What the clip paths around the shape leave of each pixel.
         let mask = self.mask.clone();
-        let (width, height, ss) = (self.width, self.height, self.ss_factor);
+        let (width, height) = (self.width, self.height);
+        let sampling = if crisp {
+            Sampling::Crisp
+        } else {
+            Sampling::Smooth(self.ss_factor)
+        };
         scan_shape(
             width,
             height,
-            ss,
+            sampling,
             outlines,
             rule,
             |row, first_col, coverage| {
@@ -6152,9 +6203,20 @@ impl<'d> SvgRenderer<'d> {
     }
 }
 
+/// How a shape's edges are found on the pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sampling {
+    /// Smoothed: this many sub-scanlines to a row, and the exact share of
+    /// each pixel across it.
+    Smooth(u32),
+    /// Crisp: each pixel whole where its centre is inside the shape, and not
+    /// at all where it is not -- `shape-rendering: crispEdges`.
+    Crisp,
+}
+
 /// Find the share of each pixel the shape `outlines` bound -- each closed back
 /// to its start -- covers under `rule`, on a surface `width` by `height`
-/// pixels with `ss` sub-scanlines to a row, and hand it over a row at a time:
+/// pixels sampled as `sampling` says, and hand it over a row at a time:
 /// `each(row, first_col, coverage)` for each row the shape reaches, `coverage`
 /// the share of column `first_col` and of each column after it.
 ///
@@ -6167,11 +6229,16 @@ impl<'d> SvgRenderer<'d> {
 fn scan_shape(
     width: u32,
     height: u32,
-    ss_factor: u32,
+    sampling: Sampling,
     outlines: &[&[(f32, f32)]],
     rule: FillRule,
     mut each: impl FnMut(u32, u32, &[f32]),
 ) {
+    // One line through each row's centre, for crisp edges.
+    let (ss_factor, crisp) = match sampling {
+        Sampling::Smooth(ss) => (ss, false),
+        Sampling::Crisp => (1, true),
+    };
     let mut edges: Vec<FillEdge> = Vec::new();
     let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
     let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -6264,12 +6331,41 @@ fn scan_shape(
                     FillRule::NonZero => winding != 0,
                     FillRule::EvenOdd => winding & 1 != 0,
                 };
-                if inside {
+                if inside && crisp {
+                    cover_centres(&mut coverage, left - origin, right - origin);
+                } else if inside {
                     cover_span(&mut coverage, left - origin, right - origin, weight);
                 }
             }
         }
         each(row, first_col, &coverage);
+    }
+}
+
+/// Make whole each pixel of `coverage` -- its first entry the pixel whose left
+/// edge is at 0 -- whose centre the span `left..right` holds.
+fn cover_centres(coverage: &mut [f32], left: f32, right: f32) {
+    if left.is_nan() || right.is_nan() {
+        return;
+    }
+    // The centre of pixel `c` is `c + 0.5`: inside from the first `c` at or
+    // past `left - 0.5`, up to the first at or past `right - 0.5`.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a row's width in pixels, far inside f32's exact range"
+    )]
+    let columns = coverage.len() as f32;
+    let first = (left - 0.5).ceil().clamp(0.0, columns);
+    let end = (right - 0.5).ceil().clamp(0.0, columns);
+    // Whole numbers held to the row first.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "whole, and held to 0..=the row's width"
+    )]
+    let (first, end) = (first as usize, end as usize);
+    if let Some(cells) = coverage.get_mut(first..end) {
+        cells.fill(1.0);
     }
 }
 

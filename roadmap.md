@@ -2204,8 +2204,10 @@ live.
   under an icon to lighting and turbulence, and CSS's `blur()`,
   `drop-shadow()`, `grayscale()` and the rest -- with a faded group now
   faded as a whole, its overlapping parts no darker where they overlap.
-  And markers -- arrowheads and vertex dots, turned along the path.
-  Still not drawn: text and embedded pictures
+  And markers -- arrowheads and vertex dots, turned along the path -- and
+  embedded pictures, an `<image>` of a `data:` PNG, JPEG, GIF, WebP, BMP,
+  ICO or TIFF. Still not drawn: text, waiting on lane F
+  (`requests/c-f-an-outline-for-each-shaped-glyph.md`)
   (`TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES`).
 
 - `[C]` **The run box wears the theme's window frame** (`design-decisions.md`

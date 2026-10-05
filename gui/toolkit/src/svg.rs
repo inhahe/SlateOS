@@ -46,6 +46,10 @@
 //!   a style) put a `<marker>`'s content on a path's, line's, polyline's or
 //!   polygon's vertices, facing the path where it says `orient="auto"` (the
 //!   `marker` module says what of them is drawn)
+//! - Pictures: an `<image>`, or an `feImage`, naming a picture in a `data:`
+//!   URL -- PNG, JPEG, GIF, WebP, BMP, ICO or TIFF -- fitted into its
+//!   viewport by its `preserveAspectRatio` (the `image` module says what of
+//!   them is drawn; a drawing's references to other files are not followed)
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
 //!   viewport of its own; g (with inheritance)
@@ -78,6 +82,7 @@ mod clip;
 mod css;
 mod effects;
 mod filter;
+mod image;
 #[cfg(test)]
 mod layer_tests;
 mod marker;
@@ -94,6 +99,7 @@ mod viewport_tests;
 pub use clip::Clip;
 use clip::{ClipPath, MAX_CLIP_DEPTH, Mask, Referable, clip_path_frame, may_clip};
 use filter::{FilterDef, FilterLists, MAX_FILTER_PIXELS, Target};
+use image::{Picture, Pictures};
 use marker::{MarkerDef, Orient, Reference};
 use mask::{MaskDef, kept, mask_frame};
 use paint::{Defs, Gradient};
@@ -1314,6 +1320,23 @@ pub enum SvgNode {
         transform: Transform,
         style: SvgStyle,
     },
+    /// An `<image>`: a picture, fitted into its viewport.
+    Image {
+        /// Its viewport: `x`, `y`, `width`, `height`.
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        /// How the picture is fitted into the viewport.
+        aspect: AspectRatio,
+        /// The picture, by its place among the document's.
+        picture: usize,
+        /// Read between pixels (`true`) or from the nearest one
+        /// (`image-rendering: pixelated`).
+        smooth: bool,
+        transform: Transform,
+        style: SvgStyle,
+    },
     /// A `<use>`: the element it names, drawn again here. The element is
     /// built once, however many `<use>`s name it, and kept with the
     /// document; `content` is its place there.
@@ -1361,6 +1384,8 @@ pub struct SvgDocument {
     /// Its `<marker>`s, at the places [`SvgStyle::marker_start`] and the
     /// others give.
     markers: Vec<MarkerDef>,
+    /// The pictures its `<image>`s and `feImage`s show, decoded.
+    pictures: Vec<Picture>,
 }
 
 /// The user-space rectangle an `<svg>` element shows, `(x, y, width,
@@ -1430,6 +1455,8 @@ impl SvgDocument {
         let filter_ids = Referable::collect(first, &by_id, "filter");
         let filter_lists = FilterLists::collect(first, &filter_ids);
         let marker_ids = Referable::collect(first, &by_id, "marker");
+        // Every picture named, decoded once however many name it.
+        let pictures = Pictures::collect(first);
         let tables = Tables {
             defs: &defs,
             reusable: &reusable,
@@ -1438,6 +1465,7 @@ impl SvgDocument {
             patterns: &pattern_ids,
             filter_lists: &filter_lists,
             markers: &marker_ids,
+            pictures: &pictures,
         };
         let builder = Builder {
             tables: &tables,
@@ -1466,10 +1494,11 @@ impl SvgDocument {
         // The `<filter>` elements, then the filter functions, at the places
         // the lists give them. An `feImage` draws what a `<use>` would.
         let content_of = |id: &str| reusable.find(id).map(|(place, _)| place);
+        let picture_of = |href: &str| pictures.place(href);
         let mut filters: Vec<FilterDef> = filter_ids
             .elements
             .iter()
-            .map(|elem| filter::build_filter(elem, (view_w, view_h), &content_of))
+            .map(|elem| filter::build_filter(elem, (view_w, view_h), &content_of, &picture_of))
             .collect();
         let markers = marker_ids
             .elements
@@ -1481,6 +1510,7 @@ impl SvgDocument {
             lists, functions, ..
         } = filter_lists;
         filters.extend(functions);
+        let Pictures { decoded, .. } = pictures;
         Ok(Self {
             root,
             defs,
@@ -1491,6 +1521,7 @@ impl SvgDocument {
             filters,
             filter_lists: lists,
             markers,
+            pictures: decoded,
         })
     }
 
@@ -1649,6 +1680,15 @@ enum Fill<'d> {
         inverse: Transform,
         alpha: f32,
     },
+    /// A picture: `inverse` takes a device pixel's centre into its pixels,
+    /// read between them where `smooth`; its colours' alpha is drawn at
+    /// `alpha` of itself.
+    Picture {
+        picture: &'d Picture,
+        inverse: Transform,
+        alpha: f32,
+        smooth: bool,
+    },
 }
 
 /// `alpha` scaled by `share`, held to a byte.
@@ -1752,6 +1792,8 @@ impl Extent {
 fn overlaps_itself(node: &SvgNode, parent_style: &ResolvedStyle) -> bool {
     match node {
         SvgNode::Svg { .. } | SvgNode::Group { .. } | SvgNode::Use { .. } => true,
+        // A picture is one paint, whatever fill or stroke it inherits.
+        SvgNode::Image { .. } => false,
         _ => style_of(node).is_some_and(|style| {
             let resolved = parent_style.with_overrides(style);
             (resolved.fill_paint().is_some()
@@ -1841,6 +1883,7 @@ fn style_of(node: &SvgNode) -> Option<&SvgStyle> {
         | SvgNode::Polyline { style, .. }
         | SvgNode::Polygon { style, .. }
         | SvgNode::Path { style, .. }
+        | SvgNode::Image { style, .. }
         | SvgNode::Use { style, .. } => Some(style),
     }
 }
@@ -1859,6 +1902,7 @@ fn local_transform(node: &SvgNode) -> Transform {
         | SvgNode::Polyline { transform, .. }
         | SvgNode::Polygon { transform, .. }
         | SvgNode::Path { transform, .. }
+        | SvgNode::Image { transform, .. }
         | SvgNode::Use { transform, .. } => *transform,
     }
 }
@@ -1893,6 +1937,16 @@ fn shape_outline(node: &SvgNode, to: Transform) -> Vec<Subpath> {
         SvgNode::Polyline { points, .. } => vec![points_subpath(points, to, false)],
         SvgNode::Polygon { points, .. } => vec![points_subpath(points, to, true)],
         SvgNode::Path { commands, .. } => path_to_subpaths(commands, to),
+        // A picture's box is its viewport.
+        SvgNode::Image {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => rect_subpath(*x, *y, *width, *height, 0.0, 0.0, to)
+            .into_iter()
+            .collect(),
         SvgNode::Svg { .. } | SvgNode::Group { .. } | SvgNode::Use { .. } => Vec::new(),
     }
 }
@@ -2451,6 +2505,8 @@ struct Tables<'b> {
     filter_lists: &'b FilterLists,
     /// The document's `<marker>`s, by `id`, for a `marker-*` that names one.
     markers: &'b Referable<'b>,
+    /// The pictures its `<image>`s name, decoded, by `href`.
+    pictures: &'b Pictures,
 }
 
 /// What building an element's node needs beyond the element: what the whole
@@ -2628,8 +2684,62 @@ fn build_shape(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
         "polygon" => build_polygon(elem, b),
         "path" => build_path(elem, b),
         "use" => build_use(elem, b),
+        "image" => build_image(elem, b),
         _ => Ok(nothing()),
     }
+}
+
+/// An `<image>`: the picture its `href` names, in the viewport its `x`,
+/// `y`, `width` and `height` make -- a size `auto` or not said being the
+/// picture's own, as SVG 2 has it. Nothing for a picture that is not one
+/// this renderer draws ([`image`] says which), or a viewport with no area.
+fn build_image(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
+    let Some(place) = image::href(elem).and_then(|href| b.tables.pictures.place(href)) else {
+        return Ok(nothing());
+    };
+    let Some(picture) = b.tables.pictures.decoded.get(place) else {
+        return Ok(nothing());
+    };
+    let (view_w, view_h) = b.viewport;
+    let length = |name: &str, extent: f32| {
+        elem.attr(name)
+            .filter(|value| value.trim() != "auto")
+            .and_then(|value| viewport_length(value, extent))
+    };
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a picture's side, at most imagecodec's limit, far inside f32's exact range"
+    )]
+    let (own_w, own_h) = (picture.width as f32, picture.height as f32);
+    let (width, height) = match (length("width", view_w), length("height", view_h)) {
+        (Some(w), Some(h)) => (w, h),
+        // One side said: the other in the picture's proportion.
+        (Some(w), None) => (w, w * own_h / own_w),
+        (None, Some(h)) => (h * own_w / own_h, h),
+        (None, None) => (own_w, own_h),
+    };
+    if !(width > 0.0 && height > 0.0 && width.is_finite() && height.is_finite()) {
+        return Ok(nothing());
+    }
+    let smooth = !property(elem, "image-rendering")
+        .is_some_and(|value| matches!(value.trim(), "pixelated" | "crisp-edges" | "optimizeSpeed"));
+    Ok(SvgNode::Image {
+        x: length("x", view_w).unwrap_or(0.0),
+        y: length("y", view_h).unwrap_or(0.0),
+        width,
+        height,
+        aspect: elem
+            .attr("preserveAspectRatio")
+            .map_or(AspectRatio::DEFAULT, AspectRatio::parse),
+        picture: place,
+        smooth,
+        transform: elem
+            .attr("transform")
+            .map(parse_transform)
+            .transpose()?
+            .unwrap_or(Transform::IDENTITY),
+        style: parse_style_attrs(elem, b)?,
+    })
 }
 
 /// A `<use>`: the content the document keeps for the element it names,
@@ -2854,9 +2964,8 @@ fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     match elem.tag.as_str() {
         "svg" => build_svg(elem, b),
         "g" => build_group(elem, b),
-        "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path" | "use" => {
-            build_shape(elem, b)
-        }
+        "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path" | "use"
+        | "image" => build_shape(elem, b),
         // Unknown elements treated as groups (e.g., <defs>, <title>).
         _ => build_children(elem, b.inner()).map(plain_group),
     }
@@ -4839,7 +4948,9 @@ impl<'d> SvgRenderer<'d> {
                 }
                 // Half the stroke's width, as far as a miter or a square cap
                 // can carry it -- along the axis the transform stretches most.
-                let margin = if resolved.stroke_paint().is_some() {
+                let stroked =
+                    resolved.stroke_paint().is_some() && !matches!(node, SvgNode::Image { .. });
+                let margin = if stroked {
                     let (sx, sy) = combined.axis_scales();
                     let reach = match resolved.line_join {
                         LineJoin::Miter => resolved.miter_limit.max(core::f32::consts::SQRT_2),
@@ -5241,12 +5352,85 @@ impl<'d> SvgRenderer<'d> {
         };
         let combined = transform.then(local_transform(node));
         let resolved = parent_style.with_own(style, own_opacity);
+        // A picture is its one paint: no fill, no stroke.
+        if let SvgNode::Image {
+            x,
+            y,
+            width,
+            height,
+            aspect,
+            picture,
+            smooth,
+            ..
+        } = *node
+        {
+            self.draw_image(
+                (x, y, width, height),
+                aspect,
+                picture,
+                smooth,
+                combined,
+                &resolved,
+            );
+            return;
+        }
         let outline = shape_outline(node, combined);
         self.paint(&outline, &resolved, combined);
         // After the fill and the stroke, as SVG paints them.
         if resolved.has_markers() && marker::markable(node) {
             self.draw_markers(node, combined, &resolved);
         }
+    }
+
+    /// Draw the picture at `place` in `viewport` (`x, y, width, height`, in
+    /// the space `transform` carries to the pixels), fitted by `aspect` and
+    /// cut to the viewport -- what `slice` lets overflow -- at the element's
+    /// opacity.
+    fn draw_image(
+        &mut self,
+        viewport: (f32, f32, f32, f32),
+        aspect: AspectRatio,
+        place: usize,
+        smooth: bool,
+        transform: Transform,
+        style: &ResolvedStyle,
+    ) {
+        let doc = self.doc;
+        let Some(picture) = doc.pictures.get(place) else {
+            return;
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a picture's side, at most imagecodec's limit, far inside f32's exact range"
+        )]
+        let own = (0.0, 0.0, picture.width as f32, picture.height as f32);
+        let Some(fit) = fit_view_box(own, aspect, viewport) else {
+            return;
+        };
+        // The picture's box in user space, cut to the viewport.
+        let (px0, py0) = fit.apply(0.0, 0.0);
+        let (px1, py1) = fit.apply(own.2, own.3);
+        let (vx, vy, vw, vh) = viewport;
+        let x0 = px0.min(px1).max(vx);
+        let y0 = py0.min(py1).max(vy);
+        let x1 = px0.max(px1).min(vx + vw);
+        let y1 = py0.max(py1).min(vy + vh);
+        if !(x1 > x0 && y1 > y0) {
+            return;
+        }
+        let Some(inverse) = transform.then(fit).inverse() else {
+            return;
+        };
+        let Some(outline) = rect_subpath(x0, y0, x1 - x0, y1 - y0, 0.0, 0.0, transform) else {
+            return;
+        };
+        let fill = Fill::Picture {
+            picture,
+            inverse,
+            alpha: style.opacity.clamp(0.0, 1.0),
+            smooth,
+        };
+        self.fill_shape(&[outline.points.as_slice()], FillRule::NonZero, &fill);
     }
 
     /// Draw the markers `style` puts on the vertices of the shape `node`,
@@ -5538,7 +5722,9 @@ impl<'d> SvgRenderer<'d> {
     fn fill_shape(&mut self, outlines: &[&[(f32, f32)]], rule: FillRule, fill: &Fill<'_>) {
         let invisible = match fill {
             Fill::Solid(color) => color.a == 0,
-            Fill::Gradient { alpha, .. } | Fill::Pattern { alpha, .. } => *alpha <= 0.0,
+            Fill::Gradient { alpha, .. }
+            | Fill::Pattern { alpha, .. }
+            | Fill::Picture { alpha, .. } => *alpha <= 0.0,
         };
         if self.buffer.is_empty() || invisible {
             return;
@@ -5578,6 +5764,16 @@ impl<'d> SvgRenderer<'d> {
                         } => {
                             let (u, v) = inverse.apply(col as f32 + 0.5, row as f32 + 0.5);
                             let c = tile.color_at(u, v);
+                            Color::rgba(c.r, c.g, c.b, scaled_alpha(c.a, *alpha))
+                        }
+                        Fill::Picture {
+                            picture,
+                            inverse,
+                            alpha,
+                            smooth,
+                        } => {
+                            let (u, v) = inverse.apply(col as f32 + 0.5, row as f32 + 0.5);
+                            let c = picture.color_at(u, v, *smooth);
                             Color::rgba(c.r, c.g, c.b, scaled_alpha(c.a, *alpha))
                         }
                     };

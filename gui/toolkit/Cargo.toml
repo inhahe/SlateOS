@@ -6,6 +6,12 @@ description = "SlateOS GUI toolkit — widget library with Flexbox/Grid layout e
 
 [dependencies]
 osfont = { path = "../font" }
+# The pictures an SVG drawing embeds (`svg::image`: `<image>` and `feImage`
+# naming a `data:` URL). Without AVIF, exactly as `osfont` above already
+# builds it -- so this links nothing the toolkit did not already: the PNG,
+# JPEG, GIF, WebP, BMP, ICO and TIFF decoders, `no_std` and bounded against
+# a hostile file before they allocate.
+imagecodec = { path = "../imagecodec", default-features = false }
 # The name of a settings file, which `Event::SettingsChanged` carries; its
 # own crate so `settingsfile`, below the toolkit, applies the same rule.
 settingsname = { path = "../settingsname" }

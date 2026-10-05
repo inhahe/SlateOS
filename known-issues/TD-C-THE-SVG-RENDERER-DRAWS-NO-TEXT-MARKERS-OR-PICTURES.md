@@ -1,7 +1,11 @@
 ## TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES (lane C, 2026-10-05)
 
-**Status:** OPEN -- markers done 2026-10-05 (`gui/toolkit/src/svg/marker.rs`, the
-first of the three parts below); text and pictures remain.
+**Status:** OPEN -- markers done 2026-10-05 (`gui/toolkit/src/svg/marker.rs`, part 1
+below) and pictures in `data:` URLs the same day (`svg/image.rs`, part 3 --
+the decoder was already linked, through `osfont`'s use of `imagecodec`).
+Text remains, waiting on lane F: `requests/c-f-an-outline-for-each-shaped-glyph.md`.
+Not followed, by design: an `<image>` naming another file or a URL, and an
+SVG picture inside an SVG.
 
 **In short:** the toolkit's SVG renderer, which draws every icon theme's
 pictures, thumbnails and the image viewer's SVG files, now draws everything

@@ -33,8 +33,10 @@ units, evaluation), `gui/toolkit/src/svg.rs` (`render_layered`,
 
 ### What is not drawn
 
-`feImage` of a picture file (the renderer draws no raster images at all --
-`<image>` neither), text, and markers:
+Text, which waits on lane F for glyph outlines
+(`requests/c-f-an-outline-for-each-shaped-glyph.md`), and a picture named by
+a file path or a URL rather than carried in a `data:` URL -- including an
+`feImage` naming one -- which a drawing may not reach out for:
 `known-issues/TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES.md`.
-`BackgroundImage` and `BackgroundAlpha`, which no browser draws either, are
-transparent.
+(Markers and `data:` pictures followed the same day.) `BackgroundImage` and
+`BackgroundAlpha`, which no browser draws either, are transparent.

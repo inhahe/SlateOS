@@ -1535,6 +1535,7 @@ name = "guitk"
 version = "0.1.0"
 dependencies = [
  "civildate",
+ "imagecodec",
  "osfont",
  "pathcodec",
  "randrange",

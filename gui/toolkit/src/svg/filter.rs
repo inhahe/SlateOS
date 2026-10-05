@@ -56,7 +56,8 @@ use super::effects::{
 };
 use super::paint::Units;
 use super::{
-    Extent, SvgPaint, SvgRenderer, Transform, XmlElement, parse_color, property, viewport_length,
+    AspectRatio, Extent, SvgPaint, SvgRenderer, Transform, XmlElement, fit_view_box, image,
+    parse_color, property, viewport_length,
 };
 
 /// The most values a convolution kernel may have: one larger passes its
@@ -193,10 +194,17 @@ pub(super) enum Kind {
         input: Input,
         deviation: (f32, f32),
     },
-    /// An element drawn: the place among the document's reused content of
-    /// the one it names, or `None` for a picture file, which is not drawn.
+    /// An element drawn, or a picture shown: `content` the place among the
+    /// document's reused content of the element it names, `picture` that
+    /// among its pictures of the `data:` picture it names -- neither for a
+    /// picture file or anything else, which draws nothing.
     Image {
         content: Option<usize>,
+        picture: Option<usize>,
+        /// How a picture is fitted into the subregion.
+        aspect: AspectRatio,
+        /// A picture read between pixels, or from the nearest one.
+        smooth: bool,
     },
     Merge {
         inputs: Vec<Input>,
@@ -250,11 +258,13 @@ impl Kind {
 
 /// A `<filter>`, built: its units and region, and its primitives, each
 /// input resolved to what it names. `content_of` gives the place, among the
-/// document's reused content, of the element an `feImage` names by `id`.
+/// document's reused content, of the element an `feImage` names by `id`;
+/// `picture_of`, among its pictures, of the picture one names by URL.
 pub(super) fn build_filter(
     elem: &XmlElement,
     viewport: (f32, f32),
     content_of: &dyn Fn(&str) -> Option<usize>,
+    picture_of: &dyn Fn(&str) -> Option<usize>,
 ) -> FilterDef {
     let units = units_of(elem, "filterUnits", Units::ObjectBoundingBox);
     let primitive_units = units_of(elem, "primitiveUnits", Units::UserSpaceOnUse);
@@ -268,7 +278,7 @@ pub(super) fn build_filter(
             .checked_sub(1)
             .map_or(Input::SourceGraphic, Input::Result);
         let resolve = |value: Option<&str>| input(value, default, &results);
-        let Some(kind) = build_kind(child, &resolve, content_of) else {
+        let Some(kind) = build_kind(child, &resolve, content_of, picture_of) else {
             continue;
         };
         let place = |name: &str, extent: f32| {
@@ -431,6 +441,7 @@ fn build_kind(
     elem: &XmlElement,
     resolve: &dyn Fn(Option<&str>) -> Input,
     content_of: &dyn Fn(&str) -> Option<usize>,
+    picture_of: &dyn Fn(&str) -> Option<usize>,
 ) -> Option<Kind> {
     let attr = |name: &str| elem.attr(name).map(str::trim);
     let input_of = |name: &str| resolve(elem.attr(name));
@@ -528,14 +539,19 @@ fn build_kind(
             input: input_of("in"),
             deviation: deviation(pair(elem, "stdDeviation", (0.0, 0.0))),
         },
-        "feImage" => Kind::Image {
-            content: elem
-                .attr("href")
-                .or_else(|| elem.attr("xlink:href"))
-                .map(str::trim)
-                .and_then(|href| href.strip_prefix('#'))
-                .and_then(content_of),
-        },
+        "feImage" => {
+            let href = image::href(elem);
+            Kind::Image {
+                content: href.and_then(|h| h.strip_prefix('#')).and_then(content_of),
+                picture: href.filter(|h| !h.starts_with('#')).and_then(picture_of),
+                aspect: elem
+                    .attr("preserveAspectRatio")
+                    .map_or(AspectRatio::DEFAULT, AspectRatio::parse),
+                smooth: !property(elem, "image-rendering").is_some_and(|value| {
+                    matches!(value.trim(), "pixelated" | "crisp-edges" | "optimizeSpeed")
+                }),
+            }
+        }
         // Each node reads as a primitive's own `in` would, through the same
         // names; one naming nothing reads what a primitive naming nothing
         // reads.
@@ -1597,7 +1613,17 @@ impl SvgRenderer<'_> {
                 let (sx, sy) = measure.extent(*deviation);
                 effects::blur(&get(*input), sx, sy, area)
             }
-            Kind::Image { content } => self.image_primitive(*content, target, space, area),
+            Kind::Image {
+                content,
+                picture,
+                aspect,
+                smooth,
+            } => match picture {
+                Some(place) => {
+                    self.picture_primitive(*place, rect, *aspect, *smooth, target, space, area)
+                }
+                None => self.image_primitive(*content, target, space, area),
+            },
             Kind::Merge { inputs } => {
                 let layers: Vec<Cow<'_, Image>> = inputs.iter().map(|i| get(*i)).collect();
                 let refs: Vec<&Image> = layers.iter().map(AsRef::as_ref).collect();
@@ -1676,6 +1702,70 @@ impl SvgRenderer<'_> {
                 effects::turbulence(&params, w, h, to_noise, area)
             }
         }
+    }
+
+    /// What an `feImage` naming a picture draws: the picture fitted into
+    /// the subregion `rect` -- in the filtered element's user space -- by
+    /// `aspect`, read between its pixels where `smooth`, in `space`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the primitive's own settings and the target's, each one"
+    )]
+    fn picture_primitive(
+        &self,
+        place: usize,
+        rect: [f32; 4],
+        aspect: AspectRatio,
+        smooth: bool,
+        target: &Target,
+        space: Space,
+        area: Area,
+    ) -> Image {
+        let (w, h) = (target.width, target.height);
+        let mut out = Image::transparent(w, h);
+        let doc = self.doc;
+        let Some(picture) = doc.pictures.get(place) else {
+            return out;
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a picture's side, at most imagecodec's limit, far inside f32's exact range"
+        )]
+        let own = (0.0, 0.0, picture.width as f32, picture.height as f32);
+        let [x, y, rw, rh] = rect;
+        let Some(fit) = fit_view_box(own, aspect, (x, y, rw, rh)) else {
+            return out;
+        };
+        // A layer pixel's centre, carried into the picture's pixels.
+        let Some(inverse) = target.to_layer.then(fit).inverse() else {
+            return out;
+        };
+        for py in area.y0..area.y1 {
+            for px in area.x0..area.x1 {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a pixel coordinate, far inside f32's exact range"
+                )]
+                let (u, v) = inverse.apply(px as f32 + 0.5, py as f32 + 0.5);
+                // Outside the picture is transparent, not its edge repeated.
+                if !(u >= 0.0 && v >= 0.0 && u < own.2 && v < own.3) {
+                    continue;
+                }
+                let c = picture.color_at(u, v, smooth);
+                let a = f32::from(c.a) / 255.0;
+                out.set(
+                    px,
+                    py,
+                    [
+                        f32::from(c.r) / 255.0 * a,
+                        f32::from(c.g) / 255.0 * a,
+                        f32::from(c.b) / 255.0 * a,
+                        a,
+                    ],
+                );
+            }
+        }
+        effects::convert(out, Space::Srgb, space)
     }
 
     /// What an `feImage` naming an element draws: the element, in the

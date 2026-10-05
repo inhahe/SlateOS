@@ -181,6 +181,21 @@ fn an_image_is_smooth_by_default() {
     assert_eq!(at(&image, 1, 10), RED, "held to its edge, not wrapped");
 }
 
+/// **`image-rendering` keeps a picture's pixels whole** -- under each of the
+/// three values that ask for it: drawn wide, the red-to-blue picture turns
+/// blue at its middle, with no mix of the two either side.
+#[test]
+fn a_pixelated_image_keeps_its_edges() {
+    for rendering in ["pixelated", "crisp-edges", "optimizeSpeed"] {
+        let image = draw(&format!(
+            r#"<image href="{}" width="20" height="20" image-rendering="{rendering}"/>"#,
+            halves()
+        ));
+        assert_eq!(at(&image, 9, 10), RED, "{rendering}");
+        assert_eq!(at(&image, 10, 10), BLUE, "{rendering}");
+    }
+}
+
 /// **An image is faded by its opacity, transformed with its element, and
 /// cut by its clip.**
 #[test]
@@ -265,4 +280,44 @@ fn an_fe_image_draws_its_picture() {
         CLEAR,
         "the element is what the filter makes"
     );
+}
+
+/// A lime square filtered by an `feImage` of `url` filling the drawing,
+/// stretched to it, with `attrs` for its other attributes.
+fn fe_image(url: &str, attrs: &str) -> Vec<[u8; 4]> {
+    draw(&format!(
+        r#"<filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="20" height="20">
+             <feImage href="{url}" x="0" y="0" width="20" height="20" preserveAspectRatio="none" {attrs}/>
+           </filter>
+           <rect width="20" height="20" fill="lime" filter="url(#f)"/>"#
+    ))
+}
+
+/// **An `feImage`'s picture comes out as it went in** -- read into the
+/// filter premultiplied and in the filter's colour space, as its other
+/// inputs are, and back out of both: a half-transparent blue-grey is the
+/// same colour after.
+#[test]
+fn an_fe_image_keeps_its_pictures_colour() {
+    for space in ["linearRGB", "sRGB"] {
+        let image = fe_image(
+            &png_url(1, 1, |_, _| 0x8040_80C0),
+            &format!(r#"color-interpolation-filters="{space}""#),
+        );
+        let px = at(&image, 10, 10);
+        for (got, want) in px.iter().zip([0x40u8, 0x80, 0xC0, 0x80]) {
+            assert!(got.abs_diff(want) <= 2, "{space}: {px:?}");
+        }
+    }
+}
+
+/// **`image-rendering` keeps an `feImage`'s pixels whole too.**
+#[test]
+fn a_pixelated_fe_image_keeps_its_edges() {
+    let image = fe_image(&halves(), r#"image-rendering="pixelated""#);
+    assert_eq!(at(&image, 9, 10), RED);
+    assert_eq!(at(&image, 10, 10), BLUE);
+    let smooth = fe_image(&halves(), "");
+    let middle = at(&smooth, 10, 10);
+    assert!(middle[0] > 40 && middle[2] > 40, "{middle:?}");
 }

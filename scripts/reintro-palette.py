@@ -18532,11 +18532,13 @@ DEFECTS = [
         "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: an update rebuilds each window from nothing, losing the shell's own state",
         DESK,
         [
-            ('            let carried = self\n                .windows\n                .get(&id)\n                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));\n',
-             '            let carried = self\n                .windows\n                .get(&id)\n                .filter(|_| false)\n                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));\n'),
+            ('            let carried = self\n                .windows\n                .get(&id)\n                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab, w.to_tray));\n',
+             '            let carried = self\n                .windows\n                .get(&id)\n                .filter(|_| false)\n                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab, w.to_tray));\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-05: a window rule's `tray` is carried over
+            # beside the taskbar and Alt+Tab flags.
             # Re-derived 2026-09-27 against the code as it now reads. What a window carries over is read out as
             # `carried` now.
             # `icon_id` has no counterpart in the compositor's list -- it is
@@ -18544,6 +18546,12 @@ DEFECTS = [
             # window cannot preserve it. The symptom is every taskbar icon
             # reverting to the blank one each time any window is retitled.
             'a_retitle_reaches_the_button_without_disturbing_shell_local_state',
+            # And a window rule, consulted again for a window it already
+            # answered for, asks the compositor all over again (2026-10-05).
+            'a_one_shot_rule_is_spent_by_the_window_it_fired_on_and_not_by_the_frame',
+            'a_rule_asking_for_a_maximized_start_asks_once_and_never_again',
+            'a_rule_files_a_window_on_another_desktop_only_when_that_is_a_move',
+            'a_window_rule_about_an_arriving_window_reaches_the_compositor',
         ],
     ),
     (

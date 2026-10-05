@@ -4019,8 +4019,18 @@ lane C's `guitk`.
     mkvmerge-muxed, and timed text written box by box; 387 cues) held to
     ffmpeg's SRT cue for cue but for 72 departures, each checked against
     libass, HTML or the specification; seeks give the cues still showing.
-    Pictures of text are refused by name. Not yet: MP4's WebVTT and TTML
-    (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
+    - `[x]` Blu-ray's PGS, pictures of text (2026-10-05, design-decisions
+      §1362): cues of images (`Cue::images`, `CueImage`) -- RGBA on the
+      film's canvas, forced ones marked -- FFmpeg's pixels to the bit, its
+      rules read off its output probe by probe (epochs, palettes, the first
+      two objects, run-length damage, its 10-bit fixed-point colours), but
+      that a crop is made as a Blu-ray player makes it. A seek reads from
+      the start of the epoch the time falls in. Four fixtures written
+      segment by segment, held to FFmpeg's sub2video pictures at every
+      change, with every subtitle and with the forced alone.
+    - `[ ]` DVD's VobSub and DVB's pictures, refused by name; MP4's WebVTT
+      and TTML
+      (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

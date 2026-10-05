@@ -1,5 +1,6 @@
-//! A video file's text subtitles, cue by cue: SubRip, ASS and SSA, and
-//! WebVTT, in Matroska and WebM; 3GPP timed text in MP4.
+//! A video file's subtitles, cue by cue: SubRip, ASS and SSA, and WebVTT, in
+//! Matroska and WebM; 3GPP timed text in MP4 -- and Blu-ray's PGS, which are
+//! pictures of text.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,19 +34,30 @@
 //!   reads it, its default style, place and style runs said in SRT
 //!   (`movtext.rs`).
 //!
-//! A track of pictures of text -- Blu-ray's PGS, DVD's VobSub, DVB's -- is
-//! refused by its format's name ([`crate::Error::SubtitleFormat`]).
+//! **A cue of pictures** -- Blu-ray's PGS (`S_HDMV/PGS`), subtitles stored
+//! as pictures of their text -- has no text and gives [`Cue::images`]
+//! instead: each image's pixels, as RGBA, placed on the picture the
+//! subtitles were made for (its *canvas*), which a player scales as it
+//! scales the film; each marked when it is *forced*, shown even with
+//! subtitles off. They are what FFmpeg's decoder shows, its colours to the
+//! bit, but that a crop is cropped, as a Blu-ray player crops it
+//! (`pgs.rs`). A picture lasts until the next display set replaces or
+//! clears it; the last of a track, until the film ends (its end is
+//! `i64::MAX`). DVD's VobSub and DVB's subtitles, pictures too, are refused
+//! by their format's name ([`crate::Error::SubtitleFormat`]).
 //!
 //! **Time** is in nanoseconds on the file's clock, the clock [`crate::Video`]
 //! and [`crate::Sound`] give theirs on. A cue whose packet the file gives no
 //! time, whose text is not UTF-8 (as Matroska requires it to be), which is
 //! not an ASS event, or a timed-text sample too damaged to read, is passed
-//! over and counted ([`Subtitles::damaged`]). A timed-text sample with no
-//! text clears the screen, and is no cue.
+//! over and counted ([`Subtitles::damaged`]), as is a PGS display set that
+//! met damage. A timed-text sample with no text clears the screen, and is
+//! no cue.
 
 mod ass;
 mod colours;
 mod movtext;
+mod pgs;
 mod srt;
 mod subrip;
 mod webvtt;
@@ -69,16 +81,43 @@ pub struct SubtitleInfo {
     pub forced: bool,
 }
 
-/// One cue: text to show from `start` until `end`.
+/// One cue: what to show from `start` until `end`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cue {
     /// When it appears, in nanoseconds on the file's clock.
     pub start: i64,
-    /// When it goes, in nanoseconds: `start` plus its block's duration, or
-    /// `start` itself where the file gives none.
+    /// When it goes, in nanoseconds: for text, `start` plus its block's
+    /// duration, or `start` itself where the file gives none; for pictures,
+    /// when the next display set replaces or clears them, or `i64::MAX` --
+    /// the end of the film -- where none does.
     pub end: i64,
-    /// What it shows, as SRT markup (see the module documentation).
+    /// What it shows, as SRT markup (see the module documentation); empty
+    /// for a cue of pictures.
     pub text: String,
+    /// What a cue of pictures shows, drawn in order, each over what is
+    /// there; empty for text.
+    pub images: Vec<CueImage>,
+}
+
+/// One image a cue of pictures shows: a picture of its text, placed on the
+/// canvas -- the picture the subtitles were made for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CueImage {
+    /// The canvas's size. A player scales the canvas to the film as it is
+    /// shown, and the image with it.
+    pub canvas_width: u32,
+    pub canvas_height: u32,
+    /// Where its top left pixel goes on the canvas.
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// `width * height` pixels, the top row first, each red, green, blue and
+    /// alpha -- the colour not multiplied by the alpha.
+    pub rgba: Vec<u8>,
+    /// Shown even when only forced subtitles are: a sign, a line in another
+    /// language, that the film itself leaves untranslated.
+    pub forced: bool,
 }
 
 /// How a track's packets are read.
@@ -92,6 +131,8 @@ enum Reader {
         webm: bool,
     },
     MovText(movtext::Setup),
+    /// Blu-ray's pictures, a display set a block.
+    Pgs(pgs::Decoder),
 }
 
 /// A file's subtitle track, read cue by cue.
@@ -105,13 +146,17 @@ pub struct Subtitles<R> {
     reader: Reader,
     /// A seek's time, while cues that have gone by it are passed over.
     target: Option<i64>,
+    /// The pictures on screen, given once the display set that ends them
+    /// is read.
+    showing: Option<Cue>,
     damaged: u64,
 }
 
 impl<R: Read + Seek> Subtitles<R> {
     /// The subtitles of `source` -- a Matroska, WebM or MP4 file -- from its best
-    /// track: one read here before one that is not, then an enabled one,
-    /// then one marked default, the file's order among equals.
+    /// track: text before pictures, pictures read here before those that
+    /// are not, then an enabled one, then one marked default, the file's
+    /// order among equals.
     ///
     /// # Errors
     ///
@@ -139,9 +184,14 @@ impl<R: Read + Seek> Subtitles<R> {
         let tracks = demuxer.subtitles();
         let chosen: &SubtitleTrack = match track {
             Some(n) => tracks.iter().find(|t| t.number == n),
-            None => tracks
-                .iter()
-                .min_by_key(|t| (!t.format.is_text(), !t.enabled, !t.default)),
+            None => tracks.iter().min_by_key(|t| {
+                (
+                    !t.format.is_text(),
+                    !t.format.is_read(),
+                    !t.enabled,
+                    !t.default,
+                )
+            }),
         }
         .ok_or(Error::NoSubtitles)?;
         let reader = match chosen.format {
@@ -153,6 +203,7 @@ impl<R: Read + Seek> Subtitles<R> {
                 webm: chosen.codec_id.starts_with(b"D_WEBVTT/"),
             },
             SubtitleFormat::MovText => Reader::MovText(movtext::Setup::parse(&chosen.config)),
+            SubtitleFormat::Pgs => Reader::Pgs(pgs::Decoder::default()),
             format => return Err(Error::SubtitleFormat(format)),
         };
         // The track's own packets only, a film's pictures and sound passed
@@ -169,6 +220,7 @@ impl<R: Read + Seek> Subtitles<R> {
             time_base: chosen.time_base,
             reader,
             target: None,
+            showing: None,
             damaged: 0,
             demuxer,
         })
@@ -196,14 +248,33 @@ impl<R: Read + Seek> Subtitles<R> {
                 continue;
             };
             let start = time::to_ns(ticks, self.time_base);
+            if let Reader::Pgs(decoder) = &mut self.reader {
+                let pgs::Shown::Images(images) = decoder.display_set(&sample.data) else {
+                    continue;
+                };
+                // What was on screen goes now, and these come.
+                let gone = self.showing.take();
+                if !images.is_empty() {
+                    self.showing = Some(Cue {
+                        start,
+                        end: i64::MAX,
+                        text: String::new(),
+                        images,
+                    });
+                }
+                let Some(cue) = gone else {
+                    continue;
+                };
+                // Pictures replaced at the time they came were never seen.
+                if start > cue.start && self.kept(cue.start, start) {
+                    return Ok(Some(Cue { end: start, ..cue }));
+                }
+                continue;
+            }
             let length = time::duration_to_ns(sample.duration, self.time_base);
             let end = start.saturating_add(i64::try_from(length).unwrap_or(i64::MAX));
-            if let Some(target) = self.target {
-                if start >= target {
-                    self.target = None;
-                } else if end <= target {
-                    continue;
-                }
+            if !self.kept(start, end) {
+                continue;
             }
             let text = match said(&self.reader, &sample) {
                 Said::Cue(text) => text,
@@ -213,31 +284,128 @@ impl<R: Read + Seek> Subtitles<R> {
                     continue;
                 }
             };
-            return Ok(Some(Cue { start, end, text }));
+            return Ok(Some(Cue {
+                start,
+                end,
+                text,
+                images: Vec::new(),
+            }));
         }
-        Ok(None)
+        // Pictures still on screen at the end stay until the film ends.
+        let Some(cue) = self.showing.take() else {
+            return Ok(None);
+        };
+        Ok(self.kept(cue.start, cue.end).then_some(cue))
+    }
+
+    /// Whether a cue from `start` to `end` is given, after a seek: one gone
+    /// by the seek's time is not. The first to start at the time or after
+    /// ends the passing over; one still showing at it is given, and the
+    /// passing over goes on, another cue may be showing too.
+    fn kept(&mut self, start: i64, end: i64) -> bool {
+        let Some(target) = self.target else {
+            return true;
+        };
+        if start >= target {
+            self.target = None;
+            true
+        } else {
+            end > target
+        }
     }
 
     /// Go to `time` (nanoseconds on the file's clock): the next cue is the
     /// first still showing then, or the first after it.
+    ///
+    /// Pictures (PGS) are read from the start of the epoch the time falls
+    /// in -- the display set that defines afresh what the ones after it
+    /// show -- so that what is on screen at the time is known; up to
+    /// [`EPOCH_STEPS`] display sets back.
     ///
     /// # Errors
     ///
     /// [`Error::Container`] when the source fails, or the track has no cue
     /// to go to. Reading then goes on where it was.
     pub fn seek(&mut self, time: i64) -> Result<(), Error> {
-        self.demuxer
-            .seek(self.key, time::to_ticks(time, self.time_base))?;
+        let ticks = time::to_ticks(time, self.time_base);
+        self.demuxer.seek(self.key, ticks)?;
+        if let Reader::Pgs(_) = self.reader {
+            self.back_to_epoch_start(ticks)?;
+        }
+        if let Reader::Pgs(decoder) = &mut self.reader {
+            decoder.reset();
+        }
+        self.showing = None;
         self.target = Some(time);
         Ok(())
     }
 
-    /// How many cues were passed over: given no time, not UTF-8, or not an
-    /// ASS event.
+    /// From the display set a seek to `ticks` found, back to the start of
+    /// its epoch -- an epoch start or an acquisition point -- a set at a
+    /// time found by seeking to it, the one before by seeking a tick
+    /// earlier; no further than the track's first set, nor than
+    /// [`EPOCH_STEPS`] sets.
+    fn back_to_epoch_start(&mut self, ticks: i64) -> Result<(), Error> {
+        // The time the demuxer was last sent to: it is at the set at or
+        // before it.
+        let mut at = ticks;
+        // The earliest set read so far.
+        let mut earliest: Option<i64> = None;
+        for _ in 0..EPOCH_STEPS {
+            let Some(sample) = self.next_own()? else {
+                break;
+            };
+            let Some(t) = sample.time else {
+                break;
+            };
+            if let Some(first) = earliest.filter(|&e| t >= e) {
+                // A seek before the earliest set found it again, as a seek
+                // before a track's first key frame does: it is the first.
+                at = first;
+                break;
+            }
+            if pgs::begins_epoch(&sample.data) {
+                at = t;
+                break;
+            }
+            earliest = Some(t);
+            let before = t.saturating_sub(1);
+            if self.demuxer.seek(self.key, before).is_err() {
+                // No set before it: the track's first. Reading went on
+                // where it was, past it.
+                at = t;
+                break;
+            }
+            at = before;
+        }
+        self.demuxer.seek(self.key, at)?;
+        Ok(())
+    }
+
+    /// The track's next packet.
+    fn next_own(&mut self) -> Result<Option<Sample>, Error> {
+        while let Some(sample) = self.demuxer.next_packet()? {
+            if sample.track == self.key {
+                return Ok(Some(sample));
+            }
+        }
+        Ok(None)
+    }
+
+    /// How many cues were passed over -- given no time, not UTF-8, or not
+    /// an ASS event -- and PGS display sets that met damage.
     pub fn damaged(&self) -> u64 {
-        self.damaged
+        let pictures = match &self.reader {
+            Reader::Pgs(decoder) => decoder.damaged(),
+            _ => 0,
+        };
+        self.damaged.saturating_add(pictures)
     }
 }
+
+/// The display sets [`Subtitles::seek`] goes back for the start of an
+/// epoch: Blu-ray's usually begin one at every subtitle.
+const EPOCH_STEPS: usize = 64;
 
 /// What a packet says.
 enum Said {
@@ -287,8 +455,8 @@ fn said(reader: &Reader, sample: &Sample) -> Said {
             })
         }
         Reader::Ass(script) => ass::cue(script, text).map_or(Said::Damaged, Said::Cue),
-        // Read above, as bytes.
-        Reader::MovText(_) => Said::Damaged,
+        // Read above, as bytes; pictures are not read here.
+        Reader::MovText(_) | Reader::Pgs(_) => Said::Damaged,
     }
 }
 

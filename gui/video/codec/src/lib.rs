@@ -52,15 +52,18 @@
 //!
 //! # Subtitles
 //!
-//! [`Subtitles`] is a file's text subtitles, as [`Sound`] is its sound:
-//! opened on the same file, it gives back each cue with its start and end
-//! on the same clock, and its text as SRT markup whatever the track's format
-//! -- SubRip, ASS and SSA, WebVTT, in Matroska and WebM. The markup is
-//! written as `ffmpeg -c:s srt` writes it, and is ffmpeg's text for the
-//! track wherever that says what the format's own renderer shows (libass's
-//! for ASS, the specification's for WebVTT); where it does not, the
-//! renderer is followed (`subtitle.rs`, `tests/subtitles.rs`). A track of
-//! pictures of text (PGS, VobSub, DVB) is refused by its format's name.
+//! [`Subtitles`] is a file's subtitles, as [`Sound`] is its sound: opened
+//! on the same file, it gives back each cue with its start and end on the
+//! same clock, and its text as SRT markup whatever the track's format --
+//! SubRip, ASS and SSA, WebVTT, in Matroska and WebM; 3GPP timed text in
+//! MP4. The markup is written as `ffmpeg -c:s srt` writes it, and is
+//! ffmpeg's text for the track wherever that says what the format's own
+//! renderer shows (libass's for ASS, the specification's for WebVTT); where
+//! it does not, the renderer is followed (`subtitle.rs`,
+//! `tests/subtitles.rs`). Blu-ray's PGS, pictures of the text, come as
+//! images ([`Cue::images`], [`CueImage`]): FFmpeg's pixels, to the bit, but
+//! that a crop is cropped as a Blu-ray player crops it. DVD's VobSub and
+//! DVB's pictures are refused by their format's name.
 //!
 //! # Colour
 //!
@@ -106,7 +109,7 @@ pub use decoder::{Decoder, Packet};
 pub use orientation::Orientation;
 pub use picture::Picture;
 pub use sound::{Block, Sound, SoundInfo};
-pub use subtitle::{Cue, SubtitleInfo, Subtitles};
+pub use subtitle::{Cue, CueImage, SubtitleInfo, Subtitles};
 pub use video::{SeekMode, Video, VideoInfo};
 
 use core::fmt;
@@ -279,7 +282,7 @@ impl fmt::Display for SoundCodec {
 }
 
 /// A subtitle format: those read here, and the picture formats a film most
-/// often carries, so that a track in one is refused by its name.
+/// often carries, so that a track in one not read is refused by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubtitleFormat {
     /// SubRip, SRT's own (`S_TEXT/UTF8`).
@@ -292,7 +295,7 @@ pub enum SubtitleFormat {
     WebVtt,
     /// 3GPP timed text, MP4's (`tx3g`; QuickTime's `text`).
     MovText,
-    /// Blu-ray's pictures of text (`S_HDMV/PGS`). Not read here.
+    /// Blu-ray's pictures of text (`S_HDMV/PGS`), read as images.
     Pgs,
     /// DVD's pictures of text (`S_VOBSUB`). Not read here.
     VobSub,
@@ -303,12 +306,18 @@ pub enum SubtitleFormat {
 }
 
 impl SubtitleFormat {
-    /// Whether it is text, which [`Subtitles`] reads.
+    /// Whether it is text: its cues give SRT markup.
     pub const fn is_text(self) -> bool {
         matches!(
             self,
             Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText
         )
+    }
+
+    /// Whether [`Subtitles`] reads it: text, or pictures it gives as
+    /// images.
+    pub const fn is_read(self) -> bool {
+        self.is_text() || matches!(self, Self::Pgs)
     }
 }
 
@@ -372,8 +381,8 @@ pub enum Error {
     Mp3,
     /// The file has no subtitle track, or not the one asked for.
     NoSubtitles,
-    /// The subtitles are in a format this does not read: pictures of text,
-    /// or one it does not know.
+    /// The subtitles are in a format this does not read: DVD's or DVB's
+    /// pictures of text, or one it does not know.
     SubtitleFormat(SubtitleFormat),
 }
 
@@ -409,7 +418,7 @@ impl fmt::Display for Error {
             Self::SubtitleFormat(SubtitleFormat::Other) => {
                 f.write_str("the subtitles' format is not one read here")
             }
-            Self::SubtitleFormat(s) if s.is_text() => {
+            Self::SubtitleFormat(s) if s.is_read() => {
                 write!(f, "the subtitles are {s}, and could not be read")
             }
             Self::SubtitleFormat(s) => {

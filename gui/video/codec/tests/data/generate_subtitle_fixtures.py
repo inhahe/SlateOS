@@ -32,11 +32,24 @@ that encoder never writes -- a styled default, justification, colours,
 fonts, style runs out of order. ffmpeg's SRT of each is the answer, as for
 the rest.
 
+Blu-ray's PGS, pictures of text, which ffmpeg cannot write: `pgs*.mkv` are
+written here segment by segment (`PgsSet`, `make_pgs`) and muxed by
+mkvmerge. Their answer, NAME.states, is a list of pictures: the canvas
+FFmpeg's sub2video draws the track on, at each change, as an MD5 of its
+RGBA bytes -- with every subtitle shown, and (`forced` lines) with only the
+forced ones (ffmpeg's `-forced_subs_only`). For the well-formed fixtures the
+generator draws every display set itself, from what it wrote, and stops
+unless ffmpeg agrees at every one, colours to the bit; `pgs_cropped`'s crops
+are where the crate crops as a Blu-ray player does and ffmpeg does not, and
+there the answer is the generator's drawing. `pgs_damage` is display sets
+no muxer writes, and its answer is ffmpeg's alone.
+
 Run from this directory, on Windows, with gyan.dev's ffmpeg (2026-03-09, git
 9b7439c31b) and MKVToolNix's mkvmerge 99.0 on PATH (or in the MKVMERGE
 environment variable): `python generate_subtitle_fixtures.py`.
 """
 
+import hashlib
 import os
 import shutil
 import struct
@@ -680,6 +693,430 @@ def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, 
     print("wrote", out, raw, answer)
 
 
+# --- Blu-ray's PGS: pictures of text, written here segment by segment -------
+#
+# ffmpeg writes no PGS, so these are written here, as the probes that found
+# FFmpeg's rules were: a display set a block, each a list of segments. The
+# answer, NAME.states, is FFmpeg's: the picture its sub2video shows at each
+# change, as an MD5 of the canvas's RGBA bytes. For the well-formed fixtures
+# the generator also draws every state itself (`pgs_draw`, from what it
+# wrote) and stops unless FFmpeg agrees -- but for the states PGS_DEPARTURES
+# names, where the crate crops an object as a Blu-ray player does and FFmpeg
+# does not; there the answer is the generator's drawing.
+
+PGS_PDS, PGS_ODS, PGS_PCS, PGS_WDS, PGS_END = 0x14, 0x15, 0x16, 0x17, 0x80
+
+
+def pgs_segment(kind, ms_time, body):
+    """A .sup segment: "PG", the time at 90 kHz twice (PTS, DTS 0), the type,
+    the length, the body."""
+    return b"PG" + struct.pack(">IIBH", ms_time * 90, 0, kind, len(body)) + body
+
+
+def pgs_pcs(canvas, number, state, palette, objects):
+    """objects: (id, x, y, forced, crop or None)."""
+    body = struct.pack(">HHBHBBBB", *canvas, 0x10, number, state, 0, palette, len(objects))
+    for oid, x, y, forced, crop in objects:
+        body += struct.pack(">HBBHH", oid, 0, (0x80 if crop else 0) | (0x40 if forced else 0), x, y)
+        if crop:
+            body += struct.pack(">HHHH", *crop)
+    return body
+
+
+def pgs_rle(rows):
+    """Rows of palette indexes, coded as PGS codes them: the shortest code
+    for each run."""
+    out = bytearray()
+    for row in rows:
+        i = 0
+        while i < len(row):
+            c, n = row[i], 1
+            while i + n < len(row) and row[i + n] == c and n < 16383:
+                n += 1
+            if c == 0:
+                out += bytes([0, n]) if n < 64 else bytes([0, 0x40 | n >> 8, n & 0xFF])
+            elif n < 3:
+                out += bytes([c]) * n
+            elif n < 64:
+                out += bytes([0, 0x80 | n, c])
+            else:
+                out += bytes([0, 0xC0 | n >> 8, n & 0xFF, c])
+            i += n
+        out += b"\x00\x00"
+    return bytes(out)
+
+
+def pgs_ods(oid, rows, pieces=1):
+    """An object's segments' bodies: whole, or its codes cut into `pieces`."""
+    codes = pgs_rle(rows)
+    head = struct.pack(">HB", oid, 0)
+    size = (len(codes) + 4).to_bytes(3, "big") + struct.pack(">HH", len(rows[0]), len(rows))
+    cuts = [len(codes) * k // pieces for k in range(pieces + 1)]
+    bodies = []
+    for k in range(pieces):
+        flags = (0x80 if k == 0 else 0) | (0x40 if k == pieces - 1 else 0)
+        bodies.append(head + bytes([flags]) + (size if k == 0 else b"") + codes[cuts[k]:cuts[k + 1]])
+    return bodies
+
+
+class PgsSet:
+    """One display set: at `ms`, composing `objects` (id, x, y, forced, crop)
+    in `palette`, after defining `palettes` ((id, [(entry, Y, Cr, Cb, A)]))
+    and `shapes` ((id, rows, pieces)). `raw` replaces the segments' bodies
+    with these (type, body) pairs, for damage the writer would not make."""
+
+    def __init__(self, ms_time, state=0x80, objects=(), palette=0, palettes=(), shapes=(),
+                 raw=None):
+        self.ms, self.state, self.objects, self.palette = ms_time, state, list(objects), palette
+        self.palettes, self.shapes, self.raw = list(palettes), list(shapes), raw
+
+    def segments(self, canvas, number):
+        if self.raw is not None:
+            return b"".join(pgs_segment(kind, self.ms, body) for kind, body in self.raw)
+        out = pgs_segment(PGS_PCS, self.ms, pgs_pcs(canvas, number, self.state, self.palette, self.objects))
+        windows = [(i, x, y, 1, 1) for i, (_, x, y, _, _) in enumerate(self.objects[:2])]
+        out += pgs_segment(PGS_WDS, self.ms, bytes([len(windows)]) + b"".join(
+            struct.pack(">BHHHH", *w) for w in windows))
+        for pid, entries in self.palettes:
+            out += pgs_segment(PGS_PDS, self.ms, bytes([pid, 0]) + b"".join(bytes(e) for e in entries))
+        for oid, rows, pieces in self.shapes:
+            for body in pgs_ods(oid, rows, pieces):
+                out += pgs_segment(PGS_ODS, self.ms, body)
+        return out + pgs_segment(PGS_END, self.ms, b"")
+
+
+def pgs_colour(y, cr, cb, sd):
+    """FFmpeg's conversion: BT.709's or (sd) BT.601's matrix on the studio
+    range, in 10-bit fixed point (found by probing; design-decisions §1362)."""
+    def fix(x):
+        return int(x * 1024 + 0.5)
+    kr, gb, gr, kb = (1.402, 0.34414, 0.71414, 1.772) if sd else (1.5747, 0.1873, 0.4682, 1.8556)
+    cb, cr = cb - 128, cr - 128
+    yy = (y - 16) * fix(255 / 219)
+    return tuple(max(0, min(255, (yy + v + 512) >> 10)) for v in (
+        fix(kr * 255 / 224) * cr,
+        -fix(gb * 255 / 224) * cb - fix(gr * 255 / 224) * cr,
+        fix(kb * 255 / 224) * cb))
+
+
+def pgs_draw(sets, canvas):
+    """Each display set's picture as the crate shows it -- for the sets the
+    generator wrote whole: [(ms, md5)] for those that change it."""
+    w, h = canvas
+    sd = 0 < h <= 576
+    objects, palettes, states = {}, {}, []
+    for s in sets:
+        if s.state & 0xC0:
+            objects.clear()
+            palettes.clear()
+        for pid, entries in s.palettes:
+            p = palettes.setdefault(pid, [(0, 0, 0, 0)] * 256)
+            for e, y, cr, cb, a in entries:
+                p[e] = (*pgs_colour(y, cr, cb, sd), a)
+        for oid, rows, _ in s.shapes:
+            objects[oid] = rows
+        if s.objects and s.palette not in palettes:
+            continue
+        frame = bytearray(w * h * 4)
+        for oid, x, y, _, crop in s.objects[:2]:
+            rows = objects.get(oid)
+            if rows is None:
+                continue
+            left, top, cw, ch = crop or (0, 0, len(rows[0]), len(rows))
+            for r in range(top, min(top + ch, len(rows))):
+                for c in range(left, min(left + cw, len(rows[0]))):
+                    at = ((y + r - top) * w + x + c - left) * 4
+                    frame[at:at + 4] = bytes(palettes[s.palette][rows[r][c]])
+        states.append((s.ms, hashlib.md5(frame).hexdigest()))
+    return states
+
+
+def dedup(states):
+    """[(ms, md5)] with each repeat of the picture before it dropped, and of
+    pictures at one time the last alone -- what shows."""
+    out = []
+    for t, md5 in states:
+        if out and out[-1][0] == t:
+            out.pop()
+        if not out or out[-1][1] != md5:
+            out.append((t, md5))
+    return out
+
+
+def sub2video_states(mkv, canvas, forced=False):
+    """FFmpeg's picture at each change -- of the forced subtitles alone with
+    `forced` -- as [(ms, md5)], the blank it shows before the first
+    subtitle's dropped."""
+    r = subprocess.run(
+        ["ffmpeg", "-v", "error", *(["-forced_subs_only", "1"] if forced else []), "-copyts",
+         "-i", mkv, "-filter_complex", "[0:s:0]format=rgba[v]", "-map", "[v]", "-fps_mode",
+         "passthrough", "-copyts", "-f", "framemd5", "-"],
+        capture_output=True, text=True, encoding="utf-8")
+    if r.returncode != 0:
+        sys.exit(f"sub2video of {mkv} failed:\n{r.stderr}")
+    blank = hashlib.md5(bytes(canvas[0] * canvas[1] * 4)).hexdigest()
+    states = []
+    for line in r.stdout.splitlines():
+        if line.startswith("#"):
+            continue
+        _, _, pts, _, _, md5 = (f.strip() for f in line.split(","))
+        t = int(pts)
+        if t % 1000:
+            continue  # the frame sub2video shows a microsecond before a change
+        if states and states[-1][0] == t // 1000:
+            states[-1] = (t // 1000, md5)  # the last frame at a time is what shows
+        elif not states or states[-1][1] != md5:
+            states.append((t // 1000, md5))
+    while states and states[0][1] == blank:
+        states.pop(0)
+    # sub2video's last frame, at a time past every subtitle's end.
+    if states and states[-1][0] > 4_000_000:
+        states.pop()
+    return dedup(states)
+
+
+def shown_at(states, t):
+    """The picture `states` shows at `t` ms: the last change at or before."""
+    md5 = None
+    for st, m in states:
+        if st <= t:
+            md5 = m
+    return md5
+
+
+def make_pgs(name, canvas, sets, departures=(), drawn=True):
+    """Write NAME.mkv of `sets`, and NAME.states: FFmpeg's pictures, all of
+    them and the forced alone. With `drawn` they are checked against the
+    generator's drawing of every display set, and the sets at the times in
+    `departures` show the drawing's instead."""
+    sup = os.path.join(HERE, f"{name}.source.sup")
+    out = os.path.join(HERE, f"{name}.mkv")
+    with open(sup, "wb") as f:
+        for n, s in enumerate(sets):
+            f.write(s.segments(canvas, n))
+    mkvmerge(out, sup)
+    os.remove(sup)
+    states = sub2video_states(out, canvas)
+    forced = sub2video_states(out, canvas, forced=True)
+    if drawn:
+        drawing = pgs_draw(sets, canvas)
+        # Of sets at one time, the last is what shows.
+        for t, md5 in dict(drawing).items():
+            if t not in departures and shown_at(states, t) != md5:
+                sys.exit(f"{name}: at {t} ms FFmpeg shows {shown_at(states, t)}, the drawing {md5}")
+        times = {t for t, _ in drawing}
+        for t, _ in states:
+            if t not in times:
+                sys.exit(f"{name}: FFmpeg's picture changes at {t} ms, where nothing was written")
+        blank = hashlib.md5(bytes(canvas[0] * canvas[1] * 4)).hexdigest()
+        states = dedup(drawing)
+        while states and states[0][1] == blank:
+            states.pop(0)
+        if departures and any(s.objects and any(o[3] for o in s.objects) for s in sets):
+            sys.exit(f"{name}: forced subtitles and departures in one fixture: the forced"
+                     " answer would be FFmpeg's, uncropped")
+    answer = os.path.join(HERE, f"{name}.states")
+    write(answer, f"# {name}.mkv: the picture at each change, as an MD5 of the RGBA canvas;"
+                  f" `forced` lines with only forced subtitles shown"
+                  f" (generate_subtitle_fixtures.py)\ncanvas {canvas[0]} {canvas[1]}\n"
+                  + "".join(f"state {t} {md5}\n" for t, md5 in states)
+                  + "".join(f"forced {t} {md5}\n" for t, md5 in forced))
+    print("wrote", out, answer)
+
+
+PGS_CANVAS = (1280, 720)
+# White, black, a half-transparent red, a green at 200.
+PGS_PALETTE = [(1, 235, 128, 128, 255), (2, 16, 128, 128, 255), (3, 81, 240, 90, 128),
+               (4, 145, 34, 54, 200)]
+# Entries 1 and 2 again, blue and yellow: 3 and 4 kept.
+PGS_UPDATE = [(1, 41, 110, 240, 255), (2, 210, 146, 16, 255)]
+# Alpha from 0 (its colour kept, unseen) to 255.
+PGS_ALPHAS = [(1, 235, 128, 128, 0), (2, 81, 240, 90, 1), (3, 145, 34, 54, 127),
+              (4, 41, 110, 240, 254), (5, 210, 146, 16, 255)]
+# Colours across the cube, for the 601 matrix.
+PGS_SD_PALETTE = [(i, 16 + 27 * i, 255 - 20 * i, 30 * i % 256, 255) for i in range(1, 9)]
+
+
+def pgs_shape(w, h, k):
+    """A picture like a line of text: strokes of 1, outlined in 2, on 0."""
+    rows = []
+    for r in range(h):
+        row = []
+        for c in range(w):
+            ink = (c // 7 + k) % 3 != 0 and 3 <= r % 12 < 10 and c % 7 < 5
+            edge = (c // 7 + k) % 3 != 0 and (r % 12 in (2, 10) or c % 7 == 5) and 2 <= r % 12 <= 10
+            row.append(1 if ink else 2 if edge else 0)
+        rows.append(row)
+    return rows
+
+
+def pgs_scenes():
+    line = pgs_shape(300, 40, 0)
+    line2 = pgs_shape(200, 30, 1)
+    # Runs of 64 and more: the long codes.
+    wide = [[1] * 1000 + [0] * 100 + [3] * 70 for _ in range(10)]
+    alphas = [[1, 2, 3, 4, 5] * 8 for _ in range(8)]
+    pal = [(0, PGS_PALETTE)]
+    shown = [
+        # A line, then cleared.
+        PgsSet(1000, objects=[(0, 490, 620, False, None)], palettes=pal, shapes=[(0, line, 1)]),
+        PgsSet(2000, state=0),
+        # Two objects at once.
+        PgsSet(3000, objects=[(0, 100, 50, False, None), (1, 700, 600, False, None)], palettes=pal,
+               shapes=[(0, line, 1), (1, line2, 1)]),
+        PgsSet(4000, state=0),
+        # Within an epoch: shown, its palette changed, moved, its picture
+        # replaced -- each set naming what the epoch holds.
+        PgsSet(5000, objects=[(0, 200, 300, False, None)], palettes=pal, shapes=[(0, line, 1)]),
+        PgsSet(6000, state=0, objects=[(0, 200, 300, False, None)], palettes=[(0, PGS_UPDATE)]),
+        PgsSet(7000, state=0, objects=[(0, 400, 350, False, None)]),
+        PgsSet(8000, state=0, objects=[(0, 400, 350, False, None)], shapes=[(0, line2, 1)]),
+        PgsSet(9000, state=0),
+        # An object in three segments.
+        PgsSet(10000, objects=[(3, 10, 10, False, None)], palettes=pal, shapes=[(3, line, 3)]),
+        PgsSet(11000, state=0),
+        # Forced; then replaced by the next epoch with no clear between.
+        PgsSet(12000, objects=[(0, 300, 500, True, None)], palettes=pal, shapes=[(0, line2, 1)]),
+        PgsSet(13000, objects=[(1, 50, 650, False, None)], palettes=pal, shapes=[(1, wide, 1)]),
+        PgsSet(14000, state=0),
+        # Every alpha.
+        PgsSet(15000, objects=[(0, 0, 0, False, None)], palettes=[(0, PGS_ALPHAS)], shapes=[(0, alphas, 1)]),
+        PgsSet(16000, state=0),
+        # An acquisition point bringing what it shows; a palette numbered 5.
+        PgsSet(17000, state=0x40, objects=[(0, 640, 360, False, None)], palettes=pal, shapes=[(0, line, 1)]),
+        PgsSet(18000, state=0),
+        PgsSet(19000, objects=[(0, 640, 360, True, None)], palette=5, palettes=[(5, PGS_PALETTE)],
+               shapes=[(0, line, 1)]),
+        PgsSet(20000, state=0),
+        # Two sets at one time: the first never seen. The second is never
+        # cleared, and shows until the film ends.
+        PgsSet(21000, objects=[(0, 100, 100, False, None)], palettes=pal, shapes=[(0, line2, 1)]),
+        PgsSet(21000, objects=[(0, 500, 100, False, None)], palettes=pal, shapes=[(0, line, 1)]),
+    ]
+    sd = [
+        PgsSet(1000, objects=[(0, 20, 400, False, None)], palettes=[(0, PGS_SD_PALETTE)],
+               shapes=[(0, [[(c // 8) % 9 for c in range(72)] for _ in range(16)], 1)]),
+        PgsSet(2000, state=0),
+    ]
+    cropped = [
+        # A crop of the line; one reaching past it, cut to it; the whole
+        # again; one wholly outside it, showing nothing.
+        PgsSet(1000, objects=[(0, 100, 100, False, (10, 5, 100, 20))], palettes=pal, shapes=[(0, line, 1)]),
+        PgsSet(2000, state=0, objects=[(0, 100, 100, False, (250, 30, 200, 200))]),
+        PgsSet(3000, state=0, objects=[(0, 100, 100, False, None)]),
+        PgsSet(4000, state=0, objects=[(0, 100, 100, False, (400, 0, 10, 10))]),
+        PgsSet(5000, state=0),
+    ]
+    return shown, sd, cropped
+
+
+def pgs_damage():
+    """Display sets a muxer would not write, each as FFmpeg's rules take it:
+    the answer is FFmpeg's pictures alone."""
+    tile = pgs_shape(40, 24, 0)
+    pal = [(0, PGS_PALETTE)]
+    end = (PGS_END, b"")
+
+    def palette(pid):
+        return (PGS_PDS, bytes([pid, 0]) + b"".join(bytes(e) for e in PGS_PALETTE))
+
+    def obj(oid, rows):
+        return (PGS_ODS, pgs_ods(oid, rows)[0])
+
+    def comp(state, palette_id, objects):
+        return (PGS_PCS, pgs_pcs(PGS_CANVAS, 0, state, palette_id, objects))
+
+    def raw(ms_time, *segments):
+        return PgsSet(ms_time, raw=list(segments))
+
+    def show(ms_time, x, y):
+        return PgsSet(ms_time, objects=[(0, x, y, False, None)], palettes=pal, shapes=[(0, tile, 1)])
+
+    # Codes a line short of the height they declare.
+    codes = pgs_rle(tile[:-1])
+    short = (PGS_ODS, struct.pack(">HBB", 0, 0, 0xC0) + (len(codes) + 4).to_bytes(3, "big")
+             + struct.pack(">HH", 40, 24) + codes)
+    # Lines a pixel longer than the 60 they declare: each line's extra pixel
+    # pushes the next along, and the last line's run of 2s, which would pass
+    # the end, is skipped -- so the codes still fill the object.
+    codes = pgs_rle([[1] * 30 + [2] * 30 + [1] for _ in range(30)])
+    long = (PGS_ODS, struct.pack(">HBB", 0, 0, 0xC0) + (len(codes) + 4).to_bytes(3, "big")
+            + struct.pack(">HH", 60, 30) + codes)
+    return [
+        # A first set naming an object and a palette no set has defined:
+        # nothing shows. (A reader that read on to the last epoch, and seeks
+        # back here, must have forgotten that epoch's.)
+        raw(500, comp(0x00, 0, [(0, 600, 100, False, None)]), end),
+        # A palette never defined: the picture shown stays.
+        show(1000, 100, 100),
+        raw(2000, comp(0x80, 7, [(0, 200, 100, False, None)]), palette(0), obj(0, tile), end),
+        PgsSet(3000, state=0),
+        # Three objects: the first two shown.
+        PgsSet(4000, objects=[(i, 100 + 60 * i, 200, False, None) for i in range(3)], palettes=pal,
+               shapes=[(i, tile, 1) for i in range(3)]),
+        PgsSet(5000, state=0),
+        # Ten palettes: the ninth and tenth not held, the eighth shown.
+        raw(6000, comp(0x80, 9, [(0, 100, 300, False, None)]), *[palette(p) for p in range(10)],
+            obj(0, tile), end),
+        raw(7000, comp(0x00, 7, [(0, 100, 300, False, None)]), end),
+        PgsSet(8000, state=0),
+        # Sixty-five objects: the last not held, and object 3 replaced.
+        raw(9000, comp(0x80, 0, [(64, 0, 400, False, None), (3, 100, 400, False, None)]), palette(0),
+            *[obj(i, tile) for i in range(65)], obj(3, pgs_shape(80, 12, 2)), end),
+        PgsSet(10000, state=0),
+        # Wider than the canvas: not shown.
+        PgsSet(11000, objects=[(0, 0, 500, False, None)], palettes=pal, shapes=[(0, [[1] * 1300] * 4, 1)]),
+        # Codes a line short: not shown, and the object they replace goes too.
+        show(13000, 300, 300),
+        raw(14000, comp(0x00, 0, [(0, 300, 300, False, None)]), short, end),
+        # Lines longer than the width: the codes run on into the next line.
+        raw(15000, comp(0x80, 0, [(0, 500, 300, False, None)]), palette(0), long, end),
+        PgsSet(16000, state=0),
+        # An epoch start naming the last epoch's object: gone.
+        show(17000, 100, 600),
+        raw(18000, comp(0x80, 0, [(0, 200, 600, False, None)]), palette(0), end),
+        # An acquisition point bringing nothing, then a normal set bringing
+        # nothing: neither has a palette, and the picture shown stays.
+        show(19000, 100, 600),
+        raw(20000, comp(0x40, 0, [(0, 200, 600, False, None)]), end),
+        raw(21000, comp(0x00, 0, [(0, 300, 600, False, None)]), end),
+        PgsSet(22000, state=0),
+        # A composition cut short clears.
+        show(23000, 100, 600),
+        raw(24000, (PGS_PCS, pgs_pcs(PGS_CANVAS, 0, 0, 0, [])[:5]), end),
+        # A state of neither top bit keeps the epoch.
+        show(25000, 100, 600),
+        raw(26000, comp(0x20, 0, [(0, 400, 600, False, None)]), end),
+        PgsSet(27000, state=0),
+    ]
+
+
+def make_mixed():
+    """Films with subtitle tracks of several kinds, for which one Subtitles
+    opens: `pgs_and_text.mkv`, Blu-ray pictures marked default beside SubRip
+    text; `vobsub_and_pgs.mkv`, DVD pictures (ffmpeg's dvdsub encoder's,
+    from pgs_sd's) marked default beside Blu-ray's. Made from fixtures
+    made already."""
+    def path(name):
+        return os.path.join(HERE, name)
+
+    def merge(out, *sources):
+        args = [MKVMERGE, "--quiet", "--deterministic", "mixed", "-o", path(out)]
+        for name, default in sources:
+            args += ["--default-track-flag", f"0:{'yes' if default else 'no'}", path(name)]
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0:
+            sys.exit(f"mkvmerge {out} failed:\n{r.stdout}{r.stderr}")
+        print("wrote", path(out))
+
+    merge("pgs_and_text.mkv", ("pgs_sd.mkv", True), ("subrip.mkv", False))
+    vob = path("vobsub.tmp.mkv")
+    ffmpeg("-copyts", "-i", path("pgs_sd.mkv"), "-map", "0", "-c:s", "dvdsub",
+           "-fflags", "+bitexact", "-flags", "+bitexact", vob)
+    merge("vobsub_and_pgs.mkv", ("vobsub.tmp.mkv", True), ("pgs_sd.mkv", False))
+    os.remove(vob)
+
+
 def main():
     # One cue a second and a half apart, a second long.
     def srt_of(texts):
@@ -722,6 +1159,13 @@ def main():
     right_middle = tx3g_setup(across=-1, down=1)
     make("movtext_justified", "", lambda out: tx3g_mp4(out, right_middle, [tx3g_sample("right and middle")]),
          "mp4", muxer="written")
+
+    shown, sd, cropped = pgs_scenes()
+    make_pgs("pgs", PGS_CANVAS, shown)
+    make_pgs("pgs_sd", (720, 480), sd)
+    make_pgs("pgs_cropped", PGS_CANVAS, cropped, departures={1000, 2000, 4000})
+    make_pgs("pgs_damage", PGS_CANVAS, pgs_damage(), drawn=False)
+    make_mixed()
 
 
 if __name__ == "__main__":

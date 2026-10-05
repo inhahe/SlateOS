@@ -1,9 +1,12 @@
 //! The subtitle fixtures (`tests/data/subrip*`, `ass*`, `ssa*`, `webvtt*`,
-//! `overlap*`) read through [`videocodec::Subtitles`]: every cue's start, end
-//! and text held to the fixture's answer, `NAME.srt` -- ffmpeg's SRT of the
-//! track (`NAME.ffmpeg.srt`) but for the cues where this follows the format's
-//! own renderer instead, which `tests/data/generate_subtitle_fixtures.py`
-//! lists and says why of, one by one.
+//! `overlap*`, `movtext*`) read through [`videocodec::Subtitles`]: every
+//! cue's start, end and text held to the fixture's answer, `NAME.srt` --
+//! ffmpeg's SRT of the track (`NAME.ffmpeg.srt`) but for the cues where this
+//! follows the format's own renderer instead, which
+//! `tests/data/generate_subtitle_fixtures.py` lists and says why of, one by
+//! one. The pictures of Blu-ray's PGS (`pgs*`) are held to `NAME.states`:
+//! the picture FFmpeg's sub2video shows at each change, every subtitle shown
+//! and the forced alone, but for the crops it does not make.
 
 #![allow(
     clippy::unwrap_used,
@@ -18,7 +21,7 @@ use std::fs::File;
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use videocodec::{Cue, Error, SubtitleFormat, Subtitles};
+use videocodec::{Cue, CueImage, Error, SubtitleFormat, Subtitles};
 
 fn data(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -53,6 +56,7 @@ fn answers(name: &str) -> Vec<Cue> {
                 start: srt_time(start),
                 end: srt_time(end),
                 text: lines.collect::<Vec<_>>().join("\n"),
+                images: Vec::new(),
             }
         })
         .collect()
@@ -258,4 +262,217 @@ fn a_track_is_opened_by_its_number() {
     let file = File::open(data("ass.mkv")).unwrap();
     let subtitles = Subtitles::open_track(file, number).unwrap();
     assert_eq!(subtitles.info().format, SubtitleFormat::Ass);
+}
+
+// --- Pictures of text: Blu-ray's PGS ---------------------------------------
+
+/// A pictures fixture's answer, `NAME.states`: its canvas, and the picture
+/// at each change -- the time in milliseconds, an MD5 of the canvas's RGBA
+/// bytes -- with every subtitle shown, and with the forced alone.
+struct Pictures {
+    canvas: (u32, u32),
+    all: Vec<(i64, String)>,
+    forced: Vec<(i64, String)>,
+}
+
+fn pictures(name: &str) -> Pictures {
+    let text = std::fs::read_to_string(data(&format!("{name}.states"))).unwrap();
+    let mut p = Pictures {
+        canvas: (0, 0),
+        all: Vec::new(),
+        forced: Vec::new(),
+    };
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let w: Vec<&str> = line.split(' ').collect();
+        match w[0] {
+            "canvas" => p.canvas = (w[1].parse().unwrap(), w[2].parse().unwrap()),
+            "state" => p.all.push((w[1].parse().unwrap(), w[2].to_owned())),
+            "forced" => p.forced.push((w[1].parse().unwrap(), w[2].to_owned())),
+            other => panic!("{name}.states: a line this test does not know: {other}"),
+        }
+    }
+    p
+}
+
+/// The canvas with `images` drawn on it as FFmpeg's sub2video draws them --
+/// each copied over what is there, in order; one reaching past the canvas
+/// left out -- as an MD5 of its RGBA bytes.
+fn drawn(canvas: (u32, u32), images: &[&CueImage]) -> String {
+    let (w, h) = (canvas.0 as usize, canvas.1 as usize);
+    let mut frame = vec![0u8; w * h * 4];
+    for i in images {
+        let (x, y) = (i.x as usize, i.y as usize);
+        let (iw, ih) = (i.width as usize, i.height as usize);
+        assert_eq!(i.rgba.len(), iw * ih * 4, "an image's pixels fill it");
+        if x + iw > w || y + ih > h {
+            continue;
+        }
+        for row in 0..ih {
+            let to = ((y + row) * w + x) * 4;
+            frame[to..to + iw * 4].copy_from_slice(&i.rgba[row * iw * 4..(row + 1) * iw * 4]);
+        }
+    }
+    md5::md5_hex(&frame).to_string()
+}
+
+/// What `cues` show, change by change -- with every image, and with the
+/// forced alone: each cue's pictures at its start, the blank at its end
+/// where no cue starts then, with a leading blank and repeats dropped, as
+/// the answers drop them. (A canvas is drawn once a cue where it can be: a
+/// test built without optimisation hashes a few megabytes a second.)
+fn shown(cues: &[Cue], canvas: (u32, u32)) -> [Vec<(i64, String)>; 2] {
+    let blank = drawn(canvas, &[]);
+    let mut changes: [Vec<(i64, String)>; 2] = [Vec::new(), Vec::new()];
+    for (k, cue) in cues.iter().enumerate() {
+        let every: Vec<&CueImage> = cue.images.iter().collect();
+        let forced: Vec<&CueImage> = cue.images.iter().filter(|i| i.forced).collect();
+        let all = drawn(canvas, &every);
+        let only_forced = match forced.len() {
+            0 => blank.clone(),
+            n if n == every.len() => all.clone(),
+            _ => drawn(canvas, &forced),
+        };
+        let start = cue.start / 1_000_000;
+        changes[0].push((start, all));
+        changes[1].push((start, only_forced));
+        if cue.end != i64::MAX && cues.get(k + 1).map(|c| c.start) != Some(cue.end) {
+            for c in &mut changes {
+                c.push((cue.end / 1_000_000, blank.clone()));
+            }
+        }
+    }
+    changes.map(|changes| {
+        let mut out: Vec<(i64, String)> = Vec::new();
+        for (t, md5) in changes {
+            if out.last().map_or(md5 != blank, |(_, m)| *m != md5) {
+                out.push((t, md5));
+            }
+        }
+        out
+    })
+}
+
+/// Every picture of `NAME.mkv` against `NAME.states`; the cues of pictures
+/// alone, on the answer's canvas. The cues, for more to be asked of them.
+fn pictures_held_to_their_answer(name: &str) -> (Vec<Cue>, Subtitles<File>) {
+    let answer = pictures(name);
+    let file = File::open(data(&format!("{name}.mkv"))).unwrap();
+    let mut subtitles = Subtitles::open(file).unwrap();
+    assert_eq!(subtitles.info().format, SubtitleFormat::Pgs, "{name}");
+    let cues = read_all(&mut subtitles);
+    for cue in &cues {
+        assert!(cue.text.is_empty(), "{name}: pictures have no text");
+        assert!(!cue.images.is_empty(), "{name}: a cue shows something");
+        for i in &cue.images {
+            assert_eq!((i.canvas_width, i.canvas_height), answer.canvas, "{name}");
+        }
+    }
+    let [all, forced] = shown(&cues, answer.canvas);
+    assert_eq!(all, answer.all, "{name}: the pictures");
+    assert_eq!(forced, answer.forced, "{name}: the forced pictures");
+    (cues, subtitles)
+}
+
+#[test]
+fn pgs() {
+    let (cues, subtitles) = pictures_held_to_their_answer("pgs");
+    assert_eq!(subtitles.damaged(), 0);
+    // The last picture is never cleared: it shows until the film ends. The
+    // one set at the same time before it was never seen, and is no cue:
+    // the cue before the last is the one cleared at 20 s.
+    let last = cues.last().unwrap();
+    assert_eq!((last.start, last.end), (21_000_000_000, i64::MAX));
+    assert_eq!(cues[cues.len() - 2].end, 20_000_000_000);
+}
+
+#[test]
+fn pgs_on_a_standard_definition_canvas() {
+    let (_, subtitles) = pictures_held_to_their_answer("pgs_sd");
+    assert_eq!(subtitles.damaged(), 0);
+}
+
+#[test]
+fn pgs_cropped_as_a_blu_ray_player_crops() {
+    let (_, subtitles) = pictures_held_to_their_answer("pgs_cropped");
+    assert_eq!(subtitles.damaged(), 0);
+}
+
+#[test]
+fn pgs_damage_taken_as_ffmpeg_takes_it() {
+    let (_, subtitles) = pictures_held_to_their_answer("pgs_damage");
+    // Ten palettes, sixty-five objects, one wider than the canvas, codes a
+    // line short, a composition cut short: five sets met damage.
+    assert_eq!(subtitles.damaged(), 5);
+}
+
+/// The first cue after seeking `NAME.mkv` to `ms`: its start and end in
+/// milliseconds, and the picture it shows.
+fn first_after_seek(name: &str, ms: i64) -> (i64, i64, String) {
+    let answer = pictures(name);
+    let file = File::open(data(&format!("{name}.mkv"))).unwrap();
+    let mut subtitles = Subtitles::open(file).unwrap();
+    subtitles.seek(ms * 1_000_000).unwrap();
+    let cue = subtitles.next_cue().unwrap().unwrap();
+    let images: Vec<&CueImage> = cue.images.iter().collect();
+    (
+        cue.start / 1_000_000,
+        cue.end / 1_000_000,
+        drawn(answer.canvas, &images),
+    )
+}
+
+#[test]
+fn a_seek_in_pictures_lands_on_the_picture_showing_then() {
+    let answer = pictures("pgs");
+    let at = |t: i64| {
+        answer
+            .all
+            .iter()
+            .rev()
+            .find(|(s, _)| *s <= t)
+            .unwrap()
+            .1
+            .clone()
+    };
+    // A picture its own display set defines.
+    assert_eq!(first_after_seek("pgs", 5500), (5000, 6000, at(5000)));
+    // Pictures in the middle of an epoch, their object and palette defined
+    // by the sets before: the seek goes back to the epoch's start.
+    assert_eq!(first_after_seek("pgs", 6500), (6000, 7000, at(6000)));
+    assert_eq!(first_after_seek("pgs", 7500), (7000, 8000, at(7000)));
+    assert_eq!(first_after_seek("pgs", 8000), (8000, 9000, at(8000)));
+    // Between pictures: the next one.
+    assert_eq!(first_after_seek("pgs", 2500), (3000, 4000, at(3000)));
+}
+
+#[test]
+fn a_seek_back_forgets_what_was_read_after_it() {
+    // pgs_damage's first display set, at half a second, names an object and
+    // a palette no set before it defined, and shows nothing. Read to the
+    // end, the reader holds the last epoch's of those ids; sought back to
+    // the first set, it must have forgotten them, and the first picture is
+    // the one at a second.
+    let file = File::open(data("pgs_damage.mkv")).unwrap();
+    let mut subtitles = Subtitles::open(file).unwrap();
+    read_all(&mut subtitles);
+    subtitles.seek(600_000_000).unwrap();
+    assert_eq!(subtitles.next_cue().unwrap().unwrap().start, 1_000_000_000);
+}
+
+#[test]
+fn text_is_opened_before_pictures_and_pictures_read_before_those_not() {
+    // Blu-ray pictures marked default, text beside them: the text.
+    let file = File::open(data("pgs_and_text.mkv")).unwrap();
+    let info = Subtitles::open(file).unwrap().info().clone();
+    assert_eq!((info.format, info.default), (SubtitleFormat::SubRip, false));
+    // DVD pictures marked default, Blu-ray's beside them: Blu-ray's.
+    let file = File::open(data("vobsub_and_pgs.mkv")).unwrap();
+    let info = Subtitles::open(file).unwrap().info().clone();
+    assert_eq!((info.format, info.default), (SubtitleFormat::Pgs, false));
+    // The DVD track asked for by its number: refused by its format's name.
+    let file = File::open(data("vobsub_and_pgs.mkv")).unwrap();
+    assert!(matches!(
+        Subtitles::open_track(file, 1),
+        Err(Error::SubtitleFormat(SubtitleFormat::VobSub))
+    ));
 }

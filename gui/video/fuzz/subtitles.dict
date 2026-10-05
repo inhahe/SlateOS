@@ -91,3 +91,18 @@
 "S_TEXT/SSA"
 "S_TEXT/WEBVTT"
 "D_WEBVTT/SUBTITLES"
+"S_HDMV/PGS"
+
+# PGS segment headers (type, then a 16-bit length): an end segment whole;
+# a composition, palette, object and window header each of a short length;
+# composition states (epoch start, acquisition point); an object's first
+# and last segment flags; a long run of colour 1.
+"\x80\x00\x00"
+"\x16\x00\x13"
+"\x14\x00\x07"
+"\x15\x00\x0f"
+"\x17\x00\x0a"
+"\x80\x00\x00\x00"
+"\x40\x00\x00\x00"
+"\xc0\x00"
+"\x00\xc1\x00\x01"

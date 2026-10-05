@@ -1,0 +1,27 @@
+# pgs.mkv: the picture at each change, as an MD5 of the RGBA canvas; `forced` lines with only forced subtitles shown (generate_subtitle_fixtures.py)
+canvas 1280 720
+state 1000 fc365a3684a8e5548bea7e7dcc001e3b
+state 2000 7b3ba1b1b5fedb562f08fe3428e99dc2
+state 3000 5357ff2b6fcb9bc2c6d16f08317158e2
+state 4000 7b3ba1b1b5fedb562f08fe3428e99dc2
+state 5000 02c77b18ec1b9e3c8858be976ee4de73
+state 6000 b397e15d878fdeca50c4d9bdd5aa1ac7
+state 7000 c517a83a9e286cbdbc96269cea478ebc
+state 8000 538362cc0f7c8de41f441098695cc77b
+state 9000 7b3ba1b1b5fedb562f08fe3428e99dc2
+state 10000 f69235dd747ebf2f86a25766c5523336
+state 11000 7b3ba1b1b5fedb562f08fe3428e99dc2
+state 12000 1c0ff5d049afbebd23d555daa5ae6db9
+state 13000 f35d184bccf7607fb0e91c4b3f00a7ca
+state 14000 7b3ba1b1b5fedb562f08fe3428e99dc2
+state 15000 47e33ce8c5e87ec510b60375a1ed9217
+state 16000 7b3ba1b1b5fedb562f08fe3428e99dc2
+state 17000 584f857f1bceb8f1fb96ad66e7eef1c4
+state 18000 7b3ba1b1b5fedb562f08fe3428e99dc2
+state 19000 584f857f1bceb8f1fb96ad66e7eef1c4
+state 20000 7b3ba1b1b5fedb562f08fe3428e99dc2
+state 21000 84a1c93216fcf32568f0cdbd10ec42ce
+forced 12000 1c0ff5d049afbebd23d555daa5ae6db9
+forced 13000 7b3ba1b1b5fedb562f08fe3428e99dc2
+forced 19000 584f857f1bceb8f1fb96ad66e7eef1c4
+forced 20000 7b3ba1b1b5fedb562f08fe3428e99dc2

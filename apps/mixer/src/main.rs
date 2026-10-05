@@ -1119,9 +1119,21 @@ impl MixerApp {
 
     /// The pointer during a drag of column `sel`'s fader.
     fn drag_fader(&mut self, sel: Selection, ev: &MouseEvent) -> EventResult {
-        let placement = self.fader_placement_of(sel);
-        let (Some(placement), Some(fader)) = (placement, self.fader_mut(sel)) else {
-            // The column went while it was dragged.
+        let Some(placement) = self.fader_placement_of(sel) else {
+            // The fader went while it was dragged: the window shrank under
+            // it. The toolkit's rule for a drag that loses its pointer is to
+            // take it back, and the slider must be told -- one left holding
+            // its drag would follow the pointer, button up, once the room
+            // came back.
+            self.dragging = None;
+            let response = self.fader_mut(sel).map(Slider::cancel);
+            if let Some(event) = response.and_then(guitk::slider::Response::event) {
+                self.fader_moved(sel, event);
+            }
+            return EventResult::Consumed;
+        };
+        let Some(fader) = self.fader_mut(sel) else {
+            // The column itself is gone; there is no slider left to tell.
             self.dragging = None;
             return EventResult::Ignored;
         };
@@ -3347,6 +3359,58 @@ mod tests {
             a.muted_of(Selection::Stream(1)),
             Some(true),
             "the drag kept the pointer"
+        );
+    }
+
+    /// **A drag whose fader goes is taken back**, and lets the pointer go.
+    /// The window shrinking under a drag takes the fader away; the drag is
+    /// abandoned as the toolkit asks of one that loses its pointer, and the
+    /// fader that comes back with the room does not follow a pointer whose
+    /// button is up.
+    #[test]
+    fn a_drag_whose_fader_goes_is_taken_back_and_lets_the_pointer_go() {
+        let mut a = app();
+        let l = a.layout();
+        let track = l
+            .fader_placement(l.column_of(Selection::Stream(0)).expect("a column"))
+            .expect("room for a fader")
+            .track;
+        let x = track.centre().0;
+        a.apply(Action::SetVolume(Selection::Stream(0), 0.5));
+        mouse(
+            &mut a,
+            x,
+            track.y + track.h * 0.1,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        let got = a.volume_of(Selection::Stream(0)).unwrap();
+        assert!((got - 0.9).abs() < 0.02, "the press set {got}");
+
+        handle_event(
+            &mut a,
+            &Event::Resize {
+                width: 1,
+                height: 1,
+            },
+        );
+        assert!(
+            a.fader_placement_of(Selection::Stream(0)).is_none(),
+            "a 1x1 window still has room for a fader"
+        );
+        mouse(&mut a, 0.5, 0.5, MouseEventKind::Move);
+        assert_eq!(a.dragging, None, "the drag outlived its fader");
+        let got = a.volume_of(Selection::Stream(0)).unwrap();
+        assert!(
+            (got - 0.5).abs() < 0.001,
+            "the drag the window took away was kept: {got}"
+        );
+
+        a.resize(WINDOW_WIDTH, WINDOW_HEIGHT);
+        mouse(&mut a, x, track.y + track.h * 0.7, MouseEventKind::Move);
+        let got = a.volume_of(Selection::Stream(0)).unwrap();
+        assert!(
+            (got - 0.5).abs() < 0.001,
+            "the fader came back following a pointer whose button is up: {got}"
         );
     }
 

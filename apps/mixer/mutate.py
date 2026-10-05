@@ -411,6 +411,23 @@ MUTATIONS = [
         '        let response = fader.handle_mouse(&placement, ev);\n',
         ['a_fader_follows_a_drag_and_stays_where_it_is_let_go'],
     ),
+    # 2026-10-04: a fader the window took away under a drag kept the drag,
+    # and followed the pointer, button up, when the room came back.
+    (
+        'a drag whose fader goes is kept by the slider',
+        '            let response = self.fader_mut(sel).map(Slider::cancel);\n'
+        '            if let Some(event) = response.and_then(guitk::slider::Response::event) {\n'
+        '                self.fader_moved(sel, event);\n'
+        '            }\n',
+        '',
+        ['a_drag_whose_fader_goes_is_taken_back_and_lets_the_pointer_go'],
+    ),
+    (
+        'a drag whose fader goes keeps the pointer',
+        '            // came back.\n            self.dragging = None;\n',
+        '            // came back.\n',
+        ['a_drag_whose_fader_goes_is_taken_back_and_lets_the_pointer_go'],
+    ),
     (
         'a key during a drag moves the fader the pointer has',
         '        if let Some(sel) = self.dragging {\n            return self.drag_key(sel, ev);\n        }\n',

@@ -1,0 +1,16 @@
+1
+00:00:01,000 --> 00:00:02,000
+Plain SSA
+
+2
+00:00:02,500 --> 00:00:03,500
+<font face="Verdana" size="28" color="#ff0000"><b><i>{\an8}Old style, top centre in SSA's numbering</i></b></font>
+
+3
+00:00:04,000 --> 00:00:05,000
+<i>override</i> in SSA
+
+4
+00:00:05,500 --> 00:00:06,500
+{\an5}legacy override in SSA
+

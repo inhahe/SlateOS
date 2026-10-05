@@ -16,7 +16,7 @@ of them.
 |---|---|---|
 | Tracks compressed with bzip2 or LZO | the track is marked unreadable (`Track::readable`) and its packets skipped | undo them in `track.rs`'s `Encoding::undo` (FFmpeg does) |
 | Encrypted tracks (WebM's for EME, which ffmpeg passes on still encrypted) | marked unreadable; the key ID is in the track's metadata (`enc_key_id`) | nothing to decrypt with; a DRM question, not a demuxer one |
-| WavPack, ProRes, RealMedia audio and WebVTT packets, which FFmpeg rebuilds from Matroska's form | given as stored | FFmpeg's `matroska_parse_wavpack`, `_prores`, `_rm_audio` and `_webvtt`, if those codecs are ever decoded here |
+| WavPack, ProRes and RealMedia audio packets, which FFmpeg rebuilds from Matroska's form | given as stored | FFmpeg's `matroska_parse_wavpack`, `_prores` and `_rm_audio`, if those codecs are ever decoded here. (WebVTT's, which FFmpeg's `matroska_parse_webvtt` takes apart, are given as stored too, and `videocodec::Subtitles` takes WebM's apart as it does.) |
 | Several `ContentEncoding`s on one track | passed through as stored, as FFmpeg does | nothing: FFmpeg's own behaviour |
 | A source that cannot seek (a pipe, a live stream) | `Demuxer::open` measures the source, so it needs `Seek` | a streaming mode: the reader already knows where every element ends, but `open`'s SeekHead and the seek's index read ahead |
 | A top-level element of unknown size other than a Cluster (the specification allows it of none) | refused before the first Cluster; ends following the SeekHead there | FFmpeg reads one until an element that cannot be inside it begins, as it reads a Cluster of unknown size |

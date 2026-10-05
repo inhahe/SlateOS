@@ -59,6 +59,16 @@
 //!    ones that are. Without that a Shift held across a drop would stay stuck
 //!    down for ever, and every subsequent letter would be a capital.
 //!
+//!    The same read is made once when each device opens, for the same reason:
+//!    a key that went down before the device was opened -- held since the
+//!    machine was switched on, or across a restart of the compositor -- has no
+//!    transition in the stream at all. Without it a Shift held while the
+//!    desktop starts is missing from the modifier state, so the first letters
+//!    typed come out lower-case, and the login screen cannot tell that the user
+//!    is holding Shift to stop an automatic sign-in (`design-decisions.md`
+//!    §1427). The keys found are pressed by the first [`EvdevInput::poll_at`],
+//!    which the server makes before it answers any client.
+//!
 //! ## Why this is split in three, again
 //!
 //! Same reason [`drm`](super::drm) is. Every bug this module can have is a
@@ -531,7 +541,8 @@ struct Stream<S> {
     buf: Vec<u8>,
     /// What has arrived since the last `SYN_REPORT`.
     packet: Packet,
-    /// Set by `SYN_DROPPED`; cleared once `EVIOCGKEY` has been re-read.
+    /// Set when the device opens and by `SYN_DROPPED`; cleared once
+    /// `EVIOCGKEY` has been read.
     needs_resync: bool,
     /// Set when the device failed in a way that will not recover, so it is
     /// skipped rather than re-erroring once a frame for ever.
@@ -761,11 +772,13 @@ impl<S: EventSys> Stream<S> {
 
     /// Re-read which keys are held, and reconcile both ways.
     ///
-    /// Called after a `SYN_DROPPED`. Both directions matter and for different
-    /// reasons: a key we think is down and is not would be stuck for ever (a
-    /// stuck Shift capitalises everything typed afterwards), and a key that is
-    /// down and we do not know about would be missing from the modifier state,
-    /// so a Ctrl held across a drop would stop making shortcuts.
+    /// Called when the device opens and after a `SYN_DROPPED`. Both directions
+    /// matter and for different reasons: a key we think is down and is not
+    /// would be stuck for ever (a stuck Shift capitalises everything typed
+    /// afterwards), and a key that is down and we do not know about would be
+    /// missing from the modifier state, so a Ctrl held across a drop would stop
+    /// making shortcuts. At open only the second direction can arise, since
+    /// nothing is yet believed to be down.
     fn resync(&mut self, keys: &mut Keys, out: &mut Vec<InputEvent>) {
         if !self.needs_resync || self.dead {
             return;
@@ -915,10 +928,22 @@ pub struct EvdevInput<S> {
     pointer: Pointer,
     /// The user's pointer and repeat preferences.
     settings: InputSettings,
+    /// Presses found by reading each device's key state as it opened, for the
+    /// next [`Self::poll_at`] to hand over ahead of anything it reads.
+    ///
+    /// Held here rather than returned by the constructor so that they reach
+    /// the compositor by the one path every key takes, `poll`, and update its
+    /// modifier state exactly as a press typed later would.
+    pending: Vec<InputEvent>,
 }
 
 impl<S: EventSys> EvdevInput<S> {
-    /// Open every device `source` offers, up to [`MAX_DEVICES`].
+    /// Open every device `source` offers, up to [`MAX_DEVICES`], and read
+    /// which keys each one is already holding.
+    ///
+    /// The held keys are read here, at open, rather than at the first poll, so
+    /// that an `EvdevInput` knows them from the moment it exists, whenever its
+    /// owner first polls. They are reported as presses by that first poll.
     ///
     /// # Errors
     ///
@@ -943,7 +968,9 @@ impl<S: EventSys> EvdevInput<S> {
                         name,
                         buf: Vec::new(),
                         packet: Packet::default(),
-                        needs_resync: false,
+                        // Read below, before anything is: a key down since
+                        // before the open has no transition in the stream.
+                        needs_resync: true,
                         dead: false,
                     });
                 }
@@ -958,11 +985,17 @@ impl<S: EventSys> EvdevInput<S> {
                 EvdevError::NoDevices
             });
         }
+        let mut keys = Keys::default();
+        let mut pending = Vec::new();
+        for stream in &mut streams {
+            stream.resync(&mut keys, &mut pending);
+        }
         Ok(Self {
             streams,
-            keys: Keys::default(),
+            keys,
             pointer: Pointer::new(width, height),
             settings,
+            pending,
         })
     }
 
@@ -993,7 +1026,9 @@ impl<S: EventSys> EvdevInput<S> {
     /// this module that depends on the clock rather than on the byte stream —
     /// is testable without sleeping.
     pub fn poll_at(&mut self, now: Instant) -> Vec<InputEvent> {
-        let mut out = Vec::new();
+        // The keys found held at open come first: they went down before
+        // anything read since, and a release read now must follow its press.
+        let mut out = std::mem::take(&mut self.pending);
         for stream in &mut self.streams {
             stream.drain(
                 now,
@@ -1066,7 +1101,14 @@ impl<S: EventSys> InputSource for EvdevInput<S> {
     /// synthesised here from the clock — so no device becomes readable when
     /// one is due, and without this a held key would repeat only when
     /// something else happened to wake the loop.
+    ///
+    /// Or now, while presses read at open are still waiting to be handed
+    /// over: no device becomes readable for those either. The server polls
+    /// before it first waits, so this only matters to a loop that does not.
     fn deadline(&self) -> Option<Instant> {
+        if !self.pending.is_empty() {
+            return Some(Instant::now());
+        }
         self.keys.next_repeat(&self.settings.keyboard)
     }
 }

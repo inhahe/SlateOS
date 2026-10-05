@@ -226,6 +226,13 @@ const FORM_TEXT_SIZE: f32 = 13.0;
 /// A form row's height.
 const FORM_ROW_H: f32 = 40.0;
 
+/// Said under an event's colour when it is too close to the accent to see
+/// on it: what happens, and how to change it -- here, or the accent.
+const COLOUR_WARNING: [&str; 2] = [
+    "Close to your accent colour: its dot can vanish into today's circle.",
+    "Choose another colour here, or another accent in Settings.",
+];
+
 /// A field of the event form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormField {
@@ -235,6 +242,7 @@ pub enum FormField {
     Starts,
     Ends,
     Category,
+    Colour,
     Repeats,
     Place,
     Notes,
@@ -244,7 +252,10 @@ impl FormField {
     /// Whether the field is typed into; the others are chosen, a press or
     /// Left, Right and Space stepping through their values.
     fn is_text(self) -> bool {
-        !matches!(self, Self::AllDay | Self::Category | Self::Repeats)
+        !matches!(
+            self,
+            Self::AllDay | Self::Category | Self::Colour | Self::Repeats
+        )
     }
 
     fn label(self) -> &'static str {
@@ -255,6 +266,7 @@ impl FormField {
             Self::Starts => "Starts",
             Self::Ends => "Ends",
             Self::Category => "Category",
+            Self::Colour => "Colour",
             Self::Repeats => "Repeats",
             Self::Place => "Place",
             Self::Notes => "Notes",
@@ -268,7 +280,7 @@ impl FormField {
             Self::Date => "YYYY-MM-DD",
             Self::Starts | Self::Ends => "HH:MM, 24-hour",
             Self::Place | Self::Notes => "Optional",
-            Self::AllDay | Self::Category | Self::Repeats => "",
+            Self::AllDay | Self::Category | Self::Colour | Self::Repeats => "",
         }
     }
 
@@ -279,9 +291,30 @@ impl FormField {
             Self::Notes => 2000,
             Self::Date => 16,
             Self::Starts | Self::Ends => 5,
-            Self::AllDay | Self::Category | Self::Repeats => 0,
+            Self::AllDay | Self::Category | Self::Colour | Self::Repeats => 0,
         }
     }
+}
+
+/// The colours the form offers an event besides its category's own: the
+/// palette's hues, named, so a theme's change reaches them all.
+pub fn palette_hues(p: &Palette) -> [(&'static str, Color); 14] {
+    [
+        ("Blue", p.blue),
+        ("Sapphire", p.sapphire),
+        ("Sky", p.sky),
+        ("Teal", p.teal),
+        ("Green", p.green),
+        ("Yellow", p.yellow),
+        ("Peach", p.peach),
+        ("Maroon", p.maroon),
+        ("Red", p.red),
+        ("Pink", p.pink),
+        ("Mauve", p.mauve),
+        ("Lavender", p.lavender),
+        ("Flamingo", p.flamingo),
+        ("Rosewater", p.rosewater),
+    ]
 }
 
 /// The repeats the form offers for any event, in order.
@@ -359,7 +392,13 @@ pub struct EventForm {
     /// this program raises a reminder, so offering to set one would promise
     /// an alert that never comes.
     reminder: Reminder,
+    /// The colour chosen for the event, or `None` for its category's.
     color_override: Option<Color>,
+    /// The colour the event came with, offered beside the palette's hues
+    /// when it is none of them -- one an imported calendar gave, or one
+    /// picked under a theme since changed -- so that changing an event's
+    /// title does not change its colour.
+    other_colour: Option<Color>,
 }
 
 impl EventForm {
@@ -379,6 +418,7 @@ impl EventForm {
             notes: TextInput::new(),
             reminder: Reminder::None,
             color_override: None,
+            other_colour: None,
         }
     }
 
@@ -399,6 +439,7 @@ impl EventForm {
             notes: field_with(&e.description),
             reminder: e.reminder,
             color_override: e.color_override,
+            other_colour: e.color_override,
         }
     }
 
@@ -411,6 +452,7 @@ impl EventForm {
                 FormField::Date,
                 FormField::AllDay,
                 FormField::Category,
+                FormField::Colour,
                 FormField::Repeats,
                 FormField::Place,
                 FormField::Notes,
@@ -423,6 +465,7 @@ impl EventForm {
                 FormField::Starts,
                 FormField::Ends,
                 FormField::Category,
+                FormField::Colour,
                 FormField::Repeats,
                 FormField::Place,
                 FormField::Notes,
@@ -439,7 +482,9 @@ impl EventForm {
             FormField::Ends => Some(&mut self.ends),
             FormField::Place => Some(&mut self.place),
             FormField::Notes => Some(&mut self.notes),
-            FormField::AllDay | FormField::Category | FormField::Repeats => None,
+            FormField::AllDay | FormField::Category | FormField::Colour | FormField::Repeats => {
+                None
+            }
         }
     }
 
@@ -452,7 +497,9 @@ impl EventForm {
             FormField::Ends => Some(&self.ends),
             FormField::Place => Some(&self.place),
             FormField::Notes => Some(&self.notes),
-            FormField::AllDay | FormField::Category | FormField::Repeats => None,
+            FormField::AllDay | FormField::Category | FormField::Colour | FormField::Repeats => {
+                None
+            }
         }
     }
 
@@ -463,8 +510,29 @@ impl EventForm {
         out
     }
 
+    /// The colours this form offers, in order: the category's (`None`), the
+    /// palette's hues, and the event's own when it is none of them.
+    fn colour_choices(&self, pal: &Palette) -> Vec<Option<Color>> {
+        let mut out = vec![None];
+        out.extend(palette_hues(pal).iter().map(|(_, c)| Some(*c)));
+        if let Some(own) = self.other_colour
+            && !out.contains(&Some(own))
+        {
+            out.push(Some(own));
+        }
+        out
+    }
+
+    /// The colour the event is drawn in: the one chosen, or its category's.
+    pub fn effective_colour(&self, pal: &Palette) -> Color {
+        self.color_override
+            .unwrap_or_else(|| self.category.color(pal))
+    }
+
     /// Step chosen field `which` on (`forward`) or back. Whether it is one.
-    fn step(&mut self, which: FormField, forward: bool) -> bool {
+    ///
+    /// `pal` is the palette the colours are offered from.
+    fn step(&mut self, which: FormField, forward: bool, pal: &Palette) -> bool {
         match which {
             FormField::AllDay => self.all_day = !self.all_day,
             FormField::Category => {
@@ -472,6 +540,16 @@ impl EventForm {
                 let at = all.iter().position(|c| *c == self.category).unwrap_or(0);
                 if let Some(next) = all.get(step_index(at, all.len(), forward)) {
                     self.category = *next;
+                }
+            }
+            FormField::Colour => {
+                let choices = self.colour_choices(pal);
+                let at = choices
+                    .iter()
+                    .position(|c| *c == self.color_override)
+                    .unwrap_or(0);
+                if let Some(next) = choices.get(step_index(at, choices.len(), forward)) {
+                    self.color_override = *next;
                 }
             }
             FormField::Repeats => {
@@ -486,9 +564,19 @@ impl EventForm {
         true
     }
 
-    /// What chosen field `which` shows.
-    fn choice_label(&self, which: FormField) -> String {
+    /// What chosen field `which` shows, its colours named from `pal`.
+    fn choice_label(&self, which: FormField, pal: &Palette) -> String {
         match which {
+            FormField::Colour => match self.color_override {
+                None => format!("As its category ({})", self.category.label()),
+                Some(c) => palette_hues(pal)
+                    .iter()
+                    .find(|(_, hue)| *hue == c)
+                    .map_or_else(
+                        || format!("Its own, {}", c.hex_text()),
+                        |(name, _)| (*name).to_owned(),
+                    ),
+            },
             FormField::AllDay => String::from(if self.all_day { "Yes" } else { "No" }),
             FormField::Category => {
                 format!("{} {}", self.category.icon(), self.category.label())
@@ -927,6 +1015,8 @@ pub struct CalendarApp {
     kept_revision: u64,
     /// Why the events are not being kept, when they are not.
     store_error: Option<String>,
+    /// What the command line asked for and could not be done.
+    launch_notice: Option<String>,
     /// "Your latest changes are not saved", while it is being asked.
     question: Option<Question<()>>,
     /// The event form, while it is up.
@@ -945,12 +1035,19 @@ pub struct CalendarApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// What the pointer is over, which is drawn lit.
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl CalendarApp {
     pub fn new(width: f32, height: f32, today: Date) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             width,
             height,
             view: CalendarView::Month,
@@ -976,6 +1073,7 @@ impl CalendarApp {
             persist: false,
             kept_revision: 0,
             store_error: None,
+            launch_notice: None,
             question: None,
             form: None,
             form_field: FormField::Title,
@@ -1129,6 +1227,21 @@ impl CalendarApp {
     }
 
     /// Change event `id`, in the form.
+    /// Event `id`'s form, open at its colour: what `--event-colour` asks
+    /// for, which Settings' accent warning uses to take the user straight to
+    /// an event whose colour the new accent hides. An event that is not
+    /// there says so, under the top bar.
+    pub fn open_event_colour(&mut self, id: u64) {
+        if self.store.get(id).is_some() {
+            self.open_edit_event(id);
+            self.form_field = FormField::Colour;
+        } else {
+            self.launch_notice = Some(format!(
+                "There is no event {id} to change the colour of: it may have been deleted"
+            ));
+        }
+    }
+
     pub fn open_edit_event(&mut self, id: u64) {
         let Some(event) = self.store.get(id) else {
             return;
@@ -1294,6 +1407,9 @@ impl CalendarApp {
         let mut lines = Vec::new();
         if let Some(error) = &self.store_error {
             lines.push((error.clone(), true));
+        }
+        if let Some(note) = &self.launch_notice {
+            lines.push((note.clone(), true));
         }
         if let Some(note) = &self.last_file_action {
             let failed = note.starts_with(FILE_FAILED_PREFIX) || note.starts_with("INCOMPLETE");
@@ -1635,9 +1751,17 @@ impl CalendarApp {
     // ========================================================================
 
     /// Where the form's card is.
+    /// Whether the form's colour is too close to the accent to see on it:
+    /// the one test Settings' accent picker asks too (`hard_to_tell_apart`,
+    /// design-decisions §1424), so the two warnings cannot disagree.
+    fn colour_clashes(&self, form: &EventForm) -> bool {
+        appearance::hard_to_tell_apart(form.effective_colour(&self.palette), self.palette.accent)
+    }
+
     fn form_card(&self, form: &EventForm) -> Rect {
-        #[allow(clippy::cast_precision_loss, reason = "nine rows at most")]
-        let rows = form.fields().len() as f32;
+        // A row per field, and one more for the colour's warning.
+        #[allow(clippy::cast_precision_loss, reason = "eleven rows at most")]
+        let rows = form.fields().len() as f32 + if self.colour_clashes(form) { 1.0 } else { 0.0 };
         let card_w = 560.0_f32.min(self.width - 24.0).max(0.0);
         let card_h = (64.0 + rows * FORM_ROW_H + 96.0)
             .min(self.height - 24.0)
@@ -1694,6 +1818,30 @@ impl CalendarApp {
                 self.draw_form_choice(frame, form, field, rect);
             }
             y += FORM_ROW_H;
+            // The colour kept as chosen, and why it may not show: under
+            // the choice, in a row of its own (§1424, the operator's answer
+            // to C-Q19 -- warn, never refuse).
+            if field == FormField::Colour && self.colour_clashes(form) {
+                for (i, line) in COLOUR_WARNING.iter().enumerate() {
+                    #[expect(clippy::cast_precision_loss, reason = "two lines")]
+                    let ly = y - 4.0 + i as f32 * 16.0;
+                    label(
+                        frame,
+                        rect.x,
+                        ly,
+                        *line,
+                        11.0,
+                        self.palette.ink(self.palette.peach),
+                        if i == 0 {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        },
+                        Some(control_w),
+                    );
+                }
+                y += FORM_ROW_H;
+            }
         }
         if let Some(error) = &self.form_error {
             label(
@@ -1737,18 +1885,19 @@ impl CalendarApp {
     /// it is empty and the keys are elsewhere, what it wants.
     fn draw_form_text(&self, frame: &mut Frame, form: &EventForm, field: FormField, rect: Rect) {
         let focused = self.form_field == field;
-        self.palette
-            .push_surface(frame, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        stroke(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             frame,
+            &self.palette,
             rect,
-            if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(field)),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            4.0,
-            if focused { 2.0 } else { 1.0 },
+            self.focus_ring_width,
         );
         if let Some(input) = form.input_ref(field) {
             if input.text().is_empty() && !focused {
@@ -1835,7 +1984,16 @@ impl CalendarApp {
             4.0,
             if focused { 2.0 } else { 1.0 },
         );
-        let text = form.choice_label(field);
+        // The colour itself, beside its name.
+        let text_from = if field == FormField::Colour {
+            let swatch = Rect::new(value.x + 8.0, value.y + (value.h - 16.0) / 2.0, 16.0, 16.0);
+            fill(frame, swatch, form.effective_colour(&self.palette), 3.0);
+            stroke(frame, swatch, self.palette.overlay0, 3.0, 1.0);
+            swatch.right() + 8.0
+        } else {
+            value.x + 8.0
+        };
+        let text = form.choice_label(field, &self.palette);
         label(
             frame,
             guitk::text::center_x(
@@ -1844,13 +2002,13 @@ impl CalendarApp {
                 FORM_TEXT_SIZE,
                 FontWeightHint::Regular,
             )
-            .max(value.x + 8.0),
+            .max(text_from),
             value.y + 8.0,
             text,
             FORM_TEXT_SIZE,
             self.palette.text,
             FontWeightHint::Regular,
-            Some((value.w - 16.0).max(0.0)),
+            Some((value.right() - 8.0 - text_from).max(0.0)),
         );
         frame.hit(Target::Field(field), value);
     }
@@ -2017,10 +2175,20 @@ impl CalendarApp {
         }
 
         if let Some(search) = layout.search {
-            fill(frame, search, self.palette.surface0, 4.0);
-            if self.search_focused {
-                stroke(frame, search, self.palette.blue, 4.0, 1.5);
-            }
+            // The toolkit's field, in the theme's shape (lane C,
+            // c-e-a-theme-can-shape-the-controls).
+            guitk::field::draw(
+                frame,
+                &self.palette,
+                search,
+                guitk::field::State {
+                    hovered: self.hover == Some(Target::SearchField),
+                    focused: self.search_focused,
+                    disabled: false,
+                    invalid: false,
+                },
+                self.focus_ring_width,
+            );
             let empty = self.search_query.is_empty();
             label(
                 frame,
@@ -3054,6 +3222,46 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
         Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
         Picked::Ignored => {}
     }
+    // What is under the pointer is drawn lit -- the form's fields under the
+    // form, the calendar's controls without it -- so the pointer is followed
+    // before the modal branches below, which drop all but a press.
+    if let Event::Mouse(mouse) = event
+        && matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Leave)
+    {
+        return track_pointer(state, mouse);
+    }
+    // The shortcut card is modal, and drawn over everything: while it is up,
+    // F1, `?` and Escape put it away and every other key is its own; a press,
+    // with any button, puts it away rather than reaching the control drawn
+    // under it; and the wheel turns nothing it covers. It was modal for none
+    // of it -- N opened a new event under it, Ctrl+S a save dialog, and a
+    // click acted on whatever it was drawn over. A move is followed above, so
+    // the light is right when it goes, and a release still ends a drag.
+    if state.show_help {
+        match event {
+            Event::Key(key) if key.pressed => {
+                let plain = textline::is_plain(key.modifiers);
+                let closes = match key.key {
+                    Key::F1 | Key::Escape => plain,
+                    Key::Slash => plain && key.modifiers.shift,
+                    _ => false,
+                };
+                if closes {
+                    state.show_help = false;
+                }
+                return EventResult::Consumed;
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    state.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
     // The form and the question before a delete are modal: every key and
     // every press is theirs while they are up.
     if state.form.is_some() {
@@ -3234,7 +3442,10 @@ impl CalendarApp {
 }
 
 fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
-    if key.modifiers.ctrl {
+    // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+S
+    // is a Polish `ś` -- it opened the save dialog, and in the search box
+    // it typed nothing.
+    if textline::is_ctrl_chord(key.modifiers) {
         return match key.key {
             Key::F => {
                 state.search_focused = true;
@@ -3257,6 +3468,27 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         };
     }
 
+    // Typed into the search box: what the key typed, AltGr's included, and
+    // not a command's letter -- Alt+W typed a `w` into the query.
+    if state.search_focused && textline::types_into_field(key) {
+        state.search_query.extend(key.typed());
+        state.search();
+        // The agenda is the only view that shows results, so a search that
+        // leaves you looking at a month grid has found nothing as far as the
+        // user can tell.
+        state.view = CalendarView::Agenda;
+        state.content_scroll = 0.0;
+        return EventResult::Consumed;
+    }
+
+    // Every other binding is on the key itself, and is the calendar's only
+    // with nothing but Shift held: a chord with Alt or the Windows key is
+    // the window's or the desktop's, and arrives carrying its key -- Alt+N
+    // opened a new event and Alt+Delete asked to delete one.
+    if !textline::is_plain(key.modifiers) {
+        return EventResult::Ignored;
+    }
+
     if state.search_focused {
         match key.key {
             Key::Escape => {
@@ -3274,16 +3506,6 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             }
             Key::Enter => {
                 state.search_focused = false;
-                return EventResult::Consumed;
-            }
-            _ if key.types_text() => {
-                state.search_query.extend(key.typed());
-                state.search();
-                // The agenda is the only view that shows results, so a search
-                // that leaves you looking at a month grid has found nothing as
-                // far as the user can tell.
-                state.view = CalendarView::Agenda;
-                state.content_scroll = 0.0;
                 return EventResult::Consumed;
             }
             _ => {}
@@ -3358,12 +3580,8 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             state.show_help = !state.show_help;
             EventResult::Consumed
         }
-        // Before the plain `Escape` arm below, which would otherwise take this
-        // and clear the selection while the list stayed up.
-        Key::Escape if state.show_help => {
-            state.show_help = false;
-            EventResult::Consumed
-        }
+        // (While the list is up its own keys never get here: `route_event`
+        // takes every key the card is up for.)
         Key::Escape => {
             state.selected_event_id = Option::None;
             EventResult::Consumed
@@ -3403,8 +3621,12 @@ fn handle_form_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     if !fields.contains(&state.form_field) {
         state.form_field = fields.first().copied().unwrap_or(FormField::Title);
     }
+    // The form's own keys are taken plain (Shift+Tab walks back): Alt+Enter
+    // saved it and Alt+Escape threw it away. Anything else goes to the
+    // field, which knows a command from typing.
+    let plain = textline::is_plain(key.modifiers);
     match key.key {
-        Key::Tab => {
+        Key::Tab if plain => {
             let at = fields
                 .iter()
                 .position(|f| *f == state.form_field)
@@ -3413,18 +3635,19 @@ fn handle_form_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             state.form_field = fields.get(next).copied().unwrap_or(state.form_field);
             EventResult::Consumed
         }
-        Key::Enter => {
+        Key::Enter if plain => {
             state.save_form();
             EventResult::Consumed
         }
-        Key::Escape => {
+        Key::Escape if plain => {
             state.cancel_form();
             EventResult::Consumed
         }
-        Key::Left | Key::Right | Key::Space if !state.form_field.is_text() => {
+        Key::Left | Key::Right | Key::Space if plain && !state.form_field.is_text() => {
             let (field, forward) = (state.form_field, key.key != Key::Left);
+            let pal = state.palette;
             if let Some(form) = state.form.as_mut()
-                && form.step(field, forward)
+                && form.step(field, forward, &pal)
             {
                 state.form_error = None;
                 EventResult::Consumed
@@ -3461,17 +3684,19 @@ fn handle_form_click(state: &mut CalendarApp, hit: Option<Target>) -> EventResul
         Some(Target::Field(field)) => {
             state.form_field = field;
             // A press on a chosen value steps it on, as the arrow after it does.
+            let pal = state.palette;
             if !field.is_text()
                 && let Some(form) = state.form.as_mut()
             {
-                form.step(field, true);
+                form.step(field, true, &pal);
             }
         }
         Some(Target::StepBack(field) | Target::StepForward(field)) => {
             state.form_field = field;
             let forward = matches!(hit, Some(Target::StepForward(_)));
+            let pal = state.palette;
             if let Some(form) = state.form.as_mut() {
-                form.step(field, forward);
+                form.step(field, forward, &pal);
             }
         }
         Some(Target::Save) => state.save_form(),
@@ -3491,12 +3716,32 @@ fn handle_form_click(state: &mut CalendarApp, hit: Option<Target>) -> EventResul
 /// keeps it; every other key is swallowed, since a key that reached the
 /// calendar would be acted on under a question it has not answered.
 fn handle_confirm_key(state: &mut CalendarApp, id: u64, key: &KeyEvent) -> EventResult {
+    // Answered by a plain key only: Alt+Y, a chord that is not an answer,
+    // deleted the event.
+    if !textline::is_plain(key.modifiers) {
+        return EventResult::Consumed;
+    }
     match key.key {
         Key::Enter | Key::Y => state.delete_event(id),
         Key::Escape | Key::N => state.pending_delete = None,
         _ => {}
     }
     EventResult::Consumed
+}
+
+/// The pointer moved or left: what is under it now is drawn lit. Only a
+/// change in that is worth a redraw.
+fn track_pointer(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
+    let over = match mouse.kind {
+        MouseEventKind::Move => state.target_at(mouse.x, mouse.y),
+        _ => None,
+    };
+    if over == state.hover {
+        EventResult::Ignored
+    } else {
+        state.hover = over;
+        EventResult::Consumed
+    }
 }
 
 fn handle_mouse(state: &mut CalendarApp, mouse: &MouseEvent) -> EventResult {
@@ -3619,6 +3864,10 @@ impl App for CalendarApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         String::from("Calendar")
     }
@@ -3663,6 +3912,118 @@ impl App for CalendarApp {
             question.render(&palette, width, height, &mut tree);
         }
         tree
+    }
+}
+
+#[cfg(test)]
+mod field_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use guitk::probe;
+
+    /// The search box and the event form's fields are the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, out when it
+    /// leaves, and marked at the user's focus width while they have the
+    /// keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let today = Date {
+            year: 2026,
+            month: 9,
+            day: 8,
+        };
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &CalendarApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame(app.width, app.height);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |app: &mut CalendarApp, x: f32, y: f32, kind: MouseEventKind| {
+            handle_event(app, &Event::Mouse(MouseEvent { x, y, kind }))
+        };
+
+        let search = probe::rect_of(&app, Target::SearchField).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        assert_eq!(
+            pointer(&mut app, x, y, MouseEventKind::Move),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            pointer(&mut app, x + 1.0, y, MouseEventKind::Move),
+            EventResult::Ignored,
+            "a move that changed nothing redrew the window"
+        );
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+        assert_eq!(
+            pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave),
+            EventResult::Consumed
+        );
+        assert!(
+            draws(&app, search, idle),
+            "the box stayed lit after the pointer left"
+        );
+        probe::click(&mut app, Target::SearchField);
+        assert!(
+            draws(&app, search, keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+
+        probe::click(&mut app, Target::NewEvent);
+        let first = app.form_field;
+        let rect = probe::rect_of(&app, Target::Field(first)).expect("the first field");
+        assert!(
+            draws(&app, rect, keyed),
+            "the field with the keyboard is not marked at the user's width"
+        );
+        let place = probe::rect_of(&app, Target::Field(FormField::Place)).expect("place");
+        let (px, py) = place.centre();
+        pointer(&mut app, px, py, MouseEventKind::Move);
+        assert!(
+            draws(&app, place, lit),
+            "a form field under the pointer is not lit"
+        );
     }
 }
 
@@ -3928,8 +4289,65 @@ fn main() -> ExitCode {
     });
     // The events kept last time. It used to open on `sample_events`, and
     // then empty, and kept nothing.
+    let args = match app::ArgsOs::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("calendar: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let asked = match Asked::from_args(&args.rest) {
+        Ok(asked) => asked,
+        Err(e) => {
+            eprintln!("calendar: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let mut app = CalendarApp::from_settings(DEFAULT_WIDTH, DEFAULT_HEIGHT, today);
-    app::launch("calendar", &mut app)
+    if let Asked::EventColour(id) = asked {
+        app.open_event_colour(id);
+    }
+    app::launch_with("calendar", args.display.as_deref(), &mut app)
+}
+
+/// What the command line asks the calendar to open at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    /// The calendar as it was left.
+    Calendar,
+    /// `--event-colour ID`: that event's form, at its colour.
+    EventColour(u64),
+}
+
+impl Asked {
+    /// The arguments after the display's, as given.
+    ///
+    /// # Errors
+    ///
+    /// A message fit to print for an argument the calendar does not take,
+    /// or `--event-colour` without an event's number.
+    fn from_args(rest: &[std::ffi::OsString]) -> Result<Self, String> {
+        match rest {
+            [] => Ok(Self::Calendar),
+            [flag, id] if flag == "--event-colour" => id
+                .to_str()
+                .and_then(|id| id.parse::<u64>().ok())
+                .map(Self::EventColour)
+                .ok_or_else(|| {
+                    format!(
+                        "--event-colour needs an event's number, not '{}'",
+                        id.as_os_str().shown()
+                    )
+                }),
+            [flag] if flag == "--event-colour" => {
+                Err(String::from("--event-colour needs an event's number"))
+            }
+            [other, ..] => Err(format!(
+                "no such argument '{}' (the calendar takes --event-colour ID)",
+                other.as_os_str().shown()
+            )),
+        }
+    }
 }
 
 // ============================================================================
@@ -5775,6 +6193,80 @@ mod tests {
         );
     }
 
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts; a press
+    /// puts it away and does nothing else; the wheel turns nothing under it.
+    /// It was modal for none of it. The controls at the end are the same
+    /// key, press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = sample_app(june_2024());
+        let card_up = |app: &CalendarApp| help_text(app).contains("? closes this");
+        let bar = app.layout().sidebar.expect("the sidebar fits at 1280x720");
+        let (bx, by) = bar.centre();
+        let wheel = |app: &mut CalendarApp| {
+            handle_event(
+                app,
+                &Event::Mouse(MouseEvent {
+                    x: bx,
+                    y: by,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+                }),
+            )
+        };
+        let month = app.mini_cal_month;
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        assert!(card_up(&app));
+        probe::key(&mut app, &probe::press(Key::N));
+        assert!(app.form.is_none(), "N opened a new event under the card");
+        probe::key(&mut app, &probe::ctrl(Key::S));
+        assert!(
+            !app.picker.is_open(),
+            "Ctrl+S opened the save dialog under the card"
+        );
+        wheel(&mut app);
+        assert_eq!(
+            app.mini_cal_month, month,
+            "the wheel turned the month under the card"
+        );
+        assert!(
+            card_up(&app),
+            "a key or turn that is not the card's put it away"
+        );
+
+        probe::click(&mut app, Target::NewEvent);
+        assert!(!card_up(&app), "the press did not put the card away");
+        assert!(
+            app.form.is_none(),
+            "the press went through the card to New event"
+        );
+
+        // Any button, and the card's own keys.
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::click_with(&mut app, Target::NewEvent, MouseButton::Right);
+        assert!(!card_up(&app), "a right-button press left the card up");
+        probe::key(&mut app, &probe::press(Key::F1));
+        for stroke in guitk::shortcut::keystrokes("?").unwrap_or_else(|e| panic!("{e}")) {
+            handle_event(&mut app, &Event::Key(stroke));
+        }
+        assert!(!card_up(&app), "? did not put the card away");
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!card_up(&app), "Escape did not put the card away");
+
+        wheel(&mut app);
+        assert_ne!(
+            app.mini_cal_month, month,
+            "control: the wheel turns nothing"
+        );
+        probe::key(&mut app, &probe::press(Key::N));
+        assert!(
+            app.form.is_some(),
+            "control: N does nothing with the card down"
+        );
+    }
+
     /// **The clock can be put into 24-hour time.**
     ///
     /// `use_24h` was `false` at construction and written nowhere, so every
@@ -6166,6 +6658,216 @@ mod tests {
         Date::new(2026, 9, 26).unwrap()
     }
 
+    // ------------------------------------------------------------------
+    // An event's colour, and the warning when the accent hides it (C-Q19)
+    // ------------------------------------------------------------------
+
+    /// **The colour field offers the category's colour, then every hue of
+    /// the palette by name**, round from the last to the first.
+    #[test]
+    fn the_colour_field_offers_the_category_then_every_hue() {
+        let pal = Palette::for_mode(false);
+        let mut form = EventForm::new_on(a_saturday());
+        assert_eq!(
+            form.choice_label(FormField::Colour, &pal),
+            "As its category (Personal)"
+        );
+        let mut seen = Vec::new();
+        for _ in palette_hues(&pal) {
+            assert!(form.step(FormField::Colour, true, &pal));
+            seen.push(form.choice_label(FormField::Colour, &pal));
+        }
+        let names: Vec<String> = palette_hues(&pal)
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        assert_eq!(seen, names);
+        form.step(FormField::Colour, true, &pal);
+        assert_eq!(form.color_override, None, "the list did not come round");
+        form.step(FormField::Colour, false, &pal);
+        assert_eq!(form.color_override, Some(pal.rosewater));
+    }
+
+    /// **An event's own colour -- one no hue of the palette is -- is offered
+    /// beside them**, so changing its title does not change its colour.
+    #[test]
+    fn an_events_own_colour_is_offered_beside_the_hues() {
+        let pal = Palette::for_mode(false);
+        let own = Color::from_hex(0x12_34_56);
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let id = add_event_at(&mut app, a_saturday(), 9, "Imported");
+        let mut e = app.store.get(id).unwrap().clone();
+        e.color_override = Some(own);
+        let mut form = EventForm::editing(&e);
+        assert_eq!(
+            form.choice_label(FormField::Colour, &pal),
+            "Its own, #123456"
+        );
+        assert_eq!(form.to_event().unwrap().color_override, Some(own));
+        form.step(FormField::Colour, true, &pal);
+        assert_eq!(form.color_override, None, "its own is the last choice");
+        form.step(FormField::Colour, false, &pal);
+        assert_eq!(form.color_override, Some(own));
+    }
+
+    /// **The warning shows exactly when the colour is too close to the
+    /// accent** -- the one test Settings asks too -- and a colour apart from
+    /// it shows none. Over every choice, in both modes, with the accents
+    /// the user can pick.
+    #[test]
+    fn a_colour_too_close_to_the_accent_is_warned_of() {
+        let (mut clashed, mut apart) = (false, false);
+        for light in [false, true] {
+            for accent in [
+                appearance::AccentColor::Blue,
+                appearance::AccentColor::Teal,
+                appearance::AccentColor::Mauve,
+            ] {
+                let pal = Palette::from_settings(&appearance::AppearanceSettings {
+                    theme_mode: if light {
+                        appearance::ThemeMode::Light
+                    } else {
+                        appearance::ThemeMode::Dark
+                    },
+                    accent_color: accent,
+                    ..appearance::AppearanceSettings::default()
+                });
+                let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+                app.theme_changed(&pal);
+                app.open_new_event();
+                let choices = app.form.as_ref().unwrap().colour_choices(&pal);
+                for choice in choices {
+                    app.form.as_mut().unwrap().color_override = choice;
+                    let colour = app.form.as_ref().unwrap().effective_colour(&pal);
+                    let clash = appearance::hard_to_tell_apart(colour, pal.accent);
+                    let said = drawn(&app).contains(COLOUR_WARNING[0]);
+                    assert_eq!(said, clash, "{choice:?} under {accent:?}, light {light}");
+                    clashed |= clash;
+                    apart |= !clash;
+                }
+            }
+        }
+        assert!(clashed && apart, "the choices never clash, or always do");
+    }
+
+    /// **A colour close to the accent is kept as chosen**: the warning
+    /// warns, and the event is saved in it (§1424 -- never refused, never
+    /// moved).
+    #[test]
+    fn a_colour_close_to_the_accent_is_kept_as_chosen() {
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let id = add_event_at(&mut app, a_saturday(), 9, "Standup");
+        app.open_event_colour(id);
+        let pal = app.palette;
+        let accent = pal.accent;
+        let clashing = palette_hues(&pal)
+            .into_iter()
+            .map(|(_, c)| c)
+            .find(|c| appearance::hard_to_tell_apart(*c, accent))
+            .expect("some hue is close to the accent");
+        // Every choice is one press on: the category's colour, then the
+        // palette's hues. More presses than that and the keys are not
+        // reaching the colour -- a failure, not a test that never ends.
+        for _ in 0..=palette_hues(&pal).len() {
+            if app.form.as_ref().unwrap().color_override == Some(clashing) {
+                break;
+            }
+            probe::key(&mut app, &probe::press(Key::Right));
+        }
+        assert_eq!(
+            app.form.as_ref().unwrap().color_override,
+            Some(clashing),
+            "the keys never reached the colour"
+        );
+        assert!(drawn(&app).contains(COLOUR_WARNING[0]));
+        app.save_form();
+        assert!(app.form.is_none(), "the form was not saved");
+        assert_eq!(app.store.get(id).unwrap().color_override, Some(clashing));
+    }
+
+    /// **The warning has a row of its own**: the fields after the colour
+    /// move down to make room for it, so it covers none of them.
+    #[test]
+    fn the_colour_warning_has_a_row_of_its_own() {
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        app.open_new_event();
+        let pal = app.palette;
+        let at = |app: &CalendarApp, field| probe::rect_of(app, Target::Field(field)).unwrap();
+        let mut quiet = None;
+        let mut loud = None;
+        for choice in app.form.as_ref().unwrap().colour_choices(&pal) {
+            app.form.as_mut().unwrap().color_override = choice;
+            let gap = at(&app, FormField::Repeats).y - at(&app, FormField::Colour).y;
+            if app.colour_clashes(app.form.as_ref().unwrap()) {
+                loud = Some(gap);
+            } else {
+                quiet = Some(gap);
+            }
+        }
+        let (quiet, loud) = (quiet.unwrap(), loud.unwrap());
+        assert!(
+            (loud - quiet - FORM_ROW_H).abs() < 0.01,
+            "{quiet} then {loud}"
+        );
+    }
+
+    /// **The field shows the colour itself**, beside its name.
+    #[test]
+    fn the_colour_field_shows_the_colour() {
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        app.open_new_event();
+        let pal = app.palette;
+        for _ in 0..3 {
+            let colour = app.form.as_ref().unwrap().effective_colour(&pal);
+            let field = probe::rect_of(&app, Target::Field(FormField::Colour)).unwrap();
+            let shown = render(&app).iter().any(|c| {
+                matches!(c, RenderCommand::FillRect { x, y, color, .. }
+                    if *color == colour && field.contains(*x + 1.0, *y + 1.0))
+            });
+            assert!(shown, "{colour:?} is not in the field");
+            app.form
+                .as_mut()
+                .unwrap()
+                .step(FormField::Colour, true, &pal);
+        }
+    }
+
+    /// **`--event-colour ID` opens that event's form at its colour**, the
+    /// way Settings' accent warning takes the user to an event the accent
+    /// hides; an event that is not there says so, and any other argument is
+    /// refused rather than ignored.
+    #[test]
+    fn the_argument_opens_an_events_colour() {
+        let args = |a: &[&str]| -> Vec<std::ffi::OsString> {
+            a.iter().map(std::ffi::OsString::from).collect()
+        };
+        assert_eq!(Asked::from_args(&[]), Ok(Asked::Calendar));
+        assert_eq!(
+            Asked::from_args(&args(&["--event-colour", "7"])),
+            Ok(Asked::EventColour(7))
+        );
+        assert!(Asked::from_args(&args(&["--event-colour"])).is_err());
+        let err = Asked::from_args(&args(&["--event-colour", "seven"])).unwrap_err();
+        assert!(err.contains("'seven'"), "{err}");
+        let err = Asked::from_args(&args(&["--frobnicate"])).unwrap_err();
+        assert!(err.contains("'--frobnicate'"), "{err}");
+
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let id = add_event_at(&mut app, a_saturday(), 9, "Dentist");
+        app.open_event_colour(id);
+        assert_eq!(app.form.as_ref().and_then(|f| f.id), Some(id));
+        assert_eq!(app.form_field, FormField::Colour);
+
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        app.open_event_colour(999);
+        assert!(app.form.is_none());
+        assert!(
+            drawn(&app).contains("There is no event 999"),
+            "{}",
+            drawn(&app)
+        );
+    }
+
     /// An event of every kind the file has to hold: text that needs escaping
     /// in every free field, a colour, a repeat on named days, a reminder.
     fn awkward_event(title: &str) -> CalendarEvent {
@@ -6497,11 +7199,14 @@ mod tests {
         let mut e = awkward_event("Pills");
         e.recurrence = RecurrenceRule::Custom { interval_days: 3 };
         let mut form = EventForm::editing(&e);
-        assert_eq!(form.choice_label(FormField::Repeats), "Every 3 days");
-        let mut seen = vec![form.choice_label(FormField::Repeats)];
+        assert_eq!(
+            form.choice_label(FormField::Repeats, &Palette::for_mode(false)),
+            "Every 3 days"
+        );
+        let mut seen = vec![form.choice_label(FormField::Repeats, &Palette::for_mode(false))];
         for _ in 0..7 {
-            assert!(form.step(FormField::Repeats, true));
-            seen.push(form.choice_label(FormField::Repeats));
+            assert!(form.step(FormField::Repeats, true, &Palette::for_mode(false)));
+            seen.push(form.choice_label(FormField::Repeats, &Palette::for_mode(false)));
         }
         assert_eq!(
             seen,
@@ -6516,12 +7221,105 @@ mod tests {
                 "Every 3 days",
             ]
         );
-        form.step(FormField::Repeats, false);
-        assert_eq!(form.choice_label(FormField::Repeats), "Yearly");
+        form.step(FormField::Repeats, false, &Palette::for_mode(false));
+        assert_eq!(
+            form.choice_label(FormField::Repeats, &Palette::for_mode(false)),
+            "Yearly"
+        );
         // A new event's list has no seventh entry.
         let mut fresh = EventForm::new_on(a_saturday());
-        fresh.step(FormField::Repeats, false);
-        assert_eq!(fresh.choice_label(FormField::Repeats), "Yearly");
+        fresh.step(FormField::Repeats, false, &Palette::for_mode(false));
+        assert_eq!(
+            fresh.choice_label(FormField::Repeats, &Palette::for_mode(false)),
+            "Yearly"
+        );
+    }
+
+    /// **A key held with Alt or the Windows key is not the calendar's, and
+    /// AltGr is not Ctrl**: Alt+N opened a new event, Alt+Y answered "delete
+    /// this event?", Alt+W typed a `w` into the search, and AltGr+S -- a
+    /// Polish `ś` -- opened the save dialog rather than typing.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_calendars() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let id = app.store.add(awkward_event("Kept"));
+        app.selected_event_id = Some(id);
+        let (view, date, week) = (app.view, app.view_date, app.week_starts_monday);
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for key in [
+                Key::N,
+                Key::W,
+                Key::Num2,
+                Key::Right,
+                Key::F1,
+                Key::S,
+                Key::Delete,
+            ] {
+                assert_eq!(
+                    probe::key(&mut app, &probe::press_with(key, held)),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert!(app.form.is_none(), "a chord opened a new event");
+        assert_eq!(
+            (app.view, app.view_date),
+            (view, date),
+            "a chord moved the calendar"
+        );
+        assert_eq!(app.week_starts_monday, week, "a chord changed the week");
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(!app.picker.is_open(), "AltGr+S opened the save dialog");
+        assert_eq!(app.pending_delete, None, "a chord asked to delete");
+
+        // The question before a delete is answered by a plain key only.
+        app.pending_delete = Some(id);
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            probe::key(&mut app, &probe::press_with(Key::Y, held));
+            probe::key(&mut app, &probe::press_with(Key::Enter, held));
+        }
+        assert_eq!(app.store.len(), 1, "a chord deleted the event");
+        assert_eq!(
+            app.pending_delete,
+            Some(id),
+            "a chord answered the question"
+        );
+        app.pending_delete = None;
+
+        // The form's own keys are plain: Alt+Enter does not save it, nor
+        // Alt+Escape throw it away.
+        probe::key(&mut app, &probe::press(Key::N));
+        assert!(app.form.is_some(), "control: N opens the form");
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            probe::key(&mut app, &probe::press_with(Key::Enter, held));
+            probe::key(&mut app, &probe::press_with(Key::Escape, held));
+        }
+        assert!(app.form.is_some(), "a chord closed the form");
+        assert_eq!(app.store.len(), 1, "a chord saved the form");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(app.form.is_none(), "control: Escape closes the form");
+
+        // The search types what a key typed -- AltGr's `ś` among it -- and
+        // not a command's letter.
+        app.search_focused = true;
+        let typed = |key: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        probe::key(&mut app, &typed(Key::W, "w", Modifiers::alt()));
+        probe::key(&mut app, &typed(Key::W, "w", Modifiers::super_key()));
+        assert_eq!(app.search_query, "", "a command's letter was typed");
+        probe::key(&mut app, &typed(Key::S, "ś", altgr));
+        assert_eq!(app.search_query, "ś", "AltGr's ś was not typed");
+        assert!(!app.picker.is_open(), "AltGr+S opened the save dialog");
     }
 
     #[test]

@@ -67,6 +67,10 @@
 //! jamo or a tone mark, neither of which normalization touches — unlike the
 //! Thai pass in [`thai`](crate::thai), which has to run before the sort
 //! because the mark it produces would be sorted to the wrong side.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-ot-shaper-hangul.cc`,
+//! copyright © 2013 Google, Inc. Used under HarfBuzz's licence: see
+//! `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 

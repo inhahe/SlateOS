@@ -22,26 +22,54 @@
 //! *file*, so the pattern is as much untrusted input as the subject is.
 //!
 //! ## Supported syntax
-//! `. ^ $`, literals, `\`-escapes (`\.`, `\(`, `\\`, `\n`, `\t`, `\r`, …),
-//! grouping `( … )` (capturing → `BASH_REMATCH`), alternation `a|b`, the
-//! quantifiers `* + ?` and bounded `{m}` / `{m,}` / `{m,n}` (greedy), and
-//! bracket expressions `[...]` / `[^...]` with ranges (`a-z`), literal-`]`/`-`
-//! placement, and POSIX classes (`[[:digit:]]`, `[[:alpha:]]`, …). Non-ERE
-//! Perl shorthands (`\d`, `\w`, `\s`, non-greedy `*?`, backreferences) are
-//! intentionally not provided — `bash`'s `=~` is POSIX ERE, not PCRE.
+//! `. ^ $`, literals, grouping `( … )` (capturing → `BASH_REMATCH`),
+//! alternation `a|b`, the quantifiers `* + ?` and bounded `{m}` / `{m,}` /
+//! `{m,n}` (greedy), bracket expressions `[...]` / `[^...]` with ranges
+//! (`a-z`), literal-`]`/`-` placement and POSIX classes (`[[:digit:]]`,
+//! `[[:alpha:]]`, …), the backreferences `\1`–`\9`, and the GNU operators
+//! `\w \W \s \S \b \B \< \>` and the buffer anchors `` \` `` and `\'`. Perl's
+//! `\d` and non-greedy `*?` are not provided — `bash`'s `=~` is POSIX ERE, not
+//! PCRE — and `\d` is simply a `d`, as it is in glibc.
+//!
+//! ## A backslash means what it means to glibc, and nothing more
+//! Before any other character a backslash makes that character literal: `\.`
+//! is a dot, `\(` a parenthesis, `\\` a backslash. There are **no C escapes**:
+//! `\t` is a `t` and `\n` an `n`, exactly as glibc's `regcomp` reads them, so
+//! `grep -E 'a\tb'` matches `atb`. A program whose *language* has C escapes —
+//! awk, whose regexes POSIX gives them, and sed, which GNU gives them —
+//! resolves them before the pattern reaches this engine, which is where gawk
+//! and GNU sed resolve them too.
+//!
+//! Inside a bracket expression a backslash is an ordinary member, as POSIX
+//! says: `[\.]` is a backslash or a dot, and `[\t]` a backslash or a `t`.
+//! Only a dialect with [`Syntax::backslash_escape_in_lists`] — awk's — reads
+//! it as quoting the next character there.
+//!
+//! The engine used to read C escapes in both places, which was right for awk
+//! and wrong for everyone else: `grep -E '[\.]'` missed a backslash, `grep
+//! 'a\tb'` matched a tab, and `sed 's/[\.]/X/'` left a backslash alone. See
+//! `known-issues.md`, TD-B-ERE-BRACKET-BACKSLASH.
 //!
 //! ## Characters, not bytes and not `char`s
 //! A shell value is bytes, and a SlateOS path may hold any byte but `/` and
 //! NUL, so both the subject and the pattern can contain a byte that begins no
 //! valid UTF-8 sequence. The engine therefore scans [`Ch`] — a decoded scalar
-//! *or* one undecodable byte — exactly as the glob engine does. That is the
-//! only reading that makes `.` match such a byte as **one** character rather
-//! than as a third of an `é`, and it is what lets `[[ $f =~ ^a ]]` answer for a
-//! filename the locale cannot decode. ERE *syntax* is entirely ASCII, so every
-//! metacharacter test goes through [`Ch::as_ascii`] and no encoding question
-//! arises in the parser.
+//! *or* one undecodable byte — exactly as the glob engine does. That keeps a
+//! match from ever splitting an `é`, and it is what lets `[[ $f =~ ^a ]]`
+//! answer for a filename the locale cannot decode. ERE *syntax* is entirely
+//! ASCII, so every metacharacter test goes through [`Ch::as_ascii`] and no
+//! encoding question arises in the parser.
+//!
+//! An undecodable byte is a character for spans and for a literal byte in the
+//! pattern, but **`.` and bracket expressions do not match it** -- as in
+//! glibc's UTF-8 locales, where GNU `grep 'a.b'`, `sed` and bash's `=~` all
+//! fail to match `a\xffb` and all match it in the C locale. The C locale's
+//! reading is [`Regex::with_byte_chars`]. See `takes`. (Until 2026-10-02 `.`
+//! did match it, a deliberate choice that matched none of the programs it
+//! stood in for; `tac -r -s '.'` on such a file was where it showed.)
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -395,13 +423,12 @@ impl WordAssert {
     ///
     /// Off either end counts as "not a word character", which is what makes
     /// `\bx\b` match the whole of a one-character subject.
-    fn holds_at(self, input: &[Ch], sp: usize) -> bool {
+    fn holds_at<S: Subject + ?Sized>(self, input: &S, sp: usize) -> bool {
         let before = sp
             .checked_sub(1)
-            .and_then(|i| input.get(i))
-            .copied()
+            .and_then(|i| input.at(i))
             .is_some_and(is_word_ch);
-        let after = input.get(sp).copied().is_some_and(is_word_ch);
+        let after = input.at(sp).is_some_and(is_word_ch);
         match self {
             WordAssert::Boundary => before != after,
             WordAssert::NotBoundary => before == after,
@@ -439,15 +466,71 @@ impl ClassData {
     /// this reduces to the plain test.
     fn matches_ci(&self, c: Ch, ci: bool) -> bool {
         let mut hit = self.hit_positive(c);
-        if ci && !hit {
-            for alt in c.to_lowercase().into_iter().chain(c.to_uppercase()) {
-                if alt != c && self.hit_positive(alt) {
-                    hit = true;
-                    break;
-                }
-            }
+        if ci
+            && !hit
+            && let Ch::U(u) = c
+        {
+            hit = u
+                .to_lowercase()
+                .chain(u.to_uppercase())
+                .any(|alt| alt != u && self.hit_positive(Ch::U(alt)));
         }
         hit ^ self.negated
+    }
+}
+
+/// A set of the 256 characters a byte can be read as ([`bytes::byte_ch`]),
+/// one bit each.
+type ByteSet = [u64; 4];
+
+/// The byte character `c` is read from -- the inverse of [`bytes::byte_ch`] --
+/// or `None` for a character no byte is read as (a decoded non-ASCII one).
+fn byte_index(c: Ch) -> Option<u8> {
+    match c {
+        Ch::U(u) => u8::try_from(u).ok().filter(u8::is_ascii),
+        Ch::B(b) => Some(b).filter(|b| !b.is_ascii()),
+    }
+}
+
+/// The byte characters for which `test` holds.
+fn byte_set(mut test: impl FnMut(Ch) -> bool) -> ByteSet {
+    let mut set = [0u64; 4];
+    for b in 0..=u8::MAX {
+        if test(bytes::byte_ch(b))
+            && let Some(word) = set.get_mut(usize::from(b >> 6))
+        {
+            *word |= 1 << (b & 63);
+        }
+    }
+    set
+}
+
+/// Whether byte character `b` is in `set`.
+fn in_byte_set(set: &ByteSet, b: u8) -> bool {
+    set.get(usize::from(b >> 6))
+        .is_some_and(|word| (word >> (b & 63)) & 1 != 0)
+}
+
+/// A bracket expression as the matchers run it: the class, and its answer for
+/// every byte character worked out when the pattern is compiled -- which is
+/// every character of a subject read a byte at a time, and the ASCII ones of
+/// any other. Testing one is then a bit, where the class itself is a walk of
+/// its ranges and named classes, with case folding on top.
+#[derive(Debug, Clone)]
+struct ClassInst {
+    data: ClassData,
+    /// [`ClassData::matches_ci`] of each byte character, under the regex's
+    /// case sensitivity.
+    set: ByteSet,
+}
+
+impl ClassInst {
+    /// [`ClassData::matches_ci`], `ci` being the one the set was made with.
+    fn matches(&self, c: Ch, ci: bool) -> bool {
+        match byte_index(c) {
+            Some(b) => in_byte_set(&self.set, b),
+            None => self.data.matches_ci(c, ci),
+        }
     }
 }
 
@@ -515,11 +598,12 @@ impl PosixClass {
 
 /// Which ERE dialect a pattern is written in.
 ///
-/// The grammar is the same in both; what differs is what happens to two kinds
-/// of nonsense. That is not a distinction this crate invented — it is glibc's
-/// `reg_syntax_t` bits, and our callers genuinely want different ones:
-/// `osh`'s `[[ =~ ]]`, `find -regextype posix-extended`, `sed -E` and `awk`
-/// want [`Syntax::POSIX_EXTENDED`], while `grep -E` wants [`Syntax::EGREP`].
+/// The grammar is the same in all of them; what differs is what happens to a
+/// few kinds of nonsense, and what a backslash means in two places. That is
+/// not a distinction this crate invented — it is glibc's `reg_syntax_t` bits,
+/// and our callers genuinely want different ones: `osh`'s `[[ =~ ]]`, `find
+/// -regextype posix-extended` and `sed -E` want [`Syntax::POSIX_EXTENDED`],
+/// `grep -E` wants [`Syntax::EGREP`], and `awk` wants [`Syntax::POSIX_AWK`].
 ///
 /// The two-caller problem is real and was measured, not assumed. Against
 /// glibc 2.39 / findutils 4.9.0 / grep 3.11, in `C.UTF-8`:
@@ -562,14 +646,85 @@ pub struct Syntax {
     /// left with no members at all is legal and is what it says: `[z-a]`
     /// matches nothing and `[^z-a]` matches any character.
     pub empty_ranges: bool,
+    /// Inside a bracket expression, a backslash quotes the character after it
+    /// -- `[\]]` holds a `]` and `[\\]` one backslash -- instead of being a
+    /// member itself.
+    ///
+    /// glibc's `RE_BACKSLASH_ESCAPE_IN_LISTS`, which every awk syntax sets and
+    /// nothing else does. Without it a backslash is an ordinary member, as
+    /// POSIX requires: `[\.]` is a backslash or a dot. A backslash with nothing
+    /// after it is a member under either reading, which leaves the bracket
+    /// unclosed. Measured against grep 3.11, sed 4.9 and gawk 5.2.1
+    /// `--posix`: `^[\.]$` matches a backslash for the first two and not for
+    /// gawk, and `^[\]]$` matches `\]` for the first two and `]` for gawk.
+    pub backslash_escape_in_lists: bool,
+    /// `\w \W \s \S \b \B \< \>` and the buffer anchors `` \` `` and `\'` are
+    /// the literal characters, not operators.
+    ///
+    /// glibc's `RE_NO_GNU_OPS`, which POSIX awk's syntax sets: `gawk --posix
+    /// '/^\w$/'` matches the line `w`. Every other caller here wants the
+    /// operators, which glibc reads in both of its POSIX dialects.
+    pub no_gnu_ops: bool,
+    /// A repetition operator with nothing to repeat -- at the start of the
+    /// pattern, a branch or a group, or straight after an assertion -- is the
+    /// character itself, instead of an error. `context_indep_ops`, when set,
+    /// wins: then it repeats the empty expression.
+    ///
+    /// glibc's syntaxes with neither `RE_CONTEXT_INDEP_OPS` nor
+    /// `RE_CONTEXT_INVALID_OPS`, whose `parse_expression` falls through to
+    /// "We treat it as a normal character": the two awk syntaxes findutils
+    /// offers, `awk` and `gnu-awk`. Measured: `find -regextype gnu-awk -regex
+    /// 'ft/(*a)'` finds the file `*a`, where `posix-awk` refuses the pattern
+    /// and `egrep` finds `a`.
+    pub leading_repeat_literal: bool,
+    /// `{` is always the character: there are no intervals at all.
+    ///
+    /// glibc's syntax without `RE_INTERVALS`, which is `RE_SYNTAX_AWK`:
+    /// `find -regextype awk -regex 't/a{2}'` finds the file `a{2}`, not `aa`.
+    pub no_intervals: bool,
+    /// `\1`–`\9` are the digits, not backreferences.
+    ///
+    /// glibc's `RE_NO_BK_REFS`, which `RE_SYNTAX_AWK` sets: `find -regextype
+    /// awk -regex 't/a\1'` finds the file `a1`, where every other type refuses
+    /// the pattern ("Invalid back reference").
+    pub no_backrefs: bool,
+    /// `.` does not match a newline.
+    ///
+    /// glibc's syntax *without* `RE_DOT_NEWLINE`. Every POSIX syntax sets that
+    /// bit, so `.` matches a newline everywhere -- except after `regcomp`'s
+    /// `REG_NEWLINE`, which clears it; see [`Syntax::reg_newline`].
+    pub dot_not_newline: bool,
+    /// A bracket that begins with `^` does not match a newline: `[^a]` matches
+    /// every character except `a` and the newline.
+    ///
+    /// glibc's `RE_HAT_LISTS_NOT_NEWLINE`, which only `REG_NEWLINE` sets among
+    /// the dialects here; see [`Syntax::reg_newline`].
+    pub hat_lists_not_newline: bool,
+    /// A `)` that closes no group is the character `)`. Without it, it is an
+    /// error: `Unmatched ) or \)`.
+    ///
+    /// glibc's `RE_UNMATCHED_RIGHT_PAREN_ORD`, which `RE_SYNTAX_POSIX_EXTENDED`
+    /// and every dialect here sets -- `grep -E 'a)'`, `find -regex`, awk and
+    /// bash's `=~` all match the text `a)` -- and which GNU sed clears in its
+    /// default mode: `sed -E 's/a)/X/'` is `Unmatched ) or \)`, measured, sed
+    /// 4.9. Under `POSIXLY_CORRECT` or `--posix` sed sets it again.
+    pub unmatched_right_paren_ord: bool,
 }
 
 impl Syntax {
-    /// `RE_SYNTAX_POSIX_EXTENDED`: what `osh`, `find`, `sed -E` and `awk` use.
+    /// `RE_SYNTAX_POSIX_EXTENDED`: what `osh`, `find` and `sed -E` use.
     pub const POSIX_EXTENDED: Syntax = Syntax {
         context_indep_ops: false,
         invalid_interval_ord: false,
         empty_ranges: false,
+        backslash_escape_in_lists: false,
+        no_gnu_ops: false,
+        leading_repeat_literal: false,
+        no_intervals: false,
+        no_backrefs: false,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
     };
 
     /// `RE_SYNTAX_EGREP` as GNU `grep -E` applies it.
@@ -577,7 +732,89 @@ impl Syntax {
         context_indep_ops: true,
         invalid_interval_ord: true,
         empty_ranges: false,
+        backslash_escape_in_lists: false,
+        no_gnu_ops: false,
+        leading_repeat_literal: false,
+        no_intervals: false,
+        no_backrefs: false,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
     };
+
+    /// `RE_SYNTAX_GNU_AWK`, findutils' `gnu-awk` type: POSIX-extended with a
+    /// backslash in a bracket quoting, a malformed interval a literal brace,
+    /// and a repetition with nothing to repeat the character itself. The GNU
+    /// operators and backreferences stay.
+    pub const GNU_AWK: Syntax = Syntax {
+        context_indep_ops: false,
+        invalid_interval_ord: true,
+        empty_ranges: false,
+        backslash_escape_in_lists: true,
+        no_gnu_ops: false,
+        leading_repeat_literal: true,
+        no_intervals: false,
+        no_backrefs: false,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
+    };
+
+    /// `RE_SYNTAX_AWK`, findutils' `awk` type: traditional awk's regexes --
+    /// no intervals, no backreferences, no GNU operators, a backslash in a
+    /// bracket quoting, and a repetition with nothing to repeat the character.
+    pub const AWK: Syntax = Syntax {
+        context_indep_ops: false,
+        invalid_interval_ord: false,
+        empty_ranges: false,
+        backslash_escape_in_lists: true,
+        no_gnu_ops: true,
+        leading_repeat_literal: true,
+        no_intervals: true,
+        no_backrefs: true,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
+    };
+
+    /// `RE_SYNTAX_POSIX_AWK`: what `gawk --posix` compiles a regex with, and so
+    /// what `awk` uses -- after its own escape layer has turned `\t`, `\101`
+    /// and the rest into the characters they name.
+    ///
+    /// It is POSIX-extended with three differences: a backslash inside a
+    /// bracket quotes, the GNU operators are literals, and a `{` that does not
+    /// open an interval is a literal brace (`a{b}` matches those four
+    /// characters). A quantifier with nothing before it is still an error.
+    pub const POSIX_AWK: Syntax = Syntax {
+        context_indep_ops: false,
+        invalid_interval_ord: true,
+        empty_ranges: false,
+        backslash_escape_in_lists: true,
+        no_gnu_ops: true,
+        leading_repeat_literal: false,
+        no_intervals: false,
+        no_backrefs: false,
+        dot_not_newline: false,
+        hat_lists_not_newline: false,
+        unmatched_right_paren_ord: true,
+    };
+
+    /// This syntax as POSIX `regcomp` adjusts it for `REG_NEWLINE`: neither `.`
+    /// nor a `[^...]` bracket matches a newline.
+    ///
+    /// That is two of `REG_NEWLINE`'s three effects. The third -- `^` and `$`
+    /// also matching at each newline -- belongs to the compiled regex rather
+    /// than to the syntax, as it does in glibc, and is
+    /// [`Regex::with_newline_anchor`]; a `REG_NEWLINE` caller wants both.
+    /// libmagic is one: every `regex` rule is compiled with it.
+    #[must_use]
+    pub const fn reg_newline(self) -> Syntax {
+        Syntax {
+            dot_not_newline: true,
+            hat_lists_not_newline: true,
+            ..self
+        }
+    }
 }
 
 impl Default for Syntax {
@@ -640,6 +877,17 @@ pub enum Warning {
     /// not (the `a` is the atom the branch needed). An empty group *is* an
     /// atom, so `()*` is silent. All measured against grep 3.11.
     QuantifierAtStart(Quantifier),
+    /// A bracket expression that looks like a character class written without
+    /// its outer brackets: `[:alpha:]`, which is the set `:`, `a`, `l`, `p`,
+    /// `h`, and almost never what was meant.
+    ///
+    /// dfa.c's `colon_warning_state`: the bracket opens with `:` (after any
+    /// `^`), closes with `:`, has something else between, and holds no range.
+    /// Every GNU program that compiles through dfa.c refuses it -- grep with
+    /// `character class syntax is [[:space:]], not [:space:]`, status 2, and
+    /// sed the same, status 4, unless `POSIXLY_CORRECT` is set. Measured, grep
+    /// 3.11 and sed 4.9: `[:a]`, `[::]` and `[:a-z:]` are all let through.
+    ConfusingBracket,
 }
 
 /// One bound of a `{m,n}` interval as [`EParser::fetch_number`] read it.
@@ -702,6 +950,15 @@ struct EParser {
     seen_atom: bool,
     /// Accepted-but-notable things found while parsing; see [`Warning`].
     warnings: Vec<Warning>,
+    /// Where [`Self::parse_brace`] last rolled a `{` back to a literal.
+    ///
+    /// glibc turns the rolled-back token into an ordinary character on the
+    /// spot, so the `{` never comes back to it as a quantifier. Here it is
+    /// re-read from the pattern by the next [`Self::parse_repeat`], which
+    /// would otherwise see a quantifier at the start of an atom and -- without
+    /// [`Syntax::context_indep_ops`] -- refuse it: `a{b}` was "nothing to
+    /// repeat" under awk's syntax, where gawk matches the four characters.
+    literal_brace: Option<usize>,
 }
 
 impl EParser {
@@ -800,6 +1057,12 @@ impl EParser {
             if c == '|' || (c == ')' && self.depth > 0) {
                 break;
             }
+            if c == ')' && !self.syntax.unmatched_right_paren_ord {
+                return Err(EreError::new(
+                    RegCode::UnmatchedRightParen,
+                    b"unmatched ) in regex".to_vec(),
+                ));
+            }
             parts.push(self.parse_repeat()?);
         }
         match parts.len() {
@@ -811,7 +1074,10 @@ impl EParser {
 
     /// Parse one atom and every quantifier stacked on it.
     fn parse_repeat(&mut self) -> Result<Node, EreError> {
-        if is_quantifier_start(self.peek_ascii()) {
+        // A `{` already rolled back to a literal is an atom, not a quantifier
+        // looking for one; see `literal_brace`.
+        let rolled_back = self.literal_brace == Some(self.pos);
+        if self.quantifier_here() && !rolled_back {
             // A quantifier has to have something to quantify — under
             // `RE_SYNTAX_POSIX_EXTENDED`, where `RE_CONTEXT_INVALID_OPS` makes
             // it `REG_BADRPT`. glibc rejects `*a`, `?a`, `{2}a` and — because
@@ -821,7 +1087,18 @@ impl EParser {
             // error, `{b}a` and `{}a` and `{a` included: measured against
             // findutils 4.9.0, which reports "Invalid preceding regular
             // expression" for all of them.
+            //
+            // In a syntax with neither of glibc's two context bits it is the
+            // character itself -- see `Syntax::leading_repeat_literal` -- and
+            // can be repeated like any other: `**` is a star, repeated.
             if !self.syntax.context_indep_ops {
+                if self.syntax.leading_repeat_literal
+                    && let Some(c) = self.peek()
+                {
+                    self.bump(1);
+                    self.seen_atom = true;
+                    return self.stack_quantifiers(Node::Lit(c));
+                }
                 return Err(nothing_to_repeat());
             }
             // Under egrep syntax the quantifier repeats the *empty*
@@ -889,22 +1166,45 @@ impl EParser {
     /// matters here is that it *compiles*, because the previous reading of
     /// "quantifier already applied" as an error made those four patterns fail.)
     fn stack_quantifiers(&mut self, mut node: Node) -> Result<Node, EreError> {
-        while let Some(q) = self.parse_quantifier()? {
-            // `^` is an assertion, not an atom, so glibc reports `^*` and
-            // `a^*b` the way it reports a leading `*`. `$` it does accept.
-            // Under egrep syntax nothing here is an error at all, and `^*`
-            // becomes the anchor repeated zero-or-more times — which is why
-            // `grep -E 'a^*b'` matches "ab": zero repetitions of an assertion
-            // that can never hold is the empty string.
-            // `` \` `` is `^`'s twin and answers the same way; `\'` is `$`'s.
-            if matches!(node, Node::Start | Node::BufStart) && !self.syntax.context_indep_ops {
-                return Err(nothing_to_repeat());
+        // An assertion -- `^ $`, the buffer anchors, the word assertions -- is
+        // not an atom, and glibc's `parse_expression` returns from one before
+        // it looks for a repetition. So the quantifier after it begins a fresh
+        // expression, and without `RE_CONTEXT_INDEP_OPS` that is "Invalid
+        // preceding regular expression": every one of `^*`, `a$*`, `a\b*`,
+        // `a\<+`, `` a\`? `` and `a\'{2}` is refused by bash 5.2's `=~`, by
+        // `find -regextype posix-extended` and by gawk 5.2.1 `--posix`
+        // (measured). Until 2026-10-01 only `^` and `` \` `` were refused here,
+        // and `a$*` compiled to a repeated anchor
+        // (`known-issues.md`, TD-B-ERE-QUANTIFIED-ANCHOR).
+        //
+        // Judged on the *character*, before `parse_quantifier` reads it, for
+        // the same reason: glibc meets the `{` at the start of an expression,
+        // so `^{b}` is refused even in a dialect where `a{b}` is four literals.
+        if is_assertion(&node) && !self.syntax.context_indep_ops && self.quantifier_here() {
+            // Where a repetition with nothing to repeat is the character, it
+            // is one here too: the next `parse_repeat` reads it as such.
+            if self.syntax.leading_repeat_literal {
+                return Ok(node);
             }
+            return Err(nothing_to_repeat());
+        }
+        while let Some(q) = self.parse_quantifier()? {
             // Each *stacked* quantifier warns too, not just the first: `**a`
             // and `*+?a` produce two and three lines respectively, and `?*`
             // names both operators in order. `seen_atom` has already been set
             // by the caller if the base was a real atom, so `a**` is silent.
             self.warn_at_start(q.kind);
+            // Only egrep syntax gets here with an assertion, and GNU grep
+            // repeats the line and buffer anchors -- `grep -E 'a^*b'` matches
+            // "ab", zero repetitions of an anchor that cannot hold -- but not a
+            // word assertion: `*`, `+` and `?` leave `\b`, `\B`, `\<` and `\>`
+            // as they were, so `grep -E 'a\b*'` matches `a*` and not `ab`.
+            // Measured, grep 3.11. (An interval on one is a different and
+            // self-contradicting story in GNU grep, and is repeated here; see
+            // the xfail rows in `scripts/grep-diff.sh`.)
+            if matches!(node, Node::Word(_)) && q.kind != Quantifier::Interval {
+                continue;
+            }
             node = repeat(node, q.min, q.max);
         }
         Ok(node)
@@ -930,10 +1230,22 @@ impl EParser {
             // That is the same `None` this function uses for "no quantifier
             // here", and deliberately so: to the caller the two are the same
             // fact — the cursor has not moved and the next thing is an atom.
-            Some('{') => Ok(self
+            // With no intervals in the syntax at all it is never one.
+            Some('{') if !self.syntax.no_intervals => Ok(self
                 .parse_brace()?
                 .map(|(min, max)| Quant::new(Quantifier::Interval, min, max))),
             _ => Ok(None),
+        }
+    }
+
+    /// Whether a repetition operator is at the cursor: `*`, `+`, `?`, or a `{`
+    /// in a syntax that has intervals. A `{` counts even when the braces turn
+    /// out to be malformed -- what that means is `parse_brace`'s to decide.
+    fn quantifier_here(&self) -> bool {
+        match self.peek_ascii() {
+            Some('*' | '+' | '?') => true,
+            Some('{') => !self.syntax.no_intervals,
+            _ => false,
         }
     }
 
@@ -981,10 +1293,12 @@ impl EParser {
             )
         };
         let open = self.pos;
-        // Rewind to the `{` and report it as no interval at all.
+        // Rewind to the `{` and report it as no interval at all -- and mark it,
+        // so that the parser reads it as the literal glibc has just made it.
         macro_rules! rollback {
             () => {{
                 self.pos = open;
+                self.literal_brace = Some(open);
                 return Ok(None);
             }};
         }
@@ -1116,7 +1430,15 @@ impl EParser {
             Some('[') => self.parse_class(),
             Some('.') => {
                 self.bump(1);
-                Ok(Node::Any)
+                if self.syntax.dot_not_newline {
+                    Ok(Node::Class(ClassData {
+                        negated: true,
+                        ranges: vec![(Ch::U('\n'), Ch::U('\n'))],
+                        posix: Vec::new(),
+                    }))
+                } else {
+                    Ok(Node::Any)
+                }
             }
             Some('^') => {
                 self.bump(1);
@@ -1145,8 +1467,9 @@ impl EParser {
                 // glibc reports too ("Invalid back reference"). The alternative
                 // — treating `\7` in a pattern with two groups as the literal
                 // `7` — is the silent-wrong-answer shape this crate exists to
-                // avoid.
-                if let Some(d @ '1'..='9') = e.as_ascii() {
+                // avoid. (In a syntax with no backreferences at all, the digit
+                // is the digit: `Syntax::no_backrefs`.)
+                if let Some(d @ '1'..='9') = e.as_ascii().filter(|_| !self.syntax.no_backrefs) {
                     let n = (d as usize).saturating_sub('0' as usize);
                     if n > self.ngroups {
                         return Err(EreError::new(
@@ -1156,13 +1479,15 @@ impl EParser {
                     }
                     return Ok(Node::Backref(n));
                 }
-                // The GNU operators. glibc honours these in both dialects —
-                // `RE_NO_GNU_OPS` is off for every syntax grep, sed and awk
-                // use — so they are handled here, once, rather than in `bre`'s
+                // The GNU operators. glibc honours these in both POSIX dialects
+                // — `RE_NO_GNU_OPS` is off for every syntax grep and sed use —
+                // so they are handled here, once, rather than in `bre`'s
                 // translation. Before this they fell through to the literal arm
                 // below, which made `grep -E '\w'` search for a `w`: a silent
                 // wrong answer, and the shape this crate exists to avoid.
-                if let Some(op) = e.as_ascii() {
+                // POSIX awk's syntax is the one that sets the bit, and there
+                // they *are* the literal characters; see `Syntax::no_gnu_ops`.
+                if let Some(op) = e.as_ascii().filter(|_| !self.syntax.no_gnu_ops) {
                     match op {
                         'w' | 'W' => return Ok(Node::Class(word_class(op == 'W'))),
                         's' | 'S' => return Ok(Node::Class(space_class(op == 'S'))),
@@ -1180,7 +1505,11 @@ impl EParser {
                         _ => {}
                     }
                 }
-                Ok(Node::Lit(unescape(e)))
+                // Anything else is itself: `\.` a dot, `\\` a backslash -- and
+                // `\t` a `t`, because glibc has no C escapes and neither does
+                // this. The programs whose languages have them convert them
+                // first; see the module docs.
+                Ok(Node::Lit(e))
             }
             // Under POSIX-extended syntax only `parse_quantifier` may consume
             // a `{`, and `parse_repeat` rejects one that reaches an atom slot,
@@ -1193,11 +1522,14 @@ impl EParser {
             // brace got here because `parse_brace` rolled back, which is
             // `RE_INVALID_INTERVAL_ORD` saying the character was never an
             // interval. Falling through to the literal arm below is the whole
-            // of the difference for `grep -E 'a{b}'`.
-            Some('{') if !self.syntax.invalid_interval_ord => Err(EreError::new(
-                RegCode::UnmatchedBrace,
-                b"invalid interval in regex".to_vec(),
-            )),
+            // of the difference for `grep -E 'a{b}'`. In a syntax without
+            // intervals a `{` is always a literal, and arrives here as one.
+            Some('{') if !self.syntax.invalid_interval_ord && !self.syntax.no_intervals => {
+                Err(EreError::new(
+                    RegCode::UnmatchedBrace,
+                    b"invalid interval in regex".to_vec(),
+                ))
+            }
             // Anything that is not one of the ASCII metacharacters above is a
             // literal — including a character that is not ASCII and a byte that
             // decodes to no character at all.
@@ -1221,6 +1553,11 @@ impl EParser {
         let mut ranges: Vec<(Ch, Ch)> = Vec::new();
         let mut posix: Vec<PosixClass> = Vec::new();
         let mut first = true;
+        // dfa.c's `colon_warning_state`, for [`Warning::ConfusingBracket`]: 1
+        // if the bracket opens with `:`, 2 while the member just read is `:`,
+        // 4 once any other member has been read, 8 once there has been a
+        // range. Exactly 7 is `[:name:]` without its outer brackets.
+        let mut colon: u8 = u8::from(self.peek_ascii() == Some(':'));
         loop {
             let Some(c) = self.peek() else {
                 return Err(EreError::new(
@@ -1239,6 +1576,7 @@ impl EParser {
                 break;
             }
             first = false;
+            colon &= !2;
 
             // POSIX named class `[:name:]`. A class name is ASCII letters, so
             // the scan below can never stop inside a multi-byte character.
@@ -1282,6 +1620,7 @@ impl EParser {
                 && self.chars.get(self.pos.saturating_add(1)).is_some()
             {
                 self.bump(1); // consume '-'
+                colon |= 8;
                 let hi = self.class_char()?;
                 if lo <= hi {
                     ranges.push((lo, hi));
@@ -1302,8 +1641,16 @@ impl EParser {
                 // Otherwise the range is empty and adds nothing; see
                 // [`Syntax::empty_ranges`].
             } else {
+                colon |= if lo.as_ascii() == Some(':') { 2 } else { 4 };
                 ranges.push((lo, lo));
             }
+        }
+        if colon == 7 {
+            self.warnings.push(Warning::ConfusingBracket);
+        }
+        if negated && self.syntax.hat_lists_not_newline {
+            // Excluded from the negation by being a member of what it negates.
+            ranges.push((Ch::U('\n'), Ch::U('\n')));
         }
         Ok(Node::Class(ClassData {
             negated,
@@ -1312,7 +1659,13 @@ impl EParser {
         }))
     }
 
-    /// Read one character inside a bracket expression, honoring `\`-escapes.
+    /// Read one character inside a bracket expression.
+    ///
+    /// A backslash is a member like any other, as POSIX has it, unless the
+    /// dialect has [`Syntax::backslash_escape_in_lists`] -- and even then only
+    /// when something follows it, which is glibc's `peek_token_bracket`: a
+    /// backslash that ends the pattern is a member either way, and the bracket
+    /// it leaves open is what gets reported.
     fn class_char(&mut self) -> Result<Ch, EreError> {
         let Some(c) = self.peek() else {
             return Err(EreError::new(
@@ -1320,26 +1673,25 @@ impl EParser {
                 b"unterminated '[' in regex".to_vec(),
             ));
         };
-        if c == '\\' {
-            self.bump(1);
-            let e = self.peek().ok_or_else(|| {
-                EreError::new(
-                    RegCode::TrailingBackslash,
-                    b"trailing backslash in class".to_vec(),
-                )
-            })?;
-            self.bump(1);
-            return Ok(unescape(e));
+        if c == '\\'
+            && self.syntax.backslash_escape_in_lists
+            && let Some(e) = self.chars.get(self.pos.saturating_add(1)).copied()
+        {
+            self.bump(2);
+            return Ok(e);
         }
         self.bump(1);
         Ok(c)
     }
 }
 
-/// Whether a character begins a quantifier. `{` counts even when the braces
-/// turn out to be malformed — that is an error either way, never a literal.
-fn is_quantifier_start(c: Option<char>) -> bool {
-    matches!(c, Some('*' | '+' | '?' | '{'))
+/// Whether a node is a zero-width assertion -- one of glibc's `ANCHOR` tokens,
+/// which a repetition cannot follow in the POSIX dialects.
+fn is_assertion(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Start | Node::End | Node::BufStart | Node::BufEnd | Node::Word(_)
+    )
 }
 
 /// Wrap `node` in a `{min,max}` repetition.
@@ -1366,30 +1718,18 @@ fn nothing_to_repeat() -> EreError {
     EreError::new(RegCode::BadRepeat, b"nothing to repeat in regex".to_vec())
 }
 
-/// Map an escaped character to the literal it denotes (`\n` → newline, etc.).
-///
-/// Only the ASCII escape letters mean anything; every other character —
-/// including a byte that decodes to none — denotes itself, which is what makes
-/// `\` the way to write a metacharacter literally.
-fn unescape(c: Ch) -> Ch {
-    match c.as_ascii() {
-        Some('n') => Ch::U('\n'),
-        Some('t') => Ch::U('\t'),
-        Some('r') => Ch::U('\r'),
-        Some('f') => Ch::U('\u{0C}'),
-        Some('v') => Ch::U('\u{0B}'),
-        Some('0') => Ch::U('\0'),
-        _ => c,
-    }
-}
-
 // ---- Compiler ---------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 enum Inst {
     Char(Ch),
     Any,
-    Class(ClassData),
+    /// The unanchored search's step over one character -- any character,
+    /// including a byte that decodes to nothing, which `.` ([`Inst::Any`])
+    /// does not take in a UTF-8 reading. The search prefix's only consuming
+    /// instruction, and nothing else's.
+    Skip,
+    Class(ClassInst),
     Match,
     Jmp(usize),
     Split(usize, usize),
@@ -1419,6 +1759,14 @@ struct Compiler {
     /// pattern asking for 10⁹ instructions costs the cap plus one iteration per
     /// nesting level rather than 10⁹ no-ops. `new_flags` turns it into an error.
     over: bool,
+    /// Whether the pattern is matched without regard to case, which a
+    /// class's byte set ([`ClassInst`]) is worked out under.
+    ci: bool,
+    /// The byte sets worked out so far, by the address of the class in the
+    /// syntax tree they were worked out for: a repetition compiles one class
+    /// once per copy, and `[a-z]{30000}` should not work out the same set
+    /// thirty thousand times.
+    sets: BTreeMap<usize, ByteSet>,
 }
 
 impl Compiler {
@@ -1448,7 +1796,15 @@ impl Compiler {
                 self.emit(Inst::Any);
             }
             Node::Class(d) => {
-                self.emit(Inst::Class(d.clone()));
+                let ci = self.ci;
+                let set = *self
+                    .sets
+                    .entry(core::ptr::from_ref(d).addr())
+                    .or_insert_with(|| byte_set(|c| d.matches_ci(c, ci)));
+                self.emit(Inst::Class(ClassInst {
+                    data: d.clone(),
+                    set,
+                }));
             }
             Node::Start => {
                 self.emit(Inst::AssertStart);
@@ -1589,10 +1945,182 @@ fn char_eq(input: Option<Ch>, lit: Ch, ci: bool) -> bool {
 /// A byte that decodes to no character has no case — [`Ch::to_lowercase`] maps
 /// it to itself — so two *different* undecodable bytes never fold together, and
 /// none of them ever folds into a letter.
+///
+/// Compared without allocating: this runs for every character a
+/// case-insensitive literal is tried against.
 fn char_fold_eq(a: Ch, b: Ch) -> bool {
-    a.to_ascii_lowercase() == b.to_ascii_lowercase()
-        || a.to_lowercase() == b.to_lowercase()
-        || a.to_uppercase() == b.to_uppercase()
+    match (a, b) {
+        (Ch::U(x), Ch::U(y)) if x.is_ascii() && y.is_ascii() => x.eq_ignore_ascii_case(&y),
+        (Ch::U(x), Ch::U(y)) => {
+            x.to_lowercase().eq(y.to_lowercase()) || x.to_uppercase().eq(y.to_uppercase())
+        }
+        // An undecodable byte is above 0x7f, where ASCII folding is the
+        // identity, and folds to nothing but itself.
+        _ => a == b,
+    }
+}
+
+/// Whether consuming instruction `inst` takes character `c` (`None` past the
+/// end of the subject, which none takes). The one definition of "takes", for
+/// the Pike VM, the backtracker and the [`Prefilter`] alike: if they ever
+/// disagreed, a position the prefilter stepped over could be one the VM would
+/// have matched at.
+///
+/// `bytes` is [`Regex::with_byte_chars`]: the subject read as the C locale
+/// reads it. Read as characters -- a UTF-8 locale -- **a byte that decodes to
+/// nothing is taken only by itself**: `.` does not take it, and neither does
+/// any bracket expression, negated or not. That is glibc's rule, and so the
+/// rule of every program this engine stands in for -- measured under
+/// `C.UTF-8` with `a\xffb` as the subject, GNU `grep 'a.b'` and `grep
+/// 'a[^x]b'`, `sed -n '/a.b/p'` and bash's `[[ $s =~ ^a.b$ ]]` all fail to
+/// match, and all match under `C`. glibc's `.` in a UTF-8 locale takes only
+/// a valid sequence, and its bracket expressions keep only the bytes that are
+/// characters on their own (`bitset_mask (sbcset, dfa->sb_char)`); a literal
+/// byte in the pattern is a `CHARACTER` and compares as a byte.
+fn takes(inst: &Inst, c: Option<Ch>, ci: bool, bytes: bool) -> bool {
+    let undecodable = matches!(c, Some(Ch::B(_))) && !bytes;
+    match inst {
+        Inst::Char(lit) => char_eq(c, *lit, ci),
+        Inst::Any => c.is_some() && !undecodable,
+        Inst::Skip => c.is_some(),
+        Inst::Class(k) => !undecodable && c.is_some_and(|ch| k.matches(ch, ci)),
+        _ => false,
+    }
+}
+
+/// What the matchers read: a subject's characters, by index.
+///
+/// A subject is either characters decoded once into a slice, or bytes read
+/// where they lie ([`Bytes`]) by a regex that reads a byte at a time
+/// ([`Regex::with_byte_chars`]): there character `i` is byte `i`, and decoding
+/// would only copy the subject into something sixteen times its size first.
+/// The matchers are generic over the two, so each is compiled for each and
+/// neither pays for the other.
+trait Subject {
+    /// The number of characters.
+    fn len(&self) -> usize;
+    /// Character `i`, or `None` past the end.
+    fn at(&self, i: usize) -> Option<Ch>;
+}
+
+impl Subject for [Ch] {
+    fn len(&self) -> usize {
+        <[Ch]>::len(self)
+    }
+
+    fn at(&self, i: usize) -> Option<Ch> {
+        self.get(i).copied()
+    }
+}
+
+/// A subject read a byte at a time, where it lies: character `i` is byte `i`,
+/// read as [`bytes::byte_ch`] reads it -- the characters
+/// [`bytes::byte_positions`] would decode it to.
+struct Bytes<'a>(&'a [u8]);
+
+impl Subject for Bytes<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn at(&self, i: usize) -> Option<Ch> {
+        self.0.get(i).copied().map(bytes::byte_ch)
+    }
+}
+
+/// Where a match can begin, worked out once from the program, so that the
+/// unanchored search can step over the positions where none can -- most of a
+/// subject, for most patterns. See [`Regex::scan`].
+///
+/// It is a superset, never a guess: every character that can begin a match
+/// is in it, and a position is stepped over only when the character there is
+/// not. A pattern that can match the empty string can match anywhere and has
+/// none.
+#[derive(Debug, Clone)]
+struct Prefilter {
+    /// Which byte characters can begin a match.
+    set: ByteSet,
+    /// The instructions a match's first character is taken by, asked directly
+    /// about a character that is not a byte character.
+    firsts: Vec<usize>,
+    /// Whether every match begins at `^` or `` \` `` -- so only where a line,
+    /// or the subject, begins.
+    line_start: bool,
+}
+
+impl Prefilter {
+    /// The prefilter of the pattern entered at `entry`, or `None` when it would
+    /// step over nothing: the pattern can match empty, or begins with a
+    /// backreference, or can begin with any character anywhere.
+    ///
+    /// The instructions a match's first character can be taken by are those
+    /// reached from `entry` without consuming anything. An assertion between
+    /// is taken to hold -- a superset, which is what is wanted -- except that
+    /// whether every way to them passed `^` or `` \` `` is kept, and makes
+    /// [`Prefilter::line_start`].
+    fn of(prog: &[Inst], entry: usize, ci: bool) -> Option<Prefilter> {
+        // Each instruction is visited at most once unanchored and once
+        // anchored.
+        let mut visited = vec![[false; 2]; prog.len()];
+        let mut stack = vec![(entry, false)];
+        let mut firsts: Vec<usize> = Vec::new();
+        let mut line_start = true;
+        while let Some((pc, anchored)) = stack.pop() {
+            let seen = visited.get_mut(pc)?.get_mut(usize::from(anchored))?;
+            if *seen {
+                continue;
+            }
+            *seen = true;
+            let next = pc.saturating_add(1);
+            match prog.get(pc)? {
+                Inst::Char(_) | Inst::Any | Inst::Skip | Inst::Class(_) => {
+                    // At most twice, anchored and not; deduplicated below.
+                    firsts.push(pc);
+                    line_start &= anchored;
+                }
+                // A match reachable without consuming is an empty one; a
+                // backreference first takes what no instruction says.
+                Inst::Match | Inst::Backref(_) => return None,
+                Inst::Jmp(x) => stack.push((*x, anchored)),
+                Inst::Split(x, y) => {
+                    // Order is immaterial: the closure is a set.
+                    stack.push((*x, anchored));
+                    stack.push((*y, anchored));
+                }
+                Inst::Save(_) | Inst::AssertEnd | Inst::AssertBufEnd | Inst::AssertWord(_) => {
+                    stack.push((next, anchored));
+                }
+                Inst::AssertStart | Inst::AssertBufStart => stack.push((next, true)),
+            }
+        }
+        firsts.sort_unstable();
+        firsts.dedup();
+        let set = byte_set(|c| {
+            firsts.iter().any(|&pc| {
+                prog.get(pc)
+                    .is_some_and(|inst| takes(inst, Some(c), ci, true))
+            })
+        });
+        if !line_start && set == [u64::MAX; 4] {
+            return None;
+        }
+        Some(Prefilter {
+            set,
+            firsts,
+            line_start,
+        })
+    }
+
+    /// Whether character `c` can begin a match.
+    fn first(&self, prog: &[Inst], c: Ch, ci: bool) -> bool {
+        match byte_index(c) {
+            Some(b) => in_byte_set(&self.set, b),
+            None => self.firsts.iter().any(|&pc| {
+                prog.get(pc)
+                    .is_some_and(|inst| takes(inst, Some(c), ci, true))
+            }),
+        }
+    }
 }
 
 /// A compiled ERE. Compile once with [`Regex::new`], then match repeatedly.
@@ -1615,7 +2143,20 @@ pub struct Regex {
     /// Whether `^` and `$` also match next to a newline inside the subject.
     /// See [`Regex::with_newline_anchor`].
     newline_anchor: bool,
+    /// Whether the subject is read a byte at a time. See
+    /// [`Regex::with_byte_chars`].
+    bytes: bool,
+    /// Where a match can begin, for the unanchored search to step over the
+    /// rest; `None` when that would step over nothing. See [`Prefilter`].
+    prefilter: Option<Prefilter>,
 }
+
+/// The capture slots a search that wants only where the whole match lies
+/// keeps: group 0's two. The other groups' slots change nothing about where a
+/// match is -- the threads' priorities decide that -- so leaving them out
+/// changes no answer, and saves copying them for every thread at every
+/// character.
+const MATCH_SLOTS: usize = 2;
 
 /// A compiled regex prints as its shape, not its program.
 ///
@@ -1638,14 +2179,29 @@ impl core::fmt::Debug for Regex {
 /// Per-step NFA thread frontier with a `seen` set for `O(1)` dedupe, so each
 /// program counter is added at most once per input position (keeps the run
 /// linear and terminates epsilon cycles like `()*`).
+///
+/// The threads' capture slots live in one arena, `slots`, a thread's at
+/// `at..at + nslots`, rather than in a `Vec` of each thread's own: a step
+/// copies every live thread's slots, and with a `Vec` apiece that was an
+/// allocation and a free per thread per character -- most of the time a
+/// search took. The arena keeps its capacity across [`ThreadList::clear`], so
+/// a search allocates while its frontier first grows and not after.
+///
+/// `seen` holds, for each instruction, the generation of the list it was last
+/// added to: the list holds it when that is the current `generation`. So
+/// clearing the list is a new generation, where clearing a set of flags was a
+/// pass over every instruction of the program -- at every character.
 struct ThreadList {
     threads: Vec<Thread>,
-    seen: Vec<bool>,
+    seen: Vec<u32>,
+    generation: u32,
+    slots: Vec<Option<usize>>,
 }
 
 struct Thread {
     pc: usize,
-    caps: Vec<Option<usize>>,
+    /// Where this thread's capture slots begin in its list's `slots`.
+    at: usize,
 }
 
 /// One point the backreference backtracker may return to.
@@ -1670,13 +2226,29 @@ impl ThreadList {
     fn new(n: usize) -> Self {
         ThreadList {
             threads: Vec::new(),
-            seen: vec![false; n],
+            seen: vec![0; n],
+            generation: 1,
+            slots: Vec::new(),
         }
     }
 
     fn clear(&mut self) {
         self.threads.clear();
-        self.seen.fill(false);
+        self.slots.clear();
+        self.generation = self.generation.wrapping_add(1);
+        // After four billion generations the stamps start again, and the old
+        // ones must not be mistaken for new.
+        if self.generation == 0 {
+            self.seen.fill(0);
+            self.generation = 1;
+        }
+    }
+
+    /// Thread `th`'s capture slots.
+    fn caps(&self, th: &Thread, nslots: usize) -> &[Option<usize>] {
+        self.slots
+            .get(th.at..th.at.saturating_add(nslots))
+            .unwrap_or_default()
     }
 }
 
@@ -1700,9 +2272,10 @@ impl Regex {
 
     /// Compile an ERE pattern in a chosen dialect.
     ///
-    /// Only `grep -E` wants anything but [`Syntax::POSIX_EXTENDED`]; see
-    /// [`Syntax`] for the measured table of what differs and why one engine
-    /// cannot serve both callers with one answer.
+    /// `grep -E`, `awk` and `ptx` each want something other than
+    /// [`Syntax::POSIX_EXTENDED`]; see [`Syntax`] for the measured tables of
+    /// what differs and why one engine cannot serve every caller with one
+    /// answer.
     ///
     /// # Errors
     /// Returns [`EreError`] on a syntax error, as [`Regex::new`] — though
@@ -1727,14 +2300,46 @@ impl Regex {
         ci: bool,
         syntax: Syntax,
     ) -> Result<(Regex, Vec<Warning>), EreError> {
+        Self::compile_pattern(pattern, ci, syntax, false)
+    }
+
+    /// [`Regex::new_syntax`] with the pattern read a byte at a time, as well as
+    /// the subject ([`Regex::with_byte_chars`]): how glibc reads both in the C
+    /// locale, where every byte above 0x7f is a character of its own. So `[é]`
+    /// is a bracket of two bytes and `é*` repeats the second of them.
+    ///
+    /// # Errors
+    /// As [`Regex::new_syntax`].
+    pub fn new_syntax_bytes(
+        pattern: BStr<'_>,
+        ci: bool,
+        syntax: Syntax,
+    ) -> Result<Regex, EreError> {
+        Self::compile_pattern(pattern, ci, syntax, true).map(|(re, _)| re.with_byte_chars(true))
+    }
+
+    /// The compiler behind every constructor; `pattern_bytes` reads the
+    /// pattern a byte at a time rather than as UTF-8.
+    fn compile_pattern(
+        pattern: BStr<'_>,
+        ci: bool,
+        syntax: Syntax,
+        pattern_bytes: bool,
+    ) -> Result<(Regex, Vec<Warning>), EreError> {
+        let chars: Vec<Ch> = if pattern_bytes {
+            bytes::byte_positions(pattern).map(|(_, c)| c).collect()
+        } else {
+            bytes::chars(pattern).collect()
+        };
         let mut parser = EParser {
-            chars: bytes::chars(pattern).collect(),
+            chars,
             pos: 0,
             ngroups: 0,
             depth: 0,
             syntax,
             seen_atom: false,
             warnings: Vec::new(),
+            literal_brace: None,
         };
         let ast = parser.parse()?;
         let ngroups = parser.ngroups;
@@ -1744,15 +2349,17 @@ impl Regex {
             prog: Vec::new(),
             has_backref: false,
             over: false,
+            ci,
+            sets: BTreeMap::new(),
         };
         // Unanchored search prefix: prefer entering the match at the current
         // position (leftmost) over skipping one char and retrying.
         //   0: Split(real, skip)
-        //   1: Any            (skip)
+        //   1: Skip           (any character, a byte that decodes to nothing too)
         //   2: Jmp 0
         //   real: Save(0) … Save(1) Match
         let split = c.emit(Inst::Split(0, 0));
-        let skip = c.emit(Inst::Any);
+        let skip = c.emit(Inst::Skip);
         c.emit(Inst::Jmp(split));
         let real = c.prog.len();
         c.patch(split, Inst::Split(real, skip));
@@ -1767,6 +2374,7 @@ impl Regex {
             return Err(EreError::new(RegCode::TooBig, b"regex too large".to_vec()));
         }
 
+        let prefilter = Prefilter::of(&c.prog, real, ci);
         Ok((
             Regex {
                 prog: c.prog,
@@ -1775,6 +2383,8 @@ impl Regex {
                 ci,
                 has_backref: c.has_backref,
                 newline_anchor: false,
+                bytes: false,
+                prefilter,
             },
             warnings,
         ))
@@ -1800,21 +2410,68 @@ impl Regex {
         self
     }
 
+    /// Read the subject a byte at a time, as glibc's `regexec` does in the C
+    /// locale: `.` matches one byte, a bracket's members are bytes, and a
+    /// UTF-8 sequence is as many characters as it has bytes -- each above
+    /// 0x7f matching nothing but itself, `.` and a negated bracket, and
+    /// folding to nothing under case-insensitivity.
+    ///
+    /// libmagic is the caller that wants it: it switches to the C locale for
+    /// every `regcomp` and `regexec` it makes, so a magic rule's `x.y` does
+    /// not match `x`, `é`, `y`. The pattern itself is read as before; a magic
+    /// rule's pattern is ASCII.
+    ///
+    /// [`Regex::find`], [`Regex::find_at`], [`Regex::is_match`] and
+    /// [`Regex::captures`] then read the subject where it lies, with nothing
+    /// decoded first; the iterators and [`Regex::search`] still decode it
+    /// once, to the same characters.
+    #[must_use]
+    pub fn with_byte_chars(mut self, on: bool) -> Regex {
+        self.bytes = on;
+        self
+    }
+
+    /// The subject decoded as this regex reads it.
+    fn decode(&self, text: BStr<'_>) -> Scan {
+        Scan::new(text, self.bytes)
+    }
+
     /// Whether `^` holds at character position `sp` of `input`.
-    fn line_start_at(&self, input: &[Ch], sp: usize, bol: StartOfLine) -> bool {
+    fn line_start_at<S: Subject + ?Sized>(&self, input: &S, sp: usize, bol: StartOfLine) -> bool {
         if sp == 0 {
             return bol == StartOfLine::Yes;
         }
         self.newline_anchor
             && sp
                 .checked_sub(1)
-                .and_then(|i| input.get(i))
-                .is_some_and(|&c| c == Ch::U('\n'))
+                .and_then(|i| input.at(i))
+                .is_some_and(|c| c == Ch::U('\n'))
     }
 
     /// Whether `$` holds at character position `sp` of `input`.
-    fn line_end_at(&self, input: &[Ch], sp: usize) -> bool {
-        sp == input.len() || (self.newline_anchor && input.get(sp) == Some(&Ch::U('\n')))
+    fn line_end_at<S: Subject + ?Sized>(&self, input: &S, sp: usize) -> bool {
+        sp == input.len() || (self.newline_anchor && input.at(sp) == Some(Ch::U('\n')))
+    }
+
+    /// The first position at or after `from` where a match can begin, by the
+    /// prefilter `pf`, or `None` if there is none before the end. (At the end
+    /// none can: a pattern with a prefilter cannot match empty.)
+    fn next_start<S: Subject + ?Sized>(
+        &self,
+        pf: &Prefilter,
+        input: &S,
+        from: usize,
+        bol: StartOfLine,
+    ) -> Option<usize> {
+        if pf.line_start && !self.newline_anchor {
+            // A line starts only where the subject does.
+            return (from == 0
+                && input
+                    .at(0)
+                    .is_some_and(|c| pf.first(&self.prog, c, self.ci)))
+            .then_some(0);
+        }
+        (from..input.len()).find(|&p| self.can_start(pf, input, p, bol))
     }
 
     /// Number of capturing groups (excluding the whole-match group 0).
@@ -1850,7 +2507,7 @@ impl Regex {
     /// [`MatchLimit`] if a backreference search exceeded its budget. A pattern
     /// without a backreference cannot return one.
     pub fn is_match(&self, text: BStr<'_>) -> Result<bool, MatchLimit> {
-        Ok(self.captures(text)?.is_some())
+        Ok(self.find(text)?.is_some())
     }
 
     /// Find the leftmost match and return the captured substrings: index `0` is
@@ -1864,29 +2521,50 @@ impl Regex {
     /// # Errors
     /// [`MatchLimit`] if a backreference search exceeded its budget.
     pub fn captures(&self, text: BStr<'_>) -> Result<Option<Vec<Option<Str>>>, MatchLimit> {
-        let chars: Vec<Ch> = bytes::chars(text).collect();
-        let Some(slots) = self.run(&chars, 0, StartOfLine::Yes)? else {
+        if self.bytes {
+            // Read where it lies: character `i` is byte `i`, so a group's
+            // characters are its bytes.
+            let Some(slots) = self.run(&Bytes(text), 0, StartOfLine::Yes, self.all_slots())? else {
+                return Ok(None);
+            };
+            return Ok(Some(
+                self.groups(&slots, |s, e| text.get(s..e).map(<[u8]>::to_vec)),
+            ));
+        }
+        let chars: Vec<Ch> = self.decode(text).chars;
+        let Some(slots) = self.run(chars.as_slice(), 0, StartOfLine::Yes, self.all_slots())? else {
             return Ok(None);
         };
-        let mut out = Vec::with_capacity(self.ngroups.saturating_add(1));
-        for g in 0..=self.ngroups {
-            // The open and close slots of group `g`. A group is an opening paren
-            // in the pattern, so `2·g + 1` is bounded by the pattern's length;
-            // the slots are read with `get`, so even a saturated index is a
-            // missing capture rather than a panic.
-            let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
-            match (
-                slots.get(open).copied().flatten(),
-                slots.get(close).copied().flatten(),
-            ) {
-                (Some(s), Some(e)) if s <= e && e <= chars.len() => {
-                    let span = chars.get(s..e).unwrap_or_default();
-                    out.push(Some(bytes::from_chars(span.iter().copied())));
+        Ok(Some(self.groups(&slots, |s, e| {
+            chars
+                .get(s..e)
+                .map(|span| bytes::from_chars(span.iter().copied()))
+        })))
+    }
+
+    /// Each group's text, by `text_of` its span of characters; `None` for a
+    /// group that did not participate.
+    fn groups(
+        &self,
+        slots: &[Option<usize>],
+        text_of: impl Fn(usize, usize) -> Option<Str>,
+    ) -> Vec<Option<Str>> {
+        (0..=self.ngroups)
+            .map(|g| {
+                // The open and close slots of group `g`. A group is an opening
+                // paren in the pattern, so `2·g + 1` is bounded by the
+                // pattern's length; the slots are read with `get`, so even a
+                // saturated index is a missing capture rather than a panic.
+                let (open, close) = (g.saturating_mul(2), g.saturating_mul(2).saturating_add(1));
+                match (
+                    slots.get(open).copied().flatten(),
+                    slots.get(close).copied().flatten(),
+                ) {
+                    (Some(s), Some(e)) if s <= e => text_of(s, e),
+                    _ => None,
                 }
-                _ => out.push(None),
-            }
-        }
-        Ok(Some(out))
+            })
+            .collect()
     }
 
     /// Where the leftmost match begins and ends, as **byte** offsets into
@@ -1919,8 +2597,9 @@ impl Regex {
     /// `from` is rounded forward to a character boundary, so a caller that
     /// resumes from an arbitrary byte cannot start a match inside a character.
     ///
-    /// Prefer [`Regex::find_iter`] for a scan: this decodes `text` on every
-    /// call, so stepping through a long subject with it is quadratic.
+    /// Prefer [`Regex::find_iter`] for a scan: unless the regex reads bytes
+    /// ([`Regex::with_byte_chars`]), this decodes `text` on every call, so
+    /// stepping through a long subject with it is quadratic.
     ///
     /// # Errors
     /// [`MatchLimit`] if a backreference search exceeded its budget.
@@ -1929,8 +2608,31 @@ impl Regex {
         text: BStr<'_>,
         from: usize,
     ) -> Result<Option<(usize, usize)>, MatchLimit> {
-        let scan = Scan::new(text);
-        let Some(slots) = self.run(&scan.chars, scan.char_index(from), StartOfLine::Yes)? else {
+        if self.bytes {
+            // Read where it lies: every byte offset is a character boundary,
+            // and character offsets are byte offsets.
+            let start = from.min(text.len());
+            let Some(slots) = self.run(&Bytes(text), start, StartOfLine::Yes, MATCH_SLOTS)? else {
+                return Ok(None);
+            };
+            return Ok(
+                match (
+                    slots.first().copied().flatten(),
+                    slots.get(1).copied().flatten(),
+                ) {
+                    (Some(s), Some(e)) if s <= text.len() && e <= text.len() => Some((s, e)),
+                    _ => None,
+                },
+            );
+        }
+        let scan = self.decode(text);
+        let Some(slots) = self.run(
+            scan.chars.as_slice(),
+            scan.char_index(from),
+            StartOfLine::Yes,
+            MATCH_SLOTS,
+        )?
+        else {
             return Ok(None);
         };
         let (Some(s), Some(e)) = (
@@ -1951,7 +2653,7 @@ impl Regex {
     pub fn find_iter(&self, text: BStr<'_>) -> Matches<'_> {
         Matches {
             re: self,
-            cur: Cursor::new(text),
+            cur: Cursor::new(self.decode(text)),
         }
     }
 
@@ -1966,7 +2668,7 @@ impl Regex {
     pub fn capture_spans_iter(&self, text: BStr<'_>) -> CaptureMatches<'_> {
         CaptureMatches {
             re: self,
-            cur: Cursor::new(text),
+            cur: Cursor::new(self.decode(text)),
         }
     }
 
@@ -2013,7 +2715,7 @@ impl Regex {
     pub fn search(&self, text: BStr<'_>) -> Search<'_> {
         Search {
             re: self,
-            scan: Scan::new(text),
+            scan: self.decode(text),
         }
     }
 
@@ -2067,16 +2769,22 @@ impl Regex {
     /// # Errors
     /// [`MatchLimit`] if a backreference search ran out of budget. A pattern
     /// without a backreference never returns one.
-    fn run(
+    ///
+    /// `nslots` is how many capture slots the caller will read: all of them
+    /// ([`Regex::all_slots`]) for the groups, or [`MATCH_SLOTS`] for where the
+    /// match lies. The backtracker keeps them all regardless -- a
+    /// backreference reads its group's.
+    fn run<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         start: usize,
         bol: StartOfLine,
+        nslots: usize,
     ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
         if self.has_backref {
             return self.run_backtrack(input, start, bol);
         }
-        let Some(first) = self.scan(input, start, 0, false, bol) else {
+        let Some(first) = self.scan(input, start, 0, false, bol, nslots) else {
             return Ok(None);
         };
         let Some(at) = first.first().copied().flatten() else {
@@ -2086,7 +2794,14 @@ impl Regex {
         // was just found at exactly that position — and is written out rather
         // than unwrapped so a future change to the prefix cannot turn a shorter
         // answer into no answer at all.
-        Ok(self.scan(input, at, self.entry, true, bol).or(Some(first)))
+        Ok(self
+            .scan(input, at, self.entry, true, bol, nslots)
+            .or(Some(first)))
+    }
+
+    /// Every capture slot: two for each group and two for the whole match.
+    fn all_slots(&self) -> usize {
+        self.ngroups.saturating_add(1).saturating_mul(2)
     }
 
     /// How many steps one search of `input` may take before it is abandoned.
@@ -2117,9 +2832,9 @@ impl Regex {
     /// [`MatchLimit`] when the budget runs out. The budget is shared across all
     /// the start positions of one search, so the cost of a call is bounded, not
     /// just the cost of each attempt within it.
-    fn run_backtrack(
+    fn run_backtrack<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         start: usize,
         bol: StartOfLine,
     ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
@@ -2178,14 +2893,14 @@ impl Regex {
     /// answer Perl gives (an iteration that consumed nothing ends the loop). And
     /// the budget bounds the genuinely exponential patterns, which no structural
     /// rule can.
-    fn backtrack_at(
+    fn backtrack_at<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         start: usize,
         budget: &mut u64,
         bol: StartOfLine,
     ) -> Result<Option<Vec<Option<usize>>>, MatchLimit> {
-        let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
+        let nslots = self.all_slots();
         let mut best: Option<Vec<Option<usize>>> = None;
         let mut best_end: Option<usize> = None;
         let mut stack: Vec<BtFrame> = vec![BtFrame {
@@ -2213,16 +2928,8 @@ impl Regex {
                 // and `sp` is an index into `input`.
                 let next_pc = f.pc.saturating_add(1);
                 match inst {
-                    Inst::Char(ch) if char_eq(input.get(f.sp).copied(), *ch, self.ci) => {
-                        f.pc = next_pc;
-                        f.sp = f.sp.saturating_add(1);
-                    }
-                    Inst::Any if f.sp < input.len() => {
-                        f.pc = next_pc;
-                        f.sp = f.sp.saturating_add(1);
-                    }
-                    Inst::Class(d)
-                        if input.get(f.sp).is_some_and(|c| d.matches_ci(*c, self.ci)) =>
+                    Inst::Char(_) | Inst::Any | Inst::Skip | Inst::Class(_)
+                        if takes(inst, input.at(f.sp), self.ci, self.bytes) =>
                     {
                         f.pc = next_pc;
                         f.sp = f.sp.saturating_add(1);
@@ -2308,9 +3015,9 @@ impl Regex {
     /// re-compares a long capture many times pays for it. Charging one step per
     /// instruction alone would make `\(.*\)\1\1\1…` almost free to the budget
     /// and expensive to the machine, which is the wrong way round.
-    fn backref_step(
+    fn backref_step<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         f: &BtFrame,
         n: usize,
         budget: &mut u64,
@@ -2329,36 +3036,50 @@ impl Regex {
             Some(left) => left,
             None => return Err(MatchLimit),
         };
-        let (Some(want), Some(have)) = (input.get(s..e), input.get(f.sp..f.sp.saturating_add(len)))
-        else {
+        // The group's text and as much again from here must both be there.
+        let Some(have_end) = f.sp.checked_add(len) else {
             return Ok(None);
         };
-        if want
-            .iter()
-            .zip(have)
-            .all(|(&w, &h)| char_eq(Some(h), w, self.ci))
-        {
-            Ok(Some(f.sp.saturating_add(len)))
-        } else {
-            Ok(None)
+        if e > input.len() || have_end > input.len() {
+            return Ok(None);
         }
+        let same = (0..len).all(|k| {
+            match (
+                input.at(s.saturating_add(k)),
+                input.at(f.sp.saturating_add(k)),
+            ) {
+                (Some(w), have @ Some(_)) => char_eq(have, w, self.ci),
+                _ => false,
+            }
+        });
+        Ok(same.then_some(have_end))
     }
 
     /// One pass of the Pike VM: threads seeded at `seed_pc` and character index
-    /// `start`, returning the winning thread's capture slots (`2 × (ngroups +
-    /// 1)` positions). With `longest`, a thread reaching `Match` records its
-    /// slots and the pass continues, so a later — longer — match supersedes it;
-    /// without it the pass stops at the first, highest-priority `Match`.
-    fn scan(
+    /// `start`, returning the winning thread's first `nslots` capture slots.
+    /// With `longest`, a thread reaching `Match` records its slots and the pass
+    /// continues, so a later — longer — match supersedes it; without it the
+    /// pass stops at the first, highest-priority `Match`.
+    ///
+    /// The unanchored pass (`seed_pc` 0) steps over the positions where no
+    /// match can begin, by the [`Prefilter`] -- but only while every live
+    /// thread is one the search seeded at this position, since a thread that
+    /// began earlier may be partway through a match the character here
+    /// continues. Seeded here, the pattern's threads stand at instructions
+    /// that take a match's first character, so if the prefilter says this
+    /// character cannot be one they all die at this step, and what is left is
+    /// the search prefix's thread, which seeds the pattern again at the next
+    /// position. Seeding it instead at the next position the prefilter allows
+    /// is the same search without the steps between.
+    fn scan<S: Subject + ?Sized>(
         &self,
-        input: &[Ch],
+        input: &S,
         start: usize,
         seed_pc: usize,
         longest: bool,
         bol: StartOfLine,
+        nslots: usize,
     ) -> Option<Vec<Option<usize>>> {
-        // Two slots — open and close — for every group plus the whole match.
-        let nslots = self.ngroups.saturating_add(1).saturating_mul(2);
         let mut clist = ThreadList::new(self.prog.len());
         let mut nlist = ThreadList::new(self.prog.len());
         let mut matched: Option<Vec<Option<usize>>> = None;
@@ -2368,17 +3089,45 @@ impl Regex {
         let mut matched_at: Option<usize> = None;
 
         let mut caps = vec![None; nslots];
+        let prefilter = self.prefilter.as_ref().filter(|_| seed_pc == 0);
         // `start` past the end is not an error — it is a scan that has run off
         // the subject, which `find_iter` does on its last step.
-        let start = start.min(input.len());
-        self.add_thread(&mut clist, seed_pc, start, &mut caps, input, bol);
+        let mut sp = start.min(input.len());
+        if let Some(pf) = prefilter {
+            sp = self.next_start(pf, input, sp, bol)?;
+        }
+        self.add_thread(&mut clist, seed_pc, sp, &mut caps, input, bol);
+        // Whether every thread in `clist` was seeded at `sp`.
+        let mut fresh = true;
 
-        for sp in start..=input.len() {
+        while sp <= input.len() {
             if clist.threads.is_empty() {
                 break;
             }
-            let c = input.get(sp).copied();
+            if let Some(pf) = prefilter
+                && fresh
+                && !self.can_start(pf, input, sp, bol)
+            {
+                // No match begins here, and none is under way: on to where one
+                // can begin, if anywhere.
+                let Some(p) = self.next_start(pf, input, sp.saturating_add(1), bol) else {
+                    break;
+                };
+                clist.clear();
+                caps.clear();
+                caps.resize(nslots, None);
+                self.add_thread(&mut clist, seed_pc, p, &mut caps, input, bol);
+                sp = p;
+                continue;
+            }
+            let c = input.at(sp);
             nlist.clear();
+            // How many threads of the next list descend from threads that
+            // began before the next position, counted when the search prefix's
+            // thread -- the last, lowest-priority one -- seeds the pattern
+            // there; and how many there were once it had.
+            let mut older: Option<usize> = None;
+            let mut seeded = 0;
             let mut i = 0;
             // Indexed rather than iterated because the threads are consulted in
             // priority order and the loop may stop early at `Match`; `get`
@@ -2399,21 +3148,29 @@ impl Regex {
                 // (`Match` is), and `sp` is an index into `input`.
                 let next = (pc.saturating_add(1), sp.saturating_add(1));
                 match inst {
-                    Inst::Char(ch) if char_eq(c, *ch, self.ci) => {
-                        let mut caps = th.caps.clone();
+                    Inst::Char(_) | Inst::Any | Inst::Skip | Inst::Class(_)
+                        if takes(inst, c, self.ci, self.bytes) =>
+                    {
+                        // The search prefix is the instructions before the
+                        // pattern's entry; its one consuming instruction is
+                        // the `Any` whose successor seeds the pattern again.
+                        let prefix = pc < self.entry;
+                        if prefix {
+                            older = Some(nlist.threads.len());
+                        }
+                        // The thread's slots, copied into the scratch buffer
+                        // `add_thread` threads through the successor's epsilon
+                        // closure and leaves where it found them.
+                        caps.clear();
+                        caps.extend_from_slice(clist.caps(th, nslots));
                         self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
-                    }
-                    Inst::Any if c.is_some() => {
-                        let mut caps = th.caps.clone();
-                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
-                    }
-                    Inst::Class(d) if c.is_some_and(|ch| d.matches_ci(ch, self.ci)) => {
-                        let mut caps = th.caps.clone();
-                        self.add_thread(&mut nlist, next.0, next.1, &mut caps, input, bol);
+                        if prefix {
+                            seeded = nlist.threads.len();
+                        }
                     }
                     Inst::Match => {
                         if matched_at.is_none_or(|at| sp > at) {
-                            matched = Some(th.caps.clone());
+                            matched = Some(clist.caps(th, nslots).to_vec());
                             matched_at = Some(sp);
                         }
                         if !longest {
@@ -2439,21 +3196,44 @@ impl Regex {
                 }
                 i = i.saturating_add(1);
             }
+            // The prefix's thread is the last, so nothing follows what it
+            // seeded; were anything to, the list would not be all fresh, and
+            // the next step simply would not skip.
+            fresh = older == Some(0) && seeded == nlist.threads.len();
             core::mem::swap(&mut clist, &mut nlist);
+            sp = sp.saturating_add(1);
         }
         matched
+    }
+
+    /// Whether a match can begin at position `p` of `input`, by the prefilter
+    /// `pf`: the character there can begin one, and -- for a pattern whose
+    /// every match begins at `^` or `` \` `` -- a line or the subject begins
+    /// there. (`p == 0` is let through for `` \` ``, which holds there whatever
+    /// `bol` says.)
+    fn can_start<S: Subject + ?Sized>(
+        &self,
+        pf: &Prefilter,
+        input: &S,
+        p: usize,
+        bol: StartOfLine,
+    ) -> bool {
+        input
+            .at(p)
+            .is_some_and(|c| pf.first(&self.prog, c, self.ci))
+            && (!pf.line_start || p == 0 || self.line_start_at(input, p, bol))
     }
 
     /// Add `pc` (following epsilon transitions) to `list` at input position
     /// `sp`, threading capture slots. Deduped via `list.seen` so the first
     /// (highest-priority) path to each pc wins.
-    fn add_thread(
+    fn add_thread<S: Subject + ?Sized>(
         &self,
         list: &mut ThreadList,
         pc: usize,
         sp: usize,
         caps: &mut Vec<Option<usize>>,
-        input: &[Ch],
+        input: &S,
         bol: StartOfLine,
     ) {
         // `seen` is sized to the program, so a `pc` it cannot index is one no
@@ -2463,10 +3243,10 @@ impl Regex {
         let Some(seen) = list.seen.get_mut(pc) else {
             return;
         };
-        if *seen {
+        if *seen == list.generation {
             return;
         }
-        *seen = true;
+        *seen = list.generation;
         let Some(inst) = self.prog.get(pc) else {
             return;
         };
@@ -2518,10 +3298,13 @@ impl Regex {
                 }
             }
             // Consuming/terminal instruction — becomes a live thread.
-            _ => list.threads.push(Thread {
-                pc,
-                caps: caps.clone(),
-            }),
+            _ => {
+                list.threads.push(Thread {
+                    pc,
+                    at: list.slots.len(),
+                });
+                list.slots.extend_from_slice(caps);
+            }
         }
     }
 }
@@ -2555,9 +3338,12 @@ impl Search<'_> {
         from: usize,
         bol: StartOfLine,
     ) -> Result<Option<GroupSpans>, MatchLimit> {
-        let Some(slots) = self
-            .re
-            .run(&self.scan.chars, self.scan.char_index(from), bol)?
+        let Some(slots) = self.re.run(
+            self.scan.chars.as_slice(),
+            self.scan.char_index(from),
+            bol,
+            self.re.all_slots(),
+        )?
         else {
             return Ok(None);
         };
@@ -2579,7 +3365,7 @@ impl Search<'_> {
     /// [`MatchLimit`] if a backreference search exceeded its budget.
     pub fn find_window(&self, lo: usize, hi: usize) -> Result<Option<(usize, usize)>, MatchLimit> {
         self.in_window(lo, hi, |re, input| {
-            let Some(slots) = re.run(input, 0, StartOfLine::Yes)? else {
+            let Some(slots) = re.run(input, 0, StartOfLine::Yes, MATCH_SLOTS)? else {
                 return Ok(None);
             };
             Ok(slots
@@ -2602,13 +3388,56 @@ impl Search<'_> {
                 let mut budget = Regex::backtrack_budget(input.len());
                 re.backtrack_at(input, 0, &mut budget, StartOfLine::Yes)?
             } else {
-                re.scan(input, 0, re.entry, true, StartOfLine::Yes)
+                re.scan(input, 0, re.entry, true, StartOfLine::Yes, MATCH_SLOTS)
             };
             Ok(slots
                 .and_then(|s| s.get(1).copied().flatten())
                 .map(|end| (0, end)))
         })?;
         Ok(span.map(|(_, end)| end))
+    }
+
+    /// glibc's *backward* search: the match that begins latest in the bytes
+    /// `0..hi`, taken as the whole subject -- each starting character tried
+    /// from the last one down to the first -- and, at the first start that
+    /// matches, the longest match there. `(start, end)` as byte offsets, or
+    /// `None` if nothing in the window matches.
+    ///
+    /// `re_search (re, s, hi, hi - 1, -(hi - 1), regs)`: how `tac -r` finds the
+    /// separator nearest the end of what it has not printed yet. The anchors
+    /// are the window's, because the window is the string glibc is handed:
+    /// `^` and `` \` `` hold at byte 0 (and `^` after a newline, under the
+    /// newline anchor), `$` and `\'` at `hi` -- wherever those fall in the
+    /// file the window came from.
+    ///
+    /// Only the first byte of a character is tried as a start, as glibc tries
+    /// in a multibyte locale; a byte that decodes to nothing is a character of
+    /// its own. The prefilter, where the pattern has one, skips a start no
+    /// match can begin at, as glibc's fastmap does.
+    ///
+    /// # Errors
+    /// [`MatchLimit`] if a backreference search exceeded its budget, which is
+    /// shared by every start tried.
+    pub fn rsearch(&self, hi: usize) -> Result<Option<(usize, usize)>, MatchLimit> {
+        self.in_window(0, hi, |re, input| {
+            let mut budget = Regex::backtrack_budget(input.len());
+            for start in (0..input.len()).rev() {
+                if let Some(pf) = re.prefilter.as_ref()
+                    && !re.can_start(pf, input, start, StartOfLine::Yes)
+                {
+                    continue;
+                }
+                let slots = if re.has_backref {
+                    re.backtrack_at(input, start, &mut budget, StartOfLine::Yes)?
+                } else {
+                    re.scan(input, start, re.entry, true, StartOfLine::Yes, MATCH_SLOTS)
+                };
+                if let Some(end) = slots.and_then(|s| s.get(1).copied().flatten()) {
+                    return Ok(Some((start, end)));
+                }
+            }
+            Ok(None)
+        })
     }
 
     /// Run `search` over the characters of the window `lo..hi` and turn the
@@ -2637,7 +3466,7 @@ impl Search<'_> {
             return Ok(self.scan.span(clo.saturating_add(s), clo.saturating_add(e)));
         }
         let bytes = self.window_bytes(lo, hi);
-        let sub = Scan::new(&bytes);
+        let sub = self.re.decode(&bytes);
         let Some((s, e)) = search(self.re, &sub.chars)? else {
             return Ok(None);
         };
@@ -2686,12 +3515,19 @@ struct Scan {
 }
 
 impl Scan {
-    fn new(text: BStr<'_>) -> Scan {
+    /// Decode `text` -- a byte at a time when `bytes`, see
+    /// [`Regex::with_byte_chars`].
+    fn new(text: BStr<'_>, bytes: bool) -> Scan {
         let mut chars = Vec::new();
         let mut offs = Vec::new();
-        for (at, c) in bytes::char_positions(text) {
+        let mut take = |(at, c)| {
             offs.push(at);
             chars.push(c);
+        };
+        if bytes {
+            bytes::byte_positions(text).for_each(&mut take);
+        } else {
+            bytes::char_positions(text).for_each(&mut take);
         }
         offs.push(text.len());
         Scan { chars, offs }
@@ -2727,9 +3563,9 @@ struct Cursor {
 }
 
 impl Cursor {
-    fn new(text: BStr<'_>) -> Cursor {
+    fn new(scan: Scan) -> Cursor {
         Cursor {
-            scan: Scan::new(text),
+            scan,
             next: 0,
             last_end: None,
             done: false,
@@ -2742,12 +3578,26 @@ impl Cursor {
     /// abandoned rather than finished — a distinction the caller has to keep,
     /// because a truncated `gsub` that reported success would silently write
     /// half a substitution.
-    fn step(&mut self, re: &Regex) -> Option<Result<Vec<Option<usize>>, MatchLimit>> {
+    ///
+    /// `nslots` is how many capture slots the caller reads (see
+    /// [`Regex::run`]); at least the whole match's two are kept, which the
+    /// stepping itself reads.
+    fn step(
+        &mut self,
+        re: &Regex,
+        nslots: usize,
+    ) -> Option<Result<Vec<Option<usize>>, MatchLimit>> {
+        let nslots = nslots.max(MATCH_SLOTS);
         loop {
             if self.done {
                 return None;
             }
-            let slots = match re.run(&self.scan.chars, self.next, StartOfLine::Yes) {
+            let slots = match re.run(
+                self.scan.chars.as_slice(),
+                self.next,
+                StartOfLine::Yes,
+                nslots,
+            ) {
                 Ok(Some(slots)) => slots,
                 Ok(None) => {
                     self.done = true;
@@ -2819,7 +3669,7 @@ impl Iterator for Matches<'_> {
     type Item = Result<(usize, usize), MatchLimit>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let slots = match self.cur.step(self.re)? {
+        let slots = match self.cur.step(self.re, MATCH_SLOTS)? {
             Ok(slots) => slots,
             Err(limit) => return Some(Err(limit)),
         };
@@ -2841,7 +3691,7 @@ impl Iterator for CaptureMatches<'_> {
     type Item = Result<GroupSpans, MatchLimit>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let slots = match self.cur.step(self.re)? {
+        let slots = match self.cur.step(self.re, self.re.all_slots())? {
             Ok(slots) => slots,
             Err(limit) => return Some(Err(limit)),
         };
@@ -2892,6 +3742,54 @@ mod tests {
         assert_eq!(br.find(b"a\nbb\nc").unwrap(), Some((2, 4)));
     }
 
+    /// Read a byte at a time, as the C locale reads, a UTF-8 sequence is as
+    /// many characters as it has bytes: `.` takes one, a bracket's negation
+    /// takes one, and nothing above 0x7f is a letter or folds.
+    #[test]
+    fn byte_chars_read_a_byte_at_a_time() {
+        let re = |p: &[u8], ci: bool| Regex::new_flags(p, ci).unwrap().with_byte_chars(true);
+        let e_acute = "x\u{e9}y".as_bytes();
+        assert_eq!(re(b"x.y", false).find(e_acute).unwrap(), None);
+        assert_eq!(re(b"x..y", false).find(e_acute).unwrap(), Some((0, 4)));
+        assert_eq!(re(b"[^x]", false).find(e_acute).unwrap(), Some((1, 2)));
+        assert_eq!(
+            re(b"[[:alpha:]]+", false).find(e_acute).unwrap(),
+            Some((0, 1))
+        );
+        assert_eq!(re(b"y", true).find(b"\xc3\x9fY").unwrap(), Some((2, 3)));
+        // Captures come back as the bytes they covered.
+        let caps = re(b"x(.)", false).captures(e_acute).unwrap().unwrap();
+        assert_eq!(caps.get(1).cloned().flatten(), Some(b"\xc3".to_vec()));
+        // Every match a scan finds is on byte offsets.
+        let all: Vec<_> = re(b".", false)
+            .find_iter(e_acute)
+            .map(|m| m.unwrap())
+            .collect();
+        assert_eq!(all, vec![(0, 1), (1, 2), (2, 3), (3, 4)]);
+        // Off by default: the same subject is three characters.
+        assert_eq!(found("x.y", "x\u{e9}y"), Some((0, 4)));
+    }
+
+    /// `REG_NEWLINE`'s syntax half keeps `.` and `[^...]` off a newline, and
+    /// nothing else: a bracket that names the newline still matches it.
+    #[test]
+    fn reg_newline_keeps_dot_and_negated_brackets_off_a_newline() {
+        let nl = Syntax::POSIX_EXTENDED.reg_newline();
+        let re = |p: &[u8]| Regex::new_syntax(p, false, nl).unwrap();
+        assert_eq!(re(b"a.b").find(b"a\nb a-b").unwrap(), Some((4, 7)));
+        assert_eq!(re(b"a[^x]b").find(b"a\nb a-b").unwrap(), Some((4, 7)));
+        assert_eq!(re(b"a[\n]b").find(b"a\nb").unwrap(), Some((0, 3)));
+        assert_eq!(re(b"a[^\n]b").find(b"a\nb").unwrap(), None);
+        // With the newline anchor too, as `regcomp` gives it.
+        let both = re(b"^b.*$").with_newline_anchor(true);
+        assert_eq!(both.find(b"a\nbcd\ne").unwrap(), Some((2, 5)));
+        // Without it, the plain syntax lets both through.
+        let plain = Regex::new(b"a.b").unwrap();
+        assert_eq!(plain.find(b"a\nb").unwrap(), Some((0, 3)));
+        let plain = Regex::new(b"a[^x]b").unwrap();
+        assert_eq!(plain.find(b"a\nb").unwrap(), Some((0, 3)));
+    }
+
     /// A window of a subject is searched as though it were the whole subject:
     /// its edges are the anchors and the word boundaries see nothing past them.
     #[test]
@@ -2926,14 +3824,66 @@ mod tests {
         assert_eq!(backref.search(b"baab").longest_at(1, 4).unwrap(), Some(3));
     }
 
+    /// `re_search` backward: the latest start that matches, and the longest
+    /// match there; the window's ends are the anchors.
+    #[test]
+    fn a_backward_search_finds_the_latest_start() {
+        let re = |p: &str| emacs_nl(p);
+        // The latest start wins, not the longest match overall.
+        assert_eq!(re("a+").search(b"baaa").rsearch(4).unwrap(), Some((3, 4)));
+        assert_eq!(re("ba+").search(b"baaab").rsearch(5).unwrap(), Some((0, 4)));
+        // Newlines, as tac's default separator would find them.
+        assert_eq!(
+            re("\n").search(b"a\nb\nc").rsearch(5).unwrap(),
+            Some((3, 4))
+        );
+        assert_eq!(
+            re("\n").search(b"a\nb\nc").rsearch(3).unwrap(),
+            Some((1, 2))
+        );
+        assert_eq!(re("\n").search(b"abc").rsearch(3).unwrap(), None);
+        assert_eq!(re("\n").search(b"abc").rsearch(0).unwrap(), None);
+        // `^` holds at the window's start and after a newline; `$` at its end.
+        assert_eq!(re("^b").search(b"ab\nb").rsearch(4).unwrap(), Some((3, 4)));
+        assert_eq!(re("^a").search(b"xa").rsearch(2).unwrap(), None);
+        assert_eq!(re("b$").search(b"ab\ncd").rsearch(2).unwrap(), Some((1, 2)));
+        assert_eq!(re("\\`x").search(b"xx").rsearch(2).unwrap(), Some((0, 1)));
+        // Only a character's first byte starts a match: `.` at the start of
+        // "é" takes both its bytes.
+        let e = "a\u{e9}".as_bytes();
+        assert_eq!(re(".").search(e).rsearch(3).unwrap(), Some((1, 3)));
+        // A window that ends inside a character sees its first byte alone,
+        // which decodes to nothing, so `.` skips it for the `a` before.
+        assert_eq!(re(".").search(e).rsearch(2).unwrap(), Some((0, 1)));
+        // The backtracker answers the same way.
+        let backref = emacs_nl("\\(a\\)\\1");
+        let br = backref.search(b"aaxaa");
+        assert_eq!(br.rsearch(5).unwrap(), Some((3, 5)));
+        assert_eq!(br.rsearch(4).unwrap(), Some((0, 2)));
+    }
+
+    fn emacs_nl(p: &str) -> Regex {
+        crate::emacs::compile(p.as_bytes(), false)
+            .unwrap()
+            .with_newline_anchor(true)
+    }
+
     /// A window that starts inside a character is decoded from its own bytes:
-    /// the tail of the character is bytes that decode to nothing.
+    /// the tail of the character is bytes that decode to nothing -- which, read
+    /// as characters, only a literal byte takes, and read as bytes, anything
+    /// that takes a byte does.
     #[test]
     fn a_window_inside_a_character_sees_bytes() {
-        let re = Regex::new(br"[^a]b").unwrap();
         // "é" is C3 A9; from byte 2 the window is A9, then "b".
         let text = "aéb".as_bytes();
+        let re = Regex::new(br"[^a]b").unwrap();
         let search = re.search(text);
+        assert_eq!(search.find_window(2, 4).unwrap(), None);
+        assert_eq!(search.longest_at(2, 4).unwrap(), None);
+        let b = Regex::new(br"b").unwrap();
+        assert_eq!(b.search(text).find_window(2, 4).unwrap(), Some((3, 4)));
+        let bytes = Regex::new(br"[^a]b").unwrap().with_byte_chars(true);
+        let search = bytes.search(text);
         assert_eq!(search.find_window(2, 4).unwrap(), Some((2, 4)));
         assert_eq!(search.longest_at(2, 4).unwrap(), Some(4));
     }
@@ -3214,10 +4164,32 @@ mod tests {
         bad("{2}a");
         bad("(*a)");
         bad("a|*b");
-        // `^` is an assertion, not an atom; `$` glibc does let you quantify.
+        // An assertion is not an atom -- any of them, `$` and the word
+        // assertions as much as `^` -- and that holds before a brace that
+        // would otherwise have rolled back to a literal. Measured, bash 5.2
+        // `=~` and findutils 4.9 posix-extended, every one refused.
         bad("^*a");
         bad("a^*b");
-        assert!(compile("a$*").is_ok());
+        bad("^{2}");
+        bad("a$*");
+        bad("$*");
+        bad("a$+b");
+        bad(r"a\b*");
+        bad(r"a\<+");
+        bad(r"a\>?");
+        bad(r"a\B*b");
+        bad(r"a\`*");
+        bad(r"a\'{2}");
+        // ...but a group around one is an atom.
+        assert!(compile("a($)*").is_ok());
+        assert!(compile("(^)*a").is_ok());
+        assert_eq!(
+            Regex::new_syntax(b"^{b}", false, Syntax::POSIX_AWK)
+                .unwrap_err()
+                .code,
+            RegCode::BadRepeat
+        );
+        assert_eq!(compile("^{b}").unwrap_err().code, RegCode::BadRepeat);
         // A parenthesis has to be closed. An *unopened* `)` does not have to
         // be — it is an ordinary character — which is the accept side's job.
         bad("(");
@@ -3300,6 +4272,49 @@ mod tests {
     /// halves are one behaviour and are tested as one. Every row is a measured
     /// `grep -E` run against grep 3.11: the pattern was fed one line on stdin
     /// and stderr compared verbatim.
+    /// dfa.c's `colon_warning_state`, row by row as grep 3.11 and sed 4.9
+    /// answer: a bracket that opens and closes with `:`, has something else
+    /// between, and holds no range.
+    #[test]
+    fn a_class_written_without_its_outer_brackets_is_reported() {
+        let confusing = |pat: &str| {
+            Regex::new_syntax_warn(pat.as_bytes(), false, Syntax::POSIX_EXTENDED)
+                .unwrap_or_else(|e| panic!("{pat:?} should compile: {e:?}"))
+                .1
+                .contains(&Warning::ConfusingBracket)
+        };
+        for pat in ["[:alpha:]", "[^:alpha:]", "a[:space:]b", "[:x:]"] {
+            assert!(confusing(pat), "{pat}");
+        }
+        for pat in [
+            "[[:alpha:]]",
+            "[:a]",
+            "[a:]",
+            "[::]",
+            "[:a-z:]",
+            "[:]",
+            ":alpha:",
+        ] {
+            assert!(!confusing(pat), "{pat}");
+        }
+    }
+
+    /// `RE_UNMATCHED_RIGHT_PAREN_ORD`: on in every dialect here, off in GNU
+    /// sed's default mode, where `sed -E 's/a)/X/'` is an error.
+    #[test]
+    fn an_unmatched_close_paren_is_a_character_unless_the_syntax_says_not() {
+        let lit = Regex::new_syntax(b"a)", false, Syntax::POSIX_EXTENDED).unwrap();
+        assert!(lit.is_match(b"a)").unwrap());
+        let strict = Syntax {
+            unmatched_right_paren_ord: false,
+            ..Syntax::POSIX_EXTENDED
+        };
+        let e = Regex::new_syntax(b"a)", false, strict).unwrap_err();
+        assert_eq!(e.message(), r"Unmatched ) or \)");
+        // A `)` that does close a group is unaffected.
+        assert!(Regex::new_syntax(b"(a)", false, strict).is_ok());
+    }
+
     #[test]
     fn egrep_reports_a_quantifier_with_nothing_before_it() {
         use Quantifier::{Interval, Plus, Question, Star};
@@ -3308,7 +4323,10 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{pat:?} should compile: {e:?}"))
                 .1
                 .into_iter()
-                .map(|Warning::QuantifierAtStart(q)| q)
+                .filter_map(|w| match w {
+                    Warning::QuantifierAtStart(q) => Some(q),
+                    Warning::ConfusingBracket => None,
+                })
                 .collect::<Vec<_>>()
         };
 
@@ -3420,6 +4438,230 @@ mod tests {
         assert!(!me("^a{2,}$", "a"));
         assert!(me("^a{1}{2}$", "aa"));
         assert!(me("^a{,3}$", ""));
+    }
+
+    /// GNU grep `-E` repeats a line or buffer anchor but leaves a word
+    /// assertion as it was under `*`, `+` and `?`. Measured, grep 3.11, on the
+    /// lines `a ab a* * a$ a^ b`: `a\b*`, `a\b+` and `a\b?` each print `a`,
+    /// `a*`, `a$` and `a^` and never `ab`; `a\B*` prints only `ab`; `a$*`
+    /// prints every line with an `a` and `a$+` only `a`.
+    #[test]
+    fn egrep_repeats_an_anchor_but_not_a_word_assertion() {
+        for pat in [r"a\b*", r"a\b+", r"a\b?", r"a\>*"] {
+            assert!(me(pat, "a"), "{pat} on a");
+            assert!(me(pat, "a*"), "{pat} on a*");
+            assert!(!me(pat, "ab"), "{pat} on ab");
+        }
+        assert!(me(r"a\B*", "ab"));
+        assert!(!me(r"a\B*", "a*"));
+        assert!(!me(r"a\<*", "ab"));
+        assert!(me("a$*", "ab"));
+        assert!(me("a$+", "a"));
+        assert!(!me("a$+", "ab"));
+        assert!(me(r"a\`*", "ab"));
+    }
+
+    /// findutils' `awk` and `gnu-awk` regex types, measured against findutils
+    /// 4.9: a repetition with nothing to repeat is the character, `awk` has
+    /// no intervals and no backreferences, and `gnu-awk` keeps both and the GNU
+    /// operators.
+    #[test]
+    fn the_two_awk_syntaxes_findutils_offers() {
+        for syntax in [Syntax::AWK, Syntax::GNU_AWK] {
+            // `(*a)` is a group holding a star and an `a`.
+            assert!(ms(syntax, "^(*a)$", "*a"), "{syntax:?}");
+            assert!(!ms(syntax, "^(*a)$", "a"), "{syntax:?}");
+            assert!(ms(syntax, "^*a$", "*a"));
+            assert!(ms(syntax, "^x|+a$", "+a"));
+            // A leading star repeated is a star repeated.
+            assert!(ms(syntax, "^**$", "***"));
+            // After an assertion too: `a$*` is an `a`, the end, and a star
+            // that can never follow it -- compiled, matching nothing.
+            assert!(Regex::new_syntax(b"a$*", false, syntax).is_ok());
+            assert!(!ms(syntax, "a$*", "a"));
+            assert!(!ms(syntax, "a$*", "a*"));
+            // A backslash in a bracket quotes.
+            assert!(ms(syntax, "^[a\\]b]$", "]"));
+        }
+        // `awk`: `{` is the character, `\1` the digit, `\w` the letter.
+        assert!(ms(Syntax::AWK, "^a{2}$", "a{2}"));
+        assert!(!ms(Syntax::AWK, "^a{2}$", "aa"));
+        assert!(ms(Syntax::AWK, "^a\\1$", "a1"));
+        assert!(ms(Syntax::AWK, "^a\\w$", "aw"));
+        // `gnu-awk`: intervals, backreferences and GNU operators all stay.
+        assert!(ms(Syntax::GNU_AWK, "^a{2}$", "aa"));
+        assert!(ms(Syntax::GNU_AWK, "^a{b}$", "a{b}"));
+        assert!(ms(Syntax::GNU_AWK, "^(a)\\1$", "aa"));
+        assert!(ms(Syntax::GNU_AWK, "^a\\w$", "a1"));
+        assert_eq!(
+            Regex::new_syntax(b"a\\1", false, Syntax::GNU_AWK)
+                .unwrap_err()
+                .code,
+            RegCode::BadBackReference
+        );
+        // And the other ERE syntaxes still refuse or skip it, as measured.
+        assert!(Regex::new_syntax(b"(*a)", false, Syntax::POSIX_AWK).is_err());
+        assert!(Regex::new(b"(*a)").is_err());
+        assert!(me("^(*a)$", "a"));
+    }
+
+    /// Match under `syntax`.
+    fn ms(syntax: Syntax, pat: &str, s: &str) -> bool {
+        Regex::new_syntax(pat.as_bytes(), false, syntax)
+            .unwrap()
+            .is_match(s.as_bytes())
+            .unwrap()
+    }
+
+    /// A backslash makes the next character literal and does nothing else:
+    /// glibc has no C escapes, so `\t` is a `t`. Measured against grep 3.11:
+    /// `grep -E '^a\tb$'` prints `atb` and not `a<TAB>b`, and `grep -E '^\0$'`
+    /// prints `0`. (awk and sed have C escapes in their *languages*, and
+    /// resolve them before a pattern gets here.)
+    #[test]
+    fn there_are_no_c_escapes() {
+        for syntax in [Syntax::POSIX_EXTENDED, Syntax::EGREP, Syntax::POSIX_AWK] {
+            assert!(ms(syntax, r"^a\tb$", "atb"));
+            assert!(!ms(syntax, r"^a\tb$", "a\tb"));
+            assert!(ms(syntax, r"^\n$", "n"));
+            assert!(ms(syntax, r"^\r\f\v$", "rfv"));
+            assert!(ms(syntax, r"^\0$", "0"));
+            assert!(!ms(syntax, r"^\0$", "\0"));
+            // The metacharacters are still what a backslash is for.
+            assert!(ms(syntax, r"^a\.b$", "a.b"));
+            assert!(!ms(syntax, r"^a\.b$", "axb"));
+            assert!(ms(syntax, r"^\\$", "\\"));
+            assert!(ms(syntax, r"^\%$", "%"));
+        }
+    }
+
+    /// Inside a bracket expression a backslash is a member, as POSIX says and
+    /// glibc does. Every row measured against grep 3.11 (`-E` and basic alike)
+    /// and bash 5.2's `[[ =~ ]]`:
+    ///
+    /// | pattern | matches | does not match |
+    /// |---|---|---|
+    /// | `^[\.]$` | `\` and `.` | |
+    /// | `^[\t]$` | `\` and `t` | a tab |
+    /// | `^[\]]$` | `\]` | `]` |
+    /// | `^[a\]x$` | `ax` and `\x` | |
+    /// | `^[^\t]$` | `x` and a tab | `t` and `\` |
+    /// | `^[\w-]+$` | `w\-` | `ab_` |
+    #[test]
+    fn a_backslash_in_a_bracket_is_a_member() {
+        for syntax in [Syntax::POSIX_EXTENDED, Syntax::EGREP] {
+            assert!(ms(syntax, r"^[\.]$", "\\"));
+            assert!(ms(syntax, r"^[\.]$", "."));
+            assert!(ms(syntax, r"^[\t]$", "\\"));
+            assert!(ms(syntax, r"^[\t]$", "t"));
+            assert!(!ms(syntax, r"^[\t]$", "\t"));
+            assert!(ms(syntax, r"^[\]]$", "\\]"));
+            assert!(!ms(syntax, r"^[\]]$", "]"));
+            assert!(ms(syntax, r"^[a\]x$", "ax"));
+            assert!(ms(syntax, r"^[a\]x$", "\\x"));
+            assert!(ms(syntax, r"^[^\t]$", "x"));
+            assert!(ms(syntax, r"^[^\t]$", "\t"));
+            assert!(!ms(syntax, r"^[^\t]$", "t"));
+            assert!(!ms(syntax, r"^[^\t]$", "\\"));
+            assert!(ms(syntax, r"^[\w-]+$", "w\\-"));
+            assert!(!ms(syntax, r"^[\w-]+$", "ab_"));
+            // A backslash closing nothing: `[\]` is a bracket holding one.
+            assert!(ms(syntax, r"[\]", "a\\b"));
+            assert!(!ms(syntax, r"[\]", "ab"));
+        }
+    }
+
+    /// Under awk's syntax a backslash in a bracket quotes the next character
+    /// (`RE_BACKSLASH_ESCAPE_IN_LISTS`). Measured against gawk 5.2.1
+    /// `--posix`, whose escape layer has already turned `\t` into a tab by
+    /// the time the compiler sees it -- which is why `[\t]` is not a row here:
+    /// to the compiler it is `[\t]` only if the program wrote `[\\t]`.
+    #[test]
+    fn awk_reads_a_backslash_in_a_bracket_as_quoting() {
+        let awk = Syntax::POSIX_AWK;
+        assert!(ms(awk, r"^[\.]$", "."));
+        assert!(!ms(awk, r"^[\.]$", "\\"));
+        assert!(ms(awk, r"^[\]]$", "]"));
+        assert!(ms(awk, r"^[\\]$", "\\"));
+        assert!(ms(awk, r"^[\/]$", "/"));
+        assert!(!ms(awk, r"^[\/]$", "\\"));
+        assert!(ms(awk, r"^[\q]$", "q"));
+        // `[a\]x]`: the quoted `]` is a member and the next one closes.
+        assert!(ms(awk, r"^[a\]x]$", "a"));
+        assert!(ms(awk, r"^[a\]x]$", "]"));
+        assert!(ms(awk, r"^[a\]x]$", "x"));
+        // A quoted `-` is a member, not a range: `[a\-z]` is three characters.
+        assert!(ms(awk, r"^[a\-z]$", "-"));
+        assert!(!ms(awk, r"^[a\-z]$", "m"));
+        // A quoted `^` first is a member, not negation.
+        assert!(ms(awk, r"^[\^a]$", "^"));
+        // `[^\]]` negates a `]`.
+        assert!(!ms(awk, r"^[^\]]$", "]"));
+        assert!(ms(awk, r"^[^\]]$", "x"));
+        // Unclosed: the quoted `]` closes nothing, and a final backslash is a
+        // member that leaves the bracket open (glibc's `peek_token_bracket`).
+        for pat in [r"^[a\]x$", r"[\", r"[a\"] {
+            assert_eq!(
+                Regex::new_syntax(pat.as_bytes(), false, awk)
+                    .unwrap_err()
+                    .code,
+                RegCode::UnmatchedBracket,
+                "{pat}"
+            );
+        }
+    }
+
+    /// Under awk's syntax the GNU operators are the characters themselves
+    /// (`RE_NO_GNU_OPS`). Measured against gawk 5.2.1 `--posix`, which warns
+    /// about each escape and then matches the letter.
+    #[test]
+    fn awk_has_no_gnu_operators() {
+        let awk = Syntax::POSIX_AWK;
+        for (pat, s) in [
+            (r"^\w$", "w"),
+            (r"^\W$", "W"),
+            (r"^\s$", "s"),
+            (r"^\S$", "S"),
+            (r"^\b$", "b"),
+            (r"^\B$", "B"),
+            (r"^\<$", "<"),
+            (r"^\>$", ">"),
+            (r"^\`$", "`"),
+            (r"^\'$", "'"),
+            (r"^\y$", "y"),
+        ] {
+            assert!(ms(awk, pat, s), "{pat} should match {s:?} under awk");
+        }
+        // And everywhere else they are still operators.
+        assert!(!ms(Syntax::POSIX_EXTENDED, r"^\w$", "%"));
+        assert!(ms(Syntax::POSIX_EXTENDED, r"^\w$", "q"));
+        assert!(!ms(awk, r"^\w$", "q"));
+    }
+
+    /// awk's syntax has `RE_INVALID_INTERVAL_ORD` without egrep's
+    /// `RE_CONTEXT_INDEP_OPS`: a malformed interval after an atom is a
+    /// literal brace, while a quantifier with nothing before it is still an
+    /// error. The combination needed the rolled-back `{` to stay a literal
+    /// when it is read again (`EParser::literal_brace`): before, `a{b}` was
+    /// "nothing to repeat". Measured against gawk 5.2.1 `--posix`.
+    #[test]
+    fn awk_reads_a_malformed_interval_after_an_atom_as_a_literal_brace() {
+        let awk = Syntax::POSIX_AWK;
+        let code = |pat: &str| {
+            Regex::new_syntax(pat.as_bytes(), false, awk)
+                .unwrap_err()
+                .code
+        };
+        assert!(ms(awk, "a{b}c", "a{b}c"));
+        assert!(ms(awk, "a{1,2", "a{1,2"));
+        assert!(ms(awk, "^a{1}{b}$", "a{b}"));
+        assert!(ms(awk, "^a{2}$", "aa"));
+        // Nothing before it: refused, as glibc refuses it.
+        for pat in ["{b}a", "{2}a", "*a", "a|{b}", "({b})", "^{b}", "^*"] {
+            assert_eq!(code(pat), RegCode::BadRepeat, "{pat}");
+        }
+        // A committed interval with bad content is still an error.
+        assert_eq!(code("a{1,2,3}"), RegCode::BadBraceContent);
     }
 
     /// Everything the two dialects agree about, checked in both.
@@ -3599,9 +4841,17 @@ mod tests {
     /// a pattern was reported as an uncompilable right-hand side.
     #[test]
     fn matches_a_subject_and_a_pattern_that_are_not_text() {
-        // `.` matches one *character*, and an undecodable byte is one — not a
-        // third of an `é`, and not nothing.
-        assert!(Regex::new(b"^a.b$").unwrap().is_match(b"a\xffb").unwrap());
+        // `.` matches one *character* -- not a third of an `é` -- but, as in a
+        // glibc UTF-8 locale, not a byte that decodes to nothing; read as the
+        // C locale reads it, it does.
+        assert!(!Regex::new(b"^a.b$").unwrap().is_match(b"a\xffb").unwrap());
+        assert!(
+            Regex::new(b"^a.b$")
+                .unwrap()
+                .with_byte_chars(true)
+                .is_match(b"a\xffb")
+                .unwrap()
+        );
         assert!(
             Regex::new(b"^a.b$")
                 .unwrap()
@@ -3628,16 +4878,27 @@ mod tests {
                 .is_match(b"a\xffb")
                 .unwrap()
         );
-        // …and inside a bracket expression.
+        // …but not inside a bracket expression, which in a UTF-8 reading keeps
+        // only the bytes that are characters on their own -- measured, bash's
+        // `[[ $'a\xffb' =~ ^a[$'\xff']b$ ]]` fails under C.UTF-8 and holds
+        // under C. Read as bytes, it is a member like any other.
+        assert!(
+            !Regex::new(b"^a[\xff\xfe]b$")
+                .unwrap()
+                .is_match(b"a\xffb")
+                .unwrap()
+        );
         assert!(
             Regex::new(b"^a[\xff\xfe]b$")
                 .unwrap()
+                .with_byte_chars(true)
                 .is_match(b"a\xffb")
                 .unwrap()
         );
         assert!(
             !Regex::new(b"^a[\xfe]b$")
                 .unwrap()
+                .with_byte_chars(true)
                 .is_match(b"a\xffb")
                 .unwrap()
         );
@@ -3657,8 +4918,17 @@ mod tests {
                 .is_match(b"\xff")
                 .unwrap()
         );
-        // …so a negated class does match it, as bash in the C locale does.
-        assert!(Regex::new(b"^[^a-z]$").unwrap().is_match(b"\xff").unwrap());
+        // …and a negated class does not match it either, as bash's does not
+        // under C.UTF-8 -- while under C, where the byte is a character, it
+        // does.
+        assert!(!Regex::new(b"^[^a-z]$").unwrap().is_match(b"\xff").unwrap());
+        assert!(
+            Regex::new(b"^[^a-z]$")
+                .unwrap()
+                .with_byte_chars(true)
+                .is_match(b"\xff")
+                .unwrap()
+        );
 
         // A quantifier counts it as one character.
         assert!(
@@ -3690,8 +4960,16 @@ mod tests {
         );
 
         // A capture hands back the bytes, not an approximation of them — this
-        // is what reaches `BASH_REMATCH`.
+        // is what reaches `BASH_REMATCH`. (`.` takes the bytes only read as
+        // the C locale reads them; a literal byte takes itself either way.)
         let caps = Regex::new(b"^a(.+)b$")
+            .unwrap()
+            .with_byte_chars(true)
+            .captures(b"a\xff\xfeb")
+            .unwrap()
+            .unwrap();
+        assert_eq!(caps[1].as_deref(), Some(&b"\xff\xfe"[..]));
+        let caps = Regex::new(b"^a(\xff\xfe)b$")
             .unwrap()
             .captures(b"a\xff\xfeb")
             .unwrap()
@@ -3964,7 +5242,22 @@ mod tests {
         // a span must not split it or skip it.
         let hay: &[u8] = &[b'a', 0xFF, b'b'];
         assert_eq!(re("b").find(hay).unwrap(), Some((2, 3)));
-        assert_eq!(re("a.b").find(hay).unwrap(), Some((0, 3)));
+        // Only itself takes it: not `.`, and no bracket expression.
+        assert_eq!(re("a.b").find(hay).unwrap(), None);
+        assert_eq!(re("a[^x]b").find(hay).unwrap(), None);
+        assert_eq!(re("a[^[:alpha:]]b").find(hay).unwrap(), None);
+        assert_eq!(re("a\\Wb").find(hay).unwrap(), None);
+        assert_eq!(
+            Regex::new(b"a\xffb").unwrap().find(hay).unwrap(),
+            Some((0, 3))
+        );
+        // `.` still takes a whole valid character, and the byte between.
+        assert_eq!(re("a.b").find("a\u{e9}b".as_bytes()).unwrap(), Some((0, 4)));
+        assert_eq!(re("x.").find(b"x\xffx\xc3\xa9").unwrap(), Some((2, 5)));
+        // Read as bytes -- the C locale -- `.` and a negated bracket take it.
+        let bytes = |p: &str| Regex::new(p.as_bytes()).unwrap().with_byte_chars(true);
+        assert_eq!(bytes("a.b").find(hay).unwrap(), Some((0, 3)));
+        assert_eq!(bytes("a[^x]b").find(hay).unwrap(), Some((0, 3)));
     }
 
     // ---- backreferences --------------------------------------------------
@@ -4122,5 +5415,231 @@ mod tests {
         assert_eq!(whole("^(a)\\1*", "aaa", 0, StartOfLine::Yes), Some((0, 3)));
         assert_eq!(whole("^(a)\\1*", "aaa", 0, StartOfLine::No), None);
         assert_eq!(whole("(a)\\1*", "aaa", 0, StartOfLine::No), Some((0, 3)));
+    }
+
+    /// A small deterministic generator for the equivalence test below
+    /// (xorshift64*): the same cases every run, so a failure reproduces.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
+        }
+
+        fn pick<'a>(&mut self, from: &[&'a [u8]]) -> &'a [u8] {
+            from[self.below(from.len())]
+        }
+    }
+
+    /// A random pattern over a small alphabet that still reaches every kind
+    /// of instruction: literals in and out of ASCII, `.`, brackets, every
+    /// anchor and word assertion, groups, alternation and repetition.
+    fn random_pattern(r: &mut Rng, depth: usize) -> Vec<u8> {
+        const ATOMS: &[&[u8]] = &[
+            b"a",
+            b"b",
+            b"A",
+            b".",
+            b"[ab]",
+            b"[^a]",
+            b"[[:alpha:]]",
+            b"[a-z]",
+            b"[^\n]",
+            b"\n",
+            "\u{e9}".as_bytes(),
+            b"\x80",
+            b"x",
+            b"()",
+            b"\\b",
+            b"\\B",
+            b"\\<",
+            b"\\>",
+            b"^",
+            b"$",
+            b"\\`",
+            b"\\'",
+            b"\\w",
+            b"\\W",
+            b"\\1",
+        ];
+        let mut p = Vec::new();
+        for _ in 0..=r.below(4) {
+            if depth > 0 && r.below(4) == 0 {
+                p.push(b'(');
+                p.extend(random_pattern(r, depth - 1));
+                if r.below(3) == 0 {
+                    p.push(b'|');
+                    p.extend(random_pattern(r, depth - 1));
+                }
+                p.push(b')');
+            } else {
+                p.extend_from_slice(r.pick(ATOMS));
+            }
+            p.extend_from_slice(
+                r.pick(&[b"", b"", b"", b"", b"*", b"+", b"?", b"{1,2}", b"{0,1}"]),
+            );
+        }
+        if r.below(6) == 0 {
+            p.push(b'|');
+            p.extend(random_pattern(r, depth.saturating_sub(1)));
+        }
+        p
+    }
+
+    fn random_subject(r: &mut Rng) -> Vec<u8> {
+        const PIECES: &[&[u8]] = &[
+            b"a",
+            b"b",
+            b"A",
+            b"x",
+            b"\n",
+            b" ",
+            b"_",
+            "\u{e9}".as_bytes(),
+            b"\x80",
+        ];
+        let mut s = Vec::new();
+        for _ in 0..r.below(12) {
+            s.extend_from_slice(r.pick(PIECES));
+        }
+        s
+    }
+
+    /// Skipping by the prefilter, reading bytes where they lie, keeping only
+    /// the whole match's slots and the allocation-free folds change no answer:
+    /// every search, by every entry point, agrees with the same regex run
+    /// with no prefilter, over random patterns and subjects, in each reading
+    /// (characters or bytes), with and without the newline anchor and case
+    /// folding.
+    fn equivalence(cases: usize, seed: u64) {
+        let mut r = Rng(seed);
+        let mut compiled = 0;
+        let mut filtered = 0;
+        for _ in 0..cases {
+            let pattern = random_pattern(&mut r, 2);
+            let subjects: Vec<Vec<u8>> = (0..8).map(|_| random_subject(&mut r)).collect();
+            for (ci, newline, bytes) in [
+                (false, false, false),
+                (false, false, true),
+                (false, true, false),
+                (true, false, true),
+                (true, true, false),
+                (false, true, true),
+            ] {
+                let make = || {
+                    Regex::new_flags(&pattern, ci)
+                        .ok()
+                        .map(|re| re.with_newline_anchor(newline).with_byte_chars(bytes))
+                };
+                let (Some(re), Some(mut plain)) = (make(), make()) else {
+                    continue;
+                };
+                compiled += 1;
+                filtered += usize::from(re.prefilter.is_some());
+                plain.prefilter = None;
+                let what = |s: &[u8]| {
+                    alloc::format!(
+                        "pattern {:?} subject {:?} ci {ci} newline {newline} bytes {bytes}",
+                        alloc::string::String::from_utf8_lossy(&pattern),
+                        alloc::string::String::from_utf8_lossy(s)
+                    )
+                };
+                for s in &subjects {
+                    assert_eq!(re.captures(s), plain.captures(s), "{}", what(s));
+                    assert_eq!(re.is_match(s), plain.is_match(s), "{}", what(s));
+                    let all: Vec<_> = re.find_iter(s).collect();
+                    let all_plain: Vec<_> = plain.find_iter(s).collect();
+                    assert_eq!(all, all_plain, "{}", what(s));
+                    let groups: Vec<_> = re.capture_spans_iter(s).collect();
+                    let groups_plain: Vec<_> = plain.capture_spans_iter(s).collect();
+                    assert_eq!(groups, groups_plain, "{}", what(s));
+                    let (search, search_plain) = (re.search(s), plain.search(s));
+                    for from in 0..=s.len().saturating_add(1) {
+                        let found = re.find_at(s, from);
+                        assert_eq!(found, plain.find_at(s, from), "{} from {from}", what(s));
+                        for bol in [StartOfLine::Yes, StartOfLine::No] {
+                            let spans = search.capture_spans_from(from, bol);
+                            assert_eq!(
+                                spans,
+                                search_plain.capture_spans_from(from, bol),
+                                "{} from {from} bol {bol:?}",
+                                what(s)
+                            );
+                            if bol == StartOfLine::Yes {
+                                // `find_at` (bytes in place, two slots) and the
+                                // decoded search (every slot) find one match.
+                                let whole =
+                                    spans.unwrap().and_then(|g| g.first().copied().flatten());
+                                assert_eq!(found.unwrap(), whole, "{} from {from}", what(s));
+                            }
+                        }
+                        let ends = [from, from.midpoint(s.len()), s.len()];
+                        for hi in ends.into_iter().filter(|&hi| hi >= from) {
+                            assert_eq!(
+                                search.find_window(from, hi),
+                                search_plain.find_window(from, hi),
+                                "{} window {from}..{hi}",
+                                what(s)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // The test is only worth something if it reached both kinds.
+        assert!(compiled > cases, "{compiled} of {cases} patterns compiled");
+        assert!(
+            filtered > compiled / 4,
+            "{filtered} of {compiled} had a prefilter"
+        );
+        assert!(
+            filtered < compiled,
+            "{filtered} of {compiled} had a prefilter"
+        );
+    }
+
+    #[test]
+    fn the_fast_paths_change_no_answer() {
+        equivalence(300, 0x0005_eed0_fe4e);
+    }
+
+    /// The same, at scale: `cargo test -p ere -- --ignored`.
+    #[test]
+    #[ignore = "a minute or more; run when the engine changes"]
+    fn the_fast_paths_change_no_answer_at_scale() {
+        equivalence(20_000, 0xdead_beef_cafe);
+    }
+
+    /// The prefilter of a few shapes of pattern, as worked out.
+    #[test]
+    fn what_the_prefilter_knows() {
+        let pf = |p: &str| Regex::new(p.as_bytes()).unwrap().prefilter;
+        // A literal first character: only it can begin a match.
+        let lit = pf("ab*").unwrap();
+        assert!(in_byte_set(&lit.set, b'a'));
+        assert!(!in_byte_set(&lit.set, b'b'));
+        assert!(!lit.line_start);
+        // Anchored: only at a line's start, and only with the right character.
+        let anchored = pf("^#!").unwrap();
+        assert!(anchored.line_start && in_byte_set(&anchored.set, b'#'));
+        // Not on every path, so not anchored.
+        assert!(!pf("^a|b").unwrap().line_start);
+        // Matching empty, or beginning anywhere with anything: none.
+        assert!(pf("a*").is_none());
+        assert!(pf("a?b?").is_none());
+        assert!(pf(".b").is_none());
+        assert!(pf("^.").is_some_and(|p| p.line_start));
+        // A backreference first: none.
+        assert!(pf(r"(a)|\1").is_none());
+        // Case folding widens the set.
+        let ci = Regex::new_flags(b"q", true).unwrap().prefilter.unwrap();
+        assert!(in_byte_set(&ci.set, b'q') && in_byte_set(&ci.set, b'Q'));
     }
 }

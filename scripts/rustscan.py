@@ -140,23 +140,104 @@ def strip_comments(text: str, keep_literals: bool = False) -> str:
     """
     return rustlex.strip_noise(text, keep_literals=keep_literals)
 
+# The words an *item* -- something that ends at its `;` or at its braced
+# block -- begins with, once its attributes and any `pub` are passed.
+_ITEM_WORDS = frozenset({
+    "fn", "impl", "mod", "struct", "enum", "union", "trait", "use", "const",
+    "static", "type", "extern", "unsafe", "async", "macro_rules", "let",
+})
+
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _is_list_member(text: str, start: int) -> bool:
+    """Whether what begins at `start` is a member of an enclosing list -- a
+    struct's field, an enum's variant, a match arm, a struct literal's
+    field, a parameter -- rather than an item.
+
+    Read from the first word after any further attributes and any `pub` or
+    `pub(...)`: an item begins with one of [`_ITEM_WORDS`]; a member begins
+    with its own name or pattern.
+    """
+    n = len(text)
+    i = start
+
+    def skip_space(k: int) -> int:
+        while k < n and text[k].isspace():
+            k += 1
+        return k
+
+    def skip_group(k: int, open_: str, close: str) -> int:
+        depth = 0
+        while k < n:
+            if text[k] == open_:
+                depth += 1
+            elif text[k] == close:
+                depth -= 1
+                if depth == 0:
+                    return k + 1
+            k += 1
+        return n
+
+    i = skip_space(i)
+    while text.startswith("#[", i):
+        i = skip_space(skip_group(i + 1, "[", "]"))
+    m = _WORD_RE.match(text, i)
+    if m and m.group() == "pub":
+        i = skip_space(m.end())
+        if text.startswith("(", i):
+            i = skip_space(skip_group(i, "(", ")"))
+        m = _WORD_RE.match(text, i)
+    return not (m and m.group() in _ITEM_WORDS)
+
+
 def item_end(text: str, start: int) -> int:
     """Index just past the item beginning at `start`.
 
     An item ends either at a brace-matched block (`mod`, `fn`, `impl`) or at a
     semicolon (`use`, `const`). Parens and brackets are tracked so that the
     `;` in `fn f() -> [u8; 4]` is not mistaken for the end of the item.
+
+    **An attribute can also stand on a member of a list** -- a struct's
+    field, a variant, a match arm, a struct literal's field, a parameter --
+    which ends at its `,`, or, if it is the last, just *before* the bracket
+    that closes the list. Neither shape was known here, so a
+    `#[cfg(test)]` field ran on past the struct's closing brace to the next
+    `;` in the file, and [`strip_cfg_test`] blanked that brace with it: every
+    brace-matching scan of the text afterwards was one level deep for the
+    rest of the file. That is how apps/netmanager -- whose window struct ends
+    in a `#[cfg(test)]` field -- read to the card scan as one 6,239-line
+    `fn new`, and passed it.
+
+    The `,` ends only a member (see [`_is_list_member`]), and only outside
+    `<...>`: an item's own commas -- `impl<A, B>`, a `where` clause -- are
+    not its end. A closing bracket with nothing open ends either: whatever
+    began at `start` cannot reach past the list it is in.
     """
     i = start
     n = len(text)
     nest = 0
+    angle = 0
+    member = _is_list_member(text, start)
     while i < n:
         c = text[i]
         if c in "([":
             nest += 1
         elif c in ")]":
             nest -= 1
+            if nest < 0:
+                return i
+        elif c == "<":
+            angle += 1
+        elif c == ">":
+            # `->` and `=>` are arrows, not the end of a generic.
+            if i > 0 and text[i - 1] not in "-=":
+                angle = max(0, angle - 1)
+        elif nest == 0 and c == "}":
+            return i
         elif nest == 0 and c == ";":
+            return i + 1
+        elif nest == 0 and c == "," and member and angle == 0:
             return i + 1
         elif nest == 0 and c == "{":
             depth = 0
@@ -383,6 +464,53 @@ def _self_test() -> int:
         "the cfg(test) body really is gone",
         "gone" in strip_cfg_test("#[cfg(test)]\nmod t { fn gone() {} }\nfn keep() {}"),
         False,
+    )
+    # A `#[cfg(test)]` *field* ends at its comma, or before the brace that
+    # closes the struct. It used to run on to the next `;` in the file and
+    # take the struct's `}` with it, so every brace-matching scan was a level
+    # deep for the rest of the file (apps/netmanager, 2026-10-04).
+    last_field = strip_cfg_test(
+        "struct S {\n    a: u8,\n    #[cfg(test)]\n    b: u8,\n}\nconst C: u8 = 1;\nfn keep() {}"
+    )
+    check(
+        "a cfg(test) last field leaves the struct's brace",
+        (last_field.count("{"), last_field.count("}"), "b: u8" in last_field, "const C" in last_field),
+        (2, 2, False, True),
+    )
+    check(
+        "a cfg(test) field without a comma leaves the struct's brace",
+        strip_cfg_test("struct S { #[cfg(test)] b: u8 }").count("}"),
+        1,
+    )
+    check(
+        "the field after a cfg(test) field stays",
+        "c: u8" in strip_cfg_test("struct S {\n    #[cfg(test)]\n    pub b: Vec<u8>,\n    c: u8,\n}"),
+        True,
+    )
+    check(
+        "a cfg(test) variant ends at its comma",
+        "Kept" in strip_cfg_test("enum E {\n    #[cfg(test)]\n    Gone(u8, u16),\n    Kept,\n}"),
+        True,
+    )
+    check(
+        "the arm after a cfg(test) arm stays",
+        "2 => b()" in strip_cfg_test("match x {\n    #[cfg(test)]\n    1 => a(),\n    2 => b(),\n}"),
+        True,
+    )
+    check(
+        "a cfg(test) last parameter leaves the closing paren",
+        strip_cfg_test("fn f(a: u8, #[cfg(test)] b: u8) {}").count(")"),
+        1,
+    )
+    # An item's own commas -- its generics, its `where` clause -- are not its
+    # end: only a member of a list ends at a comma.
+    generic = strip_cfg_test(
+        "#[cfg(test)]\nimpl<A, B> T for S<A, B>\nwhere\n    A: X,\n    B: Y,\n{\n    fn gone() {}\n}\nfn keep() {}"
+    )
+    check(
+        "a cfg(test) impl with generics and a where clause goes whole",
+        ("gone" in generic, "fn keep()" in generic),
+        (False, True),
     )
 
     if failures:

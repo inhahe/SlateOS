@@ -410,21 +410,44 @@ MUTATIONS = [
     ),
     (
         "a dead cell is drawn as a live one",
-        "                if alive {\n                    let color = if is_cursor { LAVENDER } else { GREEN };",
-        "                if true {\n                    let color = if is_cursor { LAVENDER } else { GREEN };",
+        "                if self.grid.get(row, col) {\n                    fill(f, face(r), c.live, 0.0);",
+        "                if true {\n                    fill(f, face(r), c.live, 0.0);",
         ["a_live_cell_is_drawn_and_a_dead_one_is_not"],
     ),
     (
         "a live cell is not drawn at all",
-        "                if alive {\n                    let color",
-        "                if false {\n                    let color",
+        "                if self.grid.get(row, col) {\n                    fill(f, face(r), c.live, 0.0);",
+        "                if false {\n                    fill(f, face(r), c.live, 0.0);",
         ["a_live_cell_is_drawn_and_a_dead_one_is_not"],
     ),
+    # The cursor is a ring inside its cell, in whichever of the text and the
+    # page stands off the cell (2026-10-04; it was a fill that hid the cell).
     (
-        "the cursor is not shown on a cell that is already alive",
-        "                } else if is_cursor {",
-        "                } else if is_cursor && false {",
-        ["the_cursor_is_drawn_whether_its_cell_is_alive_or_not"],
+        "the cursor is not drawn",
+        "        draw_ring(f, face(l.cell_rect(row, col)), ring);\n",
+        "        let _ = ring;\n",
+        [
+            "the_cursor_is_a_ring_and_the_cell_under_it_still_shows_its_state",
+            "in_a_tiny_window_the_cursor_fills_its_cell_rather_than_vanishing",
+        ],
+    ),
+    (
+        "the cursor's ring is the dead cell's on a live one",
+        "        let ring = if self.grid.get(row, col) {\n            c.cursor_on_live",
+        "        let ring = if false {\n            c.cursor_on_live",
+        ["the_cursor_is_a_ring_and_the_cell_under_it_still_shows_its_state"],
+    ),
+    (
+        "the cursor fills its cell and hides it",
+        "    if face.w <= t * 2.0 || face.h <= t * 2.0 {",
+        "    if true {",
+        ["the_cursor_is_a_ring_and_the_cell_under_it_still_shows_its_state"],
+    ),
+    (
+        "a tiny cell has no cursor",
+        "        fill(f, face, colour, 0.0);\n        return;",
+        "        return;",
+        ["in_a_tiny_window_the_cursor_fills_its_cell_rather_than_vanishing"],
     ),
     (
         "the grid lines are drawn whether they are switched on or not",
@@ -515,8 +538,8 @@ MUTATIONS = [
         # Fault seven, restored: the backdrop is recorded *after* the sheet, so
         # it wins and the sheet's own rows become unclickable.
         "the modal backdrop is recorded over the sheet it is behind",
-        "        fill(f, l.window, Color::rgba(0, 0, 0, 180), 0.0);\n        // First, so that every box recorded below it wins. `hit_test` takes the\n        // last box at a point, which is what makes a modal backdrop and the\n        // things on top of it both work with no special case in the handler.\n        f.hit(Target::ClosePatterns, l.window);",
-        "        fill(f, l.window, Color::rgba(0, 0, 0, 180), 0.0);",
+        "        let ground = self.colours.panel_ground(&self.palette);\n        // First, so that every box recorded below it wins. `hit_test` takes the\n        // last box at a point, which is what makes a modal backdrop and the\n        // things on top of it both work with no special case in the handler.\n        f.hit(Target::ClosePatterns, l.window);",
+        "        let ground = self.colours.panel_ground(&self.palette);",
         [
             "a_click_anywhere_off_the_sheet_cancels_it",
             "while_the_sheet_is_up_no_click_reaches_the_board_beneath_it",
@@ -524,8 +547,8 @@ MUTATIONS = [
     ),
     (
         "the help sheet does not block the board underneath it",
-        '        fill(f, l.window, Color::rgba(0, 0, 0, 190), 0.0);\n        // The whole window closes it: there is nothing on the sheet to press.\n        f.hit(Target::CloseHelp, l.window);',
-        '        fill(f, l.window, Color::rgba(0, 0, 0, 190), 0.0);',
+        '        self.draw_panel(f, l, sheet);\n        // The whole window closes it: there is nothing on the sheet to press.\n        f.hit(Target::CloseHelp, l.window);',
+        '        self.draw_panel(f, l, sheet);',
         ["while_the_help_sheet_is_up_a_click_anywhere_only_closes_it"],
     ),
     (
@@ -634,5 +657,76 @@ MUTATIONS = [
     ),
 ]
 
+COLOURS = "the_window_is_drawn_in_the_users_colours"
+READS = "every_text_reads_on_what_is_under_it_in_every_theme"
+SEEN = "the_cells_and_the_cursor_are_seen_in_every_theme"
+MARKED = "the_grid_switch_and_place_are_marked_as_the_games_mark_them"
+
+MUTATIONS += [
+    # The window is drawn in the user's colours, through the games' chrome
+    # (2026-10-04; it was eleven constants of Catppuccin Mocha).
+    (
+        "a new theme keeps the old colours",
+        "        self.colours = Colours::of(palette);\n",
+        "",
+        [COLOURS],
+    ),
+    (
+        "a new theme keeps the old palette",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        self.colours = Colours::of(palette);",
+        [COLOURS],
+    ),
+    (
+        "a live cell is the palette's green whatever the board",
+        "        let live = Ink::on(p.green, &[chrome.well]).large;",
+        "        let live = p.green;",
+        [SEEN],
+    ),
+    (
+        "the cursor on a live cell is the text whatever the cell",
+        "            cursor_on_live: gamechrome::legible_on((p.text, p.base), live),",
+        "            cursor_on_live: p.text,",
+        [SEEN],
+    ),
+    (
+        "the cursor on a dead cell is the page whatever the board",
+        "            cursor_on_dead: gamechrome::legible_on((p.text, p.base), chrome.well),",
+        "            cursor_on_dead: p.base,",
+        [SEEN],
+    ),
+    (
+        "the board's size is in the disabled grey",
+        '            (format!("{}x{}", self.grid.cols(), self.grid.rows()), c.dim),',
+        '            (format!("{}x{}", self.grid.cols(), self.grid.rows()), c.off),',
+        [READS],
+    ),
+    (
+        "the header writes on the band in the page's inks",
+        "        let c = self.colours.chrome.on(band);",
+        "        let c = self.colours.chrome;",
+        [READS],
+    ),
+    (
+        "the grid's switch is never marked",
+        "                if self.show_grid {\n                    Kind::Primary",
+        "                if false {\n                    Kind::Primary",
+        [MARKED],
+    ),
+    (
+        "the grid's switch is always marked",
+        "                if self.show_grid {\n                    Kind::Primary",
+        "                if true {\n                    Kind::Primary",
+        [MARKED],
+    ),
+    (
+        "Place is a plain button",
+        '        button(f, &self.palette, l, place, "Place", Kind::Primary, ground);',
+        '        button(f, &self.palette, l, place, "Place", Kind::Plain, ground);',
+        [MARKED],
+    ),
+]
+
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "life", timeout=240))
+    only = sys.argv[1:] or None
+    sys.exit(sweep(SRC, MUTATIONS, "life", timeout=240, only=only))

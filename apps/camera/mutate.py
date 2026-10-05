@@ -126,8 +126,8 @@ MUTATIONS = [
     # -- what is painted -----------------------------------------------------
     (
         "only the viewfinder is filled, leaving the rest of the window bare",
-        "        fill(&mut f, l.window, CRUST, CornerRadii::ZERO);",
-        "        fill(&mut f, l.viewfinder, CRUST, CornerRadii::ZERO);",
+        "        fill(&mut f, l.window, self.palette.crust, CornerRadii::ZERO);",
+        "        fill(&mut f, l.viewfinder, self.palette.crust, CornerRadii::ZERO);",
         ["the_window_is_filled_edge_to_edge_before_anything_else"],
     ),
     (
@@ -345,6 +345,23 @@ MUTATIONS = [
         "        if self.active_camera().is_none() {",
         "        if false {",
         ["a_real_build_lists_no_camera_and_says_why"],
+    ),
+    # -- the shortcut card's hold on the pointer
+    (
+        "a press goes through the shortcut card",
+        "        if self.show_help {\n"
+        "            // The card is modal for the pointer as it is for the keys: a\n",
+        "        if false {\n"
+        "            // The card is modal for the pointer as it is for the keys: a\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "only the left button puts the card away",
+        "            if matches!(mouse.kind, MouseEventKind::Press(_)) {\n"
+        "                self.show_help = false;\n",
+        "            if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {\n"
+        "                self.show_help = false;\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
     ),
 ]
 

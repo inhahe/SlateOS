@@ -11,19 +11,27 @@
 //! | `-e S` | add S to the script; may be repeated |
 //! | `-f F` | add the contents of file F to the script |
 //! | `-i[SUF]` | edit each file in place, keeping a `SUF` backup if given |
+//! | `--follow-symlinks` | read, and under `-i` edit, the file a link finally names |
 //! | `-E` / `-r` | patterns are Extended regular expressions |
 //! | `-s` | treat the files as separate streams rather than one |
 //! | `-z` | lines are separated by NUL rather than newline |
-//! | `-u`, `-b` | accepted and ignored: nothing here buffers or translates |
+//! | `-u` | flush the output after every line |
+//! | `-b` | accepted and ignored: nothing here translates CR+LF |
 //! | `-l N` | the width `l` wraps at; 0 never wraps, and the default is 70 |
 //! | `--sandbox` | refuse `r`, `R`, `w`, `W` and `s///w` while compiling |
+//! | `--posix` | refuse or read as POSIX does every GNU extension |
 //! | `--` | end of options; what follows is a file |
 //!
 //! Long options are resolved by [`coreutils::getopt`], so they abbreviate to
 //! any unambiguous prefix as every GNU utility's do: `--expr=p` works and
 //! `--s` is refused as ambiguous between `--silent`, `--sandbox` and
-//! `--separate`. `--posix`, `--debug` and `--follow-symlinks` are accepted and
-//! do nothing yet; see `known-issues.md`.
+//! `--separate`.
+//!
+//! `POSIXLY_CORRECT` in the environment selects GNU's middle mode, which
+//! keeps the extensions and changes a handful of behaviours to POSIX's --
+//! `N` on the last line prints nothing, `w /dev/stdout` is a file -- and
+//! `--posix` the strict one. A `v` command switches back to the default. See
+//! [`Posixicity`].
 //!
 //! Exit status: 0 normally, 1 for a bad script or usage, 2 for an input file
 //! that could not be opened (the rest are still processed), 4 for a failure
@@ -60,19 +68,72 @@
 //! from the *end of the output*, not from that line wherever it appears. That
 //! is why writing goes through [`Out`], which holds a newline back until it
 //! knows something follows it.
+//!
+//! ## Output, and output that fails
+//!
+//! GNU sed checks every write it makes and names the one that failed --
+//! `couldn't write 3 items to stdout: No space left on device`,
+//! `couldn't flush stdout: …`, `couldn't close stdout: Bad file descriptor` --
+//! so which write fails, and how many bytes it carried, is part of its output.
+//! That depends on exactly where glibc's buffer fills and flushes, so standard
+//! output and every `w` file is a [`coreutils::stdio::StdioFile`], which
+//! reproduces glibc's arithmetic, and the places that write hand it the same
+//! pieces GNU's do: a line's text and its separator as two writes, `l` one per
+//! character, an `r` file in 8192-byte pieces, `e`'s output in 4096-byte ones.
+//!
+//! The run ends as GNU's does: every `w` file closed, newest first, then
+//! standard output, the first failure fatal (status 4). A fatal error part-way
+//! through is `exit`, which flushes everything and checks nothing — so what
+//! was written before the failure still arrives, after the message. `-u`
+//! flushes each file after every line, as GNU's does.
+//!
+//! `w /dev/stdout`, `w /dev/stderr` and `w /dev/stdin` are not opened: they
+//! are the process's own streams, each with a separator debt of its own. See
+//! [`WTarget`].
+//!
+//! ## Input
+//!
+//! Standard input is glibc's `stdin`: one stream for the whole run, read a
+//! block at a time -- a byte at a time under `-u` -- by every operand of `-`
+//! and by `R /dev/stdin`, in turn. Nothing is read ahead of the line being
+//! executed but the one byte `$` looks at, and at the end of the run the
+//! descriptor is sought back over what was read and not used, so the next
+//! reader of a shared standard input -- the rest of a shell block, a child
+//! started by `e` -- starts just after the last line sed took. A file that
+//! opens and then cannot be read ends the run; one that will not open is
+//! reported and skipped. See [`Input`] and [`STDIN`].
+//!
+//! ## Editing in place
+//!
+//! `-i` writes each file's edit to a new file beside it, `DIR/sedXXXXXX`,
+//! gives that the old file's owner and mode, renames the old one to the backup
+//! if there is to be one, and renames the new one over the name -- so the name
+//! always holds a whole file, and a run that fails, or a disk that fills,
+//! leaves the original untouched and removes the new one. The edit is a new
+//! file, with what follows from that: a hard link keeps the old text, a
+//! symbolic link is replaced by a file unless `--follow-symlinks`, and it is
+//! the directory that must be writable, not the file. See [`InPlace`].
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, Read};
 use std::process;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes};
 use coreutils::stdfd;
+use coreutils::stdio::{StdioFile, StdioReader};
+use ere::sed::{Named, RecursiveC, control_byte, named_byte};
+
+// The standard descriptors as the process was given them: a closed standard
+// output is what makes GNU sed say `couldn't close stdout`. See `stdfd`.
+coreutils::guard_std_fds!();
 use ere::{Regex, bre};
 
 /// The status for a failure that stops the run where it stands.
@@ -98,17 +159,17 @@ const EXIT_PANIC: i32 = 4;
 /// command set is here too, so it moves only when that is true.
 const SED_FEATURE_LEVEL: &str = "4.9";
 
-/// Print one diagnostic, with sed's pending output delivered first.
+/// Print one diagnostic.
 ///
-/// `error(3)` opens with `fflush (stdout)` so that a complaint about a stream
-/// arrives *after* the bytes already written to it, and
-/// [`coreutils::stdfd::diag_bytes`] does the same for the descriptor-level
-/// buffer every converted utility writes through. sed does not use that buffer
-/// — it writes through `io::stdout()`, a `LineWriter` that holds back a line
-/// with no separator yet, which is exactly what [`Out`] leaves pending at end
-/// of input — so the flush has to be repeated for the buffer sed does use.
+/// Straight to descriptor 2, and *without* delivering sed's own pending
+/// output first. That is GNU sed's behaviour rather than an oversight: its
+/// diagnostics are `fprintf (stderr, ...)` and `panic`, not `error(3)`, and
+/// neither flushes standard output. So with both streams in one file,
+/// `sed p good missing >out 2>&1` puts `can't read missing` *before* the
+/// block-buffered copy of `good` -- measured -- and only `-u`, which flushes
+/// after every line, puts it after. This port used to flush first, and so got
+/// the `-u` order every time.
 fn diag_line(line: &str) {
-    let _ = io::stdout().flush();
     stdfd::diag_line(line);
 }
 
@@ -119,7 +180,6 @@ fn diag_line(line: &str) {
 /// `format!` would render those bytes as U+FFFD, which names a different file
 /// from the one that failed.
 fn diag_path(before: &str, path: &OsStr, after: &str) {
-    let _ = io::stdout().flush();
     let mut line = Vec::from(before.as_bytes());
     line.extend_from_slice(&os_bytes(path));
     line.extend_from_slice(after.as_bytes());
@@ -140,15 +200,20 @@ macro_rules! diag {
 }
 
 /// Report a failure sed cannot continue past, and leave with status 4.
+///
+/// GNU's `panic`: the message, then `exit`, which flushes whatever every
+/// output stream still holds without saying whether it arrived -- so the
+/// output written before the failure still reaches its files, *after* the
+/// message. See [`exit_quietly`].
 fn panic_out(msg: &str) -> ! {
     diag!("sed: {msg}");
-    process::exit(EXIT_PANIC)
+    exit_quietly(EXIT_PANIC)
 }
 
 /// [`panic_out`] for a message that names a file. See [`diag_path`].
 fn panic_path(before: &str, path: &OsStr, after: &str) -> ! {
     diag_path(before, path, after);
-    process::exit(EXIT_PANIC)
+    exit_quietly(EXIT_PANIC)
 }
 
 // ---------------------------------------------------------------- the script
@@ -165,6 +230,11 @@ enum Addr {
     Re(Option<Rc<Regex>>),
     /// GNU's `first~step`.
     Step(usize, usize),
+    /// `+0` or `~0` written as a *first* address: GNU's `ADDR_IS_NULL`, which
+    /// matches every line -- `sed '+0p'` prints each line twice. (`+N` and
+    /// `~N` with N above zero are refused there; as a second address they are
+    /// [`EndAddr::Plus`] and [`EndAddr::Multiple`].)
+    Null,
 }
 
 /// The second half of a range, which may be relative to where the range began.
@@ -271,6 +341,10 @@ enum Action {
     InsertText(Vec<u8>),
     ChangeText(Vec<u8>),
     ReadFile(String),
+    /// `0rFILE`, compiled as `1rFILE` with the file written there and then
+    /// rather than queued -- so it comes out before the first line. GNU's
+    /// `readcmd.append == false`.
+    ReadFileNow(String),
     /// `R` — one line per cycle from a shared handle. See [`RFile`].
     ReadLine(usize),
     WriteFile(usize),
@@ -316,10 +390,15 @@ struct Command {
 
 struct Script {
     cmds: Vec<Command>,
-    wfiles: Vec<String>,
-    rfiles: Vec<String>,
+    wfiles: Vec<Target>,
+    rfiles: Vec<Target>,
     /// Set by a `#n` first line, which is POSIX's in-script spelling of `-n`.
     suppress: bool,
+    /// The [`Posixicity`] the script left the run in: the command line's,
+    /// unless a `v` switched it to `Extended`. It is a global in GNU, read
+    /// while running as well as while compiling -- `N` on the last line
+    /// prints only under `Extended` -- so a `v` anywhere changes it for all.
+    posix: Posixicity,
     /// Where a diagnostic raised *after* the script has been read points, as
     /// the bytes that go between `sed: ` and the message — or `None` when there
     /// is no script text to point into.
@@ -333,12 +412,72 @@ struct Script {
     end_loc: Option<Vec<u8>>,
 }
 
+/// What a `w` or `R` names: one of GNU's special streams, or a file.
+///
+/// Decided while the script is read, by the [`Posixicity`] in force at that
+/// point: outside `Extended` the three names are ordinary files, and a `v`
+/// part-way through makes the later ones special again. GNU's `get_openfile`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Target {
+    Stdin,
+    Stdout,
+    Stderr,
+    File(String),
+}
+
 // ---------------------------------------------------------------- the parser
+
+/// GNU sed's `posixicity`: how much of POSIX's letter a run keeps to.
+///
+/// `Extended` is the default, every GNU extension on. `Correct` is what
+/// `POSIXLY_CORRECT` in the environment selects: the extensions stay, and a
+/// handful of behaviours change to POSIX's -- `N` on the last line prints
+/// nothing, `w /dev/stdout` is a file like any other, an unmatched `)` is a
+/// character, and so on. `Basic` is `--posix`: every extension refused or
+/// read as POSIX reads it. A `v` command switches the rest of the script, and
+/// the run, back to `Extended`, as GNU's does. See
+/// `TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS` for the table this
+/// follows, place by place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Posixicity {
+    Extended,
+    Correct,
+    Basic,
+}
+
+/// The name of dfa.c's one complaint sed can see: a bracket written like a
+/// class without the class's own brackets. See [`ere::Warning::ConfusingBracket`].
+const CONFUSING_BRACKET: &str = "character class syntax is [[:space:]], not [:space:]";
 
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
     ere: bool,
+    /// See [`Posixicity`]. Changed part-way by `v`.
+    posix: Posixicity,
+    /// Whether dfa.c's warning about `[:alpha:]` ends the run: GNU's
+    /// `dfawarn` does unless `POSIXLY_CORRECT` is set -- the variable, not
+    /// the mode, so `--posix` alone does not excuse it.
+    dfa_warnings_fatal: bool,
+    /// The line separator, which decides whether `M` makes `^` and `$` match
+    /// at a newline: under `-z` it does not, as GNU's `newline_anchor` is
+    /// only set when the separator is a newline.
+    sep: u8,
+    /// A refusal that is not a syntax error in the script but the end of the
+    /// run: dfa.c's, which GNU makes with `panic` -- no location, status 4.
+    /// Set by [`Parser::compile`] and turned into its error by
+    /// [`compile_script`].
+    fatal: Option<&'static str>,
+    /// Whether the `a`, `i` or `c` text just read never finished: `a\` at the
+    /// very end, or a last line ending in a backslash. GNU's `pending_text`,
+    /// which `--posix` refuses as `incomplete command`.
+    pending_text: bool,
+    /// The offsets of the newlines that join one `-e` fragment or `-f` file
+    /// to the next. GNU compiles each fragment on its own, so where this
+    /// parser meets one of these GNU meets the end of its input -- which
+    /// matters to the few things that read past a line's end: `1,` and an
+    /// unfinished `a` text under `--posix`.
+    joints: Vec<usize>,
     /// The width `l` uses when it is given no number of its own: `-l N`, or 70.
     line_len: usize,
     /// `--sandbox`. It is the *parser* that enforces it, not the executor, so
@@ -352,8 +491,8 @@ struct Parser<'a> {
     /// The rendering of the command currently being read, cleared before each
     /// one and moved into its [`Command`] when it is built.
     dump: Vec<u8>,
-    wfiles: Vec<String>,
-    rfiles: Vec<String>,
+    wfiles: Vec<Target>,
+    rfiles: Vec<Target>,
 }
 
 impl Parser<'_> {
@@ -392,7 +531,7 @@ impl Parser<'_> {
             return;
         }
         self.dump.push(b'/');
-        let norm = normalize_regex(pat).unwrap_or_else(|_| pat.to_vec());
+        let norm = sed_regex(pat, self.posix).unwrap_or_else(|_| pat.to_vec());
         for &b in &norm {
             if b == b'/' {
                 self.dump.extend_from_slice(b"\\/");
@@ -405,6 +544,12 @@ impl Parser<'_> {
 
     fn peek(&self) -> Option<u8> {
         self.s.get(self.i).copied()
+    }
+
+    /// Whether the parser is at the end of a fragment -- see
+    /// [`Parser::joints`] -- or of the script.
+    fn at_fragment_end(&self) -> bool {
+        self.peek().is_none() || self.joints.contains(&self.i)
     }
 
     fn bump(&mut self) -> Option<u8> {
@@ -583,25 +728,33 @@ impl Parser<'_> {
         }
     }
 
-    /// `I` after a pattern asks for case-insensitive matching.
-    fn re_flags(&mut self) -> Result<bool, String> {
-        let mut ci = false;
+    /// The modifiers after an address regex: `I`, case-insensitive, and `M`,
+    /// multi-line -- any number, in any order, blanks between, as GNU reads
+    /// each with `in_nonblank`. None under `--posix`, where the letter is left
+    /// for the command reader: `--posix '/a/Ip'` is `unknown command: `I'`.
+    fn re_flags(&mut self) -> (bool, bool) {
+        let (mut ci, mut multi) = (false, false);
+        if self.posix == Posixicity::Basic {
+            return (ci, multi);
+        }
         loop {
+            self.skip_blank();
             match self.peek() {
-                Some(b'I') => {
-                    self.i = self.i.saturating_add(1);
-                    ci = true;
-                }
-                // `M` makes `^`/`$` match at embedded newlines, which the
-                // engine cannot express. Refusing beats matching the wrong
-                // lines silently.
-                Some(b'M') => return Err("the `M' regex modifier is not supported".to_string()),
-                _ => return Ok(ci),
+                Some(b'I') => ci = true,
+                Some(b'M') => multi = true,
+                _ => return (ci, multi),
             }
+            self.i = self.i.saturating_add(1);
         }
     }
 
-    fn compile(&self, pat: &[u8], ci: bool) -> Result<Option<Rc<Regex>>, String> {
+    /// Compile a pattern as GNU's `compile_regex_1` does, in the syntax the
+    /// [`Posixicity`] in force selects.
+    ///
+    /// `multi` is `M`: neither `.` nor `[^...]` matches a newline, and `^`
+    /// and `$` match next to one -- except under `-z`, where GNU leaves the
+    /// anchors at the ends of the pattern space.
+    fn compile(&mut self, pat: &[u8], ci: bool, multi: bool) -> Result<Option<Rc<Regex>>, String> {
         // An empty pattern is not an error: `s//X/` and `//d` re-use the last
         // regular expression that was *tried*, which is a run-time value — and
         // whether there was one is a run-time question too, which is why
@@ -611,7 +764,7 @@ impl Parser<'_> {
             // to was compiled elsewhere with modifiers of its own. This one *is*
             // decided here: GNU refuses `s//X/I` while reading the script, with
             // no input read and whatever else the script says.
-            if ci {
+            if ci || multi {
                 return Err("cannot specify modifiers on empty regexp".to_string());
             }
             return Ok(None);
@@ -619,14 +772,43 @@ impl Parser<'_> {
         // The one funnel every pattern passes through, which is why GNU's
         // byte-naming escapes are converted here rather than at each of the
         // three places a pattern is written.
-        let pat = &normalize_regex(pat)?;
-        let r = if self.ere {
-            Regex::new_flags(pat, ci)
+        let pat = &sed_regex(pat, self.posix)?;
+        // GNU clears `RE_UNMATCHED_RIGHT_PAREN_ORD` in its default mode, so
+        // `sed -E 's/a)/X/'` is an error there and a literal `)` otherwise;
+        // `--posix` adds `RE_NO_GNU_OPS`, and for a basic expression
+        // `RE_LIMITED_OPS`.
+        let ord = self.posix != Posixicity::Extended;
+        let basic = self.posix == Posixicity::Basic;
+        let compiled = if self.ere {
+            let syntax = ere::Syntax {
+                unmatched_right_paren_ord: ord,
+                no_gnu_ops: basic,
+                ..ere::Syntax::POSIX_EXTENDED
+            };
+            let syntax = if multi { syntax.reg_newline() } else { syntax };
+            Regex::new_syntax_warn(pat, ci, syntax)
         } else {
-            bre::compile(pat, ci)
+            let syntax = bre::BreSyntax {
+                limited_ops: basic,
+                no_gnu_ops: basic,
+                unmatched_right_paren_ord: ord,
+                reg_newline: multi,
+                ..bre::BreSyntax::POSIX_BASIC
+            };
+            bre::compile_syntax_warn(pat, ci, syntax)
         };
-        match r {
-            Ok(re) => Ok(Some(Rc::new(re))),
+        match compiled {
+            Ok((re, warnings)) => {
+                // dfa.c's one complaint, which ends the run rather than the
+                // parse: see [`Parser::fatal`].
+                if self.dfa_warnings_fatal && warnings.contains(&ere::Warning::ConfusingBracket) {
+                    self.fatal = Some(CONFUSING_BRACKET);
+                    return Err(CONFUSING_BRACKET.to_string());
+                }
+                Ok(Some(Rc::new(
+                    re.with_newline_anchor(multi && self.sep == b'\n'),
+                )))
+            }
             // `e.message()`, not `e.detail`: GNU sed hands the pattern to glibc
             // and prints back verbatim whatever `re_compile_pattern` returned,
             // so the sentence after `char N:` is one of glibc's fourteen fixed
@@ -649,13 +831,7 @@ impl Parser<'_> {
             Some(b'/') => {
                 self.i = self.i.saturating_add(1);
                 let pat = self.take_until(b'/', true, "address regex")?;
-                let ci = self.re_flags()?;
-                let re = self.compile(&pat, ci)?;
-                self.d_re(&pat);
-                if ci {
-                    self.d(b"I");
-                }
-                Ok(Some(Addr::Re(re)))
+                self.address_regex(&pat).map(Some)
             }
             // `\cREc` — any delimiter, so a pattern full of slashes need not be
             // written full of backslashes.
@@ -665,17 +841,16 @@ impl Parser<'_> {
                     .bump()
                     .ok_or_else(|| "expected a delimiter after `\\'".to_string())?;
                 let pat = self.take_until(d, true, "address regex")?;
-                let ci = self.re_flags()?;
-                let re = self.compile(&pat, ci)?;
-                self.d_re(&pat);
-                if ci {
-                    self.d(b"I");
-                }
-                Ok(Some(Addr::Re(re)))
+                self.address_regex(&pat).map(Some)
             }
             Some(c) if c.is_ascii_digit() => {
                 let n = self.number()?;
-                if self.eat(b'~') {
+                // `first~step` is a GNU extension, and blanks may surround the
+                // `~` (GNU reads both sides with `in_nonblank`).
+                let save = self.i;
+                self.skip_blank();
+                if self.posix != Posixicity::Basic && self.eat(b'~') {
+                    self.skip_blank();
                     let step = self.number()?;
                     // A step of zero is no step at all, and GNU collapses it to
                     // the plain line number rather than carrying it — which is
@@ -689,6 +864,8 @@ impl Parser<'_> {
                         self.d_num(step);
                         return Ok(Some(Addr::Step(n, step)));
                     }
+                } else {
+                    self.i = save;
                 }
                 self.d_num(n);
                 Ok(Some(Addr::Line(n)))
@@ -697,8 +874,50 @@ impl Parser<'_> {
         }
     }
 
+    /// The modifiers and the compiled pattern of an address regex, `pat`
+    /// already read, and its `--debug` rendering: the pattern, then `I`, then
+    /// `M`, as GNU's `debug_print_regex_flags` orders them.
+    fn address_regex(&mut self, pat: &[u8]) -> Result<Addr, String> {
+        let (ci, multi) = self.re_flags();
+        let re = self.compile(pat, ci, multi)?;
+        self.d_re(pat);
+        if ci {
+            self.d(b"I");
+        }
+        if multi {
+            self.d(b"M");
+        }
+        Ok(Addr::Re(re))
+    }
+
+    /// `+N` or `~N`, the `+` or `~` already read: GNU's `in_integer
+    /// (in_nonblank ())`, blanks allowed before the digits and no digits
+    /// meaning zero.
+    fn step_number(&mut self) -> Result<usize, String> {
+        self.skip_blank();
+        self.number()
+    }
+
     fn parse_sel(&mut self) -> Result<Sel, String> {
-        let Some(a1) = self.parse_addr()? else {
+        // `+N` and `~N` are addresses to GNU's `compile_address` in either
+        // position, and refused as a first address only afterwards -- unless N
+        // is zero, which makes `ADDR_IS_NULL`, a first address that matches
+        // every line. Under `--posix` they are not addresses at all, and the
+        // `+` is then the unknown command.
+        let a1 = match self.peek() {
+            Some(op @ (b'+' | b'~')) if self.posix != Posixicity::Basic => {
+                self.i = self.i.saturating_add(1);
+                if self.step_number()? > 0 {
+                    return Err("invalid usage of +N or ~N as first address".to_string());
+                }
+                // GNU's `debug_print_addr` names it rather than spelling it.
+                let _ = op;
+                self.d(b"[ADDR-NULL]");
+                Some(Addr::Null)
+            }
+            _ => self.parse_addr()?,
+        };
+        let Some(a1) = a1 else {
             return Ok(Sel::Always);
         };
         self.skip_blank();
@@ -707,19 +926,26 @@ impl Parser<'_> {
         }
         self.d(b",");
         self.skip_blank();
-        let end = if self.eat(b'+') {
-            let n = self.number()?;
+        let gnu = self.posix != Posixicity::Basic;
+        let end = if gnu && self.eat(b'+') {
+            let n = self.step_number()?;
             self.d(b"+");
             self.d_num(n);
             EndAddr::Plus(n)
-        } else if self.eat(b'~') {
-            let n = self.number()?;
+        } else if gnu && self.eat(b'~') {
+            let n = self.step_number()?;
             self.d(b"~");
             self.d_num(n);
             EndAddr::Multiple(n)
         } else {
             let Some(a2) = self.parse_addr()? else {
-                return Err("expected an address after `,'".to_string());
+                // GNU's `BAD_COMMA`, reported one past the character that is
+                // not an address -- which `in_nonblank` had already read, unless
+                // it met the end of the fragment.
+                if !self.at_fragment_end() {
+                    self.i = self.i.saturating_add(1);
+                }
+                return Err("unexpected `,'".to_string());
             };
             EndAddr::Addr(a2)
         };
@@ -745,12 +971,19 @@ impl Parser<'_> {
     /// is why `sed -z 'a X'` ends the appended line with a newline and not with
     /// the NUL every other line ends with. See [`text_out`].
     fn parse_text(&mut self) -> Result<Vec<u8>, String> {
+        self.pending_text = false;
         self.skip_blank();
         // The end of the script is the one thing that cannot introduce text.
         // Everything else can, including a bare newline (`sed $'a\np'` appends
         // an empty line and then prints) and a bare backslash at the very end
         // (`sed 'a\'`, which appends nothing) — both measured, both accepted.
         if self.peek().is_none() {
+            return Err("expected \\ after `a', `c' or `i'".to_string());
+        }
+        // POSIX's spelling only, under `--posix`: the one-liner `a text` is
+        // refused, one past the character that should have been a backslash.
+        if self.posix == Posixicity::Basic && self.peek() != Some(b'\\') {
+            self.i = self.i.saturating_add(1);
             return Err("expected \\ after `a', `c' or `i'".to_string());
         }
         let mut out = Vec::new();
@@ -767,7 +1000,16 @@ impl Parser<'_> {
             // ending `a\` *and a newline* (appends one empty line). All
             // measured.
             match self.peek() {
-                None => return Ok(out),
+                None => {
+                    self.pending_text = true;
+                    return Ok(out);
+                }
+                // The end of an `-e` fragment: GNU's text waits for the next
+                // fragment, which `--posix` refuses -- see `pending_text`.
+                Some(b'\n') if self.posix == Posixicity::Basic && self.at_fragment_end() => {
+                    self.pending_text = true;
+                    return Ok(out);
+                }
                 Some(b'\n') => self.i = self.i.saturating_add(1),
                 Some(_) => {}
             }
@@ -782,8 +1024,18 @@ impl Parser<'_> {
                 out.push(c);
                 continue;
             }
+            // A backslash that ends a fragment continues the text into the
+            // next one in GNU's default mode, and is `incomplete command`
+            // under `--posix`; the parser stops there, where GNU's error points.
+            if self.posix == Posixicity::Basic && self.at_fragment_end() {
+                self.pending_text = true;
+                break;
+            }
             let esc = self.i;
-            let Some(n) = self.bump() else { break };
+            let Some(n) = self.bump() else {
+                self.pending_text = true;
+                break;
+            };
             if let Some(b) = control_byte(n) {
                 out.push(b);
                 continue;
@@ -797,7 +1049,7 @@ impl Parser<'_> {
                     out.push(b'\\');
                     self.i = next;
                 }
-                Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+                Some(Named::Recursive) => return Err(RecursiveC.message().to_string()),
                 // A continued line — the newline is part of the text — and
                 // anything else: the character itself.
                 None => out.push(n),
@@ -855,11 +1107,26 @@ impl Parser<'_> {
     /// must produce one file holding both writes in order, not two handles
     /// racing to truncate each other.
     fn wfile(&mut self, path: String) -> usize {
-        if let Some(i) = self.wfiles.iter().position(|p| *p == path) {
+        let target = self.target(path);
+        if let Some(i) = self.wfiles.iter().position(|p| *p == target) {
             return i;
         }
-        self.wfiles.push(path);
+        self.wfiles.push(target);
         self.wfiles.len().saturating_sub(1)
+    }
+
+    /// GNU's `get_openfile`'s question: is this one of the three special
+    /// names, in the mode in force where the script names it?
+    fn target(&self, path: String) -> Target {
+        if self.posix != Posixicity::Extended {
+            return Target::File(path);
+        }
+        match path.as_str() {
+            "/dev/stdin" => Target::Stdin,
+            "/dev/stdout" => Target::Stdout,
+            "/dev/stderr" => Target::Stderr,
+            _ => Target::File(path),
+        }
     }
 
     /// Intern an `R` source, for the same reason [`Parser::wfile`] interns a
@@ -867,10 +1134,11 @@ impl Parser<'_> {
     /// naming one file share its read position, so in one cycle the first takes
     /// line 1 and the second line 2, rather than both taking line 1.
     fn rfile(&mut self, path: String) -> usize {
-        if let Some(i) = self.rfiles.iter().position(|p| *p == path) {
+        let target = self.target(path);
+        if let Some(i) = self.rfiles.iter().position(|p| *p == target) {
             return i;
         }
-        self.rfiles.push(path);
+        self.rfiles.push(target);
         self.rfiles.len().saturating_sub(1)
     }
 
@@ -925,8 +1193,12 @@ impl Parser<'_> {
         let mut occurrence = 0usize;
         let mut print = false;
         let mut ci = false;
+        let mut multi = false;
         let mut eval = false;
         let mut wfile = None;
+        // `i`, `m` and `e` are GNU extensions, refused under `--posix` with
+        // the same words as any unknown flag.
+        let gnu = self.posix != Posixicity::Basic;
         // Kept beside the interned index only for the `--debug` dump, which
         // prints the file name and not the slot it landed in.
         let mut wpath: Option<String> = None;
@@ -953,21 +1225,21 @@ impl Parser<'_> {
                 }
                 // No multiple-use check on these two: GNU has none either, so
                 // `s/a/b/Ii` is accepted.
-                Some(b'i' | b'I') => {
+                Some(b'i' | b'I') if gnu => {
                     self.i = self.i.saturating_add(1);
                     ci = true;
                 }
                 // `e` reaches outside the script exactly as `e`, `r` and `w`
                 // do, so the sandbox refuses it with the same message — and
                 // refuses it here, at the flag, which is where GNU points.
-                Some(b'e') => {
+                Some(b'e') if gnu => {
                     self.i = self.i.saturating_add(1);
                     self.deny_in_sandbox()?;
                     eval = true;
                 }
-                Some(b'm' | b'M') => {
+                Some(b'm' | b'M') if gnu => {
                     self.i = self.i.saturating_add(1);
-                    return Err("the `M' flag of `s' is not supported".to_string());
+                    multi = true;
                 }
                 Some(c) if c.is_ascii_digit() => {
                     let seen = occurrence != 0;
@@ -997,14 +1269,17 @@ impl Parser<'_> {
             }
         }
 
-        let re = self.compile(&pat, ci)?;
-        let repl = parse_replacement(&raw_repl)?;
+        let re = self.compile(&pat, ci, multi)?;
+        let repl = parse_replacement(&raw_repl, self.posix)?;
         // A `\N` naming a group the pattern does not have is refused, not
         // silently empty — and refused here, after the flags, because that is
         // where GNU reports it: `s/a/\9/w f.txt` says char 14, the end of the
         // whole command. Skipped when the pattern is empty, since `s//\1/` will
         // re-use a regular expression that is not known until run time.
-        if let Some(re) = re.as_deref() {
+        //
+        // GNU marks this one "not POSIXLY_CORRECT behavior" and makes it only
+        // in its default mode; elsewhere the missing group is simply empty.
+        if let Some(re) = re.as_deref().filter(|_| self.posix == Posixicity::Extended) {
             let groups = re.group_count();
             if let Some(n) = repl.iter().find_map(|r| match *r {
                 Rep::Group(n) if n > groups => Some(n),
@@ -1025,6 +1300,9 @@ impl Parser<'_> {
             self.dump.push(b'/');
             if ci {
                 self.dump.push(b'i');
+            }
+            if multi {
+                self.dump.push(b'm');
             }
             if global {
                 self.dump.push(b'g');
@@ -1106,150 +1384,20 @@ fn literal_for(c: u8) -> Vec<u8> {
     }
 }
 
-/// GNU's wording for `\c\`, which it refuses rather than guessing at.
-const RECURSIVE_C: &str = "recursive escaping after \\c not allowed";
-
-/// The escapes that name a control character by letter.
+/// GNU's `normalize_text` for a regular expression, with its one refusal worded
+/// as a diagnostic.
 ///
-/// GNU converts these in the same pass as the numeric ones below, which is why
-/// `\t` is a tab in a regular expression, in a replacement, in `y` and in `a`
-/// text alike. `\b` is deliberately absent: GNU sed 4.0 read it as a backspace,
-/// but every version since reads it as a word boundary, which is `ere`'s to
-/// interpret and not ours.
-fn control_byte(c: u8) -> Option<u8> {
-    Some(match c {
-        b'a' => 0x07,
-        b'f' => 0x0c,
-        b'n' => b'\n',
-        b'r' => b'\r',
-        b't' => b'\t',
-        b'v' => 0x0b,
-        _ => return None,
-    })
-}
-
-/// One digit of `base`, or `None` if `c` is not one.
-fn digit(c: u8, base: u8) -> Option<u8> {
-    let v = match c {
-        b'0'..=b'9' => c.wrapping_sub(b'0'),
-        b'a'..=b'f' => c.wrapping_sub(b'a').wrapping_add(10),
-        b'A'..=b'F' => c.wrapping_sub(b'A').wrapping_add(10),
-        _ => return None,
-    };
-    (v < base).then_some(v)
-}
-
-/// What one of GNU's byte-naming escapes turned out to be.
-enum Named {
-    /// The byte it names, and the index just past the escape.
-    Byte(u8, usize),
-    /// `\c` with the script ending right after it: GNU emits a lone backslash
-    /// and drops the `c`.
-    Backslash(usize),
-    /// `\c\`, which GNU refuses — see [`RECURSIVE_C`].
-    Recursive,
-}
-
-/// Read `\xNN`, `\oNNN`, `\dNNN` or `\cX`, where `raw[i]` is the character
-/// *after* the backslash.
-///
-/// `None` means the escape is none of those and belongs to whoever asked: `\w`
-/// to the regex engine, `\1` to the replacement parser, `\;` to nobody.
-///
-/// The three numeric forms are GNU's `convert_number`, measured rather than
-/// recalled: **at most two** hexadecimal digits and **at most three** decimal
-/// or octal ones, the value taken mod 256, and *no* digits at all is not an
-/// error — the letter then denotes itself, which is why `sed 's/\x/Z/'`
-/// replaces an `x`. So GNU reads `\x616` as `a` then `6`, `\d0977` as `a` then
-/// `7`, `\x0061` as NUL then `61`, and `\d300` as `,`.
-fn named_byte(raw: &[u8], i: usize) -> Option<Named> {
-    let letter = raw.get(i).copied()?;
-    let (base, max) = match letter {
-        b'x' => (16u8, 2usize),
-        b'd' => (10, 3),
-        b'o' => (8, 3),
-        b'c' => {
-            let after = i.saturating_add(1);
-            return Some(match raw.get(after).copied() {
-                None => Named::Backslash(after),
-                Some(b'\\') => Named::Recursive,
-                // GNU's own arithmetic: fold to upper case, then flip the bit
-                // that separates a control code from its printable partner, so
-                // `\cI` is a tab and `\c1` is `q`.
-                Some(c) => Named::Byte(c.to_ascii_uppercase() ^ 0x40, after.saturating_add(1)),
-            });
-        }
-        _ => return None,
-    };
-    // Accumulating in a `u8` is the mod-256 wrap, not an accident of width:
-    // GNU stores the running value in a `char`, which is why `\d300` is `,`.
-    let mut n: u8 = 0;
-    let first = i.saturating_add(1);
-    let mut j = first;
-    let end = first.saturating_add(max);
-    while j < end {
-        let Some(d) = raw.get(j).copied().and_then(|c| digit(c, base)) else {
-            break;
-        };
-        n = n.wrapping_mul(base).wrapping_add(d);
-        j = j.saturating_add(1);
-    }
-    Some(if j == first {
-        Named::Byte(letter, j)
+/// The conversion itself is `ere::sed::regex`, shared with the kernel shell's
+/// sed so that the two cannot disagree about what `\t` means -- and it is not
+/// the regex compiler's: like glibc's, that has no C escapes, which is why
+/// `grep '[\t]'` is a backslash or a `t` while sed's is a tab.
+fn sed_regex(raw: &[u8], posix: Posixicity) -> Result<Vec<u8>, String> {
+    let converted = if posix == Posixicity::Extended {
+        ere::sed::regex(raw)
     } else {
-        Named::Byte(n, j)
-    })
-}
-
-/// GNU's `normalize_text` for a regular expression: every escape that names a
-/// byte becomes that byte, and every other escape is left for the regex engine.
-///
-/// The produced byte is **not** protected, which is GNU's behaviour and is
-/// surprising enough to be worth stating: `\x2e` is the metacharacter `.` and
-/// not a literal dot, so `sed 's/\x2e/Z/'` replaces the first character of any
-/// line. `\x5c` is a bare backslash, so `sed 's/\x5c/Z/'` is a *trailing
-/// backslash* error — which is exactly what GNU reports. Both measured.
-///
-/// The conversion runs after the delimiter scan, so a delimiter it produces is
-/// a character and not the end of the command: `sed 's/\x2f/Z/'` replaces a
-/// slash.
-fn normalize_regex(raw: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0usize;
-    while let Some(&c) = raw.get(i) {
-        i = i.saturating_add(1);
-        if c != b'\\' {
-            out.push(c);
-            continue;
-        }
-        let Some(&n) = raw.get(i) else {
-            out.push(b'\\');
-            break;
-        };
-        if let Some(b) = control_byte(n) {
-            out.push(b);
-            i = i.saturating_add(1);
-            continue;
-        }
-        match named_byte(raw, i) {
-            Some(Named::Byte(b, next)) => {
-                out.push(b);
-                i = next;
-            }
-            Some(Named::Backslash(next)) => {
-                out.push(b'\\');
-                i = next;
-            }
-            Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
-            // Not ours: `\w`, `\(`, `\1`, `\.` all reach the engine as written.
-            None => {
-                out.push(b'\\');
-                out.push(n);
-                i = i.saturating_add(1);
-            }
-        }
-    }
-    Ok(out)
+        ere::sed::regex_posix(raw)
+    };
+    converted.map_err(|e| e.message().to_string())
 }
 
 /// `y` takes text, not a pattern, so only the escapes that name a byte apply.
@@ -1280,7 +1428,7 @@ fn unescape_y(raw: &[u8]) -> Result<Vec<u8>, String> {
                 out.push(b'\\');
                 i = next;
             }
-            Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+            Some(Named::Recursive) => return Err(RecursiveC.message().to_string()),
             // `\\` and anything else: the character itself.
             None => {
                 out.push(n);
@@ -1298,7 +1446,7 @@ fn unescape_y(raw: &[u8]) -> Result<Vec<u8>, String> {
 /// protection of the same byte works out: `s/a/\x26/` yields a `&` and not the
 /// whole match, and `s/a/\x5cn/` yields a backslash followed by an `n` and not
 /// a newline. Both measured.
-fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
+fn parse_replacement(raw: &[u8], posix: Posixicity) -> Result<Vec<Rep>, String> {
     let mut parts: Vec<Rep> = Vec::new();
     let mut lit: Vec<u8> = Vec::new();
     let flush = |lit: &mut Vec<u8>, parts: &mut Vec<Rep>| {
@@ -1330,7 +1478,9 @@ fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
                 flush(&mut lit, &mut parts);
                 parts.push(Rep::Group(usize::from(n.wrapping_sub(b'0'))));
             }
-            b'u' | b'l' | b'U' | b'L' | b'E' => {
+            // The case conversions are GNU's; under `--posix` a backslash before
+            // anything but a digit is that character, so `\U` is a `U`.
+            b'u' | b'l' | b'U' | b'L' | b'E' if posix != Posixicity::Basic => {
                 flush(&mut lit, &mut parts);
                 parts.push(Rep::Case(match n {
                     b'u' => CaseOp::OneUpper,
@@ -1354,7 +1504,7 @@ fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
                         lit.push(b'\\');
                         i = next;
                     }
-                    Some(Named::Recursive) => return Err(RECURSIVE_C.to_string()),
+                    Some(Named::Recursive) => return Err(RecursiveC.message().to_string()),
                     // `\&`, `\\`, `\<newline>` and anything else: the character
                     // itself.
                     None => lit.push(n),
@@ -1374,7 +1524,8 @@ fn parse_replacement(raw: &[u8]) -> Result<Vec<Rep>, String> {
 #[cfg_attr(test, derive(Debug))]
 struct ScriptError {
     pos: Pos,
-    msg: String,
+    /// Bytes, for [`ScriptFail::Label`]'s sake.
+    msg: Vec<u8>,
     code: i32,
 }
 
@@ -1410,7 +1561,8 @@ enum ScriptFail {
     Syntax(String),
     /// A syntax error somewhere other than where the parser stopped.
     SyntaxAt(Pos, String),
-    Label(String),
+    /// Bytes, because it quotes the label, and a label need not be text.
+    Label(Vec<u8>),
 }
 
 /// `strverscmp(3)`, which is how `v` decides whether the version a script asks
@@ -1458,7 +1610,8 @@ fn strverscmp(a: &[u8], b: &[u8]) -> Ordering {
     // it is a byte lower than every digit, so a string that ends is less than
     // one that carries on. Reading past the end as 0 reproduces that.
     let at = |s: &[u8], i: usize| -> u8 { s.get(i).copied().unwrap_or(0) };
-    let class = |c: u8| -> usize { usize::from(c == b'0') + usize::from(c.is_ascii_digit()) };
+    let class =
+        |c: u8| -> usize { usize::from(c == b'0').saturating_add(usize::from(c.is_ascii_digit())) };
     let sign = |d: i32| -> Ordering {
         if d < 0 {
             Ordering::Less
@@ -1472,7 +1625,7 @@ fn strverscmp(a: &[u8], b: &[u8]) -> Ordering {
     let mut c1 = at(a, 0);
     let mut c2 = at(b, 0);
     let mut state = S_N.saturating_add(class(c1));
-    let mut diff = i32::from(c1) - i32::from(c2);
+    let mut diff = i32::from(c1).saturating_sub(i32::from(c2));
     while diff == 0 {
         if c1 == 0 {
             return Ordering::Equal;
@@ -1483,7 +1636,7 @@ fn strverscmp(a: &[u8], b: &[u8]) -> Ordering {
         c1 = at(a, p1);
         c2 = at(b, p2);
         state = state.saturating_add(class(c1));
-        diff = i32::from(c1) - i32::from(c2);
+        diff = i32::from(c1).saturating_sub(i32::from(c2));
     }
 
     match RESULT_TYPE
@@ -1521,10 +1674,50 @@ impl From<String> for ScriptFail {
     }
 }
 
-/// Compile a whole script.
-///
-/// The `-e` fragments and `-f` files are joined with newlines and parsed once,
-/// because a `{` may be opened in one fragment and closed in the next.
+/// What the command line and the environment say about how to read a script,
+/// beyond its text and the options [`compile_script`] already takes.
+#[derive(Clone, Copy)]
+struct Mode {
+    /// See [`Posixicity`].
+    posix: Posixicity,
+    /// The line separator: `\0` under `-z`.
+    sep: u8,
+    /// See [`Parser::dfa_warnings_fatal`].
+    dfa_warnings_fatal: bool,
+}
+
+impl Mode {
+    /// GNU's defaults: every extension, lines ending in a newline, and dfa.c's
+    /// complaint fatal.
+    #[cfg(test)]
+    const DEFAULT: Mode = Mode {
+        posix: Posixicity::Extended,
+        sep: b'\n',
+        dfa_warnings_fatal: true,
+    };
+
+    /// The mode the environment and the command line select: `--posix` is
+    /// `Basic` whatever else is set; `POSIXLY_CORRECT`, set to anything at
+    /// all, is `Correct` -- and also, separately, what excuses dfa.c's
+    /// complaint, under `--posix` too. GNU's `main` and `dfawarn`.
+    fn from_run(posix_option: bool, null_data: bool) -> Mode {
+        let posixly_correct = env::var_os("POSIXLY_CORRECT").is_some();
+        Mode {
+            posix: if posix_option {
+                Posixicity::Basic
+            } else if posixly_correct {
+                Posixicity::Correct
+            } else {
+                Posixicity::Extended
+            },
+            sep: if null_data { 0 } else { b'\n' },
+            dfa_warnings_fatal: !posixly_correct,
+        }
+    }
+}
+
+/// Compile a whole script in GNU's default [`Mode`], as the tests do.
+#[cfg(test)]
 fn compile_script(
     script: &[u8],
     segments: &[Segment],
@@ -1533,10 +1726,44 @@ fn compile_script(
     sandbox: bool,
     debug: bool,
 ) -> Result<Script, ScriptError> {
+    compile_script_mode(
+        script,
+        segments,
+        ere,
+        line_len,
+        sandbox,
+        debug,
+        Mode::DEFAULT,
+    )
+}
+
+/// Compile a whole script in `mode`.
+///
+/// The `-e` fragments and `-f` files are joined with newlines and parsed once,
+/// because a `{` may be opened in one fragment and closed in the next.
+fn compile_script_mode(
+    script: &[u8],
+    segments: &[Segment],
+    ere: bool,
+    line_len: usize,
+    sandbox: bool,
+    debug: bool,
+    mode: Mode,
+) -> Result<Script, ScriptError> {
     let mut p = Parser {
         s: script,
         i: 0,
         ere,
+        posix: mode.posix,
+        dfa_warnings_fatal: mode.dfa_warnings_fatal,
+        sep: mode.sep,
+        fatal: None,
+        pending_text: false,
+        joints: segments
+            .iter()
+            .skip(1)
+            .filter_map(|seg| seg.start.checked_sub(1))
+            .collect(),
         line_len,
         sandbox,
         debug,
@@ -1544,17 +1771,31 @@ fn compile_script(
         wfiles: Vec::new(),
         rfiles: Vec::new(),
     };
-    match parse_body(&mut p, script) {
+    let parsed = parse_body(&mut p, script);
+    // dfa.c's complaint is GNU's `panic`, not `bad_prog`: no location, and
+    // the status of a run that could not go on.
+    if let Some(msg) = p.fatal {
+        return Err(ScriptError {
+            pos: Pos::Nowhere,
+            msg: msg.as_bytes().to_vec(),
+            code: EXIT_PANIC,
+        });
+    }
+    match parsed {
         Ok(mut s) => {
             s.end_loc = locate(script, segments, Pos::AfterParse(script.len()));
             Ok(s)
         }
         Err(ScriptFail::Syntax(msg)) => Err(ScriptError {
             pos: Pos::At(p.i),
-            msg,
+            msg: msg.into_bytes(),
             code: 1,
         }),
-        Err(ScriptFail::SyntaxAt(pos, msg)) => Err(ScriptError { pos, msg, code: 1 }),
+        Err(ScriptFail::SyntaxAt(pos, msg)) => Err(ScriptError {
+            pos,
+            msg: msg.into_bytes(),
+            code: 1,
+        }),
         // GNU reports an unresolvable label after parsing has finished, and
         // gives it its own status. Matching that keeps a script that checks
         // `$?` behaving the same under either sed.
@@ -1615,7 +1856,15 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
 
         let sel = p.parse_sel()?;
         p.skip_blank();
-        if sel.rejects_line_zero() {
+        // `0rFILE` is GNU's way to put a file before the first line: it is
+        // compiled as `1rFILE` with the file written at once rather than
+        // queued. Only bare -- no second address, no `!` -- and not under
+        // `--posix`, which refuses every line-0 address.
+        let prepend = matches!(sel, Sel::One(Addr::Line(0)))
+            && p.peek() == Some(b'r')
+            && p.posix != Posixicity::Basic;
+        let zero_range = matches!(sel, Sel::Range(Addr::Line(0), _));
+        if !prepend && (sel.rejects_line_zero() || (zero_range && p.posix == Posixicity::Basic)) {
             // GNU makes this check having already read the character that
             // follows the address — the `!` or the command letter — so the
             // offset it prints is one past it, except at the end of the script
@@ -1657,6 +1906,58 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
         let Some(c) = p.bump() else {
             return Err(ScriptFail::Syntax("missing command".to_string()));
         };
+        let ranged = matches!(sel, Sel::Range(..));
+        // `--posix` refuses the GNU commands outright and allows only one
+        // address on five that GNU lets take a range -- checked before the
+        // command is read any further, which is where GNU checks it.
+        if p.posix == Posixicity::Basic {
+            if matches!(
+                c,
+                b'e' | b'F' | b'v' | b'z' | b'L' | b'Q' | b'T' | b'R' | b'W'
+            ) {
+                return Err(ScriptFail::Syntax(format!(
+                    "unknown command: `{}'",
+                    c.escape_ascii()
+                )));
+            }
+            if ranged && matches!(c, b'a' | b'i' | b'l' | b'=' | b'r') {
+                return Err(ScriptFail::Syntax(
+                    "command only uses one address".to_string(),
+                ));
+            }
+        }
+        // A comment, a label and a block's end take no address at all, and
+        // `q` and `Q` one -- each refused one past the command letter.
+        let addressed = !matches!(sel, Sel::Always);
+        match c {
+            b'#' if addressed => {
+                return Err(ScriptFail::Syntax(
+                    "comments don't accept any addresses".to_string(),
+                ));
+            }
+            b':' if addressed => {
+                return Err(ScriptFail::Syntax(
+                    ": doesn't want any addresses".to_string(),
+                ));
+            }
+            b'}' if addressed && !open.is_empty() => {
+                return Err(ScriptFail::Syntax(
+                    "`}' doesn't want any addresses".to_string(),
+                ));
+            }
+            b'q' | b'Q' if ranged => {
+                return Err(ScriptFail::Syntax(
+                    "command only uses one address".to_string(),
+                ));
+            }
+            // `!` with no address, before a comment or a block's end: GNU
+            // reads them as it reads them anywhere.
+            b'#' => {
+                p.skip_to_eol();
+                continue;
+            }
+            _ => {}
+        }
         // `v` is not a command: it is a compile-time assertion that this sed is
         // new enough, and it leaves nothing behind to execute. That is visible
         // under `--debug`, whose program dump shows no line for it at all — not
@@ -1676,6 +1977,10 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                     "expected newer version of sed".to_string(),
                 ));
             }
+            // GNU: "We compare the version and ignore POSIXLY_CORRECT" -- a
+            // script that asks for GNU sed gets all of it, from here on and
+            // for the whole run.
+            p.posix = Posixicity::Extended;
             continue;
         }
         let here = cmds.len();
@@ -1686,7 +1991,15 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 open.push((here, p.i.saturating_sub(1)));
                 Action::Block(0)
             }
-            b'}' => return Err(ScriptFail::Syntax("unexpected `}'".to_string())),
+            b'}' => {
+                let Some((start, _)) = open.pop() else {
+                    return Err(ScriptFail::Syntax("unexpected `}'".to_string()));
+                };
+                if let Some(cmd) = cmds.get_mut(start) {
+                    cmd.act = Action::Block(here.saturating_add(1));
+                }
+                Action::BlockEnd
+            }
             b':' => {
                 let name = p.parse_label();
                 if name.is_empty() {
@@ -1744,6 +2057,12 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             }
             b'a' | b'i' | b'c' => {
                 let text = p.parse_text()?;
+                // Text that never finished -- `a\` at the end, or a last line
+                // ending in a backslash -- is allowed by GNU's default mode and
+                // is `incomplete command` under `--posix`.
+                if p.posix == Posixicity::Basic && p.pending_text {
+                    return Err(ScriptFail::Syntax("incomplete command".to_string()));
+                }
                 // `a\` and then the text, whichever spelling the script used —
                 // upstream normalizes the one-liner back to POSIX's form.
                 p.d(b"\\");
@@ -1761,7 +2080,11 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 // one. Upstream's asymmetry again, and measured.
                 p.d(b" ");
                 p.d(path.as_bytes());
-                Action::ReadFile(path)
+                if prepend {
+                    Action::ReadFileNow(path)
+                } else {
+                    Action::ReadFile(path)
+                }
             }
             b'R' => {
                 p.deny_in_sandbox()?;
@@ -1790,7 +2113,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 // Only a number the script *wrote* is dumped, and then always
                 // with a space: `l0` comes back as `l 0` while a bare `l` comes
                 // back as `l` and not as the `-l` width it resolved to.
-                let width = if p.peek().is_some_and(|d| d.is_ascii_digit()) {
+                let width = if p.posix != Posixicity::Basic
+                    && p.peek().is_some_and(|d| d.is_ascii_digit())
+                {
                     let n = p.number()?;
                     p.d(b" ");
                     p.d_num(n);
@@ -1802,7 +2127,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             }
             b'q' | b'Q' => {
                 p.skip_blank();
-                let code = if p.peek().is_some_and(|d| d.is_ascii_digit()) {
+                let code = if p.posix != Posixicity::Basic
+                    && p.peek().is_some_and(|d| d.is_ascii_digit())
+                {
                     let n = p.number()?;
                     p.d(b" ");
                     p.d_num(n);
@@ -1847,11 +2174,23 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
         ) {
             p.end_of_cmd()?;
         }
+        let sel = if prepend {
+            Sel::One(Addr::Line(1))
+        } else {
+            sel
+        };
+        let mut dump = std::mem::take(&mut p.dump);
+        // GNU dumps the command it compiled, which says `1`.
+        if prepend && dump.first() == Some(&b'0') {
+            if let Some(first) = dump.first_mut() {
+                *first = b'1';
+            }
+        }
         cmds.push(Command {
             sel,
             negated,
             act,
-            dump: std::mem::take(&mut p.dump),
+            dump,
         });
     }
 
@@ -1877,10 +2216,9 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 .find(|(l, _)| *l == name)
                 .map(|(_, i)| i)
                 .ok_or_else(|| {
-                    ScriptFail::Label(format!(
-                        "can't find label for jump to `{}'",
-                        String::from_utf8_lossy(&name)
-                    ))
+                    ScriptFail::Label(
+                        [b"can't find label for jump to `".as_slice(), &name, b"'"].concat(),
+                    )
                 })?
         };
         if let Some(cmd) = cmds.get_mut(at) {
@@ -1894,6 +2232,7 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
 
     Ok(Script {
         cmds,
+        posix: p.posix,
         wfiles: std::mem::take(&mut p.wfiles),
         rfiles: std::mem::take(&mut p.rfiles),
         suppress,
@@ -1909,45 +2248,126 @@ struct Line {
     bytes: Vec<u8>,
     /// Whether the line ended with the separator, as opposed to end-of-file.
     had_sep: bool,
-    /// The operand this line came from, as it was written on the command line —
-    /// `-` for standard input, and interned so a million-line file costs one
-    /// copy of its name.
-    ///
-    /// It is stamped here rather than read from [`Input`] when it is wanted,
-    /// because the input reads one line *ahead*: by the time a line is being
-    /// executed, `Input`'s idea of the current file may already be the next
-    /// one. `F` and `--debug`'s `INPUT:` line would then name the wrong file at
-    /// every file boundary.
-    file: Rc<OsString>,
 }
 
-/// The lines of a list of files, read as one stream.
+thread_local! {
+    /// glibc's `stdin`: one stream for the whole run, read whenever an
+    /// operand is `-` and whenever `R /dev/stdin` asks for a line. GNU sed
+    /// reads both through the same `FILE` (`input->fp = stdin`), so they take
+    /// turns at one buffer -- `sed 'R /dev/stdin' -` pairs each line with the
+    /// *next* one, not with a second copy of the input. Measured.
+    static STDIN: Rc<RefCell<StdioReader>> = Rc::new(RefCell::new(StdioReader::stdin()));
+}
+
+/// Standard input's one stream. See [`STDIN`].
+fn stdin_stream() -> Rc<RefCell<StdioReader>> {
+    STDIN.with(Rc::clone)
+}
+
+/// What `exit` does for standard input once the output is flushed: glibc
+/// seeks a buffered stream back over what it read ahead and did not use, so
+/// the next reader of the descriptor starts just after the last line sed
+/// took. `{ sed 1q; cat; } < file` gives `cat` the rest of the file because of
+/// this, and `printf '1\n2\n' | { sed 1q; cat; }` gives it nothing, a pipe
+/// being unable to seek. See [`StdioReader::exit_sync`].
+fn give_back_stdin() {
+    STDIN.with(|s| {
+        if let Ok(mut s) = s.try_borrow_mut() {
+            s.exit_sync();
+        }
+    });
+}
+
+/// The error standard input's stream answers if something is already
+/// reading it -- which nothing here does while anything else is, so this is
+/// a guard rather than a case.
+fn stdin_busy() -> io::Error {
+    io::Error::other("standard input is already being read")
+}
+
+/// Whether a stream has a byte to give: `feof`, then `getc` and `ungetc`. A
+/// read that fails counts as the end, as GNU's `getc` returning `EOF` does.
+fn has_more(r: &mut StdioReader) -> bool {
+    !r.at_eof() && matches!(r.peek(), Ok(Some(_)))
+}
+
+/// The stream an input is being read through.
+enum Reader {
+    /// Standard input's one stream: see [`STDIN`].
+    Stdin(Rc<RefCell<StdioReader>>),
+    /// A file named on the command line, with a stream of its own.
+    File(StdioReader),
+    /// Bytes already in memory, standing in for standard input in the unit
+    /// tests.
+    #[cfg(test)]
+    Bytes(io::Cursor<Vec<u8>>),
+}
+
+impl Reader {
+    /// GNU's `ck_getdelim`.
+    fn read_until(&mut self, sep: u8, out: &mut Vec<u8>) -> io::Result<usize> {
+        match self {
+            Reader::Stdin(s) => s
+                .try_borrow_mut()
+                .map_err(|_| stdin_busy())?
+                .read_until(sep, out),
+            Reader::File(r) => r.read_until(sep, out),
+            #[cfg(test)]
+            Reader::Bytes(c) => io::BufRead::read_until(c, sep, out),
+        }
+    }
+
+    /// See [`has_more`].
+    fn has_more(&mut self) -> bool {
+        match self {
+            Reader::Stdin(s) => s.try_borrow_mut().is_ok_and(|mut s| has_more(&mut s)),
+            Reader::File(r) => has_more(r),
+            #[cfg(test)]
+            Reader::Bytes(c) => io::BufRead::fill_buf(c).is_ok_and(|b| !b.is_empty()),
+        }
+    }
+}
+
+/// The lines of a list of files, read as one stream -- GNU sed's `struct
+/// input`, with its `read_pattern_space`, `test_eof` and
+/// `last_file_with_data_p`.
 ///
-/// It reads one line ahead, because `$` cannot be answered without knowing
-/// whether anything follows — and with several files that question crosses a
-/// file boundary.
+/// Nothing is read ahead of the line being executed except what `$` asks
+/// for, and that is one byte: `$` is answered by looking at the next byte,
+/// as GNU's `getc` and `ungetc` do, and only when an address asks. Reading a
+/// whole line ahead, as this used to, is invisible in a file and visible in a
+/// pipe shared with someone else: under `-u`, `printf '1\n2\n3\n' | sed -u
+/// '1e cat'` hands `cat` the lines sed has not read, and a line taken early
+/// would be missing from them.
 struct Input {
     paths: Vec<OsString>,
     next_path: usize,
-    cur: Option<Box<dyn BufRead>>,
-    /// What to call the file now open, in a read-error diagnostic. Upstream
-    /// names standard input `stdin` there even though the operand was `-`.
+    cur: Option<Reader>,
+    /// What a read error calls the file now open: `stdin` for `-`, GNU's
+    /// `utils_fp_name`, and the operand otherwise.
     cur_name: OsString,
-    /// The *operand* the file now open was named by, which is what `F` and
-    /// `--debug` report — a different string from `cur_name` for standard
-    /// input, where upstream says `-` and `STDIN` respectively.
+    /// GNU's `in_file_name`: the operand most recently *opened*, which `F`
+    /// prints and `--debug` reports -- `-` for standard input, which the
+    /// trace spells `STDIN`. Most recently opened, not the one the current
+    /// line came from: a `$` test at the end of a file opens the next one to
+    /// see whether it has a line, and from then on `F` names that one. `sed -n
+    /// '$!F' a b` prints `a` and then `b`, measured; this port used to stamp
+    /// each line with its file and printed `a` twice.
     cur_file: Rc<OsString>,
     /// Whether a `-` operand means standard input. It does everywhere except
     /// under `-i`, where there is no sense in editing standard input in place
     /// and upstream therefore opens a file whose name is one dash.
     dash_is_stdin: bool,
-    peeked: Option<Line>,
+    /// `-u` outside `-i`: each input is read a byte at a time, GNU's
+    /// `setvbuf (input->fp, NULL, _IONBF, 0)`, so that no more is taken from a
+    /// shared descriptor than has been used.
+    unbuffered: bool,
     sep: u8,
     had_error: bool,
 }
 
 impl Input {
-    fn new(paths: Vec<OsString>, sep: u8, dash_is_stdin: bool) -> Input {
+    fn new(paths: Vec<OsString>, sep: u8, dash_is_stdin: bool, unbuffered: bool) -> Input {
         Input {
             paths,
             next_path: 0,
@@ -1955,118 +2375,736 @@ impl Input {
             cur_name: OsString::from("stdin"),
             cur_file: Rc::new(OsString::from("-")),
             dash_is_stdin,
-            peeked: None,
+            unbuffered,
             sep,
             had_error: false,
         }
     }
 
-    fn open_next(&mut self) -> bool {
-        while let Some(path) = self.paths.get(self.next_path) {
-            let path = path.clone();
-            self.next_path = self.next_path.saturating_add(1);
-            if path == "-" && self.dash_is_stdin {
-                self.cur = Some(Box::new(BufReader::new(io::stdin())));
-                self.cur_name = OsString::from("stdin");
-                self.cur_file = Rc::new(path);
-                return true;
-            }
-            match File::open(&path) {
-                Ok(f) => {
-                    self.cur = Some(Box::new(BufReader::new(f)));
-                    self.cur_file = Rc::new(path.clone());
-                    self.cur_name = path;
-                    return true;
-                }
-                Err(e) => {
-                    diag_path("sed: can't read ", &path, &format!(": {}", strerror(&e)));
-                    self.had_error = true;
-                }
-            }
-        }
-        false
+    /// An input over a file already open -- `-i`, which has to look at the
+    /// file before the edit can begin. `name` is what a read error calls it;
+    /// `shown` is what `F` prints, GNU's `in_file_name`, which
+    /// `--follow-symlinks` may have resolved.
+    fn opened(name: OsString, shown: OsString, file: File, sep: u8) -> Input {
+        let mut input = Input::new(Vec::new(), sep, false, false);
+        input.cur = Some(Reader::File(StdioReader::from_file(file)));
+        input.cur_name = name;
+        input.cur_file = Rc::new(shown);
+        input
     }
 
-    fn fill(&mut self) {
-        if self.peeked.is_some() {
-            return;
-        }
-        loop {
-            if self.cur.is_none() && !self.open_next() {
-                return;
+    /// GNU's `open_next_file`: open one operand, and say so if it will not.
+    /// The name is taken first, as GNU's `in_file_name` is, whether or not the
+    /// open succeeds.
+    fn open(&mut self, path: OsString) -> bool {
+        self.cur_file = Rc::new(path.clone());
+        if path == "-" && self.dash_is_stdin {
+            let stdin = stdin_stream();
+            if let Ok(mut s) = stdin.try_borrow_mut() {
+                // `clearerr (stdin)`: a second `-` reads again rather than
+                // inheriting the first one's end of file.
+                s.clear_error();
+                if self.unbuffered {
+                    s.set_unbuffered();
+                }
             }
-            let Some(r) = self.cur.as_mut() else { return };
-            let mut buf = Vec::new();
-            match r.read_until(self.sep, &mut buf) {
-                Ok(0) => {
-                    self.cur = None;
+            self.cur = Some(Reader::Stdin(stdin));
+            self.cur_name = OsString::from("stdin");
+            return true;
+        }
+        // GNU's `in_file_name = follow_symlink (name)`: what `F` names, and
+        // a name that cannot be followed ends the run before the open.
+        if follow_symlinks() {
+            self.cur_file = Rc::new(follow_symlink(&path));
+        }
+        match File::open(&path) {
+            Ok(f) => {
+                let mut r = StdioReader::from_file(f);
+                if self.unbuffered {
+                    r.set_unbuffered();
                 }
-                Ok(_) => {
-                    let had_sep = buf.last() == Some(&self.sep);
-                    if had_sep {
-                        buf.pop();
-                    }
-                    self.peeked = Some(Line {
-                        bytes: buf,
-                        had_sep,
-                        file: Rc::clone(&self.cur_file),
-                    });
-                    return;
-                }
-                // A read that fails part-way through a file is not the same
-                // as a file that would not open: there is no sensible way to
-                // carry on with the rest of the stream, so this ends the run.
-                Err(e) => panic_path(
-                    "sed: read error on ",
-                    &self.cur_name,
-                    &format!(": {}", strerror(&e)),
-                ),
+                self.cur = Some(Reader::File(r));
+                self.cur_name = path;
+                true
+            }
+            Err(e) => {
+                diag_path("sed: can't read ", &path, &format!(": {}", strerror(&e)));
+                self.had_error = true;
+                false
             }
         }
     }
 
+    /// GNU's `closedown` of an input that is not being edited in place: a
+    /// file is closed, and a failure to close it is fatal; standard input is
+    /// left open -- GNU's `ck_fclose` passes over a stream it never
+    /// registered, and the next `-`, or `R /dev/stdin`, reads on from it.
+    fn close_current(&mut self) {
+        if let Some(Reader::File(r)) = self.cur.take()
+            && let Err(e) = r.close()
+        {
+            panic_path(
+                "sed: couldn't close ",
+                &self.cur_name,
+                &format!(": {}", strerror(&e)),
+            );
+        }
+    }
+
+    /// GNU's `read_pattern_space`, less what it does to the program's state:
+    /// the next line, from the next operand that has one when the current
+    /// one runs out.
     fn next_line(&mut self) -> Option<Line> {
-        self.fill();
-        self.peeked.take()
+        loop {
+            if let Some(cur) = self.cur.as_mut() {
+                let sep = self.sep;
+                let mut buf = Vec::new();
+                match cur.read_until(sep, &mut buf) {
+                    Ok(0) => self.close_current(),
+                    Ok(_) => {
+                        let had_sep = buf.last() == Some(&sep);
+                        if had_sep {
+                            buf.pop();
+                        }
+                        return Some(Line {
+                            bytes: buf,
+                            had_sep,
+                        });
+                    }
+                    // A read that fails part-way through a file is not the
+                    // same as a file that would not open: there is no sensible
+                    // way to carry on with the rest of the stream, so this
+                    // ends the run.
+                    Err(e) => panic_path(
+                        "sed: read error on ",
+                        &self.cur_name,
+                        &format!(": {}", strerror(&e)),
+                    ),
+                }
+            }
+            let path = self.paths.get(self.next_path).cloned()?;
+            self.next_path = self.next_path.saturating_add(1);
+            self.open(path);
+        }
     }
 
-    /// Whether the line just handed out was the last one there will be.
+    /// GNU's `test_eof`: whether the line just read was the last there is.
     fn at_end(&mut self) -> bool {
-        self.fill();
-        self.peeked.is_none()
+        if self.cur.as_mut().is_some_and(Reader::has_more) {
+            return false;
+        }
+        self.last_file_with_data()
+    }
+
+    /// GNU's `last_file_with_data_p`: close what is open, then open each
+    /// remaining operand in turn until one has a byte to give -- saying
+    /// `can't read` about any that will not open now, when `$` is asked,
+    /// rather than when its turn would have come.
+    fn last_file_with_data(&mut self) -> bool {
+        loop {
+            self.close_current();
+            let Some(path) = self.paths.get(self.next_path).cloned() else {
+                return true;
+            };
+            self.next_path = self.next_path.saturating_add(1);
+            if self.open(path) && self.cur.as_mut().is_some_and(Reader::has_more) {
+                return false;
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------- editing in place
+
+thread_local! {
+    /// The temporary file an in-place edit is writing, until it is renamed
+    /// over the file it replaces: GNU's `G_file_to_unlink`, removed by the
+    /// `atexit` handler if the run ends first -- so a script that fails, or a
+    /// disk that fills, leaves the original as it was and no stray file
+    /// beside it.
+    static CLEANUP: RefCell<Option<OsString>> = const { RefCell::new(None) };
+}
+
+/// Remove the temporary file an edit left unfinished: see [`CLEANUP`].
+fn remove_cleanup_file() {
+    CLEANUP.with(|c| {
+        if let Some(path) = c.borrow_mut().take() {
+            // Ignored, as GNU's `unlink` there is: the run is ending, and
+            // there is nobody left to tell.
+            drop(fs::remove_file(path));
+        }
+    });
+}
+
+/// `--follow-symlinks`: resolve an operand's symbolic links before reading
+/// it, and under `-i` edit the file at the end of them rather than replacing
+/// the link. GNU's `follow_symlinks`, a global there too.
+static FOLLOW_SYMLINKS: AtomicBool = AtomicBool::new(false);
+
+fn follow_symlinks() -> bool {
+    FOLLOW_SYMLINKS.load(AtomicOrdering::Relaxed)
+}
+
+/// GNU's `__eloop_threshold`: how many links a name may pass through before
+/// it is a loop. `sysconf (_SC_SYMLOOP_MAX)` is no answer on Linux, and
+/// gnulib's floor is 40.
+const ELOOP_THRESHOLD: usize = 40;
+
+/// Whether `readlink` failed because the name is not a link -- `EINVAL` --
+/// which is where following stops.
+#[cfg(unix)]
+fn not_a_link(e: &io::Error) -> bool {
+    /// `EINVAL`.
+    const EINVAL: i32 = 22;
+    e.raw_os_error() == Some(EINVAL)
+}
+
+/// Off unix nothing is followed: every name is taken as it stands.
+#[cfg(not(unix))]
+fn not_a_link(_e: &io::Error) -> bool {
+    true
+}
+
+/// GNU sed's `follow_symlink`: the name `name` finally stands for, found by
+/// replacing the name with what its link holds until it is not a link. The
+/// replacement is textual -- a relative link is taken relative to the
+/// directory part of the name that held it, so `d/up -> ../t` gives `d/../t`,
+/// measured -- and a link that cannot be read, including one whose target
+/// does not exist, ends the run, as a loop does. `sed --follow-symlinks p
+/// nosuch` is `couldn't readlink nosuch: No such file or directory`, status 4,
+/// rather than `can't read`.
+fn follow_symlink(name: &OsStr) -> OsString {
+    let mut current = os_bytes(name).into_owned();
+    let mut links = 0usize;
+    loop {
+        let held = match fs::read_link(os_from_bytes(&current)) {
+            Ok(held) => held,
+            Err(e) if not_a_link(&e) => return os_from_bytes(&current),
+            Err(e) => panic_path(
+                "sed: couldn't readlink ",
+                &os_from_bytes(&current),
+                &format!(": {}", strerror(&e)),
+            ),
+        };
+        if links >= ELOOP_THRESHOLD {
+            /// `ELOOP`.
+            const ELOOP: i32 = 40;
+            panic_path(
+                "sed: couldn't follow symlink ",
+                name,
+                &format!(": {}", strerror(&io::Error::from_raw_os_error(ELOOP))),
+            );
+        }
+        links = links.saturating_add(1);
+        let held = os_bytes(held.as_os_str()).into_owned();
+        current = match current.iter().rposition(|&b| b == b'/') {
+            // Relative, and not from the working directory: beside the link.
+            Some(slash) if held.first() != Some(&b'/') => {
+                let mut joined = current.get(..=slash).unwrap_or_default().to_vec();
+                joined.extend_from_slice(&held);
+                joined
+            }
+            // Absolute, or a link in the working directory: the link's
+            // contents are the whole new name.
+            _ => held,
+        };
+    }
+}
+
+/// glibc's `mkostemp` on `DIR/sedXXXXXX` under `umask (0077)`: a new file only
+/// this user can read, its six `X`s replaced by letters and digits, and
+/// another name tried if that one is taken. The name, and the file or the
+/// error -- whose message GNU gives with the name it last tried.
+fn make_temp(dir: &[u8]) -> (Vec<u8>, io::Result<File>) {
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    /// glibc tries every name there is; this many is already absurd.
+    const ATTEMPTS: usize = 1000;
+    let mut random = coreutils::randint::RandRead::open(None).ok();
+    // Mixed in, so a source that will not give bytes still varies the name.
+    let mut fallback = u64::from(std::process::id())
+        ^ std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::from(d.subsec_nanos()));
+    let mut name = Vec::new();
+    for _ in 0..ATTEMPTS {
+        let mut bytes = [0u8; 6];
+        if random.as_mut().is_none_or(|r| r.read(&mut bytes).is_err()) {
+            for b in &mut bytes {
+                fallback = fallback
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                *b = fallback.to_le_bytes().get(7).copied().unwrap_or(0);
+            }
+        }
+        name = dir.to_vec();
+        name.extend_from_slice(b"/sed");
+        for b in bytes {
+            let at = usize::from(b).checked_rem(LETTERS.len()).unwrap_or(0);
+            name.push(LETTERS.get(at).copied().unwrap_or(b'X'));
+        }
+        match create_private(&os_from_bytes(&name)) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            other => return (name, other),
+        }
+    }
+    (name, Err(io::Error::from(io::ErrorKind::AlreadyExists)))
+}
+
+/// A new file, readable and writable by this user only.
+#[cfg(unix)]
+fn create_private(path: &OsStr) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &OsStr) -> io::Result<File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// One file being edited in place: GNU's `open_next_file` and `closedown`
+/// with `in_place_extension` set.
+///
+/// The edit is written to a new file beside the old one and renamed over it,
+/// so at every moment the name holds either the whole old file or the whole
+/// new one. That is also what decides what the edit *is*: a new file, which
+/// breaks a hard link -- the other name keeps the old text -- replaces a
+/// symbolic link rather than writing through it (unless
+/// `--follow-symlinks`), needs a writable directory and not a writable file,
+/// and leaves a backup that is the original file itself, renamed. All
+/// measured against GNU sed 4.9; this port used to rewrite the file where it
+/// stood, which got every one of those the other way round and could leave a
+/// file half-written on a full disk.
+struct InPlace {
+    /// The name being replaced: GNU's `in_file_name`.
+    target: OsString,
+    /// The temporary file's name, `DIR/sedXXXXXX`.
+    temp: OsString,
+    /// The temporary file's stream, on [`OPEN`] while the edit runs.
+    out: Shared,
+    /// The original's owner, group and mode, for the new file.
+    meta: fs::Metadata,
+}
+
+impl InPlace {
+    /// Check `input` can be edited and make the file the edit goes to. Each
+    /// refusal ends the run, as GNU's `panic` does.
+    fn begin(target: &OsStr, input: &File) -> InPlace {
+        use std::io::IsTerminal;
+
+        if input.is_terminal() {
+            panic_path("sed: couldn't edit ", target, ": is a terminal");
+        }
+        let meta = match input.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => panic_path("sed: couldn't edit ", target, ": not a regular file"),
+        };
+        // GNU's `tmpdir`: the name up to its last slash, or `.`.
+        let name = os_bytes(target);
+        let dir = match name.iter().rposition(|&b| b == b'/') {
+            Some(slash) => name.get(..slash).unwrap_or_default().to_vec(),
+            None => b".".to_vec(),
+        };
+        let (temp, made) = make_temp(&dir);
+        let file = match made {
+            Ok(f) => f,
+            Err(e) => panic_path(
+                "sed: couldn't open temporary file ",
+                &os_from_bytes(&temp),
+                &format!(": {}", strerror(&e)),
+            ),
+        };
+        let temp = os_from_bytes(&temp);
+        CLEANUP.with(|c| *c.borrow_mut() = Some(temp.clone()));
+        let out = register(StdioFile::from_file(file), &os_bytes(&temp));
+        InPlace {
+            target: target.to_os_string(),
+            temp,
+            out,
+            meta,
+        }
+    }
+
+    /// GNU's `closedown`: the new file given the old one's owner and mode,
+    /// closed -- its flush and close checked -- the old one renamed to the
+    /// backup if there is to be one, and the new one renamed over it.
+    fn finish(self, suffix: &OsStr) {
+        self.copy_ownership();
+        // Off the list of open files first, as GNU's `ck_fclose` takes it off
+        // before closing: the end of the run must not close it again.
+        unregister(&self.out);
+        if let Err(e) = ck_fclose(&self.out) {
+            let mut line = b"sed: ".to_vec();
+            line.extend_from_slice(&failure_message(&e));
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            exit_quietly(EXIT_PANIC);
+        }
+        if let Some(backup) = backup_name(&self.target, suffix)
+            && let Err(e) = fs::rename(&self.target, &backup)
+        {
+            panic_path(
+                "sed: cannot rename ",
+                &self.target,
+                &format!(": {}", strerror(&e)),
+            );
+        }
+        if let Err(e) = fs::rename(&self.temp, &self.target) {
+            panic_path(
+                "sed: cannot rename ",
+                &self.temp,
+                &format!(": {}", strerror(&e)),
+            );
+        }
+        // Renamed: nothing to remove any more.
+        CLEANUP.with(|c| *c.borrow_mut() = None);
+    }
+
+    /// `fchown` to the original's owner and group -- or, failing that, to its
+    /// group alone; neither failure is reported -- then gnulib's `copy_acl`,
+    /// which here is the mode, set last because a change of owner can clear
+    /// the set-id bits. A failure to set the mode is reported and the edit
+    /// goes on, as gnulib's is.
+    #[cfg(unix)]
+    fn copy_ownership(&self) {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let Ok(out) = self.out.try_borrow() else {
+            return;
+        };
+        let Some(file) = out.file.file() else {
+            return;
+        };
+        if std::os::unix::fs::fchown(file, Some(self.meta.uid()), Some(self.meta.gid())).is_err() {
+            // Ignored, as GNU ignores it: a user may give a file to a group
+            // they are in, and not to another user.
+            drop(std::os::unix::fs::fchown(file, None, Some(self.meta.gid())));
+        }
+        let mode = fs::Permissions::from_mode(self.meta.mode() & 0o7777);
+        if let Err(e) = file.set_permissions(mode) {
+            diag!(
+                "sed: preserving permissions for {}: {}",
+                coreutils::quote::quote(&os_bytes(&self.temp)),
+                strerror(&e)
+            );
+        }
+    }
+
+    /// No owners off unix, and of the mode only what the platform keeps --
+    /// on the Windows host, whether the file is read-only.
+    #[cfg(not(unix))]
+    fn copy_ownership(&self) {
+        let Ok(out) = self.out.try_borrow() else {
+            return;
+        };
+        if let Some(file) = out.file.file() {
+            // Ignored: a build that exists to run unit tests on, where the
+            // flag is the whole of what could be copied.
+            drop(file.set_permissions(self.meta.permissions()));
+        }
     }
 }
 
 // ---------------------------------------------------------------- the output
+
+/// One of sed's output files: a stdio stream, and the name GNU sed's messages
+/// give it -- `stdout`, or the name the script wrote after `w`.
+struct SedFile {
+    file: StdioFile,
+    name: Vec<u8>,
+}
+
+/// An output file, shared between the place that writes it and the list of
+/// everything open. See [`OPEN`].
+type Shared = Rc<RefCell<SedFile>>;
+
+thread_local! {
+    /// Every output file sed has open, oldest first: glibc's `_IO_list_all`,
+    /// for the one thing that list is for here -- `exit` flushes every stream
+    /// in it. GNU sed's fatal errors are `panic`, which is `exit
+    /// (EXIT_PANIC)`, so output written before the failure still reaches its
+    /// files; reproducing that from deep inside a run needs the streams
+    /// reachable from there. Standard output is the first entry.
+    static OPEN: RefCell<Vec<Shared>> = const { RefCell::new(Vec::new()) };
+
+    /// Standard output, once made: kept apart from [`OPEN`] so that finding
+    /// it never depends on the order things were opened in. The `w` files are
+    /// opened while the script is read, before anything is written, so the
+    /// first entry of [`OPEN`] is a `w` file in any script that has one --
+    /// and taking that for standard output sent `sed 'w out'`'s output into
+    /// `out`.
+    static STDOUT: RefCell<Option<Shared>> = const { RefCell::new(None) };
+}
+
+/// `-u`: every line flushed as it is written, and every input read a byte at
+/// a time. GNU's `unbuffered`, a global there too.
+static UNBUFFERED: AtomicBool = AtomicBool::new(false);
+
+/// Whether `-u` was given.
+fn unbuffered() -> bool {
+    UNBUFFERED.load(AtomicOrdering::Relaxed)
+}
+
+/// Start an output file and add it to [`OPEN`].
+fn register(file: StdioFile, name: &[u8]) -> Shared {
+    let shared = Rc::new(RefCell::new(SedFile {
+        file,
+        name: name.to_vec(),
+    }));
+    OPEN.with(|open| open.borrow_mut().push(Rc::clone(&shared)));
+    shared
+}
+
+/// Take a file off [`OPEN`], once something else is closing it.
+fn unregister(f: &Shared) {
+    OPEN.with(|open| open.borrow_mut().retain(|g| !Rc::ptr_eq(g, f)));
+}
+
+/// Standard output, made on first use and put at the *front* of [`OPEN`]
+/// whenever that is: glibc's `stdout` is on its list of streams from the
+/// start, behind every file opened later, so `exit` flushes it last.
+fn stdout_file() -> Shared {
+    STDOUT.with(|cell| {
+        if let Some(made) = cell.borrow().as_ref() {
+            return Rc::clone(made);
+        }
+        let shared = Rc::new(RefCell::new(SedFile {
+            file: StdioFile::stdout(),
+            name: b"stdout".to_vec(),
+        }));
+        OPEN.with(|open| open.borrow_mut().insert(0, Rc::clone(&shared)));
+        *cell.borrow_mut() = Some(Rc::clone(&shared));
+        shared
+    })
+}
+
+/// glibc's `exit`: every open stream flushed, newest first, and nothing said
+/// about any that fails -- there is no one left to tell. Then the status.
+fn exit_quietly(code: i32) -> ! {
+    OPEN.with(|open| {
+        for f in open.borrow().iter().rev() {
+            if let Ok(mut f) = f.try_borrow_mut() {
+                // Ignored on purpose: this is `exit`'s own flush, which GNU
+                // does not check either; the status is already decided.
+                drop(f.file.flush());
+            }
+        }
+    });
+    give_back_stdin();
+    remove_cleanup_file();
+    process::exit(code)
+}
+
+/// One of GNU sed's fatal output messages, carried up from the write that
+/// failed to where the run ends: `couldn't write 3 items to stdout: No space
+/// left on device`, `couldn't flush stdout: ...`, `couldn't close stdout: ...`.
+#[derive(Debug)]
+struct OutputFailed(Vec<u8>);
+
+impl std::fmt::Display for OutputFailed {
+    /// Not the message: that is bytes -- a `w` file's name need not be text --
+    /// and is printed as bytes, by [`failure_message`]. This is only what the
+    /// `Error` trait asks for.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("sed could not write its output")
+    }
+}
+
+impl std::error::Error for OutputFailed {}
+
+/// Wrap a failed `write(2)` in GNU sed's message for it, keeping the error's
+/// kind -- a reader that left is still recognised as one.
+fn output_failed(what: &str, name: &[u8], reason: &io::Error) -> io::Error {
+    let mut message = what.as_bytes().to_vec();
+    message.extend_from_slice(name);
+    message.extend_from_slice(format!(": {}", strerror(reason)).as_bytes());
+    io::Error::new(reason.kind(), OutputFailed(message))
+}
+
+/// `EBADF`: what a stream answers that cannot be written -- closed, or open
+/// for reading only.
+const EBADF: i32 = 9;
+
+/// The start of `ck_fwrite`'s complaint, with GNU's `ngettext` choice between
+/// "item" and "items".
+fn items(n: usize) -> String {
+    if n == 1 {
+        "couldn't write 1 item to ".to_string()
+    } else {
+        format!("couldn't write {n} items to ")
+    }
+}
+
+/// How many bytes the first of `output_line`'s writes carries: the owed
+/// separator if there is one, else the text if there is any, else the line's
+/// own separator. The first is the one that fails on a stream that cannot be
+/// written, so it is the count GNU's message gives.
+fn first_write(owed: bool, bytes: &[u8]) -> usize {
+    if owed || bytes.is_empty() {
+        1
+    } else {
+        bytes.len()
+    }
+}
+
+/// GNU sed's `ck_fwrite`: write, and name the write if it fails.
+///
+/// The count is the number of bytes this call was given -- GNU writes with
+/// `fwrite (ptr, 1, n, fp)`, so its "items" are bytes -- which is why the
+/// places that write have to hand over the same pieces GNU's do: the text of a
+/// line and its separator are two writes, `l` is one per character, and a file
+/// read by `r` goes in 8192-byte pieces.
+fn ck_fwrite(f: &Shared, data: &[u8]) -> io::Result<()> {
+    let mut f = f.borrow_mut();
+    f.file.clear_error();
+    f.file
+        .write(data)
+        .map_err(|e| output_failed(&items(data.len()), &f.name, &e))
+}
+
+/// GNU sed's `ck_fflush`. A closed descriptor is let pass here, for the close
+/// to report.
+fn ck_fflush(f: &Shared) -> io::Result<()> {
+    let mut f = f.borrow_mut();
+    f.file.clear_error();
+    match f.file.flush() {
+        Err(e) if e.raw_os_error() != Some(EBADF) => {
+            Err(output_failed("couldn't flush ", &f.name, &e))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// GNU sed's `do_ck_fclose`: flush, then close.
+///
+/// One deliberate difference: GNU unlinks a `w` file from its list of open
+/// files *before* flushing it, so a flush that fails at the end of the run is
+/// reported as `couldn't flush <unknown>`. The name is right here, and is what
+/// is printed.
+fn ck_fclose(f: &Shared) -> io::Result<()> {
+    ck_fflush(f)?;
+    let mut f = f.borrow_mut();
+    f.file.clear_error();
+    f.file
+        .close()
+        .map_err(|e| output_failed("couldn't close ", &f.name, &e))
+}
+
+/// GNU sed's `ck_fclose (NULL)`: every `w` file, newest first, then standard
+/// output -- each flushed and closed -- with the first failure fatal.
+///
+/// Run where GNU runs it: at the end of a run, and after `--help`,
+/// `--version` and a usage error. Not after a fatal error, which is `exit`
+/// and checks nothing; see [`exit_quietly`].
+///
+/// # Errors
+///
+/// The first file's failure, worded by [`failure_message`].
+fn close_everything() -> io::Result<()> {
+    let files: Vec<Shared> = OPEN.with(|open| open.borrow().clone());
+    let stdout = stdout_file();
+    for f in files.iter().rev().filter(|f| !Rc::ptr_eq(f, &stdout)) {
+        ck_fclose(f)?;
+    }
+    ck_fclose(&stdout)
+}
+
+/// The text of an output failure: GNU's own sentence when the failure came
+/// from one of the functions above, and the error's own words otherwise.
+fn failure_message(e: &io::Error) -> Vec<u8> {
+    match e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<OutputFailed>())
+    {
+        Some(OutputFailed(message)) => message.clone(),
+        None => format!("couldn't write: {}", strerror(e)).into_bytes(),
+    }
+}
+
+/// Where an [`Out`] writes: one of sed's output files, or the copy of a file
+/// `-i` builds in memory.
+trait Dest {
+    /// GNU's `ck_fwrite`.
+    fn put(&mut self, data: &[u8]) -> io::Result<()>;
+    /// `fprintf` and the `--debug` trace, whose results GNU never checks: a
+    /// failure here is dropped, and the next checked write starts afresh with
+    /// `clearerr`.
+    fn put_unchecked(&mut self, data: &[u8]);
+    /// GNU's `flush_output`: under `-u`, `ck_fflush` after every line.
+    fn line_done(&mut self) -> io::Result<()>;
+}
+
+impl Dest for Vec<u8> {
+    fn put(&mut self, data: &[u8]) -> io::Result<()> {
+        self.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn put_unchecked(&mut self, data: &[u8]) {
+        self.extend_from_slice(data);
+    }
+
+    fn line_done(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// An [`Out`] onto one of sed's files.
+struct FileDest(Shared);
+
+impl Dest for FileDest {
+    fn put(&mut self, data: &[u8]) -> io::Result<()> {
+        ck_fwrite(&self.0, data)
+    }
+
+    fn put_unchecked(&mut self, data: &[u8]) {
+        // Unchecked, as GNU's `fprintf` is: see the trait.
+        drop(self.0.borrow_mut().file.write(data));
+    }
+
+    fn line_done(&mut self) -> io::Result<()> {
+        if UNBUFFERED.load(AtomicOrdering::Relaxed) {
+            ck_fflush(&self.0)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// A sink that holds a missing separator back.
 ///
 /// The input's last line may have no newline, and then the output's last line
 /// must have none either — but any *earlier* copy of that same line does need
 /// one. Deciding at write time is impossible; deciding at the next write is
-/// exactly right, and costs one flag.
+/// exactly right, and costs one flag. GNU's `struct output`, whose
+/// `missing_newline` is this flag.
 struct Out<'a> {
-    w: &'a mut dyn Write,
+    w: &'a mut dyn Dest,
     sep: u8,
     owed: bool,
     /// Where `--debug`'s trace goes, or `None` when there is no trace.
     trace_to: Option<Trace>,
 }
 
-/// Which descriptor a `--debug` trace line is written to.
+/// Which stream a `--debug` trace line is written to.
 ///
 /// Upstream always traces to *standard output*, which is the same place the
 /// edited text goes — except under `-i`, where the text goes to the file and
-/// the trace stays on the terminal. Both are measured, and the distinction has
-/// to be made here rather than by always naming standard output, because the
-/// ordinary case holds a `StdoutLock` for the whole run and a second handle
-/// would interleave against a buffer it does not own.
-#[derive(Clone, Copy)]
+/// the trace stays on the terminal. Both are measured.
+#[derive(Clone)]
 enum Trace {
     /// The same sink the output uses.
     Inline,
     /// Standard output while the output goes elsewhere — `-i`.
-    Stdout,
+    Stdout(Shared),
 }
 
 impl Out<'_> {
@@ -2083,34 +3121,62 @@ impl Out<'_> {
     /// --debug p` emits `a`, then `END-OF-CYCLE:`, and only then the newline the
     /// first `a` was owed. Measured, and routing the trace through `raw` would
     /// quietly move that newline.
-    fn trace(&mut self, bytes: &[u8]) -> io::Result<()> {
-        match self.trace_to {
-            None => Ok(()),
-            Some(Trace::Inline) => self.w.write_all(bytes),
-            Some(Trace::Stdout) => io::stdout().write_all(bytes),
+    ///
+    /// Unchecked, as GNU's `printf` to standard output is: a trace line that
+    /// does not arrive is not what ends a run, so there is nothing to return.
+    fn trace(&mut self, bytes: &[u8]) {
+        match &self.trace_to {
+            None => {}
+            Some(Trace::Inline) => self.w.put_unchecked(bytes),
+            Some(Trace::Stdout(f)) => FileDest(Rc::clone(f)).put_unchecked(bytes),
         }
     }
 
-    fn line(&mut self, bytes: &[u8], sep: bool) -> io::Result<()> {
+    /// GNU's `output_missing_newline`: the separator a previous line held
+    /// back, now that something follows it.
+    fn pay_owed(&mut self) -> io::Result<()> {
         if self.owed {
-            self.w.write_all(&[self.sep])?;
+            self.w.put(&[self.sep])?;
             self.owed = false;
-        }
-        self.w.write_all(bytes)?;
-        if sep {
-            self.w.write_all(&[self.sep])?;
-        } else {
-            self.owed = true;
         }
         Ok(())
     }
 
-    fn raw(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.owed {
-            self.w.write_all(&[self.sep])?;
-            self.owed = false;
+    /// GNU's `output_line`: the owed separator, the text, its own separator
+    /// (or the debt of one), and a flush under `-u` -- as separate writes,
+    /// because a failure names the write it was.
+    fn line(&mut self, bytes: &[u8], sep: bool) -> io::Result<()> {
+        self.pay_owed()?;
+        if !bytes.is_empty() {
+            self.w.put(bytes)?;
         }
-        self.w.write_all(bytes)
+        if sep {
+            self.w.put(&[self.sep])?;
+        } else {
+            self.owed = true;
+        }
+        self.w.line_done()
+    }
+
+    /// One checked write, with nothing added. For callers that lay out their
+    /// own pieces -- `l`, `e`, the append queue.
+    fn put(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.w.put(bytes)
+    }
+
+    /// The separator debt paid, then `text` written unchecked, then a flush
+    /// under `-u`: GNU's `=` and `F`, which `fprintf` their output.
+    fn unchecked_line(&mut self, text: &[u8]) -> io::Result<()> {
+        self.pay_owed()?;
+        let mut line = text.to_vec();
+        line.push(self.sep);
+        self.w.put_unchecked(&line);
+        self.w.line_done()
+    }
+
+    /// `flush_output`, for a caller that wrote its own pieces.
+    fn line_done(&mut self) -> io::Result<()> {
+        self.w.line_done()
     }
 }
 
@@ -2147,11 +3213,17 @@ fn text_out(out: &mut Out, t: &[u8]) -> io::Result<()> {
 /// descriptor 1. That is what puts `sed -i 'e echo SIDE' f` into `f` instead of
 /// onto the terminal — measured, and the reason this cannot simply inherit.
 ///
+/// Inherited standard input has to be asked for: `Command::output` gives the
+/// child an empty one unless told otherwise, which is what this did until
+/// 2026-10-03 -- so `printf '1\n2\n3\n' | sed -u '1e cat'` printed `1 2 3`
+/// where GNU's `cat` takes the two lines sed has not read and prints `2 3 1`.
+///
 /// A command that *runs* and fails is not an error — upstream discards the exit
 /// status, so `sed 'e false'` succeeds. A shell that will not start at all is,
 /// and stops the run, because every later `e` would fail the same way.
 fn shell_capture(cmd: &[u8]) -> Vec<u8> {
     match coreutils::shell::shell_bytes(cmd)
+        .stdin(process::Stdio::inherit())
         .stderr(process::Stdio::inherit())
         .output()
     {
@@ -2196,6 +3268,13 @@ enum Flow {
     },
 }
 
+/// GNU sed's `FREAD_BUFFER_SIZE`: how much of an `r` file goes in one write.
+const FREAD_BUFFER_SIZE: usize = 8192;
+
+/// How much of an `e COMMAND`'s output goes in one write: GNU reads the pipe
+/// into a 4096-byte buffer and writes each bufferful.
+const E_BUFFER_SIZE: usize = 4096;
+
 /// Text queued by `a` or `r`, emitted after the cycle's own output.
 enum Pending {
     File(String),
@@ -2207,14 +3286,33 @@ enum Pending {
 }
 
 /// Where a `w` (or `s///w`) target sends its lines.
+///
+/// GNU sed treats three names specially (`special_files` in its
+/// `compile.c`): they are not opened, but stand for the streams the process
+/// already has. Each is its own `struct output` there, with its own
+/// missing-separator flag -- which is why each [`WFile`] carries one.
 enum WTarget {
-    /// `/dev/stdout` is not opened: it is sed's own output stream, so writing
-    /// it through the same [`Out`] is what keeps `w /dev/stdout` interleaved
-    /// with the pattern space rather than racing it through a second buffer.
+    /// `/dev/stdout`: standard output itself, the same stream and buffer the
+    /// pattern space is printed through -- so `w /dev/stdout` interleaves with
+    /// it rather than racing it through a second buffer -- but with a debt of
+    /// its own. `printf 'a\nb' | sed 'w /dev/stdout'` is `a`, `a`, then `bb`:
+    /// neither copy of the unterminated `b` pays the other's. Under `-i` this
+    /// is still standard output, not the file being edited. All three
+    /// measured; this port used to write it through the main output, which
+    /// put a newline between the `b`s and, under `-i`, put the copies into
+    /// the edited file.
     Stdout,
     /// `/dev/stderr` goes to descriptor 2 with one `write(2)` per line.
     Stderr,
-    File(File),
+    /// `/dev/stdin`: GNU's `stdin` stream, which is open for reading, so the
+    /// first write fails -- `couldn't write 1 item to stdin: Bad file
+    /// descriptor` -- and ends the run. This port used to open the name for
+    /// writing instead, which on Linux re-opens whatever standard input is:
+    /// `sed 'w /dev/stdin' f < g` emptied `g` and wrote `f` into it.
+    Stdin,
+    /// A file of its own, buffered as stdio buffers one, and on [`OPEN`] so
+    /// that the end of the run flushes and closes it.
+    File(Shared),
 }
 
 /// One opened `w` target, with the separator it may still owe.
@@ -2236,15 +3334,16 @@ struct WFile {
 /// long pipeline. And the handle has to outlive the per-file [`Exec`]: with
 /// `-s`, or with `-i` over several files, a target reopened per input file
 /// would truncate away what the previous file wrote.
-fn open_wfiles(paths: &[String]) -> Vec<WFile> {
-    paths
+fn open_wfiles(targets: &[Target]) -> Vec<WFile> {
+    targets
         .iter()
-        .map(|path| {
-            let target = match path.as_str() {
-                "/dev/stdout" => WTarget::Stdout,
-                "/dev/stderr" => WTarget::Stderr,
-                _ => match File::create(path) {
-                    Ok(f) => WTarget::File(f),
+        .map(|t| {
+            let target = match t {
+                Target::Stdout => WTarget::Stdout,
+                Target::Stderr => WTarget::Stderr,
+                Target::Stdin => WTarget::Stdin,
+                Target::File(path) => match File::create(path) {
+                    Ok(f) => WTarget::File(register(StdioFile::from_file(f), path.as_bytes())),
                     Err(e) => {
                         panic_out(&format!("couldn't open file {path}: {}", strerror(&e)));
                     }
@@ -2258,15 +3357,30 @@ fn open_wfiles(paths: &[String]) -> Vec<WFile> {
         .collect()
 }
 
-/// One `R` source: a handle that yields a single line per execution.
+/// One `R` source, opened once for the run.
 ///
-/// A missing or unopenable file is `None` rather than an error. That is
+/// A missing or unopenable file gives nothing rather than an error. That is
 /// upstream's behaviour and it is deliberate on both sides: `R` is an
 /// inclusion, and a script that runs before its optional include exists should
 /// produce the text without it, not a diagnostic. (`r` agrees; `w` does not,
-/// because a write that goes nowhere loses data.)
-struct RFile {
-    r: Option<BufReader<File>>,
+/// because a write that goes nowhere loses data.) A file that opens and then
+/// cannot be *read* is another matter, and ends the run as GNU's does: `R dir`
+/// is `read error on dir: Is a directory`, measured, where this port used to
+/// say nothing.
+enum RFile {
+    /// Would not open.
+    Missing,
+    /// A file with a stream of its own.
+    File { reader: StdioReader, name: String },
+    /// `/dev/stdin`, one of GNU's `special_files`: standard input's one
+    /// stream, shared with an operand of `-` (see [`STDIN`]) -- so `sed 'R
+    /// /dev/stdin' -` pairs each line with the next, measured, where opening
+    /// the name read the input a second time.
+    Stdin,
+    /// `/dev/stdout` or `/dev/stderr`: streams open only for writing, so the
+    /// first `R` from one is a read error -- `read error on stdout: Bad file
+    /// descriptor`.
+    WriteOnly(&'static str),
 }
 
 /// Open every `R` source the script names, before a line of input is read.
@@ -2275,28 +3389,224 @@ struct RFile {
 /// reasons: the handle carries a read position that has to survive the
 /// per-input-file [`Exec`], or `R` would restart from line 1 on every input
 /// file even without `-s`.
-fn open_rfiles(paths: &[String]) -> Vec<RFile> {
-    paths
+fn open_rfiles(targets: &[Target]) -> Vec<RFile> {
+    targets
         .iter()
-        .map(|path| RFile {
-            r: File::open(path).ok().map(BufReader::new),
+        .map(|t| match t {
+            Target::Stdin => RFile::Stdin,
+            Target::Stdout => RFile::WriteOnly("stdout"),
+            Target::Stderr => RFile::WriteOnly("stderr"),
+            Target::File(path) => match File::open(path) {
+                Ok(f) => RFile::File {
+                    reader: StdioReader::from_file(f),
+                    name: path.clone(),
+                },
+                Err(_) => RFile::Missing,
+            },
         })
         .collect()
 }
 
-/// Return every `R` source to its first line.
+/// Return every `R` source to its first line: GNU's `rewind_read_files`.
 ///
 /// `-s` (and `-i`, which implies it) makes each input file a fresh stream, and
 /// upstream extends that to the `R` sources: `sed -s 'R inc' a b` pairs `inc`'s
 /// first lines with *both* files rather than continuing through it. A handle
 /// that cannot seek is left where it is, which is the best available answer for
-/// a pipe or a device.
+/// a pipe or a device. Standard input is not one of these -- GNU's special
+/// files are not on the list it rewinds -- and is not rewound.
 fn rewind_rfiles(rfiles: &mut [RFile]) {
     for f in rfiles {
-        if let Some(r) = f.r.as_mut() {
-            let _ = r.rewind();
+        if let RFile::File { reader, .. } = f {
+            reader.rewind();
         }
     }
+}
+
+/// One line from a stream for `R`: nothing once it has reached its end,
+/// which `R` does not read past (GNU's `!feof` test).
+fn line_from(r: &mut StdioReader, sep: u8) -> io::Result<Option<Vec<u8>>> {
+    if r.at_eof() {
+        return Ok(None);
+    }
+    let mut buf = Vec::new();
+    match r.read_until(sep, &mut buf)? {
+        0 => Ok(None),
+        _ => Ok(Some(buf)),
+    }
+}
+
+/// `R`'s line from `f`, if it has one. A read that fails ends the run,
+/// named as GNU's `ck_getdelim` names it.
+fn read_rfile(f: Option<&mut RFile>, sep: u8) -> Option<Vec<u8>> {
+    let (name, got): (&[u8], io::Result<Option<Vec<u8>>>) = match f? {
+        RFile::Missing => return None,
+        RFile::File { reader, name } => (name.as_bytes(), line_from(reader, sep)),
+        RFile::Stdin => {
+            let stdin = stdin_stream();
+            let got = match stdin.try_borrow_mut() {
+                Ok(mut s) => line_from(&mut s, sep),
+                Err(_) => Err(stdin_busy()),
+            };
+            return match got {
+                Ok(line) => line,
+                Err(e) => panic_out(&format!("read error on stdin: {}", strerror(&e))),
+            };
+        }
+        RFile::WriteOnly(name) => {
+            // glibc turns the stream to reading first, which writes out what
+            // standard output is holding -- and a failure there is the error
+            // reported -- and then refuses the read.
+            let refused = if *name == "stdout" {
+                stdout_file()
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut f| f.file.flush().err())
+                    .unwrap_or_else(|| io::Error::from_raw_os_error(EBADF))
+            } else {
+                io::Error::from_raw_os_error(EBADF)
+            };
+            panic_out(&format!("read error on {name}: {}", strerror(&refused)));
+        }
+    };
+    match got {
+        Ok(line) => line,
+        Err(e) => panic_path(
+            "sed: read error on ",
+            &os_from_bytes(name),
+            &format!(": {}", strerror(&e)),
+        ),
+    }
+}
+
+/// Where `r` reads from: GNU's `print_file` opens the name afresh each time.
+enum RSource {
+    File(File),
+    /// Standing in for a re-open of `/dev/stdin`, where the platform's
+    /// `/dev/stdin` is not descriptor 0's file. On Linux it is -- a link to
+    /// `/proc/self/fd/0` -- and opening it opens that file again: a regular
+    /// file from its start, whatever descriptor 0's offset (`offset`), and a
+    /// pipe or a terminal as the same pipe or terminal (`None`). SlateOS's
+    /// devfs node is the console instead, which would make `cmd | sed '1r
+    /// /dev/stdin' f` insert nothing; this gives Linux's answer until it
+    /// gives it itself (`requests/b-a-dev-stdin-stdout-and-stderr-are-console-
+    /// nodes-not-the-callers-descriptors.md`), after which it is never chosen.
+    Reopened {
+        offset: Option<u64>,
+    },
+}
+
+impl RSource {
+    /// GNU's `ck_fopen (name, "r", false)`: `None` for a file that will not
+    /// open, which `r` treats as empty.
+    fn open(path: &str) -> Option<RSource> {
+        let file = File::open(path).ok()?;
+        if path == "/dev/stdin" && !is_descriptor_zero(&file) {
+            return RSource::reopen_stdin();
+        }
+        Some(RSource::File(file))
+    }
+
+    /// What opening `/dev/stdin` gives on Linux, from descriptor 0 itself.
+    /// `None` -- an empty file to `r` -- where there is no descriptor 0, as
+    /// Linux's open fails there.
+    fn reopen_stdin() -> Option<RSource> {
+        let meta = stdfd::metadata(0).ok()?;
+        let offset = (meta.is_file() || meta.is_dir()).then_some(0);
+        Some(RSource::Reopened { offset })
+    }
+
+    /// `fread` into `chunk`: as much as fits, stopping early only at the end
+    /// of the file or at a failure. The count, and the failure if there was
+    /// one.
+    fn fill(&mut self, chunk: &mut [u8]) -> (usize, Option<io::Error>) {
+        let mut got = 0usize;
+        while let Some(room) = chunk.get_mut(got..).filter(|r| !r.is_empty()) {
+            let read = match self {
+                RSource::File(f) => io::Read::read(f, room),
+                RSource::Reopened { offset: Some(at) } => stdfd::read_at(0, room, *at),
+                RSource::Reopened { offset: None } => stdfd::read(0, room),
+            };
+            match read {
+                Ok(0) => break,
+                Ok(n) => {
+                    got = got.saturating_add(n);
+                    if let RSource::Reopened { offset: Some(at) } = self {
+                        *at = at.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return (got, Some(e)),
+            }
+        }
+        (got, None)
+    }
+
+    /// `fclose`, whose failure GNU reports.
+    fn close(self) -> io::Result<()> {
+        match self {
+            RSource::File(f) => stdfd::close(f),
+            RSource::Reopened { .. } => Ok(()),
+        }
+    }
+}
+
+/// Whether `file` is descriptor 0's file: the same device, inode and type.
+#[cfg(unix)]
+fn is_descriptor_zero(file: &File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (file.metadata(), stdfd::metadata(0)) {
+        (Ok(a), Ok(b)) => {
+            a.dev() == b.dev() && a.ino() == b.ino() && a.file_type() == b.file_type()
+        }
+        _ => false,
+    }
+}
+
+/// No device and inode to compare off unix, and no `/dev/stdin` to open
+/// either: whatever opened is what there is.
+#[cfg(not(unix))]
+fn is_descriptor_zero(_file: &File) -> bool {
+    true
+}
+
+/// GNU's `print_file`, for `r`: the file opened afresh and copied in
+/// 8192-byte pieces, one checked write each. A file that will not open is an
+/// empty one -- POSIX: "treated as if it were an empty file, causing no error
+/// condition" -- but one that opens and then cannot be read ends the run,
+/// after what was read before the failure has been written: `r dir` is `read
+/// error on dir: Is a directory`, measured, where this port used to say
+/// nothing.
+fn print_file(path: &str, out: &mut Out<'_>) -> io::Result<()> {
+    let Some(mut source) = RSource::open(path) else {
+        return Ok(());
+    };
+    let mut chunk = vec![0u8; FREAD_BUFFER_SIZE];
+    loop {
+        let (got, failed) = source.fill(&mut chunk);
+        if let Some(piece) = chunk.get(..got).filter(|p| !p.is_empty()) {
+            out.put(piece)?;
+        }
+        if let Some(e) = failed {
+            panic_path(
+                "sed: read error on ",
+                OsStr::new(path),
+                &format!(": {}", strerror(&e)),
+            );
+        }
+        if got < chunk.len() {
+            break;
+        }
+    }
+    if let Err(e) = source.close() {
+        panic_path(
+            "sed: couldn't close ",
+            OsStr::new(path),
+            &format!(": {}", strerror(&e)),
+        );
+    }
+    Ok(())
 }
 
 struct RangeState {
@@ -2343,10 +3653,6 @@ struct Exec<'w> {
     hold: Vec<u8>,
     line_num: usize,
     had_sep: bool,
-    /// The operand the current line came from, carried on the line itself
-    /// rather than read back from [`Input`] — see [`Line::file`] for why.
-    /// `F` prints it, and so does `--debug`'s `INPUT:` line.
-    file: Rc<OsString>,
     sub_made: bool,
     appends: Vec<Pending>,
     last_re: Option<Rc<Regex>>,
@@ -2366,6 +3672,9 @@ struct Exec<'w> {
     /// a trace that disagreed with upstream's would be worse than one that
     /// shares its quirk. Starts at 0, where the program dump starts at 1.
     indent: usize,
+    /// The run's [`Posixicity`], which `N` on the last line asks: GNU prints
+    /// the pattern space there only in its default mode.
+    posix: Posixicity,
 }
 
 impl<'w> Exec<'w> {
@@ -2392,11 +3701,11 @@ impl<'w> Exec<'w> {
             ranges.push(RangeState { active, end_line });
         }
         Exec {
+            posix: script.posix,
             pattern: Vec::new(),
             hold: Vec::new(),
             line_num: 0,
             had_sep: true,
-            file: Rc::new(OsString::from("-")),
             sub_made: false,
             appends: Vec::new(),
             last_re: None,
@@ -2409,26 +3718,26 @@ impl<'w> Exec<'w> {
     }
 
     /// One `PATTERN:` trace line, or nothing when there is no trace.
-    fn trace_pattern(&self, out: &mut Out<'_>) -> io::Result<()> {
+    fn trace_pattern(&self, out: &mut Out<'_>) {
         if !out.tracing() {
-            return Ok(());
+            return;
         }
         let mut t = Vec::from(&b"PATTERN: "[..]);
         debug_escape(&self.pattern, &mut t);
         t.push(b'\n');
-        out.trace(&t)
+        out.trace(&t);
     }
 
     /// One `HOLD:` trace line. The tag is padded to the same nine columns every
     /// other tag occupies, which is why it carries four trailing spaces.
-    fn trace_hold(&self, out: &mut Out<'_>) -> io::Result<()> {
+    fn trace_hold(&self, out: &mut Out<'_>) {
         if !out.tracing() {
-            return Ok(());
+            return;
         }
         let mut t = Vec::from(&b"HOLD:    "[..]);
         debug_escape(&self.hold, &mut t);
         t.push(b'\n');
-        out.trace(&t)
+        out.trace(&t);
     }
 
     /// Resolve `//` and record what was tried, so the next `//` can find it.
@@ -2467,6 +3776,7 @@ impl<'w> Exec<'w> {
                 }
             }
             Addr::Re(r) => self.resolve(r.as_ref())?.find(&self.pattern)?.is_some(),
+            Addr::Null => true,
         })
     }
 
@@ -2496,6 +3806,14 @@ impl<'w> Exec<'w> {
                         .and_then(|q| q.checked_mul(*n))
                         .unwrap_or(usize::MAX),
                 ),
+                // GNU tests a `first~step` end on the line the range starts on
+                // too, so `2,0~2p` is line 2 alone. Measured.
+                EndAddr::Addr(a @ Addr::Step(..)) => {
+                    if self.addr_match(a, input)? {
+                        return Ok(true);
+                    }
+                    None
+                }
                 EndAddr::Addr(_) => None,
             };
             if let Some(r) = self.ranges.get_mut(pc) {
@@ -2508,7 +3826,8 @@ impl<'w> Exec<'w> {
         let close = match a2 {
             EndAddr::Addr(Addr::Last) => input.at_end(),
             EndAddr::Addr(Addr::Re(r)) => self.resolve(r.as_ref())?.find(&self.pattern)?.is_some(),
-            EndAddr::Addr(Addr::Step(_, _)) => false,
+            // Closed by the first line it names: `1,2~3p` is lines 1 and 2.
+            EndAddr::Addr(a @ Addr::Step(..)) => self.addr_match(a, input)?,
             _ => {
                 let end = self.ranges.get(pc).and_then(|r| r.end_line);
                 end.is_some_and(|e| self.line_num >= e)
@@ -2556,7 +3875,6 @@ impl<'w> Exec<'w> {
             return Ok(());
         };
         match &mut w.target {
-            WTarget::Stdout => out.line(bytes, had_sep),
             WTarget::Stderr => {
                 // Assembled and written once, because `write_all` here is one
                 // `write(2)` per call and a line torn into two of them can
@@ -2568,6 +3886,11 @@ impl<'w> Exec<'w> {
                 // `sed 'w /dev/stderr' f 2>&-` and for `2>/dev/full`, and it
                 // can only be 4 here if the failure is visible to the caller.
                 let mut line = Vec::with_capacity(bytes.len().saturating_add(2));
+                // GNU's first write of the three it would make, which is the
+                // one whose failure it reports -- to the descriptor that has
+                // just failed, so nobody reads it; what it decides is the
+                // status.
+                let first = first_write(w.owed, bytes);
                 if w.owed {
                     line.push(sep);
                 }
@@ -2577,10 +3900,31 @@ impl<'w> Exec<'w> {
                 }
                 w.owed = !had_sep;
                 coreutils::stdfd::write_all(2, &line)
+                    .map_err(|e| output_failed(&items(first), b"stderr", &e))
             }
-            WTarget::File(f) => {
+            WTarget::Stdin => {
+                // Nothing at all is written for an empty line that owes no
+                // separator and has none -- GNU's `output_line` skips both
+                // writes -- so that one cannot fail; it only runs up a debt.
+                if !w.owed && bytes.is_empty() && !had_sep {
+                    w.owed = true;
+                    return Ok(());
+                }
+                let refused = io::Error::from_raw_os_error(EBADF);
+                Err(output_failed(
+                    &items(first_write(w.owed, bytes)),
+                    b"stdin",
+                    &refused,
+                ))
+            }
+            WTarget::Stdout | WTarget::File(_) => {
+                let file = match &w.target {
+                    WTarget::File(f) => Rc::clone(f),
+                    _ => stdout_file(),
+                };
+                let mut dest = FileDest(file);
                 let mut o = Out {
-                    w: f,
+                    w: &mut dest,
                     sep,
                     owed: w.owed,
                     // A `w` target is not where a trace goes; this borrows
@@ -2595,29 +3939,27 @@ impl<'w> Exec<'w> {
         }
     }
 
-    fn flush_appends(&mut self, out: &mut Out<'_>) -> io::Result<()> {
+    /// GNU's `dump_append_queue`: the separator a previous line still owes,
+    /// then everything `a`, `r` and `R` queued, then a flush under `-u`.
+    ///
+    /// GNU runs it at the start of the next read, when anything is queued --
+    /// and after `q` whether anything is or not, which is `always`. That is
+    /// how `printf a | sed q` comes out as `a` and a newline, and why queuing a
+    /// file that turns out to be missing still pays the debt: the debt is paid
+    /// on the way in, before anything is known about what follows. Both
+    /// measured; this port used to pay it only when something was written.
+    fn dump_appends(&mut self, out: &mut Out<'_>, always: bool) -> io::Result<()> {
+        if self.appends.is_empty() && !always {
+            return Ok(());
+        }
+        out.pay_owed()?;
         for p in std::mem::take(&mut self.appends) {
             match p {
-                Pending::Raw(t) => out.raw(&t)?,
-                Pending::File(path) => {
-                    // GNU ignores a file it cannot read here: `r` is an
-                    // inclusion, and a missing one is not an error in a script
-                    // that may run before the file exists.
-                    let read = if path == "/dev/stdin" {
-                        let mut b = Vec::new();
-                        io::stdin().read_to_end(&mut b).map(|_| b)
-                    } else {
-                        fs::read(&path)
-                    };
-                    if let Ok(bytes) = read
-                        && !bytes.is_empty()
-                    {
-                        out.raw(&bytes)?;
-                    }
-                }
+                Pending::Raw(t) => out.put(&t)?,
+                Pending::File(path) => print_file(&path, out)?,
             }
         }
-        Ok(())
+        out.line_done()
     }
 
     /// Apply one `s` command; returns whether anything was replaced.
@@ -2671,10 +4013,7 @@ impl<'w> Exec<'w> {
                     t.extend_from_slice(hay.get(gs..ge).unwrap_or_default());
                     t.extend_from_slice(b"'\n");
                 }
-                if let Err(err) = sink.trace(&t) {
-                    self.pattern = hay;
-                    return Err(Stop::Io(err));
-                }
+                sink.trace(&t);
             }
             seen = seen.saturating_add(1);
             let replace = if sub.global {
@@ -2708,7 +4047,7 @@ impl<'w> Exec<'w> {
             if out.tracing() {
                 let mut t = Vec::from(&b"COMMAND: "[..]);
                 debug_command_line(cmd, &mut self.indent, &mut t);
-                out.trace(&t)?;
+                out.trace(&t);
             }
             if !self.selected(pc, cmd, input)? {
                 pc = match cmd.act {
@@ -2778,7 +4117,7 @@ impl<'w> Exec<'w> {
                             // A `D` that restarts shows what it kept; one that
                             // falls back to `d` shows nothing, and gets no
                             // `END-OF-CYCLE:` either. Measured.
-                            self.trace_pattern(out)?;
+                            self.trace_pattern(out);
                             Flow::Restart
                         }
                         None => Flow::DeletedQuietly,
@@ -2800,14 +4139,19 @@ impl<'w> Exec<'w> {
                         let bytes = self.pattern.clone();
                         out.line(&bytes, self.had_sep)?;
                     }
-                    self.flush_appends(out)?;
+                    // GNU's `test_eof`: with no line left, `n` reads nothing,
+                    // so it dumps nothing either -- the queue waits for the
+                    // read that finds the input exhausted, after the cycle.
+                    if input.at_end() {
+                        return Ok(Flow::Ended { print: false });
+                    }
+                    self.dump_appends(out, false)?;
                     match input.next_line() {
                         Some(l) => {
                             self.pattern = l.bytes;
                             self.had_sep = l.had_sep;
-                            self.file = l.file;
                             self.line_num = self.line_num.saturating_add(1);
-                            self.trace_pattern(out)?;
+                            self.trace_pattern(out);
                         }
                         // No more input: sed stops, and the pattern space has
                         // already been printed by this very command.
@@ -2815,20 +4159,33 @@ impl<'w> Exec<'w> {
                     }
                 }
                 Action::AppendNext => {
-                    self.flush_appends(out)?;
+                    // As for `n`: at the end of input nothing is read, so the
+                    // queue is not dumped here but after the pattern space is
+                    // printed. `printf 'a\n' | sed -e 'a X' -e N` is `a`, then
+                    // `X` -- measured, and this port had them the other way
+                    // round.
+                    if input.at_end() {
+                        return Ok(Flow::Ended {
+                            print: self.posix == Posixicity::Extended,
+                        });
+                    }
+                    self.dump_appends(out, false)?;
                     match input.next_line() {
                         Some(l) => {
                             self.pattern.push(out.sep);
                             self.pattern.extend_from_slice(&l.bytes);
                             self.had_sep = l.had_sep;
-                            self.file = l.file;
                             self.line_num = self.line_num.saturating_add(1);
-                            self.trace_pattern(out)?;
+                            self.trace_pattern(out);
                         }
                         // GNU prints what it has rather than dropping it, which
                         // is what makes `sed '$!N;s/\n/ /'` join pairs of lines
                         // without losing an odd last one.
-                        None => return Ok(Flow::Ended { print: true }),
+                        None => {
+                            return Ok(Flow::Ended {
+                                print: self.posix == Posixicity::Extended,
+                            });
+                        }
                     }
                 }
                 Action::Hold => self.hold.clone_from(&self.pattern),
@@ -2842,9 +4199,10 @@ impl<'w> Exec<'w> {
                     self.pattern.extend_from_slice(&self.hold);
                 }
                 Action::Exchange => std::mem::swap(&mut self.pattern, &mut self.hold),
+                // `fprintf`, which GNU does not check: see [`Out::unchecked_line`].
                 Action::LineNumber => {
                     let n = self.line_num.to_string();
-                    out.line(n.as_bytes(), true)?;
+                    out.unchecked_line(n.as_bytes())?;
                 }
                 // Verbatim, newline and all — not `Pending::Text`, which would
                 // end the line with the output separator. GNU's append queue
@@ -2868,20 +4226,16 @@ impl<'w> Exec<'w> {
                     return Ok(Flow::Deleted);
                 }
                 Action::ReadFile(path) => self.appends.push(Pending::File(path.clone())),
+                // Written straight out, with no separator owed paid first and
+                // no flush after, as GNU's `print_file` call there makes it.
+                Action::ReadFileNow(path) => print_file(path, out)?,
                 Action::ReadLine(idx) => {
                     // Read now, not at flush time. `R /dev/stdin` in a script
                     // whose input is a pipe interleaves with the cycle that
                     // asked for it, and deferring the read would reorder that.
                     let sep = out.sep;
-                    if let Some(r) = self.rfiles.get_mut(*idx).and_then(|f| f.r.as_mut()) {
-                        let mut buf = Vec::new();
-                        // A read failure is as silent as a missing file, for
-                        // the reason given on `RFile`. Exhaustion arrives here
-                        // as `Ok(0)` and is likewise a no-op, which is what
-                        // makes `R` on a short file simply stop contributing.
-                        if r.read_until(sep, &mut buf).is_ok() && !buf.is_empty() {
-                            self.appends.push(Pending::Raw(buf));
-                        }
+                    if let Some(line) = read_rfile(self.rfiles.get_mut(*idx), sep) {
+                        self.appends.push(Pending::Raw(line));
                     }
                 }
                 Action::WriteFile(idx) => {
@@ -2896,19 +4250,27 @@ impl<'w> Exec<'w> {
                     self.write_wfile_sep(*idx, &bytes, sep, out)?;
                 }
                 Action::List(width) => {
-                    let bytes = list_escape(&self.pattern, *width, out.sep);
+                    // GNU's `do_list`: the debt paid, then one checked write
+                    // per character's rendering and per line break, then `$`
+                    // and the separator -- which a failure's item count shows.
                     // Always with a separator: `l`'s output is a rendering, not
                     // a copy, so it does not inherit the input line's missing
                     // one. `printf ab | sed -n l` ends in `$` *and* a newline.
-                    out.line(&bytes, true)?;
+                    out.pay_owed()?;
+                    let sep = out.sep;
+                    list_walk(&self.pattern, *width, sep, &mut |piece| out.put(piece))?;
+                    out.put(&[sep])?;
+                    out.line_done()?;
                 }
                 Action::Zap => self.pattern.clear(),
                 // Terminated by the output separator, not by a newline: under
                 // `-z` upstream writes `-\0` and not `-\n`, the same as `=`
                 // does. Measured.
+                // GNU's `in_file_name`, which is the file most recently opened
+                // -- see [`Input::cur_file`].
                 Action::FileName => {
-                    let name = os_bytes(&self.file).into_owned();
-                    out.line(&name, true)?;
+                    let name = os_bytes(&input.cur_file).into_owned();
+                    out.unchecked_line(&name)?;
                 }
                 Action::Execute(cmd) => {
                     if cmd.is_empty() {
@@ -2923,7 +4285,13 @@ impl<'w> Exec<'w> {
                         self.pattern = o;
                     } else {
                         let o = shell_capture(cmd);
-                        out.raw(&o)?;
+                        // The debt paid first, then the output in the pieces
+                        // GNU reads the pipe in.
+                        out.pay_owed()?;
+                        for chunk in o.chunks(E_BUFFER_SIZE) {
+                            out.put(chunk)?;
+                        }
+                        out.line_done()?;
                     }
                 }
                 Action::Quit { code, print } => {
@@ -2948,11 +4316,11 @@ impl<'w> Exec<'w> {
                     Action::Subst(_)
                     | Action::Transliterate(_)
                     | Action::GetAppend
-                    | Action::Zap => self.trace_pattern(out)?,
-                    Action::Hold | Action::HoldAppend | Action::Get => self.trace_hold(out)?,
+                    | Action::Zap => self.trace_pattern(out),
+                    Action::Hold | Action::HoldAppend | Action::Get => self.trace_hold(out),
                     Action::Exchange => {
-                        self.trace_pattern(out)?;
-                        self.trace_hold(out)?;
+                        self.trace_pattern(out);
+                        self.trace_hold(out);
                     }
                     _ => {}
                 }
@@ -2974,7 +4342,6 @@ impl<'w> Exec<'w> {
         while let Some(line) = input.next_line() {
             self.pattern = line.bytes;
             self.had_sep = line.had_sep;
-            self.file = line.file;
             self.line_num = self.line_num.saturating_add(1);
             self.sub_made = false;
 
@@ -2983,7 +4350,7 @@ impl<'w> Exec<'w> {
                 // `STDIN` — where `F`, which names the same thing, prints the
                 // `-`. Upstream spells them differently and so does this.
                 let mut t = Vec::from(&b"INPUT:   '"[..]);
-                let name = os_bytes(&self.file).into_owned();
+                let name = os_bytes(&input.cur_file).into_owned();
                 if name == b"-" {
                     t.extend_from_slice(b"STDIN");
                 } else {
@@ -2992,20 +4359,20 @@ impl<'w> Exec<'w> {
                 t.extend_from_slice(b"' line ");
                 t.extend_from_slice(self.line_num.to_string().as_bytes());
                 t.push(b'\n');
-                out.trace(&t)?;
-                self.trace_pattern(out)?;
+                out.trace(&t);
+                self.trace_pattern(out);
             }
 
             loop {
                 match self.run(cmds, input, out)? {
                     Flow::Normal => {
-                        out.trace(b"END-OF-CYCLE:\n")?;
+                        out.trace(b"END-OF-CYCLE:\n");
                         if !self.suppress {
                             let bytes = std::mem::take(&mut self.pattern);
                             out.line(&bytes, self.had_sep)?;
                             self.pattern = bytes;
                         }
-                        self.flush_appends(out)?;
+                        self.dump_appends(out, false)?;
                         break;
                     }
                     // A deleted cycle is still a completed one, so it gets the
@@ -3013,20 +4380,21 @@ impl<'w> Exec<'w> {
                     // `Flow::Restart` below gets none: `D` starts the script
                     // over on the same cycle rather than ending it.
                     Flow::Deleted => {
-                        out.trace(b"END-OF-CYCLE:\n")?;
-                        self.flush_appends(out)?;
+                        out.trace(b"END-OF-CYCLE:\n");
+                        self.dump_appends(out, false)?;
                         break;
                     }
                     // …and `D` is the exception to that: it ends the cycle the
                     // same way but is not traced as ending one. See
                     // [`Flow::DeletedQuietly`].
                     Flow::DeletedQuietly => {
-                        self.flush_appends(out)?;
+                        self.dump_appends(out, false)?;
                         break;
                     }
-                    Flow::Restart => {
-                        self.flush_appends(out)?;
-                    }
+                    // Nothing is read, so nothing is dumped: GNU's `D` jumps
+                    // back to the start of the script, and the queue waits for
+                    // the next read.
+                    Flow::Restart => {}
                     // The *input* ended rather than the script asking to stop,
                     // so this returns `None` — "ran out", not "quit with a
                     // status". Two things turn on the difference. Under `-s`
@@ -3036,21 +4404,29 @@ impl<'w> Exec<'w> {
                     // `--debug` the cycle is complete, so it gets the
                     // `END-OF-CYCLE:` line that `q` and `Q` do not. Measured.
                     Flow::Ended { print } => {
-                        out.trace(b"END-OF-CYCLE:\n")?;
+                        out.trace(b"END-OF-CYCLE:\n");
                         if print && !self.suppress {
                             let bytes = std::mem::take(&mut self.pattern);
                             out.line(&bytes, self.had_sep)?;
                             self.pattern = bytes;
                         }
-                        self.flush_appends(out)?;
+                        self.dump_appends(out, false)?;
                         return Ok(None);
                     }
+                    // `q` dumps the queue whether or not anything is in it --
+                    // see [`Exec::dump_appends`] -- and `Q` drops it unwritten:
+                    // GNU's `Q` returns without the dump `q` falls through to.
+                    // `printf 'a\n' | sed -e 'a X' -e Q` prints nothing.
                     Flow::Quit { code, print } => {
-                        if print && !self.suppress {
-                            let bytes = std::mem::take(&mut self.pattern);
-                            out.line(&bytes, self.had_sep)?;
+                        if print {
+                            if !self.suppress {
+                                let bytes = std::mem::take(&mut self.pattern);
+                                out.line(&bytes, self.had_sep)?;
+                            }
+                            self.dump_appends(out, true)?;
+                        } else {
+                            self.appends.clear();
                         }
-                        self.flush_appends(out)?;
                         return Ok(Some(code));
                     }
                 }
@@ -3081,9 +4457,31 @@ impl<'w> Exec<'w> {
 ///
 /// `sep` is the output separator, which the wrap and the final `$` both use:
 /// under `-z` the breaks are NUL-terminated like everything else.
+///
+/// The run itself writes through [`list_walk`], piece by piece; this whole
+/// rendering is what the tests read.
+#[cfg(test)]
 fn list_escape(bytes: &[u8], width: usize, sep: u8) -> Vec<u8> {
-    const OCTAL: &[u8; 8] = b"01234567";
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len().saturating_add(2));
+    // A `Vec` cannot refuse a write, so the walk cannot fail.
+    drop(list_walk(bytes, width, sep, &mut |piece| {
+        out.extend_from_slice(piece);
+        Ok(())
+    }));
+    out
+}
+
+/// [`list_escape`] one piece at a time, each handed to `emit` as GNU's
+/// `do_list` writes it: a character's rendering, the `\` and separator of a
+/// line break, and the closing `$`. The pieces are the unit a write failure is
+/// reported in, so they are GNU's.
+fn list_walk(
+    bytes: &[u8],
+    width: usize,
+    sep: u8,
+    emit: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    const OCTAL: &[u8; 8] = b"01234567";
     let mut col = 0usize;
     let mut esc: Vec<u8> = Vec::with_capacity(4);
     for &b in bytes {
@@ -3113,15 +4511,14 @@ fn list_escape(bytes: &[u8], width: usize, sep: u8) -> Vec<u8> {
             }
         }
         if width > 0 && col.saturating_add(esc.len()).saturating_add(1) > width {
-            out.push(b'\\');
-            out.push(sep);
+            emit(b"\\")?;
+            emit(&[sep])?;
             col = 0;
         }
-        out.extend_from_slice(&esc);
+        emit(&esc)?;
         col = col.saturating_add(esc.len());
     }
-    out.push(b'$');
-    out
+    emit(b"$")
 }
 
 /// Escape bytes the way `--debug` writes them.
@@ -3421,6 +4818,12 @@ struct SedArgs {
     sandbox: bool,
     /// `--debug`: dump the compiled program, then trace every cycle.
     debug: bool,
+    /// `-u`: flush every output line as it is written. See [`UNBUFFERED`].
+    unbuffered: bool,
+    /// `--follow-symlinks`. See [`FOLLOW_SYMLINKS`].
+    follow_symlinks: bool,
+    /// `--posix`. See [`Posixicity`].
+    posix: bool,
     /// `-l N`, defaulting to [`DEFAULT_LINE_LEN`]; 0 means never wrap.
     line_len: usize,
     /// `Some(suffix)` for `-i`; an empty suffix means no backup.
@@ -3439,6 +4842,9 @@ impl Default for SedArgs {
             null_data: false,
             sandbox: false,
             debug: false,
+            unbuffered: false,
+            follow_symlinks: false,
+            posix: false,
             line_len: DEFAULT_LINE_LEN,
             in_place: None,
             script_parts: Vec::new(),
@@ -3503,13 +4909,12 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             }
             Opt::Long("sandbox", _) => out.sandbox = true,
             Opt::Long("debug", _) => out.debug = true,
-            // Accepted and ignored, each for its own reason. `-u` asks for less
-            // buffering, and this sed already flushes at every boundary that
-            // matters. `-b` asks for binary mode, which is the only mode there
-            // is here: nothing translates CR+LF. `--follow-symlinks` and
-            // `--posix` are answered in tranche 2c.
-            Opt::Short(b'u', _)
-            | Opt::Long("unbuffered" | "binary" | "posix" | "follow-symlinks", _) => {}
+            Opt::Short(b'u', _) | Opt::Long("unbuffered", _) => out.unbuffered = true,
+            Opt::Long("follow-symlinks", _) => out.follow_symlinks = true,
+            Opt::Long("posix", _) => out.posix = true,
+            // Accepted and ignored: binary mode is the only mode there is
+            // here, and nothing translates CR+LF.
+            Opt::Long("binary", _) => {}
             Opt::Short(b'i', value) | Opt::Long("in-place", value) => {
                 // `-i` takes an *optional* value, so it is never the next word:
                 // GNU reads `sed -i backup f` as an in-place edit of `backup`
@@ -3601,7 +5006,7 @@ Usage: sed [OPTION]... {script-only-if-no-other-script} [input-file]...
                            use extended regular expressions in the script
   -s, --separate           consider the files separate rather than one stream
       --sandbox            operate in sandbox mode (disable e/r/w commands)
-  -u, --unbuffered         accepted and ignored: this sed does not batch files
+  -u, --unbuffered         flush the output after every line
   -z, --null-data          separate lines by NUL characters
       --help               display this help and exit
       --version            output version information and exit
@@ -3713,6 +5118,9 @@ fn locate(script: &[u8], segments: &[Segment], pos: Pos) -> Option<Vec<u8>> {
         }
         Origin::File(name) => {
             let counted = script.get(seg.start..at).unwrap_or_default();
+            // Once, for one diagnostic, over one script: the `bytecount`
+            // crate's speed would be a dependency bought for nothing.
+            #[allow(clippy::naive_bytecount)]
             let line = counted
                 .iter()
                 .filter(|&&b| b == b'\n')
@@ -3727,22 +5135,27 @@ fn locate(script: &[u8], segments: &[Segment], pos: Pos) -> Option<Vec<u8>> {
 }
 
 fn main() {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(Request::Run(p)) => p,
+        // GNU's `usage (EXIT_SUCCESS)` and `--version`: the text on standard
+        // output, then `ck_fclose (NULL)` -- which is what makes a full disk
+        // `couldn't flush stdout` and status 4, where this used to panic
+        // (status 134) inside `println!`.
         Ok(Request::Help) => {
-            println!("{USAGE}");
-            let _ = io::stdout().flush();
-            process::exit(0);
+            let mut text = USAGE.as_bytes().to_vec();
+            text.push(b'\n');
+            FileDest(stdout_file()).put_unchecked(&text);
+            finish(0)
         }
         Ok(Request::Version) => {
-            println!("sed (SlateOS coreutils)");
-            let _ = io::stdout().flush();
-            process::exit(0);
+            FileDest(stdout_file()).put_unchecked(b"sed (SlateOS coreutils)\n");
+            finish(0)
         }
         Ok(Request::BadUsage) => {
             diag!("{USAGE}");
-            process::exit(1);
+            finish(1)
         }
         Err(e) => {
             // `e.sentence`, not `e.message()`: GNU sed answers a usage error
@@ -3750,31 +5163,35 @@ fn main() {
             // `Try 'sed --help' for more information.` referral.
             diag!("sed: {}", e.sentence);
             diag!("{USAGE}");
-            process::exit(e.status);
+            finish(e.status)
         }
     };
+    UNBUFFERED.store(parsed.unbuffered, AtomicOrdering::Relaxed);
+    FOLLOW_SYMLINKS.store(parsed.follow_symlinks, AtomicOrdering::Relaxed);
 
     let (script_text, segments) = match collect_script(&parsed.script_parts) {
         Ok(s) => s,
         // Not status 1: the command line was well formed, and a `-f` file that
         // will not open is an I/O failure like any other.
+        // GNU's `panic`: nothing has been written yet, so `exit` has nothing
+        // to flush, but it is the same exit.
         Err(msg) => {
-            let _ = io::stdout().flush();
             let mut line = Vec::from(&b"sed: "[..]);
             line.extend_from_slice(&msg);
             line.push(b'\n');
             stdfd::diag_bytes(&line);
-            process::exit(EXIT_PANIC);
+            exit_quietly(EXIT_PANIC);
         }
     };
 
-    let script = match compile_script(
+    let script = match compile_script_mode(
         &script_text,
         &segments,
         parsed.ere,
         parsed.line_len,
         parsed.sandbox,
         parsed.debug,
+        Mode::from_run(parsed.posix, parsed.null_data),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -3783,11 +5200,10 @@ fn main() {
                 line.extend_from_slice(&where_);
                 line.extend_from_slice(b": ");
             }
-            line.extend_from_slice(e.msg.as_bytes());
+            line.extend_from_slice(&e.msg);
             line.push(b'\n');
-            let _ = io::stdout().flush();
             stdfd::diag_bytes(&line);
-            process::exit(e.code);
+            exit_quietly(e.code);
         }
     };
 
@@ -3796,7 +5212,8 @@ fn main() {
     // goes to standard output even under `-i`, where the edited text does not.
     if parsed.debug {
         let dump = debug_program(&script.cmds);
-        let _ = io::stdout().write_all(&dump);
+        // `printf`, unchecked, like every line of the trace.
+        FileDest(stdout_file()).put_unchecked(&dump);
     }
 
     // `-i` rewrites the files it is given, so with none it has nothing to
@@ -3822,7 +5239,7 @@ fn main() {
         // handle to it. See [`Trace`].
         trace: if parsed.debug {
             Some(if parsed.in_place.is_some() {
-                Trace::Stdout
+                Trace::Stdout(stdout_file())
             } else {
                 Trace::Inline
             })
@@ -3838,7 +5255,28 @@ fn main() {
     } else {
         job.joined(&files)
     };
-    process::exit(status);
+    finish(status)
+}
+
+/// GNU sed's last act: `ck_fclose (NULL)` -- every `w` file and then standard
+/// output, flushed and closed -- and `exit (status)`.
+///
+/// The close is where a full disk is finally `couldn't flush stdout`, and where
+/// a standard output that was never open is `couldn't close stdout: Bad file
+/// descriptor` even when nothing was written to it; either is status 4. A
+/// reader that left is the exception, as everywhere (§377).
+fn finish(status: i32) -> ! {
+    match close_everything() {
+        Ok(()) => exit_quietly(status),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => exit_quietly(status),
+        Err(e) => {
+            let mut line = b"sed: ".to_vec();
+            line.extend_from_slice(&failure_message(&e));
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            exit_quietly(EXIT_PANIC)
+        }
+    }
 }
 
 /// Everything a run needs that does not change from one input file to the next.
@@ -3858,7 +5296,20 @@ struct Job<'a> {
 
 impl Job<'_> {
     /// Wire one `Input` to one `Out` and run the script over it.
-    fn run_one(&mut self, input: &mut Input, sink: &mut dyn Write) -> (Option<i32>, bool) {
+    ///
+    /// `owed` is the separator the output still owes from before this input,
+    /// and is left as this input leaves it: GNU's `output_file.missing_newline`,
+    /// which survives from one file to the next under `-s` -- the inputs are
+    /// separate, but the output is one stream -- and is dropped under `-i`,
+    /// where each file's output is a file of its own. `printf 'a\nb' > n;
+    /// sed -s -n '$p' n n` is `b`, a newline, `b`: measured, and this port
+    /// used to print `bb`.
+    fn run_one(
+        &mut self,
+        input: &mut Input,
+        sink: &mut dyn Dest,
+        owed: &mut bool,
+    ) -> (Option<i32>, bool) {
         let mut exec = Exec::new(
             self.script,
             self.suppress,
@@ -3868,18 +5319,27 @@ impl Job<'_> {
         let mut out = Out {
             w: sink,
             sep: self.sep,
-            owed: false,
-            trace_to: self.trace,
+            owed: *owed,
+            trace_to: self.trace.clone(),
         };
-        let quit = match exec.cycle(&self.script.cmds, input, &mut out) {
+        let ran = exec.cycle(&self.script.cmds, input, &mut out);
+        *owed = out.owed;
+        let quit = match ran {
             Ok(q) => q,
             Err(Stop::Io(e)) => {
-                // A closed pipe is how `sed … | head` ends, not a failure.
-                if e.kind() != io::ErrorKind::BrokenPipe {
-                    diag!("sed: couldn't write: {}", strerror(&e));
-                    return (Some(EXIT_PANIC), true);
+                // A closed pipe is how `sed … | head` ends, not a failure:
+                // GNU is killed by `SIGPIPE` there, saying nothing, and there
+                // is no signal here to be killed by (design-decisions §377).
+                // Stop where it would have died, and keep the status earned.
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    exit_quietly(status(None, input.had_error));
                 }
-                None
+                // GNU's `ck_fwrite` panics: the message, then `exit`.
+                let mut line = b"sed: ".to_vec();
+                line.extend_from_slice(&failure_message(&e));
+                line.push(b'\n');
+                stdfd::diag_bytes(&line);
+                exit_quietly(EXIT_PANIC);
             }
             // Not "couldn't write": the run stopped because a search was
             // abandoned, and sending the reader to the disk would waste their
@@ -3888,23 +5348,21 @@ impl Job<'_> {
                 diag!("sed: {e}");
                 return (Some(EXIT_PANIC), true);
             }
-            // Upstream leaves at once, and leaves *after* what it has already
-            // written: a `w` file given a line on an earlier cycle keeps it, and
-            // the pattern spaces already printed are on standard output. Hence
-            // the flush before the diagnostic and the exit rather than a return
-            // — under `-i` there is a half-written temporary file, and GNU does
-            // not finish it either. Measured.
+            // Upstream leaves at once, and keeps what it has already written:
+            // a `w` file given a line on an earlier cycle keeps it, and the
+            // pattern spaces already printed reach standard output -- after
+            // the message, since it is `exit` that flushes them. Under `-i`
+            // there is a half-written temporary file, and GNU does not finish
+            // it either. Measured.
             Err(Stop::NoRegex) => {
-                let _ = sink.flush();
                 let mut line = Vec::from(&b"sed: "[..]);
                 if let Some(at) = self.script.end_loc.as_deref() {
                     line.extend_from_slice(at);
                     line.extend_from_slice(b": ");
                 }
                 line.extend_from_slice(b"no previous regular expression\n");
-                let _ = io::stdout().flush();
                 stdfd::diag_bytes(&line);
-                process::exit(1);
+                exit_quietly(1);
             }
         };
         // The cycle either finished or took one of the branches above, each of
@@ -3914,18 +5372,17 @@ impl Job<'_> {
 
     /// All the files as one stream: line numbers and `$` run across them.
     fn joined(&mut self, files: &[OsString]) -> i32 {
-        let stdout = io::stdout();
-        let mut sink = stdout.lock();
-        let mut input = Input::new(files.to_vec(), self.sep, true);
-        let (quit, exec_err) = self.run_one(&mut input, &mut sink);
-        let _ = sink.flush();
+        let mut sink = FileDest(stdout_file());
+        let mut input = Input::new(files.to_vec(), self.sep, true, unbuffered());
+        let (quit, exec_err) = self.run_one(&mut input, &mut sink, &mut false);
         status(quit, input.had_error || exec_err)
     }
 
     /// `-s`: each file starts again at line 1, and each has its own last line.
     fn separate(&mut self, files: &[OsString]) -> i32 {
-        let stdout = io::stdout();
-        let mut sink = stdout.lock();
+        let mut sink = FileDest(stdout_file());
+        // One debt for the whole run: see `run_one`.
+        let mut owed = false;
         let mut bad = false;
         for path in files {
             // Upstream rewinds every `R` source when a new input file starts
@@ -3933,70 +5390,52 @@ impl Job<'_> {
             // with both files rather than running off the end of `inc` during
             // the first. See [`rewind_rfiles`].
             rewind_rfiles(&mut self.rfiles);
-            let mut input = Input::new(vec![path.clone()], self.sep, true);
-            let (quit, exec_err) = self.run_one(&mut input, &mut sink);
+            let mut input = Input::new(vec![path.clone()], self.sep, true, unbuffered());
+            let (quit, exec_err) = self.run_one(&mut input, &mut sink, &mut owed);
             bad = bad || input.had_error || exec_err;
             if let Some(code) = quit {
-                let _ = sink.flush();
                 return status(Some(code), bad);
             }
         }
-        let _ = sink.flush();
         status(None, bad)
     }
 
-    /// `-i`: the output of each file replaces it.
-    ///
-    /// The result is built in memory and written once, so a script that fails
-    /// part-way through does not leave the file half-edited.
+    /// `-i`: each file's output replaces it, through a temporary file beside
+    /// it -- see [`InPlace`].
     fn in_place(&mut self, files: &[OsString], suffix: &OsStr) -> i32 {
         let mut bad = false;
         for path in files {
+            // GNU's `in_file_name`: under `--follow-symlinks` the file at the
+            // end of the links, which is then the one replaced; otherwise the
+            // name as given, so that a link is replaced by a file. Resolved
+            // before the open, so a name that cannot be followed ends the run
+            // rather than being `can't read`.
+            let target = if follow_symlinks() {
+                follow_symlink(path)
+            } else {
+                path.clone()
+            };
             // A `-` operand is a file named `-`, not standard input: there is
             // no way to rewrite a stream in place, so it gets no special case
             // and fails as any missing file would.
-            match File::open(path) {
+            let file = match File::open(path) {
+                Ok(f) => f,
                 Err(e) => {
                     diag_path("sed: can't read ", path, &format!(": {}", strerror(&e)));
                     bad = true;
                     continue;
                 }
-                // A directory opens happily and then fails to read, which
-                // would end the run with a confusing "read error". Refusing
-                // anything that is not a regular file names the real problem.
-                Ok(f) => match f.metadata() {
-                    Ok(m) if !m.is_file() => {
-                        panic_path("sed: couldn't edit ", path, ": not a regular file");
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        diag_path("sed: can't read ", path, &format!(": {}", strerror(&e)));
-                        bad = true;
-                        continue;
-                    }
-                },
-            }
+            };
             // `-i` implies `-s`, including for the `R` sources. See `separate`.
             rewind_rfiles(&mut self.rfiles);
-            let mut buf: Vec<u8> = Vec::new();
-            // `false`: the `File::open` above already treated a `-` operand as
-            // a file, and the reader has to agree — otherwise `-i` on a file
-            // named `-` would open it, then read standard input into it.
-            let mut input = Input::new(vec![path.clone()], self.sep, false);
-            let (quit, exec_err) = self.run_one(&mut input, &mut buf);
+            let edit = InPlace::begin(&target, &file);
+            let mut input = Input::opened(path.clone(), target, file, self.sep);
+            let mut sink = FileDest(Rc::clone(&edit.out));
+            // A debt of its own, which ends with the file.
+            let (quit, exec_err) = self.run_one(&mut input, &mut sink, &mut false);
             bad = bad || input.had_error || exec_err;
-
-            if let Some(backup) = backup_name(path, suffix)
-                && let Err(e) = fs::copy(path, &backup)
-            {
-                diag_path("sed: cannot back up ", path, &format!(": {}", strerror(&e)));
-                bad = true;
-                continue;
-            }
-            if let Err(e) = fs::write(path, &buf) {
-                diag_path("sed: couldn't write ", path, &format!(": {}", strerror(&e)));
-                bad = true;
-            }
+            drop(input);
+            edit.finish(suffix);
             if let Some(code) = quit {
                 return status(Some(code), bad);
             }
@@ -4073,17 +5512,9 @@ mod tests {
     /// input a real run reads. Built by hand rather than through
     /// [`Input::new`], which only knows how to open paths.
     fn over(bytes: Vec<u8>, sep: u8) -> Input {
-        Input {
-            paths: Vec::new(),
-            next_path: 0,
-            cur_name: OsString::from("stdin"),
-            cur_file: Rc::new(OsString::from("-")),
-            dash_is_stdin: true,
-            cur: Some(Box::new(BufReader::new(io::Cursor::new(bytes)))),
-            peeked: None,
-            sep,
-            had_error: false,
-        }
+        let mut input = Input::new(Vec::new(), sep, true, false);
+        input.cur = Some(Reader::Bytes(io::Cursor::new(bytes)));
+        input
     }
 
     /// [`compile_script`] with what `main` passes for a bare `sed 'script'`:
@@ -4096,8 +5527,13 @@ mod tests {
     /// [`compile`] with `--debug`, so the [`Command::dump`] of each command is
     /// filled in and can be checked.
     fn compile_debug(script: &[u8]) -> Script {
-        compile_script(script, &[], false, DEFAULT_LINE_LEN, false, true)
-            .unwrap_or_else(|e| panic!("compiling {}: {}", String::from_utf8_lossy(script), e.msg))
+        compile_script(script, &[], false, DEFAULT_LINE_LEN, false, true).unwrap_or_else(|e| {
+            panic!(
+                "compiling {}: {}",
+                String::from_utf8_lossy(script),
+                String::from_utf8_lossy(&e.msg)
+            )
+        })
     }
 
     /// The `SED PROGRAM:` dump of `script`, as text.
@@ -4135,7 +5571,7 @@ mod tests {
             sep: b'\n',
             trace: Some(Trace::Inline),
         };
-        job.run_one(&mut inp, &mut sink);
+        job.run_one(&mut inp, &mut sink, &mut false);
         String::from_utf8_lossy(&sink).into_owned()
     }
 
@@ -4145,7 +5581,7 @@ mod tests {
     fn compile_err(script: &[u8]) -> String {
         match compile(script, false) {
             Ok(_) => panic!("{} compiled", String::from_utf8_lossy(script)),
-            Err(e) => e.msg,
+            Err(e) => String::from_utf8(e.msg).unwrap(),
         }
     }
 
@@ -4164,8 +5600,13 @@ mod tests {
     /// Separate because every caller but the `-z` tests wants text, and a
     /// separator of NUL makes the input and the output both unprintable.
     fn run_sep(script: &[u8], input: &[u8], suppress: bool, ere: bool, sep: u8) -> Vec<u8> {
-        let compiled = compile(script, ere)
-            .unwrap_or_else(|e| panic!("compiling {}: {}", String::from_utf8_lossy(script), e.msg));
+        let compiled = compile(script, ere).unwrap_or_else(|e| {
+            panic!(
+                "compiling {}: {}",
+                String::from_utf8_lossy(script),
+                String::from_utf8_lossy(&e.msg)
+            )
+        });
         let mut sink: Vec<u8> = Vec::new();
         let mut inp = over(input.to_vec(), sep);
         let mut job = Job {
@@ -4176,7 +5617,15 @@ mod tests {
             sep,
             trace: None,
         };
-        job.run_one(&mut inp, &mut sink);
+        job.run_one(&mut inp, &mut sink, &mut false);
+        // The end of a real run closes the `w` files, which is when their
+        // buffers reach the disk; the tests read them back, so they close
+        // them too.
+        for w in job.wfiles.iter().rev() {
+            if let WTarget::File(f) = &w.target {
+                ck_fclose(f).expect("closing a `w` file");
+            }
+        }
         sink
     }
 
@@ -4189,7 +5638,7 @@ mod tests {
     /// being checked.
     fn run_stopping(script: &str, input: &str) -> Result<Vec<u8>, Vec<u8>> {
         let compiled = compile(script.as_bytes(), false)
-            .unwrap_or_else(|e| panic!("compiling {script}: {}", e.msg));
+            .unwrap_or_else(|e| panic!("compiling {script}: {}", String::from_utf8_lossy(&e.msg)));
         let mut inp = over(input.as_bytes().to_vec(), b'\n');
         let mut wfiles = open_wfiles(&compiled.wfiles);
         let mut rfiles = open_rfiles(&compiled.rfiles);
@@ -4206,7 +5655,8 @@ mod tests {
             match exec.cycle(&compiled.cmds, &mut inp, &mut out) {
                 Ok(_) => false,
                 Err(Stop::NoRegex) => true,
-                Err(_) => panic!("{script} failed for some other reason"),
+                Err(Stop::Io(e)) => panic!("{script} failed reading or writing: {e}"),
+                Err(Stop::Limit(_)) => panic!("{script} hit the match limit"),
             }
         };
         if stopped { Err(sink) } else { Ok(sink) }
@@ -4270,7 +5720,7 @@ mod tests {
             sep: b'\n',
             trace: None,
         };
-        let (status, _) = job.run_one(&mut inp, &mut sink);
+        let (status, _) = job.run_one(&mut inp, &mut sink, &mut false);
         assert_eq!(status, Some(4), "a declined search must fail the run");
         assert!(
             sink.is_empty(),
@@ -4602,6 +6052,185 @@ mod tests {
     }
 
     #[test]
+    fn a_separate_file_pays_the_newline_the_one_before_it_held_back() {
+        // `-s` makes the inputs separate and leaves the output one stream: the
+        // newline the first file's unterminated last line held back is paid
+        // when the next file prints. GNU prints `b`, a newline, `c`; starting
+        // each file with no debt printed `bc`.
+        let compiled = compile(b"$p", false).unwrap();
+        let mut job = Job {
+            script: &compiled,
+            wfiles: Vec::new(),
+            rfiles: Vec::new(),
+            suppress: true,
+            sep: b'\n',
+            trace: None,
+        };
+        let mut sink: Vec<u8> = Vec::new();
+        let mut owed = false;
+        let mut inp = over(b"a\nb".to_vec(), b'\n');
+        job.run_one(&mut inp, &mut sink, &mut owed);
+        assert!(owed, "an unterminated last line leaves a debt");
+        let mut inp = over(b"c\n".to_vec(), b'\n');
+        job.run_one(&mut inp, &mut sink, &mut owed);
+        assert_eq!(sink, b"b\nc\n");
+        assert!(!owed);
+    }
+
+    /// The names in `dir`, sorted.
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `sed -iSUFFIX script f` over `f` in its own directory.
+    fn edit_in_place(script: &[u8], f: &std::path::Path, suffix: &str) -> i32 {
+        let compiled = compile(script, false).unwrap();
+        let mut job = Job {
+            script: &compiled,
+            wfiles: Vec::new(),
+            rfiles: Vec::new(),
+            suppress: false,
+            sep: b'\n',
+            trace: None,
+        };
+        job.in_place(&[f.as_os_str().to_os_string()], OsStr::new(suffix))
+    }
+
+    #[test]
+    fn an_edit_in_place_is_a_new_file_and_a_hard_link_keeps_the_old_one() {
+        // GNU writes the edit to a new file and renames it over the name, so
+        // another name for the old file still holds the old text -- measured;
+        // this port used to rewrite the file where it stood, changing both.
+        let dir = ScratchDir::new("sed-inplace-link");
+        let f = dir.path("f");
+        let hard = dir.path("hard");
+        fs::write(&f, b"a\nb\n").unwrap();
+        fs::hard_link(&f, &hard).unwrap();
+        assert_eq!(edit_in_place(b"s/a/X/", &f, ""), 0);
+        assert_eq!(fs::read(&f).unwrap(), b"X\nb\n");
+        assert_eq!(fs::read(&hard).unwrap(), b"a\nb\n");
+        // The temporary file was renamed, not left beside them.
+        assert_eq!(names_in(dir.dir()), ["f", "hard"]);
+    }
+
+    #[test]
+    fn an_edit_in_place_with_a_suffix_keeps_the_original_as_the_backup() {
+        let dir = ScratchDir::new("sed-inplace-backup");
+        let f = dir.path("f");
+        fs::write(&f, b"a\n").unwrap();
+        assert_eq!(edit_in_place(b"s/a/X/", &f, ".bak"), 0);
+        assert_eq!(fs::read(&f).unwrap(), b"X\n");
+        assert_eq!(fs::read(dir.path("f.bak")).unwrap(), b"a\n");
+        assert_eq!(names_in(dir.dir()), ["f", "f.bak"]);
+    }
+
+    #[test]
+    fn a_dollar_test_at_the_end_of_a_file_opens_the_next_one() {
+        let dir = ScratchDir::new("sed-input-boundary");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"a1\na2\n").unwrap();
+        fs::write(&b, b"b1\n").unwrap();
+        let mut input = Input::new(
+            vec![a.clone().into_os_string(), b.clone().into_os_string()],
+            b'\n',
+            true,
+            false,
+        );
+        assert_eq!(input.next_line().map(|l| l.bytes), Some(b"a1".to_vec()));
+        // A byte follows in `a`, so `a` is still the file `F` names.
+        assert!(!input.at_end());
+        assert_eq!(*input.cur_file, a.clone().into_os_string());
+        assert_eq!(input.next_line().map(|l| l.bytes), Some(b"a2".to_vec()));
+        // Nothing follows in `a`: `$` opens `b` to look, and from then on `b`
+        // is the file named -- GNU's `in_file_name`, measured.
+        assert!(!input.at_end());
+        assert_eq!(*input.cur_file, b.clone().into_os_string());
+        assert_eq!(input.next_line().map(|l| l.bytes), Some(b"b1".to_vec()));
+        assert!(input.at_end());
+        assert!(input.next_line().is_none());
+        assert!(!input.had_error);
+    }
+
+    #[test]
+    fn the_end_is_where_no_later_file_has_a_byte() {
+        let dir = ScratchDir::new("sed-input-end");
+        let a = dir.path("a");
+        let empty = dir.path("empty");
+        fs::write(&a, b"a1\n").unwrap();
+        fs::write(&empty, b"").unwrap();
+        let mut input = Input::new(
+            vec![
+                a.into_os_string(),
+                empty.into_os_string(),
+                dir.path("missing").into_os_string(),
+            ],
+            b'\n',
+            true,
+            false,
+        );
+        assert_eq!(input.next_line().map(|l| l.bytes), Some(b"a1".to_vec()));
+        // The empty file and the missing one are both passed over -- the
+        // missing one reported as it is reached -- and `a1` is the last line.
+        assert!(input.at_end());
+        assert!(input.had_error);
+        assert!(input.next_line().is_none());
+    }
+
+    /// What `script` fails with on its first write to standard input, or
+    /// `Ok` if it never makes one.
+    fn stdin_refusal(script: &[u8], input: &[u8]) -> Result<(), Vec<u8>> {
+        let compiled = compile(script, false).unwrap();
+        let mut wfiles = open_wfiles(&compiled.wfiles);
+        assert!(matches!(
+            wfiles.first().map(|w| &w.target),
+            Some(WTarget::Stdin)
+        ));
+        let mut rfiles = Vec::new();
+        let mut sink: Vec<u8> = Vec::new();
+        let mut inp = over(input.to_vec(), b'\n');
+        let mut exec = Exec::new(&compiled, true, &mut wfiles, &mut rfiles);
+        let mut out = Out {
+            w: &mut sink,
+            sep: b'\n',
+            owed: false,
+            trace_to: None,
+        };
+        match exec.cycle(&compiled.cmds, &mut inp, &mut out) {
+            Ok(_) => Ok(()),
+            Err(Stop::Io(e)) => Err(failure_message(&e)),
+            Err(Stop::Limit(_) | Stop::NoRegex) => {
+                panic!("{} stopped for another reason", show(script))
+            }
+        }
+    }
+
+    #[test]
+    fn writing_to_standard_input_fails_rather_than_opening_it() {
+        // GNU writes to its `stdin` stream, which is open for reading, and the
+        // first write fails. Opening the name instead re-opens standard input
+        // for writing -- and truncates it, when it is a file.
+        let message = stdin_refusal(b"w /dev/stdin", b"abc\n").unwrap_err();
+        assert!(message.starts_with(b"couldn't write 3 items to stdin: "));
+        #[cfg(unix)]
+        assert_eq!(
+            message,
+            b"couldn't write 3 items to stdin: Bad file descriptor"
+        );
+        // The count is the first write's: an empty line's is its separator.
+        let message = stdin_refusal(b"w /dev/stdin", b"\n").unwrap_err();
+        assert!(message.starts_with(b"couldn't write 1 item to stdin: "));
+        // An emptied unterminated last line writes nothing at all, so there
+        // is nothing to fail.
+        assert_eq!(stdin_refusal(b"s/a//w /dev/stdin", b"a"), Ok(()));
+    }
+
+    #[test]
     fn a_line_that_is_not_text_passes_through() {
         let compiled = compile(b"s/b/B/", false).unwrap();
         let raw: Vec<u8> = vec![0xff, b'a', b'b', 0xfe, b'\n'];
@@ -4615,7 +6244,7 @@ mod tests {
             sep: b'\n',
             trace: None,
         };
-        job.run_one(&mut inp, &mut sink);
+        job.run_one(&mut inp, &mut sink, &mut false);
         assert_eq!(sink, vec![0xff, b'a', b'B', 0xfe, b'\n']);
     }
 
@@ -4716,6 +6345,29 @@ mod tests {
         let _ = fs::remove_file(&target);
         run_opts(&format!("W {path}"), "a", true, false);
         assert_eq!(fs::read(&target).expect("W wrote nothing"), b"a");
+    }
+
+    #[test]
+    fn standard_output_is_not_whichever_file_opened_first() {
+        // The `w` files open while the script is read, before standard output
+        // is first used. Finding standard output as "the oldest open file" --
+        // which this port briefly did -- found the `w` file instead, and `sed
+        // 'w out'` wrote its output into `out` and nothing to standard output.
+        // Each test runs on a thread of its own, so the thread-local list
+        // starts empty here.
+        let dir = ScratchDir::new("sed-stdout-identity");
+        let made = File::create(dir.path("out")).expect("creating a `w` file");
+        let w = register(StdioFile::from_file(made), b"out");
+        let stdout = stdout_file();
+        assert!(!Rc::ptr_eq(&w, &stdout));
+        assert_eq!(stdout.borrow().name, b"stdout");
+        // ...and it is the same stream on every later call.
+        assert!(Rc::ptr_eq(&stdout, &stdout_file()));
+        // First on the list, whenever it was made, so that `exit` -- which
+        // flushes the newest first -- reaches it last, as glibc's does.
+        let first = OPEN.with(|open| open.borrow().first().cloned());
+        assert!(first.is_some_and(|f| Rc::ptr_eq(&f, &stdout)));
+        ck_fclose(&w).expect("closing the `w` file");
     }
 
     // ---------------- `R` ----------------

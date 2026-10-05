@@ -174,7 +174,8 @@ fn a_damaged_fixture_is_refused_or_read_but_never_panics() {
     }
 }
 
-/// One line of `avif_pixels.txt`: a fixture and what Pillow made of it.
+/// One line of `avif_pixels.txt` or `avif_rescale.txt`: a fixture and what
+/// Pillow made of it.
 #[cfg(feature = "avif")]
 struct PixelAnswer {
     name: String,
@@ -183,8 +184,8 @@ struct PixelAnswer {
 }
 
 #[cfg(feature = "avif")]
-fn pixel_answers() -> Vec<PixelAnswer> {
-    let path = format!("{}/tests/data/avif_pixels.txt", env!("CARGO_MANIFEST_DIR"));
+fn pixel_answers(file: &str) -> Vec<PixelAnswer> {
+    let path = format!("{}/tests/data/{file}", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     text.lines()
         .filter(|line| !line.starts_with('#'))
@@ -231,8 +232,27 @@ fn pillow_bytes(pixels: &[u32], alpha: bool) -> Vec<u8> {
 #[cfg(feature = "avif")]
 #[test]
 fn every_pixel_fixture_decodes_to_pillow_s_pixels() {
-    let answers = pixel_answers();
+    let answers = pixel_answers("avif_pixels.txt");
     assert_eq!(answers.len(), 39);
+    check_pixel_answers(answers);
+}
+
+/// Pictures decoded at another size than their `ispe` declares, brought to
+/// it as libavif brings them -- libyuv's box filter, bilinear down and up,
+/// its fixed ratios, linear across, rows alone and nearest, for luma, chroma
+/// and alpha at 8, 10 and 12 bits and each subsampling -- held to Pillow's
+/// pixels, byte for byte (`tests/data/generate_avif_rescale.py`).
+#[cfg(feature = "avif")]
+#[test]
+fn every_rescaled_fixture_decodes_to_pillow_s_pixels() {
+    let answers = pixel_answers("avif_rescale.txt");
+    assert_eq!(answers.len(), 28);
+    check_pixel_answers(answers);
+}
+
+/// Each fixture decoded and held to its answer.
+#[cfg(feature = "avif")]
+fn check_pixel_answers(answers: Vec<PixelAnswer>) {
     for answer in answers {
         let name = &answer.name;
         let bytes = read(name);
@@ -259,9 +279,10 @@ fn every_pixel_fixture_decodes_to_pillow_s_pixels() {
 
 /// Damage reaching the AV1 data as well as the boxes: every byte of a still
 /// picture, a picture in `idat`, a cropped and turned one, a sequence, a grid
-/// with alpha, a deep one and a premultiplied one, inverted in turn, then cut
-/// short at every length. Each must decode or be refused -- never panic, and
-/// never produce pixels that disagree with its own size.
+/// with alpha, a deep one, a premultiplied one and two decoded at another
+/// size than they declare, inverted in turn, then cut short at every length.
+/// Each must decode or be refused -- never panic, and never produce pixels
+/// that disagree with its own size.
 #[cfg(feature = "avif")]
 #[test]
 fn a_damaged_file_decodes_or_is_refused_but_never_panics() {
@@ -273,6 +294,8 @@ fn a_damaged_file_decodes_or_is_refused_but_never_panics() {
         "avif_color_grid_alpha_nogrid",
         "avifpx_10_422a_2020_limited",
         "avifpx_8_420a_709_prem",
+        "avifrs_8_420a_twice",
+        "avifrs_10_420a_twice",
     ] {
         let bytes = read(name);
         let check = |data: &[u8], what: &str| {

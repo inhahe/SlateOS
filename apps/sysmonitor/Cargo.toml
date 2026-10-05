@@ -22,6 +22,9 @@ oswindow = { path = "../../gui/window" }
 # The shared `/proc` reader, so this window and `apps/procexplorer` cannot
 # drift into two parsers of the same file.
 procinfo = { path = "../../procinfo" }
+# Whether a key is plain, a Ctrl chord or typing: a key held with Alt or the
+# Windows key is not the monitor's, and AltGr is not Ctrl.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

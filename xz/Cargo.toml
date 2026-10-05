@@ -1,0 +1,29 @@
+[package]
+name = "xz"
+version = "0.1.0"
+edition = "2024"
+description = "The .xz and .lzma formats and raw LZMA/LZMA2, ported from liblzma 5.2.5: accepts what xz -d accepts and refuses what it refuses, and writes what xz writes, byte for byte."
+# liblzma 5.2.5 is in the public domain; `licenses/notices.yaml` names it for
+# the image's notices, which its COPYING asks for as a courtesy.
+license-file = "licenses/liblzma-COPYING"
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` + `alloc`, as `deflate` and `bzip2`: the kernel links this, and a
+# decompressor cannot be allocation-free.
+[dependencies]
+# The check most .xz files carry after CRC-64, and the one every block
+# header, stream header, footer and index carries: the reflected IEEE CRC-32,
+# as gzip's.
+crc32 = { path = "../crc32" }
+# The SHA-256 check (`xz --check=sha256`).
+sha2 = { path = "../sha2" }
+
+# Compression and decompression speed, preset by preset (`cargo bench -p xz`).
+[[bench]]
+name = "rate"
+harness = false
+
+[lints]
+workspace = true

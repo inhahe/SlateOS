@@ -19,6 +19,9 @@ snapstore = { path = "../snapstore" }
 safeio = { path = "../safeio" }
 # A name on disk, shown by its bytes rather than a lossy decode.
 pathtext = { path = "../pathtext" }
+# Whether a key is plain, a Ctrl chord or typing: a key held with Alt or the
+# Windows key is not the window's, and AltGr types.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # Scratch folders for the store and for the programs' settings, so no test

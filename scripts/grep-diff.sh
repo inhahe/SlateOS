@@ -14,8 +14,11 @@
 # header rather than by running the two binaries. Measuring reduced the
 # difference to two bits and showed the posix-extended side needed no change at
 # all — the opposite of what the header reading had concluded. The same
-# question is still open for `-G` (`RE_SYNTAX_GREP`), and this file is how it
-# gets answered: by asking the real grep, one pattern at a time.
+# question for `-G` (`RE_SYNTAX_GREP`) was answered the same way on 2026-10-01:
+# measured, it is POSIX basic without `RE_CONTEXT_INVALID_DUP` -- `a**` and a
+# leading `\{` are accepted, where sed and ed refuse both -- and is
+# `ere::bre::BreSyntax::GREP`. This file is how such questions get answered: by
+# asking the real grep, one pattern at a time.
 #
 # ## Why it moved into WSL
 #
@@ -45,14 +48,15 @@
 # stdout and the exit status, byte for byte, always.
 #
 # stderr text is compared **by default**, which is the change from the old
-# harness — it compared presence only, for every case. The reason it gave is
-# real but narrow: the wording of a *pattern* error comes from glibc's regcomp
-# on GNU's side and from `ere` on ours, and matching glibc's phrasing would fit
-# us to its parser's internals rather than to grep. That argument covers about
-# fifteen cases. It does not cover `grep: /nonexistent: No such file or
-# directory`, or `grep: invalid max count`, or an unknown-option diagnostic,
-# which are plain reports a script may reasonably grep for and which nothing
-# here had ever checked.
+# harness — it compared presence only, for every case. The reason it gave was
+# real but narrow: the wording of a *pattern* error came from glibc's regcomp
+# on GNU's side and from `ere` on ours. That covered about fifteen cases, and no
+# longer holds even for them: `ere` carries glibc's code for every refusal
+# (`EreError::message`), grep prints that sentence as upstream does, and those
+# cases are compared word for word like the rest. It never covered `grep:
+# /nonexistent: No such file or directory`, or `grep: invalid max count`, or an
+# unknown-option diagnostic, which are plain reports a script may reasonably
+# grep for and which nothing here had ever checked.
 #
 # So the rule is inverted: text is pinned unless a case opts out with `~`.
 #
@@ -140,6 +144,8 @@ cd "$fixtures" || exit 1
 #                what `-i`, `.` and `[[:alpha:]]` do to a character that is not
 #                one byte. Only meaningful now that the locale is `C.UTF-8` on
 #                both sides rather than whatever the Windows host had.
+#   bslash       a line for each thing a backslash could be taken to mean, so
+#                that `[\.]`, `[\t]` and `a\tb` show which reading ran
 #   ctx          eight numbered lines with two well-separated hits, so -A, -B
 #                and -C have room to overlap or not
 #   ctxtop       a hit on the *first* line, which is the only way to ask
@@ -161,7 +167,15 @@ printf 'a\nb'                                   > nonl
 printf 'bin\0ary\nplain\n'                      > binfile
 printf 'foo\0bar\0foo bar\0'                    > zsep
 printf 'foo\n\nqux\n'                           > pats
+# Two lines that will not compile, one of them twice.
+printf 'ok\n[\nfine\n\\(\n[\n'                  > badpats
 printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
+# What a backslash can be taken to mean: a dot or a backslash, a `t` or a tab,
+# `]` or `\]`, `ax` or `\x`, `w\-` and `ab_`, and the letters `n` and `0`.
+printf '.\n\\\nt\n\tx\na\tb\natb\n]\n\\]\nax\n\\x\nw\\-\nab_\nn\n0\n' > bslash
+# The lines a repetition after an assertion tells apart: whether the `*` is a
+# character (`a*`), repeats the assertion (`ab`), or leaves it alone.
+printf 'a\nab\na*\n*\na$\na^\nb\n+a\n?a\na+\n'   > anchors
 printf '1\n2\nHIT\n4\n5\n6\nHIT\n8\n'           > ctx
 printf 'HIT\n2\n3\n'                            > ctxtop
 printf 'HIT\nHIT\nHIT\n'                        > run3
@@ -429,11 +443,26 @@ grep '\(a\)\1' braces
 grep '\(a\)b' braces
 grep '\.' braces
 grep '\\' braces
-~glibc regcomp's wording, not grep's|grep 'a[' braces
-~glibc regcomp's wording, not grep's|grep 'a\{2' braces
-~glibc regcomp's wording, not grep's|grep 'a\{2,1\}' braces
-~glibc regcomp's wording, not grep's|grep '\(a' braces
-~glibc regcomp's wording, not grep's|grep 'a\)' braces
+grep 'a[' braces
+grep 'a\{2' braces
+grep 'a\{2,1\}' braces
+grep '\(a' braces
+grep 'a\)' braces
+grep '[' braces
+grep '[[:foo:]]' braces
+grep '[[:alpha:]' braces
+grep '\1' braces
+grep 'a\' braces
+grep 'a\{x\}' braces
+# Every pattern that will not compile is refused, each once, in the order the
+# command line gave them -- `-e` and `-f` interleaved -- a `-f` line named
+# `FILE:LINE:`, and nothing searched.
+grep -e '[' -e '\(' -e '[' braces
+grep -f badpats braces
+grep -f badpats -e '\(a' braces
+grep -e '\(a' -f badpats braces
+grep -E -f badpats braces
+printf 'a\n\\(\n' | grep -f - braces
 grep '*a' braces
 grep '\w' mixed
 grep '\W' words
@@ -452,6 +481,67 @@ grep -E '\<foo' words
 grep -E 'foo\>' words
 grep -E '\bfoo' words
 grep -E '\Bo' words
+
+# --- a backslash: no C escapes, and inside a bracket a member ---
+# glibc reads `\t` as a `t` and gives a backslash no special meaning inside
+# `[...]`, in both dialects. `ere` read C escapes in both places until
+# 2026-10-01 (known-issues.md, TD-B-ERE-BRACKET-BACKSLASH): `[\.]` missed the
+# backslash, `[\t]` was a tab, `a\tb` matched a tab.
+grep '^[\.]$' bslash
+grep -E '^[\.]$' bslash
+grep '^[\t]$' bslash
+grep -E '^[\t]$' bslash
+grep -E '^[^\t]$' bslash
+grep 'a\tb' bslash
+grep -E 'a\tb' bslash
+grep '^[\]]$' bslash
+grep -E '^[\]]$' bslash
+grep -E '^[a\]x$' bslash
+grep -E '^[\w-]+$' bslash
+grep -E '^\n$' bslash
+grep '^\0$' bslash
+grep '[\]' bslash
+grep -c '[\\]' bslash
+
+# --- grep's own basic syntax, which is not sed's ---
+# No RE_CONTEXT_INVALID_DUP: a repetition may repeat a repetition, and a `\{`
+# with nothing before it is the character. And a `\}` closing nothing is the
+# character in every basic syntax. (ere::bre::BreSyntax::GREP)
+grep 'a**' braces
+grep 'a*\{2\}' braces
+grep 'a\{1\}*' braces
+grep '\{b\}a' braces
+grep 'a\}' braces
+grep '\{' braces
+
+# --- a repetition after an assertion ---
+# In a basic expression an assertion ends what can be repeated, so the `*`
+# after it is a character -- even with an atom before it -- and so are `\+` and
+# `\?` with nothing to repeat. Under -E grep repeats a line anchor but leaves a
+# word assertion as it was. known-issues.md TD-B-ERE-QUANTIFIED-ANCHOR.
+grep 'a\b*' anchors
+grep 'a\>*' anchors
+grep 'a\B*' anchors
+grep 'a\<*' anchors
+grep '\+a' anchors
+grep '\?a' anchors
+grep '^\+a' anchors
+grep 'a\b\+' anchors
+grep '\<^a' anchors
+grep -E 'a\b*' anchors
+grep -E 'a\b+' anchors
+grep -E 'a\b?' anchors
+grep -E 'a\B*' anchors
+grep -E 'a\>*' anchors
+grep -E 'a\<*' anchors
+grep -E 'a$*' anchors
+grep -E 'a$+' anchors
+grep -E 'a^*' anchors
+grep -E 'a\b{0}' anchors
+!GNU grep's dfa repeats a buffer anchor here; glibc -- and so GNU sed, ed and expr, which share our translation -- reads a literal `*`, and ours follows glibc|grep 'a\`*' anchors
+!the same, for the end-of-buffer anchor|grep "a\\'*" anchors
+grep 'a\b\{1\}' anchors
+!GNU grep contradicts itself on an interval on a word assertion -- `\b{1}` alone matches `a{1}`, `a\b{1}` matches nothing -- and ours repeats it plainly|grep -E 'a\b{1}' anchors
 
 # --- -E, the egrep dialect: the two syntax bits, measured ---
 grep -E 'a+' braces
@@ -504,6 +594,22 @@ grep -E -e '*a' -e '*b' braces
 # BRE, and -F escapes it.
 grep -G '*a' braces
 grep -F '*a' braces
+# dfa.c refuses a bracket that is a class written without the class's own
+# brackets -- `[:alpha:]` is the set of `:`, `a`, `l`, `p` and `h` -- with
+# status 2, after any warning before it, in either dialect and whatever
+# POSIXLY_CORRECT says; -F never reaches dfa.c. `[:a]`, `[::]` and a range are
+# let through. Measured, grep 3.11; this grep searched for the set until
+# 2026-10-03.
+grep '[:alpha:]' mixed
+grep -E '[:alpha:]' mixed
+grep '[^:digit:]' mixed
+grep -e x -e '[:alpha:]' mixed
+grep -E -e '*a' -e '[:alpha:]' braces
+POSIXLY_CORRECT=1 grep '[:alpha:]' mixed
+grep -F '[:alpha:]' mixed
+grep '[:a]' mixed
+grep '[:a-z:]' mixed
+grep '[[:alpha:]]' mixed
 # RE_INVALID_INTERVAL_ORD: a `{` that does not open a well-formed interval is a
 # literal brace.
 grep -E 'a{b}' braces
@@ -511,13 +617,16 @@ grep -E 'a{' braces
 grep -E '{b}' braces
 grep -E 'a{,}' braces
 # A well-formed-looking but wrong interval stays an error in both dialects.
-~glibc regcomp's wording, not grep's|grep -E 'a{}' braces
-~glibc regcomp's wording, not grep's|grep -E 'a{1,2,3}' braces
-~glibc regcomp's wording, not grep's|grep -E 'a{2,1}' braces
-~glibc regcomp's wording, not grep's|grep -E 'a{99999999}' braces
-~glibc regcomp's wording, not grep's|grep -E 'a(' braces
-~glibc regcomp's wording, not grep's|grep -E 'a)' braces
-~glibc regcomp's wording, not grep's|grep -E 'a[' braces
+grep -E 'a{}' braces
+grep -E 'a{1,2,3}' braces
+grep -E 'a{2,1}' braces
+grep -E 'a{99999999}' braces
+grep -E 'a(' braces
+grep -E 'a)' braces
+grep -E 'a[' braces
+grep -E '[' braces
+grep -E '(' braces
+grep -E 'a\' braces
 # GNU is two engines here — at the start of an expression glibc regcomp skips
 # the offending token while dfa.c makes it a literal — so these exit 1 with no
 # diagnostic. They were written as expected-to-differ and turned out to agree:
@@ -1141,6 +1250,11 @@ GREP_COLORS='rv:sl=33:cx=34' grep --color=always -v foo words
 GREP_COLORS='rv:sl=33:cx=34' grep --color=always foo words
 GREP_COLORS='zz=1' grep --color=always foo words
 GREP_COLORS='ms=zz' grep --color=always foo words
+# ...and a malformed item ends the reading there: nothing after it is applied.
+GREP_COLORS='ms=01;3x:fn=35' grep --color=always -H foo words
+GREP_COLORS='ms=1=2:fn=35' grep --color=always -H foo words
+GREP_COLORS='=01:fn=35' grep --color=always -H foo words
+GREP_COLORS='fn=35:ms=zz:ln=33' grep --color=always -Hn foo words
 GREP_COLORS='' grep --color=always foo words
 # A value capability with no `=` is *ignored*, not read as "set it to empty":
 # `ms` leaves the default highlight alone where `ms=` removes it. The two
@@ -1185,9 +1299,19 @@ GREP_COLORS='sl=33' grep --color=always -TnbHZ HIT w99
 GREP_COLOR='01;35' grep --color=always foo words
 # An empty one is not a setting: no warning, and the default highlight stands.
 GREP_COLOR='' grep --color=always foo words
+# Only digits and `;` are a GREP_COLOR at all; anything else is ignored in
+# silence -- the default highlight, and no warning.
+GREP_COLOR=$'01;3\xff' grep --color=always foo words
+GREP_COLOR='0x1' grep --color=always foo words
+GREP_COLOR='red' grep --color=always foo words
 # GREP_COLOR loses to a GREP_COLORS that names the same capability, and neither
 # is read at all when colour is off — the deprecation warning included.
 GREP_COLOR='01;35' GREP_COLORS='ms=01;36' grep --color=always foo words
+# The warning is for a GREP_COLOR still in effect once GREP_COLORS is read:
+# `mt=` replaces both match colours and silences it, `mc=` alone does not.
+GREP_COLOR='01;35' GREP_COLORS='mt=01;36' grep --color=always foo words
+GREP_COLOR='01;35' GREP_COLORS='mc=01;36' grep --color=always -C 1 HIT ctx
+GREP_COLOR='01;35' GREP_COLORS='ms=:mc=' grep --color=always foo words
 GREP_COLOR='01;35' grep foo words
 GREP_COLOR='01;35' grep --color=never foo words
 # `--color=` with a word that is none of the three is not an error: GNU sets

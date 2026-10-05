@@ -1668,8 +1668,8 @@ on `$PATH`, so a script that says `ps` gets `ps`._
 - [ ] OS-level image codec support (all common formats apps can decode/encode via system API):
   - [-] *(Lane F 2026-09-25: PNG, JPEG baseline and progressive, GIF with its animations, WebP -- lossless, lossy, with alpha, and animated -- BMP and ICO decode in `gui/imagecodec`, and TIFF; JPEG, lossless included, exactly as libjpeg-turbo decodes it; the others do not yet.)* JPEG, PNG, GIF (animated), BMP, TIFF, WebP, AVIF, HEIC/HEIF, ICO, SVG
   - [ ] RAW formats (CR2, NEF, ARW, DNG — via libraw or similar)
-- [ ] OS-level video codec support (via FFmpeg/libav):
-  - [ ] H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, WMV, MOV container, MKV container, WebM
+- [-] OS-level video codec support (via FFmpeg/libav):
+  - [-] *(Lane F 2026-10-04: VP8, VP9 and AV1 decode, and Matroska, WebM and MP4/MOV demultiplex, in `gui/video` -- `videocodec` plays them, held to ffmpeg frame by frame; H.264, HEVC, MPEG-4 Part 2 and WMV do not decode yet. See `roadmap.md`, "Video files".)* H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, WMV, MOV container, MKV container, WebM
   - [ ] Hardware-accelerated decode where GPU supports it (VAAPI/NVDEC)
 - [ ] Thumbnail generation service (used by file explorer, shared across apps)
 
@@ -2376,7 +2376,7 @@ below and read the same kernel views, so the two can never disagree._
 - [ ] Reminder/calendar/alarm program (custom Python/fastpy — see decision below)
 
 _Custom music player in Python (fastpy). foobar2000 is closed source. Features:_
-- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_
+- _Audio decoding via FFmpeg/libav FFI (not custom decoders)_ — `[~]` for Opus and Vorbis, superseded: `gui/video/opus` is libopus's decoder, `gui/video/vorbis` Tremor and `gui/video/flac` libFLAC, each ported to Rust (design-decisions §1350, §1352, §1354), the tree building with no C compiler (§1339); MP3 and AAC still to come (AAC waits on open-questions F-Q9).
 - _Library browser, album art, metadata editing_
 - _Equalizer_
 - _User-customizable layout using the toolkit's dockable panel widget (drag-and-drop panels, add/remove, slide splitters) — simpler than foobar2000's layout system_

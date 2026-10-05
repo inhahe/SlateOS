@@ -67,9 +67,14 @@ groupdel = useradd
 groupmod = useradd
 userdel = useradd
 usermod = useradd
-w = who
 unzip = zip
 ```
+
+**`w = who` withdrawn 2026-10-02.** `w` is a program of its own now --
+procps-ng's, ported into coreutils, listed in
+`b-d-new-coreutils-programs-for-the-rootfs-manifest.md` -- and the crate
+whose `argv[0]` branch it was, `userspace/who`, is deleted. Staging a `w`
+that is `who` under a second name would give the name to the wrong program.
 
 Why these: each program dispatches on its invocation name, each name's
 branch is implemented and tested in the crate, and each set of siblings

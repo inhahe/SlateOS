@@ -36,8 +36,10 @@
 //! rules do not apply.
 //!
 //! Portions of this file are copyright (C) 2006-2023 by David Turner, Robert
-//! Wilhelm and Werner Lemberg, from The FreeType Project (www.freetype.org).
-//! Used under the FreeType License: see `gui/font/licenses/FTL.TXT`.
+//! Wilhelm and Werner Lemberg (`afcjk.c`), and copyright (C) 2007-2023 by
+//! Rahul Bhalerao (`afindic.c`), from The FreeType Project
+//! (www.freetype.org). Used under the FreeType License: see
+//! `gui/font/licenses/FTL.TXT`.
 
 #![allow(
     clippy::arithmetic_side_effects,

@@ -114,8 +114,8 @@ MUTATIONS = [
     # -- what is painted -----------------------------------------------------
     (
         "only the body is filled, leaving the rest of the window bare",
-        "        f.push(fill(l.window, BASE, 0.0));",
-        "        f.push(fill(l.body, BASE, 0.0));",
+        "        f.push(fill(l.window, self.palette.base, 0.0));",
+        "        f.push(fill(l.body, self.palette.base, 0.0));",
         ["the_window_is_painted_edge_to_edge_at_every_size"],
     ),
     (
@@ -281,6 +281,79 @@ MUTATIONS = [
         "                f.hit(Target::SetPosition, here);",
         "                let _ = here;",
         ["the_set_position_button_sets_it"],
+    ),
+    (
+        'AltGr+D is taken for Ctrl+D',
+        '        if event.key == Key::D && textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.key == Key::D && event.modifiers.ctrl {',
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+    (
+        'a chord works the compass',
+        '        // Alt+M dropped a waypoint.\n        if !textline::is_plain(event.modifiers) {\n            return;\n        }\n',
+        '        // Alt+M dropped a waypoint.\n',
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+    (
+        'a chord works the waypoint list',
+        "        // Taken plain, as the compass's: Alt+Delete removed a waypoint.\n        if !textline::is_plain(event.modifiers) {\n            return;\n        }\n",
+        "        // Taken plain, as the compass's: Alt+Delete removed a waypoint.\n",
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+    (
+        "a command's letter is typed into a coordinate",
+        '        if textline::types_into_field(event) {',
+        '        if event.types_text() {',
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+    (
+        'a chord works the coordinate form',
+        "        // The form's own keys are taken plain: Alt+Enter added the waypoint.\n        if !textline::is_plain(event.modifiers) {\n            return;\n        }\n",
+        "        // The form's own keys are taken plain: Alt+Enter added the waypoint.\n",
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+]
+
+FIELDS = 'the_entry_boxes_are_the_toolkits_fields'
+
+MUTATIONS += [
+    # The entry boxes are the toolkit's fields (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        'an entry box never lights',
+        '                    hovered: self.hover == Some(field),\n',
+        '                    hovered: false,\n',
+        [FIELDS],
+    ),
+    (
+        'every entry box is marked',
+        '                    focused: self.active_coord_field == field,\n',
+        '                    focused: true,\n',
+        [FIELDS],
+    ),
+    (
+        'an entry box never says its value is wrong',
+        '                    invalid: self.entry_is_wrong(field),\n',
+        '                    invalid: false,\n',
+        [FIELDS],
+    ),
+    (
+        'any number is taken for a coordinate',
+        '                .is_ok_and(|v| (-limit..=limit).contains(&v))\n',
+        '                .is_ok()\n',
+        [FIELDS],
+    ),
+    (
+        'the light stays after the pointer leaves',
+        '                self.hover = None;\n',
+        '',
+        [FIELDS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELDS],
     ),
 ]
 

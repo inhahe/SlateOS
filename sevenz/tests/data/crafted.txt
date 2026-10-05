@@ -1,0 +1,13 @@
+# archive verdict -- what was done to it; verdicts with several threads
+crafted-after-end-deflate.7z OPEN errors=- warnings=- items=#0:There_are_some_data_after_the_end_of_the_payload_data -- small-deflate with 2 bytes after its first packed stream
+crafted-after-end-deflate64.7z OPEN errors=- warnings=- items=#0:There_are_some_data_after_the_end_of_the_payload_data -- small-deflate64 with 2 bytes after its first packed stream
+crafted-after-end-bzip2.7z OPEN errors=- warnings=- items=#0:There_are_some_data_after_the_end_of_the_payload_data -- small-bzip2 with 2 bytes after its first packed stream
+crafted-after-end-copy.7z OPEN errors=- warnings=- items=#0:There_are_some_data_after_the_end_of_the_payload_data -- small-copy with 2 bytes after its first packed stream
+crafted-after-end-lzma.7z OPEN errors=- warnings=- items=#0:Data_Error -- small-headers-plain with 2 bytes after its first packed stream
+crafted-after-end-ppmd.7z OPEN errors=- warnings=- items=#0:Data_Error -- small-ppmd with 2 bytes after its first packed stream
+crafted-two-streams-bzip2.7z OPEN errors=- warnings=- items=a.txt:Data_Error|b.bin:Data_Error|c.bin:Data_Error -- small-bzip2 packed as two bzip2 streams, as pbzip2 does
+crafted-incomplete-code-deflate.7z OK -- small-deflate with a literal/length code of 257 9-bit codes
+crafted-code-286-deflate.7z OK -- small-deflate with a match of 3 coded as 286
+crafted-code-287-deflate.7z OK -- small-deflate with a match of 3 coded as 287
+crafted-props-deflate.7z OPEN errors=- warnings=- items=a.txt:Unsupported_Method|b.bin:Unsupported_Method|c.bin:Unsupported_Method -- small-deflate with a property byte on its coder
+crafted-props-bzip2.7z OPEN errors=- warnings=- items=a.txt:Unsupported_Method|b.bin:Unsupported_Method|c.bin:Unsupported_Method -- small-bzip2 with a property byte on its coder

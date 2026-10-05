@@ -1,0 +1,22 @@
+# edit_at_shown_key.mp4: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 0 -2048 K__ 0
+packet 0 -1024 -1024 _D_ 0
+packet 0 0 0 ___ 0
+packet 0 2048 1024 ___ 0
+packet 0 3072 2048 KD_ 0
+packet 0 6144 3072 _D_ 0
+seek 100
+packet 0 0 -2048 K__ 0
+packet 0 -1024 -1024 _D_ 0
+packet 0 0 0 ___ 0
+packet 0 2048 1024 ___ 0
+packet 0 3072 2048 KD_ 0
+packet 0 6144 3072 _D_ 0
+seek 200
+packet 0 0 -2048 K__ 0
+packet 0 -1024 -1024 _D_ 0
+packet 0 0 0 ___ 0
+packet 0 2048 1024 ___ 0
+packet 0 3072 2048 KD_ 0
+packet 0 6144 3072 _D_ 0

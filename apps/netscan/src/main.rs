@@ -42,6 +42,8 @@ use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use guitk::field;
+use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[cfg(test)]
@@ -51,6 +53,9 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -158,13 +163,26 @@ const SUMMARY_BAR_HEIGHT: f32 = 26.0;
 /// when each worked it out for itself they disagreed by the summary bar's
 /// height -- so a click selected the host one row above the one under the
 /// pointer.
-const RESULTS_ROWS_TOP: f32 = TITLE_BAR_HEIGHT
-    + CONFIG_PANEL_HEIGHT
-    + PADDING
-    + TAB_HEIGHT
-    + PADDING
-    + SUMMARY_BAR_HEIGHT
-    + TABLE_HEADER_HEIGHT;
+const RESULTS_ROWS_TOP: f32 = VIEW_TOP + SUMMARY_BAR_HEIGHT + TABLE_HEADER_HEIGHT;
+/// Y of the top of every view's content, under the tab strip.
+const VIEW_TOP: f32 = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
+/// Y of the profile buttons' row, for the drawing and for a press.
+const PROFILE_Y: f32 = TITLE_BAR_HEIGHT + 28.0;
+/// Where the Traceroute and WHOIS views' Run button is, under the view's box:
+/// for the drawing and for a press.
+///
+/// The press was looked for 18 pixels above where the button was drawn, so
+/// the bottom of the box above it ran the trace and the bottom of the button
+/// did nothing.
+const RUN_BUTTON: Rect = Rect::new(
+    PADDING,
+    VIEW_TOP + 22.0 + INPUT_HEIGHT + 8.0,
+    120.0,
+    BUTTON_HEIGHT,
+);
+/// Room the sidebar keeps under the Send WOL button for the line saying what
+/// the last Send did.
+const WAKE_NOTE_HEIGHT: f32 = 14.0;
 /// How many host nodes the topology view draws before it gives up and says how
 /// many it left out. A radial diagram of 256 nodes is not a diagram.
 const MAX_TOPOLOGY_NODES: usize = 24;
@@ -1977,6 +1995,95 @@ impl ViewTab {
 }
 
 // ============================================================================
+// Text Boxes
+// ============================================================================
+
+/// One of the window's text boxes.
+///
+/// There are five, and until 2026-10-04 none of them took a key: they were
+/// drawn, with placeholders, and nothing typed into them -- so the only
+/// target a scan could have was the network the window opened on, a route
+/// could be traced and an owner looked up only for `8.8.8.8`, and
+/// Wake-on-LAN could wake no machine at all, its box starting empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    /// What to scan: an address, a range or a CIDR block.
+    Target,
+    /// Which ports, for the Custom profile -- the only one that asks.
+    Ports,
+    /// Where to trace a route to, on the Traceroute tab.
+    Trace,
+    /// Whose address to look up, on the WHOIS tab.
+    Whois,
+    /// Which machine to wake, in the results' sidebar while no host is
+    /// selected.
+    WakeMac,
+}
+
+impl Field {
+    /// What an empty box shows, faint, in place of its text.
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Target => "192.168.1.0/24",
+            Self::Ports => "80,443,8080",
+            Self::Trace | Self::Whois => "8.8.8.8",
+            Self::WakeMac => "AA:BB:CC:DD:EE:FF",
+        }
+    }
+}
+
+/// Where the results sidebar's controls are while it shows its overview (no
+/// host selected): Wake-on-LAN's heading, box, button and note, and the
+/// Export button with its menu.
+///
+/// One answer for the drawing and for a press. They were worked out twice,
+/// and apart: the overview's heading, its Wake-on-LAN heading and its Send
+/// button were drawn against the window's left edge -- over the hosts table
+/// -- while a press for Send was looked for over the MAC box, so pressing
+/// the box sent the packet; and Send was drawn on the Export button's row.
+#[derive(Clone, Copy, Debug)]
+struct Overview {
+    /// The left edge of the sidebar's contents.
+    x: f32,
+    /// Y of the "Wake-on-LAN" heading.
+    wake_label_y: f32,
+    /// The MAC address box.
+    wake_field: Rect,
+    /// The Send WOL button.
+    wake_button: Rect,
+    /// Y of the line saying what the last Send did.
+    wake_note_y: f32,
+    /// The Export button, once there is a scan to export.
+    export: Option<Rect>,
+    /// The Export menu, while it is open: its two rows, CSV then JSON.
+    export_menu: Option<Rect>,
+}
+
+/// The size a box's text is drawn at.
+const FIELD_TEXT_SIZE: f32 = 12.0;
+/// How far a box's text sits in from its left and right edges.
+const FIELD_TEXT_INSET: f32 = 8.0;
+/// The most a box holds, in characters. A range of addresses or a list of
+/// ports is a line, not a document.
+const FIELD_CAPACITY: usize = 256;
+
+/// The keys this window answers, as the F1 list shows them.
+///
+/// It had no list: F1 did nothing, and every key here but F5 -- which the
+/// scan button's face names -- could be found only by pressing it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("F5 / Ctrl+Enter", "Start or stop a scan"),
+    ("Ctrl+Tab", "Next view"),
+    ("Tab / Shift+Tab", "Next or previous box"),
+    ("Enter", "In a box: scan, trace, look up or wake"),
+    ("Up / Down", "Move through the hosts"),
+    ("PageUp / PageDown", "Scroll the hosts a page"),
+    ("Home", "First host"),
+    ("Escape", "Leave the box, or let go of the host"),
+];
+
+// ============================================================================
 // Scan Progress
 // ============================================================================
 
@@ -2102,7 +2209,20 @@ pub struct NetScanApp {
     /// three for a full detent alike.
     results_wheel: wheel::Accumulator,
     ports_wheel: wheel::Accumulator,
-    pub config_field_focus: usize,
+    /// The box the keyboard types into, if one has it.
+    ///
+    /// Replaces `config_field_focus`, a number that nothing read: see
+    /// [`Field`] for what that cost.
+    focus: Option<Field>,
+    /// The focused box's editor -- its caret and selection over the box's
+    /// text -- reloaded whenever the keyboard moves to another box.
+    editor: TextInput,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
+    /// Whether the list of keys is up.
+    show_help: bool,
+    /// How wide the keyboard's mark around a box is: the user's setting.
+    focus_ring_width: f32,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -2162,7 +2282,11 @@ impl Default for NetScanApp {
             detail_port_scroll: 0,
             results_wheel: wheel::Accumulator::default(),
             ports_wheel: wheel::Accumulator::default(),
-            config_field_focus: 0,
+            focus: None,
+            editor: TextInput::new(),
+            clipboard: String::new(),
+            show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             scan: None,
             prober: DEFAULT_PROBER,
             waker: None,
@@ -2639,9 +2763,270 @@ impl NetScanApp {
         self.detail_port_scroll = scroll_window::shift(self.detail_port_scroll, delta);
     }
 
+    /// Ctrl+Tab: the next view, after the last the first.
+    fn next_view(&mut self) {
+        let tabs = ViewTab::ALL;
+        let current_idx = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
+        // `checked_rem` is the emptiness test: there is no next tab in a list
+        // of none, and no remainder modulo zero.
+        let next = current_idx.saturating_add(1).checked_rem(tabs.len());
+        self.active_tab = next
+            .and_then(|i| tabs.get(i))
+            .copied()
+            .unwrap_or(ViewTab::Results);
+    }
+
+    // ========================================================================
+    // Text boxes
+    // ========================================================================
+
+    /// Where `field` is drawn and pressed, or `None` while it is not on
+    /// screen. The one description of each box's place: the drawing reads it
+    /// and so does a press.
+    fn field_rect(&self, field: Field) -> Option<Rect> {
+        // Under the profile buttons, beside the "Target:" and "Ports:" labels.
+        let config_y = TITLE_BAR_HEIGHT + 28.0 + BUTTON_HEIGHT + 8.0;
+        match field {
+            Field::Target => Some(Rect::new(PADDING + 60.0, config_y, 250.0, INPUT_HEIGHT)),
+            Field::Ports => (self.config.profile == ScanProfile::Custom)
+                .then(|| Rect::new(PADDING + 380.0, config_y, 200.0, INPUT_HEIGHT)),
+            Field::Trace => (self.active_tab == ViewTab::Traceroute)
+                .then(|| Rect::new(PADDING + 60.0, VIEW_TOP + 22.0, 200.0, INPUT_HEIGHT)),
+            Field::Whois => (self.active_tab == ViewTab::Whois)
+                .then(|| Rect::new(PADDING + 30.0, VIEW_TOP + 22.0, 200.0, INPUT_HEIGHT)),
+            Field::WakeMac => self.overview().map(|o| o.wake_field),
+        }
+    }
+
+    /// The results sidebar's controls while it shows its overview, or `None`
+    /// while it does not -- another view is up, or a host is selected and the
+    /// sidebar shows that host instead.
+    fn overview(&self) -> Option<Overview> {
+        if self.active_tab != ViewTab::Results || self.selected_host().is_some() {
+            return None;
+        }
+        let x = self.window_width - SIDEBAR_WIDTH + PADDING;
+        let export_y = self.window_height - 50.0;
+        let export = self
+            .results
+            .is_some()
+            .then(|| Rect::new(x, export_y, 120.0, BUTTON_HEIGHT));
+        let export_menu = export
+            .filter(|_| self.show_export_menu)
+            .map(|e| Rect::new(e.x, e.y - 60.0, 120.0, 56.0));
+        // Wake-on-LAN stands on the Export button's row, with room for its
+        // note whether or not there is one, so nothing moves when a Send
+        // writes it -- or when a scan finishes and Export appears.
+        let wake_note_y = export_y - PADDING - WAKE_NOTE_HEIGHT;
+        let wake_button = Rect::new(x, wake_note_y - 6.0 - BUTTON_HEIGHT, 120.0, BUTTON_HEIGHT);
+        let wake_field = Rect::new(
+            x,
+            wake_button.y - 8.0 - INPUT_HEIGHT,
+            SIDEBAR_WIDTH - PADDING * 3.0,
+            INPUT_HEIGHT,
+        );
+        Some(Overview {
+            x,
+            wake_label_y: wake_field.y - 18.0,
+            wake_field,
+            wake_button,
+            wake_note_y,
+            export,
+            export_menu,
+        })
+    }
+
+    /// What `field` holds.
+    fn field_text(&self, field: Field) -> &str {
+        match field {
+            Field::Target => &self.config.target_input,
+            Field::Ports => &self.config.port_input,
+            Field::Trace => &self.traceroute_target,
+            Field::Whois => &self.whois_target,
+            Field::WakeMac => &self.wol_target_mac,
+        }
+    }
+
+    /// What `field` holds, to be changed.
+    fn field_text_mut(&mut self, field: Field) -> &mut String {
+        match field {
+            Field::Target => &mut self.config.target_input,
+            Field::Ports => &mut self.config.port_input,
+            Field::Trace => &mut self.traceroute_target,
+            Field::Whois => &mut self.whois_target,
+            Field::WakeMac => &mut self.wol_target_mac,
+        }
+    }
+
+    /// Whether what `field` holds is something its action would refuse: the
+    /// box is red, so the reader knows before pressing anything. An empty box
+    /// is not wrong -- it is waiting.
+    fn field_is_wrong(&self, field: Field) -> bool {
+        let text = self.field_text(field);
+        !text.trim().is_empty()
+            && match field {
+                Field::Target => ScanTarget::parse(text).is_none(),
+                Field::Ports => parse_port_spec(text).is_none(),
+                Field::Trace | Field::Whois => Ipv4Addr::parse(text).is_none(),
+                Field::WakeMac => parse_mac(text).is_none(),
+            }
+    }
+
+    /// The boxes on screen, in the order Tab visits them.
+    fn fields_on_screen(&self) -> Vec<Field> {
+        [
+            Field::Target,
+            Field::Ports,
+            Field::Trace,
+            Field::Whois,
+            Field::WakeMac,
+        ]
+        .into_iter()
+        .filter(|f| self.field_rect(*f).is_some())
+        .collect()
+    }
+
+    /// The box on screen under (`x`, `y`), with where it is.
+    fn field_at(&self, x: f32, y: f32) -> Option<(Field, Rect)> {
+        self.fields_on_screen().into_iter().find_map(|f| {
+            self.field_rect(f)
+                .filter(|r| r.contains(x, y))
+                .map(|r| (f, r))
+        })
+    }
+
+    /// Give `field` the keyboard, its caret after what it holds.
+    fn focus_field(&mut self, field: Field) {
+        self.focus = Some(field);
+        let text = self.field_text(field).to_owned();
+        self.editor.set_text(&text);
+    }
+
+    /// Tab: the next box on screen, after the last the first -- or, from
+    /// outside every box, the first. Shift+Tab goes the other way.
+    fn step_focus(&mut self, forward: bool) {
+        let fields = self.fields_on_screen();
+        let at = self.focus.and_then(|f| fields.iter().position(|g| *g == f));
+        let next = match (at, forward) {
+            (None, true) => fields.first(),
+            (None, false) => fields.last(),
+            (Some(i), true) => fields.get(i.saturating_add(1)).or(fields.first()),
+            (Some(i), false) => i
+                .checked_sub(1)
+                .and_then(|j| fields.get(j))
+                .or(fields.last()),
+        };
+        if let Some(&field) = next {
+            self.focus_field(field);
+        }
+    }
+
+    /// Reload the editor if `field`'s text changed under it, caret at the
+    /// end.
+    fn sync_editor(&mut self, field: Field) {
+        if self.editor.text() != self.field_text(field) {
+            let text = self.field_text(field).to_owned();
+            self.editor.set_text(&text);
+        }
+    }
+
+    /// Where `field`'s caret is drawn: the editor's while the box has the
+    /// keyboard (its end, if the text changed under the editor), its start
+    /// otherwise. One answer for the drawing and for a press.
+    fn field_cursor(&self, field: Field) -> TextCursor {
+        if self.focus != Some(field) {
+            TextCursor::default()
+        } else if self.editor.text() == self.field_text(field) {
+            self.editor.cursor()
+        } else {
+            TextCursor::from(self.field_text(field).len())
+        }
+    }
+
+    /// A press in `field`, drawn at `rect`, at `x`: it takes the keyboard,
+    /// with the caret under the pointer, measured against the box as it was
+    /// drawn.
+    fn press_field(&mut self, field: Field, rect: Rect, x: f32) {
+        let drawn = self.field_cursor(field);
+        self.focus = Some(field);
+        self.sync_editor(field);
+        let cursor = textedit::cursor_at_click(
+            self.field_text(field),
+            drawn,
+            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
+            FIELD_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - FIELD_TEXT_INSET,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+    }
+
+    /// A key for `field`, which has the keyboard.
+    ///
+    /// Enter does what the box is for -- scans, traces, looks up or wakes --
+    /// and Escape leaves the box, keeping what is in it. Every other key is
+    /// the box's: the arrows, Home and End move its caret, Backspace and
+    /// Delete delete, Ctrl+A, C, X and V select, copy, cut and paste, and
+    /// typing types, AltGr's characters among it. A key the box does not
+    /// answer -- one held with Alt or the Windows key -- is left for the
+    /// window and the desktop.
+    fn field_key(&mut self, field: Field, key: &KeyEvent) -> EventResult {
+        if textline::is_plain(key.modifiers) {
+            match key.key {
+                Key::Escape => {
+                    self.focus = None;
+                    return EventResult::Consumed;
+                }
+                Key::Enter => {
+                    self.submit(field);
+                    return EventResult::Consumed;
+                }
+                _ => {}
+            }
+        }
+        self.sync_editor(field);
+        let edit = textline::apply_key(
+            &mut self.editor,
+            key,
+            FIELD_CAPACITY,
+            &self.clipboard,
+            FIELD_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        if self.editor.text() != self.field_text(field) {
+            let typed = self.editor.text().to_owned();
+            *self.field_text_mut(field) = typed;
+        }
+        if edit.handled {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Enter in `field`: what the box is for.
+    fn submit(&mut self, field: Field) {
+        match field {
+            // Starts a scan and never stops one. Enter in the box says "scan
+            // this"; a scan under way is stopped by its button, or F5, which
+            // say "Stop".
+            Field::Target | Field::Ports => {
+                if !self.is_scanning {
+                    self.start_scan();
+                }
+            }
+            Field::Trace => self.run_traceroute(),
+            Field::Whois => self.run_whois(),
+            Field::WakeMac => self.send_wol(),
+        }
+    }
+
     /// Handle keyboard events.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
-        match event {
+        let result = match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize { width, height } => {
@@ -2653,34 +3038,64 @@ impl NetScanApp {
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
+        };
+        // A box that has left the screen -- another view, another profile, a
+        // host selected over the Wake-on-LAN box -- cannot keep the keyboard:
+        // typing would go into something nobody can see.
+        if self.focus.is_some_and(|f| self.field_rect(f).is_none()) {
+            self.focus = None;
         }
+        result
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
-        // Ctrl+Enter starts scan
-        if key.modifiers.ctrl && key.key == Key::Enter {
-            self.start_scan();
+        // The list of keys first: it is drawn over everything, and modal
+        // while it is up -- a plain F1, `?` or Escape puts it away, and no
+        // other key reaches what it covers.
+        let plain = textline::is_plain(key.modifiers);
+        let question = key.key == Key::Slash && key.modifiers.shift;
+        if self.show_help {
+            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        // F1 raises it from anywhere, a box included, because it is never
+        // typed; `?` is typed in a box, so it raises the list only from
+        // outside one.
+        if plain && (key.key == Key::F1 || question && self.focus.is_none()) {
+            self.show_help = true;
             return EventResult::Consumed;
         }
 
+        // The window's own keys, from a box or not: none of them is ever
+        // typed. Ctrl chords, not Ctrl held -- AltGr arrives as Ctrl+Alt, and
+        // types.
+        let ctrl = textline::is_ctrl_chord(key.modifiers);
+        if (plain && key.key == Key::F5) || (ctrl && key.key == Key::Enter) {
+            self.start_scan();
+            return EventResult::Consumed;
+        }
+        if ctrl && key.key == Key::Tab {
+            self.next_view();
+            return EventResult::Consumed;
+        }
+        // Tab walks the boxes on screen, Shift+Tab back: the only way the
+        // keyboard reaches them.
+        if plain && key.key == Key::Tab {
+            self.step_focus(!key.modifiers.shift);
+            return EventResult::Consumed;
+        }
+        if let Some(field) = self.focus {
+            return self.field_key(field, key);
+        }
+
+        // Every other key is taken plain: a chord with Alt or the Windows key
+        // is the window's or the desktop's, and arrives carrying its key.
+        if !plain {
+            return EventResult::Ignored;
+        }
         match key.key {
-            Key::F5 => {
-                self.start_scan();
-                EventResult::Consumed
-            }
-            Key::Tab if key.modifiers.ctrl => {
-                // Cycle tabs
-                let tabs = ViewTab::ALL;
-                let current_idx = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
-                // `checked_rem` is the emptiness test: there is no next tab in
-                // a list of none, and no remainder modulo zero.
-                let next = current_idx.saturating_add(1).checked_rem(tabs.len());
-                self.active_tab = next
-                    .and_then(|i| tabs.get(i))
-                    .copied()
-                    .unwrap_or(ViewTab::Results);
-                EventResult::Consumed
-            }
             Key::Escape => {
                 self.show_export_menu = false;
                 self.selected_host_idx = None;
@@ -2738,8 +3153,40 @@ impl NetScanApp {
         let mx = mouse.x;
         let my = mouse.y;
 
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else, and the
+        // wheel scrolls nothing it covers. A move or a release passes.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
+
         match &mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => {
+                let overview = self.overview();
+                // The Export menu is drawn over the Wake-on-LAN section, and a
+                // press on it must not reach the Send button under it.
+                if overview
+                    .and_then(|o| o.export_menu)
+                    .is_some_and(|m| m.contains(mx, my))
+                {
+                    return EventResult::Consumed;
+                }
+                // A box takes the keyboard where it is pressed; a press
+                // anywhere else takes the keyboard away, and then does what it
+                // does.
+                if let Some((field, rect)) = self.field_at(mx, my) {
+                    self.press_field(field, rect, mx);
+                    return EventResult::Consumed;
+                }
+                self.focus = None;
+
                 // Check tab clicks
                 let tab_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING;
                 if my >= tab_y && my <= tab_y + TAB_HEIGHT {
@@ -2754,8 +3201,10 @@ impl NetScanApp {
                     }
                 }
 
-                // Check profile button clicks
-                let profile_y = TITLE_BAR_HEIGHT + PADDING + 32.0;
+                // Check profile button clicks, at the height they are drawn.
+                // This looked 16 pixels lower, so the top half of each button
+                // did nothing and the top of the Target box chose a profile.
+                let profile_y = PROFILE_Y;
                 if my >= profile_y && my <= profile_y + BUTTON_HEIGHT {
                     let mut px = PADDING;
                     for (i, profile) in ScanProfile::ALL.iter().enumerate() {
@@ -2810,64 +3259,33 @@ impl NetScanApp {
                     }
                 }
 
-                // Check export button
-                if self.active_tab == ViewTab::Results && self.results.is_some() {
-                    let export_x = self.window_width - SIDEBAR_WIDTH + PADDING;
-                    let export_y = self.window_height - 50.0;
-                    if mx >= export_x
-                        && mx <= export_x + 120.0
-                        && my >= export_y
-                        && my <= export_y + BUTTON_HEIGHT
-                    {
-                        self.show_export_menu = !self.show_export_menu;
-                        return EventResult::Consumed;
-                    }
+                // The Export button, where the overview draws it -- not under
+                // a selected host's details, where it is not drawn and was
+                // still pressed.
+                if overview
+                    .and_then(|o| o.export)
+                    .is_some_and(|e| e.contains(mx, my))
+                {
+                    self.show_export_menu = !self.show_export_menu;
+                    return EventResult::Consumed;
                 }
 
-                // Traceroute run button
-                if self.active_tab == ViewTab::Traceroute {
-                    let btn_y = TITLE_BAR_HEIGHT
-                        + CONFIG_PANEL_HEIGHT
-                        + TAB_HEIGHT
-                        + PADDING * 3.0
-                        + INPUT_HEIGHT;
-                    if my >= btn_y
-                        && my <= btn_y + BUTTON_HEIGHT
-                        && (PADDING..=PADDING + 120.0).contains(&mx)
-                    {
+                // The Traceroute or WHOIS view's Run button.
+                if matches!(self.active_tab, ViewTab::Traceroute | ViewTab::Whois)
+                    && RUN_BUTTON.contains(mx, my)
+                {
+                    if self.active_tab == ViewTab::Traceroute {
                         self.run_traceroute();
-                        return EventResult::Consumed;
-                    }
-                }
-
-                // WHOIS run button
-                if self.active_tab == ViewTab::Whois {
-                    let btn_y = TITLE_BAR_HEIGHT
-                        + CONFIG_PANEL_HEIGHT
-                        + TAB_HEIGHT
-                        + PADDING * 3.0
-                        + INPUT_HEIGHT;
-                    if my >= btn_y
-                        && my <= btn_y + BUTTON_HEIGHT
-                        && (PADDING..=PADDING + 120.0).contains(&mx)
-                    {
+                    } else {
                         self.run_whois();
-                        return EventResult::Consumed;
                     }
+                    return EventResult::Consumed;
                 }
 
-                // WOL button
-                if self.active_tab == ViewTab::Results {
-                    let wol_btn_x = self.window_width - SIDEBAR_WIDTH + PADDING;
-                    let wol_btn_y = self.window_height - 90.0;
-                    if mx >= wol_btn_x
-                        && mx <= wol_btn_x + 120.0
-                        && my >= wol_btn_y
-                        && my <= wol_btn_y + BUTTON_HEIGHT
-                    {
-                        self.send_wol();
-                        return EventResult::Consumed;
-                    }
+                // Send WOL, where the overview draws it.
+                if overview.is_some_and(|o| o.wake_button.contains(mx, my)) {
+                    self.send_wol();
+                    return EventResult::Consumed;
                 }
 
                 EventResult::Ignored
@@ -2930,6 +3348,19 @@ impl NetScanApp {
 
         if let Some(ref progress) = self.scan_progress {
             self.render_progress_bar(&mut tree, progress);
+        }
+
+        // The list of keys over everything: it is the one thing on screen a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         tree
@@ -3039,7 +3470,7 @@ impl NetScanApp {
         });
 
         // Profile buttons
-        let profile_y = y + 28.0;
+        let profile_y = PROFILE_Y;
         let mut px = PADDING;
         for (i, profile) in ScanProfile::ALL.iter().enumerate() {
             let pw = profile_width(*profile);
@@ -3091,14 +3522,7 @@ impl NetScanApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        self.render_text_field(
-            tree,
-            PADDING + 60.0,
-            input_y - 2.0,
-            250.0,
-            &self.config.target_input,
-            "192.168.1.0/24",
-        );
+        self.render_field(tree, Field::Target);
 
         // Port input (shown for custom profile)
         if self.config.profile == ScanProfile::Custom {
@@ -3112,14 +3536,7 @@ impl NetScanApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            self.render_text_field(
-                tree,
-                PADDING + 380.0,
-                input_y - 2.0,
-                200.0,
-                &self.config.port_input,
-                "80,443,8080",
-            );
+            self.render_field(tree, Field::Ports);
         }
 
         // Discovery method label
@@ -3210,42 +3627,81 @@ impl NetScanApp {
         });
     }
 
-    fn render_text_field(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        width: f32,
-        value: &str,
-        placeholder: &str,
-    ) {
-        self.palette
-            .push_surface(tree, x, y, width, INPUT_HEIGHT, SMALL_RADIUS, Surface::Card);
-        tree.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width,
-            height: INPUT_HEIGHT,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
-        let display = if value.is_empty() { placeholder } else { value };
-        let color = if value.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
+    /// Draw `field` where [`field_rect`](Self::field_rect) puts it, if it is
+    /// on screen: the toolkit's field -- the theme's well and edge, the
+    /// keyboard's mark at the user's width while it has the keyboard (not
+    /// under the list of keys), red while what it holds would be refused --
+    /// and its text, or what it is for, faint, while it is empty. With the
+    /// keyboard, its caret and selection; an empty box with the keyboard
+    /// draws its caret before what it is for, as the toolkit's own input
+    /// dialog does.
+    ///
+    /// The boxes were a card fill and a one-pixel stroke of this file's own,
+    /// with no caret, because nothing typed into them.
+    fn render_field(&self, tree: &mut RenderTree, field: Field) {
+        let Some(rect) = self.field_rect(field) else {
+            return;
         };
-        tree.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 7.0,
-            text: display.to_string(),
-            color,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let focused = self.focus == Some(field) && !self.show_help;
+        field::draw(
+            tree,
+            &self.palette,
+            rect,
+            field::State {
+                hovered: false,
+                focused,
+                disabled: false,
+                invalid: self.field_is_wrong(field),
+            },
+            self.focus_ring_width,
+        );
+        let line = text::line_height(FIELD_TEXT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + FIELD_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
+        );
+        let value = self.field_text(field);
+        if value.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: field.placeholder().to_owned(),
+                color: self.palette.subtext0,
+                font_size: FIELD_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(tree, x, y, line, self.palette.text, textedit::CARET_WIDTH);
+            }
+            return;
+        }
+        let editing = self.focus == Some(field) && self.editor.text() == value;
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: value,
+                cursor: self.field_cursor(field),
+                selection_anchor: if editing {
+                    self.editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused,
+                x,
+                y,
+                width,
+                line_height: line,
+                font_size: FIELD_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
     }
 
     fn render_tabs(&self, tree: &mut RenderTree) {
@@ -3323,7 +3779,7 @@ impl NetScanApp {
     }
 
     fn render_results_view(&self, tree: &mut RenderTree) {
-        let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
+        let content_y = VIEW_TOP;
         let table_width = self.window_width - SIDEBAR_WIDTH;
 
         // The live counts while a scan runs; then what it found, in words --
@@ -3630,169 +4086,138 @@ impl NetScanApp {
 
         if let Some(host) = self.selected_host() {
             self.render_host_detail(tree, x + PADDING, top_y + PADDING, host);
-        } else {
-            // Overview panel
+        } else if let Some(o) = self.overview() {
+            self.render_overview(tree, top_y, &o);
+        }
+    }
+
+    /// The sidebar with no host selected: what it is for, Wake-on-LAN, and
+    /// Export -- each where [`overview`](Self::overview) puts it, which is
+    /// where a press looks for it.
+    fn render_overview(&self, tree: &mut RenderTree, top_y: f32, o: &Overview) {
+        let inner_w = SIDEBAR_WIDTH - PADDING * 2.0;
+        tree.push(RenderCommand::Text {
+            x: o.x,
+            y: top_y + PADDING,
+            text: "Host Details".to_string(),
+            color: self.palette.ink(self.palette.lavender),
+            font_size: 14.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(inner_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        tree.push(RenderCommand::Text {
+            x: o.x,
+            y: top_y + PADDING + 24.0,
+            text: "Select a host to view details".to_string(),
+            color: self.palette.subtext0,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(inner_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // Wake-on-LAN: its heading, the MAC box, the Send button, and what
+        // the last Send did.
+        tree.push(RenderCommand::Text {
+            x: o.x,
+            y: o.wake_label_y,
+            text: "Wake-on-LAN".to_string(),
+            color: self.palette.ink(self.palette.lavender),
+            font_size: 12.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(inner_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        self.render_field(tree, Field::WakeMac);
+        let b = o.wake_button;
+        tree.push(RenderCommand::FillRect {
+            x: b.x,
+            y: b.y,
+            width: b.w,
+            height: b.h,
+            color: self.palette.mauve,
+            corner_radii: CornerRadii::all(SMALL_RADIUS),
+        });
+        tree.push(RenderCommand::Text {
+            x: b.x + 20.0,
+            y: b.y + 9.0,
+            // Always "Send WOL". It used to read "Packet Sent!" once pressed,
+            // which was the claim; the outcome goes in a line below the
+            // button instead, where it can say why.
+            text: "Send WOL".to_string(),
+            color: self.palette.crust,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((b.w - 20.0).max(0.0)),
+            overflow: TextOverflow::Clip,
+        });
+        // What the press did. Without this line a Send was a silent no-op,
+        // which a user reads as a broken button -- found by
+        // `check-fields-written-never-read`: `wol_note` was assigned and read
+        // by nothing.
+        if let Some(note) = &self.wol_note {
             tree.push(RenderCommand::Text {
-                x: PADDING,
-                y: top_y + PADDING,
-                text: "Host Details".to_string(),
-                color: self.palette.ink(self.palette.lavender),
-                font_size: 14.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            tree.push(RenderCommand::Text {
-                x: PADDING,
-                y: top_y + PADDING + 24.0,
-                text: "Select a host to view details".to_string(),
-                color: self.palette.subtext0,
-                font_size: 12.0,
+                x: o.x,
+                y: o.wake_note_y,
+                text: note.clone(),
+                color: self.palette.ink(self.palette.yellow),
+                font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
+                max_width: Some(inner_w),
                 overflow: TextOverflow::Ellipsis,
             });
+        }
 
-            // WOL section
-            let wol_y = self.window_height - 100.0;
-            tree.push(RenderCommand::Text {
-                x: PADDING,
-                y: wol_y,
-                text: "Wake-on-LAN".to_string(),
-                color: self.palette.ink(self.palette.lavender),
-                font_size: 12.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            self.render_text_field(
-                tree,
-                x + PADDING,
-                wol_y + 18.0,
-                SIDEBAR_WIDTH - PADDING * 3.0,
-                &self.wol_target_mac,
-                "AA:BB:CC:DD:EE:FF",
-            );
-
-            // WOL Send button
-            let wol_btn_y = wol_y + 50.0;
+        if let Some(e) = o.export {
             tree.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: wol_btn_y,
-                width: 120.0,
-                height: BUTTON_HEIGHT,
-                color: self.palette.mauve,
+                x: e.x,
+                y: e.y,
+                width: e.w,
+                height: e.h,
+                color: self.palette.teal,
                 corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             tree.push(RenderCommand::Text {
-                x: x + PADDING + 20.0,
-                y: wol_btn_y + 9.0,
-                // Always "Send WOL". It used to read "Packet Sent!" once
-                // pressed, which was the claim; the outcome goes in a line
-                // below the button instead, where it can say why.
-                text: "Send WOL".to_string(),
+                x: e.x + 20.0,
+                y: e.y + 9.0,
+                text: "Export...".to_string(),
                 color: self.palette.crust,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
+                max_width: Some((e.w - 20.0).max(0.0)),
                 overflow: TextOverflow::Clip,
             });
-
-            // What the press did. The comment above said this line existed
-            // three commits before it did: the button stopped claiming
-            // "Packet Sent!" and nothing replaced it, so pressing Send became
-            // a silent no-op -- which is a worse answer than the false one,
-            // because a user reads silence as a broken button and goes looking
-            // for the fault in the wrong place.
-            //
-            // Caught by `check-fields-written-never-read`, not by a test:
-            // `wol_note` was assigned and read by nothing. Second time in one
-            // day that a comment here described a render that had not been
-            // written; the first was `apps/hexeditor`'s file picker.
-            if let Some(note) = &self.wol_note {
+        }
+        if let Some(m) = o.export_menu {
+            tree.push(RenderCommand::BoxShadow {
+                x: m.x,
+                y: m.y,
+                width: m.w,
+                height: m.h,
+                offset_x: 0.0,
+                offset_y: 2.0,
+                blur: 8.0,
+                spread: 0.0,
+                color: Color::rgba(0, 0, 0, 120),
+                corner_radii: CornerRadii::all(SMALL_RADIUS),
+            });
+            self.palette
+                .push_surface(tree, m.x, m.y, m.w, m.h, SMALL_RADIUS, Surface::Panel);
+            for (i, label) in ["Export as CSV", "Export as JSON"].into_iter().enumerate() {
                 tree.push(RenderCommand::Text {
-                    x: PADDING,
-                    y: wol_btn_y + BUTTON_HEIGHT + 8.0,
-                    text: note.clone(),
-                    color: self.palette.ink(self.palette.yellow),
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-
-            // Export button
-            let export_y = self.window_height - 50.0;
-            if self.results.is_some() {
-                tree.push(RenderCommand::FillRect {
-                    x: x + PADDING,
-                    y: export_y,
-                    width: 120.0,
-                    height: BUTTON_HEIGHT,
-                    color: self.palette.teal,
-                    corner_radii: CornerRadii::all(SMALL_RADIUS),
-                });
-                tree.push(RenderCommand::Text {
-                    x: x + PADDING + 20.0,
-                    y: export_y + 9.0,
-                    text: "Export...".to_string(),
-                    color: self.palette.crust,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
-
-            // Export menu popup
-            if self.show_export_menu {
-                let menu_y = export_y - 60.0;
-                tree.push(RenderCommand::BoxShadow {
-                    x: x + PADDING,
-                    y: menu_y,
-                    width: 120.0,
-                    height: 56.0,
-                    offset_x: 0.0,
-                    offset_y: 2.0,
-                    blur: 8.0,
-                    spread: 0.0,
-                    color: Color::rgba(0, 0, 0, 120),
-                    corner_radii: CornerRadii::all(SMALL_RADIUS),
-                });
-                self.palette.push_surface(
-                    tree,
-                    x + PADDING,
-                    menu_y,
-                    120.0,
-                    56.0,
-                    SMALL_RADIUS,
-                    Surface::Panel,
-                );
-                tree.push(RenderCommand::Text {
-                    x: x + PADDING + 10.0,
-                    y: menu_y + 8.0,
-                    text: "Export as CSV".to_string(),
+                    x: m.x + 10.0,
+                    y: m.y + 8.0 + 24.0 * i as f32,
+                    text: label.to_string(),
                     color: self.palette.text,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                tree.push(RenderCommand::Text {
-                    x: x + PADDING + 10.0,
-                    y: menu_y + 32.0,
-                    text: "Export as JSON".to_string(),
-                    color: self.palette.text,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
+                    max_width: Some((m.w - 20.0).max(0.0)),
                     overflow: TextOverflow::Clip,
                 });
             }
         }
     }
-
     fn render_host_detail(&self, tree: &mut RenderTree, x: f32, y: f32, host: &HostResult) {
         let w = SIDEBAR_WIDTH - PADDING * 2.0;
 
@@ -4020,7 +4445,7 @@ impl NetScanApp {
     }
 
     fn render_topology_view(&self, tree: &mut RenderTree) {
-        let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
+        let content_y = VIEW_TOP;
         let area_w = self.window_width - PADDING * 2.0;
         let area_h = self.window_height - content_y - PADDING;
 
@@ -4211,7 +4636,7 @@ impl NetScanApp {
     }
 
     fn render_history_view(&self, tree: &mut RenderTree) {
-        let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
+        let content_y = VIEW_TOP;
 
         tree.push(RenderCommand::Text {
             x: PADDING,
@@ -4398,7 +4823,7 @@ impl NetScanApp {
     }
 
     fn render_traceroute_view(&self, tree: &mut RenderTree) {
-        let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
+        let content_y = VIEW_TOP;
 
         tree.push(RenderCommand::Text {
             x: PADDING,
@@ -4423,27 +4848,21 @@ impl NetScanApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        self.render_text_field(
-            tree,
-            PADDING + 60.0,
-            input_y,
-            200.0,
-            &self.traceroute_target,
-            "8.8.8.8",
-        );
+        self.render_field(tree, Field::Trace);
 
-        // Run button
-        let btn_y = input_y + INPUT_HEIGHT + 8.0;
+        // Run button, where a press looks for it.
+        let run = RUN_BUTTON;
+        let btn_y = run.y;
         tree.push(RenderCommand::FillRect {
-            x: PADDING,
+            x: run.x,
             y: btn_y,
-            width: 120.0,
-            height: BUTTON_HEIGHT,
+            width: run.w,
+            height: run.h,
             color: self.palette.blue,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::Text {
-            x: PADDING + 16.0,
+            x: run.x + 16.0,
             y: btn_y + 9.0,
             text: "Run Traceroute".to_string(),
             color: self.palette.crust,
@@ -4597,7 +5016,7 @@ impl NetScanApp {
     }
 
     fn render_whois_view(&self, tree: &mut RenderTree) {
-        let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
+        let content_y = VIEW_TOP;
 
         tree.push(RenderCommand::Text {
             x: PADDING,
@@ -4622,27 +5041,21 @@ impl NetScanApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        self.render_text_field(
-            tree,
-            PADDING + 30.0,
-            input_y,
-            200.0,
-            &self.whois_target,
-            "8.8.8.8",
-        );
+        self.render_field(tree, Field::Whois);
 
-        // Run button
-        let btn_y = input_y + INPUT_HEIGHT + 8.0;
+        // Run button, where a press looks for it.
+        let run = RUN_BUTTON;
+        let btn_y = run.y;
         tree.push(RenderCommand::FillRect {
-            x: PADDING,
+            x: run.x,
             y: btn_y,
-            width: 120.0,
-            height: BUTTON_HEIGHT,
+            width: run.w,
+            height: run.h,
             color: self.palette.mauve,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         tree.push(RenderCommand::Text {
-            x: PADDING + 18.0,
+            x: run.x + 18.0,
             y: btn_y + 9.0,
             text: "Lookup WHOIS".to_string(),
             color: self.palette.crust,
@@ -4850,6 +5263,10 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
 impl App for NetScanApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -6793,25 +7210,10 @@ mod tests {
         }
     }
 
-    /// Same for the profile buttons, whose click handler is likewise a second
-    /// walk over the same widths.
-    #[test]
-    fn clicking_a_profile_selects_that_profile() {
-        let mut app = NetScanApp::new();
-        let profile_y = TITLE_BAR_HEIGHT + PADDING + 32.0 + BUTTON_HEIGHT / 2.0;
-        let mut x = PADDING;
-        for profile in &ScanProfile::ALL {
-            let w = profile_width(*profile);
-            let ev = guitk::event::MouseEvent {
-                x: x + w / 2.0,
-                y: profile_y,
-                kind: MouseEventKind::Press(MouseButton::Left),
-            };
-            assert_eq!(app.handle_mouse(&ev), EventResult::Consumed);
-            assert_eq!(app.config.profile, *profile);
-            x += w + 6.0;
-        }
-    }
+    // The profile buttons' walk is `the_profile_buttons_are_pressed_where_they_are_drawn`,
+    // which takes each button's place from the drawing: the test that stood
+    // here took it from the handler's own sum, which was 16 pixels low, and
+    // passed by pressing the drawn button's bottom edge.
 
     // --- Host-table layout ---
 
@@ -7585,5 +7987,850 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The text boxes, the list of keys, and where things are pressed
+    // ------------------------------------------------------------------
+
+    fn key_of(k: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn hit(app: &mut NetScanApp, k: Key, modifiers: Modifiers) -> EventResult {
+        app.handle_event(&Event::Key(key_of(k, modifiers, "")))
+    }
+
+    /// Type `text` a character at a time, as the keyboard would.
+    fn type_in(app: &mut NetScanApp, text: &str) {
+        for c in text.chars() {
+            let k = if c.is_ascii_digit() {
+                Key::Num1
+            } else {
+                Key::A
+            };
+            app.handle_event(&Event::Key(key_of(k, Modifiers::NONE, &c.to_string())));
+        }
+    }
+
+    fn click(app: &mut NetScanApp, button: MouseButton, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(guitk::event::MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn centre(r: Rect) -> (f32, f32) {
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    fn drawn_texts(app: &NetScanApp) -> Vec<String> {
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The rectangle of the first fill drawn in `color` whose size is
+    /// `(w, h)` -- a button, found by what it looks like rather than by
+    /// asking the code where it put it.
+    fn drawn_fill(app: &NetScanApp, color: Color, w: f32, h: f32) -> Option<Rect> {
+        app.render_tree().commands.iter().find_map(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color: c,
+                ..
+            } if *c == color && *width == w && *height == h => {
+                Some(Rect::new(*x, *y, *width, *height))
+            }
+            _ => None,
+        })
+    }
+
+    /// Whether the window draws the toolkit's field at `rect` in `state` --
+    /// and, unless `state` is focused, does not also draw it focused there.
+    fn draws_field(app: &NetScanApp, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, &app.palette, rect, s, app.focus_ring_width);
+            v
+        };
+        let cmds = app.render_tree().commands;
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// An app on `tab` with each box holding nothing, the Custom profile
+    /// chosen so the ports box is up, and the user's focus mark a ring at
+    /// two and a half times the toolkit's width.
+    fn boxes_on(tab: ViewTab) -> NetScanApp {
+        let mut app = NetScanApp::new();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        app.config.profile = ScanProfile::Custom;
+        app.active_tab = tab;
+        app.config.target_input.clear();
+        app.config.port_input.clear();
+        app.traceroute_target.clear();
+        app.whois_target.clear();
+        app.wol_target_mac.clear();
+        app
+    }
+
+    /// **Every box takes typing where it is drawn, and Enter does what the
+    /// box is for.** None of the five took a key: the target, the ports, the
+    /// traceroute and WHOIS addresses and the MAC address to wake were
+    /// drawn, and could only ever hold what the window opened with.
+    ///
+    /// What each is given is something its action refuses, so each Enter is
+    /// seen in the refusal it writes -- and nothing reaches a network.
+    #[test]
+    fn every_box_takes_typing_and_enter_does_what_it_is_for() {
+        for (tab, field, typed) in [
+            (ViewTab::Results, Field::Target, "10.0.0.300"),
+            (ViewTab::Results, Field::Ports, "80,http"),
+            (ViewTab::Traceroute, Field::Trace, "8.8.8"),
+            (ViewTab::Whois, Field::Whois, "1.2.3"),
+            (ViewTab::Results, Field::WakeMac, "AA:BB:CC"),
+        ] {
+            let mut app = boxes_on(tab);
+            if field == Field::Ports {
+                // A target that would scan, so the refusal is the ports'.
+                app.config.target_input = String::from("10.0.0.1");
+            }
+            let rect = app
+                .field_rect(field)
+                .unwrap_or_else(|| panic!("{field:?} is not on screen on {tab:?}"));
+            let (x, y) = centre(rect);
+            assert_eq!(
+                click(&mut app, MouseButton::Left, x, y),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                app.focus,
+                Some(field),
+                "a press on {field:?} did not take the keyboard"
+            );
+            assert!(
+                draws_field(
+                    &app,
+                    rect,
+                    field::State {
+                        focused: true,
+                        ..field::State::default()
+                    }
+                ),
+                "{field:?} with the keyboard is not the toolkit's field with its mark"
+            );
+            type_in(&mut app, typed);
+            assert_eq!(
+                app.field_text(field),
+                typed,
+                "{field:?} did not take the typing"
+            );
+            assert!(
+                draws_field(
+                    &app,
+                    rect,
+                    field::State {
+                        focused: true,
+                        invalid: true,
+                        ..field::State::default()
+                    }
+                ),
+                "{field:?} holding {typed:?}, which would be refused, is not red"
+            );
+            hit(&mut app, Key::Backspace, Modifiers::NONE);
+            assert_eq!(
+                app.field_text(field),
+                &typed[..typed.len() - 1],
+                "Backspace did not delete in {field:?}"
+            );
+            type_in(&mut app, &typed[typed.len() - 1..]);
+            hit(&mut app, Key::Enter, Modifiers::NONE);
+            let said = match field {
+                Field::Target | Field::Ports => app.scan_note.clone(),
+                Field::Trace => app.traceroute_note.clone(),
+                Field::Whois => app.whois_note.clone(),
+                Field::WakeMac => app.wol_note.clone(),
+            };
+            assert!(
+                said.as_deref()
+                    .is_some_and(|s| s.contains(if field == Field::Ports {
+                        "No ports to scan"
+                    } else {
+                        typed
+                    })),
+                "Enter in {field:?} did not do what the box is for: {said:?}"
+            );
+            assert_eq!(app.focus, Some(field), "Enter took the keyboard away");
+            hit(&mut app, Key::Escape, Modifiers::NONE);
+            assert_eq!(app.focus, None, "Escape left the keyboard in {field:?}");
+            assert_eq!(
+                app.field_text(field),
+                typed,
+                "Escape threw away what was typed"
+            );
+        }
+    }
+
+    /// The ports box is answered only for what it holds: a scan of a good
+    /// target over ports that are not ports is refused for the ports.
+    #[test]
+    fn enter_in_the_ports_box_scans_and_is_refused_for_the_ports() {
+        let mut app = boxes_on(ViewTab::Results);
+        app.config.target_input = String::from("not an address");
+        let (x, y) = centre(app.field_rect(Field::Ports).unwrap());
+        click(&mut app, MouseButton::Left, x, y);
+        type_in(&mut app, "80");
+        hit(&mut app, Key::Enter, Modifiers::NONE);
+        assert!(
+            app.scan_note
+                .as_deref()
+                .is_some_and(|s| s.starts_with("Not a scannable target")),
+            "Enter in the ports box did not start a scan: {:?}",
+            app.scan_note
+        );
+    }
+
+    /// **The keys a box answers are a box's**: the caret moves and a
+    /// selection is replaced; Ctrl+A, C, X and V edit; and AltGr types.
+    #[test]
+    fn a_box_edits_at_a_caret_and_knows_a_chord_from_altgr() {
+        let mut app = boxes_on(ViewTab::Results);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert_eq!(app.focus, Some(Field::Target));
+        type_in(&mut app, "10.0.0.1");
+        hit(&mut app, Key::Home, Modifiers::NONE);
+        type_in(&mut app, "1");
+        assert_eq!(
+            app.config.target_input, "110.0.0.1",
+            "Home did not move the caret"
+        );
+        hit(&mut app, Key::A, Modifiers::ctrl());
+        hit(&mut app, Key::C, Modifiers::ctrl());
+        hit(&mut app, Key::Right, Modifiers::NONE);
+        hit(&mut app, Key::V, Modifiers::ctrl());
+        assert_eq!(
+            app.config.target_input, "110.0.0.1110.0.0.1",
+            "Ctrl+C then Ctrl+V"
+        );
+        hit(&mut app, Key::A, Modifiers::ctrl());
+        hit(&mut app, Key::X, Modifiers::ctrl());
+        assert_eq!(app.config.target_input, "", "Ctrl+X left the text");
+        app.handle_event(&Event::Key(key_of(
+            Key::Q,
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            "@",
+        )));
+        assert_eq!(
+            app.config.target_input, "@",
+            "AltGr's character was not typed"
+        );
+        assert_eq!(
+            hit(&mut app, Key::X, Modifiers::alt()),
+            EventResult::Ignored,
+            "an Alt chord was taken by the box rather than left for the window"
+        );
+
+        // Another box, pressed, is edited with its own text under the caret,
+        // not the last box's.
+        let (x, y) = centre(app.field_rect(Field::Ports).unwrap());
+        click(&mut app, MouseButton::Left, x, y);
+        type_in(&mut app, "8");
+        assert_eq!(
+            app.config.port_input, "8",
+            "the ports box was typed into over the target's text"
+        );
+        assert_eq!(app.config.target_input, "@");
+    }
+
+    /// **A press puts the caret where it lands, and an empty box says what it
+    /// is for** -- with the caret before what it says while it has the
+    /// keyboard, and no caret without it.
+    #[test]
+    fn a_press_puts_the_caret_where_it_lands() {
+        let mut app = boxes_on(ViewTab::Results);
+        let rect = app.field_rect(Field::WakeMac).unwrap();
+        let carets = |app: &NetScanApp| {
+            app.render_tree()
+                .commands
+                .iter()
+                .filter(|c| {
+                    matches!(c, RenderCommand::Line { x1, y1, x2, .. }
+                        if x1 == x2 && rect.contains(*x1, *y1))
+                })
+                .count()
+        };
+        assert!(
+            drawn_texts(&app).iter().any(|t| t == "AA:BB:CC:DD:EE:FF"),
+            "the empty box does not say what it is for"
+        );
+        assert_eq!(carets(&app), 0, "a caret in a box without the keyboard");
+        let (x, y) = centre(rect);
+        click(&mut app, MouseButton::Left, x, y);
+        assert_eq!(
+            carets(&app),
+            1,
+            "the empty box with the keyboard has no caret"
+        );
+        type_in(&mut app, "AA:BB");
+        click(&mut app, MouseButton::Left, rect.right() - 4.0, y);
+        type_in(&mut app, "9");
+        assert_eq!(
+            app.wol_target_mac, "AA:BB9",
+            "a press past the text did not put the caret at its end"
+        );
+        click(&mut app, MouseButton::Left, rect.x + 1.0, y);
+        type_in(&mut app, "1");
+        assert_eq!(
+            app.wol_target_mac, "1AA:BB9",
+            "a press at the box's left edge did not put the caret at the start"
+        );
+        assert_eq!(carets(&app), 1);
+    }
+
+    /// **Enter in the target box starts a scan and never stops one**: a scan
+    /// under way is stopped by its button or F5, which say "Stop".
+    #[test]
+    fn enter_in_the_target_box_never_stops_a_scan() {
+        let mut app = NetScanApp::new();
+        app.config.target_input = String::from("192.168.1.0/24");
+        app.prober = slow;
+        app.config.concurrency = 2;
+        app.focus_field(Field::Target);
+        hit(&mut app, Key::Enter, Modifiers::NONE);
+        assert!(
+            app.is_scanning,
+            "Enter in the target box did not start a scan"
+        );
+        hit(&mut app, Key::Enter, Modifiers::NONE);
+        // Stopping is not instant -- the workers finish the probes they hold
+        // -- so a stop is seen in what the window says, not in the flag.
+        assert_ne!(
+            app.scan_note.as_deref(),
+            Some("Stopping..."),
+            "Enter in the target box stopped the scan"
+        );
+        assert!(app.is_scanning);
+        hit(&mut app, Key::F5, Modifiers::NONE);
+        assert_eq!(
+            app.scan_note.as_deref(),
+            Some("Stopping..."),
+            "F5 from the box did not stop the scan"
+        );
+        finish(&mut app);
+    }
+
+    /// **A chord is not one of this window's keys**: Alt+F5 and Alt+Down are
+    /// the window manager's, and AltGr+Enter -- which arrives as Ctrl+Alt --
+    /// is not Ctrl+Enter. Ctrl+Enter scans.
+    #[test]
+    fn a_chord_is_not_one_of_this_windows_keys() {
+        let mut app = app_with_hosts(5, 1);
+        app.config.target_input = String::from("not an address");
+        hit(&mut app, Key::F5, Modifiers::alt());
+        hit(
+            &mut app,
+            Key::Enter,
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+        );
+        assert_eq!(app.scan_note, None, "a chord scanned");
+        hit(&mut app, Key::Down, Modifiers::alt());
+        assert_eq!(
+            app.selected_host_idx, None,
+            "Alt+Down moved through the hosts"
+        );
+        hit(&mut app, Key::Enter, Modifiers::ctrl());
+        assert!(app.scan_note.is_some(), "Ctrl+Enter did not scan");
+    }
+
+    /// **Tab walks the boxes on screen, Shift+Tab back, wrapping** -- the
+    /// only way the keyboard reaches them. The ports box is in the walk only
+    /// for the Custom profile, and each view's own box only on that view.
+    #[test]
+    fn tab_walks_the_boxes_on_screen() {
+        let walk = |app: &mut NetScanApp, shift: bool, n: usize| -> Vec<Option<Field>> {
+            let mods = if shift {
+                Modifiers::shift()
+            } else {
+                Modifiers::NONE
+            };
+            (0..n)
+                .map(|_| {
+                    hit(app, Key::Tab, mods);
+                    app.focus
+                })
+                .collect()
+        };
+        let mut app = boxes_on(ViewTab::Results);
+        assert_eq!(
+            walk(&mut app, false, 4),
+            [
+                Some(Field::Target),
+                Some(Field::Ports),
+                Some(Field::WakeMac),
+                Some(Field::Target)
+            ]
+        );
+        assert_eq!(
+            walk(&mut app, true, 2),
+            [Some(Field::WakeMac), Some(Field::Ports)]
+        );
+
+        let mut app = boxes_on(ViewTab::Traceroute);
+        app.config.profile = ScanProfile::Quick;
+        assert_eq!(
+            walk(&mut app, true, 1),
+            [Some(Field::Trace)],
+            "Shift+Tab from none"
+        );
+        assert_eq!(
+            walk(&mut app, false, 2),
+            [Some(Field::Target), Some(Field::Trace)]
+        );
+
+        let mut app = boxes_on(ViewTab::Whois);
+        assert_eq!(
+            walk(&mut app, false, 3),
+            [Some(Field::Target), Some(Field::Ports), Some(Field::Whois)]
+        );
+    }
+
+    /// **A box that leaves the screen lets go of the keyboard**, so nothing
+    /// is typed into a box nobody can see: the Wake-on-LAN box and the
+    /// traceroute box when Ctrl+Tab moves the view on -- the one way a box
+    /// leaves the screen under the keyboard; a press elsewhere takes the
+    /// keyboard itself (`only_the_box_with_the_keyboard_is_marked`).
+    #[test]
+    fn a_box_that_leaves_the_screen_lets_go_of_the_keyboard() {
+        let mut app = app_with_hosts(5, 2);
+        let (x, y) = centre(app.field_rect(Field::WakeMac).unwrap());
+        click(&mut app, MouseButton::Left, x, y);
+        assert_eq!(app.focus, Some(Field::WakeMac));
+        hit(&mut app, Key::Down, Modifiers::NONE);
+        assert_eq!(
+            app.focus,
+            Some(Field::WakeMac),
+            "the box gave the arrow to the list"
+        );
+        assert_eq!(
+            app.selected_host_idx, None,
+            "Down in the box moved through the hosts"
+        );
+        hit(&mut app, Key::Tab, Modifiers::ctrl());
+        assert_eq!(
+            app.active_tab,
+            ViewTab::Topology,
+            "Ctrl+Tab from a box did not move on"
+        );
+        assert_eq!(
+            app.focus, None,
+            "the hidden Wake-on-LAN box kept the keyboard"
+        );
+
+        let mut app = boxes_on(ViewTab::Traceroute);
+        hit(&mut app, Key::Tab, Modifiers::shift());
+        assert_eq!(app.focus, Some(Field::Trace));
+        hit(&mut app, Key::Tab, Modifiers::ctrl());
+        assert_eq!(
+            app.active_tab,
+            ViewTab::Whois,
+            "Ctrl+Tab from a box did not move on"
+        );
+        assert_eq!(
+            app.focus, None,
+            "the hidden traceroute box kept the keyboard"
+        );
+    }
+
+    /// **The keyboard's mark is the user's width**, and the boxes without the
+    /// keyboard carry none of it; a press outside every box takes it away.
+    #[test]
+    fn only_the_box_with_the_keyboard_is_marked() {
+        let mut app = boxes_on(ViewTab::Results);
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let target = app.field_rect(Field::Target).unwrap();
+        let ports = app.field_rect(Field::Ports).unwrap();
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(draws_field(&app, target, idle) && draws_field(&app, ports, idle));
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert!(draws_field(&app, target, focused) && draws_field(&app, ports, idle));
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        assert!(draws_field(&app, target, idle) && draws_field(&app, ports, focused));
+        let bottom = app.window_height - 5.0;
+        click(&mut app, MouseButton::Left, 5.0, bottom);
+        assert_eq!(
+            app.focus, None,
+            "a press outside every box left the keyboard in one"
+        );
+        assert!(draws_field(&app, ports, idle));
+    }
+
+    /// **The Wake-on-LAN section is in the sidebar, and pressed where it is
+    /// drawn.** Its heading and Send button were drawn against the window's
+    /// left edge, over the hosts table, while a press for Send was looked for
+    /// over the MAC box -- so pressing the box to type in it sent the packet.
+    #[test]
+    fn wake_on_lan_is_drawn_in_the_sidebar_and_pressed_there() {
+        let mut app = boxes_on(ViewTab::Results);
+        let sidebar = app.window_width - SIDEBAR_WIDTH;
+        let o = app.overview().expect("the overview is up");
+        let send = drawn_fill(&app, app.palette.mauve, 120.0, BUTTON_HEIGHT)
+            .expect("no Send WOL button was drawn");
+        assert_eq!(
+            send, o.wake_button,
+            "Send is drawn somewhere a press does not look"
+        );
+        assert!(
+            send.x >= sidebar,
+            "Send is drawn outside the sidebar, at x {}",
+            send.x
+        );
+        let field = o.wake_field;
+        assert!(
+            !send.contains(centre(field).0, centre(field).1) && field.bottom() <= send.y,
+            "the MAC box and the Send button overlap"
+        );
+        for heading in ["Host Details", "Wake-on-LAN"] {
+            let x = app
+                .render_tree()
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, x, .. } if text == heading => Some(*x),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{heading:?} was not drawn"));
+            assert!(
+                x >= sidebar,
+                "{heading:?} is drawn at {x}, outside the sidebar"
+            );
+        }
+
+        // A press on the box takes the keyboard and sends nothing.
+        let (x, y) = centre(field);
+        click(&mut app, MouseButton::Left, x, y);
+        assert_eq!(app.focus, Some(Field::WakeMac));
+        assert_eq!(app.wol_note, None, "pressing the MAC box sent a packet");
+        // The bottom of the button sends -- with nothing typed, to nobody,
+        // and says so.
+        click(
+            &mut app,
+            MouseButton::Left,
+            send.x + 4.0,
+            send.bottom() - 2.0,
+        );
+        assert_eq!(app.wol_note.as_deref(), Some("Not a MAC address: "));
+        assert_eq!(
+            app.focus, None,
+            "the press on Send left the keyboard in the box"
+        );
+    }
+
+    /// **The Run buttons are pressed where they are drawn**: the press was
+    /// looked for 18 pixels higher, so the bottom of the box above ran the
+    /// trace and the bottom of the button did nothing.
+    #[test]
+    fn the_run_buttons_are_pressed_where_they_are_drawn() {
+        for (tab, colour) in [(ViewTab::Traceroute, "blue"), (ViewTab::Whois, "mauve")] {
+            let mut app = boxes_on(tab);
+            let ink = if colour == "blue" {
+                app.palette.blue
+            } else {
+                app.palette.mauve
+            };
+            let run = drawn_fill(&app, ink, 120.0, BUTTON_HEIGHT).expect("no Run button was drawn");
+            assert_eq!(
+                run, RUN_BUTTON,
+                "{tab:?}'s Run is drawn where a press does not look"
+            );
+            let boxed = app
+                .field_rect(if tab == ViewTab::Traceroute {
+                    Field::Trace
+                } else {
+                    Field::Whois
+                })
+                .unwrap();
+            click(
+                &mut app,
+                MouseButton::Left,
+                boxed.x + 4.0,
+                boxed.bottom() - 2.0,
+            );
+            assert_eq!(
+                (app.traceroute_note.clone(), app.whois_note.clone()),
+                (None, None),
+                "the bottom of {tab:?}'s box ran it"
+            );
+            click(&mut app, MouseButton::Left, run.x + 4.0, run.bottom() - 2.0);
+            let said = if tab == ViewTab::Traceroute {
+                app.traceroute_note.clone()
+            } else {
+                app.whois_note.clone()
+            };
+            assert_eq!(
+                said.as_deref(),
+                Some("Not an IPv4 address: "),
+                "the bottom of {tab:?}'s Run did nothing"
+            );
+        }
+    }
+
+    /// **The profile buttons are pressed where they are drawn.** The press
+    /// was looked for 16 pixels lower: the top half of each button did
+    /// nothing, and the top of the target box chose a profile.
+    #[test]
+    fn the_profile_buttons_are_pressed_where_they_are_drawn() {
+        let mut app = NetScanApp::new();
+        let mut x = PADDING;
+        for profile in &ScanProfile::ALL {
+            let w = profile_width(*profile);
+            let colours = [app.palette.blue, app.palette.surface0];
+            let drawn = app.render_tree().commands.iter().find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x: fx,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *fx == x && *width == w && colours.contains(color) => {
+                    Some(Rect::new(*fx, *y, *width, *height))
+                }
+                _ => None,
+            });
+            let drawn = drawn.unwrap_or_else(|| panic!("{profile:?}'s button was not drawn"));
+            assert_eq!(drawn.y, PROFILE_Y, "{profile:?} is drawn off its row");
+            click(&mut app, MouseButton::Left, x + w / 2.0, drawn.y + 2.0);
+            assert_eq!(
+                app.config.profile, *profile,
+                "the top of {profile:?} did nothing"
+            );
+            x += w + 6.0;
+        }
+        app.config.profile = ScanProfile::Quick;
+        let target = app.field_rect(Field::Target).unwrap();
+        click(&mut app, MouseButton::Left, PADDING + 70.0, target.y + 2.0);
+        assert_eq!(
+            app.config.profile,
+            ScanProfile::Quick,
+            "the target box chose a profile"
+        );
+        assert_eq!(
+            app.focus,
+            Some(Field::Target),
+            "the press on the box missed it"
+        );
+    }
+
+    /// **Export is pressed only where it is drawn, and its menu covers what
+    /// is under it.** It was pressed under a selected host's details, where
+    /// it is not drawn; and a press on the open menu reached Send underneath.
+    #[test]
+    fn export_is_pressed_only_where_it_is_drawn() {
+        let mut app = app_with_hosts(3, 1);
+        let export = app
+            .overview()
+            .and_then(|o| o.export)
+            .expect("Export is drawn");
+        let (x, y) = centre(export);
+        click(&mut app, MouseButton::Left, x, y);
+        assert!(app.show_export_menu, "Export did not open its menu");
+        let o = app.overview().unwrap();
+        let menu = o.export_menu.expect("the menu is drawn");
+        let send = o.wake_button;
+        let over = (send.x + 4.0, send.bottom() - 2.0);
+        assert!(
+            menu.contains(over.0, over.1),
+            "the test needs the menu over Send"
+        );
+        click(&mut app, MouseButton::Left, over.0, over.1);
+        assert_eq!(
+            app.wol_note, None,
+            "a press on the menu reached Send under it"
+        );
+        click(&mut app, MouseButton::Left, x, y);
+        assert!(!app.show_export_menu, "Export did not close its menu");
+
+        app.selected_host_idx = Some(0);
+        click(&mut app, MouseButton::Left, x, y);
+        assert!(
+            !app.show_export_menu,
+            "a press where Export is not drawn -- under a host's details -- opened its menu"
+        );
+    }
+
+    /// **Every key the list of keys advertises is answered by this window**,
+    /// pressed from outside every box -- Enter from inside one, which is the
+    /// only place it is a key.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = app_with_hosts(30, 1);
+                app.config.target_input = String::from("not an address");
+                if *label == "Enter" {
+                    app.focus_field(Field::Target);
+                }
+                assert_eq!(
+                    app.handle_event(&Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = NetScanApp::new();
+        assert!(
+            !drawn_texts(&app).iter().any(|t| t == "F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            hit(&mut app, Key::F1, chord);
+            assert!(
+                !app.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        let missing = guitk::shortcut::missing_rows(&drawn_texts(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        hit(&mut app, Key::Escape, Modifiers::alt());
+        assert!(app.show_help, "Alt+Escape put the list away");
+        hit(&mut app, Key::Escape, Modifiers::NONE);
+        assert!(!app.show_help, "Escape left the list up");
+        app.handle_event(&Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")));
+        assert!(app.show_help, "? raised nothing");
+        app.handle_event(&Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")));
+        assert!(!app.show_help, "? left the list up");
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        assert!(!app.show_help, "F1 left the list up");
+    }
+
+    /// **`?` is typed into a box**, where it is a character, and F1 raises the
+    /// list from there, where it never is; the box's mark is not drawn under
+    /// the list.
+    #[test]
+    fn a_question_mark_is_typed_into_a_box_and_f1_still_raises_the_list() {
+        let mut app = boxes_on(ViewTab::Results);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        app.handle_event(&Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")));
+        assert!(!app.show_help, "? raised the list from a box");
+        assert_eq!(app.config.target_input, "?", "? was not typed");
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        assert!(app.show_help, "F1 did not raise the list from a box");
+        let target = app.field_rect(Field::Target).unwrap();
+        assert!(
+            draws_field(
+                &app,
+                target,
+                field::State {
+                    invalid: true,
+                    ..field::State::default()
+                }
+            ),
+            "the box's mark is drawn under the list"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of
+    /// the wheel reaches what it covers. The controls are the same with it
+    /// down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut app = app_with_hosts(60, 1);
+        app.config.target_input = String::from("not an address");
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        hit(&mut app, Key::F5, Modifiers::NONE);
+        hit(&mut app, Key::Tab, Modifiers::NONE);
+        hit(&mut app, Key::Tab, Modifiers::ctrl());
+        hit(&mut app, Key::Down, Modifiers::NONE);
+        assert!(
+            app.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(app.scan_note, None, "F5 scanned under the list");
+        assert_eq!(app.focus, None, "Tab took a box under it");
+        assert_eq!(
+            app.active_tab,
+            ViewTab::Results,
+            "Ctrl+Tab moved the view under it"
+        );
+        assert_eq!(app.selected_host_idx, None, "Down selected a host under it");
+        let (rx, ry) = (100.0, RESULTS_ROWS_TOP + TABLE_ROW_HEIGHT / 2.0);
+        app.handle_event(&Event::Mouse(guitk::event::MouseEvent {
+            x: rx,
+            y: ry,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        }));
+        assert_eq!(
+            app.results_scroll, 0,
+            "the wheel scrolled the hosts under it"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        let (tx, ty) = centre(app.field_rect(Field::Target).unwrap());
+        click(&mut app, MouseButton::Left, tx, ty);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(app.focus, None, "the press took the box under it");
+        hit(&mut app, Key::F1, Modifiers::NONE);
+        click(&mut app, MouseButton::Right, rx, ry);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The controls.
+        hit(&mut app, Key::Down, Modifiers::NONE);
+        assert_eq!(app.selected_host_idx, Some(0));
+        click(&mut app, MouseButton::Left, tx, ty);
+        assert_eq!(app.focus, Some(Field::Target));
+        hit(&mut app, Key::F5, Modifiers::NONE);
+        assert!(app.scan_note.is_some(), "F5 did nothing");
     }
 }

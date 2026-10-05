@@ -79,6 +79,23 @@ printf 'startrun\0middle\0endrun'                        > ends.bin
 printf ''                                                > empty.bin
 printf 'x'                                               > onebyte.bin
 
+# UTF-8 of every length -- 2, 3 and 4 bytes -- for `-U`, one string apiece.
+printf 'abc\303\251def\0xyz\342\202\254uvw\0pq\360\237\230\200rs\0ab\364\217\277\277cd\n' > unicode.bin
+
+# UTF-8 that is not: a lead with no continuation, a stray continuation, a
+# three-byte sequence cut short, and a four-byte one cut short at a run's start.
+printf 'abcd\303Xefgh\0abcd\251efgh\0wxyz\342\202Qrst\0\360\237\230abcd\0' > broken.bin
+
+# Argument files for `@FILE`, which libiberty expands before anything is parsed.
+printf -- '-n 6 -t x'        > opts1
+printf -- "-f '-s' :"        > opts2
+printf -- '@opts1 -w'        > nested
+printf -- '  \n\t '          > blank
+printf -- '-n'               > partial
+printf -- '"plain.txt"'      > operand
+printf -- '@self'            > self
+mkdir -p atdir
+
 # A real object file, so the default "loaded sections only" rule is exercised.
 # `/bin/true` is read-only, tiny, and present on every host this runs on.
 cp /bin/true elf.bin
@@ -160,6 +177,16 @@ run_case -n 6 lengths.bin
 run_case -n4 lengths.bin
 run_case -4 lengths.bin
 run_case -1 lengths.bin
+# The digit shorthand is the whole word that holds it, read after every other
+# option: `-12` is twelve, `-5 -n 3` is five either way round, and `-a5` is
+# refused as an integer.
+run_case -10 plain.txt
+run_case -12 plain.txt
+run_case -5 -n 3 lengths.bin
+run_case -n 3 -5 lengths.bin
+run_case -1 -5 lengths.bin
+run_case -010 plain.txt
+run_case -a5 plain.txt
 run_case --bytes=3 lengths.bin
 run_case -n 0 lengths.bin
 run_case -n -1 lengths.bin
@@ -235,8 +262,8 @@ xfail_case "our usage text, not the GNU project's -- it names the options this b
 # NINE OF THESE ARE xfail AND THE REASON IS ONE LINE OF OUR OWN HELP TEXT.
 #
 # Every case here prints the usage, and this build's usage carries a line GNU's
-# does not: `--target, @<file>, and every --unicode mode but \`d' are refused`,
-# where GNU prints `supported targets: elf64-x86-64 ...`. We cannot print that
+# does not: `This build reads ELF64 objects only, for --data, so --target is
+# refused`, where GNU prints `supported targets: elf64-x86-64 ...`. We cannot print that
 # list without claiming support we do not have, so the two can never match and
 # `--help`/`--version` are already xfail for exactly this.
 #
@@ -253,6 +280,62 @@ run_case .
 xfail_case "our usage text, not the GNU project's -- it names the options this build refuses where GNU lists its supported targets" -Q plain.txt
 xfail_case "our usage text, not the GNU project's -- it names the options this build refuses where GNU lists its supported targets" --nosuchoption plain.txt
 xfail_case "GNU accepts an unknown --target on a non-object file and prints its strings; this build refuses --target outright" -T nosucharch plain.txt
+
+# --- -U/--unicode -------------------------------------------------------------------------------------------------
+# Every mode, both spellings. Any mode but `d` forces `-e S`; `l` prints only a
+# character's first byte (upstream's `%.1s`); a four-byte character's escape is
+# upstream's arithmetic, not its code point; `h` is `e` off a terminal.
+run_case -U d unicode.bin
+run_case -U l unicode.bin
+run_case -U e unicode.bin
+run_case -U x unicode.bin
+run_case -U h unicode.bin
+run_case -U i unicode.bin
+run_case --unicode=default unicode.bin
+run_case --unicode=locale unicode.bin
+run_case --unicode=escape unicode.bin
+run_case --unicode=hex unicode.bin
+run_case --unicode=highlight unicode.bin
+run_case --unicode=invalid unicode.bin
+run_case -U e -n 2 unicode.bin
+run_case -U e -n 7 unicode.bin
+run_case -U e -t x unicode.bin
+run_case -U x -t d -f unicode.bin
+run_case -U e -e l unicode.bin
+run_case -U e -w spaced.bin
+run_case -U e high.bin
+run_case -U e broken.bin
+run_case -U x -t x broken.bin
+run_case -U i broken.bin
+run_case -U l broken.bin
+run_case -U e plain.txt unicode.bin
+run_stdin 'abc\xc3\xa9def\0' -U e
+run_stdin 'abc\xc3\xa9def\0' -U x -t d
+# `-d` reads an object's sections from memory: upstream's buffer path.
+run_case -U e -d elf.bin
+run_case -U x -d -t x elf.bin
+run_case -U i -d elf.bin
+run_case -U e -d unicode.bin
+# The help advertises `show`; the parser refuses it, and `s`, without the usage.
+run_case -U s unicode.bin
+run_case -U show unicode.bin
+run_case -U '' unicode.bin
+run_case --unicode= unicode.bin
+
+# --- @FILE ---------------------------------------------------------------------------------------------------------
+# Each readable `@FILE` becomes the words in it, nested files too, before any
+# parsing -- after `--` as well. One that cannot be read stays an operand, a
+# directory or a file that names itself is refused before anything else.
+run_case @opts1 plain.txt
+run_case @opts2 plain.txt
+run_case @nested spaced.bin
+run_case @blank plain.txt
+run_case @operand
+run_case -- @opts1 plain.txt
+run_case @partial plain.txt
+run_case @nosuchfile plain.txt
+run_case @atdir plain.txt
+run_case @self plain.txt
 
 # --- the two whose text is ours ----------------------------------------------------------------------------------
 xfail_case "our help text, not the GNU project's" --help

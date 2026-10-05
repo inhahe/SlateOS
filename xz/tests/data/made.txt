@@ -1,0 +1,27 @@
+# file kind size seed verdict [length fnv64] -- made by xz 5.2.5 with: args
+text-crc64.xz text 40000 1 OK 40000 e6b3107aa88440f2 -- --format=xz --check=crc64 -6
+text-crc32.xz text 40000 1 OK 40000 e6b3107aa88440f2 -- --format=xz --check=crc32 -6
+text-sha256.xz text 40000 1 OK 40000 e6b3107aa88440f2 -- --format=xz --check=sha256 -6
+text-none.xz text 40000 1 OK 40000 e6b3107aa88440f2 -- --format=xz --check=none -6
+text-blocks.xz text 200000 2 OK 200000 37c66cfd28dc1f93 -- --format=xz --block-size=65536 -6
+random-0.xz random 8000 3 OK 8000 155968517bf2bb35 -- --format=xz -0
+random-9e.xz random 8000 3 OK 8000 155968517bf2bb35 -- --format=xz -9e
+code-x86.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --x86 --lzma2=preset=6
+code-arm.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --arm --lzma2=preset=6
+code-armthumb.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --armthumb --lzma2=preset=6
+code-powerpc.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --powerpc --lzma2=preset=6
+code-ia64.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --ia64 --lzma2=preset=6
+code-sparc.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --sparc --lzma2=preset=6
+code-x86-start.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --x86=start=4096 --lzma2=preset=6
+code-delta.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --delta=dist=4 --lzma2=preset=6
+code-chain.xz code 24000 4 OK 24000 a1bcd5b5a65251b7 -- --format=xz --x86 --delta=dist=2 --lzma2=preset=1
+empty.xz text 0 1 OK 0 cbf29ce484222325 -- --format=xz
+lzma-text.lzma text 40000 5 OK 40000 500683627823675b -- --format=lzma -6
+lzma-empty.lzma text 0 5 OK 0 cbf29ce484222325 -- --format=lzma
+raw-lzma2.raw text 20000 6 OK 20000 0f6e7adff23b6f06 -- --format=raw --lzma2=preset=6
+two-streams.xz cat - - OK 80000 bcb3c7237928cdc5 -- concatenated
+padded.xz cat - - OK 80000 bcb3c7237928cdc5 -- concatenated
+badly-padded.xz cat - - ERR 9 -- concatenated
+badly-padded-at-end.xz cat - - ERR 9 -- concatenated
+trailing-garbage.xz cat - - ERR 10 -- concatenated
+reserved-flag.xz cat - - ERR 8 -- concatenated

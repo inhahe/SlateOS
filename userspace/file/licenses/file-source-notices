@@ -1,0 +1,45 @@
+The copyright notices at the head of the file 5.45 sources that
+userspace/file follows. Each source is distributed under the terms in
+file-COPYING (the two-clause BSD licence).
+
+apprentice.c, ascmagic.c, compress.c, encoding.c, file.c, file.h,
+fsmagic.c, is_tar.c, print.c, softmagic.c, tar.h:
+    Copyright (c) Ian F. Darwin 1986-1995.
+    Software written by Ian F. Darwin and others;
+    maintained 1995-present by Christos Zoulas and others.
+
+funcs.c, magic.c, readelf.c, readelf.h:
+    Copyright (c) Christos Zoulas 2003.
+    All Rights Reserved.
+
+elfclass.h:
+    Copyright (c) Christos Zoulas 2008.
+    All Rights Reserved.
+
+cdf.c, cdf.h, cdf_time.c:
+    Copyright (c) 2008 Christos Zoulas
+    All rights reserved.
+
+readcdf.c:
+    Copyright (c) 2008, 2016 Christos Zoulas
+    All rights reserved.
+
+der.c, der.h:
+    Copyright (c) 2016 Christos Zoulas
+    All rights reserved.
+
+buffer.c:
+    Copyright (c) Christos Zoulas 2017.
+    All Rights Reserved.
+
+is_json.c:
+    Copyright (c) 2018 Christos Zoulas
+    All rights reserved.
+
+is_csv.c:
+    Copyright (c) 2019 Christos Zoulas
+    All rights reserved.
+
+is_simh.c:
+    Copyright (c) 2023 Christos Zoulas
+    All rights reserved.

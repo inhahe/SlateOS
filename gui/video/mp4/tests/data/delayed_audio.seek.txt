@@ -1,0 +1,36 @@
+# delayed_audio.mp4: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 0 0 K__ 0
+packet 0 1024 1024 ___ 0
+packet 1 9264 9264 K__ 0
+packet 0 2048 2048 ___ 0
+packet 1 10224 10224 K__ 0
+packet 1 11184 11184 K__ 0
+seek 250
+packet 0 0 0 K__ 0
+packet 0 1024 1024 ___ 0
+packet 1 9264 9264 K__ 0
+packet 0 2048 2048 ___ 0
+packet 1 10224 10224 K__ 0
+packet 1 11184 11184 K__ 0
+seek 550
+packet 1 18864 18864 K__ 0
+packet 0 4096 4096 K__ 0
+packet 1 19824 19824 K__ 0
+packet 1 20784 20784 K__ 0
+packet 1 21744 21744 K__ 0
+packet 1 22704 22704 K__ 0
+seek 900
+packet 1 38064 38064 K__ 0
+packet 0 8192 8192 K__ 0
+packet 1 39024 39024 K__ 0
+packet 1 39984 39984 K__ 0
+packet 1 40944 40944 K__ 0
+packet 1 41904 41904 K__ 0
+seek 99000
+packet 1 38064 38064 K__ 0
+packet 0 8192 8192 K__ 0
+packet 1 39024 39024 K__ 0
+packet 1 39984 39984 K__ 0
+packet 1 40944 40944 K__ 0
+packet 1 41904 41904 K__ 0

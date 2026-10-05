@@ -53,10 +53,15 @@ use appearance::Palette;
 use guitk::color::Color;
 use guitk::date::Date;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
+use guitk::listview::ListKey;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -137,7 +142,21 @@ pub struct Layout {
     pub notification: Option<Rect>,
 }
 
+/// How far the task box's text sits in from either side of the box.
+const TASK_TEXT_INSET: f32 = 6.0;
+
+/// The most characters a task label holds: room for any label, and a stop
+/// for a paste of something that is not one.
+const TASK_CAPACITY: usize = 200;
+
 impl Layout {
+    /// The size the task line's text is drawn at: in proportion to the
+    /// line, within reason.
+    #[must_use]
+    pub fn task_text_size(&self) -> f32 {
+        (self.task.h * 0.7).clamp(9.0, 12.0)
+    }
+
     pub fn new(width: f32, height: f32, notification: bool) -> Self {
         let window = Rect::new(0.0, 0.0, width.max(1.0), height.max(1.0));
 
@@ -538,11 +557,26 @@ pub struct PomodoroApp {
 
     pub current_task: String,
     pub task_input_active: bool,
+    /// The task box's caret and selection, laid over `current_task`, which
+    /// stays the truth: reloaded whenever the label has changed under it.
+    task_editor: TextInput,
+    /// The label as it was when the box opened: what Escape puts back.
+    task_before: String,
+    /// What Ctrl+C or Ctrl+X last took from the task box, for Ctrl+V.
+    clipboard: String,
+    /// How wide the mark is round the task box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    pub focus_ring_width: f32,
 
     pub ambient_sound: AmbientSound,
 
     pub log_entries: Vec<LogEntry>,
     pub log_scroll: usize,
+    /// The wheel's unspent fraction of a row of the log. `log_scroll` is a
+    /// whole row, so a touchpad's small turns have to be added up somewhere
+    /// or each rounds to nothing.
+    log_wheel: wheel::Accumulator,
 
     pub daily_stats: Vec<DayStats>,
     /// The day the clock says it is — recomputed on every tick, so a session
@@ -593,9 +627,14 @@ impl PomodoroApp {
             settings,
             current_task: String::new(),
             task_input_active: false,
+            task_editor: TextInput::new(),
+            task_before: String::new(),
+            clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             ambient_sound: AmbientSound::None,
             log_entries: Vec::new(),
             log_scroll: 0,
+            log_wheel: wheel::Accumulator::default(),
             daily_stats: Vec::new(),
             today: day_of(now_ms),
             streak_days: 0,
@@ -970,10 +1009,15 @@ impl PomodoroApp {
         EventResult::Consumed
     }
 
+    /// Open the task box on the label there is, all of it selected: typing
+    /// replaces it, an arrow key keeps it to edit. (It was emptied, so a
+    /// label could only be typed again from nothing.)
     fn begin_task_input(&mut self) {
         self.task_input_active = true;
-        self.current_task.clear();
-        self.status_message = "Type task label, Enter to confirm".into();
+        self.task_before.clone_from(&self.current_task);
+        self.task_editor.set_text(&self.current_task);
+        self.task_editor.select_all();
+        self.status_message = "Type a task label: Enter keeps it, Esc puts the old one back".into();
     }
 
     fn end_task_input(&mut self) {
@@ -1024,44 +1068,45 @@ impl PomodoroApp {
             return self.handle_settings_key(key);
         }
 
+        // The log's keys, as every list reads them (`ListKey`): Home and
+        // End with or without Ctrl, and nothing held with Alt or the Windows
+        // key.
+        if self.screen == Screen::Log
+            && let Some(movement) = ListKey::of(key)
+        {
+            let rows = self.layout().log_rows();
+            match movement {
+                ListKey::Previous => self.scroll_log(-1),
+                ListKey::Next => self.scroll_log(1),
+                ListKey::PageUp => self.scroll_log(page(rows).saturating_neg()),
+                ListKey::PageDown => self.scroll_log(page(rows)),
+                ListKey::First => self.log_scroll = 0,
+                ListKey::Last => self.log_scroll = self.max_log_scroll(),
+            }
+            return EventResult::Consumed;
+        }
+
+        // Every key from here on is a bare key, and one held with Ctrl, Alt
+        // or the Windows key is not this window's: Windows+1 is the
+        // desktop's, not the timer screen, and AltGr -- which arrives as
+        // Ctrl+Alt -- types a letter, not Alt+R's reset.
+        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
+            return EventResult::Ignored;
+        }
+
         // A digit switches screens from anywhere; the tab strip is the same
         // four targets under the pointer.
         if let Some(result) = self.handle_screen_key(key) {
             return result;
         }
 
-        let ctrl = key.modifiers.ctrl;
         match key.key {
             Key::Space => self.activate(Target::StartPause),
-            Key::R if !ctrl => self.activate(Target::Reset),
-            Key::S if !ctrl => self.activate(Target::Skip),
-            Key::T if !ctrl => self.activate(Target::Task),
-            Key::A if !ctrl => self.activate(Target::Sound),
-            Key::N if !ctrl => self.activate(Target::Notification),
-            Key::PageUp if self.screen == Screen::Log => {
-                self.scroll_log(page(self.layout().log_rows()).saturating_neg());
-                EventResult::Consumed
-            }
-            Key::PageDown if self.screen == Screen::Log => {
-                self.scroll_log(page(self.layout().log_rows()));
-                EventResult::Consumed
-            }
-            Key::Up if self.screen == Screen::Log => {
-                self.scroll_log(-1);
-                EventResult::Consumed
-            }
-            Key::Down if self.screen == Screen::Log => {
-                self.scroll_log(1);
-                EventResult::Consumed
-            }
-            Key::Home if self.screen == Screen::Log => {
-                self.log_scroll = 0;
-                EventResult::Consumed
-            }
-            Key::End if self.screen == Screen::Log => {
-                self.log_scroll = self.max_log_scroll();
-                EventResult::Consumed
-            }
+            Key::R => self.activate(Target::Reset),
+            Key::S => self.activate(Target::Skip),
+            Key::T => self.activate(Target::Task),
+            Key::A => self.activate(Target::Sound),
+            Key::N => self.activate(Target::Notification),
             _ => EventResult::Ignored,
         }
     }
@@ -1078,25 +1123,46 @@ impl PomodoroApp {
         Some(self.activate(Target::Tab(index)))
     }
 
+    /// A key while the task box is open: Enter keeps the label, Escape puts
+    /// the old one back, plain; every other key is the editor's
+    /// (`textline::apply_key`) -- the caret keys, Backspace and Delete,
+    /// Ctrl+A, C, X and V, and typing, which knows a command from AltGr:
+    /// Polish `ż` is AltGr+Z, and a command carries its letter as text and
+    /// types none of it. The box had no caret: Backspace from the end was
+    /// its only edit.
     fn handle_task_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Enter | Key::Escape => {
+            Key::Enter if plain => {
                 self.end_task_input();
                 EventResult::Consumed
             }
-            Key::Backspace => {
-                self.current_task.pop();
+            Key::Escape if plain => {
+                self.current_task = std::mem::take(&mut self.task_before);
+                self.end_task_input();
                 EventResult::Consumed
             }
             _ => {
-                // The typed text, not the key name: a label is whatever the
-                // keyboard produced, including characters no `Key` names.
-                // `typed` has already dropped the control characters that
-                // Enter, Tab and Escape produce on most layouts.
-                if key.modifiers.ctrl || !key.types_text() {
+                if self.task_editor.text() != self.current_task {
+                    self.task_editor.set_text(&self.current_task);
+                }
+                let size = self.layout().task_text_size();
+                let edit = textline::apply_key(
+                    &mut self.task_editor,
+                    key,
+                    TASK_CAPACITY,
+                    &self.clipboard,
+                    size,
+                );
+                if let Some(copied) = edit.copied {
+                    self.clipboard = copied;
+                }
+                if !edit.handled {
                     return EventResult::Ignored;
                 }
-                self.current_task.extend(key.typed());
+                if self.task_editor.text() != self.current_task {
+                    self.current_task = self.task_editor.text().to_owned();
+                }
                 EventResult::Consumed
             }
         }
@@ -1189,6 +1255,20 @@ impl PomodoroApp {
     // ── Pointer ────────────────────────────────────────────────────────
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything: a press with any button puts it away and does
+        // nothing else -- it used to start, reset or skip the interval under
+        // it -- and the wheel scrolls nothing it covers.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => match self.target_at(mouse.x, mouse.y) {
                 Some(target) => self.activate(target),
@@ -1201,12 +1281,19 @@ impl PomodoroApp {
                 // `wheel` answers in offset space already — one notch down is
                 // a *larger* offset — so the result is added as it comes.
                 // Negating it here is the trap its own docs warn about.
-                let rows = wheel::rows_f(dy);
-                if rows == 0.0 {
-                    return EventResult::Ignored;
+                //
+                // Through an accumulator, not `rows_f(dy) as isize`: that
+                // truncated a touchpad's fifth of a notch -- 0.6 of a row -- to
+                // nothing, every time, so the log could not be scrolled from
+                // a touchpad at all.
+                let rows = self.log_wheel.rows(dy);
+                let before = self.log_scroll;
+                self.scroll_log(rows);
+                if self.log_scroll == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
                 }
-                self.scroll_log(rows as isize);
-                EventResult::Consumed
             }
             _ => EventResult::Ignored,
         }
@@ -1436,17 +1523,7 @@ impl PomodoroApp {
 
         // Task line, or the input box while a label is being typed.
         if self.task_input_active {
-            fill(frame, layout.task, self.palette.surface1, 5.0);
-            let text = format!("Task: {}_", self.current_task);
-            label(
-                frame,
-                layout.task.x + 6.0,
-                layout.task.y + 2.0,
-                text,
-                (layout.task.h * 0.7).clamp(9.0, 12.0),
-                self.palette.text,
-                layout.task.w - 12.0,
-            );
+            self.draw_task_box(frame, layout);
         } else if self.current_task.is_empty() {
             centred(
                 frame,
@@ -1469,6 +1546,63 @@ impl PomodoroApp {
         frame.hit(Target::Task, layout.task);
 
         self.draw_buttons(frame, layout);
+    }
+
+    /// The task box while a label is being typed: the toolkit's field over
+    /// the task line, with the keyboard's mark -- not under the list of
+    /// keys, which covers it -- and the label with the editor's caret and
+    /// selection, scrolled to keep the caret in view. It was a grey bar
+    /// reading "Task: " and the label with an `_` for a caret. Never lit
+    /// under the pointer: nothing in this window is.
+    fn draw_task_box(&self, frame: &mut Frame, layout: &Layout) {
+        let r = layout.task;
+        let state = self.task_box_state();
+        field::draw(frame, &self.palette, r, state, self.focus_ring_width);
+        let size = layout.task_text_size();
+        let line = text::line_height(size, FontWeightHint::Regular);
+        let editing = self.task_editor.text() == self.current_task;
+        let mut typed = RenderTree::new();
+        textedit::draw(
+            &mut typed,
+            &textedit::SingleLine {
+                text: &self.current_task,
+                cursor: if editing {
+                    self.task_editor.cursor()
+                } else {
+                    guitk::text::TextCursor::from(self.current_task.len())
+                },
+                selection_anchor: if editing {
+                    self.task_editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused: state.focused,
+                x: r.x + TASK_TEXT_INSET,
+                y: r.y + (r.h - line) / 2.0,
+                width: (r.w - 2.0 * TASK_TEXT_INSET).max(0.0),
+                line_height: line,
+                font_size: size,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        for command in typed.commands {
+            frame.push(command);
+        }
+    }
+
+    /// How the task box is drawn: with the keyboard while it is open,
+    /// unless the list of keys is over it.
+    fn task_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.task_input_active && !self.show_help,
+            disabled: false,
+            invalid: false,
+        }
     }
 
     /// The control row, as a table rather than five hand-placed rectangles.
@@ -1872,6 +2006,10 @@ impl App for PomodoroApp {
     /// Adopt the user's colours (§822).
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -2773,6 +2911,116 @@ mod tests {
         assert!(app.status_message.contains("write test"));
     }
 
+    /// **The task box is the toolkit's field**, with the keyboard in the
+    /// theme's mark at the user's width while it is open -- not under the
+    /// list of keys -- and the label drawn with a caret after it, not an `_`
+    /// typed onto it. It was a grey bar reading "Task: " and the label.
+    #[test]
+    fn the_task_box_is_the_toolkits_field() {
+        let mut app = sample();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = app.layout().task;
+        let draws = |app: &PomodoroApp, s: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = render(app);
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            !draws(&app, field::State::default()),
+            "a box with nothing open"
+        );
+        press(&mut app, Key::T);
+        assert!(
+            draws(&app, focused),
+            "the open task box is not the toolkit's field"
+        );
+        typing(&mut app, "read");
+        let cmds = render(&app);
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "read"))
+            .expect("the label is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the label: {other:?}"),
+        };
+        let size = app.layout().task_text_size();
+        let end = rect.x + TASK_TEXT_INSET + text::measure("read", size, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the label at {end}"
+        );
+        assert!(
+            !drawn_text(&cmds).iter().any(|t| t.ends_with('_')),
+            "the caret is still a character"
+        );
+
+        app.show_help = true;
+        assert!(
+            draws(&app, field::State::default()),
+            "the box keeps the keyboard's mark under the list of keys"
+        );
+    }
+
+    /// **The box opens on the label there is, and Escape puts it back.**
+    /// It opened empty, so a label could only be typed again from nothing,
+    /// and Escape kept whatever had been typed so far. Now the label opens
+    /// selected -- typing replaces it, an arrow keeps it to edit -- and
+    /// Escape gives back the one there was.
+    #[test]
+    fn the_task_box_opens_on_the_label_and_escape_puts_it_back() {
+        let mut app = sample();
+        press(&mut app, Key::T);
+        typing(&mut app, "write tests");
+        press(&mut app, Key::Enter);
+        assert_eq!(app.current_task, "write tests");
+
+        press(&mut app, Key::T);
+        assert_eq!(
+            app.current_task, "write tests",
+            "opening the box emptied the label"
+        );
+        typing(&mut app, "read");
+        assert_eq!(
+            app.current_task, "read",
+            "typing did not replace the selected label"
+        );
+        press(&mut app, Key::Escape);
+        assert!(!app.task_input_active);
+        assert_eq!(
+            app.current_task, "write tests",
+            "Escape did not put the label back"
+        );
+
+        press(&mut app, Key::T);
+        press(&mut app, Key::End);
+        typing(&mut app, "!");
+        press(&mut app, Key::Home);
+        typing(&mut app, "> ");
+        assert_eq!(app.current_task, "> write tests!");
+        press(&mut app, Key::Enter);
+        assert_eq!(app.current_task, "> write tests!");
+    }
+
     /// Escape and Enter *produce text* on most layouts, so a field that
     /// appends whatever arrives fills with control characters.
     #[test]
@@ -3077,6 +3325,58 @@ mod tests {
         assert!(app.task_input_active);
     }
 
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press reached the
+    /// button drawn under the list and started the interval the reader could
+    /// not see. The controls are the same press and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = with_log(40);
+        app.screen = Screen::Timer;
+        assert_eq!(app.state, TimerState::Idle);
+
+        press(&mut app, Key::F1);
+        assert!(app.show_help);
+        assert_eq!(
+            probe::click(&mut app, Target::StartPause),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.state,
+            TimerState::Idle,
+            "the press started the timer under the list"
+        );
+
+        press(&mut app, Key::F1);
+        probe::click_with(&mut app, Target::StartPause, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        app.screen = Screen::Log;
+        press(&mut app, Key::F1);
+        handle_event(&mut app, &scroll(-1.0));
+        assert_eq!(
+            app.log_scroll, 0,
+            "the wheel scrolled the log under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        press(&mut app, Key::Escape);
+
+        // The controls.
+        handle_event(&mut app, &scroll(-1.0));
+        assert!(
+            app.log_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.screen = Screen::Timer;
+        probe::click(&mut app, Target::StartPause);
+        assert_eq!(
+            app.state,
+            TimerState::Running,
+            "control: the press starts nothing"
+        );
+    }
+
     #[test]
     fn the_notification_dismisses_under_a_click() {
         let mut app = sample();
@@ -3186,6 +3486,28 @@ mod tests {
         assert_eq!(app.log_scroll, 0, "the wheel ran past the top");
     }
 
+    /// **A touchpad's small turns add up to rows.** Each was truncated to a
+    /// whole row on its own -- a quarter notch is three quarters of a row, and
+    /// `0.75 as isize` is nothing -- so the log could not be scrolled from a
+    /// touchpad at all.
+    #[test]
+    fn a_touchpads_small_turns_add_up_to_rows() {
+        let mut app = with_log(40);
+        assert_eq!(
+            handle_event(&mut app, &scroll(-0.25)),
+            EventResult::Ignored,
+            "three quarters of a row moved a whole one"
+        );
+        assert_eq!(app.log_scroll, 0);
+        for _ in 0..3 {
+            handle_event(&mut app, &scroll(-0.25));
+        }
+        assert_eq!(
+            app.log_scroll, 3,
+            "four quarter notches are one notch, three rows"
+        );
+    }
+
     /// The old clamp was `len - 1`, which let a full table be scrolled into a
     /// nearly empty one with a single row stranded at the top.
     #[test]
@@ -3230,6 +3552,100 @@ mod tests {
         assert_eq!(app.log_scroll, app.max_log_scroll());
         press(&mut app, Key::Home);
         assert_eq!(app.log_scroll, 0);
+    }
+
+    /// **Ctrl+Home and Ctrl+End are the ends of the log too**, as in every
+    /// list (C-Q24); and a key held with Alt or the Windows key moves it
+    /// nowhere.
+    #[test]
+    fn ctrl_home_and_ctrl_end_are_the_ends_of_the_log() {
+        let mut app = with_log(60);
+        assert!(app.max_log_scroll() > 0, "the test needs a log to scroll");
+        probe::key(&mut app, &probe::ctrl(Key::End));
+        assert_eq!(app.log_scroll, app.max_log_scroll());
+        probe::key(&mut app, &probe::ctrl(Key::Home));
+        assert_eq!(app.log_scroll, 0);
+        for modifiers in [Modifiers::alt(), Modifiers::super_key()] {
+            assert_eq!(
+                probe::key(&mut app, &probe::press_with(Key::End, modifiers)),
+                EventResult::Ignored,
+                "{modifiers:?}+End"
+            );
+            assert_eq!(app.log_scroll, 0, "{modifiers:?}+End scrolled");
+        }
+    }
+
+    fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **The task's name takes what AltGr types, and no command's letter.**
+    /// AltGr arrives as Ctrl+Alt -- `ż` is AltGr+Z on a Polish keyboard --
+    /// and was refused with every key held with Ctrl. A command carries its
+    /// letter as text on a real machine (Ctrl+K arrives as `k`, Alt+F as
+    /// `f`), and Alt's and the Windows key's were typed.
+    #[test]
+    fn the_task_name_takes_altgr_letters_and_no_commands_letter() {
+        let mut app = sample();
+        press(&mut app, Key::T);
+        assert!(app.task_input_active);
+        assert_eq!(
+            probe::key(&mut app, &held(Key::Z, ALTGR, "\u{17c}")),
+            EventResult::Consumed
+        );
+        for (key, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            assert_eq!(
+                probe::key(&mut app, &held(key, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?} was typed"
+            );
+        }
+        assert_eq!(app.current_task, "\u{17c}");
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is no bare key.**
+    /// Windows+2 -- the desktop's -- switched to the statistics as 2 does,
+    /// and Alt+T, Alt+A and Windows+T began a task or changed the sound as
+    /// T and A do; AltGr+2 (`ě` on a Czech keyboard) too.
+    #[test]
+    fn a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key() {
+        let mut app = sample();
+        let screen = app.screen;
+        let sound = app.ambient_sound;
+        for modifiers in [
+            Modifiers::ctrl(),
+            ALTGR,
+            Modifiers::alt(),
+            Modifiers::super_key(),
+        ] {
+            for key in [Key::Num2, Key::T, Key::A] {
+                assert_eq!(
+                    probe::key(&mut app, &held(key, modifiers, "")),
+                    EventResult::Ignored,
+                    "{modifiers:?}+{key:?}"
+                );
+            }
+            assert_eq!(app.screen, screen, "{modifiers:?}+2 switched screens");
+            assert!(!app.task_input_active, "{modifiers:?}+T began a task");
+            assert_eq!(app.ambient_sound, sound, "{modifiers:?}+A changed it");
+        }
     }
 
     #[test]

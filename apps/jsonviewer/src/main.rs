@@ -52,14 +52,20 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FileDialog, FilePicker, Picked};
-use guitk::event::{Event, EventResult, KeyEvent, MouseButton, MouseEventKind};
+use guitk::event::{Event, EventResult, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::{Frame, Rect};
+use guitk::palette::Tone;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::textedit;
+use guitk::treeview::{TreeEvent, TreeHit, TreeItem, TreeMetrics, TreeSource, TreeView};
 use guitk::wheel;
 use oswindow::app::{self, Response};
 use pathtext::ShowPath;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -88,10 +94,14 @@ const NORMAL_TEXT: f32 = 14.0;
 const HEADER_TEXT: f32 = 16.0;
 const TITLE_TEXT: f32 = 18.0;
 const TREE_INDENT: f32 = 20.0;
-const TREE_ICON_SIZE: f32 = 14.0;
 /// The find bar's height, and its "Aa" (match case) button's left edge and
 /// width -- read by the drawing and the click alike.
 const SEARCH_BAR_HEIGHT: f32 = 36.0;
+
+/// The find bar's box, in a bar whose top is `bar_y`.
+fn search_box_rect(bar_y: f32) -> Rect {
+    Rect::new(50.0, bar_y + 4.0, 300.0, 28.0)
+}
 const CASE_BUTTON_X: f32 = 500.0;
 const CASE_BUTTON_W: f32 = 28.0;
 
@@ -1009,36 +1019,168 @@ fn resolve_segment<'a>(value: &'a JsonValue, seg: &PathSegment) -> &'a JsonValue
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PathSegment {
     Key(String),
     Index(usize),
 }
 
 // ============================================================================
-// Tree Node (for tree view)
+// The tree view's data: a `guitk::treeview` source over the JSON value
 // ============================================================================
 
-/// A flattened tree node for display in the tree view.
-#[derive(Debug, Clone)]
-struct TreeViewNode {
-    /// Depth level (0 = root).
-    depth: usize,
-    /// Label to display (key name or array index).
-    label: String,
-    /// The value at this node (for leaf display).
-    value_display: String,
-    /// The JSON value type.
-    value_type: ValueType,
-    /// Whether this node can be expanded (has children).
-    expandable: bool,
-    /// Whether this node is currently expanded.
-    expanded: bool,
-    /// Path segments to this node.
-    path: Vec<PathSegment>,
-    /// Number of children (for summary).
-    /// Whether this node matches a search.
-    search_match: bool,
+/// What names a node among its siblings in the tree (`guitk::treeview`).
+///
+/// The tree's top level is one row, the document's root value, so that a
+/// root that is a plain value -- `42` -- still has a row; a [`PathSegment`]
+/// path is this path without its first key ([`json_path`]).
+///
+/// An object member is named by its key *and* which occurrence of that key
+/// it is: JSON allows `{"a": 1, "a": 2}`, the parser keeps both, and the
+/// tree addresses a node by the keys down to it -- two siblings with one key
+/// would be one node to it, the second drawn with the first's children.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum NodeKey {
+    /// The document's root value.
+    Root,
+    /// An object member: its key, and how many earlier members share it.
+    Member(String, usize),
+    /// An array element.
+    Index(usize),
+}
+
+/// The tree's path to the node at JSON path `path`. A key is taken as its
+/// first occurrence, which is what [`resolve_segment`] finds.
+fn tree_path(path: &[PathSegment]) -> Vec<NodeKey> {
+    std::iter::once(NodeKey::Root)
+        .chain(path.iter().map(|segment| match segment {
+            PathSegment::Key(key) => NodeKey::Member(key.clone(), 0),
+            PathSegment::Index(index) => NodeKey::Index(*index),
+        }))
+        .collect()
+}
+
+/// The JSON path a tree path names, or `None` for one not under the root row.
+///
+/// A member's occurrence is dropped: a JSON path names a key, and the edits
+/// and the search that take one find its first occurrence.
+fn json_path(path: &[NodeKey]) -> Option<Vec<PathSegment>> {
+    let (NodeKey::Root, rest) = path.split_first()? else {
+        return None;
+    };
+    rest.iter()
+        .map(|key| match key {
+            NodeKey::Member(name, _) => Some(PathSegment::Key(name.clone())),
+            NodeKey::Index(index) => Some(PathSegment::Index(*index)),
+            NodeKey::Root => None,
+        })
+        .collect()
+}
+
+/// The value the tree path `path` names, telling repeated keys apart.
+fn value_at_node<'a>(root: &'a JsonValue, path: &[NodeKey]) -> Option<&'a JsonValue> {
+    let (NodeKey::Root, rest) = path.split_first()? else {
+        return None;
+    };
+    rest.iter().try_fold(root, |value, key| match (value, key) {
+        (JsonValue::Object(members), NodeKey::Member(name, nth)) => members
+            .iter()
+            .filter(|(key, _)| key == name)
+            .nth(*nth)
+            .map(|(_, child)| child),
+        (JsonValue::Array(items), NodeKey::Index(index)) => items.get(*index),
+        _ => None,
+    })
+}
+
+/// A JSON value as `guitk::treeview` reads a tree, with the search's matches
+/// marked: the document's own value, not a copy of it.
+struct JsonTree<'a> {
+    root: &'a JsonValue,
+    /// The search's results, whose rows are marked.
+    matches: &'a [Vec<PathSegment>],
+}
+
+impl JsonTree<'_> {
+    /// The row for `value`, keyed `key`, at JSON path `path`.
+    fn item(&self, key: NodeKey, path: &[PathSegment], value: &JsonValue) -> TreeItem<NodeKey> {
+        let container = matches!(value, JsonValue::Object(_) | JsonValue::Array(_));
+        let label = match &key {
+            NodeKey::Root => match value {
+                JsonValue::Object(_) => String::from("{root}"),
+                JsonValue::Array(_) => String::from("[root]"),
+                _ => String::from("(value)"),
+            },
+            NodeKey::Member(name, _) => name.clone(),
+            NodeKey::Index(index) => format!("[{index}]"),
+        };
+        let (detail, kind) = match value {
+            JsonValue::Object(members) => {
+                (format!("{{{} keys}}", members.len()), ValueType::Object)
+            }
+            JsonValue::Array(items) => (format!("[{} items]", items.len()), ValueType::Array),
+            leaf => leaf_display(leaf),
+        };
+        let item = if container {
+            TreeItem::branch(key, label)
+        } else {
+            TreeItem::leaf(key, label)
+        };
+        // A match's label is the search's colour, where the old rows were
+        // washed in it: a row's label is what a reader scans for.
+        let label_tone = if self.matches.iter().any(|m| m.as_slice() == path) {
+            Tone::Peach
+        } else if container {
+            Tone::Mauve
+        } else {
+            Tone::Blue
+        };
+        item.with_detail(detail)
+            .with_detail_tone(kind.tone())
+            .with_label_tone(label_tone)
+    }
+}
+
+impl TreeSource for JsonTree<'_> {
+    type Key = NodeKey;
+
+    fn children(&self, parent: &[NodeKey]) -> Option<Vec<TreeItem<NodeKey>>> {
+        if parent.is_empty() {
+            return Some(vec![self.item(NodeKey::Root, &[], self.root)]);
+        }
+        let path = json_path(parent)?;
+        let child_path = |segment: PathSegment| {
+            let mut child = path.clone();
+            child.push(segment);
+            child
+        };
+        Some(match value_at_node(self.root, parent)? {
+            JsonValue::Object(members) => {
+                let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+                members
+                    .iter()
+                    .map(|(name, value)| {
+                        let nth = seen.entry(name.as_str()).or_insert(0);
+                        let key = NodeKey::Member(name.clone(), *nth);
+                        *nth = nth.saturating_add(1);
+                        self.item(key, &child_path(PathSegment::Key(name.clone())), value)
+                    })
+                    .collect()
+            }
+            JsonValue::Array(items) => items
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    self.item(
+                        NodeKey::Index(index),
+                        &child_path(PathSegment::Index(index)),
+                        value,
+                    )
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1052,134 +1194,20 @@ enum ValueType {
 }
 
 impl ValueType {
-    /// The colour a JSON value's type is written in.
-    ///
-    /// Inked per arm rather than around the `match`: `overlay0` is the
-    /// faintest legible mark and is deliberately below the text floor, so
-    /// raising it would erase the distinction it exists to make. Every other
-    /// arm is a dual-use hue drawn as text and asks for the legible version.
-    /// 837, and `gui/appearance/colour-methods.py` for why this method may be
-    /// inked inside at all: every one of its callers draws text.
-    fn color(self, pal: &Palette) -> Color {
+    /// The colour a JSON value's kind is written in, as the tree asks for
+    /// one: by its name in the theme, which the toolkit holds to the text
+    /// floor (`Palette::tone`) -- all but `Faint` for null, the faintest mark
+    /// there is and deliberately below the floor, since raising it would
+    /// erase the distinction it exists to make (837).
+    fn tone(self) -> Tone {
         match self {
-            Self::Null => pal.overlay0,
-            Self::Bool => pal.ink(pal.blue),
-            Self::Number => pal.ink(pal.peach),
-            Self::Str => pal.ink(pal.green),
-            Self::Array => pal.ink(pal.lavender),
-            Self::Object => pal.ink(pal.mauve),
+            Self::Null => Tone::Faint,
+            Self::Bool => Tone::Blue,
+            Self::Number => Tone::Peach,
+            Self::Str => Tone::Green,
+            Self::Array => Tone::Lavender,
+            Self::Object => Tone::Mauve,
         }
-    }
-}
-
-/// Build a flat list of visible tree nodes from a JSON value.
-fn build_tree_nodes(
-    value: &JsonValue,
-    expanded_paths: &[Vec<PathSegment>],
-    search_matches: &[Vec<PathSegment>],
-) -> Vec<TreeViewNode> {
-    let mut nodes = Vec::new();
-    build_tree_recursive(value, 0, &[], expanded_paths, search_matches, &mut nodes);
-    nodes
-}
-
-fn build_tree_recursive(
-    value: &JsonValue,
-    depth: usize,
-    path: &[PathSegment],
-    expanded_paths: &[Vec<PathSegment>],
-    search_matches: &[Vec<PathSegment>],
-    nodes: &mut Vec<TreeViewNode>,
-) {
-    let is_expanded = is_path_expanded(path, expanded_paths);
-    let is_match = search_matches.iter().any(|m| paths_equal(m, path));
-
-    match value {
-        JsonValue::Object(obj) => {
-            nodes.push(TreeViewNode {
-                depth,
-                label: if path.is_empty() {
-                    String::from("{root}")
-                } else {
-                    path_last_label(path)
-                },
-                value_display: format!("{{{} keys}}", obj.len()),
-                value_type: ValueType::Object,
-                expandable: true,
-                expanded: is_expanded,
-                path: path.to_vec(),
-                search_match: is_match,
-            });
-            if is_expanded {
-                for (key, val) in obj {
-                    let mut child_path = path.to_vec();
-                    child_path.push(PathSegment::Key(key.clone()));
-                    build_tree_recursive(
-                        val,
-                        depth + 1,
-                        &child_path,
-                        expanded_paths,
-                        search_matches,
-                        nodes,
-                    );
-                }
-            }
-        }
-        JsonValue::Array(arr) => {
-            nodes.push(TreeViewNode {
-                depth,
-                label: if path.is_empty() {
-                    String::from("[root]")
-                } else {
-                    path_last_label(path)
-                },
-                value_display: format!("[{} items]", arr.len()),
-                value_type: ValueType::Array,
-                expandable: true,
-                expanded: is_expanded,
-                path: path.to_vec(),
-                search_match: is_match,
-            });
-            if is_expanded {
-                for (i, val) in arr.iter().enumerate() {
-                    let mut child_path = path.to_vec();
-                    child_path.push(PathSegment::Index(i));
-                    build_tree_recursive(
-                        val,
-                        depth + 1,
-                        &child_path,
-                        expanded_paths,
-                        search_matches,
-                        nodes,
-                    );
-                }
-            }
-        }
-        other => {
-            let (display, vtype) = leaf_display(other);
-            nodes.push(TreeViewNode {
-                depth,
-                label: if path.is_empty() {
-                    String::from("(value)")
-                } else {
-                    path_last_label(path)
-                },
-                value_display: display,
-                value_type: vtype,
-                expandable: false,
-                expanded: false,
-                path: path.to_vec(),
-                search_match: is_match,
-            });
-        }
-    }
-}
-
-fn path_last_label(path: &[PathSegment]) -> String {
-    match path.last() {
-        Some(PathSegment::Key(k)) => k.clone(),
-        Some(PathSegment::Index(i)) => format!("[{i}]"),
-        None => String::from("(root)"),
     }
 }
 
@@ -1199,25 +1227,6 @@ fn leaf_display(value: &JsonValue) -> (String, ValueType) {
         }
         JsonValue::Array(_) | JsonValue::Object(_) => (String::from("..."), ValueType::Object),
     }
-}
-
-fn is_path_expanded(path: &[PathSegment], expanded: &[Vec<PathSegment>]) -> bool {
-    if path.is_empty() {
-        // Root is always expanded
-        return true;
-    }
-    expanded.iter().any(|e| paths_equal(e, path))
-}
-
-fn paths_equal(a: &[PathSegment], b: &[PathSegment]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b.iter()).all(|(sa, sb)| match (sa, sb) {
-        (PathSegment::Key(ka), PathSegment::Key(kb)) => ka == kb,
-        (PathSegment::Index(ia), PathSegment::Index(ib)) => ia == ib,
-        _ => false,
-    })
 }
 
 // ============================================================================
@@ -1271,24 +1280,24 @@ fn search_recursive(
             } else {
                 s.to_lowercase()
             };
-            if compare.contains(query) && !results.iter().any(|r| paths_equal(r, path)) {
+            if compare.contains(query) && !results.iter().any(|r| r.as_slice() == path) {
                 results.push(path.to_vec());
             }
         }
         JsonValue::Number(n) => {
             let ns = format_number(*n);
-            if ns.contains(query) && !results.iter().any(|r| paths_equal(r, path)) {
+            if ns.contains(query) && !results.iter().any(|r| r.as_slice() == path) {
                 results.push(path.to_vec());
             }
         }
         JsonValue::Bool(b) => {
             let bs = if *b { "true" } else { "false" };
-            if bs.contains(query) && !results.iter().any(|r| paths_equal(r, path)) {
+            if bs.contains(query) && !results.iter().any(|r| r.as_slice() == path) {
                 results.push(path.to_vec());
             }
         }
         JsonValue::Null => {
-            if "null".contains(query) && !results.iter().any(|r| paths_equal(r, path)) {
+            if "null".contains(query) && !results.iter().any(|r| r.as_slice() == path) {
                 results.push(path.to_vec());
             }
         }
@@ -1928,15 +1937,17 @@ struct Document {
     error: Option<ParseError>,
     /// Current view mode.
     view_mode: ViewMode,
-    /// Expanded paths in tree view.
-    expanded_paths: Vec<Vec<PathSegment>>,
+    /// The tree view: which nodes are open, which is selected, how far it is
+    /// scrolled -- each by the node's path, never by row (`guitk::treeview`).
+    ///
+    /// It was three fields of this struct: a list of open paths searched
+    /// linearly on every row, a selection that was a *row number* -- so
+    /// opening a node above it moved it onto a different node -- and a scroll
+    /// in pixels with no end to it.
+    tree: TreeView<NodeKey>,
     /// Counts content changes, so an edit reads as a redraw. See
     /// [`invalidate_caches`](Self::invalidate_caches).
     revision: u64,
-    /// Selected tree node index.
-    selected_node: usize,
-    /// Scroll offset for tree view.
-    tree_scroll: f32,
     /// Scroll offset for raw view.
     raw_scroll: f32,
     /// The text being edited as it is, in the raw view; `None` while the
@@ -1973,10 +1984,8 @@ impl Document {
             parsed: None,
             error: None,
             view_mode: ViewMode::Tree,
-            expanded_paths: Vec::new(),
-            selected_node: 0,
+            tree: Self::new_tree(),
             revision: 0,
-            tree_scroll: 0.0,
             raw_scroll: 0.0,
             source: None,
             indent: IndentStyle::Spaces2,
@@ -1989,6 +1998,35 @@ impl Document {
             diff_results: Vec::new(),
             diff_scroll: 0.0,
         }
+    }
+
+    /// A tree view with the root row open, the way the tree always opened:
+    /// the root's members are what a reader opens a document to see.
+    fn new_tree() -> TreeView<NodeKey> {
+        let mut tree = TreeView::new().with_metrics(TreeMetrics {
+            row_height: LINE_HEIGHT,
+            indent: TREE_INDENT,
+            font_size: NORMAL_TEXT,
+            guides: true,
+        });
+        // Opened before there is a value: a path not drawn yet is taken on
+        // trust, so the root opens whenever it turns out to be a container.
+        let nothing = JsonTree {
+            root: &JsonValue::Null,
+            matches: &[],
+        };
+        tree.set_expanded(&[NodeKey::Root], true, &nothing);
+        tree
+    }
+
+    /// Rebuild the tree's rows from the value, with `matches` marked.
+    ///
+    /// Called whenever the value or the search changes: the tree keeps rows
+    /// as a cache of what is open, and a value changed under it draws the old
+    /// rows until it is told.
+    fn refresh_tree(&mut self, matches: &[Vec<PathSegment>]) {
+        let root = self.parsed.as_ref().unwrap_or(&JsonValue::Null);
+        self.tree.refresh(&JsonTree { root, matches });
     }
 
     fn reparse(&mut self) {
@@ -2012,6 +2050,9 @@ impl Document {
                 self.error = Some(e);
             }
         }
+        // The rows of the new value, without the search's marks, which the
+        // window adds when it next rebuilds them.
+        self.refresh_tree(&[]);
     }
 
     fn get_formatted(&mut self) -> String {
@@ -2154,6 +2195,10 @@ struct App {
     search_visible: bool,
     /// Whether the shortcut list is up.
     show_help: bool,
+    /// How wide the mark is round a box while it has the keyboard: the
+    /// user's focus width (`App::appearance_changed`), the toolkit's until it
+    /// is known.
+    focus_ring_width: f32,
     /// Edit mode flag.
     edit_mode: bool,
     /// Edit buffer for value editing.
@@ -2166,6 +2211,9 @@ struct App {
     /// tests — had no caller at all: Enter loaded a value into the buffer and
     /// nothing ever wrote it back.
     editing_path: Option<Vec<PathSegment>>,
+    /// The tree row the pointer is over, which the tree washes: a move onto
+    /// another is a redraw. See [`Self::tree_mouse`].
+    tree_hover: Option<Vec<NodeKey>>,
     /// What Ctrl+C or Ctrl+X last took from the text being edited, for
     /// Ctrl+V: the program's own, as in the other editors here.
     clipboard: String,
@@ -2416,25 +2464,24 @@ struct Fingerprint {
     /// What it holds is counted by `revision`.
     source: Option<(usize, Option<usize>, usize, f32)>,
     /// Document state: the selection, and the view it is shown in.
-    selected_node: usize,
+    tree_selected: Option<Vec<NodeKey>>,
     view_mode: ViewMode,
     /// Opening or closing the picker is a redraw.
     picker_open: bool,
     /// ...and so is raising or dismissing the shortcut list.
     show_help: bool,
-    /// The *count* of expanded paths, not the paths: one event toggles at most
-    /// one, so the count always moves, and cloning a `Vec<Vec<PathSegment>>`
-    /// every keystroke to learn that costs real time for no more information.
-    /// An operation that expanded one path and collapsed another in a single
-    /// event would defeat it, and the clone is then the honest replacement.
-    expanded: usize,
+    /// How many rows the tree draws: opening or closing a node changes it.
+    /// One event opens or closes one node, so the count always moves.
+    tree_rows: usize,
+    /// The tree row the pointer washes.
+    tree_hover: Option<Vec<NodeKey>>,
     /// Content changes -- a deleted node, a committed value -- which nothing
     /// else here can see: `parsed` and `input` are not fields of this, and a
     /// same-length edit moves no other number.
     revision: u64,
     /// Scrolling moved the view, which the old tuple's comment claimed was
-    /// covered and was not.
-    tree_scroll: f32,
+    /// covered and was not: the tree's first row drawn.
+    tree_first: usize,
     raw_scroll: f32,
     diff_scroll: f32,
     /// Every tab's title and unsaved mark: a save clears the mark and Save As
@@ -2475,9 +2522,11 @@ impl App {
             search_index: 0,
             search_visible: false,
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             edit_mode: false,
             edit_buffer: String::new(),
             editing_path: None,
+            tree_hover: None,
             clipboard: String::new(),
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
@@ -2584,27 +2633,75 @@ impl App {
         }
     }
 
+    /// Show the current match: every node above it opened, the match
+    /// selected and scrolled to.
+    ///
+    /// It opened the ancestors and stopped there, so "next" moved nothing a
+    /// reader could see when the match was below the bottom of the view --
+    /// and the selection stayed where it was.
     fn ensure_search_result_visible(&mut self) {
-        if let Some(result_path) = self.search_results.get(self.search_index) {
-            // Ensure all ancestor paths are expanded
-            if let Some(doc) = self.documents.get_mut(self.active_tab) {
-                for i in 1..result_path.len() {
-                    let ancestor = result_path[..i].to_vec();
-                    if !doc.expanded_paths.iter().any(|p| paths_equal(p, &ancestor)) {
-                        doc.expanded_paths.push(ancestor);
-                    }
-                }
-            }
+        let Some(result) = self.search_results.get(self.search_index) else {
+            return;
+        };
+        let path = tree_path(result);
+        self.with_tree(|tree, source| tree.reveal(&path, source));
+    }
+
+    /// Rebuild the active document's tree from its value and the search.
+    fn refresh_active_tree(&mut self) {
+        let matches = &self.search_results;
+        if let Some(doc) = self.documents.get_mut(self.active_tab) {
+            doc.refresh_tree(matches);
         }
     }
 
-    fn toggle_expand(&mut self, path: &[PathSegment]) {
-        if let Some(doc) = self.documents.get_mut(self.active_tab) {
-            if let Some(idx) = doc.expanded_paths.iter().position(|p| paths_equal(p, path)) {
-                doc.expanded_paths.remove(idx);
-            } else {
-                doc.expanded_paths.push(path.to_vec());
+    /// Run `act` on the active document's tree, with the source it reads:
+    /// the document's value, and the search's matches. `None` when there is
+    /// no document or no value to show.
+    fn with_tree<R>(
+        &mut self,
+        act: impl FnOnce(&mut TreeView<NodeKey>, &JsonTree<'_>) -> R,
+    ) -> Option<R> {
+        let matches = &self.search_results;
+        let doc = self.documents.get_mut(self.active_tab)?;
+        let root = doc.parsed.as_ref()?;
+        Some(act(&mut doc.tree, &JsonTree { root, matches }))
+    }
+
+    /// The tree path of the active document's selected node.
+    fn selected_tree_path(&self) -> Option<Vec<NodeKey>> {
+        self.active_doc()?.tree.selected().map(<[NodeKey]>::to_vec)
+    }
+
+    /// Enter on a node, or a double-click on its row: open or close one with
+    /// children; on a value, in edit mode, start editing it.
+    ///
+    /// The edit starts from the value's JSON, not from the text the tree
+    /// shows for it. That is cut at sixty characters and does not escape a
+    /// quote, so editing a long string and pressing Enter cut it short, and
+    /// editing `"say \"hi\""` lost its last quote.
+    fn activate_node(&mut self, path: &[NodeKey]) {
+        let value = self
+            .active_doc()
+            .and_then(|doc| doc.parsed.as_ref())
+            .and_then(|root| value_at_node(root, path));
+        let Some(value) = value else {
+            return;
+        };
+        // The leaf's JSON, taken now: `value` borrows the document.
+        let leaf = (!matches!(value, JsonValue::Object(_) | JsonValue::Array(_)))
+            .then(|| minify_json(value));
+        match leaf {
+            None => {
+                self.with_tree(|tree, source| tree.toggle_expanded(path, source));
             }
+            Some(text) if self.edit_mode => {
+                if let Some(json) = json_path(path) {
+                    self.edit_buffer = text;
+                    self.editing_path = Some(json);
+                }
+            }
+            Some(_) => {}
         }
     }
 
@@ -2613,7 +2710,7 @@ impl App {
         use guitk::event::Key;
 
         let (key, modifiers) = (ev.key, ev.modifiers);
-        let text = ev.text.chars().next();
+        let text = ev.typed().next();
         let editing_source = self.source_is_open();
 
         // The shortcut list, before anything else -- but **not** while the
@@ -2626,19 +2723,23 @@ impl App {
         // `typed()`, so a search for either found nothing. The keystroke does
         // become text; it just arrives by a road the search did not cover.
         let typing = self.search_visible || self.editing_path.is_some() || editing_source;
-        if !typing {
+        // Every key but a Ctrl chord and what is typed is taken plain: a
+        // chord with Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+5 opened the diff view and
+        // Alt+Enter started editing the text.
+        let plain = textline::is_plain(modifiers);
+        if !typing && plain {
             if key == Key::F1 || (key == Key::Slash && modifiers.shift) {
                 self.show_help = !self.show_help;
                 return;
             }
-            if key == Key::Escape && self.show_help {
-                self.show_help = false;
-                return;
-            }
+            // (While the list is up its own keys never get here:
+            // `handle_event` takes every key the card is up for.)
         }
 
-        // Global shortcuts
-        if modifiers.ctrl {
+        // Global shortcuts: Ctrl chords, not Ctrl held -- AltGr arrives as
+        // Ctrl+Alt and types, and AltGr+E, a Polish `ę`, turned editing on.
+        if textline::is_ctrl_chord(modifiers) {
             match key {
                 Key::O => {
                     self.open_file_dialog();
@@ -2718,8 +2819,20 @@ impl App {
         // An edit in progress takes every printable key, for the same reason
         // the search bar below does: while a value is being typed over, "5" is
         // the character five and not the shortcut for the diff view.
+        // What it types is what a key typed -- AltGr's among it -- and not a
+        // command's letter, which a chord carries: Ctrl+X typed an `x` into
+        // the value. Its own keys are plain.
         if self.editing_path.is_some() {
             match key {
+                _ if textline::types_into_field(ev) => {
+                    if let Some(ch) = text
+                        && self.edit_buffer.len() < MAX_SEARCH_LEN
+                    {
+                        self.edit_buffer.push(ch);
+                    }
+                    return;
+                }
+                _ if !plain => return,
                 Key::Escape => {
                     self.cancel_edit();
                     return;
@@ -2732,20 +2845,23 @@ impl App {
                     self.edit_buffer.pop();
                     return;
                 }
-                _ => {
-                    if let Some(ch) = text
-                        && self.edit_buffer.len() < MAX_SEARCH_LEN
-                    {
-                        self.edit_buffer.push(ch);
-                    }
-                    return;
-                }
+                _ => return,
             }
         }
 
-        // Search bar handling
+        // Search bar handling, as the value's edit.
         if self.search_visible {
             match key {
+                _ if textline::types_into_field(ev) => {
+                    if let Some(ch) = text
+                        && self.search_query.len() < MAX_SEARCH_LEN
+                    {
+                        self.search_query.push(ch);
+                        self.perform_search();
+                    }
+                    return;
+                }
+                _ if !plain => return,
                 Key::Escape => {
                     self.search_visible = false;
                     return;
@@ -2763,16 +2879,11 @@ impl App {
                     self.perform_search();
                     return;
                 }
-                _ => {
-                    if let Some(ch) = text
-                        && self.search_query.len() < MAX_SEARCH_LEN
-                    {
-                        self.search_query.push(ch);
-                        self.perform_search();
-                    }
-                    return;
-                }
+                _ => return,
             }
+        }
+        if !plain {
+            return;
         }
 
         // Enter edits the text itself: in the raw view, and in a tree with
@@ -2795,7 +2906,7 @@ impl App {
         // View mode handling — extract mode first to avoid holding &mut doc across handle_tree_key
         let view_mode = self.documents.get(self.active_tab).map(|d| d.view_mode);
         match view_mode {
-            Some(ViewMode::Tree) => self.handle_tree_key(key, modifiers),
+            Some(ViewMode::Tree) => self.handle_tree_key(ev),
             Some(ViewMode::Raw) => {
                 if let Some(doc) = self.documents.get_mut(self.active_tab) {
                     match key {
@@ -2806,11 +2917,11 @@ impl App {
                         }
                         Key::PageDown => doc.raw_scroll += 10.0 * LINE_HEIGHT,
                         Key::Home => doc.raw_scroll = 0.0,
-                        Key::I if !modifiers.ctrl => {
+                        Key::I => {
                             doc.indent = doc.indent.cycle();
                             doc.invalidate_caches();
                         }
-                        Key::M if !modifiers.ctrl => {
+                        Key::M => {
                             doc.minified = !doc.minified;
                             doc.invalidate_caches();
                         }
@@ -2837,11 +2948,11 @@ impl App {
         // Mode switching with number keys (separate borrow scope)
         if let Some(doc) = self.documents.get_mut(self.active_tab) {
             match key {
-                Key::Num1 if !modifiers.ctrl => doc.view_mode = ViewMode::Tree,
-                Key::Num2 if !modifiers.ctrl => doc.view_mode = ViewMode::Raw,
-                Key::Num3 if !modifiers.ctrl => doc.view_mode = ViewMode::Yaml,
-                Key::Num4 if !modifiers.ctrl => doc.view_mode = ViewMode::Stats,
-                Key::Num5 if !modifiers.ctrl => doc.view_mode = ViewMode::Diff,
+                Key::Num1 => doc.view_mode = ViewMode::Tree,
+                Key::Num2 => doc.view_mode = ViewMode::Raw,
+                Key::Num3 => doc.view_mode = ViewMode::Yaml,
+                Key::Num4 => doc.view_mode = ViewMode::Stats,
+                Key::Num5 => doc.view_mode = ViewMode::Diff,
                 _ => {}
             }
         }
@@ -2851,7 +2962,7 @@ impl App {
         // `render_diff_view` were written and tested, and the *one* thing
         // missing was anything that filled `diff_source`. The view drew
         // "0 difference(s)" for every document, always.
-        if matches!(key, Key::Num5) && !modifiers.ctrl {
+        if matches!(key, Key::Num5) {
             self.prepare_diff_against_next_tab();
         }
     }
@@ -2915,109 +3026,47 @@ impl App {
         self.edit_buffer.clear();
     }
 
-    fn handle_tree_key(&mut self, key: guitk::event::Key, modifiers: guitk::event::Modifiers) {
+    /// A key in the tree view: the tree's own keys -- the arrows, Home and
+    /// End, the page keys, Right to open and step in, Left to close and step
+    /// out, a letter to jump to the next row that starts with it -- and
+    /// this program's: Enter or Space opens a node or, in edit mode, edits a
+    /// value, and Delete deletes one.
+    ///
+    /// Reached with plain keys only (`handle_key`). The tree's keys were
+    /// written here by hand, by row number, and the page keys moved ten rows
+    /// whatever the window's height.
+    fn handle_tree_key(&mut self, ev: &KeyEvent) {
         use guitk::event::Key;
 
-        let doc = match self.documents.get_mut(self.active_tab) {
-            Some(d) => d,
-            None => return,
-        };
-
-        let nodes = build_tree_nodes(
-            doc.parsed.as_ref().unwrap_or(&JsonValue::Null),
-            &doc.expanded_paths,
-            &self.search_results,
-        );
-
-        let _ = modifiers;
-
-        match key {
-            Key::Up if doc.selected_node > 0 => {
-                doc.selected_node -= 1;
-            }
-            Key::Down if doc.selected_node + 1 < nodes.len() => {
-                doc.selected_node += 1;
-            }
-            Key::Left => {
-                // Collapse current node or go to parent
-                if let Some(node) = nodes.get(doc.selected_node) {
-                    if node.expandable && node.expanded {
-                        let path = node.path.clone();
-                        self.toggle_expand(&path);
-                    } else if !node.path.is_empty() {
-                        // Go to parent
-                        let parent_path = &node.path[..node.path.len() - 1];
-                        if let Some(idx) =
-                            nodes.iter().position(|n| paths_equal(&n.path, parent_path))
-                            && let Some(d) = self.documents.get_mut(self.active_tab)
-                        {
-                            d.selected_node = idx;
-                        }
-                    }
-                }
-            }
-            Key::Right => {
-                // Expand current node or go to first child
-                if let Some(node) = nodes.get(doc.selected_node) {
-                    if node.expandable && !node.expanded {
-                        let path = node.path.clone();
-                        self.toggle_expand(&path);
-                    } else if node.expandable
-                        && node.expanded
-                        && doc.selected_node + 1 < nodes.len()
-                    {
-                        doc.selected_node += 1;
-                    }
-                }
-            }
+        match ev.key {
             Key::Enter | Key::Space => {
                 // A commit first: with an edit in progress, Enter means "keep
                 // what I typed", not "start again".
                 if self.editing_path.is_some() {
                     self.commit_edit();
-                } else if let Some(node) = nodes.get(doc.selected_node) {
-                    if node.expandable {
-                        let path = node.path.clone();
-                        self.toggle_expand(&path);
-                    } else if self.edit_mode {
-                        // Start editing this value.
-                        self.edit_buffer = node.value_display.clone();
-                        self.editing_path = Some(node.path.clone());
+                } else if let Some(path) = self.selected_tree_path() {
+                    self.activate_node(&path);
+                }
+            }
+            Key::Delete if self.edit_mode => {
+                let Some(path) = self.selected_tree_path().as_deref().and_then(json_path) else {
+                    return;
+                };
+                if let Some(d) = self.documents.get_mut(self.active_tab) {
+                    let deleted = d
+                        .parsed
+                        .as_mut()
+                        .is_some_and(|value| delete_at_path(value, &path));
+                    if deleted {
+                        d.dirty = true;
+                        d.invalidate_caches();
+                        d.regenerate_input();
                     }
                 }
             }
-            Key::Delete => {
-                if self.edit_mode
-                    && let Some(node) = nodes.get(doc.selected_node)
-                {
-                    let path = node.path.clone();
-                    if let Some(d) = self.documents.get_mut(self.active_tab) {
-                        // Perform deletion in a separate scope to release borrow on d.parsed
-                        let deleted = d
-                            .parsed
-                            .as_mut()
-                            .is_some_and(|value| delete_at_path(value, &path));
-                        if deleted {
-                            d.dirty = true;
-                            d.invalidate_caches();
-                            d.regenerate_input();
-                        }
-                    }
-                }
+            _ => {
+                self.with_tree(|tree, source| tree.handle_key(ev, source));
             }
-            Key::PageUp => {
-                doc.selected_node = doc.selected_node.saturating_sub(10);
-            }
-            Key::PageDown => {
-                doc.selected_node = (doc.selected_node + 10).min(nodes.len().saturating_sub(1));
-            }
-            Key::Home => {
-                doc.selected_node = 0;
-            }
-            Key::End if !nodes.is_empty() => {
-                doc.selected_node = nodes.len() - 1;
-            }
-            _ => {}
         }
     }
 
@@ -3093,12 +3142,15 @@ impl App {
         let Some(source) = doc.source.as_mut() else {
             return;
         };
-        if ev.key == Key::Escape {
+        // The editor's own keys are plain: Alt+Escape closed it. The rest go
+        // to the field, which knows a command from typing.
+        let plain = textline::is_plain(ev.modifiers);
+        if ev.key == Key::Escape && plain {
             doc.source = None;
             return;
         }
         let before = source.area.clone();
-        let edited = if ev.key == Key::Tab && !ev.modifiers.ctrl && !ev.modifiers.shift {
+        let edited = if ev.key == Key::Tab && plain && !ev.modifiers.shift {
             let step = IndentStyle::detect(source.area.text())
                 .unwrap_or(IndentStyle::Spaces2)
                 .indent_str();
@@ -3223,6 +3275,12 @@ impl App {
         }
 
         // The raw view: a press edits the text itself, from where it lands.
+        //
+        // The tree's own clicks reach it before this (`tree_takes`): by the
+        // path of the row under the pointer, where this worked out a row
+        // number from the scroll and opened whatever node had it -- a single
+        // click on a row opened it, so a row could not be selected without
+        // opening it.
         if y >= content_y
             && x < self.width - SIDEBAR_WIDTH
             && button == MouseButton::Left
@@ -3231,30 +3289,6 @@ impl App {
                 .is_some_and(|d| d.view_mode == ViewMode::Raw)
         {
             self.source_click(x, y - content_y);
-            return;
-        }
-
-        // Tree view clicks
-        if y >= content_y
-            && x < self.width - SIDEBAR_WIDTH
-            && let Some(doc) = self.documents.get_mut(self.active_tab)
-            && doc.view_mode == ViewMode::Tree
-        {
-            let row = ((y - content_y + doc.tree_scroll) / LINE_HEIGHT) as usize;
-            let nodes = build_tree_nodes(
-                doc.parsed.as_ref().unwrap_or(&JsonValue::Null),
-                &doc.expanded_paths,
-                &self.search_results,
-            );
-            if row < nodes.len() {
-                doc.selected_node = row;
-                if let Some(node) = nodes.get(row)
-                    && node.expandable
-                {
-                    let path = node.path.clone();
-                    self.toggle_expand(&path);
-                }
-            }
         }
     }
 
@@ -3332,9 +3366,9 @@ impl App {
         if let Some(doc) = self.documents.get_mut(self.active_tab) {
             let step = wheel::pixels(dy, LINE_HEIGHT);
             match doc.view_mode {
-                ViewMode::Tree => {
-                    doc.tree_scroll = (doc.tree_scroll + step).max(0.0);
-                }
+                // The tree takes the wheel over itself (`tree_takes`), and
+                // the wheel moves what is under the pointer.
+                ViewMode::Tree => {}
                 ViewMode::Raw if doc.source.is_some() => {
                     if let Some(source) = doc.source.as_mut() {
                         let rows = source.wheel.rows(dy);
@@ -3690,6 +3724,11 @@ impl App {
     }
 
     fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The tree acts on rows it caches, so they are rebuilt before any
+        // event reaches it -- a value or a search changed since need not
+        // remember to -- and placed where the window now draws them.
+        self.place_trees();
+        self.refresh_active_tree();
         // The close question has every key and click while it is up: a key
         // that reached the document under it would be a change made while
         // being asked whether to keep the changes. Each one it takes is a
@@ -3716,6 +3755,37 @@ impl App {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own; a press, with any button,
+        // puts it away rather than reaching the tab or node drawn under it;
+        // and the wheel scrolls nothing it covers. It was modal for none of
+        // it -- Ctrl+N and Ctrl+O opened a tab or a dialog under it, a click
+        // chose a tab or a node, and the wheel scrolled the tree. A move and a
+        // release still go through.
+        if self.show_help {
+            match event {
+                Event::Key(key_ev) if key_ev.pressed => {
+                    use guitk::event::Key;
+                    let closes = textline::is_plain(key_ev.modifiers)
+                        && (matches!(key_ev.key, Key::F1 | Key::Escape)
+                            || key_ev.key == Key::Slash && key_ev.modifiers.shift);
+                    if closes {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
+                Event::Mouse(mouse_ev) => match mouse_ev.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         match event {
             Event::Key(key_ev) => {
                 if !key_ev.pressed {
@@ -3737,14 +3807,18 @@ impl App {
                 // The click and scroll handlers below were in the same position
                 // as `handle_key`: written, and called by nothing.
                 let before = self.state_fingerprint();
-                match mouse_ev.kind {
-                    MouseEventKind::Press(button) => {
-                        self.handle_mouse(mouse_ev.x, mouse_ev.y, button);
+                if self.tree_takes(mouse_ev) {
+                    self.tree_mouse(mouse_ev);
+                } else {
+                    match mouse_ev.kind {
+                        MouseEventKind::Press(button) => {
+                            self.handle_mouse(mouse_ev.x, mouse_ev.y, button);
+                        }
+                        MouseEventKind::Scroll { dy, .. } => {
+                            self.handle_scroll(mouse_ev.x, mouse_ev.y, dy);
+                        }
+                        _ => return EventResult::Ignored,
                     }
-                    MouseEventKind::Scroll { dy, .. } => {
-                        self.handle_scroll(mouse_ev.x, mouse_ev.y, dy);
-                    }
-                    _ => return EventResult::Ignored,
                 }
                 if self.state_fingerprint() == before {
                     EventResult::Ignored
@@ -3768,6 +3842,82 @@ impl App {
         }
     }
 
+    /// Where the tree is drawn: the content area, below the find bar when
+    /// the bar is up. It was drawn under the bar, so the row a search had
+    /// just found could be the one the bar covered.
+    fn tree_bounds(&self) -> Rect {
+        let mut top = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+        if self.search_visible {
+            top += SEARCH_BAR_HEIGHT;
+        }
+        Rect::new(
+            0.0,
+            top,
+            (self.width - SIDEBAR_WIDTH).max(0.0),
+            (self.height - top - STATUS_BAR_HEIGHT).max(0.0),
+        )
+    }
+
+    /// Give every document's tree the place it is drawn in, before it is
+    /// drawn or clicked: the window's size and the find bar move it.
+    fn place_trees(&mut self) {
+        let bounds = self.tree_bounds();
+        for doc in &mut self.documents {
+            doc.tree.set_bounds(bounds);
+        }
+    }
+
+    /// Whether the tree takes this pointer event: one over it, in the tree
+    /// view of a document with a value -- and every move and release in that
+    /// view, so a scrollbar drag goes on outside the tree, and the row the
+    /// pointer has left stops looking hovered.
+    fn tree_takes(&self, event: &MouseEvent) -> bool {
+        let shown = self
+            .active_doc()
+            .is_some_and(|d| d.view_mode == ViewMode::Tree && d.parsed.is_some());
+        shown
+            && (matches!(
+                event.kind,
+                MouseEventKind::Move | MouseEventKind::Release(_) | MouseEventKind::Leave
+            ) || self.tree_bounds().contains(event.x, event.y))
+    }
+
+    /// A pointer event for the tree.
+    ///
+    /// Hit-tested here against the tree's own frame, as
+    /// `TreeView::handle_mouse` does, to learn which row the pointer is over:
+    /// the tree washes that row, and a move onto another one is a redraw the
+    /// fingerprint has to see. A double-click on a value, in edit mode,
+    /// starts editing it, as Enter does.
+    fn tree_mouse(&mut self, event: &MouseEvent) {
+        let palette = self.palette;
+        let events = self.with_tree(|tree, source| {
+            let bounds = tree.bounds();
+            let mut frame = Frame::new(bounds.right(), bounds.bottom());
+            tree.draw(&palette, &mut frame, |hit| hit);
+            let hit = frame.hit_test(event.x, event.y);
+            let hover = match &hit {
+                Some(TreeHit::Row(path) | TreeHit::Disclosure(path) | TreeHit::Check(path)) => {
+                    Some(path.clone())
+                }
+                _ => None,
+            };
+            (tree.handle_hit(hit, event, source), hover)
+        });
+        let Some((events, hover)) = events else {
+            return;
+        };
+        self.tree_hover = match event.kind {
+            MouseEventKind::Leave => None,
+            _ => hover,
+        };
+        for happened in events {
+            if let TreeEvent::Activated(path) = happened {
+                self.activate_node(&path);
+            }
+        }
+    }
+
     /// A cheap summary of everything a keystroke can change.
     ///
     /// A tuple of small copies rather than a hash: a hash could collide and
@@ -3785,13 +3935,14 @@ impl App {
             source: doc
                 .and_then(|d| d.source.as_ref())
                 .map(|s| (s.area.caret(), s.area.anchor(), s.scroll, s.hscroll)),
-            selected_node: doc.map_or(0, |d| d.selected_node),
+            tree_selected: doc.and_then(|d| d.tree.selected().map(<[NodeKey]>::to_vec)),
             view_mode: doc.map_or(ViewMode::Tree, |d| d.view_mode),
             picker_open: self.picker.is_open(),
             show_help: self.show_help,
-            expanded: doc.map_or(0, |d| d.expanded_paths.len()),
+            tree_rows: doc.map_or(0, |d| d.tree.rows().len()),
+            tree_hover: self.tree_hover.clone(),
             revision: doc.map_or(0, |d| d.revision),
-            tree_scroll: doc.map_or(0.0, |d| d.tree_scroll),
+            tree_first: doc.map_or(0, |d| d.tree.first_visible()),
             raw_scroll: doc.map_or(0.0, |d| d.raw_scroll),
             diff_scroll: doc.map_or(0.0, |d| d.diff_scroll),
             tabs: self
@@ -3809,6 +3960,10 @@ impl App {
     /// method silently wins method lookup over `oswindow::app::App::render`, so
     /// an app that keeps the name draws nothing and reports no error.
     fn render_commands(&mut self) -> Vec<RenderCommand> {
+        // The tree is drawn from rows it caches: placed and rebuilt first,
+        // so a value or a search changed since the last event draws.
+        self.place_trees();
+        self.refresh_active_tree();
         let mut cmds = Vec::new();
 
         // Background
@@ -4125,141 +4280,136 @@ impl App {
             return;
         }
 
-        let value = match doc.parsed {
-            Some(ref v) => v,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: PADDING,
-                    y: top + 30.0,
-                    text: String::from(
-                        "Nothing here yet -- press Ctrl+O to open a JSON file, or Enter to type one",
-                    ),
-                    color: self.palette.subtext0,
-                    font_size: NORMAL_TEXT,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - PADDING * 2.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                return;
-            }
-        };
-
-        let nodes = build_tree_nodes(value, &doc.expanded_paths, &self.search_results);
-
-        let scroll = doc.tree_scroll;
-        let first_visible = (scroll / LINE_HEIGHT) as usize;
-        let visible_count = (height / LINE_HEIGHT) as usize + 2;
-        let last_visible = (first_visible + visible_count).min(nodes.len());
-
-        for i in first_visible..last_visible {
-            if let Some(node) = nodes.get(i) {
-                let row_y = top + (i as f32 * LINE_HEIGHT) - scroll;
-                let indent_x = PADDING + node.depth as f32 * TREE_INDENT;
-
-                // Selection highlight
-                if i == doc.selected_node {
-                    self.palette.push_surface(
-                        cmds,
-                        0.0,
-                        row_y,
-                        width,
-                        LINE_HEIGHT,
-                        0.0,
-                        Surface::Selected,
-                    );
-                }
-
-                // Search match highlight
-                if node.search_match {
-                    cmds.push(RenderCommand::FillRect {
-                        x: 0.0,
-                        y: row_y,
-                        width,
-                        height: LINE_HEIGHT,
-                        color: Color::rgba(250, 179, 135, 30),
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
-
-                // Expand/collapse indicator
-                if node.expandable {
-                    let arrow = if node.expanded { "v" } else { ">" };
-                    cmds.push(RenderCommand::Text {
-                        x: indent_x - TREE_ICON_SIZE,
-                        y: row_y + 14.0,
-                        text: arrow.to_string(),
-                        color: self.palette.subtext0,
-                        font_size: SMALL_TEXT,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    });
-                }
-
-                // Label (key name or index)
-                let label_width = text::measure(&node.label, NORMAL_TEXT, FontWeightHint::Bold);
-                cmds.push(RenderCommand::Text {
-                    x: indent_x,
-                    y: row_y + 14.0,
-                    text: node.label.clone(),
-                    color: if node.expandable {
-                        self.palette.ink(self.palette.mauve)
-                    } else {
-                        self.palette.ink(self.palette.blue)
-                    },
-                    font_size: NORMAL_TEXT,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(width * 0.4),
-                    overflow: TextOverflow::Ellipsis,
-                });
-
-                // Colon separator
-                let colon_x = indent_x + label_width + 4.0;
-                cmds.push(RenderCommand::Text {
-                    x: colon_x,
-                    y: row_y + 14.0,
-                    text: String::from(":"),
-                    color: self.palette.subtext0,
-                    font_size: NORMAL_TEXT,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-
-                // Value
-                let value_x = colon_x + text::width(":", NORMAL_TEXT) + 4.0;
-                cmds.push(RenderCommand::Text {
-                    x: value_x,
-                    y: row_y + 14.0,
-                    text: node.value_display.clone(),
-                    color: node.value_type.color(&self.palette),
-                    font_size: NORMAL_TEXT,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - value_x - PADDING),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
-        // Show total node count at bottom
-        if nodes.len() > visible_count {
-            let info = format!(
-                "{} nodes total, showing {}-{}",
-                nodes.len(),
-                first_visible + 1,
-                last_visible
-            );
+        if doc.parsed.is_none() {
             cmds.push(RenderCommand::Text {
                 x: PADDING,
-                y: top + height - 6.0,
-                text: info,
+                y: top + 30.0,
+                text: String::from(
+                    "Nothing here yet -- press Ctrl+O to open a JSON file, or Enter to type one",
+                ),
                 color: self.palette.subtext0,
-                font_size: SMALL_TEXT,
+                font_size: NORMAL_TEXT,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+        let _ = height;
+        cmds.extend(doc.tree.render(&self.palette));
+        self.render_tree_edit(cmds, doc);
+    }
+
+    /// The value being edited, over its row: what has been typed, and where
+    /// the next character goes. It was drawn nowhere, so a value was typed
+    /// over blind.
+    fn render_tree_edit(&self, cmds: &mut Vec<RenderCommand>, doc: &Document) {
+        let Some(editor) = self.tree_edit_rect(doc) else {
+            return;
+        };
+        // The toolkit's field, as the find bar's is, with the keyboard
+        // unless the key list is over it. Its text was drawn at 70% of the
+        // row's height, so the value hung out of the bottom of its box into
+        // the row below.
+        let state = field::State {
+            hovered: false,
+            focused: !self.show_help,
+            disabled: false,
+            invalid: false,
+        };
+        field::draw(cmds, &self.palette, editor, state, self.focus_ring_width);
+        self.render_box_text(cmds, editor, &self.edit_buffer, "", state.focused);
+    }
+
+    /// The box the value being edited is typed into, over its row: `None`
+    /// when no value is being edited or its row is scrolled out of view.
+    fn tree_edit_rect(&self, doc: &Document) -> Option<Rect> {
+        let editing = self.editing_path.as_ref()?;
+        let tree = &doc.tree;
+        let index = tree.index_of(&tree_path(editing))?;
+        if !tree.visible_range().contains(&index) {
+            return None;
+        }
+        let bounds = tree.bounds();
+        let row_height = tree.metrics().row_height;
+        let offset = u32::try_from(index.saturating_sub(tree.first_visible())).unwrap_or(u32::MAX);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a row on screen is a few dozen from the first"
+        )]
+        let y = bounds.y + offset as f32 * row_height;
+        // Over the right of the row, where the tree draws the value.
+        let x = bounds.x + bounds.w * 0.45;
+        let w = (bounds.right() - x - PADDING).max(0.0);
+        Some(Rect::new(x, y + 1.0, w, (row_height - 2.0).max(0.0)))
+    }
+
+    /// How the find bar's box is drawn now: with the keyboard while the bar
+    /// is up and nothing else takes the keys -- a value or the source being
+    /// edited does, and so does the key list -- and red while the query
+    /// finds nothing. Never lit under the pointer: it has no press of its
+    /// own.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.search_visible
+                && !self.show_help
+                && self.editing_path.is_none()
+                && !self.source_is_open(),
+            disabled: false,
+            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),
+        }
+    }
+
+    /// A box's typing, centred on its line, with the caret after it while
+    /// the box has the keyboard -- scrolled so the end being typed stays in
+    /// view rather than cut off with an ellipsis -- or, empty, what it is
+    /// for.
+    fn render_box_text(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        r: Rect,
+        typed: &str,
+        placeholder: &str,
+        focused: bool,
+    ) {
+        let line = text::line_height(NORMAL_TEXT, FontWeightHint::Regular);
+        let (x, y, w) = (r.x + 6.0, r.y + (r.h - line) / 2.0, (r.w - 12.0).max(0.0));
+        if typed.is_empty() && !placeholder.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x,
+                y,
+                text: placeholder.to_string(),
+                color: self.palette.subtext0,
+                font_size: NORMAL_TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: typed,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(typed.len()),
+                selection_anchor: None,
+                focused,
+                x,
+                y,
+                width: w,
+                line_height: line,
+                font_size: NORMAL_TEXT,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
     }
 
     fn render_raw_view(
@@ -5010,9 +5160,8 @@ impl App {
         section_y += 20.0;
 
         if let Some(ref value) = doc.parsed {
-            let nodes = build_tree_nodes(value, &doc.expanded_paths, &self.search_results);
-            if let Some(node) = nodes.get(doc.selected_node) {
-                let json_path = build_json_path(value, &node.path);
+            if let Some(selected) = doc.tree.selected().and_then(json_path) {
+                let json_path = build_json_path(value, &selected);
                 cmds.push(RenderCommand::FillRect {
                     x: sidebar_x + PADDING,
                     y: section_y - 4.0,
@@ -5377,27 +5526,17 @@ impl App {
             overflow: TextOverflow::Clip,
         });
 
-        // Search input
-        self.palette
-            .push_surface(cmds, 50.0, bar_y + 4.0, 300.0, 28.0, 4.0, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: 58.0,
-            y: bar_y + 18.0,
-            text: if self.search_query.is_empty() {
-                String::from("Search keys and values...")
-            } else {
-                self.search_query.clone()
-            },
-            color: if self.search_query.is_empty() {
-                self.palette.subtext0
-            } else {
-                self.palette.text
-            },
-            font_size: NORMAL_TEXT,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(284.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Search input: the toolkit's field, holding the query with its caret.
+        let search = search_box_rect(bar_y);
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, search, state, self.focus_ring_width);
+        self.render_box_text(
+            cmds,
+            search,
+            &self.search_query,
+            "Search keys and values...",
+            state.focused,
+        );
 
         // Result count
         if !self.search_results.is_empty() {
@@ -5622,6 +5761,10 @@ const SAMPLE_JSON: &str = r#"{
 impl oswindow::app::App for App {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -6231,6 +6374,98 @@ mod tests {
         );
     }
 
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts, and a
+    /// press puts it away and does nothing else. It was modal for none of
+    /// it. The controls at the end are the same press and chord with the
+    /// card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = two_tabs();
+        let first_width = app.documents.first().map(tab_width).unwrap_or(0.0);
+        let tab = |button| {
+            Event::Mouse(MouseEvent {
+                x: PADDING + first_width + 4.0 + 2.0,
+                y: TOOLBAR_HEIGHT + 2.0,
+                kind: MouseEventKind::Press(button),
+            })
+        };
+        let tabs = app.documents.len();
+
+        let _ = app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        let _ = app.handle_event(&press_ctrl(Key::N));
+        assert_eq!(
+            app.documents.len(),
+            tabs,
+            "Ctrl+N opened a tab under the card"
+        );
+        assert!(app.show_help, "a key that is not the card's put it away");
+
+        assert_eq!(
+            app.handle_event(&tab(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.active_tab, 0,
+            "the press went through the card to a tab"
+        );
+
+        // Any button, and the card's own keys.
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&tab(MouseButton::Right));
+        assert!(!app.show_help, "a right-button press left the card up");
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::shift(),
+            text: String::from("?"),
+        }));
+        assert!(!app.show_help, "? did not put the card away");
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&press(Key::Escape));
+        assert!(!app.show_help, "Escape did not put the card away");
+
+        let _ = app.handle_event(&tab(MouseButton::Left));
+        assert_eq!(
+            app.active_tab, 1,
+            "control: the press does nothing with the card down"
+        );
+        let _ = app.handle_event(&press_ctrl(Key::N));
+        assert_eq!(
+            app.documents.len(),
+            tabs + 1,
+            "control: Ctrl+N does nothing"
+        );
+    }
+
+    /// **The wheel scrolls no tree under the card**; the control is the
+    /// same turn with the card down.
+    #[test]
+    fn the_wheel_scrolls_no_tree_under_the_card() {
+        let mut app = holding(&format!("[{}]", vec!["1"; 100].join(",\n")));
+        let notch = Event::Mouse(MouseEvent {
+            x: 100.0,
+            y: 300.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&notch);
+        assert_eq!(
+            app.documents[0].tree.first_visible(),
+            0,
+            "the wheel scrolled the tree under the card"
+        );
+        let _ = app.handle_event(&press(Key::F1));
+        let _ = app.handle_event(&notch);
+        assert!(
+            app.documents[0].tree.first_visible() >= 1,
+            "control: the wheel scrolls nothing at all"
+        );
+    }
+
     #[test]
     fn a_resize_is_taken_but_is_not_itself_a_redraw() {
         let mut app = two_tabs();
@@ -6699,10 +6934,12 @@ mod tests {
             "Aa did not turn matching case on"
         );
 
-        // Row 1 of the tree lies under the bar here.
+        // Without the bar, the tree's second row would be here.
+        let selected = app.documents[0].tree.selected().map(<[NodeKey]>::to_vec);
         click(&mut app, 200.0, bar_y + LINE_HEIGHT + 4.0);
         assert_eq!(
-            app.documents[0].selected_node, 0,
+            app.documents[0].tree.selected().map(<[NodeKey]>::to_vec),
+            selected,
             "a click on the find bar went through to the tree"
         );
 
@@ -7443,30 +7680,307 @@ mod tests {
 
     // --- Tree view tests ---
 
+    /// The tree's rows for `json`, its root open as a document opens.
+    fn tree_rows(json: &str) -> (JsonValue, TreeView<NodeKey>) {
+        let value = parse_json(json).unwrap();
+        let mut tree = Document::new_tree();
+        tree.refresh(&JsonTree {
+            root: &value,
+            matches: &[],
+        });
+        (value, tree)
+    }
+
     #[test]
     fn tree_build_simple_object() {
-        let v = parse_json("{\"a\": 1}").unwrap();
-        let nodes = build_tree_nodes(&v, &[], &[]);
-        assert!(!nodes.is_empty());
-        assert!(nodes[0].expandable);
+        let (_, tree) = tree_rows("{\"a\": 1}");
+        let root = &tree.rows()[0];
+        assert_eq!(root.label, "{root}");
+        assert!(root.expandable && root.expanded, "the root opens by itself");
+        assert_eq!(tree.rows()[1].label, "a");
+        assert_eq!(tree.rows()[1].detail.as_deref(), Some("1"));
     }
 
     #[test]
     fn tree_expand_shows_children() {
-        let v = parse_json("{\"a\": 1, \"b\": 2}").unwrap();
-        let expanded = vec![Vec::new()]; // root expanded
-        let nodes = build_tree_nodes(&v, &expanded, &[]);
-        // Root + a + b = 3 nodes
-        assert_eq!(nodes.len(), 3);
+        // Root + a + b = 3 rows.
+        let (_, tree) = tree_rows("{\"a\": 1, \"b\": 2}");
+        assert_eq!(tree.rows().len(), 3);
     }
 
     #[test]
     fn tree_collapse_hides_children() {
-        let v = parse_json("{\"a\": 1, \"b\": 2}").unwrap();
-        let nodes = build_tree_nodes(&v, &[], &[]);
-        // Only root (collapsed, but root is always expanded -- hmm)
-        // Actually root is always expanded, so we get 3
-        assert!(!nodes.is_empty());
+        let (value, mut tree) = tree_rows("{\"a\": 1, \"b\": 2}");
+        let source = JsonTree {
+            root: &value,
+            matches: &[],
+        };
+        tree.set_expanded(&[NodeKey::Root], false, &source);
+        assert_eq!(
+            tree.rows().len(),
+            1,
+            "a closed root still shows its members"
+        );
+    }
+
+    /// **A key repeated in an object is two rows, each with its own value
+    /// and children.** JSON allows `{"a": 1, "a": {...}}`; the tree names a
+    /// node by the keys down to it, and two siblings with one key would be
+    /// one node to it -- the second drawn with the first's children.
+    #[test]
+    fn a_repeated_key_is_two_nodes() {
+        let (value, mut tree) = tree_rows("{\"a\": 1, \"a\": {\"inner\": true}}");
+        let labels: Vec<_> = tree.rows().iter().map(|r| r.label.clone()).collect();
+        assert_eq!(labels, ["{root}", "a", "a"]);
+        assert!(!tree.rows()[1].expandable && tree.rows()[2].expandable);
+        let second = [NodeKey::Root, NodeKey::Member(String::from("a"), 1)];
+        let source = JsonTree {
+            root: &value,
+            matches: &[],
+        };
+        tree.set_expanded(&second, true, &source);
+        assert_eq!(
+            tree.rows().last().map(|r| r.label.as_str()),
+            Some("inner"),
+            "the second `a` opened onto the first one's children"
+        );
+    }
+
+    /// Path of a member of the root object, as the tree names it.
+    fn member(names: &[&str]) -> Vec<NodeKey> {
+        std::iter::once(NodeKey::Root)
+            .chain(names.iter().map(|n| NodeKey::Member((*n).to_owned(), 0)))
+            .collect()
+    }
+
+    /// The middle of tree row `index` as drawn, after a frame placed it.
+    fn row_point(app: &App, index: usize) -> (f32, f32) {
+        let tree = &app.documents[app.active_tab].tree;
+        let height = tree.metrics().row_height;
+        let offset = u16::try_from(index - tree.first_visible()).unwrap();
+        let bounds = tree.bounds();
+        (
+            bounds.x + bounds.w / 3.0,
+            bounds.y + f32::from(offset) * height + height / 2.0,
+        )
+    }
+
+    fn selected(app: &App) -> Option<Vec<NodeKey>> {
+        app.documents[app.active_tab]
+            .tree
+            .selected()
+            .map(<[NodeKey]>::to_vec)
+    }
+
+    fn mouse_at(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// **The selection is a node, not a row number**: opening a node above
+    /// the selected one moved the selection onto whatever row took the
+    /// number, so Delete deleted a value the user had not chosen.
+    #[test]
+    fn opening_a_node_above_the_selection_keeps_it() {
+        let mut app = holding(r#"{"a": {"x": 1, "y": 2}, "b": 3}"#);
+        app.render_commands();
+        for _ in 0..3 {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(
+            selected(&app),
+            Some(member(&["b"])),
+            "control: Down x3 is b"
+        );
+        app.with_tree(|tree, source| tree.set_expanded(&member(&["a"]), true, source));
+        assert_eq!(selected(&app), Some(member(&["b"])), "the selection moved");
+    }
+
+    /// **The next match is opened, selected and scrolled to.** Next opened
+    /// the nodes above a match and stopped: below the fold, nothing a
+    /// reader could see moved, and the selection stayed where it was.
+    #[test]
+    fn the_next_match_is_opened_selected_and_scrolled_to() {
+        let pad = vec!["0"; 80].join(",");
+        let mut app = holding(&format!(
+            r#"{{"pad": [{pad}], "deep": {{"inner": {{"needle": 1}}}}}}"#
+        ));
+        app.with_tree(|tree, source| tree.set_expanded(&member(&["pad"]), true, source));
+        app.render_commands();
+        app.handle_event(&press_ctrl(Key::F));
+        for c in "needle".chars() {
+            app.handle_event(&typed(c));
+        }
+        app.handle_event(&press(Key::Enter));
+        let found = member(&["deep", "inner", "needle"]);
+        assert_eq!(
+            selected(&app),
+            Some(found.clone()),
+            "the match was not selected"
+        );
+        let tree = &app.documents[0].tree;
+        let index = tree.index_of(&found).expect("the match is not drawn");
+        assert!(
+            tree.visible_range().contains(&index),
+            "the match is not scrolled into view"
+        );
+    }
+
+    /// **An edit starts from the value's JSON, whole.** It started from the
+    /// text the tree shows -- cut at sixty characters, quotes unescaped -- so
+    /// Enter and Enter again cut a long string short, and lost the last
+    /// quote of `"say \"hi\""`.
+    #[test]
+    fn enter_and_enter_again_leaves_a_value_as_it_was() {
+        let long = "x".repeat(100);
+        let json = format!(r#"{{"long": "{long}", "quoted": "say \"hi\""}}"#);
+        let mut app = holding(&json);
+        app.handle_event(&press_ctrl(Key::E));
+        assert!(app.edit_mode, "control: Ctrl+E turns editing on");
+        for name in ["long", "quoted"] {
+            app.render_commands();
+            app.with_tree(|tree, _| tree.select(Some(&member(&[name]))));
+            app.handle_event(&press(Key::Enter));
+            assert!(app.editing_path.is_some(), "control: Enter edits {name}");
+            app.handle_event(&press(Key::Enter));
+            assert!(app.editing_path.is_none(), "control: Enter commits");
+        }
+        let doc = &app.documents[0];
+        let value = |name: &str| match doc.parsed.as_ref().unwrap() {
+            JsonValue::Object(members) => {
+                members.iter().find(|(k, _)| k == name).unwrap().1.clone()
+            }
+            _ => panic!("not an object"),
+        };
+        assert_eq!(
+            value("long"),
+            JsonValue::Str(long),
+            "the long string was cut"
+        );
+        assert_eq!(
+            value("quoted"),
+            JsonValue::Str(String::from("say \"hi\"")),
+            "the quoted string lost a quote"
+        );
+    }
+
+    /// **The value being edited is drawn.** It was drawn nowhere, so a value
+    /// was typed over blind.
+    #[test]
+    fn the_value_being_edited_is_drawn_over_its_row() {
+        let mut app = holding(r#"{"a": 1}"#);
+        app.handle_event(&press_ctrl(Key::E));
+        app.render_commands();
+        app.with_tree(|tree, _| tree.select(Some(&member(&["a"]))));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Backspace));
+        app.handle_event(&typed('7'));
+        // Plain or styled: the value being typed is drawn by the toolkit's
+        // single-line editor, which draws styled text.
+        let drawn: Vec<String> = app
+            .render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.contains(&String::from("7")),
+            "the edit is not drawn: {drawn:?}"
+        );
+    }
+
+    /// **A click selects a row and opens nothing; a double-click opens it.**
+    /// A single click on a node opened it, so it could not be selected
+    /// without opening -- and in edit mode a double-click on a value edits it.
+    #[test]
+    fn a_click_selects_and_a_double_click_opens_or_edits() {
+        let mut app = holding(r#"{"a": {"x": 1}, "b": 2}"#);
+        app.render_commands();
+        let (x, y) = row_point(&app, 1);
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            selected(&app),
+            Some(member(&["a"])),
+            "the click did not select a"
+        );
+        let tree = &app.documents[0].tree;
+        assert!(
+            !tree.is_expanded(&member(&["a"])),
+            "a single click opened a"
+        );
+        app.handle_event(&mouse_at(
+            x,
+            y,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        ));
+        assert!(
+            app.documents[0].tree.is_expanded(&member(&["a"])),
+            "a double-click did not open a"
+        );
+
+        // b is now row 3: root, a, x, b.
+        app.handle_event(&press_ctrl(Key::E));
+        app.render_commands();
+        let (x, y) = row_point(&app, 3);
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+        app.handle_event(&mouse_at(
+            x,
+            y,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        ));
+        assert_eq!(
+            app.editing_path,
+            Some(vec![PathSegment::Key(String::from("b"))]),
+            "a double-click on a value in edit mode did not edit it"
+        );
+        assert_eq!(app.edit_buffer, "2");
+    }
+
+    /// **A move onto another row is a redraw; one within a row is not.** The
+    /// tree washes the row under the pointer, and the window has to know when
+    /// that row changes -- and only then.
+    #[test]
+    fn a_move_onto_another_row_redraws_and_one_within_it_does_not() {
+        let mut app = holding(r#"{"a": 1, "b": 2}"#);
+        app.render_commands();
+        let (x, y1) = row_point(&app, 1);
+        let (_, y2) = row_point(&app, 2);
+        assert_eq!(
+            app.handle_event(&mouse_at(x, y1, MouseEventKind::Move)),
+            EventResult::Consumed,
+            "onto a row"
+        );
+        assert_eq!(
+            app.handle_event(&mouse_at(x + 5.0, y1 + 2.0, MouseEventKind::Move)),
+            EventResult::Ignored,
+            "within the same row"
+        );
+        assert_eq!(
+            app.handle_event(&mouse_at(x, y2, MouseEventKind::Move)),
+            EventResult::Consumed,
+            "onto the next row"
+        );
+    }
+
+    /// A search match's row is marked, and only it.
+    #[test]
+    fn a_search_match_is_marked() {
+        let value = parse_json("{\"a\": 1, \"b\": 2}").unwrap();
+        let matches = [vec![PathSegment::Key(String::from("b"))]];
+        let source = JsonTree {
+            root: &value,
+            matches: &matches,
+        };
+        let tones: Vec<_> = source
+            .children(&[NodeKey::Root])
+            .unwrap()
+            .into_iter()
+            .map(|item| item.label_tone)
+            .collect();
+        assert_eq!(tones, [Some(Tone::Blue), Some(Tone::Peach)]);
     }
 
     #[test]
@@ -7510,6 +8024,95 @@ mod tests {
             doc.reparse();
         }
         app
+    }
+
+    /// **A chord is neither a viewer key nor typing, and AltGr types**:
+    /// Alt+5 opened the diff view and Alt+M minified the raw view, each
+    /// chord carrying its key; AltGr+E -- Ctrl+Alt, a Polish `ę` -- turned
+    /// editing on as Ctrl+E does; Ctrl+X typed an `x` into a value being
+    /// edited and Alt+X one into the search; and Alt+Escape closed the
+    /// search. Ctrl+E still turns editing on.
+    #[test]
+    fn a_chord_is_neither_a_viewer_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = app_with_sample();
+        let mode = app.documents[0].view_mode;
+        for (k, text, m) in [
+            (Key::Num5, "5", Modifiers::alt()),
+            (Key::Num2, "2", Modifiers::super_key()),
+            (Key::E, "", altgr),
+            (Key::Down, "", Modifiers::alt()),
+            (Key::F1, "", Modifiers::alt()),
+            (Key::Enter, "", Modifiers::super_key()),
+        ] {
+            app.handle_event(&key(k, text, m));
+        }
+        assert_eq!(app.documents[0].view_mode, mode, "a chord changed the view");
+        assert!(!app.edit_mode, "AltGr+E turned editing on");
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(app.documents[0].source.is_none(), "a chord opened the text");
+
+        // The raw view's letters are plain too.
+        app.documents[0].view_mode = ViewMode::Raw;
+        let minified = app.documents[0].minified;
+        app.handle_event(&key(Key::M, "m", Modifiers::alt()));
+        assert_eq!(app.documents[0].minified, minified, "Alt+M minified");
+        // Enter opens the text in the raw view; Alt+Escape does not close it.
+        app.handle_event(&key(Key::Enter, "", Modifiers::NONE));
+        assert!(
+            app.documents[0].source.is_some(),
+            "control: Enter opens the text"
+        );
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert!(
+            app.documents[0].source.is_some(),
+            "Alt+Escape closed the text"
+        );
+        app.handle_event(&key(Key::Escape, "", Modifiers::NONE));
+        assert!(
+            app.documents[0].source.is_none(),
+            "control: Escape closes it"
+        );
+        app.documents[0].view_mode = mode;
+
+        // A value being edited types what a key typed.
+        app.handle_event(&key(Key::E, "e", Modifiers::ctrl()));
+        assert!(app.edit_mode, "Ctrl+E no longer turns editing on");
+        app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
+        app.edit_buffer.clear();
+        app.handle_event(&key(Key::X, "x", Modifiers::ctrl()));
+        app.handle_event(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&key(Key::E, "ę", altgr));
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(
+            app.edit_buffer, "ę",
+            "the value typed a command or lost AltGr's ę"
+        );
+        assert!(app.editing_path.is_some(), "Alt+Escape ended the edit");
+        app.editing_path = None;
+
+        // So does the search, and its own keys are plain.
+        app.handle_event(&key(Key::F, "f", Modifiers::ctrl()));
+        assert!(app.search_visible, "control: Ctrl+F searches");
+        app.handle_event(&key(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&key(Key::S, "ś", altgr));
+        app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
+        assert_eq!(
+            app.search_query, "ś",
+            "the search typed a command or lost AltGr's ś"
+        );
+        assert!(app.search_visible, "Alt+Escape closed the search");
     }
 
     #[test]
@@ -7629,15 +8232,19 @@ mod tests {
     #[test]
     fn path_equality() {
         let a = vec![PathSegment::Key("a".to_string()), PathSegment::Index(0)];
-        let b = vec![PathSegment::Key("a".to_string()), PathSegment::Index(0)];
-        assert!(paths_equal(&a, &b));
+        assert_eq!(
+            json_path(&tree_path(&a)),
+            Some(a),
+            "a path did not survive the tree"
+        );
+        assert_eq!(json_path(&[]), None, "an empty tree path is under no root");
     }
 
     #[test]
     fn path_inequality() {
         let a = vec![PathSegment::Key("a".to_string())];
         let b = vec![PathSegment::Key("b".to_string())];
-        assert!(!paths_equal(&a, &b));
+        assert_ne!(tree_path(&a), tree_path(&b));
     }
 
     #[test]
@@ -7654,11 +8261,14 @@ mod tests {
     fn value_type_colors_distinct() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
         let colors = [
-            ValueType::Null.color(&pal),
-            ValueType::Bool.color(&pal),
-            ValueType::Number.color(&pal),
-            ValueType::Str.color(&pal),
-        ];
+            ValueType::Null,
+            ValueType::Bool,
+            ValueType::Number,
+            ValueType::Str,
+            ValueType::Array,
+            ValueType::Object,
+        ]
+        .map(|kind| pal.tone(kind.tone()));
         // All should be different
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
@@ -8431,14 +9041,29 @@ mod tests {
     /// here -- not three pixels, as it did -- and the text by whole lines.
     #[test]
     fn a_notch_of_the_wheel_moves_a_view_its_rows() {
-        let mut app = holding(&"[1,\n".repeat(100));
-        app.handle_scroll(0.0, 0.0, -1.0);
-        let notch = wheel::pixels(-1.0, LINE_HEIGHT);
-        assert!((app.documents[0].tree_scroll - notch).abs() < 0.01);
+        // The tree: by whole rows, the toolkit tree's own wheel.
+        let mut tree = holding(&format!("[{}]", vec!["1"; 100].join(",\n")));
+        let over_tree = |dy: f32| {
+            Event::Mouse(MouseEvent {
+                x: 100.0,
+                y: 300.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        assert_eq!(tree.handle_event(&over_tree(-1.0)), EventResult::Consumed);
         assert!(
-            app.documents[0].tree_scroll >= LINE_HEIGHT,
-            "a notch moved less than a line"
+            tree.documents[0].tree.first_visible() >= 1,
+            "a notch moved the tree less than a row"
         );
+        tree.handle_event(&over_tree(-1000.0));
+        let last = tree.documents[0].tree.rows().len();
+        assert!(
+            tree.documents[0].tree.first_visible() < last,
+            "the tree scrolled past its last row"
+        );
+
+        let mut app = holding(&"[1,\n".repeat(100));
+        let notch = wheel::pixels(-1.0, LINE_HEIGHT);
         app.handle_event(&press(Key::Num2));
         app.handle_scroll(0.0, 0.0, -1.0);
         assert!((app.documents[0].raw_scroll - notch).abs() < 0.01);
@@ -8519,6 +9144,155 @@ mod tests {
             byte_at(text, 9, 1),
             text.len(),
             "past the last line is the end"
+        );
+    }
+    // -- The find bar's box and the value editor are the toolkit's fields
+    //    (lane C, c-e-a-theme-can-shape-the-controls)
+
+    /// A window over `{"a": 1}` whose theme marks a field with the keyboard
+    /// by a ring, at two and a half times the toolkit's focus width.
+    fn ringed() -> (App, Palette) {
+        let mut app = holding(r#"{"a": 1}"#);
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        (app, p)
+    }
+
+    /// Whether `app` draws exactly the toolkit's field for `rect` in
+    /// `state` -- and, unless `state` has the keyboard, not the focused one
+    /// as well.
+    fn draws_box(app: &mut App, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let ring = app.focus_ring_width;
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, ring);
+            v
+        };
+        let cmds = app.render_commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// The find bar's box, wherever the bar is.
+    fn find_box() -> Rect {
+        search_box_rect(TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0)
+    }
+
+    /// **The find bar's box is the toolkit's field**: it has the keyboard
+    /// while the bar is up and nothing else takes the keys, marked as the
+    /// theme marks a field in the user's width; red while the query finds
+    /// nothing; and it gives up the mark to a value being edited and to the
+    /// key list. It was a card with no caret.
+    #[test]
+    fn the_find_bars_box_is_the_toolkits_field() {
+        let (mut app, p) = ringed();
+        app.handle_event(&press_ctrl(Key::F));
+        assert!(app.search_visible);
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&mut app, &p, find_box(), focused),
+            "the box of an open find bar does not have the keyboard"
+        );
+        for c in "zzzz".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert!(app.search_results.is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(
+            draws_box(&mut app, &p, find_box(), red),
+            "a query that finds nothing does not turn the box red"
+        );
+        app.show_help = true;
+        assert!(
+            draws_box(
+                &mut app,
+                &p,
+                find_box(),
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the box keeps the keyboard's mark under the key list"
+        );
+        app.show_help = false;
+        app.editing_path = Some(vec![PathSegment::Key("a".to_string())]);
+        assert!(
+            draws_box(
+                &mut app,
+                &p,
+                find_box(),
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the find bar keeps the keyboard's mark while a value takes the keys"
+        );
+    }
+
+    /// **The value being edited is typed into the toolkit's field, inside
+    /// its row**, with the caret after it. Its text was drawn at 70% of the
+    /// row's height and hung out of the bottom of its box into the next row.
+    #[test]
+    fn the_value_editor_is_the_toolkits_field_and_its_text_sits_in_its_box() {
+        let (mut app, p) = ringed();
+        app.handle_event(&press_ctrl(Key::E));
+        app.render_commands();
+        app.with_tree(|tree, _| tree.select(Some(&member(&["a"]))));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&press(Key::Backspace));
+        app.handle_event(&typed('7'));
+        app.render_commands();
+        let rect = app
+            .active_doc()
+            .and_then(|doc| app.tree_edit_rect(doc))
+            .expect("the value is being edited on screen");
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&mut app, &p, rect, focused),
+            "the value is not typed into the toolkit's field"
+        );
+        let cmds = app.render_commands();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "7"))
+            .expect("the value is not drawn in its box");
+        let RenderCommand::RichText { y, font_size, .. } = cmds[at] else {
+            unreachable!("matched above")
+        };
+        let line = text::line_height(font_size, FontWeightHint::Regular);
+        assert!(
+            y >= rect.y - 0.5 && y + line <= rect.bottom() + 0.5,
+            "the value runs from {y} to {}, outside its box {rect:?}",
+            y + line
+        );
+        assert!(
+            matches!(cmds.get(at + 1), Some(RenderCommand::Line { .. })),
+            "no caret after the value"
         );
     }
 }

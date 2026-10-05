@@ -43,6 +43,7 @@ NOTICE = "the_warning_lines_are_not_painted_over"
 EMPTY = "a_fresh_calendar_holds_no_events_and_says_how_to_add_one"
 BUTTON = "the_new_event_button_gives_way_to_the_view_tabs"
 FOREIGN = "an_ics_from_another_calendar_is_read_as_it_was_written"
+CARD = "the_shortcut_card_takes_every_key_and_press_while_it_is_up"
 SAID = "the_import_says_what_it_could_not_keep"
 EXPORTED = "an_exported_calendar_reads_back_as_itself"
 RULES = "durations_and_repeats_are_read_as_the_standard_writes_them"
@@ -455,6 +456,205 @@ MUTATIONS = [
         "        if unreadable > 0 {",
         "        if false {",
         [SAID],
+    ),
+    (
+        "the colours leave out the category's own",
+        "        let mut out = vec![None];",
+        "        let mut out = Vec::new();",
+        ["the_colour_field_offers_the_category_then_every_hue"],
+    ),
+    (
+        "an event's own colour is not offered",
+        "        if let Some(own) = self.other_colour",
+        "        if let Some(own) = None::<Color>",
+        ["an_events_own_colour_is_offered_beside_the_hues"],
+    ),
+    (
+        "editing forgets the event's own colour",
+        "            other_colour: e.color_override,",
+        "            other_colour: None,",
+        ["an_events_own_colour_is_offered_beside_the_hues"],
+    ),
+    (
+        "a colour step goes nowhere",
+        "                    self.color_override = *next;",
+        "                    let _ = next;",
+        ["the_colour_field_offers_the_category_then_every_hue"],
+    ),
+    (
+        "a hue is named for another",
+        "                    .find(|(_, hue)| *hue == c)",
+        "                    .find(|(_, hue)| *hue != c)",
+        ["the_colour_field_offers_the_category_then_every_hue"],
+    ),
+    (
+        "the colour's warning never shows",
+        "            if field == FormField::Colour && self.colour_clashes(form) {",
+        "            if false {",
+        ["a_colour_too_close_to_the_accent_is_warned_of", "a_colour_close_to_the_accent_is_kept_as_chosen", "the_colour_warning_has_a_row_of_its_own"],
+    ),
+    (
+        "the warning is not the one test Settings asks",
+        "        appearance::hard_to_tell_apart(form.effective_colour(&self.palette), self.palette.accent)",
+        "        form.effective_colour(&self.palette) == self.palette.accent",
+        ["a_colour_too_close_to_the_accent_is_warned_of"],
+    ),
+    (
+        "the warning covers the field under it",
+        "                }\n                y += FORM_ROW_H;\n            }\n        }",
+        "                }\n            }\n        }",
+        ["the_colour_warning_has_a_row_of_its_own"],
+    ),
+    (
+        "the field does not show the colour",
+        "            fill(frame, swatch, form.effective_colour(&self.palette), 3.0);",
+        "",
+        ["the_colour_field_shows_the_colour"],
+    ),
+    (
+        "--event-colour opens the form at its title",
+        "            self.form_field = FormField::Colour;",
+        "            self.form_field = FormField::Title;",
+        ["the_argument_opens_an_events_colour"],
+    ),
+    (
+        "an event --event-colour cannot find is not said",
+        "            lines.push((note.clone(), true));",
+        "            let _ = note;",
+        ["the_argument_opens_an_events_colour"],
+    ),
+    (
+        "--event-colour's number is not read",
+        "                .map(Self::EventColour)",
+        "                .map(|_| Self::Calendar)",
+        ["the_argument_opens_an_events_colour"],
+    ),
+    (
+        "an argument the calendar does not take is ignored",
+        "            [other, ..] => Err(format!(\n                \"no such argument '{}' (the calendar takes --event-colour ID)\",\n                other.as_os_str().shown()\n            )),",
+        "            [_, ..] => Ok(Self::Calendar),",
+        ["the_argument_opens_an_events_colour"],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '    if textline::is_ctrl_chord(key.modifiers) {',
+        '    if key.modifiers.ctrl {',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '    if state.search_focused && textline::types_into_field(key) {',
+        '    if state.search_focused && key.types_text() {',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    (
+        "a key held with Alt or the Windows key is the calendar's",
+        '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Ignored;\n    }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    (
+        'a chord answers the question before a delete',
+        '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Consumed;\n    }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    (
+        "a chord works the form's own keys",
+        # With the line after it: the shortcut card's guard holds the same
+        # words, further in.
+        '    let plain = textline::is_plain(key.modifiers);\n    match key.key {\n        Key::Tab if plain => {',
+        '    let plain = true;\n    match key.key {\n        Key::Tab if plain => {',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'the search box is drawn the same wherever the pointer is',
+        '                    hovered: self.hover == Some(Target::SearchField),',
+        '                    hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the search box is not marked while it has the keyboard',
+        '                    focused: self.search_focused,',
+        '                    focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a form field is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(Target::Field(field)),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the pointer is not followed',
+        '        MouseEventKind::Move => state.target_at(mouse.x, mouse.y),',
+        '        MouseEventKind::Move => None,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the pointer is not followed under the form",
+        '        && matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Leave)',
+        '        && matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Leave)\n        && state.form.is_none()',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    # ---- the shortcut card is modal, for the keys and the pointer ----
+    (
+        "the card is modal for nothing",
+        '    if state.show_help {\n        match event {\n',
+        '    if false && state.show_help {\n        match event {\n',
+        [CARD],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                if closes {\n'
+        '                    state.show_help = false;\n'
+        '                }\n'
+        '                return EventResult::Consumed;\n',
+        '                if closes {\n'
+        '                    state.show_help = false;\n'
+        '                    return EventResult::Consumed;\n'
+        '                }\n',
+        [CARD],
+    ),
+    (
+        "? does not put the card away",
+        '                    Key::Slash => plain && key.modifiers.shift,\n',
+        '                    Key::Slash => false,\n',
+        [CARD],
+    ),
+    (
+        "Escape does not put the card away",
+        '                    Key::F1 | Key::Escape => plain,\n',
+        '                    Key::F1 => plain,\n',
+        [CARD],
+    ),
+    (
+        "a press goes through the card",
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                    state.show_help = false;\n'
+        '                    return EventResult::Consumed;\n'
+        '                }\n',
+        '',
+        [CARD],
+    ),
+    (
+        "only the left button puts the card away",
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        [CARD],
+    ),
+    (
+        "the wheel turns what the card covers",
+        '                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n',
+        '',
+        [CARD],
     ),
 ]
 

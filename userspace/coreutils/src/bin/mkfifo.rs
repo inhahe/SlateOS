@@ -76,6 +76,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+coreutils::guard_std_fds!();
+
 // The file-mode creation mask. POSIX offers no way to read it without writing
 // it, which is why there is no read-only spelling and why `take_umask` has to
 // zero it to find out what it was.
@@ -138,23 +140,29 @@ enum Request {
     Run(MkfifoFlags, Vec<OsString>),
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- an output or
+/// a diagnostic that did not arrive is status 1, as `mkfifo: write error:
+/// ...` for the first. The descriptor guard is what lets a closed one be seen
+/// at all; the runtime used to answer it with a quiet `/dev/null`. See
+/// [`stdfd::close_stdout`].
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout("mkfifo", out, earned)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            // Never an error: the stream records it for the funnel.
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Ok(Request::Version) => {
-            println!("mkfifo (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"mkfifo (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, names)) => {

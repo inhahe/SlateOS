@@ -3255,6 +3255,16 @@ impl CameraApp {
     /// `Resize` reported -- the same size the last frame was drawn at, so the
     /// boxes a click is tested against are the boxes the user is looking at.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // control drawn under it -- the shutter among them.
+            if matches!(mouse.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         if mouse.kind != MouseEventKind::Press(MouseButton::Left) {
             return EventResult::Ignored;
         }
@@ -4678,6 +4688,35 @@ mod tests {
         assert!(!app.is_recording(), "a recording of nothing started");
         let said = app.status_message.clone().unwrap_or_default();
         assert!(said.contains("Cannot record"), "{said}");
+    }
+
+    /// **A press while the card is up puts it away and does nothing else.**
+    /// It used to go straight through the card to the control drawn under
+    /// it. The control at the end is the same press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let grid = app.show_grid_overlay;
+        probe::key(&mut app, &probe::press(Key::F1));
+        assert!(app.show_help);
+        assert_eq!(probe::click(&mut app, Target::Grid), EventResult::Consumed);
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.show_grid_overlay, grid,
+            "the press went through the card to the grid button"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::click_with(&mut app, Target::Grid, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        probe::click(&mut app, Target::Grid);
+        assert_ne!(
+            app.show_grid_overlay, grid,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     /// **The card is drawn when it is asked for, and nothing acts behind it.**

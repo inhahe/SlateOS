@@ -11,6 +11,9 @@ guitk = { path = "../../gui/toolkit" }
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+# Whether a key types or is a command: a chord arrives carrying its letter,
+# and AltGr arrives as Ctrl+Alt and types.
+textline = { path = "../textline" }
 
 # The habits and every check-in, kept between runs in the user's settings.
 settingsfile = { path = "../../gui/settingsfile" }

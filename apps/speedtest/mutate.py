@@ -155,6 +155,70 @@ MAIN = [
         "            .filter(|s| s.elapsed_secs >= 0.0)",
         [SUSTAINED],
     ),
+    (
+        'a chord raises the list of keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && matches!(key.key, Key::Escape | Key::Enter) {',
+        '            if matches!(key.key, Key::Escape | Key::Enter) {',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the window',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {\n                Key::E => {',
+        '        if key.modifiers.ctrl {\n            return match key.key {\n                Key::E => {',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord works the window's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr+Q closes the window',
+        '            && textline::is_ctrl_chord(key.modifiers)\n        {',
+        '            && key.modifiers.ctrl\n        {',
+        ['a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl'],
+    ),
+]
+
+# The list of keys takes the pointer as well as the keys (2026-10-04,
+# known-issues/E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it.md).
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+
+MAIN += [
+    (
+        "a press goes through the list of keys",
+        "            Event::Mouse(mouse_event) if self.show_help => match mouse_event.kind {\n",
+        "            Event::Mouse(mouse_event) if false => match mouse_event.kind {\n",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list covers",
+        "            Event::Mouse(mouse_event) if self.show_help => match mouse_event.kind {\n",
+        "            Event::Mouse(mouse_event) if self.show_help && !matches!(mouse_event.kind, MouseEventKind::Scroll { .. }) => match mouse_event.kind {\n",
+        [CARD],
+    ),
+    (
+        "a row under the list is lit",
+        "                _ => self.set_hover(None),\n            },\n",
+        "                MouseEventKind::Move => self.handle_mouse_move(mouse_event.x, mouse_event.y),\n"
+        "                _ => self.set_hover(None),\n            },\n",
+        [CARD],
+    ),
 ]
 
 TABLES = {

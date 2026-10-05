@@ -9,6 +9,8 @@ guitk = { path = "../../gui/toolkit" }
 # The window itself: `app::launch` is what turns the renderer below into a
 # program the desktop can open, rather than a struct with a `main` that returns.
 oswindow = { path = "../../gui/window" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a key of the window nor typing.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

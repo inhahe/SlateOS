@@ -47,13 +47,11 @@ userspace/cgroup  # bare deny(clippy::all)
 userspace/chage  # bare deny(clippy::all)
 userspace/chattr  # bare deny(clippy::all)
 userspace/chpasswd
-userspace/chroot
 userspace/coredumpctl  # bare deny(clippy::all)
 userspace/cpio
 userspace/crond
 userspace/crontab
 userspace/ctags
-userspace/dbus
 userspace/diskutil
 userspace/dmesg
 userspace/dmidecode  # bare deny(clippy::all)
@@ -62,7 +60,6 @@ userspace/efibootmgr  # bare deny(clippy::all)
 userspace/eject  # bare deny(clippy::all)
 userspace/fdisk
 userspace/fio  # bare deny(clippy::all)
-userspace/fmt
 userspace/fsck
 userspace/fuser  # bare deny(clippy::all)
 userspace/fw
@@ -78,7 +75,6 @@ userspace/hwinfo  # bare deny(clippy::all)
 userspace/ifconfig  # bare deny(clippy::all)
 userspace/indexer
 userspace/inotify  # bare deny(clippy::all)
-userspace/install
 userspace/ip
 userspace/ipcalc  # bare deny(clippy::all)
 userspace/iptables  # bare deny(clippy::all)
@@ -105,7 +101,6 @@ userspace/m4
 userspace/make
 userspace/man
 userspace/mkfs
-userspace/mktemp
 userspace/monctl
 userspace/mount
 userspace/nano
@@ -118,10 +113,8 @@ userspace/nsenter  # bare deny(clippy::all)
 userspace/nslookup
 userspace/oils  # bare deny(clippy::all)
 userspace/passwd
-userspace/pgrep
 userspace/ping
 userspace/pkg
-userspace/powerctl
 userspace/pstree  # bare deny(clippy::all)
 userspace/pv
 userspace/quoting  # bare deny(clippy::all)
@@ -133,14 +126,11 @@ userspace/scp  # bare deny(clippy::all)
 userspace/screen
 userspace/service
 userspace/shell
-userspace/shuf
 userspace/ss
 userspace/sysctl
 userspace/syslogd
 userspace/sysstat  # bare deny(clippy::all)
 userspace/systemctl  # bare deny(clippy::all)
-userspace/tac
-userspace/timeout
 userspace/top
 userspace/tput
 userspace/traceroute
@@ -153,7 +143,6 @@ userspace/vi
 userspace/vmstat
 userspace/wall
 userspace/watch
-userspace/who
 userspace/wpa  # bare deny(clippy::all)
 userspace/xdg
 userspace/yacc

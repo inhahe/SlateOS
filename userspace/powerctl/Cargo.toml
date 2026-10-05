@@ -17,3 +17,10 @@ libservicebus = { path = "../libservicebus" }
 # or reboot)". That value is an argv word, so it is whatever the user typed
 # and not text this program chose.
 quoting = { path = "../quoting" }
+# POSIX's words for an I/O failure, not the host's.
+errmsg = { path = "../errmsg" }
+# Standard input, output and error open before anything is written to them.
+stdfdguard = { path = "../stdfdguard" }
+
+[lints]
+workspace = true

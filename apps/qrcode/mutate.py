@@ -301,6 +301,39 @@ MUTATIONS = [
         "            color: Color::BLACK,",
         ["the_barcode_label_is_in_the_codes_ink"],
     ),
+    # -- the input boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        "an input box is drawn the same wherever the pointer is",
+        "                hovered: self.hover == Some(Target::Field(field)),",
+        "                hovered: false,",
+        ["the_input_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the box the keys type into is not marked",
+        "                hovered: self.hover == Some(Target::Field(field)),\n                focused,",
+        "                hovered: self.hover == Some(Target::Field(field)),\n                focused: false,",
+        ["the_input_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the input boxes take the toolkit's focus width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();",
+        "        let _ = settings;",
+        ["the_input_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        # 2026-10-04: an idle box was drawn scrolled to its end, and a press
+        # measured as if it showed its start.
+        "an idle box is drawn scrolled to its end",
+        "                    } else if focused {\n"
+        "                        TextCursor::from(value.len())\n"
+        "                    } else {\n"
+        "                        TextCursor::default()\n"
+        "                    },\n",
+        "                    } else {\n"
+        "                        TextCursor::from(value.len())\n"
+        "                    },\n",
+        ["a_press_in_an_idle_box_lands_on_the_character_drawn_under_it"],
+    ),
 ]
 
 if __name__ == "__main__":

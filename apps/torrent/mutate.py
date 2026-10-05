@@ -307,6 +307,85 @@ MAIN = [
         "                            t.status = TrackerStatus::NotContacted;",
         [WINDOW],
     ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {',
+        '        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && matches!(key.key, Key::Escape | Key::Enter) {',
+        '            if matches!(key.key, Key::Escape | Key::Enter) {',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the list',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {\n                Key::U => {',
+        '        if key.modifiers.ctrl {\n            return match key.key {\n                Key::U => {',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    (
+        "a chord works the list's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the magnet dialog',
+        '            Key::Escape if plain => {\n                self.close_magnet_dialog();',
+        '            Key::Escape => {\n                self.close_magnet_dialog();',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the search',
+        '            Key::Escape if plain => {\n                self.search_active = false;',
+        '            Key::Escape => {\n                self.search_active = false;',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    (
+        'a chorded Enter closes the search',
+        '            Key::Enter | Key::Tab if plain => self.search_active = false,',
+        '            Key::Enter | Key::Tab => self.search_active = false,',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace deletes from the search',
+        '            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {\n                if self.search_query.pop().is_none() {',
+        '            Key::Backspace => {\n                if self.search_query.pop().is_none() {',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    (
+        "the search types a command's letter, and AltGr's nothing",
+        '                if !textline::types_into_field(key) {\n                    return EventResult::Ignored;\n                }\n                let typed: String = key.typed().collect();',
+        '                if key.modifiers.ctrl {\n                    return EventResult::Ignored;\n                }\n                let typed: String = key.typed().collect();',
+        ['a_chord_is_neither_a_torrent_key_nor_typing'],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        "the search box is drawn the same wherever the pointer is",
+        '                hovered: self.hover == Some(Target::Search),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the search box is not marked while it has the keyboard",
+        '                focused: self.search_active,',
+        '                focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "a link this client cannot read is not drawn red",
+        '                invalid: self.magnet_error.is_some(),',
+        '                invalid: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
 ]
 
 TRACKER = [

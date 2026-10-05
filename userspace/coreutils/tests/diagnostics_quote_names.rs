@@ -20,6 +20,17 @@
 //! call site including the ones on rare error paths, which is where an
 //! unquoted name would actually hide.
 
+// A test fails by panicking, so the lints that keep panics out of production
+// code -- unwrap, expect, panic, indexing, unchecked arithmetic -- are allowed
+// here, where a panic is the point.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use std::path::{Path, PathBuf};
 
 fn bin_dir() -> PathBuf {

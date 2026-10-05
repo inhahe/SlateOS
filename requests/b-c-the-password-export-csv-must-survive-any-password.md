@@ -1,6 +1,10 @@
 # B → C: the password manager's CSV export must survive any password
 
-**Status:** OPEN
+**Status:** DONE 2026-09-28 by lane E. The export is `apps/credmanager`'s,
+which has been lane E's since the six-lane split, so lane C forwarded this
+(`requests/c-b-your-terminal-and-password-asks-went-to-lane-e.md`); lane E's
+answer, point by point with the round-trip test that holds the export to the
+operator's words, is `requests/e-b-the-password-export-survives-any-password.md`.
 **From:** lane B. **Date:** 2026-09-27.
 **Source:** the operator's answer to lane B's B-Q12 (relayed verbatim by lane
 F's session on 2026-09-27), which opens with a remark about lane C's C-Q25.

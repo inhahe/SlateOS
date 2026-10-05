@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Generate cases for `scripts/extfloat-diff.sh`.
 
-Two case files, because reading and writing fail differently and a harness that
-only checked the round trip would let a parse error and a formatting error
-cancel out:
+Separate case files for reading and writing, because they fail differently and
+a harness that only checked the round trip would let a parse error and a
+formatting error cancel out:
 
-    extfloat-cases.py read   > read.txt    # one numeral per line
+    extfloat-cases.py read   > read.txt    # one numeral per line, for strtold
+    extfloat-cases.py readd  > readd.txt   # the same for strtod
+    extfloat-cases.py readf  > readf.txt   # the same for strtof
     extfloat-cases.py write  > write.txt   # FORMAT<TAB>numeral per line
+
+`readd` and `readf` share `read`'s fixed list -- the grammar is the same -- and
+add each format's own edges, and their random numerals reach that format's
+exponent range rather than the 80-bit one.
 
 The generator is *seeded*, so a difference the fuzz finds can be reproduced by
 re-running it, and so a run that finds nothing means the same thing twice.
@@ -64,6 +70,43 @@ FIXED_READ = [
     "", "abc", "--1", "1e5e5",
 ]
 
+# The edges of `double`: DBL_MAX and the numerals either side of its overflow
+# threshold, DBL_MIN, DBL_TRUE_MIN and the tie below it, the subnormal ties
+# glibc breaks with its dropped round bit, the value below DBL_MIN that rounds
+# up to it (tiny before rounding, not after), and the 53-bit tie that rounding
+# twice would break the wrong way.
+FIXED_READ_DOUBLE = [
+    "1.7976931348623157e308", "1.7976931348623158e308", "1.7976931348623159e308",
+    "-1.7976931348623157e308", "1.8e308", "1e308", "1e309",
+    "2.2250738585072014e-308", "2.2250738585072011e-308", "2.2250738585072012e-308",
+    "2.2250738585072013e-308", "1e-307", "1e-308", "1e-320", "1e-323", "1e-324",
+    "4.9406564584124654e-324", "4.9406564584124655e-324", "5e-324",
+    "2.4703282292062327e-324", "2.4703282292062328e-324", "2.5e-324", "1e-325",
+    "0x1p-1074", "0x1p-1075", "0x1.8p-1075", "0x1.0000000000001p-1075",
+    "0x1.4p-1073", "0x1.40000000000001p-1073", "0x1.400000000000001p-1073",
+    "0x1.fffffffffffffp-1023", "0x0.fffffffffffff8p-1022",
+    "0x0.fffffffffffff7p-1022", "0x1.ffffffffffffep-1023",
+    "0x1p-1022", "0x1.0000000000001p-1022", "0x1.fffffffffffffp1023",
+    "0x1.fffffffffffff7ffp1023", "0x1.fffffffffffff8p1023", "0x1p1024",
+    "9007199254740993", "9007199254740993.00048828125", "9007199254740995",
+    "9007199254740994.9999999999", "0.1", "0.2", "0.3", "1e23", "8.642135e+130",
+]
+
+# The same for `float`.
+FIXED_READ_FLOAT = [
+    "3.40282347e38", "3.4028235e38", "3.4028236e38", "3.40282357e38",
+    "3.40282356e38", "-3.4028235e38", "1e38", "1e39",
+    "1.17549435e-38", "1.1754942e-38", "1.17549429e-38", "1e-38", "1e-40",
+    "1.40129846e-45", "1.4e-45", "7.0064923e-46", "7.0064924e-46",
+    "7.006492321624085e-46", "1e-45", "1e-46",
+    "0x1p-149", "0x1p-150", "0x1.8p-150", "0x1.000002p-150",
+    "0x1.4p-148", "0x1.40001p-148", "0x1.400001p-148",
+    "0x1.fffffcp-127", "0x0.ffffffp-126", "0x0.fffffefp-126", "0x1p-126",
+    "0x1.fffffep127", "0x1.fffffefp127", "0x1.ffffffp127", "0x1p128",
+    "0x1.000001p0", "0x1.0000011p0", "0x1.000003p0",
+    "16777217", "16777217.5", "16777219", "0.1", "0.0001", "3.14159265358979",
+]
+
 FORMATS = [
     "%Lf", "%Le", "%Lg", "%La", "%LF", "%LE", "%LG", "%LA",
     "%f", "%e", "%g", "%a",
@@ -80,8 +123,20 @@ FORMATS = [
 ]
 
 
-def random_numeral(rnd):
+# Per format: the decimal exponents near the top of the range, those of the
+# subnormals, and the largest binary exponent a hexadecimal numeral is given.
+# The 80-bit entry is what `read` has always used; its draws are unchanged, so
+# its case file is too.
+LIMITS = {
+    "x87": ((4900, 4960), None, 200),
+    "double": ((300, 330), (300, 330), 1100),
+    "float": ((30, 50), (36, 50), 160),
+}
+
+
+def random_numeral(rnd, fmt="x87"):
     """A numeral drawn from the shapes that actually break implementations."""
+    near, sub, hexmax = LIMITS[fmt]
     kind = rnd.randrange(10)
     sign = rnd.choice(["", "", "-", "+"])
     if kind == 0:  # short integer
@@ -105,19 +160,23 @@ def random_numeral(rnd):
     if kind == 6:  # scientific, exponent near the format's own limits
         return "%s%d.%se%s%d" % (sign, rnd.randrange(1, 10),
                                  "".join(rnd.choice("0123456789") for _ in range(rnd.randrange(0, 20))),
-                                 rnd.choice(["+", "-"]), rnd.randrange(4900, 4960))
+                                 rnd.choice(["+", "-"]), rnd.randrange(*near))
     if kind == 7:  # hexadecimal: the bits, stated directly
         digits = "".join(rnd.choice("0123456789abcdefABCDEF") for _ in range(rnd.randrange(1, 17)))
         frac = "".join(rnd.choice("0123456789abcdef") for _ in range(rnd.randrange(0, 17)))
         dot = "." + frac if frac else rnd.choice(["", "."])
         return "%s0x%s%sp%s%d" % (sign, digits, dot, rnd.choice(["+", "-", ""]),
-                                  rnd.randrange(0, 200))
+                                  rnd.randrange(0, hexmax))
     if kind == 8:  # a half-way case: k + 1/2 at some scale, where ties are broken
         return "%s%d.5" % (sign, rnd.randrange(0, 10000))
     # subnormal territory
-    return "%s%d.%se-49%02d" % (sign, rnd.randrange(1, 10),
-                                "".join(rnd.choice("0123456789") for _ in range(rnd.randrange(0, 10))),
-                                rnd.randrange(20, 60))
+    if sub is None:
+        return "%s%d.%se-49%02d" % (sign, rnd.randrange(1, 10),
+                                    "".join(rnd.choice("0123456789") for _ in range(rnd.randrange(0, 10))),
+                                    rnd.randrange(20, 60))
+    return "%s%d.%se-%d" % (sign, rnd.randrange(1, 10),
+                            "".join(rnd.choice("0123456789") for _ in range(rnd.randrange(0, 10))),
+                            rnd.randrange(*sub))
 
 
 def main():
@@ -132,6 +191,14 @@ def main():
         # A numeral with trailing text, to pin where the scan stopped.
         for _ in range(count // 4):
             out.append(random_numeral(rnd) + rnd.choice(["x", " ", "e", ".", "p", ")", "\t9"]))
+    elif mode in ("readd", "readf"):
+        fmt = "double" if mode == "readd" else "float"
+        out.extend(FIXED_READ)
+        out.extend(FIXED_READ_DOUBLE if fmt == "double" else FIXED_READ_FLOAT)
+        for _ in range(count):
+            out.append(random_numeral(rnd, fmt))
+        for _ in range(count // 4):
+            out.append(random_numeral(rnd, fmt) + rnd.choice(["x", " ", "e", ".", "p", ")", "\t9"]))
     elif mode == "write":
         # Every format against every fixed value, then the fuzz. The cross
         # product is what catches a flag that only misbehaves on one shape --
@@ -143,7 +210,7 @@ def main():
         for _ in range(count):
             out.append(rnd.choice(FORMATS) + "\t" + random_numeral(rnd))
     else:
-        sys.exit("extfloat-cases.py: expected 'read' or 'write'")
+        sys.exit("extfloat-cases.py: expected 'read', 'readd', 'readf' or 'write'")
     sys.stdout.write("".join(line + "\n" for line in out if "\n" not in line))
 
 

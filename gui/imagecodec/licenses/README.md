@@ -12,10 +12,21 @@ The decoders not listed here -- PNG, GIF, the scaler, the PNG encoder -- are
 this project's own, written to their specifications and tested against the
 programs named in their documentation, not translated from them.
 
+`notices.yaml` is the same list for `scripts/gather-notices.py`, which puts
+the notices in every image (design-decisions.md §1433).
+
 **For a binary that contains this crate** (anything that decodes JPEG or
 TIFF), libjpeg-turbo's licence asks that its documentation say:
 
 > This software is based in part on the work of the Independent JPEG Group.
+
+and the University of California's notice on libtiff's LZW decoder (below)
+asks that it acknowledge the University's work:
+
+> This product includes software developed by the University of California,
+> Berkeley.
+
+`notices.yaml` gives both as attributions, which the notices page shows.
 
 ## libjpeg-turbo 3.1.1
 
@@ -56,7 +67,13 @@ Portions of this software are copyright (c) 1988-1997 Sam Leffler,
 JPEG) and (c) 2022 Even Rouault (LZW), and are used under libtiff's licence,
 `libtiff-LICENSE.md`, whose notices must appear in all copies. libtiff's
 CIE L*a*b* conversion (`tif_color.c`) is from the VIPS library, with the
-permission of its author, John Cupitt.
+permission of its author, John Cupitt. libtiff's LZW decoder (`tif_lzw.c`,
+ported as `src/tiff/lzw.rs`) derives from the `compress` program, from
+software contributed to Berkeley by James A. Woods, derived from original
+work by Spencer Thomas and Joseph Orost, copyright (c) 1985, 1986 The Regents
+of the University of California; its notice, in the same file, asks that
+documentation acknowledge that the software was developed by the University
+of California, Berkeley.
 
 | File | Derived from (libtiff 4.7.1, `libtiff/`) |
 |---|---|
@@ -125,7 +142,7 @@ under the BSD-2-Clause licence, reproduced with libavif's other notices in
 | `src/avif/setup.rs` | `src/read.c`: `avifDecoderParse`, `avifDecoderReset`; `src/avif.c`, `src/utils.c`: the clean-aperture crop; `src/gainmap.c`: `avifGainMapValidateMetadata` |
 | `src/avif/obu.rs` | `src/obu.c`, which libavif took from dav1d |
 | `src/avif/decode.rs` | `src/read.c`: `avifDecoderNextImage`, `avifDecoderDecodeTiles` and the grid tile copy; `src/codec_dav1d.c` |
-| `src/avif/convert.rs` | `src/reformat.c`, `src/reformat_libyuv.c`, `src/alpha.c`, `src/colr.c` (the matrix coefficients) |
+| `gui/video/yuv/src/reformat.rs` (a crate of its own, which video frames share) | `src/reformat.c`, `src/reformat_libyuv.c`, `src/alpha.c`, `src/colr.c` (the matrix coefficients) |
 
 The AV1 decoding itself is rav1d, a separate crate with its own notices
 (`gui/video/rav1d/COPYING`).
@@ -136,11 +153,8 @@ names each one and pins it by SHA-256.
 
 ## libyuv
 
-Portions of this software are copyright 2011, 2013 and 2015 The LibYuv
-Project Authors, from libyuv at the revision libavif 1.3.0 pins
-(`4db2af62dab48895226be6b52737247e898ebe36`), used under its BSD licence
-(`libyuv-LICENSE`) with its additional patent grant (`libyuv-PATENTS`).
-
-| File | Derived from (libyuv) |
-|---|---|
-| `src/avif/libyuv.rs` | `source/row_common.cc`, `source/scale_common.cc`, `source/scale_any.cc`, `source/convert_argb.cc`, `source/planar_functions.cc` |
+The YUV-to-RGB conversions and the scaling AVIF pictures go through are
+libyuv's, ported in their own crate, `gui/video/yuv`, whose `licenses/`
+carries libyuv's licence, patent grant and notice. That crate also carries
+libavif's choice among them (`src/reformat.rs`, above), under the libavif
+notice here.

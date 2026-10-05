@@ -18,6 +18,8 @@ oswindow = { path = "../../gui/window" }
 # An export writes through `safeio::write_str_atomically`, not `fs::write`,
 # which truncates the target before writing it.
 safeio = { path = "../safeio" }
+# `is_plain` and `types_into_field`: a chord is neither a shortcut nor typing.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

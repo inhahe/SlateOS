@@ -376,6 +376,9 @@ impl TextArea {
     ///
     /// Tab is not taken: which field comes next is the application's to
     /// say, and a key this answers is one the application does not see.
+    /// Nor is a command -- a Ctrl chord other than those, a key held with
+    /// Alt or the Windows key -- though it carries its letter as text; AltGr,
+    /// which arrives as Ctrl+Alt, types (`textline::is_command`).
     pub fn apply_key(
         &mut self,
         key: &KeyEvent,
@@ -383,8 +386,15 @@ impl TextArea {
         clipboard: &str,
         page: usize,
     ) -> Edited {
+        // The key held with Alt or the Windows key, above: the editing keys
+        // answered it all the same -- Alt+Enter broke the line, Alt+Backspace
+        // deleted, Windows+Up moved the caret while the desktop moved the
+        // window.
+        if textline::is_alt_or_windows_chord(key.modifiers) {
+            return Edited::default();
+        }
         let shift = key.modifiers.shift;
-        let ctrl = key.modifiers.ctrl;
+        let chord = textline::is_ctrl_chord(key.modifiers);
         let mut edited = Edited {
             handled: true,
             ..Edited::default()
@@ -396,35 +406,38 @@ impl TextArea {
             Key::Down => self.vertical(true, 1, shift),
             Key::PageUp => self.vertical(false, page.max(1), shift),
             Key::PageDown => self.vertical(true, page.max(1), shift),
-            Key::Home if ctrl => self.move_to(0, shift),
-            Key::End if ctrl => self.move_to(self.text.len(), shift),
+            Key::Home if chord => self.move_to(0, shift),
+            Key::End if chord => self.move_to(self.text.len(), shift),
             Key::Home => self.home(shift),
             Key::End => self.end(shift),
-            Key::A if ctrl => self.select_all(),
-            Key::C if ctrl => {
+            Key::A if chord => self.select_all(),
+            Key::C if chord => {
                 if !self.selected_text().is_empty() {
                     edited.copied = Some(self.selected_text().to_owned());
                 }
             }
-            Key::X if ctrl => {
+            Key::X if chord => {
                 if !self.selected_text().is_empty() {
                     edited.copied = Some(self.selected_text().to_owned());
                     edited.changed = self.delete_selection();
                 }
             }
-            Key::V if ctrl => edited.changed = self.insert(clipboard, capacity),
+            Key::V if chord => edited.changed = self.insert(clipboard, capacity),
             Key::Enter => edited.changed = self.insert("\n", capacity),
             Key::Backspace => edited.changed = self.backspace(),
             Key::Delete => edited.changed = self.delete(),
             Key::Tab => edited.handled = false,
             _ => {
-                if key.text.is_empty() || ctrl {
-                    edited.handled = false;
-                } else {
+                // Asked before anything is inserted, because inserting
+                // deletes the selection first: Escape, which carries `\x1b`
+                // on most layouts, took the selected text with it.
+                if textline::types_into_field(key) {
                     // Every character the keystroke produced, not just the
                     // first: a dead key followed by a letter composes into
                     // one, and an input method can deliver a whole word.
                     edited.changed = self.insert(&key.text, capacity);
+                } else {
+                    edited.handled = false;
                 }
             }
         }
@@ -490,6 +503,46 @@ mod tests {
         a.move_to(1, false);
         a.apply_key(&typed("Q"), 100, "", 5);
         assert_eq!(a.text(), "aQb\ncx\nyz");
+    }
+
+    /// **A key held with Alt or the Windows key is not the field's**: the
+    /// editing keys answered it -- Alt+Enter broke the line, Alt+Backspace
+    /// deleted, Windows+Up moved the caret -- though the doc above says such
+    /// a key is the application's. AltGr's are the field's, as Ctrl's are.
+    #[test]
+    fn a_key_held_with_alt_or_the_windows_key_edits_nothing() {
+        let held = |k: Key, modifiers: Modifiers| KeyEvent {
+            modifiers,
+            ..key(k)
+        };
+        for modifiers in [Modifiers::alt(), Modifiers::super_key()] {
+            for k in [
+                Key::Enter,
+                Key::Backspace,
+                Key::Delete,
+                Key::Left,
+                Key::Up,
+                Key::Home,
+                Key::PageDown,
+            ] {
+                let mut a = area("ab\ncd");
+                a.move_to(4, false);
+                let edit = a.apply_key(&held(k, modifiers), 100, "", 5);
+                assert!(!edit.handled, "{modifiers:?} {k:?} was the field's");
+                assert_eq!(a.text(), "ab\ncd", "{modifiers:?} {k:?} edited");
+                assert_eq!(a.caret(), 4, "{modifiers:?} {k:?} moved the caret");
+            }
+        }
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut a = area("ab");
+        assert!(
+            a.apply_key(&held(Key::Backspace, altgr), 100, "", 5)
+                .changed
+        );
+        assert_eq!(a.text(), "a", "AltGr+Backspace is a Backspace");
     }
 
     /// Up and Down keep the column across a short line, and stop at the
@@ -573,6 +626,81 @@ mod tests {
         assert!(!a.apply_key(&ctrl(Key::S), 10, "", 5).handled);
         assert!(a.apply_key(&key(Key::End), 10, "", 5).handled);
         assert!(a.text().is_empty());
+    }
+
+    fn held(k: Key, text: &str, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// AltGr arrives as Ctrl+Alt, and on the letters the field takes as
+    /// chords it types: Polish `ą` and `ć` are AltGr+A and AltGr+C, `ź` is
+    /// AltGr+X, and Hungarian `@` is AltGr+V.
+    #[test]
+    fn altgr_types_where_a_ctrl_chord_would_select_copy_cut_or_paste() {
+        let mut a = area("ab");
+        for (k, text) in [(Key::A, "\u{105}"), (Key::C, "\u{107}"), (Key::V, "@")] {
+            let done = a.apply_key(&held(k, text, ALTGR), 100, "clip", 5);
+            assert!(done.handled && done.changed, "AltGr+{k:?} typed nothing");
+            assert_eq!(done.copied, None, "AltGr+{k:?} copied");
+            assert_eq!(a.selection(), None, "AltGr+{k:?} selected");
+        }
+        assert_eq!(a.text(), "ab\u{105}\u{107}@");
+        a.apply_key(&ctrl(Key::A), 100, "", 5);
+        let done = a.apply_key(&held(Key::X, "\u{17a}", ALTGR), 100, "", 5);
+        assert_eq!((done.copied, a.text()), (None, "\u{17a}"));
+        // AltGr+Home is Home: the start of the line, not of the text.
+        let mut lines = area("one\ntwo");
+        lines.apply_key(&held(Key::Home, "", ALTGR), 100, "", 5);
+        assert_eq!(lines.caret(), "one\n".len());
+    }
+
+    /// A command carries its letter as text and types none of it: Ctrl+S is
+    /// `s`, Alt+F is `f`, and the Windows key's chords are the desktop's.
+    #[test]
+    fn a_command_types_nothing_though_it_carries_its_letter() {
+        let mut a = area("keep");
+        let windows_altgr = Modifiers {
+            super_key: true,
+            ..ALTGR
+        };
+        for k in [
+            held(Key::S, "s", Modifiers::ctrl()),
+            held(Key::F, "f", Modifiers::alt()),
+            held(Key::E, "e", Modifiers::super_key()),
+            held(Key::E, "\u{20ac}", windows_altgr),
+        ] {
+            let done = a.apply_key(&k, 100, "", 5);
+            assert!(!done.handled, "{:?} {:?} was taken", k.modifiers, k.key);
+            assert_eq!(a.text(), "keep", "{:?} {:?} typed", k.modifiers, k.key);
+        }
+    }
+
+    /// A key whose only text is a control character is not typing, and
+    /// leaves the selection it would have typed over: Escape carries `\x1b`
+    /// on most layouts, and took the selected text with it.
+    #[test]
+    fn a_key_that_types_only_a_control_character_keeps_the_selection() {
+        let mut a = area("keep this");
+        a.apply_key(&ctrl(Key::A), 100, "", 5);
+        let escape = held(Key::Escape, "\u{1b}", Modifiers::NONE);
+        let done = a.apply_key(&escape, 100, "", 5);
+        assert!(!done.handled, "Escape was taken from the application");
+        assert!(!done.changed);
+        assert_eq!(a.text(), "keep this");
+        assert_eq!(a.selected_text(), "keep this");
     }
 
     /// A press puts the caret on the line and column pressed.

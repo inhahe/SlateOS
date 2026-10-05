@@ -8,7 +8,9 @@ program is not testing the program.
 It could not save at all: its toolbar drew a Save button -- and New, Open,
 Undo, Redo, Find and GoTo -- that answered nothing, no key saved, and closing
 the window threw away every edit without a word.  The table covers what was
-added for that; the rest of the suite predates it.
+added for that, and -- since 2026-09-28 (C-Q24, §1416) -- the history kept
+as a tree, reached with Alt+Z and Alt+Shift+Z, Ctrl+Shift+Z and Ctrl+F4, and
+AltGr no longer taken for Ctrl; the rest of the suite predates it.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -101,6 +103,226 @@ MUTATIONS = [
         "                Key::W if self.focused_panel != FocusedPanel::SearchBar => {",
         "                Key::W => {",
         ["ctrl_w_decides_whether_the_search_starts_again_at_the_top"],
+    ),
+    # -- the history as a tree, and the keys (C-Q24, §1416) ----------------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(entry) => self.revert(&entry),",
+        "                Travel::Undo(entry) => self.reapply(&entry),",
+        ["a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.history.earlier();",
+        "        let steps = self.history.later();",
+        ["a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one"],
+    ),
+    (
+        "a several-byte edit is spliced short",
+        "        self.data.splice(start..end, insert.iter().copied());",
+        "        self.data.splice(start..end, insert.iter().copied().take(1));",
+        ["a_several_byte_edit_goes_back_and_forth_whole"],
+    ),
+    (
+        "Alt+Z is not a key",
+        "        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        "        if false && key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        ["alt_z_reaches_the_branch_an_undo_left"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "                doc.later();",
+        "                doc.earlier();",
+        ["alt_z_reaches_the_branch_an_undo_left"],
+    ),
+    (
+        "AltGr is taken for Ctrl",
+        "        if textline::is_ctrl_chord(key.modifiers) {",
+        "        if key.modifiers.ctrl {",
+        ["altgr_z_does_not_undo"],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "                Key::Z if key.modifiers.shift => {\n                    self.active_doc_mut().redo();",
+        "                Key::Z if key.modifiers.shift => {\n                    self.active_doc_mut().undo();",
+        ["ctrl_shift_z_redoes"],
+    ),
+    (
+        "Ctrl+F4 closes nothing",
+        "                Key::F4 => {\n                    self.request_close_tab(self.active_tab);",
+        "                Key::F4 => {\n                    let _ = self.active_tab;",
+        ["ctrl_f4_closes_the_tab_even_in_the_search_bar"],
+    ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "a key that is not the card's writes into the file behind it",
+        "        if self.show_help {\n"
+        "            // Modal: every other key is the card's while it is up. It was\n",
+        "        if false {\n"
+        "            // Modal: every other key is the card's while it is up. It was\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "a press goes through the card and the wheel scrolls under it",
+        "        if self.show_help {\n"
+        "            // The card is modal for the pointer as it is for the keys: a\n",
+        "        if false {\n"
+        "            // The card is modal for the pointer as it is for the keys: a\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "only the left button puts the card away",
+        "            if matches!(ev.kind, MouseEventKind::Press(_)) {\n"
+        "                self.show_help = false;\n",
+        "            if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {\n"
+        "                self.show_help = false;\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+]
+
+CHORD = "a_commands_letter_is_not_written_into_the_file_or_a_box"
+
+MUTATIONS += [
+    # A command's letter is not typing (2026-10-04): an unbound chord fell
+    # through to the ASCII pane and wrote its letter into the file.
+    (
+        "a command's letter is written into the file",
+        "            if !textline::types_into_field(key) {\n                return false;\n            }\n            let mut wrote_any = false;\n",
+        "            let mut wrote_any = false;\n",
+        [CHORD],
+    ),
+    (
+        "Windows+A writes a nibble",
+        "                if !textline::is_plain(key.modifiers) {\n",
+        "                if key.modifiers.ctrl || key.modifiers.alt {\n",
+        [CHORD],
+    ),
+    (
+        "a command's letter is typed into the search box",
+        "            if textline::types_into_field(key) {\n                self.search.input_text.extend(key.typed());\n",
+        "            if key.types_text() {\n                self.search.input_text.extend(key.typed());\n",
+        [CHORD],
+    ),
+    (
+        "a command's letter is typed into the go-to box",
+        "            if textline::types_into_field(key) {\n                self.goto_text.extend(key.typed());\n",
+        "            if key.types_text() {\n                self.goto_text.extend(key.typed());\n",
+        [CHORD],
+    ),
+    (
+        "AltGr+I sets whether case matters",
+        "            if key.key == Key::I && textline::is_ctrl_chord(key.modifiers) {\n",
+        "            if key.key == Key::I && key.modifiers.ctrl {\n",
+        [CHORD],
+    ),
+    (
+        "AltGr+W sets whether the search wraps",
+        "            if key.key == Key::W && textline::is_ctrl_chord(key.modifiers) {\n",
+        "            if key.key == Key::W && key.modifiers.ctrl {\n",
+        [CHORD],
+    ),
+    (
+        "a Windows chord is the window's",
+        "        if textline::is_ctrl_chord(key.modifiers) {\n",
+        "        if key.modifiers.ctrl && !key.modifiers.alt {\n",
+        [CHORD],
+    ),
+]
+
+FIND = "the_find_bars_box_is_the_toolkits_field"
+LAYOUT = "the_find_bars_parts_never_overlap_at_any_width"
+PRESS = "a_press_on_a_bar_does_not_reach_the_byte_under_it"
+GOTO = "the_go_to_box_is_red_while_it_is_not_an_offset_and_enter_leaves_it_up"
+
+MUTATIONS += [
+    # The find bar's box and the go-to box are the toolkit's fields; the bar
+    # has two rows; a press on either is theirs (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the find bar's box never lights",
+        "            hovered: open && self.query_hovered,\n",
+        "            hovered: false,\n",
+        [FIND],
+    ),
+    (
+        "the find bar's box is never marked",
+        "            focused: open && self.focused_panel == FocusedPanel::SearchBar,\n",
+        "            focused: false,\n",
+        [FIND],
+    ),
+    (
+        "the boxes show through the card",
+        "        !self.show_help && self.question.is_none() && !self.picker.is_open()\n",
+        "        self.question.is_none() && !self.picker.is_open()\n",
+        [FIND],
+    ),
+    (
+        "a search that found nothing is not red",
+        "            invalid: self.search.match_count == 0\n"
+        "                && self.search.searched.as_deref() == Some(self.search.input_text.as_str()),\n",
+        "            invalid: false,\n",
+        [FIND],
+    ),
+    (
+        "the box is red before its text is searched for",
+        "            invalid: self.search.match_count == 0\n"
+        "                && self.search.searched.as_deref() == Some(self.search.input_text.as_str()),\n",
+        "            invalid: self.search.match_count == 0,\n",
+        [FIND],
+    ),
+    (
+        "the light stays after the pointer leaves",
+        "        let inside = |r: Rect| ev.kind != MouseEventKind::Leave && r.contains(ev.x, ev.y);\n",
+        "        let inside = |r: Rect| r.contains(ev.x, ev.y);\n",
+        [FIND],
+    ),
+    (
+        "moving within a box asks for a repaint",
+        "        if (query, goto) == (self.query_hovered, self.goto_hovered) {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [FIND],
+    ),
+    (
+        "a press on the find bar's box does not give it the keyboard",
+        "                if l.query.contains(x, y) {\n                    self.focused_panel = FocusedPanel::SearchBar;\n                }\n",
+        "",
+        [FIND],
+    ),
+    (
+        "a press on the find bar reaches the byte under it",
+        "            if l.bar.contains(x, y) {\n",
+        "            if l.query.contains(x, y) {\n",
+        [PRESS],
+    ),
+    (
+        "a press on the go-to dialog reaches the byte under it",
+        "            if dialog.contains(x, y) {\n",
+        "            if input.contains(x, y) {\n",
+        [PRESS],
+    ),
+    (
+        "the options line shares the query's row",
+        "            y + Self::ROW + 6.0,\n",
+        "            y,\n",
+        [LAYOUT],
+    ),
+    (
+        "the go-to box is not red for what is not an offset",
+        "            invalid: self.goto_text_is_wrong(),\n",
+        "            invalid: false,\n",
+        [GOTO],
+    ),
+    (
+        "Enter on what is not an offset closes the box",
+        "            self.status_message = format!(\"Not an offset: {}\", self.goto_text.trim());\n            return;\n",
+        "            self.status_message = format!(\"Not an offset: {}\", self.goto_text.trim());\n            self.goto_visible = false;\n            return;\n",
+        [GOTO],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIND, GOTO],
     ),
 ]
 

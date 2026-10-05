@@ -610,6 +610,13 @@ impl MetronomeApp {
         if !event.pressed {
             return EventResult::Ignored;
         }
+        // Every binding is on the key itself, so a key is the metronome's only
+        // with nothing but Shift held: a chord with Ctrl, Alt or the Windows
+        // key is the window's or the desktop's and arrives carrying its key --
+        // Alt+R reset the tempo and Alt+Space started the beat.
+        if !textline::is_plain(event.modifiers) {
+            return EventResult::Ignored;
+        }
         if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
@@ -1527,6 +1534,47 @@ mod tests {
             modifiers: Modifiers::shift(),
             text: String::new(),
         }
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the
+    /// metronome's**: Alt+R reset the tempo and Alt+Space started the beat,
+    /// each chord arriving carrying its key. Shift+Up still steps by ten.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_metronomes() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = MetronomeApp::new();
+        app.handle_key(&make_key(Key::Up));
+        let bpm = app.bpm;
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::R, Key::Space, Key::Up, Key::Num4, Key::F1, Key::S] {
+                assert_eq!(
+                    app.handle_key(&KeyEvent {
+                        key,
+                        pressed: true,
+                        modifiers: held,
+                        text: String::new(),
+                    }),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.bpm, bpm, "a chord changed the tempo");
+        assert!(!app.playing, "a chord started the beat");
+        assert!(
+            !app.show_help && !app.show_settings,
+            "a chord opened a panel"
+        );
+        app.handle_key(&make_shift_key(Key::Up));
+        assert_eq!(app.bpm, bpm + 10, "Shift+Up no longer steps by ten");
     }
 
     // --- Time signature ---

@@ -1,0 +1,36 @@
+# aac.mp4: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 0 0 K__ 0
+packet 1 0 0 K__ 0
+packet 1 1024 1024 K__ 0
+packet 1 2048 2048 K__ 0
+packet 1 3072 3072 K__ 0
+packet 1 4096 4096 K__ 0
+seek 250
+packet 0 0 0 K__ 0
+packet 1 0 0 K__ 0
+packet 1 1024 1024 K__ 0
+packet 1 2048 2048 K__ 0
+packet 1 3072 3072 K__ 0
+packet 1 4096 4096 K__ 0
+seek 550
+packet 1 18432 18432 K__ 0
+packet 0 4096 4096 K__ 0
+packet 1 19456 19456 K__ 0
+packet 1 20480 20480 K__ 0
+packet 1 21504 21504 K__ 0
+packet 1 22528 22528 K__ 0
+seek 900
+packet 1 37888 37888 K__ 0
+packet 0 8192 8192 K__ 0
+packet 1 38912 38912 K__ 0
+packet 1 39936 39936 K__ 0
+packet 1 40960 40960 K__ 0
+packet 1 41984 41984 K__ 0
+seek 99000
+packet 1 37888 37888 K__ 0
+packet 0 8192 8192 K__ 0
+packet 1 38912 38912 K__ 0
+packet 1 39936 39936 K__ 0
+packet 1 40960 40960 K__ 0
+packet 1 41984 41984 K__ 0

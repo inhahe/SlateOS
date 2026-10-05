@@ -19,6 +19,10 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+TREE = "a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"
+CTRL_Y = "ctrl_y_and_ctrl_shift_z_make_a_move_again_with_its_flip"
+HELD = "a_key_held_with_ctrl_alt_or_the_windows_key_is_not_the_games"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # -- The card size -------------------------------------------------
@@ -440,6 +444,187 @@ MUTATIONS = [
         "l.pad, Surface::Panel);\n        }\n        let mut y",
         "l.pad, Surface::Card);\n        }\n        let mut y",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    # ── The history: a tree of whole games, walked with Alt+Z (C-Q24) ──
+    (
+        "a draw is not recorded",
+        "            self.waste.push(card);\n            self.history.begin(before);\n",
+        "            self.waste.push(card);\n",
+        ["test_draw_adds_undo", "test_undo_draw"],
+    ),
+    (
+        "a recycle is not recorded",
+        "                self.stock.push(card);\n            }\n            self.history.begin(before);\n",
+        "                self.stock.push(card);\n            }\n",
+        ["test_undo_recycle"],
+    ),
+    (
+        "a card played up from the waste is not recorded",
+        "        self.waste.pop();\n        self.history.begin(before);\n        self.bump_moves();\n        self.check_win();",
+        "        self.waste.pop();\n        self.bump_moves();\n        self.check_win();",
+        ["test_undo_waste_to_foundation"],
+    ),
+    (
+        "a card played down from the waste is not recorded",
+        "        self.waste.pop();\n        self.history.begin(before);\n        self.bump_moves();\n        true",
+        "        self.waste.pop();\n        self.bump_moves();\n        true",
+        ["test_undo_waste_to_tableau"],
+    ),
+    (
+        "a run moved between columns is not recorded",
+        "        self.flip_top_if_needed(from_col);\n        self.history.begin(before);\n",
+        "        self.flip_top_if_needed(from_col);\n",
+        ["test_undo_tableau_to_tableau_with_flip"],
+    ),
+    (
+        "a card played up from a column is not recorded",
+        "        self.flip_top_if_needed(col);\n        self.history.begin(before);\n",
+        "        self.flip_top_if_needed(col);\n",
+        ["test_undo_tableau_to_foundation"],
+    ),
+    (
+        "a card taken down from a foundation is not recorded",
+        "            source.pop();\n        }\n        self.history.begin(before);\n        self.bump_moves();\n        true\n    }\n\n    /// Flip",
+        "            source.pop();\n        }\n        self.bump_moves();\n        true\n    }\n\n    /// Flip",
+        ["test_undo_foundation_to_tableau"],
+    ),
+    (
+        "undo leaves the stock",
+        "        self.stock = s.stock;\n",
+        "",
+        ["test_undo_draw"],
+    ),
+    (
+        "undo leaves the waste",
+        "        self.waste = s.waste;\n",
+        "",
+        ["test_undo_draw"],
+    ),
+    (
+        "undo leaves the foundations",
+        "        self.foundations = s.foundations;\n",
+        "",
+        ["test_undo_waste_to_foundation"],
+    ),
+    (
+        "undo leaves the columns",
+        "        self.tableau = s.tableau;\n",
+        "",
+        ["test_undo_tableau_to_tableau_with_flip"],
+    ),
+    (
+        "undo leaves the move count",
+        "        self.move_count = s.move_count;\n",
+        "",
+        ["test_undo_decrements_move_count"],
+    ),
+    (
+        "undo leaves the game won",
+        "        self.won = s.won;\n",
+        "",
+        ["a_win_undone_and_redone_is_lost_and_won_again"],
+    ),
+    (
+        "undo keeps a selection of cards that moved",
+        "        self.won = s.won;\n        self.selection = None;\n",
+        "        self.won = s.won;\n",
+        ["an_undo_drops_the_selection"],
+    ),
+    (
+        "ctrl+z is not an undo",
+        "                HistoryKey::Undo => self.undo(),",
+        "                HistoryKey::Undo => false,",
+        [CTRL_Y],
+    ),
+    (
+        "ctrl+y is not a redo",
+        "                HistoryKey::Redo => self.redo(),",
+        "                HistoryKey::Redo => self.undo(),",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z goes forward",
+        "                HistoryKey::Earlier => self.earlier(),",
+        "                HistoryKey::Earlier => self.later(),",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "                HistoryKey::Later => self.later(),",
+        "                HistoryKey::Later => self.earlier(),",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let then = self.history.redo(now);",
+        "        let then = self.history.undo(now);",
+        [CTRL_Y, "a_win_undone_and_redone_is_lost_and_won_again"],
+    ),
+    (
+        "alt+z only undoes",
+        "        let then = self.history.earlier(now);",
+        "        let then = self.history.undo(now);",
+        [TREE],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let then = self.history.later(now);",
+        "        let then = self.history.redo(now);",
+        [TREE],
+    ),
+    (
+        "a held key is a bare key",
+        "        if held {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [HELD],
+    ),
+    (
+        "a key held with the Windows key is not held",
+        "        let held = modifiers.ctrl || modifiers.alt || modifiers.super_key;",
+        "        let held = modifiers.ctrl || modifiers.alt;",
+        [HELD],
+    ),
+    (
+        "ctrl+n deals over a won board",
+        "            if key == Key::N && !held {",
+        "            if key == Key::N {",
+        ["a_win_undone_and_redone_is_lost_and_won_again"],
+    ),
+    (
+        'F1 does not raise the list',
+        '        && help::raises(key)\n    {\n        app.show_help = true;',
+        '        && false\n    {\n        app.show_help = true;',
+        ['the_list_of_keys_reaches_the_window', 'every_advertised_key_does_something', 'the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'the list is not drawn',
+        '        if self.show_help {\n            guitk::shortcut::render_card(',
+        '        if false {\n            guitk::shortcut::render_card(',
+        ['the_list_of_keys_reaches_the_window'],
+    ),
+    (
+        'nothing puts the list away',
+        '                if help::closes(key) {\n                    app.show_help = false;',
+        '                if false {\n                    app.show_help = false;',
+        ['the_list_of_keys_reaches_the_window', 'the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'a key under the list reaches the table',
+        '                return if key.pressed {\n                    EventResult::Consumed\n                } else {\n                    EventResult::Ignored\n                };\n',
+        '',
+        ['the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'a click under the list plays',
+        '            }) => {\n                app.show_help = false;\n                return EventResult::Consumed;\n            }\n',
+        '            }) => {}\n',
+        ['the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'the header does not say how to raise the list',
+        'const HEADER_KEYS: &str = "N:New  Z:Undo  A:Auto  F1:All keys";',
+        'const HEADER_KEYS: &str = "N:New  Z:Undo  Ctrl+Y:Redo  A:Auto";',
+        ['the_list_of_keys_reaches_the_window'],
     ),
 ]
 

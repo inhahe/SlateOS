@@ -1,0 +1,20 @@
+[package]
+name = "ogg"
+version = "0.1.0"
+edition = "2024"
+description = "Ogg files taken apart into their streams' packets, timed as FFmpeg's demuxer times them."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Vorbis's block sizes, by which its packets are timed.
+vorbis = { path = "../vorbis" }
+
+[dev-dependencies]
+# The packets' fingerprints, as `ffprobe -show_data_hash MD5` prints them.
+md5 = { path = "../../../md5" }
+
+[lints]
+workspace = true

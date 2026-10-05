@@ -209,6 +209,91 @@ MUTATIONS = [
         "",
         ["the_compose_forms_keys_are_all_on_its_line"],
     ),
+    (
+        'a chord raises the keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the mailbox',
+        '        if textline::is_ctrl_chord(key.modifiers) {',
+        '        if key.modifiers.ctrl {',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    (
+        'a chord works the mailbox',
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '        if textline::types_into_field(key) {',
+        '        if key.types_text() {',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    (
+        'a chord works the search box',
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    (
+        "Alt's and the Windows key's chords reach a message",
+        '        if textline::is_alt_or_windows_chord(key.modifiers) {',
+        '        if false {',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl in a message',
+        '        let ctrl = textline::is_ctrl_chord(key.modifiers);',
+        '        let ctrl = key.modifiers.ctrl;',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    (
+        'Ctrl+Escape closes a message',
+        '            Key::Escape if plain => self.close_compose(),',
+        '            Key::Escape => self.close_compose(),',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    (
+        "Ctrl+Tab walks a message's fields",
+        '            Key::Tab if plain => {',
+        '            Key::Tab => {',
+        ['a_chord_is_neither_a_mail_key_nor_typing'],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'the search box is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(Target::SearchBox),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the search box is not marked while it has the keyboard',
+        '                focused: self.searching,',
+        '                focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a compose field is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(Target::Field(field)),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the body is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(Target::Field(ComposeField::Body)),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = &settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
 ]
 
 DECODE_MUTATIONS = [

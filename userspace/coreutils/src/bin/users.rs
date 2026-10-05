@@ -4,9 +4,10 @@
 //! Usage: users [OPTION]... [FILE]
 //! ```
 //!
-//! A port of GNU coreutils 9.4's `src/users.c`. The records are read by the
-//! shared `utmpfile` crate -- the one `who`, `last`, `finger` and `uptime`
-//! read them with -- so this file holds only what `users` does with them.
+//! A port of GNU coreutils 9.4's `src/users.c`. The records are read by
+//! [`coreutils::utmp`] -- gnulib's `readutmp`, shared with `who` and `pinky`,
+//! over the `utmpfile` parser `last`, `finger` and `uptime` use too -- so this
+//! file holds only what `users` does with them.
 //!
 //! # What it prints
 //!
@@ -57,8 +58,8 @@
 
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quote};
+use coreutils::utmp::{self, Record, UTMP_FILE, WTMP_FILE};
 use std::ffi::OsString;
-use utmpfile::{Record, USER_PROCESS};
 
 coreutils::guard_std_fds!();
 
@@ -66,12 +67,6 @@ const USERS: Program = Program::new("users", 1);
 
 /// `parse_gnu_standard_options_only`'s table.
 const LONG_OPTIONS: &[(&str, Takes)] = &[("help", Takes::Nothing), ("version", Takes::Nothing)];
-
-/// glibc's `_PATH_UTMP`, which gnulib's `UTMP_FILE` is.
-const UTMP_FILE: &str = "/var/run/utmp";
-
-/// glibc's `_PATH_WTMP`, named only in the help.
-const WTMP_FILE: &str = "/var/log/wtmp";
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum Request {
@@ -121,31 +116,15 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     Ok(Request::List(file))
 }
 
-/// gnulib's `IS_USER_PROCESS`: a live-session record with a name in it.
-fn is_user_process(record: &Record) -> bool {
-    record.record_type == USER_PROCESS && !record.user.is_empty()
-}
-
-/// gnulib's `extract_trimmed_name`: the name less any trailing spaces.
-fn trimmed_name(record: &Record) -> &[u8] {
-    let keep = record
-        .user
-        .iter()
-        .rposition(|&b| b != b' ')
-        .map_or(0, |last| last.saturating_add(1));
-    record.user.get(..keep).unwrap_or_default()
-}
-
-/// Upstream's `list_entries_users`: the line `users` prints for `records`,
-/// keeping a session only if `still_running(pid)` says so. Empty when there is
-/// nobody, rather than a lone newline.
-fn user_line(records: &[Record], still_running: impl Fn(i32) -> bool) -> Vec<u8> {
+/// Upstream's `list_entries_users`: the line `users` prints for `records`.
+/// Empty when there is nobody, rather than a lone newline. Sessions whose
+/// process has gone were left out by [`utmp::read_utmp`] when the live utmp
+/// was read, as upstream's `READ_UTMP_CHECK_PIDS` leaves them out.
+fn user_line(records: &[Record]) -> Vec<u8> {
     let mut names: Vec<&[u8]> = records
         .iter()
-        .filter(|r| is_user_process(r))
-        // gnulib's `READ_UTMP_CHECK_PIDS` asks only about a positive pid.
-        .filter(|r| r.pid <= 0 || still_running(r.pid))
-        .map(trimmed_name)
+        .filter(|r| utmp::is_user_process(r))
+        .map(utmp::trimmed_name)
         .collect();
     // `qsort` with `strcmp`: byte order, which is `[u8]`'s `Ord`.
     names.sort_unstable();
@@ -164,31 +143,12 @@ mod imp {
     use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::getopt::Report;
-    use coreutils::quote::quotef_os;
+    use coreutils::quote::{os_bytes, quotef};
     use coreutils::stdfd::{self, Stream};
+    use coreutils::utmp::{self, Want};
     use std::ffi::OsString;
-    use std::io::{self, Write};
-    use std::path::Path;
+    use std::io::Write;
     use std::process::ExitCode;
-
-    /// gnulib's `READ_UTMP_CHECK_PIDS` test, inverted: a session is dropped
-    /// only when `kill(pid, 0)` says there is no such process. `EPERM` means it
-    /// exists and is somebody else's, and anything else is not proof of death.
-    fn still_running(pid: i32) -> bool {
-        /// `ESRCH`: 3 on Linux, and `posix::errno::ESRCH` is 3.
-        const ESRCH: i32 = 3;
-
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        // SAFETY: signal 0 performs the existence and permission checks and
-        // delivers nothing. The call takes two integers and touches no memory
-        // of ours.
-        if unsafe { kill(pid, 0) } == 0 {
-            return true;
-        }
-        io::Error::last_os_error().raw_os_error() != Some(ESRCH)
-    }
 
     pub fn main() -> ExitCode {
         stdfd::restore();
@@ -211,29 +171,25 @@ mod imp {
                 let _ = out.write_all(b"users (SlateOS coreutils) 0.1.0\n");
             }
             Request::List(file) => {
-                let (path, check_pids) = match file {
-                    None => (OsString::from(UTMP_FILE), true),
-                    Some(f) => (f, false),
+                // Upstream's `users (UTMP_FILE, READ_UTMP_CHECK_PIDS)` or
+                // `users (file, 0)`, each with `READ_UTMP_USER_PROCESS` added.
+                let named = file.is_some();
+                let path = file.map_or_else(
+                    || UTMP_FILE.as_bytes().to_vec(),
+                    |f| os_bytes(&f).into_owned(),
+                );
+                let want = Want {
+                    users_only: true,
+                    live_only: !named,
                 };
-                let read = if check_pids {
-                    // The live utmp: a system that has none has nobody logged
-                    // in, but one that is there and cannot be read does not.
-                    optionalfile::read_bytes_or_empty(Path::new(&path))
-                } else {
-                    // A file named on the command line must be readable, as
-                    // gnulib's own reader requires.
-                    std::fs::read(&path)
-                };
-                let data = match read {
-                    Ok(data) => data,
+                let records = match utmp::read_utmp(&path, named, want) {
+                    Ok(records) => records,
                     Err(e) => {
-                        diag!("users: {}: {}", quotef_os(&path), strerror(&e));
+                        diag!("users: {}: {}", quotef(&path), strerror(&e));
                         return ExitCode::FAILURE;
                     }
                 };
-                let records = utmpfile::parse(&data);
-                let line = user_line(&records, |pid| !check_pids || still_running(pid));
-                let _ = out.write_all(&line);
+                let _ = out.write_all(&user_line(&records));
             }
         }
         stdfd::close_stdout("users", out, ExitCode::SUCCESS)
@@ -257,7 +213,7 @@ fn main() -> std::process::ExitCode {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use utmpfile::{DEAD_PROCESS, LOGIN_PROCESS};
+    use coreutils::utmp::{DEAD_PROCESS, LOGIN_PROCESS, USER_PROCESS};
 
     fn record(record_type: i32, user: &[u8], pid: i32) -> Record {
         Record {
@@ -268,15 +224,12 @@ mod tests {
             id: Vec::new(),
             pid,
             login_time: 0,
+            tv_sec: 0,
             login_usec: 0,
             exit_status: 0,
             session: 0,
             addr_v6: [0; 4],
         }
-    }
-
-    fn everyone(_: i32) -> bool {
-        true
     }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
@@ -292,7 +245,7 @@ mod tests {
             record(USER_PROCESS, b"alice", 13),
         ];
         // `B` sorts before `a`: byte order, not a collation.
-        assert_eq!(user_line(&records, everyone), b"Bob alice alice zoe\n");
+        assert_eq!(user_line(&records), b"Bob alice alice zoe\n");
     }
 
     #[test]
@@ -303,43 +256,34 @@ mod tests {
             record(USER_PROCESS, b"", 3),
             record(USER_PROCESS, b"x", 4),
         ];
-        assert_eq!(user_line(&records, everyone), b"x\n");
+        assert_eq!(user_line(&records), b"x\n");
     }
 
     #[test]
     fn nobody_prints_nothing_at_all() {
-        assert_eq!(user_line(&[], everyone), b"");
-        assert_eq!(user_line(&[record(DEAD_PROCESS, b"a", 1)], everyone), b"");
+        assert_eq!(user_line(&[]), b"");
+        assert_eq!(user_line(&[record(DEAD_PROCESS, b"a", 1)]), b"");
     }
 
     #[test]
     fn trailing_spaces_are_trimmed_and_nothing_else() {
         let records = [record(USER_PROCESS, b" a b  ", 1)];
-        assert_eq!(user_line(&records, everyone), b" a b\n");
+        assert_eq!(user_line(&records), b" a b\n");
         // A name of spaces alone trims to nothing, and is still a session.
         let records = [
             record(USER_PROCESS, b"  ", 1),
             record(USER_PROCESS, b"b", 2),
         ];
-        assert_eq!(user_line(&records, everyone), b" b\n");
+        assert_eq!(user_line(&records), b" b\n");
     }
 
-    #[test]
-    fn a_dead_session_is_dropped_only_when_asked_and_only_for_a_real_pid() {
-        let records = [
-            record(USER_PROCESS, b"live", 100),
-            record(USER_PROCESS, b"dead", 200),
-            record(USER_PROCESS, b"nopid", 0),
-        ];
-        let only_100 = |pid: i32| pid == 100;
-        assert_eq!(user_line(&records, only_100), b"live nopid\n");
-        assert_eq!(user_line(&records, everyone), b"dead live nopid\n");
-    }
+    // Dropping a session whose process has gone is `coreutils::utmp`'s now,
+    // and is tested there.
 
     #[test]
     fn a_name_is_bytes_not_text() {
         let records = [record(USER_PROCESS, b"caf\xe9", 1)];
-        assert_eq!(user_line(&records, everyone), b"caf\xe9\n");
+        assert_eq!(user_line(&records), b"caf\xe9\n");
     }
 
     #[test]

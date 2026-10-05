@@ -47,11 +47,11 @@
 # `division by zero`, `non-integer argument`) and a script that greps expr's
 # stderr should not have to know which expr it got.
 #
-# `run_case` is for the two that come out of the regex engine — `Unmatched ( or
-# \(`, `Invalid content of \{\}` — which are glibc's `regcomp` strings rendered
-# by glibc's `regerror`. Matching those exactly would be fitting our engine to
-# glibc's internal error taxonomy rather than to expr, so we agree only about
-# *whether* the pattern was rejected.
+# The regex engine's refusals are compared word for word too. They are glibc's
+# `regcomp` sentences -- `Unmatched ( or \(`, `Invalid content of \{\}` -- which
+# upstream prints and nothing else, and `ere` carries glibc's code for every
+# failure (`EreError::message`) for exactly that. This used to compare only
+# *whether* a pattern was refused, from before the engine had the taxonomy.
 #
 # `xfail_case` / `xmsg_case` take a reason first, for a divergence we chose. The
 # script fails if a plain case differs, and also if an xfail stops differing,
@@ -248,6 +248,20 @@ run_case aab : 'a\{2\}'
 run_case abc : 'a\{2\}'
 run_case abc : '^abc'
 run_case abc : 'abc$'
+# With nothing to repeat, `\+` and `\?` are characters in a basic expression,
+# and a `*` after an assertion is one too (TD-B-ERE-QUANTIFIED-ANCHOR).
+run_case +a : '\+a'
+run_case '?a' : '\?a'
+run_case 'a*' : 'a\>*'
+run_case ab : 'a\>*'
+# coreutils' basic syntax: no RE_CONTEXT_INVALID_DUP and no RE_NO_EMPTY_RANGES
+# (ere::bre::BreSyntax::COREUTILS), and a `\}` closing nothing is the character.
+run_case aa : 'a**'
+run_case aa : 'a\{1\}*'
+run_case '{2}a' : '\{2\}a'
+run_case a : 'a[z-a]*'
+run_case a : '[z-a]'
+run_case 'a}' : 'a\}'
 run_case abc : 'c$'
 run_case abc : '.'
 run_case abc : '.*'
@@ -272,13 +286,26 @@ run_case v1.24.3 : 'v\([0-9]*\)'
 run_case v1.24.3 : 'v\([0-9]*\)\.\([0-9]*\)'
 run_case abc : '\(x\)*a'
 
-# Patterns the engine rejects. Presence only: the text is glibc's `regcomp`
-# error taxonomy rendered by `regerror`, and matching it would be fitting our
-# engine to glibc's internals rather than to expr.
-run_case abc : 'a\('
-run_case abc : 'a\{3,1\}'
-run_case abc : '[a-'
-run_case abc : 'a\{1'
+# Patterns the engine rejects, each with glibc's sentence for it.
+msg_case abc : 'a\('
+msg_case abc : 'a\{3,1\}'
+msg_case abc : '[a-'
+msg_case abc : 'a\{1'
+msg_case abc : '['
+msg_case abc : '[^'
+msg_case abc : 'a\)'
+msg_case abc : '\)'
+msg_case abc : 'a\{x\}'
+msg_case abc : 'a\{1,x\}'
+msg_case abc : 'a\{1,2'
+msg_case abc : 'a\{,\}'
+msg_case abc : '[[:foo:]]'
+msg_case abc : '[[:alpha:]'
+msg_case abc : '\1'
+msg_case abc : '\(a\)\2'
+msg_case abc : 'a\'
+msg_case abc : 'a\{32768\}'
+msg_case abc : 'a\{1\}\{2\}'
 
 # --- match, substr, index, length -------------------------------------------
 run_case match abc a
@@ -346,22 +373,17 @@ run_case substr "$raw" 2 1
 run_case "$raw" '|' x
 run_case "$raw" = "$raw"
 
-# The regex half is where GNU stops agreeing with itself, and the two cases
-# below are the demonstration. The three cases above establish that GNU calls
-# the undecodable byte a character: `length` says 3, `index ... b` says 3, and
-# `substr ... 2 1` hands the byte back. But its matcher cannot see past it —
-# `.*` matches only the leading `a`, and `a.b` does not match at all. A string
-# that is three characters long to `length` and one character long to `.*` is
-# not a model a script can be written against.
-#
-# Ours counts the byte in both halves (design-decisions.md §322). That is also
-# the only reading under which `expr "$path" : '.*/\(.*\)'` — one of the oldest
-# spellings of `basename` — keeps working on a path this filesystem allows,
-# which is every byte but `/` and NUL.
-xfail_case 'GNU: length calls the undecodable byte a character but the matcher stops at it; ours is bytes throughout (§322)' \
-  "$raw" : '.*'
-xfail_case 'GNU: `a.b` cannot match across an undecodable byte its own `length` counts; ours is bytes throughout (§322)' \
-  "$raw" : 'a.b'
+# The regex half: GNU calls the undecodable byte a character -- `length` says
+# 3, `index ... b` says 3, and `substr ... 2 1` hands the byte back -- but in a
+# UTF-8 locale its matcher does not let `.` take it: `.*` matches only the
+# leading `a`, and `a.b` does not match at all. That is glibc's rule, and the
+# engine follows it since 2026-10-02 (`known-issues.md`
+# B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES); until then these two were deliberate
+# differences, on the argument that `expr "$path" : '.*/\(.*\)'` should work on
+# any path. GNU's answer to that is `LC_ALL=C`, which our regex tools do not
+# yet honour (`TD-B-REGEX-TOOLS-IGNORE-LC-ALL-C`).
+run_case "$raw" : '.*'
+run_case "$raw" : 'a.b'
 
 # --- syntax errors ----------------------------------------------------------
 # Text-compared. Every one of these names the offending argument back to the
@@ -418,6 +440,40 @@ help_shape() {
   report "$AGREED" 'expr --help (exits 0, writes stdout, says nothing on stderr)'
 }
 help_shape
+
+# A lone `--help` or `--version` may be abbreviated -- `expr --he`, `expr --v`
+# -- because GNU's `expr` hands its single argument to gnulib's
+# `parse_long_options`, which is `getopt_long` over those two options with its
+# complaints silenced. Their texts are not GNU's to compare (see above), so
+# the case asks each program whether the abbreviation is *the same request* as
+# the full spelling: identical output and status, on both sides.
+abbrev_case() {
+  local short=$1 full=$2 side a b ok=yes
+  for side in ours gnu; do
+    a=$(mktemp); b=$(mktemp)
+    run_side "$side" "$a" "$a.err" "$short"; echo "rc=$?" >>"$a"
+    run_side "$side" "$b" "$b.err" "$full"; echo "rc=$?" >>"$b"
+    cmp -s "$a" "$b" && cmp -s "$a.err" "$b.err" || ok=no
+    rm -f "$a" "$a.err" "$b" "$b.err"
+  done
+  REPORT="  expr $short and expr $full differ on at least one side"
+  report "$ok" "expr $short (the same as expr $full, on both sides)"
+}
+abbrev_case --he --help
+abbrev_case --h --help
+abbrev_case --hel --help
+abbrev_case --v --version
+abbrev_case --ver --version
+abbrev_case --versio --version
+# And what `getopt` would refuse is not an option at all, but a one-string
+# expression, printed back: an argument neither option takes, a name neither
+# begins, a short option, and `--=x`, whose empty name every option begins.
+run_case --help=x
+run_case --he=x
+run_case --x
+run_case --helpx
+run_case -h
+run_case --=x
 
 # --- backreferences ---------------------------------------------------------
 run_case abc : '\(a\)\1'

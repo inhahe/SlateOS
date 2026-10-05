@@ -240,6 +240,8 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+coreutils::guard_std_fds!();
+
 /// Measured: `touch -q f; echo $?` prints 1.
 const TOUCH: Program = Program::new("touch", 1);
 
@@ -527,24 +529,30 @@ enum Request {
     Run(TouchFlags, Vec<OsString>),
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- an output or
+/// a diagnostic that did not arrive is status 1, as `touch: write error:
+/// ...` for the first. The descriptor guard is what lets a closed one be seen
+/// at all; the runtime used to answer it with a quiet `/dev/null`. See
+/// [`stdfd::close_stdout`].
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout("touch", out, earned)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let clock = Clock::from_env();
     match parse_args(&args, &clock) {
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            // Never an error: the stream records it for the funnel.
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Ok(Request::Version) => {
-            println!("touch (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"touch (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
         Ok(Request::Run(mut flags, mut files)) => {
@@ -1680,7 +1688,7 @@ mod tests {
     /// advanced cannot pass on clock granularity alone.
     fn backdate(path: &Path) -> SystemTime {
         let old = SystemTime::now()
-            .checked_sub(Duration::from_secs(3600))
+            .checked_sub(Duration::from_hours(1))
             .expect("an hour before now is representable");
         File::options()
             .write(true)
@@ -1768,7 +1776,7 @@ mod tests {
         fs::create_dir(&sub).unwrap();
 
         let old = SystemTime::now()
-            .checked_sub(Duration::from_secs(3600))
+            .checked_sub(Duration::from_hours(1))
             .unwrap();
         // Backdate the directory itself, through the same door the program uses,
         // so "it moved forward" cannot pass on clock granularity.
@@ -2095,7 +2103,7 @@ mod tests {
 
         // The link's own time is `old`; give the target a different one, so
         // which of the two was read is visible in the answer.
-        let newer = old.checked_add(Duration::from_secs(1800)).unwrap();
+        let newer = old.checked_add(Duration::from_mins(30)).unwrap();
         fsattr::set_times(
             On::Path(&d.join("target"), Link::Follow),
             Times::both(newer),

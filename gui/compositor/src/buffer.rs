@@ -193,6 +193,8 @@ pub struct SharedBuffer {
     opaque: bool,
     /// Set once the compositor has finished reading this buffer for a frame.
     released: bool,
+    /// The compositor's number for this attach ([`Self::serial`]).
+    serial: u64,
 }
 
 impl SharedBuffer {
@@ -227,7 +229,22 @@ impl SharedBuffer {
             pixels,
             opaque,
             released: false,
+            serial: 0,
         })
+    }
+
+    /// Which attach this is: a number the compositor gives each buffer it
+    /// attaches, larger for every later one, so that a stream coding a
+    /// window's pixels can tell new ones from those it has already sent. 0
+    /// until attached.
+    #[must_use]
+    pub const fn serial(&self) -> u64 {
+        self.serial
+    }
+
+    /// Give the buffer its attach number ([`Self::serial`]).
+    pub(crate) fn set_serial(&mut self, serial: u64) {
+        self.serial = serial;
     }
 
     /// The kernel handle naming this buffer's shared pages.

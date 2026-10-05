@@ -87,18 +87,6 @@ terminal	F12	ditto
 # time is invisible to it and perfectly visible to a reader. This is the one
 # gap in this instrument that cannot be closed by parsing harder, since the
 # text does not exist until the program runs.
-launcher	Num1	drawn on each result row as a Ctrl+N hint; asserted by a_row_says_which_key_launches_it
-launcher	Num2	ditto
-launcher	Num3	ditto
-launcher	Num4	ditto
-launcher	Num5	ditto
-launcher	Num6	ditto
-launcher	Num7	ditto
-launcher	Num8	ditto
-sysmonitor	Num3	the tab caption is digit() plus label(), so the bar reads 3 CPU
-sysmonitor	Num4	ditto
-sysmonitor	Num5	ditto
-sysmonitor	Num6	ditto
 rssreader	Num4	the move-to-folder prompt numbers its own rows, one per folder that exists
 rssreader	Num5	ditto
 rssreader	Num6	ditto
@@ -189,3 +177,15 @@ remotedesktop	F8	ditto
 remotedesktop	F9	ditto
 remotedesktop	F10	ditto
 remotedesktop	F12	ditto
+
+# --- gamechrome: a library that reads keys for the games that call it ------
+# `HistoryKey::of` (apps/gamechrome/src/history.rs) reads the history's keys
+# -- Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z (C-Q24,
+# design-decisions §1416) -- for the ten games that call it, and draws
+# nothing: there is no window of its own to name them in. Each of the ten
+# names them on its list of keys (F1): towers, game2048, connect4, gomoku,
+# klotski, rush, sokoban, solitaire, freecell, mahjong, every one with a
+# test that presses each row. Answered after those lists existed, not before
+# them.
+gamechrome	Y	a library that draws nothing: HistoryKey::of reads Ctrl+Y for the ten games that call it, and each names it on its list of keys
+gamechrome	Z	ditto -- Ctrl+Z, Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z

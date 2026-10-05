@@ -4716,7 +4716,9 @@ s
     fn getopt_sentence(argv: &[&str]) -> String {
         match refusal(argv) {
             Refusal::Getopt(e) => e.sentence,
-            other => panic!("expected a getopt error, got {other:?}"),
+            other @ Refusal::Unimplemented(_) => {
+                panic!("expected a getopt error, got {other:?}")
+            }
         }
     }
 
@@ -4776,7 +4778,9 @@ s
                     message.contains("is not implemented"),
                     "{argv:?} -> {message}"
                 ),
-                other => panic!("{argv:?} should be refused, got {other:?}"),
+                other @ Refusal::Getopt(_) => {
+                    panic!("{argv:?} should be refused, got {other:?}")
+                }
             }
         }
     }
@@ -4849,7 +4853,9 @@ s
         assert_eq!(getopt_sentence(&["-Z"]), "invalid option -- 'Z'");
         match refusal(&["-Z"]) {
             Refusal::Getopt(e) => assert_eq!(e.status, 1),
-            other => panic!("expected a getopt error, got {other:?}"),
+            other @ Refusal::Unimplemented(_) => {
+                panic!("expected a getopt error, got {other:?}")
+            }
         }
     }
 

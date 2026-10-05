@@ -15,6 +15,9 @@ randrange = { path = "../../randrange" }
 # the file, a clock field that nothing incremented, and a `format_time` that
 # four tests covered and the header did not call.
 oswindow = { path = "../../gui/window" }
+# `is_ctrl_chord`: Ctrl and a digit is a Ctrl chord, and AltGr and a digit --
+# a German `²` -- is typing, not a new puzzle.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

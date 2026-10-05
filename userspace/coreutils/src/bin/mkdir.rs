@@ -89,6 +89,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
+coreutils::guard_std_fds!();
+
 // The file-mode creation mask. There is no read-only spelling of it in POSIX —
 // reading it means setting it — and `std` exposes no wrapper, so this is the
 // libc call itself.
@@ -154,31 +156,36 @@ enum Request {
     Run(MkdirFlags, Vec<OsString>),
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
-/// [`stdfd::close_stderr`].
+/// The funnel: upstream's `atexit (close_stdout)`, which checks standard
+/// output and then standard error on every exit path at once -- an output or
+/// a diagnostic that did not arrive is status 1, as `mkdir: write error:
+/// ...` for the first. The descriptor guard is what lets a closed one be seen
+/// at all; the runtime used to answer it with a quiet `/dev/null`. See
+/// [`stdfd::close_stdout`].
 fn main() -> ExitCode {
-    stdfd::close_stderr(run_main(), 1)
+    stdfd::restore();
+    let mut out = Stream::stdout();
+    let earned = run_main(&mut out);
+    stdfd::close_stdout("mkdir", out, earned)
 }
 
-fn run_main() -> ExitCode {
+fn run_main(out: &mut Stream) -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(Request::Help) => {
-            print!("{}", help_text());
+            // Never an error: the stream records it for the funnel.
+            let _ = out.write_all(help_text().as_bytes());
             ExitCode::SUCCESS
         }
         Ok(Request::Version) => {
-            println!("mkdir (SlateOS coreutils) 0.1.0");
+            let _ = out.write_all(b"mkdir (SlateOS coreutils) 0.1.0\n");
             ExitCode::SUCCESS
         }
         Ok(Request::Run(flags, dirs)) => {
-            let mut out = io::stdout().lock();
             // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
             // diagnostic that never arrived has to reach `close_stderr`'s flag.
             let mut err = Stream::stderr();
-            if make_all(&flags, &dirs, &mut out, &mut err) {
+            if make_all(&flags, &dirs, out, &mut err) {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)

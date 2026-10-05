@@ -1,0 +1,52 @@
+# The third-party code gui/font carries (design-decisions 1433), read by
+# scripts/gather-notices.py. README.md beside this file says which of the
+# crate's files derives from which upstream file; this is the machine-readable
+# half, one entry per upstream project, with the texts that must travel with
+# any binary built from the crate.
+
+# The auto-hinter (src/hint/) and the fixed-point arithmetic and variable-font
+# readers it depends on. FreeType's licence asks for this credit in the
+# documentation, with the year of the version used.
+FreeType:
+  version: 2.13.2
+  licence: FTL
+  attribution: Portions of this software are copyright © 2023 The FreeType Project (www.freetype.org). All rights reserved.
+  texts:
+    - FTL.TXT
+
+# The shaper and the outline and variation readers are held to HarfBuzz
+# 14.3.0 glyph for glyph, and in the places README.md lists they follow its
+# source step for step: the Indic, Khmer, Myanmar, Thai, Hangul and Universal
+# shapers, their syllable grammars, the language-tag tables, and the variation
+# arithmetic.
+HarfBuzz:
+  version: 14.3.0
+  licence: MIT-Modern-Variant
+  texts:
+    - harfbuzz-COPYING
+
+# The Universal Shaping Engine's override data (HarfBuzz's src/ms-use/, as
+# vendored in HarfBuzz 14.3.0), which src/universal_tables.rs is generated
+# from together with the Unicode data.
+Microsoft Universal Shaping Engine data:
+  licence: MIT
+  texts:
+    - ms-use-COPYING
+
+# Every generated table in src/*_tables.rs reads Unicode 16.0.0's character
+# database (bidi classes and brackets, emoji, joining types, normalisation,
+# scripts, Indic categories).
+Unicode Character Database:
+  version: 16.0.0
+  licence: Unicode-3.0
+  texts:
+    - unicode-LICENSE.txt
+
+# The OpenType tag registry in fontTools.unicodedata, which
+# tools/gen_script_tables.py maps each script to its OpenType tags through,
+# into src/script_tables.rs.
+fontTools:
+  version: 4.62.1
+  licence: MIT
+  texts:
+    - fonttools-LICENSE

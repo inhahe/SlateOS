@@ -1547,6 +1547,111 @@ fn reloading_settings_through_the_trait_changes_how_far_the_pointer_travels() {
 }
 
 // ---------------------------------------------------------------------------
+// Keys already held when a device opens
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_key_held_when_the_device_opens_is_pressed_by_the_first_poll() {
+    let (mut source, device) = FakeDevices::one();
+    // Held since the machine was switched on: there will never be a press for
+    // it in the stream, only the key state says so.
+    device.hold(KEY_LEFTSHIFT);
+    let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+
+    let now = Instant::now();
+    assert_eq!(key_downs(&input.poll_at(now)), vec![SCAN_LEFTSHIFT]);
+    assert!(
+        input.poll_at(now).is_empty(),
+        "the press is handed over once, not once per poll"
+    );
+}
+
+#[test]
+fn a_key_held_at_open_is_released_by_its_own_release() {
+    let (mut source, device) = FakeDevices::one();
+    device.hold(KEY_LEFTSHIFT);
+    let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+    // Let go before the first poll: the release is read in the same poll that
+    // hands over the press, and must come after it, or the compositor would
+    // be left believing Shift is down.
+    device.feed(&[key(KEY_LEFTSHIFT, 0), syn()]);
+
+    let events = input.poll_at(Instant::now());
+    let order: Vec<(bool, u32)> = events
+        .iter()
+        .filter_map(|e| match e {
+            InputEvent::KeyDown { scancode, .. } => Some((true, *scancode)),
+            InputEvent::KeyUp { scancode } => Some((false, *scancode)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, vec![(true, SCAN_LEFTSHIFT), (false, SCAN_LEFTSHIFT)]);
+}
+
+#[test]
+fn a_key_held_at_open_does_not_start_repeating() {
+    let (mut source, device) = FakeDevices::one();
+    // Somebody leaning on a letter while the machine starts. It is down, and
+    // reported down, but it was not pressed at any moment this process saw,
+    // so there is no press for a repeat to be timed from.
+    device.hold(KEY_A);
+    let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+    let start = Instant::now();
+    assert_eq!(key_downs(&input.poll_at(start)), vec![SCAN_A]);
+
+    assert!(input.poll_at(start + Duration::from_secs(2)).is_empty());
+}
+
+#[test]
+fn keys_held_at_open_on_two_keyboards_are_all_pressed() {
+    let (mut source, first, second) = FakeDevices::two();
+    first.hold(KEY_LEFTSHIFT);
+    second.hold(KEY_LEFTCTRL);
+    let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+
+    let mut downs = key_downs(&input.poll_at(Instant::now()));
+    downs.sort_unstable();
+    assert_eq!(downs, vec![SCAN_LEFTCTRL, SCAN_LEFTSHIFT]);
+}
+
+#[test]
+fn a_button_held_at_open_is_not_a_click() {
+    let (mut source, device) = FakeDevices::one();
+    // `EVIOCGKEY` reports buttons too. A click nobody made, delivered at
+    // start-up, would land on whatever is under the centre of the screen.
+    device.hold(BTN_LEFT);
+    let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+
+    assert!(input.poll_at(Instant::now()).is_empty());
+}
+
+#[test]
+fn a_device_that_cannot_say_what_it_holds_still_opens() {
+    let (mut source, device) = FakeDevices::one();
+    device.without_key_state();
+    let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+
+    // Nothing is believed down, so there is nothing to release either.
+    assert!(input.poll_at(Instant::now()).is_empty());
+    device.feed(&[key(KEY_A, 1), syn()]);
+    assert_eq!(key_downs(&input.poll_at(Instant::now())), vec![SCAN_A]);
+}
+
+#[test]
+fn a_press_found_at_open_is_due_until_it_is_handed_over() {
+    let (mut source, device) = FakeDevices::one();
+    device.hold(KEY_LEFTSHIFT);
+    let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+
+    // No device will become readable for it, so a loop that waited before
+    // polling must be woken at once rather than at the next keystroke.
+    let before = Instant::now();
+    assert!(input.deadline().is_some_and(|due| due >= before));
+    input.poll_at(Instant::now());
+    assert_eq!(input.deadline(), None, "a held modifier is no deadline");
+}
+
+// ---------------------------------------------------------------------------
 // Which keys repeat
 // ---------------------------------------------------------------------------
 

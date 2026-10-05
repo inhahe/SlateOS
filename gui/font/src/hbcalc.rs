@@ -20,6 +20,10 @@
 //! of an item variation store ([`crate::varstore`]) -- and those roundings go
 //! through here. [`crate::ftcalc`] is the same for FreeType, whose rounding
 //! is different again.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-algs.hh`, copyright ©
+//! 2017 Google, Inc., © 2019 Facebook, Inc. and (C) 2012 Zilong Tan. Used under
+//! HarfBuzz's licence: see `gui/font/licenses/harfbuzz-COPYING`.
 
 /// HarfBuzz's `roundf`: `floorf(x + 0.5f)`, the sum rounded to `f32`.
 pub(crate) fn roundf(x: f32) -> f32 {

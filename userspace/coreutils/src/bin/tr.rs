@@ -470,7 +470,7 @@ struct Squeezer {
 /// Streaming rather than slurping: `tr` is a filter, and a filter that waits
 /// for EOF cannot sit in a pipeline behind an endless producer.
 fn stream(job: &Job, input: &mut impl Read, out: &mut impl Write) -> Result<(), Trouble> {
-    let mut buf = [0u8; 64 * 1024];
+    let mut buf = vec![0u8; 64 * 1024];
     let mut staging: Vec<u8> = Vec::with_capacity(buf.len());
     let mut squeezer = Squeezer::default();
     loop {
@@ -768,7 +768,11 @@ fn repeat_count(digits: &[u8]) -> Result<Repeat, Refusal> {
 
     let value = std::str::from_utf8(body)
         .ok()
-        .filter(|t| !t.is_empty() && t.bytes().all(|b| (b'0'..b'0' + radix).contains(&b)))
+        .filter(|t| {
+            !t.is_empty()
+                && t.bytes()
+                    .all(|b| (b'0'..b'0'.saturating_add(radix)).contains(&b))
+        })
         .and_then(|t| usize::from_str_radix(t, u32::from(radix)).ok());
     match value {
         Some(0) => Ok(Repeat::Fill),
@@ -850,7 +854,9 @@ fn octal(s: &[u8], from: usize) -> (u8, usize) {
         if !d.is_ascii_digit() || d >= b'8' {
             break;
         }
-        value = value.saturating_mul(8).saturating_add(u32::from(d - b'0'));
+        value = value
+            .saturating_mul(8)
+            .saturating_add(u32::from(d.saturating_sub(b'0')));
         used = used.saturating_add(1);
     }
     if value > 255 && used == 3 {

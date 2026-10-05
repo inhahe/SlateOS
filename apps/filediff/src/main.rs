@@ -33,6 +33,9 @@ use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
+use guitk::textedit;
 use pathtext::ShowPath;
 // Only the tests build a modifier set by hand; the handlers read the one on
 // the event they were given. `MouseButton` went with it -- it had no reader at
@@ -1080,6 +1083,10 @@ pub struct FileDiffApp {
     pub sync_scroll: bool,
     /// Whether the shortcut list is up.
     pub show_help: bool,
+    /// How wide the mark is round the find bar's box while it has the
+    /// keyboard: the user's focus width (`App::appearance_changed`), the
+    /// toolkit's until it is known.
+    pub focus_ring_width: f32,
     /// Index of the current change being viewed.
     pub current_change_index: usize,
     /// Indices of change edits in the edit list (for navigation).
@@ -1151,6 +1158,7 @@ impl FileDiffApp {
             scroll_right: 0.0,
             sync_scroll: true,
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             current_change_index: 0,
             change_indices: Vec::new(),
             ignore_opts: IgnoreOptions::default(),
@@ -1565,40 +1573,56 @@ impl FileDiffApp {
 
     /// Handle keyboard input.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Three kinds of key, each asked for as itself. The Ctrl chords are
+        // Ctrl chords, not Ctrl held; the merge's and the ignore toggles' are
+        // Alt alone, not Alt held: AltGr arrives as Ctrl+Alt and types, and
+        // AltGr+C -- a Polish `ć` -- toggled ignoring case. Every other key
+        // is taken plain: a chord with the Windows key is the desktop's and
+        // arrives carrying its key, and Windows+J scrolled.
+        let plain = textline::is_plain(key.modifiers);
         // The shortcut list, before the search box below can turn the
         // keystroke into text. `F1` rather than `?`, because the search box
         // takes `key.typed()` and a `?` belongs in somebody's query.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
-        if key.key == Key::Escape && self.show_help {
+        if key.key == Key::Escape && plain && self.show_help {
             self.show_help = false;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: every other key is the card's while it is up. It was
+            // not, and the search, a folder's keys and the scroll keys all
+            // acted on the comparison the card covers.
             return EventResult::Consumed;
         }
         if self.search.visible {
             return self.handle_search_key(key);
         }
         if self.dir_mode
+            && plain
             && let Some(answered) = self.handle_folder_key(key)
         {
             return answered;
         }
         // From a pair opened out of the folder comparison, Escape goes back.
-        if key.key == Key::Escape && self.from_folders && self.dir_compare.is_some() {
+        if key.key == Key::Escape && plain && self.from_folders && self.dir_compare.is_some() {
             self.dir_mode = true;
             self.from_folders = false;
             return EventResult::Consumed;
         }
+        if textline::is_ctrl_chord(key.modifiers) {
+            return self.handle_ctrl_chord(key);
+        }
+        if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key {
+            return self.handle_alt_chord(key);
+        }
+        if !plain {
+            return EventResult::Ignored;
+        }
 
         match key.key {
-            // Ctrl+D: compare two folders. The folder view was drawn from a
-            // result nothing could make: no key entered it, and its
-            // comparison was over names and texts held in memory.
-            Key::D if key.modifiers.ctrl => {
-                self.choose_folders();
-                EventResult::Consumed
-            }
             // Navigation
             Key::Down | Key::J => {
                 self.scroll_left = (self.scroll_left + 1.0).min(self.max_scroll());
@@ -1630,21 +1654,6 @@ impl FileDiffApp {
                 }
                 EventResult::Consumed
             }
-            Key::Home if key.modifiers.ctrl => {
-                self.scroll_left = 0.0;
-                if self.sync_scroll {
-                    self.scroll_right = 0.0;
-                }
-                EventResult::Consumed
-            }
-            Key::End if key.modifiers.ctrl => {
-                self.scroll_left = self.max_scroll();
-                if self.sync_scroll {
-                    self.scroll_right = self.scroll_left;
-                }
-                EventResult::Consumed
-            }
-
             // Change navigation (F7/F8 or Ctrl+N/P)
             Key::F7 => {
                 self.prev_change();
@@ -1652,68 +1661,6 @@ impl FileDiffApp {
             }
             Key::F8 => {
                 self.next_change();
-                EventResult::Consumed
-            }
-            // Ctrl+O fills the left pane, Ctrl+Shift+O the right. Two keys
-            // rather than one dialog asking twice: a user comparing a file
-            // against a new version replaces one side and keeps the other,
-            // and being made to re-choose both is the commonest thing a diff
-            // tool gets wrong.
-            Key::O if key.modifiers.ctrl => {
-                let side = if key.modifiers.shift {
-                    Side::Right
-                } else {
-                    Side::Left
-                };
-                self.open_into(side);
-                EventResult::Consumed
-            }
-            Key::N if key.modifiers.ctrl => {
-                self.next_change();
-                EventResult::Consumed
-            }
-            Key::P if key.modifiers.ctrl => {
-                self.prev_change();
-                EventResult::Consumed
-            }
-
-            // View mode toggle
-            Key::Num1 if key.modifiers.ctrl => {
-                self.view_mode = ViewMode::SideBySide;
-                EventResult::Consumed
-            }
-            Key::Num2 if key.modifiers.ctrl => {
-                self.view_mode = ViewMode::Unified;
-                EventResult::Consumed
-            }
-            Key::Num3 if key.modifiers.ctrl => {
-                self.view_mode = ViewMode::Inline;
-                EventResult::Consumed
-            }
-
-            // Sync scroll toggle
-            Key::S if key.modifiers.ctrl && key.modifiers.shift => {
-                self.sync_scroll = !self.sync_scroll;
-                EventResult::Consumed
-            }
-
-            // Search
-            Key::F if key.modifiers.ctrl => {
-                self.search.visible = true;
-                EventResult::Consumed
-            }
-
-            // Merge actions
-            Key::Left if key.modifiers.alt => {
-                self.accept_left();
-                EventResult::Consumed
-            }
-            Key::Right if key.modifiers.alt => {
-                self.accept_right();
-                EventResult::Consumed
-            }
-            Key::B if key.modifiers.alt => {
-                self.accept_both();
                 EventResult::Consumed
             }
 
@@ -1727,16 +1674,112 @@ impl FileDiffApp {
                 EventResult::Consumed
             }
 
-            // Ignore toggles
-            Key::W if key.modifiers.alt => {
-                self.toggle_ignore_whitespace();
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A Ctrl chord: Ctrl without Alt or the Windows key, Shift as it is.
+    fn handle_ctrl_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            // Ctrl+D: compare two folders. The folder view was drawn from a
+            // result nothing could make: no key entered it, and its
+            // comparison was over names and texts held in memory.
+            Key::D => {
+                self.choose_folders();
                 EventResult::Consumed
             }
-            Key::C if key.modifiers.alt => {
-                self.toggle_ignore_case();
+            Key::Home => {
+                self.scroll_left = 0.0;
+                if self.sync_scroll {
+                    self.scroll_right = 0.0;
+                }
+                EventResult::Consumed
+            }
+            Key::End => {
+                self.scroll_left = self.max_scroll();
+                if self.sync_scroll {
+                    self.scroll_right = self.scroll_left;
+                }
+                EventResult::Consumed
+            }
+            // Ctrl+O fills the left pane, Ctrl+Shift+O the right. Two keys
+            // rather than one dialog asking twice: a user comparing a file
+            // against a new version replaces one side and keeps the other,
+            // and being made to re-choose both is the commonest thing a diff
+            // tool gets wrong.
+            Key::O => {
+                let side = if key.modifiers.shift {
+                    Side::Right
+                } else {
+                    Side::Left
+                };
+                self.open_into(side);
+                EventResult::Consumed
+            }
+            Key::N => {
+                self.next_change();
+                EventResult::Consumed
+            }
+            Key::P => {
+                self.prev_change();
                 EventResult::Consumed
             }
 
+            // View mode toggle
+            Key::Num1 => {
+                self.view_mode = ViewMode::SideBySide;
+                EventResult::Consumed
+            }
+            Key::Num2 => {
+                self.view_mode = ViewMode::Unified;
+                EventResult::Consumed
+            }
+            Key::Num3 => {
+                self.view_mode = ViewMode::Inline;
+                EventResult::Consumed
+            }
+
+            // Sync scroll toggle
+            Key::S if key.modifiers.shift => {
+                self.sync_scroll = !self.sync_scroll;
+                EventResult::Consumed
+            }
+
+            // Search
+            Key::F => {
+                self.search.visible = true;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A chord with Alt alone: the merge's and the ignore toggles'.
+    fn handle_alt_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            // Merge actions
+            Key::Left => {
+                self.accept_left();
+                EventResult::Consumed
+            }
+            Key::Right => {
+                self.accept_right();
+                EventResult::Consumed
+            }
+            Key::B => {
+                self.accept_both();
+                EventResult::Consumed
+            }
+
+            // Ignore toggles
+            Key::W => {
+                self.toggle_ignore_whitespace();
+                EventResult::Consumed
+            }
+            Key::C => {
+                self.toggle_ignore_case();
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -1767,6 +1810,24 @@ impl FileDiffApp {
 
     /// Handle keyboard input when search bar is active.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Whether the search matches case: Ctrl+I, a Ctrl chord. See the
+        // arm below for why it exists.
+        if key.key == Key::I && textline::is_ctrl_chord(key.modifiers) {
+            self.search.case_sensitive = !self.search.case_sensitive;
+            self.rerun_search();
+            return EventResult::Consumed;
+        }
+        // What a key typed, AltGr's among it, and not a command's letter,
+        // which a chord carries: Alt+X typed an `x` into the query.
+        if textline::types_into_field(key) {
+            self.search.query.extend(key.typed());
+            self.rerun_search();
+            return EventResult::Consumed;
+        }
+        // The box's own keys are plain.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         match key.key {
             Key::Escape => {
                 self.search.visible = false;
@@ -1791,35 +1852,30 @@ impl FileDiffApp {
                 self.scroll_to_current_match();
                 EventResult::Consumed
             }
-            // Whether the search matches case. `SearchState::case_sensitive`
-            // is handed to `textfind::Case::sensitive` on every search and
-            // was `false` with no writer, so finding `Config` also found
-            // `config` and there was no way to ask for only one of them --
-            // in a tool people open to find out which of two files says
-            // `MAX_SIZE` and which says `max_size`.
-            //
-            // Ahead of the text branch, which would otherwise type an `i`
-            // into the query. Alt+C beside it is a different question: that
-            // one is whether the *comparison* ignores case.
-            Key::I if key.modifiers.ctrl => {
-                self.search.case_sensitive = !self.search.case_sensitive;
-                self.rerun_search();
-                EventResult::Consumed
-            }
-            _ => {
-                if key.types_text() {
-                    self.search.query.extend(key.typed());
-                    self.rerun_search();
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
+            // Ctrl+I, answered above, is whether the search matches case.
+            // `SearchState::case_sensitive` is handed to
+            // `textfind::Case::sensitive` on every search and was `false`
+            // with no writer, so finding `Config` also found `config` and
+            // there was no way to ask for only one of them -- in a tool
+            // people open to find out which of two files says `MAX_SIZE` and
+            // which says `max_size`. Alt+C is a different question: that one
+            // is whether the *comparison* ignores case.
+            _ => EventResult::Ignored,
         }
     }
 
     /// Handle mouse input.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press puts it away, as it does in every other window here, and
+            // the wheel scrolls nothing it covers.
+            if matches!(mouse.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         match &mouse.kind {
             MouseEventKind::Scroll { dy, .. } => {
                 // `wheel::rows_f`, not an `Accumulator`: these offsets are
@@ -2730,77 +2786,94 @@ impl FileDiffApp {
         }
     }
 
+    /// How the box the query is typed into is drawn now: it has the keyboard
+    /// whenever the bar is up -- every key goes to it -- except while the
+    /// shortcut card or the file picker is over it; and it is red while the
+    /// query finds nothing, as a find bar's box is.
+    ///
+    /// Never lit under the pointer: the bar is driven from the keyboard, and
+    /// a box that lit up for a pointer it ignores would promise a click that
+    /// does nothing.
+    fn query_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.search.visible && !self.show_help && !self.picker.is_open(),
+            disabled: false,
+            invalid: !self.search.query.is_empty() && self.search.matches.is_empty(),
+        }
+    }
+
     /// Render the search bar overlay.
     fn render_search_bar(&self, tree: &mut RenderTree) {
-        let bar_h: f32 = 36.0;
-        let bar_y = TOOLBAR_HEIGHT;
-        let bar_w = 400.0f32.min(self.width - 20.0);
-        let bar_x = self.width - bar_w - 10.0;
+        let l = FindBar::at(self.width);
+        // The toolkit's panel, in the theme's look: it was a grey slab with a
+        // blue edge, which said "this has the keyboard" in the one colour
+        // the theme no longer chooses -- the box inside it says that now.
+        self.palette.push_surface(
+            tree,
+            l.bar.x,
+            l.bar.y,
+            l.bar.w,
+            l.bar.h,
+            6.0,
+            Surface::Panel,
+        );
 
-        // Background
-        tree.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: bar_y,
-            width: bar_w,
-            height: bar_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        // Border
-        tree.push(RenderCommand::StrokeRect {
-            x: bar_x,
-            y: bar_y,
-            width: bar_w,
-            height: bar_h,
-            color: self.palette.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        // Search label
-        tree.push(RenderCommand::Text {
-            x: bar_x + 8.0,
-            y: bar_y + 10.0,
-            text: "Find:".to_string(),
-            color: self.palette.subtext0,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Query text
-        if !self.search.query.is_empty() {
+        let words = |tree: &mut RenderTree, r: Rect, text: String| {
             tree.push(RenderCommand::Text {
-                x: bar_x + 48.0,
-                y: bar_y + 10.0,
-                text: self.search.query.clone(),
-                color: self.palette.text,
-                font_size: CONTENT_FONT_SIZE,
+                x: r.x,
+                y: r.y + (r.h - text::line_height(UI_FONT_SIZE, FontWeightHint::Regular)) / 2.0,
+                text,
+                color: self.palette.subtext0,
+                font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some((bar_w - 290.0).max(60.0)),
+                max_width: Some(r.w),
                 overflow: TextOverflow::Ellipsis,
             });
-        }
+        };
+        words(tree, l.label, "Find:".to_string());
+
+        // The query, in the toolkit's field, with the caret after the typing
+        // and scrolled so the end being typed stays in view.
+        let state = self.query_box_state();
+        field::draw(tree, &self.palette, l.query, state, self.focus_ring_width);
+        let line = text::line_height(CONTENT_FONT_SIZE, FontWeightHint::Regular);
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: &self.search.query,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(self.search.query.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: l.query.x + FindBar::INSET,
+                y: l.query.y + (l.query.h - line) / 2.0,
+                width: (l.query.w - FindBar::INSET * 2.0).max(0.0),
+                line_height: line,
+                font_size: CONTENT_FONT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
 
         // Whether case matters, and the key that changes it -- a search
         // that silently folds case turns "not found" into a claim about the
         // file rather than about the query.
-        tree.push(RenderCommand::Text {
-            x: bar_x + bar_w - 230.0,
-            y: bar_y + 10.0,
-            text: if self.search.case_sensitive {
-                "Case: on  Ctrl+I".to_string()
-            } else {
-                "Case: off  Ctrl+I".to_string()
-            },
-            color: self.palette.subtext0,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(110.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        if l.case.w > 0.0 {
+            words(
+                tree,
+                l.case,
+                if self.search.case_sensitive {
+                    "Case: on  Ctrl+I".to_string()
+                } else {
+                    "Case: off  Ctrl+I".to_string()
+                },
+            );
+        }
 
         // Match count
         let match_info = if self.search.matches.is_empty() {
@@ -2812,16 +2885,7 @@ impl FileDiffApp {
                 self.search.matches.len()
             )
         };
-        tree.push(RenderCommand::Text {
-            x: bar_x + bar_w - 80.0,
-            y: bar_y + 10.0,
-            text: match_info,
-            color: self.palette.subtext0,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        words(tree, l.count, match_info);
     }
 
     /// Render the status bar at the bottom.
@@ -3039,6 +3103,70 @@ fn render_panel_header(
 /// `text_x` is where the line's first character is drawn and `text` is the
 /// exact string drawn there, because a match's offsets are byte offsets into
 /// *that* string and nothing else.
+/// Where the find bar's parts are in a window `width` wide.
+///
+/// Laid out from both ends towards the middle -- the "Find:" label at the
+/// left, the match count and then the case setting at the right -- and the
+/// box the query is typed into takes what is left, never less than
+/// [`QUERY_MIN`](Self::QUERY_MIN) while the case setting can give way
+/// instead. The parts used to sit at fixed offsets, so in a window narrower
+/// than about 650 pixels the case setting was written over the query.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FindBar {
+    /// The bar itself.
+    bar: Rect,
+    /// "Find:".
+    label: Rect,
+    /// The box the query is typed into.
+    query: Rect,
+    /// Whether case matters; no wider than nothing when there is no room.
+    case: Rect,
+    /// The match count.
+    count: Rect,
+}
+
+impl FindBar {
+    const HEIGHT: f32 = 36.0;
+    /// Room between the parts, and at the bar's ends.
+    const GAP: f32 = 8.0;
+    /// The top and bottom margin round the parts.
+    const MARGIN_Y: f32 = 6.0;
+    /// How far the query's text sits inside its box.
+    const INSET: f32 = 4.0;
+    const COUNT_W: f32 = 72.0;
+    const CASE_W: f32 = 110.0;
+    /// The narrowest the query's box gets while the case setting can make
+    /// room for it.
+    const QUERY_MIN: f32 = 60.0;
+
+    fn at(width: f32) -> Self {
+        let w = 400.0f32.min(width - 20.0).max(0.0);
+        let bar = Rect::new(width - w - 10.0, TOOLBAR_HEIGHT, w, Self::HEIGHT);
+        let (y, h) = (bar.y + Self::MARGIN_Y, bar.h - Self::MARGIN_Y * 2.0);
+        let label_w = text::measure("Find:", UI_FONT_SIZE, FontWeightHint::Regular);
+        let label = Rect::new(bar.x + Self::GAP, y, label_w, h);
+        let query_x = label.right() + Self::GAP;
+        let count_w = Self::COUNT_W.min((bar.right() - Self::GAP - query_x).max(0.0));
+        let count = Rect::new(bar.right() - Self::GAP - count_w, y, count_w, h);
+        let room = (count.x - Self::GAP - query_x).max(0.0);
+        let case_w = (room - Self::QUERY_MIN - Self::GAP).clamp(0.0, Self::CASE_W);
+        let case = Rect::new(count.x - Self::GAP - case_w, y, case_w, h);
+        let query_right = if case_w > 0.0 {
+            case.x - Self::GAP
+        } else {
+            count.x - Self::GAP
+        };
+        let query = Rect::new(query_x, y, (query_right - query_x).max(0.0), h);
+        Self {
+            bar,
+            label,
+            query,
+            case,
+            count,
+        }
+    }
+}
+
 fn render_search_highlights(
     palette: &Palette,
     tree: &mut RenderTree,
@@ -3230,6 +3358,10 @@ fn render_dir_entry(tree: &mut RenderTree, pal: &Palette, ey: f32, entry: &DirCo
 impl App for FileDiffApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4475,21 +4607,10 @@ mod tests {
         let left: String = (0..400)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
+            .join("\n");
         let mut right_lines: Vec<String> = (0..400).map(|i| format!("line{i}")).collect();
         right_lines[399] = "changed".to_string();
-        app.load_files(
-            "a",
-            &left,
-            "b",
-            &right_lines.join(
-                "
-",
-            ),
-        );
+        app.load_files("a", &left, "b", &right_lines.join("\n"));
         app
     }
 
@@ -4499,6 +4620,66 @@ mod tests {
             y: 200.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         }));
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// keys that are not its own do nothing, the wheel scrolls nothing, and
+    /// a press puts it away. It was modal for none of it. The controls at
+    /// the end are the same key and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        use guitk::event::MouseButton;
+        let mut app = long_diff();
+        let key = |app: &mut FileDiffApp, k: Key| {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            }))
+        };
+        let press = |app: &mut FileDiffApp, button: MouseButton| {
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x: 100.0,
+                y: 200.0,
+                kind: MouseEventKind::Press(button),
+            }))
+        };
+
+        key(&mut app, Key::F1);
+        assert!(app.show_help);
+        key(&mut app, Key::PageDown);
+        assert_eq!(
+            app.scroll_left, 0.0,
+            "Page Down scrolled the comparison under the card"
+        );
+        wheel_at(&mut app, 100.0, -1.0);
+        assert_eq!(
+            app.scroll_left, 0.0,
+            "the wheel scrolled the comparison under the card"
+        );
+        assert!(
+            app.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        assert_eq!(press(&mut app, MouseButton::Left), EventResult::Consumed);
+        assert!(!app.show_help, "a press did not put the card away");
+        key(&mut app, Key::F1);
+        press(&mut app, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        wheel_at(&mut app, 100.0, -1.0);
+        assert!(
+            app.scroll_left > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        let before = app.scroll_left;
+        key(&mut app, Key::PageDown);
+        assert!(
+            app.scroll_left > before,
+            "control: Page Down scrolls nothing at all"
+        );
     }
 
     #[test]
@@ -5102,6 +5283,159 @@ mod tests {
         );
     }
 
+    /// **The find bar's box is the toolkit's field** (lane C,
+    /// `c-e-a-theme-can-shape-the-controls`): it has the keyboard while the
+    /// bar is up, marked as the theme marks a field in the user's width; not
+    /// while the shortcut card is over it; and red while the query finds
+    /// nothing. The query was written straight onto the bar, with no box and
+    /// no caret, and the bar's own edge was blue whatever the theme said.
+    #[test]
+    fn the_find_bars_box_is_the_toolkits_field() {
+        let mut app = searching_app(ViewMode::Unified, "alpha");
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        let ring = app.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive: {ring}"
+        );
+        let rect = FindBar::at(app.width).query;
+        // Drawn in `s` -- and, unless `s` has the keyboard, not with the
+        // keyboard's mark as well: a box without the mark is the first part
+        // of the same box with it, so finding the one says nothing about the
+        // other.
+        let draws = |app: &FileDiffApp, s: field::State| {
+            let seq = |s: field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut want, &p, rect, s, ring);
+                want
+            };
+            let cmds = app.render_tree().commands;
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws(&app, focused),
+            "the box of a bar that is up does not have the keyboard"
+        );
+
+        app.search.query = String::from("nowhere");
+        app.refresh_search_matches();
+        assert!(app.search.matches.is_empty());
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a query that finds nothing does not turn the box red"
+        );
+
+        app.show_help = true;
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..field::State::default()
+                }
+            ),
+            "the box keeps the keyboard's mark under the shortcut card"
+        );
+
+        app.show_help = false;
+        app.search.query.clear();
+        app.refresh_search_matches();
+        assert!(
+            draws(&app, focused),
+            "an empty query is red, though it has found nothing because it asks nothing"
+        );
+    }
+
+    /// **The find bar's parts never overlap, at any window width.** They sat
+    /// at fixed offsets from the bar's ends, so below about 650 pixels the
+    /// case setting was written over the query.
+    #[test]
+    fn the_find_bars_parts_never_overlap_at_any_width() {
+        for width in [
+            1920.0, 1024.0, 800.0, 640.0, 520.0, 480.0, 400.0, 360.0, 320.0,
+        ] {
+            let l = FindBar::at(width);
+            let parts = [l.label, l.query, l.case, l.count];
+            for r in parts {
+                assert!(
+                    r.x >= l.bar.x - 0.01 && r.right() <= l.bar.right() + 0.01,
+                    "at {width}: {r:?} is outside the bar {:?}",
+                    l.bar
+                );
+            }
+            for pair in [(l.label, l.query), (l.query, l.case), (l.case, l.count)] {
+                if pair.1.w > 0.0 {
+                    assert!(
+                        pair.0.right() <= pair.1.x + 0.01,
+                        "at {width}: {:?} runs into {:?}",
+                        pair.0,
+                        pair.1
+                    );
+                }
+            }
+            assert!(
+                l.query.right() <= l.count.x + 0.01,
+                "at {width}: the query's box runs into the count"
+            );
+            if l.case.w > 0.0 {
+                assert!(
+                    l.query.w >= FindBar::QUERY_MIN - 0.01,
+                    "at {width}: the case setting kept its room and the query's box lost its own"
+                );
+            }
+        }
+        // At the bar's full width every part has all its room.
+        let l = FindBar::at(1920.0);
+        assert!(
+            (l.case.w - FindBar::CASE_W).abs() < 0.01
+                && (l.count.w - FindBar::COUNT_W).abs() < 0.01
+        );
+    }
+
+    /// **The caret is after the typing, inside the box.**
+    #[test]
+    fn the_find_bars_caret_follows_the_typing() {
+        let app = searching_app(ViewMode::Unified, "alpha");
+        let l = FindBar::at(app.width);
+        let cmds = app.render_tree().commands;
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "alpha"))
+            .expect("the query is not drawn");
+        let caret = match cmds.get(at.saturating_add(1)) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the query: {other:?}"),
+        };
+        let end = l.query.x
+            + FindBar::INSET
+            + text::measure("alpha", CONTENT_FONT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the query at {end}"
+        );
+        assert!(caret < l.query.right());
+    }
+
     /// The feature this whole section is about: matches were computed, counted
     /// in the status bar and cycled through with Enter, and never drawn. On any
     /// file longer than a screen, find-in-diff was a number that changed.
@@ -5527,6 +5861,103 @@ mod tests {
         }
     }
 
+    /// **Each kind of key is asked for as itself**: AltGr+C -- Ctrl+Alt, which
+    /// types a Polish `ć` -- toggled ignoring case as Alt+C does, and AltGr+2
+    /// changed the view as Ctrl+2 does; Windows+J scrolled and Alt+Tab
+    /// moved to the next change, each chord arriving carrying its key; and
+    /// Alt+X typed an `x` into the search. Alt+C and Ctrl+2 still do theirs.
+    #[test]
+    fn each_kind_of_key_is_asked_for_as_itself() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let held = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = loaded();
+        let opts = |app: &FileDiffApp| {
+            (
+                app.ignore_opts.ignore_case,
+                app.ignore_opts.ignore_whitespace,
+            )
+        };
+        let (ignore, view, hunk) = (opts(&app), app.view_mode, app.selected_hunk);
+        let scroll = app.scroll_left;
+        for (k, m) in [
+            (Key::C, altgr),
+            (Key::W, altgr),
+            (Key::Num2, altgr),
+            (Key::Left, altgr),
+            (Key::J, Modifiers::super_key()),
+            (Key::Down, Modifiers::alt()),
+            (Key::Tab, Modifiers::alt()),
+            (Key::C, Modifiers::super_key()),
+            (Key::F1, Modifiers::alt()),
+        ] {
+            assert_eq!(
+                app.handle_event(&held(k, "", m)),
+                EventResult::Ignored,
+                "{m:?} {k:?} was taken"
+            );
+        }
+        assert_eq!(opts(&app), ignore, "a chord toggled an ignore option");
+        assert_eq!(app.view_mode, view, "a chord changed the view");
+        assert_eq!(app.selected_hunk, hunk, "a chord moved to another change");
+        assert!(
+            (app.scroll_left - scroll).abs() < f32::EPSILON,
+            "a chord scrolled"
+        );
+        assert!(!app.show_help, "a chord raised the keys");
+
+        app.handle_event(&held(Key::C, "", Modifiers::alt()));
+        assert_ne!(
+            opts(&app).0,
+            ignore.0,
+            "Alt+C no longer toggles ignoring case"
+        );
+        app.handle_event(&held(Key::Num2, "", Modifiers::ctrl()));
+        assert_eq!(
+            app.view_mode,
+            ViewMode::Unified,
+            "Ctrl+2 no longer changes the view"
+        );
+
+        // The list of keys is put away by a plain Escape.
+        app.handle_event(&held(Key::F1, "", Modifiers::NONE));
+        app.handle_event(&held(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put the list of keys away");
+        app.handle_event(&held(Key::Escape, "", Modifiers::NONE));
+        assert!(!app.show_help, "control: Escape puts the list away");
+
+        // The folder view's keys are plain: Alt+Escape does not leave it.
+        app.dir_mode = true;
+        app.handle_event(&held(Key::Escape, "", Modifiers::alt()));
+        assert!(app.dir_mode, "Alt+Escape left the folder view");
+        app.dir_mode = false;
+
+        // The search types what a key typed -- AltGr+I a Polish-keyboard `í`,
+        // not Ctrl+I's case toggle -- and its own keys are plain.
+        app.handle_event(&held(Key::F, "", Modifiers::ctrl()));
+        assert!(app.search.visible, "control: Ctrl+F searches");
+        let case = app.search.case_sensitive;
+        app.handle_event(&held(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&held(Key::C, "ć", altgr));
+        app.handle_event(&held(Key::I, "í", altgr));
+        assert_eq!(
+            app.search.query, "ćí",
+            "the search typed a command or lost AltGr's characters"
+        );
+        assert_eq!(app.search.case_sensitive, case, "AltGr+I toggled the case");
+        app.handle_event(&held(Key::Escape, "", Modifiers::alt()));
+        assert!(app.search.visible, "Alt+Escape closed the search");
+    }
+
     // -- Following the user's theme -------------------------------------------
 
     /// The window draws in the user's colours rather than in constants of its
@@ -5748,6 +6179,11 @@ mod tests {
         assert!(!app.dir_mode, "the pair did not open");
         assert_eq!(app.left_content, "left\n");
         assert_eq!(app.right_content, "right\n");
+        // A plain Escape: Windows+Escape is the desktop's.
+        let mut win_escape = key(Key::Escape);
+        win_escape.modifiers = Modifiers::super_key();
+        assert_eq!(app.handle_key(&win_escape), EventResult::Ignored);
+        assert!(!app.dir_mode, "Windows+Escape went back to the folder list");
         app.handle_key(&key(Key::Escape));
         assert!(app.dir_mode, "Escape did not go back to the folder list");
     }

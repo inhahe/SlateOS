@@ -65,6 +65,11 @@ printf '/usr/bin\n/tmp/x\nrelative\n'   > paths.txt
 printf 'Alpha1\nbeta22\nGAMMA333\n'     > mixed.txt
 printf 'A\x01\x7f\x80\xff\xc3\xa9Z\n'   > bytes.txt
 printf 'd\ne\nf\n'                      > def.txt
+# What a backslash can be taken to mean: a dot or a backslash, a `t` or a tab,
+# `]` or `\]`, `atb` or `a<TAB>b`, `w\-`, `ax` or `\x`, and the letter `n`.
+printf '.\n\\\nt\n\tx\n]\n\\]\natb\na\tb\nw\\-\nax\n\\x\nn\n' > bslash.txt
+# Whether the `*` after an assertion is a character (`a*`) or a repetition.
+printf 'a\nab\na*\n*\na$\na^\nb\n+a\n?a\na+\n' > anchors.txt
 # For the GNU word operators. `a_b` and `cafe' are each a single word --- `_`
 # is a word character and so is a letter outside ASCII --- and the run of two
 # spaces is where `\b` and `\B` disagree most visibly.
@@ -74,6 +79,21 @@ printf 'foo bar\na_b  c\ncaf\xc3\xa9 x1\n' > words2.txt
 # visibly wrong here and merely lucky against a file that has none.
 printf 'a\0b\nB\0c\0'                   > nulsep.txt
 : > empty.txt
+# One unterminated line, and one line longer than a 4096-byte block: what is
+# written to a full disk depends on where stdio's buffer fills, and a line that
+# overflows it on its own is where a write fails rather than a flush.
+printf 'z'                              > lone.txt
+# Long enough that a block of it is not all of it: where a shared standard
+# input is left after sed stops depends on how much sed read ahead.
+seq 1 3000                              > big.txt
+# A directory, which opens and then cannot be read.
+mkdir -p rdir
+# For the regex dialects: a stray `)`, a `\w`, a colon, a tab.
+printf 'ab w)\n'                       > wparen.txt
+printf 'a:\n'                          > colon.txt
+printf 'a\tb\n'                        > tabbed.txt
+head -c 5000 /dev/zero | tr '\0' x     > long.txt
+printf '\n'                            >> long.txt
 
 # --- one invocation of one side ----------------------------------------------
 #
@@ -240,7 +260,7 @@ kbug_stdin() {
 # copy would have the second read what the first wrote.
 run_inplace() {
   local label=$1; shift
-  local o_err g_err o_rc g_rc o_state g_state
+  local o_err g_err o_out g_out o_rc g_rc o_state g_state
   rm -rf ours.d gnu.d
   mkdir -p ours.d gnu.d
   cp abc.txt def.txt nonl.txt empty.txt ours.d/
@@ -249,19 +269,29 @@ run_inplace() {
   # is covered: it opens happily and only fails on the first read, which is
   # exactly the case a naive implementation reports as a read error.
   mkdir ours.d/adir gnu.d/adir
-  o_err=$(mktemp); g_err=$(mktemp)
+  o_err=$(mktemp); g_err=$(mktemp); o_out=$(mktemp); g_out=$(mktemp)
   # stdin is `/dev/null` rather than inherited: `-i` with no operand is one of
   # the cases below, and a sed that failed to reject it would otherwise block
   # on the harness's own terminal and hang the run rather than fail it.
-  ( cd ours.d && env PATH="$bindir/ours" sed "$@" ) </dev/null >/dev/null 2>"$o_err"; o_rc=$?
-  ( cd gnu.d  && env PATH="$bindir/gnu"  sed "$@" ) </dev/null >/dev/null 2>"$g_err"; g_rc=$?
+  #
+  # Standard output is compared too. Under `-i` the edit goes to the file and
+  # nothing else should go anywhere -- except what is *meant* for standard
+  # output: `--debug`'s trace, and `w /dev/stdout`, which this port once wrote
+  # into the edited file. Discarding it hid both.
+  ( cd ours.d && env PATH="$bindir/ours" sed "$@" ) </dev/null >"$o_out" 2>"$o_err"; o_rc=$?
+  ( cd gnu.d  && env PATH="$bindir/gnu"  sed "$@" ) </dev/null >"$g_out" 2>"$g_err"; g_rc=$?
+  o_state="$(printf 'stdout:\n'; od -An -tx1 <"$o_out")"
+  g_state="$(printf 'stdout:\n'; od -An -tx1 <"$g_out")"
+  rm -f "$o_out" "$g_out"
   # `find | sort` names every file, including one only one side created; `od`
   # of each in turn compares contents. A missing file shows up as an absent
   # block rather than as silence.
-  o_state=$(cd ours.d && find . -type f | sort | while read -r f; do
-              printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)
-  g_state=$(cd gnu.d && find . -type f | sort | while read -r f; do
-              printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)
+  o_state="$o_state
+$(cd ours.d && find . -type f | sort | while read -r f; do
+              printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)"
+  g_state="$g_state
+$(cd gnu.d && find . -type f | sort | while read -r f; do
+              printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)"
   local o_msg g_msg
   # The directory name leaks into a diagnostic that quotes the path, so it is
   # normalised away before comparison — the difference under test is sed's
@@ -285,6 +315,50 @@ run_inplace() {
 echo "sed-diff:"
 echo "  ours: $OURS"
 echo "  gnu:  $gnu_real"
+
+# --- a backslash in a regex -----------------------------------------------------
+# GNU sed turns `\t`, `\n` and the other byte-naming escapes into their bytes
+# before the regex compiler sees them -- inside a bracket too -- and glibc gives
+# any other backslash in a bracket no meaning: `[\.]` is a backslash or a dot.
+# `ere` read escapes in brackets until 2026-10-01 and so missed the backslash
+# (known-issues.md, TD-B-ERE-BRACKET-BACKSLASH). Measured, sed 4.9.
+run_stdin bslash.txt 's/^[\.]$/X/'
+run_stdin bslash.txt -E 's/^[\.]$/X/'
+run_stdin bslash.txt 's/^[\t]/X/'
+run_stdin bslash.txt -E 's/^[\t]/X/'
+run_stdin bslash.txt 's/a\tb/X/'
+run_stdin bslash.txt 's/^[\]]$/X/'
+run_stdin bslash.txt -E 's/^[\]]$/X/'
+run_stdin bslash.txt -E 's/^[a\]x$/X/'
+run_stdin bslash.txt -E 's/^[\w-]+$/X/'
+run_stdin bslash.txt 'N;s/[\n]/+/'
+run_stdin bslash.txt 's/^[\x41n]$/X/'
+
+# --- a repetition after an assertion -------------------------------------------
+# glibc returns from an assertion before looking for a repetition: in a basic
+# expression the `*` after one is a character, `\+` and `\?` with nothing to
+# repeat are characters, and `\{` there is refused; in an extended one any
+# repetition there is refused. Measured, sed 4.9. (TD-B-ERE-QUANTIFIED-ANCHOR)
+run_stdin anchors.txt -n '/a\b*/p'
+run_stdin anchors.txt -n '/a\>*/p'
+run_stdin anchors.txt -n '/a\`*/p'
+run_stdin anchors.txt -n '/\+a/p'
+run_stdin anchors.txt -n '/a\b\+/p'
+run_stdin anchors.txt -n '/a\b\{1\}/p'
+run_stdin anchors.txt -E -n '/a\b*/p'
+run_stdin anchors.txt -E -n '/a$*/p'
+run_stdin anchors.txt -E -n '/a($)*/p'
+
+# --- sed's basic syntax is RE_SYNTAX_POSIX_BASIC, which is not grep's ----------
+# RE_CONTEXT_INVALID_DUP: a `*` or `\{` straight after a repetition is refused,
+# and so is a `\{` with nothing before it; `a*\+` is not. A `\}` closing nothing
+# is the character. (ere::bre::BreSyntax::POSIX_BASIC)
+run_stdin anchors.txt -n '/a**/p'
+run_stdin anchors.txt -n '/a\{1\}*/p'
+run_stdin anchors.txt -n '/a\+*/p'
+run_stdin anchors.txt -n '/a*\+/p'
+run_stdin anchors.txt -n '/\{1\}a/p'
+run_stdin anchors.txt -n 's/a\}/X/p'
 
 # --- substitution ------------------------------------------------------------
 run_stdin words.txt 's/foo/FOO/'
@@ -370,15 +444,14 @@ run_stdin abc.txt $'s/b/x\\\ny/'
 # match them as bytes rather than dropping them.
 run_stdin bytes.txt 's/Z/z/'
 run_stdin bytes.txt 's/[[:print:]]//g'
-# `.` is the one place the two models of "a character" cannot both be right.
-# GNU matches with glibc's multibyte matcher, which in a UTF-8 locale cannot
-# decode `\x80` and so refuses to let `.` match it: `.*` stops dead at the
-# undecodable byte, and `[&]` closes in the middle of the line. Ours is
-# byte-based — `design-decisions.md` §322, the same decision `find -regex`
-# turns on — so `.*` takes the whole line. Every other case over this fixture
-# agrees; only the one whose answer depends on what a character *is* does not.
-xfail_stdin 'a byte-based `.` matches an undecodable byte; glibc'"'"'s does not' \
-  bytes.txt 's/.*/[&]/'
+# `.` and an undecodable byte. GNU matches with glibc's multibyte matcher,
+# which in a UTF-8 locale cannot decode `\x80` and so refuses to let `.`
+# match it: `.*` stops dead at the undecodable byte, and `[&]` closes in the
+# middle of the line. Ours did not, and this case was a deliberate difference
+# until 2026-10-02, when the engine took glibc's rule (`known-issues.md`
+# B-ERE-DOT-TOOK-A-BYTE-GLIBC-LEAVES); now it must agree.
+run_stdin bytes.txt 's/.*/[&]/'
+run_stdin bytes.txt 's/[^Z]*/[&]/'
 
 # --- addresses ---------------------------------------------------------------
 run_stdin nums.txt '2d'
@@ -479,6 +552,139 @@ run_inplace '-i on a - operand'   -i 's/a/A/' -
 run_inplace '-i on a directory'   -i 's/a/A/' adir
 run_inplace '-i, dir then file'   -i 's/a/A/' adir abc.txt
 
+# --- what -i does to the file system ------------------------------------------------
+#
+# GNU writes the edit to a new file beside the old one -- `DIR/sedXXXXXX` --
+# gives it the old one's owner and mode, renames the old one to the backup if
+# there is one, and renames the new one over the name. So the edit is a *new
+# file*: a hard link keeps the old text, a symbolic link is replaced by a file
+# (unless `--follow-symlinks`), a read-only file in a writable directory can be
+# edited and a writable one in a read-only directory cannot, and the backup is
+# the original itself. This port used to rewrite the file where it stood and got
+# every one of those the other way round. `fs_case CMD` runs CMD in a fresh
+# world on each side and compares what it printed (temporary names folded to
+# `sedXXXXXX`), its status, and the world afterwards: contents, modes, link
+# counts, link targets, and anything left lying about.
+fs_world() {
+  rm -rf "$1"; mkdir "$1"
+  ( cd "$1" || exit 1
+    printf 'a\nb\n' > f; chmod 640 f
+    printf 'a\nb\n' > g; ln g hard
+    printf 'a\nt\n' > target; ln -s target link; ln -s link link2
+    mkdir d; ln -s ../target d/up
+    ln -s nosuch dangling
+    printf 'a\n' > ro; chmod 444 ro
+    mkdir ud; printf 'a\n' > ud/x; chmod 555 ud )
+}
+
+fs_state() {
+  ( cd "$1" && find . -mindepth 1 | LC_ALL=C sort | while read -r x; do
+      case $x in ./sed??????) x=./sedXXXXXX ;; esac
+      if [ -L "$x" ]; then printf '%s -> %s\n' "$x" "$(readlink "$x")"
+      elif [ -d "$x" ]; then printf '%s/ %s\n' "$x" "$(stat -c %a "$x")"
+      else printf '%s %s %s\n' "$x" "$(stat -c '%a %h' "$x")" "$(od -An -tx1 <"$x" | tr -s ' \n' ' ')"
+      fi
+    done )
+}
+
+fs_case() {
+  local o_all g_all o_rc g_rc side
+  for side in ours gnu; do
+    fs_world "$DIFF_TMP/fs-$side"
+    ( cd "$DIFF_TMP/fs-$side" && env PATH="$bindir/$side:$PATH" bash -c "$1" ) </dev/null \
+      >"$DIFF_TMP/fs-$side.out" 2>&1
+    echo "$?" >"$DIFF_TMP/fs-$side.rc"
+  done
+  o_all="$(sed 's/sed[A-Za-z0-9]\{6\}/sedXXXXXX/g' "$DIFF_TMP/fs-ours.out"; fs_state "$DIFF_TMP/fs-ours")"
+  g_all="$(sed 's/sed[A-Za-z0-9]\{6\}/sedXXXXXX/g' "$DIFF_TMP/fs-gnu.out"; fs_state "$DIFF_TMP/fs-gnu")"
+  o_rc=$(cat "$DIFF_TMP/fs-ours.rc"); g_rc=$(cat "$DIFF_TMP/fs-gnu.rc")
+  chmod -R u+w "$DIFF_TMP/fs-ours" "$DIFF_TMP/fs-gnu" 2>/dev/null
+  rm -rf "$DIFF_TMP/fs-ours" "$DIFF_TMP/fs-gnu" "$DIFF_TMP"/fs-*.out "$DIFF_TMP"/fs-*.rc
+  if [ "$o_all" = "$g_all" ] && [ "$o_rc" = "$g_rc" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [fs] %s\n' "$1"
+  else
+    fail=$((fail+1))
+    printf 'DIFF [fs] %s\n' "$1"
+    printf '  ours (rc=%s) %s\n' "$o_rc" "$(printf '%s' "$o_all" | tr '\n' '|')"
+    printf '  gnu  (rc=%s) %s\n' "$g_rc" "$(printf '%s' "$g_all" | tr '\n' '|')"
+  fi
+  return 0
+}
+
+fs_case 'sed -i s/a/X/ f'
+fs_case 'sed -i s/a/X/ g'
+fs_case 'sed -i.bak s/a/X/ g'
+fs_case 'sed -i.bak s/a/X/ f'
+fs_case 'sed -i s/a/X/ link'
+fs_case 'sed -i.bak s/a/X/ link'
+fs_case 'sed -i --follow-symlinks s/a/X/ link2'
+fs_case 'sed --follow-symlinks -i.bak s/a/X/ link2'
+fs_case 'sed -i --follow-symlinks s/a/X/ d/up'
+fs_case 'sed -i s/a/X/ dangling'
+fs_case 'sed -i --follow-symlinks s/a/X/ dangling'
+fs_case 'sed -i s/a/X/ ro'
+fs_case 'sed -i s/a/X/ ud/x'
+fs_case 'sed -n -i p f nosuch g'
+fs_case 'sed -i 1q f g'
+fs_case "sed -i 'w /dev/stdout' f"
+fs_case 'sed -i s/a/X/ /dev/null'
+# `--follow-symlinks` outside `-i`: what `F` names, and the end of the run for a
+# name that cannot be followed -- before it would have been `can't read`.
+fs_case 'sed --follow-symlinks -n F link2 d/up'
+fs_case 'sed -n F link2 d/up'
+fs_case 'sed --follow-symlinks p dangling'
+fs_case 'sed --follow-symlinks p nosuch'
+fs_case 'sed p nosuch'
+
+# A disk that fills part-way through the edit: GNU stops at the write that
+# failed, removes its temporary file, and leaves the original as it was. Each
+# side runs in a user and mount namespace of its own on a 16 KiB tmpfs, as
+# `tar-diff.sh` section 11 does, and the cases are skipped where that cannot be
+# had.
+full_case() {
+  local side o g
+  for side in ours gnu; do
+    rm -rf "$DIFF_TMP/full-$side"; mkdir "$DIFF_TMP/full-$side"
+    # Inside: mount the tmpfs over the directory, step into it, make the
+    # file, run the case, and record what it said, its status, the file's
+    # checksum and whatever is left beside it -- one directory up, outside the
+    # tmpfs. Folded and compared out here, where `sed` is the system's and
+    # not the side under test.
+    ( cd "$DIFF_TMP/full-$side" && PATH="$bindir/$side:$PATH" \
+      diff_run timeout -k 2 60 unshare -mUr --propagation private sh -c '
+        mount -t tmpfs -o size=16k none "$PWD" || exit 125
+        cd "$PWD" || exit 125
+        head -c 9000 /dev/zero | tr "\0" a | fold -w 99 > f
+        sh -c "$1" >"../$2.out" 2>&1; echo "$?" >"../$2.rc"
+        md5sum f | cut -c1-8 >"../$2.sum"
+        ls -A >"../$2.left"
+      ' _ "$1" "full-$side" )
+  done
+  o=$(cd "$DIFF_TMP" && cat full-ours.out full-ours.rc full-ours.sum full-ours.left 2>/dev/null \
+        | sed 's/sed[A-Za-z0-9]\{6\}/sedXXXXXX/g')
+  g=$(cd "$DIFF_TMP" && cat full-gnu.out full-gnu.rc full-gnu.sum full-gnu.left 2>/dev/null \
+        | sed 's/sed[A-Za-z0-9]\{6\}/sedXXXXXX/g')
+  local ran=no
+  [ -s "$DIFF_TMP/full-ours.rc" ] && [ -s "$DIFF_TMP/full-gnu.rc" ] && ran=yes
+  rm -rf "$DIFF_TMP"/full-*
+  if [ "$ran" = yes ] && [ "$o" = "$g" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [full] %s\n' "$1"
+  else
+    fail=$((fail+1))
+    printf 'DIFF [full] %s\n  ours %s\n  gnu  %s\n' "$1" "$(printf '%s' "$o" | tr '\n' '|')" \
+      "$(printf '%s' "$g" | tr '\n' '|')"
+  fi
+  return 0
+}
+if ! unshare -mUr true 2>/dev/null; then
+  echo "SKIP the full-disk -i cases: no user and mount namespace can be made here"
+else
+  full_case 'sed -i s/a/b/ f'
+  full_case 'sed -i.bak s/a/b/ f'
+fi
+
 # --- w, W and the `s///w` flag ------------------------------------------------
 #
 # The file a `w` writes is the whole output of these cases, so it has to be
@@ -546,6 +752,252 @@ run_stdin abc.txt -n 'w /nosuch/dir/file'
 # fails even when no line ever reaches the command.
 run_stdin - -n 'w /nosuch/dir/file'
 run_stdin - -n '/nomatch/w /nosuch/dir/file'
+
+# --- the separator an unterminated line holds back ----------------------------
+#
+# GNU keeps one such debt per output stream (`struct output`'s
+# `missing_newline`), and these are the places it is easy to keep one too few
+# or too many. Under `-s` the inputs are separate but standard output is one
+# stream, so a debt crosses the file boundary -- and under `-i` it does not,
+# each file being an output of its own. `w /dev/stdout` is standard output's
+# buffer with a debt of its *own*: `printf 'a\nb' | sed 'w /dev/stdout'` ends
+# `bb`, neither copy paying the other's. All measured, sed 4.9; this port had
+# every one of them wrong until 2026-10-03.
+run_case -s -n '$p' nonl.txt abc.txt
+run_case -s -n '$p' nonl.txt nonl.txt
+run_case -s -n '$p' lone.txt lone.txt lone.txt
+run_case -s -n '$p' nonl.txt nosuch.txt abc.txt
+run_case -s -n '$p' abc.txt nonl.txt
+run_case 'w /dev/stdout' nonl.txt
+run_case -n 'p;w /dev/stdout' nonl.txt
+run_case -n -s 'w /dev/stdout' lone.txt lone.txt
+run_case 's/b/B/w /dev/stdout' nonl.txt
+run_case -n 'W /dev/stdout' nonl.txt
+run_case 'w /dev/stderr' nonl.txt
+run_inplace '-i and w /dev/stdout'     -i 'w /dev/stdout' nonl.txt
+run_inplace '-i -n and w /dev/stdout'  -i -n 'w /dev/stdout' nonl.txt abc.txt
+# When the debt is paid: GNU dumps the append queue as the next line is read
+# -- and after `q` whether or not anything is queued, which is how `printf z |
+# sed q` comes out as `z` and a newline. `Q` drops the queue unwritten, `n`
+# and `N` at the end of the input read nothing and so dump nothing, and `D`
+# starts the script again without reading.
+run_stdin lone.txt q
+run_stdin lone.txt -n q
+run_stdin lone.txt -e '1r nosuch.txt' -e q
+run_stdin abc.txt -e 'a X' -e N
+run_stdin abc.txt -e 'a X' -e Q
+run_stdin abc.txt -e 'a X' -e q
+run_stdin abc.txt -e 'a X' -e '$!N' -e D
+run_stdin nonl.txt -e '$!a X' -e n
+run_stdin nonl.txt -e '1a X' -e 1q
+run_stdin nonl.txt -n -e 'p;=' -e 'p;l'
+run_stdin nonl.txt -n -e 'p;i X'
+run_stdin nonl.txt -n -e 'p;e printf hi'
+
+# --- output that cannot go where it is sent ------------------------------------
+#
+# GNU sed checks every write and names the one that failed -- `couldn't write 5001
+# items to stdout`, `couldn't flush stdout`, `couldn't close stdout` -- so which
+# write fails, and with how many bytes, is output in its own right, and it turns
+# on exactly where glibc's buffer fills (coreutils::stdio). `redir_case MODE
+# ARGS...` sends one stream somewhere it cannot be written and compares what can
+# still be seen:
+#
+#   full       standard output is /dev/full     stderr and status compared
+#   closed     standard output is closed        stderr and status compared
+#   errfull    standard error is /dev/full      stdout and status compared
+#   errclosed  standard error is closed         stdout and status compared
+#   both       both streams into one file       that file and status compared
+#
+# Each side runs in a directory of its own holding copies of the fixtures, so a
+# `w` file one side writes is not read by the other, and whatever each leaves
+# behind is compared too.
+redir_side() {
+  local side=$1 mode=$2 out=$3 err=$4; shift 4
+  local dir=$DIFF_TMP/redir-$side
+  rm -rf "$dir"; mkdir -p "$dir"
+  cp abc.txt nonl.txt lone.txt long.txt "$dir/"
+  (
+    cd "$dir" || exit 125
+    case $mode in
+      full)      env PATH="$bindir/$side" sed "$@" </dev/null >/dev/full 2>"$err" ;;
+      closed)    env PATH="$bindir/$side" sed "$@" </dev/null >&- 2>"$err" ;;
+      errfull)   env PATH="$bindir/$side" sed "$@" </dev/null >"$out" 2>/dev/full ;;
+      errclosed) env PATH="$bindir/$side" sed "$@" </dev/null >"$out" 2>&- ;;
+      both)      env PATH="$bindir/$side" sed "$@" </dev/null >"$out" 2>&1 ;;
+    esac
+  )
+}
+
+redir_state() {
+  (cd "$DIFF_TMP/redir-$1" && find . -type f | sort | while read -r f; do
+     printf '== %s\n' "$f"; od -An -tx1 <"$f"; done)
+}
+
+redir_case() {
+  local mode=$1; shift
+  local o_out g_out o_err g_err o_rc g_rc o_all g_all
+  o_out=$(mktemp); g_out=$(mktemp); o_err=$(mktemp); g_err=$(mktemp)
+  redir_side ours "$mode" "$o_out" "$o_err" "$@"; o_rc=$?
+  o_all="$(od -An -tx1 <"$o_out"; cat "$o_err"; redir_state ours)"
+  redir_side gnu  "$mode" "$g_out" "$g_err" "$@"; g_rc=$?
+  g_all="$(od -An -tx1 <"$g_out"; cat "$g_err"; redir_state gnu)"
+  rm -f "$o_out" "$g_out" "$o_err" "$g_err"
+  rm -rf "$DIFF_TMP/redir-ours" "$DIFF_TMP/redir-gnu"
+  if [ "$o_all" = "$g_all" ] && [ "$o_rc" = "$g_rc" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [%s] sed %s\n' "$mode" "$*"
+  else
+    fail=$((fail+1))
+    printf 'DIFF [%s] sed %s\n' "$mode" "$*"
+    printf '  ours (rc=%s) %s\n' "$o_rc" "$(printf '%s' "$o_all" | tr -s ' \n' ' ')"
+    printf '  gnu  (rc=%s) %s\n' "$g_rc" "$(printf '%s' "$g_all" | tr -s ' \n' ' ')"
+  fi
+  return 0
+}
+
+redir_case full p abc.txt
+redir_case closed p abc.txt
+# Nothing written is a clean flush, even onto a full disk -- but a closed
+# standard output still fails at the close.
+redir_case full -n 9p abc.txt
+redir_case closed -n 9p abc.txt
+redir_case full -u p abc.txt
+# A line longer than the buffer fails in the write itself, and names its size.
+redir_case full p long.txt
+redir_case full -n l long.txt
+# `=` is an unchecked `fprintf`: only the flush at the end can fail.
+redir_case full -n = abc.txt
+redir_case full -u -n = abc.txt
+redir_case full '1r long.txt' abc.txt
+# The first write to a stream finds no buffer, so a whole block of it goes
+# straight to the descriptor: `e`'s first 4096-byte piece fails, not its second.
+redir_case full -u '1e cat long.txt' abc.txt
+redir_case full 'w out' abc.txt
+redir_case closed 'w out' abc.txt
+redir_case full -n 'w /dev/stdout' abc.txt
+redir_case full -u -n 'w /dev/stdout' abc.txt
+redir_case full -u -n 'w /dev/full' abc.txt
+# The trace is unchecked; the text it traces is not.
+redir_case full --debug p abc.txt
+redir_case full --help
+redir_case closed --version
+# A diagnostic nobody can read changes nothing -- except where writing it is
+# the point: `w /dev/stderr`.
+redir_case errfull p nosuch.txt
+redir_case errclosed p nosuch.txt
+redir_case errfull --bogus
+redir_case errfull -n 'w /dev/stderr' abc.txt
+redir_case errclosed -n 'w /dev/stderr' abc.txt
+# Order on a shared file: the diagnostic at once, standard output at the end --
+# or line by line under `-u`.
+redir_case both p nosuch.txt abc.txt
+redir_case both 'w /dev/stderr' abc.txt
+redir_case both -u 'w /dev/stderr' abc.txt
+# `/dev/stdin` is GNU's read-only `stdin` stream, so writing it fails at the
+# first write. Opening the name instead -- which this port did -- truncates
+# standard input when it is a file.
+redir_case both -n 'w /dev/stdin' abc.txt
+redir_case both -n 's/b/B/w /dev/stdin' abc.txt
+# GNU unlinks a `w` file from its list of names before the flush that closes
+# it, so a failure there is reported as `<unknown>`. The name is known here
+# and is printed.
+xfail_case 'a w file that fails at the final flush is named, not <unknown>' \
+  -n 'w /dev/full' abc.txt
+
+# --- standard input, shared with whoever reads it next ---------------------------
+#
+# GNU sed reads standard input through glibc's `stdin`: a block at a time, or a
+# byte at a time under `-u`, and at `exit` it seeks back over what it read and
+# did not use -- if it can seek, and if the stream is buffered. So where the
+# *next* reader of the descriptor starts is part of what sed does: the rest of
+# a shell block, a child started by `e`. `shell_case SNIPPET` runs a shell
+# snippet with each side's sed first on PATH and compares everything it
+# prints, both streams merged, and its status.
+shell_case() {
+  local o_out g_out o_rc g_rc
+  o_out=$(mktemp); g_out=$(mktemp)
+  env PATH="$bindir/ours:$PATH" bash -c "$1" </dev/null >"$o_out" 2>&1; o_rc=$?
+  env PATH="$bindir/gnu:$PATH"  bash -c "$1" </dev/null >"$g_out" 2>&1; g_rc=$?
+  local o g
+  o=$(od -An -tx1 <"$o_out"); g=$(od -An -tx1 <"$g_out")
+  rm -f "$o_out" "$g_out"
+  if [ "$o" = "$g" ] && [ "$o_rc" = "$g_rc" ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   [sh] %s\n' "$1"
+  else
+    fail=$((fail+1))
+    printf 'DIFF [sh] %s\n' "$1"
+    printf '  ours (rc=%s) %s\n' "$o_rc" "$(printf '%s' "$o" | tr -s ' \n' ' ')"
+    printf '  gnu  (rc=%s) %s\n' "$g_rc" "$(printf '%s' "$g" | tr -s ' \n' ' ')"
+  fi
+  return 0
+}
+
+# What is left for the next reader. A file is sought back to just after the
+# last line used; a pipe cannot be, and loses the block read ahead -- unless
+# `-u` read it a byte at a time. Under `-u` the byte `$` looked at is not given
+# back either (glibc does not sync an unbuffered stream), so `$!q` loses the
+# `2`. All measured; the old sed read ahead through Rust's own buffer and gave
+# nothing back.
+shell_case '{ sed 1q; cat; } < nums.txt'
+shell_case '{ sed -u 1q; cat; } < nums.txt'
+shell_case "{ sed '\$!q'; cat; } < nums.txt"
+shell_case "{ sed -u '\$!q'; cat; } < nums.txt"
+shell_case '{ sed -n 2p; cat; } < nums.txt'
+shell_case '{ sed 2q; cat; } < big.txt | wc -l'
+shell_case "{ sed -n '2{p;q}'; cat; } < big.txt | head -3"
+shell_case "printf '1\\n2\\n3\\n' | { sed -u 1q; cat; }"
+shell_case "printf '1\\n2\\n3\\n' | { sed 1q; cat; }"
+# A child started by `e` inherits standard input where sed's reading left it.
+# Under `-u` that is just after line 1, so `cat` prints the rest first.
+shell_case "sed '1e cat' < nums.txt"
+shell_case "sed -u '1e cat' < nums.txt"
+shell_case "printf '1\\n2\\n3\\n' | sed -u '1e cat'"
+# `R /dev/stdin` reads the same stream as an operand of `-`, so the two take
+# turns; `r /dev/stdin` opens the name again, which for a file starts from its
+# beginning every time and for a pipe reads what is left in it.
+shell_case "sed 'R /dev/stdin' - < abc.txt"
+shell_case "sed 'R /dev/stdin' def.txt < abc.txt"
+shell_case "sed -s 'R /dev/stdin' def.txt def.txt < abc.txt"
+shell_case "sed 'r /dev/stdin' def.txt < abc.txt"
+shell_case "printf 'x\\ny\\n' | sed 'r /dev/stdin' def.txt"
+# A second `-` reads on from where the first stopped, after `clearerr`.
+shell_case 'sed p - - < abc.txt'
+shell_case "sed -s -n '\$=' - - < abc.txt"
+# A closed standard input is a read error, when it is read -- and only then.
+shell_case 'sed p <&-'
+shell_case 'sed p - <&-'
+shell_case "sed -n '\$p' abc.txt <&-"
+shell_case "sed 'R /dev/stdin' abc.txt <&-"
+
+# --- `$`, `F` and the file boundary ------------------------------------------------
+#
+# `$` is answered by looking one byte ahead -- and at the end of a file, by
+# opening the next one to see whether it has a byte. From then on GNU's
+# `in_file_name` names the next file, so `F` does too: `sed -n '$!F' a b`
+# prints `a` and then `b`. A file that will not open is reported when `$`
+# reaches it, and one that opens but cannot be read counts as empty there.
+run_case -n '$!F' abc.txt def.txt
+run_case -n '$!F;F' abc.txt def.txt
+run_case -n '$!F' abc.txt nosuch.txt def.txt
+run_case --debug -n '$!F' abc.txt def.txt
+run_case -n '$p' abc.txt rdir
+run_case -n '$p' abc.txt rdir def.txt
+
+# --- reading that fails ------------------------------------------------------------
+#
+# A file that will not open is empty to `r` and `R`, by POSIX's rule; one that
+# opens and cannot be read ends the run, `r` after copying what it read.
+run_case 'R rdir' abc.txt
+run_case 'r rdir' abc.txt
+run_case '1r rdir' abc.txt
+run_case 'R nosuch.txt' abc.txt
+run_case p rdir
+run_case p abc.txt rdir def.txt
+# `/dev/stdout` and `/dev/stderr` are GNU's own streams, open for writing only.
+run_case 'R /dev/stdout' abc.txt
+run_case 'R /dev/stderr' abc.txt
 
 # --- reading a file back: r and R --------------------------------------------
 run_stdin abc.txt "1r def.txt"
@@ -770,6 +1222,9 @@ run_stdin abc.txt 'y/a/b/;p'
 # command — which is unterminated. `{b}` branches to the end, not to a label
 # called `}`.
 run_stdin abc.txt 'b x y'
+# A label nothing defines is named as it was written, bytes and all.
+run_stdin abc.txt 'b nolabel'
+run_stdin abc.txt "$(printf 'b no\377label')"
 run_stdin abc.txt ':x y'
 run_stdin abc.txt 'b x s'
 # A missing delimiter is not a fault of its own: `s` and `y` read it with the
@@ -972,6 +1427,130 @@ usage_case --version=x
 # `Report bugs to:` block, exactly as every other utility here does.
 xfail_case 'help omits the GNU bug-report block' --help
 xfail_case 'version names SlateOS' --version
+
+# --- the compiler's refusals --------------------------------------------------
+#
+# Addresses a command does not take, and the forms GNU reads as addresses only
+# to refuse them. Each is refused one past the character that settles it, as
+# GNU's `bad_prog` counts. Measured, sed 4.9; until 2026-10-03 this port
+# accepted `1,2q` and `1:a`, called `+3p` an unknown command and `1,p` a
+# missing address, and had no `0r`.
+run_case -e '1,2q' abc.txt
+run_case -e '1,2Q' abc.txt
+run_case -e '1,2!q' abc.txt
+run_case -e '/a/,/b/q' abc.txt
+run_case -e '1:a' abc.txt
+run_case -e '{p;1}' abc.txt
+run_case -e '1#x' abc.txt
+run_case -e '1 #x' abc.txt
+run_case -n -e '!#x' -e p abc.txt
+run_case -e '1,p' abc.txt
+run_case -e '1, p' abc.txt
+run_case -n -e '1,' -e p abc.txt
+run_case -e '+3p' abc.txt
+run_case -e '~3p' abc.txt
+# `+0` and `~0` as a first address are GNU's `ADDR_IS_NULL`, every line.
+run_case -e '+0p' abc.txt
+run_case -e '~0p' abc.txt
+run_case -e '+0,2p' abc.txt
+run_case -e '+p' abc.txt
+run_case -n -e '1 ~ 2p' nums.txt
+run_case -n -e '1,+ 1p' nums.txt
+# A `first~step` end closes the range on the first line it names -- tested on
+# the line the range starts on, too.
+run_case -n -e '1,2~3p' nums.txt
+run_case -n -e '2,0~2p' nums.txt
+run_case -n -e '2,1~2p' nums.txt
+# `0rFILE` puts the file before the first line, written there and then.
+run_case '0r def.txt' abc.txt
+run_case '0r def.txt' empty.txt
+run_case -s '0r def.txt' abc.txt nonl.txt
+run_case --debug '0r def.txt' abc.txt
+run_case '0,/a/r def.txt' abc.txt
+# GNU compiles `L` and then dies running it: `INTERNAL ERROR: Bad cmd L`,
+# status 4. That is a bug in a command 4.9 removed, and an error before
+# anything is read is the kinder answer.
+xfail_case 'L is refused while the script is read, not when it runs' L abc.txt
+
+# --- M: multi-line matching -------------------------------------------------------
+#
+# `M` makes `^` and `$` match at a newline inside the pattern space, and keeps
+# `.` and `[^...]` from matching one -- except that under `-z` the anchors stay
+# at the ends, GNU setting `newline_anchor` only for a newline separator. This
+# port refused `M` until 2026-10-03.
+run_case -n -e 'N;N;s/^b$/X/M' -e p abc.txt
+run_case -n -e 'N;N;s/^b$/X/' -e p abc.txt
+run_case -n -e 'N;N;s/a.b/X/M' -e p abc.txt
+run_case -n -e 'N;N;s/a.b/X/' -e p abc.txt
+run_case -n -e 'N;N;s/[^x]b/X/M' -e p abc.txt
+run_case -n -e '$!N;/^b/Mp' abc.txt
+run_case -n -e '/A/I,/C/Ip' abc.txt
+run_case -n -e '/a/ I p' abc.txt
+run_case -e 's/a/X/mg' abc.txt
+run_case -e 's//X/M' abc.txt
+run_case -z 'N;N;s/^b/X/M' abc.txt
+run_case --debug -n '/a/IMp;s/a/b/mg' abc.txt
+
+# --- the regex dialect sed hands glibc ----------------------------------------------
+#
+# GNU sed clears `RE_UNMATCHED_RIGHT_PAREN_ORD` in its default mode, so an
+# unmatched `)` is an error in `-E` (and `\)` in a basic expression); and dfa.c
+# refuses a bracket that looks like a class without the class's brackets,
+# unless `POSIXLY_CORRECT` is set.
+run_case -E 's/w)/X/' wparen.txt
+run_case 's/w\)/X/' wparen.txt
+run_case 's/[:alpha:]/X/' colon.txt
+run_case 's/[[:alpha:]]/X/' colon.txt
+run_case 's/[:a]/X/' colon.txt
+run_case -e 's/[:alpha:]/X/' -e 'Z' colon.txt
+
+# --- --posix -----------------------------------------------------------------------
+#
+# Every GNU extension refused, or read as POSIX reads it: the extra commands
+# and flags, the extra address forms, `a` text without its backslash, the
+# numbers of `l` and `q`, `\w` and `\|`, the case conversions of a
+# replacement. See TD-B-SED-HAS-NO-POSIX-MODE-AND-NO-FOLLOW-SYMLINKS for the
+# table this follows.
+for script in 's/a/X/I' 's/a/X/m' 's/a/X/e' '/a/Ip' '/a/Mp' '1~2p' '1,+1p' \
+    '1,~2p' '0,/a/p' '+0p' 'e echo' F v z L Q T 'R def.txt' 'W out' '1,2a X' \
+    '1,2i X' '1,2l' '1,2=' '1,2r def.txt' 'a X' 'a\' 'l 5' 'q 5' 's/a/\U&/' \
+    's/\(a\)/\L\1/' 's/a\|b/X/g' 's/\w/X/g' '1,2{p;}' '$!N' 's/a/\2/' \
+    '0r def.txt'; do
+  run_case --posix -e "$script" abc.txt
+done
+run_case --posix -E 's/\w/X/g' wparen.txt
+run_case --posix -E 's/w)/X/' wparen.txt
+run_case --posix 's/w\)/X/' wparen.txt
+run_case --posix 's/[:alpha:]/X/' colon.txt
+run_case --posix -e 'a\' -e 'foo' abc.txt
+run_case --posix -e 'a foo\' -e 'bar' abc.txt
+printf 'a\\\nfoo\\' > incomplete.sed
+run_case --posix -f incomplete.sed abc.txt
+run_case -f incomplete.sed abc.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case --posix 's/[:alpha:]/X/' colon.txt
+ENVV=()
+
+# --- POSIXLY_CORRECT as sed reads it ---------------------------------------------
+#
+# The extensions stay; `N` on the last line prints nothing, `w /dev/stdout`
+# is a file, a bracket's escapes are left to the regex compiler, a missing
+# group in the replacement is empty rather than refused, an unmatched `)` is a
+# character, and dfa.c's complaint is excused. `v` switches it all back.
+ENVV=(POSIXLY_CORRECT=1)
+for script in 's/a/X/I' '/a/Ip' '1~2p' F 's/a/\U&/' 's/a/\2/' N '$!N' 'N;N' \
+    'v;N;N' 's/\t/X/'; do
+  run_case -e "$script" abc.txt
+done
+run_case 's/[\t]/X/' tabbed.txt
+run_case 's/\t/X/' tabbed.txt
+run_case -E 's/w)/X/' wparen.txt
+run_case 's/w\)/X/' wparen.txt
+run_case 's/[:alpha:]/X/' colon.txt
+run_case 'w /dev/stdout' nonl.txt
+run_case 'v;w /dev/stdout' nonl.txt
+run_case -e 'w /dev/stdout' -e v -e 'w /dev/stdout' nonl.txt
+ENVV=()
 
 # --- POSIXLY_CORRECT -----------------------------------------------------------
 # glibc's getopt ends option parsing at the first operand while it is set -- to

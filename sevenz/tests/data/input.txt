@@ -1,0 +1,8 @@
+# D path | F size fnv64 path -- the tree every archive in made/ holds
+F 30000 ba063f0aea28780f data/code.bin
+F 20000 8f999a7be07efc51 data/random.bin
+F 0 cbf29ce484222325 docs/empty.txt
+F 5000 b4ec236d3bfe9663 docs/readme.txt
+D docs/sub
+F 700 2746ff3b65b9e11f naïve – ünïcødé.txt
+F 50000 ba9dcdaae983b296 top.txt

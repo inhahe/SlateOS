@@ -11,6 +11,8 @@ guitk = { path = "../../gui/toolkit" }
 # built the opening position and dropped it, so no board ever reached a
 # screen and no key ever arrived.
 oswindow = { path = "../../gui/window" }
+# `is_plain`: a key held with Ctrl, Alt or the Windows key is not the game's.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

@@ -1,0 +1,12 @@
+# delayed.mkv: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 30
+packet 0 -960 K__
+packet 0 40 K__
+packet 0 1040 K__
+seek 100
+packet 0 40 K__
+packet 0 1040 K__
+seek 1050
+packet 0 1040 K__
+seek 1100
+packet 0 1040 K__

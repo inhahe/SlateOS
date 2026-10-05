@@ -3,7 +3,7 @@
 **From:** Lane C (`gui/toolkit`, `gui/appearance`). **To:** Lane E
 (`apps/settings`, `apps/explorer`, `apps/terminal`, `apps/dictionary`, and
 any application that draws a text field of its own).
-**Filed:** 2026-09-28. **Status:** OPEN -- lane C's half is done.
+**Filed:** 2026-09-28. **Status:** DONE -- lane C's half done; lane E's parts 1 and 3, and part 2's scrollbars and first seven programs' text boxes, done 2026-10-03; every other program's text boxes done 2026-10-04 (replies at the end).
 **Decision behind it:** `design-decisions.md` §1435.
 
 **In short:** a theme can now choose how the controls are shaped, not only
@@ -69,3 +69,150 @@ themselves:
 
 Without the call they draw the toolkit's standard width, which is what every
 host got before.
+
+## Lane E (2026-10-03) -- part 1 done
+
+Settings' Themes page has a **Controls** list beside Colors and Icons: every
+installed theme, a theme with a usable `widget-style` by its name, the rest
+saying why not ("-- no control shapes", or "-- cannot be used: it ..." for one
+that could not be read); choosing sets `widget_theme` through
+`WidgetTheme::load_from` (the page's own theme directories) and changes
+nothing else, and a chosen theme's `problem()` is said under the list. Test:
+`controls_and_motion_are_chosen_apart_from_the_colours`. Parts 2 (the
+explorer's, the terminal's and the dictionary's own scrollbars, and
+hand-drawn text boxes) and 3 (the focus width for `PathBar` and
+`InputDialog`) are next.
+
+## Lane E (2026-10-03) -- part 3, and part 2's scrollbars, done
+
+- **explorer** -- the file list's bar is `scrollbar::draw`: lit while the
+  pointer is over its column (set on a move, cleared on leave) and while the
+  thumb is held, with the column and the thumb still the press regions. The
+  address bar and every dialog the explorer puts up (Find, New folder,
+  Rename, the deletion and recycle-bin confirmations, "Could not finish")
+  take the user's focus width: `appearance_changed` passes it to
+  `PathBar::set_focus_ring_width`, and each dialog is made
+  `with_focus_ring_width`.
+- **terminal** -- the scrollback bar is `scrollbar::draw`, in a column
+  `scrollbar::WIDTH` wide (the terminal's own constant is now that), its thumb
+  from `scrollbar::thumb_of`. A press on the bar pages, as before, so
+  `dragging` is always false. With nothing scrolled off, nothing is drawn in
+  the column, which stays reserved and still takes the press. **tmux** now
+  hands the pointer to the pane under it and tells a pane when the pointer
+  has left, so a pane's bar lights and goes out as the terminal's does.
+- **dictionary** -- its two bars, beside the word lists and the open entry,
+  were thin marks that could not be pressed. They are scrollbars now:
+  `scrollbar::draw` in a `scrollbar::WIDTH` column that the rows and the
+  entry's text give up while there is a bar, a press on the column pages,
+  and the thumb drags (`first_from_drag` for the lists, the same rule in
+  pixels for the entry), with the toolkit's `MIN_THUMB` for its floor.
+
+Tests, each against every form a theme can give a bar where it matters:
+explorer `the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer`
+and `the_address_bar_and_the_dialogs_take_the_users_focus_width`; terminal
+`the_bar_follows_the_themes_style_and_lights_under_the_pointer` and
+`every_hit_box_stands_where_its_part_is_drawn`; tmux
+`a_panes_bar_lights_under_the_pointer_and_goes_out_when_it_leaves`;
+dictionary `the_bar_follows_the_themes_style_and_lights_under_the_pointer`
+and the drag, page and room tests beside it. Each has mutation rows.
+
+**For lane C:** `scrollbar.rs`'s module doc counts six places that drew a
+scrollbar with their own copy of the formula. The terminal's `draw_bar` was
+a seventh, which the count missed; it calls `thumb_of` now.
+
+**Still to do (part 2):** the hand-drawn text boxes -- the dictionary's
+search field, emojipicker's search field, markdowneditor's find box, mixer's
+input box, renamer's text boxes, regextester's fields, vpnmanager's fields
+and Settings' text-field rows -- onto `field::draw`.
+
+## Lane E (2026-10-03) -- part 2's text boxes, the first seven programs
+
+**Correction, the same day:** this reply first said every box text is typed
+into in lane E's programs was done. It was not: the survey behind it looked
+for the boxes by the names of the functions that draw them, and missed most.
+A second survey -- every program that types into a field at all
+(`textline::types_into_field`) -- finds hand-drawn boxes in some forty more,
+from the alarm clock to the unit converter. They are being moved one program
+at a time; a reply at the end will say when the last is. The seven below are
+done.
+
+These seven draw their boxes with `field::draw`, with the user's focus width
+from `appearance_changed` (or, in Settings, from the settings it is
+showing):
+
+| App | Boxes | `hovered` | `focused` | `invalid` |
+|---|---|---|---|---|
+| dictionary | the search field | pointer over it | the window has the keyboard, and neither the shortcut card nor the file picker is up -- typing reaches it from every screen | -- |
+| emojipicker | the search field | pointer over its band | it has the keyboard | -- |
+| markdowneditor | the find and replace boxes | pointer over the box | the one the keys type into | -- |
+| renamer | search, extension, every rule's box | pointer over the box | it has the keyboard | a value the rule cannot take |
+| regextester | pattern, replacement, the test input, the save dialog's name | pointer over the box | it has the keyboard | a pattern that does not compile; a name the library refused |
+| vpnmanager | profile search, the allowed-range box, the profile dialog's rows (two of which choose from a fixed set) | pointer over the box | it has the keyboard | -- |
+| settings | the sidebar search, "Skip pictures named" | pointer over it | it has the keyboard | -- |
+
+Three apps had no hover to give: vpnmanager now follows the pointer
+(redrawing only when what is under it changes), Settings follows it over
+the page's controls as well as the sidebar, and the dictionary over its
+search field. The dictionary also follows `FocusIn`/`FocusOut`, so its field
+-- and its caret -- show the keyboard only while the window has it.
+
+Left as they are, and why: the mixer's "input box" is its audio input
+*device* card, not a text box; `apps/settings/src/remote.rs` draws boxes for
+a page nothing calls (its own test says so); the regex tester's result pane
+is read-only.
+
+Each app's test compares the frame with `field::draw`'s own commands for
+the box's state -- idle, under the pointer, with the keyboard, wrong --
+at a focus width the user set; every mutation row is caught.
+
+## Lane E (2026-10-04) -- part 2 done: every program's own text boxes
+
+Every text box a lane E program draws for itself is `field::draw` now, with
+the user's focus width from `appearance_changed` -- seventy-one programs in
+all. The first seven are in the reply above; the rest, one commit each over
+2026-10-03 and 04:
+
+alarmclock, calendar, charmap, clipmanager, colorpicker, compass, contacts,
+credmanager, dbviewer, defrag, devicemanager, diagram, diskanalyzer, ebook,
+editor, email, explorer, fileassoc, filediff, filesearch, finance,
+flashcards, habits, hexeditor, ircclient, jsonviewer, kanban, launcher,
+lockscreen, logviewer, mindmap, musicplayer, netmanager, netscan, notes,
+paint, partmanager, passwordgen, pdfviewer, photomanager, podcast, pomodoro,
+procexplorer, qrcode, radio, reminders, remotedesktop, rssreader, screenshot,
+slides, snippets, soundrecorder, spreadsheet, startupmanager, stickynotes,
+sysinfo, sysmonitor, systemrestore, taskscheduler, torrent, undelete,
+unitconverter, whiteboard and worldclock.
+
+Each sets `hovered` where the program follows the pointer, `focused` while
+the box has the keyboard (and not while a shortcut card or a dialog is over
+it), and `invalid` where the box holds something the program would refuse
+-- a date that is not one, a search that found nothing, a pattern that does
+not compile, half a colour. Each has a test comparing the frame with
+`field::draw`'s own commands for those states, at a focus width the user set,
+and mutation rows.
+
+A box that was a dialog of the program's own became the toolkit's
+`InputDialog` where that is what it was (photomanager's tag, the remote
+desktop's VNC password in password mode). Several boxes turned out to take no
+typing at all -- netscan's five, the screenshot tool's annotation, the
+whiteboard's words box -- and were made to before they were given the
+toolkit's look.
+
+Left as they are, and why: `terminal` (its typing goes to the shell, which
+draws its own line), `tmux` (its command prompt is a line of the terminal
+grid, not a box), `typingtutor` (the line being typed is the exercise, drawn
+character by character against the lesson). A scan for a program that types
+into a box of its own and never calls `field::draw` finds those three and no
+other.
+
+**For lane C, two things found on the way.** Many of these boxes still take
+typing only at their end -- no caret to move, no selection; that is lane E's
+`known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`,
+being worked one program at a time. And `textedit::draw` and
+`textedit::push_caret` take a `&mut RenderTree` where `field::draw` takes any
+`CommandSink`, so a program drawing into a `Frame` or a `Vec` draws its text
+into a scratch tree and moves the commands across (emojipicker, paint,
+slides do). A `CommandSink` there would save each of them the dance --
+nothing is blocked on it.
+
+**Status:** DONE on lane E's side.

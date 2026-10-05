@@ -14,6 +14,8 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+CARD = "the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # -- Layout: the bands ---------------------------------------------
@@ -670,7 +672,89 @@ MUTATIONS = [
         "                text: \"Press N or Esc for a new word\",\n                size: l.small,\n                weight: FontWeightHint::Regular,\n                color: c.chrome.off,",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "an unguessed key's letter is the page's text on its face",
+        "        c.chrome.on(face).text",
+        "        c.chrome.text",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "ENTER and DEL are the page's text on their keys",
+        "                    color: c.chrome.on(c.chrome.lit).text,",
+        "                    color: c.chrome.text,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a header button's name is the page's text on the button",
+        "                c.chrome.on(c.chrome.raised).text\n            };",
+        "                c.chrome.text\n            };",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift)) {',
+        '        if ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift) {',
+        ['a_chord_neither_raises_nor_dismisses_the_list_of_keys'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && ev.key == Key::Escape {\n',
+        '            if ev.key == Key::Escape {\n',
+        ['a_chord_neither_raises_nor_dismisses_the_list_of_keys'],
+    ),
+    # -- The list of keys is modal for the keys and the pointer (2026-10-04;
+    # known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        'a key reaches the board under the list of keys',
+        '        if self.show_help {\n'
+        '            if plain && ev.key == Key::Escape {\n'
+        '                self.show_help = false;\n'
+        '            }\n'
+        '            return EventResult::Consumed;\n'
+        '        }\n',
+        '        if plain && self.show_help && ev.key == Key::Escape {\n'
+        '            self.show_help = false;\n'
+        '            return EventResult::Consumed;\n'
+        '        }\n',
+        [CARD],
+    ),
+    (
+        'a press goes through the list of keys',
+        '        if self.show_help\n'
+        '            && matches!(\n'
+        '                ev.kind,\n'
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n'
+        '            )\n'
+        '        {\n'
+        '            self.show_help = false;\n'
+        '            return EventResult::Consumed;\n'
+        '        }\n',
+        '',
+        [CARD],
+    ),
+    (
+        'only the left button puts the list of keys away',
+        '                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n',
+        '                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_)\n',
+        [CARD],
+    ),
+    (
+        'a press under the list of keys leaves it up',
+        '        {\n'
+        '            self.show_help = false;\n'
+        '            return EventResult::Consumed;\n'
+        '        }\n'
+        '        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {\n',
+        '        {\n'
+        '            return EventResult::Consumed;\n'
+        '        }\n'
+        '        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {\n',
+        [CARD],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "wordle", timeout=240))
+    # Substrings of the rows' names to run only those; none sweeps everything.
+    only = sys.argv[1:] or None
+    sys.exit(sweep(SRC, MUTATIONS, "wordle", timeout=240, only=only))

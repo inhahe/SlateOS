@@ -11,6 +11,10 @@ so there was no path from a keystroke to a slide to test, and no layout either
 -- every rectangle in the window came out of constants that no window had ever
 been measured against.
 
+The history is a tree now (the operator's answer to C-Q24, §1416), of whole
+boards through `statehistory`: a move made after an undo keeps the boards
+undone as a branch, reached with Alt+Z, and Ctrl+Y or Ctrl+Shift+Z redoes.
+
 Usage:  python -u apps/game2048/mutate.py [substring ...]
 """
 
@@ -22,6 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
+
+TREE = "a_move_after_an_undo_keeps_the_undone_board_reachable_with_alt_z"
+ALTGR = "altgr_and_the_windows_key_are_not_the_boards"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -231,8 +238,8 @@ MUTATIONS = [
     ),
     (
         "the snapshot is taken after the move rather than before it",
-        "        let before = UndoEntry::of(&self.board);\n        if !self.board.apply_move(dir) {\n            return false;\n        }\n        self.push_undo(before);",
-        "        if !self.board.apply_move(dir) {\n            return false;\n        }\n        self.push_undo(UndoEntry::of(&self.board));",
+        "        let before = UndoEntry::of(&self.board);\n        if !self.board.apply_move(dir) {\n            return false;\n        }\n        self.history.begin(before);",
+        "        if !self.board.apply_move(dir) {\n            return false;\n        }\n        self.history.begin(UndoEntry::of(&self.board));",
         ["an_undo_puts_back_the_board_the_score_and_the_move_count"],
     ),
     (
@@ -243,8 +250,8 @@ MUTATIONS = [
     ),
     (
         "no tile is dealt after a move",
-        "        self.push_undo(before);\n        self.board.spawn_tile(&mut self.rng);",
-        "        self.push_undo(before);",
+        "        self.history.begin(before);\n        self.board.spawn_tile(&mut self.rng);",
+        "        self.history.begin(before);",
         ["a_move_that_changed_the_board_deals_a_tile_and_one_that_did_not_does_not"],
     ),
     (
@@ -315,17 +322,14 @@ MUTATIONS = [
         ["the_best_score_survives_an_undo"],
     ),
     (
-        "the history grows for ever",
-        "        if self.undo_stack.len() > MAX_UNDO {\n            self.undo_stack.remove(0);\n        }",
-        "",
+        "the history keeps far more than its cap",
+        "            history: StateHistory::new(UNDO_LIMIT),",
+        "            history: StateHistory::new(UNDO_LIMIT.saturating_add(1000)),",
         ["the_history_forgets_its_oldest_move_rather_than_growing_for_ever"],
     ),
-    (
-        "the history forgets its newest move rather than its oldest",
-        "            self.undo_stack.remove(0);",
-        "            self.undo_stack.pop();",
-        ["the_history_forgets_its_oldest_move_rather_than_growing_for_ever"],
-    ),
+    # Which end the history drops at its cap -- the oldest, as the stack's
+    # `remove(0)` did -- is the toolkit's tree's own to test now, and
+    # statehistory's; the test above still reads it from the game.
     (
         "the history is five moves deep",
         "const MAX_UNDO: usize = 50;",
@@ -347,34 +351,95 @@ MUTATIONS = [
     ),
     (
         "a new game keeps the history of the old one",
-        "        self.undo_stack.clear();\n        self.deal();",
+        "        self.history.clear();\n        self.deal();",
         "        self.deal();",
         ["a_new_game_throws_the_history_away_and_keeps_the_best_score"],
     ),
     # ── What a key asks for ───────────────────────────────────────────────
     (
         "ctrl+z is not an undo",
-        "    if ev.key == Key::Z && ev.modifiers.ctrl {",
-        "    if false {",
+        "            HistoryKey::Undo => Intent::Undo,",
+        "            HistoryKey::Undo => Intent::Continue,",
         ["ctrl_z_undoes_and_a_bare_z_does_nothing"],
     ),
     (
         "a bare z is an undo",
-        "    if ev.key == Key::Z && ev.modifiers.ctrl {",
-        "    if ev.key == Key::Z {",
+        "        Key::U => Some(Intent::Undo),",
+        "        Key::U | Key::Z => Some(Intent::Undo),",
         ["ctrl_z_undoes_and_a_bare_z_does_nothing"],
     ),
     (
+        "ctrl+y is not a redo",
+        "            HistoryKey::Redo => Intent::Redo,",
+        "            HistoryKey::Redo => Intent::Undo,",
+        ["ctrl_y_and_ctrl_shift_z_redo"],
+    ),
+    (
+        "alt+z goes forward",
+        "            HistoryKey::Earlier => Intent::Earlier,",
+        "            HistoryKey::Earlier => Intent::Later,",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "            HistoryKey::Later => Intent::Later,",
+        "            HistoryKey::Later => Intent::Earlier,",
+        [TREE],
+    ),
+    (
         "the window's own key combinations reach the board",
-        "    if ev.modifiers.ctrl || ev.modifiers.alt {\n        return None;\n    }",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {\n        return None;\n    }",
         "",
         ["a_ctrl_or_alt_arrow_belongs_to_the_window_and_not_to_the_board"],
     ),
     (
         "alt combinations reach the board and ctrl ones do not",
-        "    if ev.modifiers.ctrl || ev.modifiers.alt {",
-        "    if ev.modifiers.ctrl {",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {",
+        "    if ev.modifiers.ctrl || ev.modifiers.super_key {",
         ["a_ctrl_or_alt_arrow_belongs_to_the_window_and_not_to_the_board"],
+    ),
+    (
+        "windows-key combinations reach the board",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt {",
+        [ALTGR],
+    ),
+    # ── The history: a tree, walked with Alt+Z (C-Q24) ────────────────────
+    (
+        "redo undoes",
+        "        let then = self.history.redo(now);",
+        "        let then = self.history.undo(now);",
+        ["ctrl_y_and_ctrl_shift_z_redo", TREE],
+    ),
+    (
+        "alt+z only undoes",
+        "        let then = self.history.earlier(now);",
+        "        let then = self.history.undo(now);",
+        [TREE],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let then = self.history.later(now);",
+        "        let then = self.history.redo(now);",
+        [TREE],
+    ),
+    (
+        "a redo asked for does nothing",
+        "            Intent::Redo => {\n                if self.redo() {",
+        "            Intent::Redo => {\n                if false {",
+        ["ctrl_y_and_ctrl_shift_z_redo"],
+    ),
+    (
+        "an earlier board asked for does nothing",
+        "            Intent::Earlier => {\n                if self.earlier() {",
+        "            Intent::Earlier => {\n                if false {",
+        [TREE],
+    ),
+    (
+        "a later board asked for does nothing",
+        "            Intent::Later => {\n                if self.later() {",
+        "            Intent::Later => {\n                if false {",
+        [TREE],
     ),
     (
         "up slides down",
@@ -846,7 +911,7 @@ MUTATIONS = [
     ),
     (
         "the undo button is never greyed",
-        '            (Target::Undo, "Undo", !self.undo_stack.is_empty()),',
+        '            (Target::Undo, "Undo", self.history.can_undo()),',
         '            (Target::Undo, "Undo", true),',
         ["the_undo_button_is_greyed_while_there_is_nothing_to_undo"],
     ),
@@ -1012,7 +1077,49 @@ MUTATIONS = [
         "                Surface::Card,\n",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "a score's value is the page's text on its box",
+        "            Ink::on(c.chrome.text, &[c.chrome.raised]).at(value_size, true),",
+        "            c.chrome.text,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        'F1 and ? do not raise the sheet',
+        '    if help::raises(ev) {\n        return Some(Intent::ToggleHelp);',
+        '    if false {\n        return Some(Intent::ToggleHelp);',
+        ['f1_and_a_question_mark_raise_the_sheet_as_h_does', 'the_keys_the_help_sheet_names_are_the_keys_the_program_reads'],
+    ),
+    (
+        'A does not slide the tiles',
+        '        Key::Left | Key::A => Some(Intent::Move(Direction::Left)),',
+        '        Key::Left => Some(Intent::Move(Direction::Left)),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'U takes nothing back',
+        '        Key::U => Some(Intent::Undo),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'R does not start a new game',
+        '        Key::N | Key::R => Some(Intent::NewGame),',
+        '        Key::N => Some(Intent::NewGame),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'Enter does not keep playing after a win',
+        '        Key::C | Key::Enter => Some(Intent::Continue),',
+        '        Key::C => Some(Intent::Continue),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'Esc does not put the sheet away',
+        '        Key::Escape => Some(Intent::CloseHelp),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "game2048", timeout=240))
+    sys.exit(sweep(SRC, MUTATIONS, "game2048", timeout=240, only=sys.argv[1:] or None))

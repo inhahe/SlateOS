@@ -1,0 +1,24 @@
+[package]
+name = "matroska"
+version = "0.1.0"
+edition = "2024"
+description = "Matroska and WebM files taken apart into their tracks' packets, as FFmpeg's demuxer does."
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# zlib, for the tracks a Matroska file stores compressed.
+deflate = { path = "../../../deflate" }
+
+[dev-dependencies]
+# The packets' fingerprints, as `ffprobe -show_data_hash MD5` prints them.
+md5 = { path = "../../../md5" }
+# The decoders the fixtures' packets are played through end to end
+# (tests/decode.rs), each frame held to ffmpeg's.
+rav1d = { path = "../rav1d" }
+vp9 = { path = "../vp9" }
+
+[lints]
+workspace = true

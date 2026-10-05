@@ -1,0 +1,7 @@
+# order.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vp9 1/1000
+stream 1 opus 1/1000
+packet 0 100 40 3 343 K__ 3c6e0b8a9c15224a8228b9a98ca1531d -
+packet 1 105 N/A 5 359 K__ 0b8263d341de01f741e4deadfb18f9eb -
+packet 0 140 40 5 377 ___ 7ec8336709bf8a8d71d0ffff69127903 -
+packet 0 179 40 4 424 ___ f2c67381db28fa11c59fe7a6df0f2587 -

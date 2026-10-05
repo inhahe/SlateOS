@@ -25,6 +25,13 @@ And the recycle bin's view (`BINVIEW`, and the bin rows in `MAIN`): the pane
 shows the bin in place of the folder, and nothing done there -- a click, a
 key, the wheel, the preview's divider -- reaches the folder behind it.
 
+And the failure prompt (2026-09-28, `FILEOPS` and the failure rows in
+`MAIN`): a file an operation cannot carry out is asked about -- try again,
+skip, skip all, stop -- as a taken name is, where it used to be skipped and
+said at the end; a file that failed part-way is tried again from its first
+byte; a failure the user answered is not reported again at the end; and
+both prompts stand on a panel, where under borders they were an outline.
+
 Rows the Windows host cannot decide are left out on purpose: it cannot make a
 symbolic link without a privilege, so a *copy* of a link always fails there,
 and "copied as a link" cannot be told from "failed" -- `copy_link` and the
@@ -97,8 +104,34 @@ CYCLE = "a_link_to_a_folder_above_does_not_make_the_scan_endless"
 NOT_A_LINK = "a_link_that_is_no_longer_one_is_not_removed"
 NO_FOLDER = "a_folder_in_the_way_is_never_removed_to_make_room"
 TOO_DEEP = "a_tree_deeper_than_anyone_makes_is_refused_not_walked"
+FAIL_ASKED = "a_failed_file_is_asked_about_and_nothing_moves_until_it_is_answered"
+FAIL_AGAIN = "try_again_carries_the_file_out_again"
+FAIL_SKIP = "skip_leaves_the_file_failed_and_goes_on"
+FAIL_SKIP_ALL = "skip_all_skips_every_later_failure_without_asking"
+FAIL_STOP = "stop_ends_the_operation_and_what_is_done_stays_done"
+FAIL_COUNTS = "a_failure_the_plan_skips_is_counted_as_failed_alone"
+FAIL_PART_WAY = "a_file_that_failed_part_way_is_tried_again_from_its_first_byte"
+FAIL_CANCEL = "cancelling_an_operation_stopped_at_a_failure_ends_it"
+W_FAIL_ASKED = "a_file_a_paste_cannot_copy_is_asked_about"
+W_FAIL_ANSWERS = "each_answer_to_a_failure_does_what_it_says"
+W_FAIL_STOP = "stop_at_a_failure_stops_the_paste"
+W_FAIL_CLICK = "the_failure_prompt_answers_a_click_on_its_buttons"
+W_FAIL_CANCEL = "cancelling_a_paste_stopped_at_a_failure_takes_its_prompt_down"
+W_FAIL_UNTOLD = "a_failure_after_skip_all_is_reported_at_the_end"
+W_FAIL_NARROW = "the_failure_prompt_keeps_its_answers_inside_a_narrow_window"
+W_WHY_WRAP = "a_long_reason_is_wrapped_above_the_answers"
+W_WHY_CUT = "a_reason_past_three_lines_is_cut_on_the_third"
+W_FILLED = "the_prompts_are_filled_in_every_look"
+FAILURE_DEFAULT = "ask_is_what_a_failure_does_until_told_otherwise"
+FAILURE_REMEMBERED = (
+    "a_failed_file_is_asked_about_until_the_user_chooses_otherwise_and_the_choice_is_remembered"
+)
+FAILURE_MENU = "the_failure_choice_is_offered_on_the_folder_menu"
+FAILURE_SKIPS = "a_paste_told_to_skip_skips_a_file_it_cannot_copy_and_says_so_at_the_end"
+LINK_DRAG = "an_alt_drag_makes_a_link_or_reports_that_it_could_not"
 EXIF = "a_photographs_exif_is_three_columns"
 LATE = "exif_past_the_head_of_a_webp_is_found"
+CARD_MODAL = "the_shortcut_card_takes_every_key_and_press_while_it_is_up"
 
 MAIN = [
     (
@@ -258,15 +291,15 @@ MAIN = [
     # -- 2026-09-27: asking about a taken name --------------------------------
     (
         "the prompt never opens",
-        "            self.modal = Some(Modal::Conflict { prompt });",
-        "            let _unused = prompt;",
+        "            if let Some(question) = op.executor.waiting_on() {\n                Some(Modal::Conflict {",
+        "            if let Some(question) = op.executor.waiting_on().filter(|_| false) {\n                Some(Modal::Conflict {",
         [ASKS],
     ),
     (
         "an operation waiting on an answer wants the clock",
-        "            .any(|op| op.executor.waiting_on().is_none())",
-        "            .any(|_| true)",
-        [ASKS],
+        "        self.operations.iter().any(|op| !op.executor.asking())",
+        "        self.operations.iter().any(|_| true)",
+        [ASKS, W_FAIL_ASKED],
     ),
     (
         "the answer never reaches the operation",
@@ -329,6 +362,648 @@ MAIN = [
         "        address.contains(x, y)\n            || false && self\n",
         ["the_address_completions_are_drawn_over_the_listing_and_take_a_press"],
     ),
+    # -- a failed file is asked about (2026-09-28) ------------------------------
+    (
+        "a failure is never asked about",
+        "                op.executor.failed_on().map(|question| Modal::Failed {",
+        "                op.executor.failed_on().filter(|_| false).map(|question| Modal::Failed {",
+        [W_FAIL_ASKED],
+    ),
+    (
+        "a failure prompt outlives its question",
+        "                if !asking(&self.operations, prompt.plan, true) {",
+        "                if false && !asking(&self.operations, prompt.plan, true) {",
+        [W_FAIL_CANCEL],
+    ),
+    (
+        "the failure prompt's answer is not given",
+        "        self.modal = None;\n        self.answer_failure(plan, answer);",
+        "        self.modal = None;\n        let _unused = (plan, answer);",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "a failure's answer goes to another operation",
+        "            .find(|op| op.executor.plan_id() == plan)\n        {\n            running.executor.answer_error(answer);",
+        "            .find(|op| op.executor.plan_id() != plan)\n        {\n            running.executor.answer_error(answer);",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "Enter does not try again",
+        "                if key.key == Key::Enter {\n                    return (true, Some(ErrorAnswer::TryAgain));",
+        "                if key.key == Key::Tab {\n                    return (true, Some(ErrorAnswer::TryAgain));",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "a key answers what another key does",
+        "                let answer = ERROR_BUTTONS\n                    .iter()\n                    .find(|(_, _, k)| *k == key.key)",
+        "                let answer = ERROR_BUTTONS\n                    .iter()\n                    .find(|(_, _, k)| *k != key.key)",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "a click anywhere answers the failure prompt",
+        "                    .find(|(_, r)| r.contains(m.x, m.y))\n                    .map(|(answer, _)| *answer);",
+        "                    .find(|(_, _)| true)\n                    .map(|(answer, _)| *answer);",
+        [W_FAIL_CLICK],
+    ),
+    (
+        "passing over a failure's answer gives it",
+        "                if m.kind != MouseEventKind::Press(MouseButton::Left) {\n                    return (true, None);\n                }\n                let answer = self\n                    .hits\n                    .iter()\n                    .find(|(_, r)| r.contains(m.x, m.y))\n                    .map(|(answer, _)| *answer);",
+        "                let answer = self\n                    .hits\n                    .iter()\n                    .find(|(_, r)| r.contains(m.x, m.y))\n                    .map(|(answer, _)| *answer);",
+        [W_FAIL_CLICK],
+    ),
+    # Not a row: the prompt answering "mine" for an event it ignores (a
+    # tick, a resize). A tick reaches the work behind a modal whatever the
+    # modal says, and the window loop redraws after a resize whatever the
+    # window says, so the only difference is one redundant repaint --
+    # swept 2026-09-28 and survived, as an equivalent mutant must.
+    (
+        "a failed copy is called something else",
+        "        FileOperation::Copy => \"copy\",",
+        "        FileOperation::Copy => \"move\",",
+        [W_FAIL_ASKED],
+    ),
+    (
+        "a failed link is called something else",
+        "        FileOperation::Link => \"make a link to\",",
+        "        FileOperation::Link => \"link\",",
+        [LINK_DRAG],
+    ),
+    (
+        "the reason is one line cut at the edge",
+        "        let why = why_lines(&self.why, inner);",
+        "        let why = vec![self.why.clone()];",
+        [W_WHY_WRAP],
+    ),
+    (
+        "the reason is given every line it wraps to",
+        "    if lines.len() > WHY_LINES {",
+        "    if false {",
+        [W_WHY_CUT],
+    ),
+    (
+        "the reason's last line is not cut with an ellipsis",
+        "        lines.push(guitk::text::elide(&rest, inner, \"\\u{2026}\", 12.0, weight));",
+        "        lines.push(rest);",
+        [W_WHY_CUT],
+    ),
+    (
+        "the answers do not move down for the reason",
+        "        let first_row = y + ERROR_PROMPT_H - 50.0 + more_why;",
+        "        let first_row = y + ERROR_PROMPT_H - 50.0;",
+        [W_WHY_WRAP],
+    ),
+    (
+        "the card does not grow for the reason",
+        "        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW",
+        "        let card_h = ERROR_PROMPT_H + PROMPT_ROW",
+        [W_WHY_WRAP],
+    ),
+    (
+        "the failure prompt's answers do not wrap in a narrow window",
+        "        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW * f32::from(rows.saturating_sub(1));",
+        "        let card_h = ERROR_PROMPT_H + more_why;",
+        [W_FAIL_NARROW],
+    ),
+    (
+        "the failure prompt is an outline under borders",
+        "        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW * f32::from(rows.saturating_sub(1));\n"
+        "        let x = ((w - card_w) / 2.0).max(0.0);\n        let y = ((h - card_h) / 2.0).max(0.0);\n"
+        "        pal.push_surface(\n            &mut tree.commands,\n            x,\n            y,\n            card_w,\n            card_h,\n            8.0,\n            // A panel, as a dialog is: filled in every look. A card is an\n            // outline alone under borders, and the prompt's words would sit\n            // on the dimmed listing with its rows showing through.\n            appearance::Surface::Panel,",
+        "        let card_h = ERROR_PROMPT_H + more_why + PROMPT_ROW * f32::from(rows.saturating_sub(1));\n"
+        "        let x = ((w - card_w) / 2.0).max(0.0);\n        let y = ((h - card_h) / 2.0).max(0.0);\n"
+        "        pal.push_surface(\n            &mut tree.commands,\n            x,\n            y,\n            card_w,\n            card_h,\n            8.0,\n            // A panel, as a dialog is: filled in every look. A card is an\n            // outline alone under borders, and the prompt's words would sit\n            // on the dimmed listing with its rows showing through.\n            appearance::Surface::Card,",
+        [W_FILLED],
+    ),
+    (
+        "the taken-name prompt is an outline under borders",
+        "        let card_h = PROMPT_H + PROMPT_ROW * f32::from(rows.saturating_sub(1));\n"
+        "        let x = ((w - card_w) / 2.0).max(0.0);\n        let y = ((h - card_h) / 2.0).max(0.0);\n"
+        "        pal.push_surface(\n            &mut tree.commands,\n            x,\n            y,\n            card_w,\n            card_h,\n            8.0,\n            // A panel, as a dialog is: filled in every look. A card is an\n            // outline alone under borders, and the prompt's words would sit\n            // on the dimmed listing with its rows showing through.\n            appearance::Surface::Panel,",
+        "        let card_h = PROMPT_H + PROMPT_ROW * f32::from(rows.saturating_sub(1));\n"
+        "        let x = ((w - card_w) / 2.0).max(0.0);\n        let y = ((h - card_h) / 2.0).max(0.0);\n"
+        "        pal.push_surface(\n            &mut tree.commands,\n            x,\n            y,\n            card_w,\n            card_h,\n            8.0,\n            // A panel, as a dialog is: filled in every look. A card is an\n            // outline alone under borders, and the prompt's words would sit\n            // on the dimmed listing with its rows showing through.\n            appearance::Surface::Card,",
+        [W_FILLED],
+    ),
+    (
+        "an answered failure is reported again at the end",
+        "        let Some(untold) = errors.iter().find(|e| !e.answered) else {",
+        "        let Some(untold) = errors.iter().find(|_| true) else {",
+        [W_FAIL_ANSWERS, W_FAIL_STOP],
+    ),
+    (
+        "the end names a failure the user saw",
+        "            untold.path.shown(),\n            untold.message",
+        "            first.path.shown(),\n            first.message",
+        [W_FAIL_UNTOLD],
+    ),
+    (
+        "the Transfers view does not say which file failed",
+        "                    .or_else(|| op.executor.failed_on().map(|q| q.path.as_path()))",
+        "                    .or_else(|| None)",
+        [W_FAIL_ASKED],
+    ),
+    # -- the folder menu's "When a file cannot be done" (2026-09-28, §1228) ------
+    (
+        "the failure choice is not offered",
+        "            self.conflict_menu(),\n            self.failure_menu(),\n",
+        "            self.conflict_menu(),\n",
+        [FAILURE_MENU],
+    ),
+    (
+        "the failure menu ticks the wrong choice",
+        "                        *policy == self.failure_policy,",
+        "                        *policy != self.failure_policy,",
+        [FAILURE_MENU],
+    ),
+    (
+        "choosing what a failure does changes nothing",
+        "        self.failure_policy = policy;\n        columnprefs::set_failure_policy",
+        "        let _ = policy;\n        columnprefs::set_failure_policy",
+        [FAILURE_REMEMBERED],
+    ),
+    (
+        "the failure choice is not read, when a window opens or again",
+        "        self.failure_policy = columnprefs::failure_policy(prefs);\n",
+        "",
+        [FAILURE_REMEMBERED, "a_choice_made_in_another_window_reaches_this_one"],
+    ),
+    (
+        "a paste asks whatever was chosen",
+        "            _ => OperationPlan::plan_copy(\n                &paths,\n                &self.current_path,\n"
+        "                self.conflict_policy,\n                self.failure_policy,",
+        "            _ => OperationPlan::plan_copy(\n                &paths,\n                &self.current_path,\n"
+        "                self.conflict_policy,\n                ErrorPolicy::Ask,",
+        [FAILURE_SKIPS],
+    ),
+    (
+        'an announced explorer.yaml is not read again',
+        '            return group.file_name() == columnprefs::CONFIG_NAME && self.reread_prefs();',
+        '            return false && group.file_name() == columnprefs::CONFIG_NAME && self.reread_prefs();',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        "every program's announcement is read as the explorer's",
+        '            return group.file_name() == columnprefs::CONFIG_NAME && self.reread_prefs();',
+        '            return !group.file_name().is_empty() && self.reread_prefs();',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'an announcement waits behind a dialog',
+        '        if let Event::SettingsChanged { group } = event {',
+        '        if let (Event::SettingsChanged { group }, None) = (event, &self.modal) {',
+        ['a_choice_made_elsewhere_is_taken_up_while_a_dialog_is_open'],
+    ),
+    (
+        "the preview's being open is not taken up",
+        '        self.preview_open = columnprefs::preview_open(prefs);\n',
+        '',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        "the preview's split is not taken up",
+        '        self.preview_split = columnprefs::preview_split(prefs);\n',
+        '',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        "the preview's side is not taken up",
+        '        self.preview_side = columnprefs::preview_side(prefs);\n',
+        '',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        "the icons' labels are not taken up",
+        '        self.icon_labels = columnprefs::icon_labels(prefs);\n',
+        '',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'what a paste does with a taken name is not taken up',
+        '        self.conflict_policy = columnprefs::conflict_policy(prefs);\n',
+        '',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        "the thumbnails' size is not taken up",
+        '        if size != self.thumb_config.size {\n            self.thumb_config.size = size;',
+        '        if size != self.thumb_config.size {\n            self.thumb_config.size = self.thumb_config.size;',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'thumbnails made at the old size are kept when the file changes it',
+        '            self.thumbs.clear();\n            self.queue_thumbnails();\n        }\n    }',
+        '            self.queue_thumbnails();\n        }\n    }',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'thumbnails made at the old size are kept when the menu changes it',
+        '        self.thumbs.clear();\n        self.queue_thumbnails();\n',
+        '        self.queue_thumbnails();\n',
+        ['a_chosen_thumbnail_size_applies_and_is_remembered'],
+    ),
+    (
+        'the window opens on the out-of-the-box choices',
+        '        state.take_up_prefs();\n',
+        '',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a file unchanged is read as a change',
+        '        if prefs.to_text() == self.column_prefs.to_text() {\n            return false;\n        }\n',
+        '',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a re-read keeps the document it had',
+        '        let before = std::mem::replace(&mut self.column_prefs, prefs);',
+        '        let before = self.column_prefs.clone();\n        drop(prefs);',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a column set saved elsewhere is not taken up',
+        '        if saved_columns(&before) != saved_columns(&self.column_prefs) {',
+        '        if false {',
+        ['a_choice_made_in_another_window_reaches_this_one', 'unsaved_columns_outlast_another_windows_choice'],
+    ),
+    (
+        'columns shown here and not saved are undone by any change elsewhere',
+        '        if saved_columns(&before) != saved_columns(&self.column_prefs) {',
+        '        if true {',
+        ['unsaved_columns_outlast_another_windows_choice'],
+    ),
+    (
+        'an arrangement made elsewhere is not taken up',
+        '        if manualorder::for_folder(&before, &folder)\n            != manualorder::for_folder(&self.column_prefs, &folder)\n        {',
+        '        if false {',
+        ['an_arrangement_made_elsewhere_keeps_the_selection_on_its_files'],
+    ),
+    (
+        'a drag goes on across a new arrangement',
+        '            self.row_drag = None;\n            self.load_manual_order();',
+        '            self.load_manual_order();',
+        ['an_arrangement_made_elsewhere_keeps_the_selection_on_its_files'],
+    ),
+    (
+        'a new arrangement is not loaded',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.resort();',
+        '            self.sync_sort_indicator();\n            self.resort();',
+        ['an_arrangement_made_elsewhere_keeps_the_selection_on_its_files'],
+    ),
+    (
+        'a new arrangement is sorted without keeping the selection',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.resort();\n        }\n        true',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.sort_entries();\n        }\n        true',
+        ['an_arrangement_made_elsewhere_keeps_the_selection_on_its_files'],
+    ),
+    (
+        'sorting leaves the selection in its places',
+        '        self.selected_indices = chosen\n',
+        '        let _kept: Vec<usize> = chosen\n',
+        ['an_arrangement_made_elsewhere_keeps_the_selection_on_its_files', 'sorting_keeps_the_selection_on_its_files'],
+    ),
+    (
+        'choosing a sort does not keep the selection',
+        '        self.sync_sort_indicator();\n        self.resort();\n    }\n\n    /// Switch view modes',
+        '        self.sync_sort_indicator();\n        self.sort_entries();\n    }\n\n    /// Switch view modes',
+        ['sorting_keeps_the_selection_on_its_files'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.resort();\n        }\n        true\n    }',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.resort();\n        }\n        false\n    }',
+        ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a click on a heading does nothing',
+        '        if self.over_column_header(x, y) {\n            return self.sort_by_heading(x);\n        }\n',
+        '',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way', 'a_heading_that_cannot_sort_says_so'],
+    ),
+    (
+        'a heading that can sort does not',
+        '            Some(by) => self.set_sort(by),',
+        '            Some(_) => {}',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        'a heading that cannot sort says nothing',
+        '                self.status_message = format!(\n                    "The list cannot be sorted by {label} -- by Name, Size, Date modified or Type"\n                );\n',
+        '                let _ = label;\n',
+        ['a_heading_that_cannot_sort_says_so'],
+    ),
+    (
+        'a heading asks for no sort',
+        '            .find(|by| by.column() == Some(column))',
+        '            .find(|_| false)',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        "the Size heading's sort is another column's",
+        '            Self::Size => Some(ColumnId::SIZE),',
+        '            Self::Size => Some(ColumnId::NAME),',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        'the folder menu has no Sort by',
+        '            self.sort_menu(),\n            self.conflict_menu(),',
+        '            self.conflict_menu(),',
+        ['sort_by_is_on_the_folder_menu_and_the_headings_menu'],
+    ),
+    (
+        "the headings' menu has no Sort by",
+        '        let mut items = vec![self.sort_menu(), MenuItem::Separator];',
+        '        let mut items = vec![MenuItem::Separator];',
+        ['sort_by_is_on_the_folder_menu_and_the_headings_menu'],
+    ),
+    (
+        'your own order is offered where there is none',
+        '                    enabled: by != SortBy::Custom || !self.manual_order.is_empty(),',
+        '                    enabled: true,',
+        ['your_own_order_is_offered_only_where_there_is_one'],
+    ),
+    (
+        'asking for your own order where there is none takes it anyway',
+        '        if by == SortBy::Custom && self.manual_order.is_empty() {',
+        '        if false {',
+        ['your_own_order_is_offered_only_where_there_is_one'],
+    ),
+    (
+        "the menu's sort is not applied",
+        '        if self.sort_by != by {\n            self.sort_by = by;\n',
+        '        if self.sort_by != by {\n',
+        ['the_folders_own_order_comes_back_from_the_menu'],
+    ),
+    (
+        'choosing the sort in force turns it round',
+        '        if self.sort_by != by {\n            self.sort_by = by;\n            self.sort_dir = SortDir::Ascending;\n            self.sync_sort_indicator();\n            self.resort();\n        }\n        true\n    }',
+        '        self.set_sort(by);\n        true\n    }',
+        ['the_folders_own_order_comes_back_from_the_menu'],
+    ),
+    (
+        "the menu's rows are counted from the submenu's own id",
+        '            .checked_sub(MENU_SORT_BASE.saturating_add(1))',
+        '            .checked_sub(MENU_SORT_BASE)',
+        ['the_folders_own_order_comes_back_from_the_menu'],
+    ),
+    (
+        'the menu does not reach the sort',
+        '            || self.sort_action(id)\n',
+        '',
+        ['the_folders_own_order_comes_back_from_the_menu', 'your_own_order_is_offered_only_where_there_is_one'],
+    ),
+    (
+        "a folder with nothing saved keeps the last folder's columns",
+        '            if !self.apply_saved_columns() {\n                self.columns.show_built_in();\n            }',
+        '            self.apply_saved_columns();',
+        ['a_folder_with_nothing_saved_shows_the_built_in_columns'],
+    ),
+    (
+        'a refresh re-applies the saved columns',
+        '        if self.columns_folder.as_deref() != Some(self.current_path.as_path()) {',
+        '        if true {',
+        ['columns_shown_and_not_saved_outlast_a_refresh'],
+    ),
+    (
+        "entering a folder keeps the last folder's columns",
+        '        if self.columns_folder.as_deref() != Some(self.current_path.as_path()) {',
+        '        if self.columns_folder.is_none() {',
+        ['a_folder_with_nothing_saved_shows_the_built_in_columns'],
+    ),
+    (
+        'the folder whose columns are shown is not recorded',
+        '            self.columns_folder = Some(self.current_path.clone());\n',
+        '',
+        ['columns_shown_and_not_saved_outlast_a_refresh'],
+    ),
+    (
+        'a file nobody chose a program for opens with nothing',
+        '        let id = programs::default_for(guitk::filetypes::mime_for_extension(ext))?;',
+        '        let id = programs::default_for("")?;',
+        ['a_file_nobody_chose_a_program_for_opens_with_slateos_default'],
+    ),
+    (
+        "the person's choice is not asked first",
+        '        if let Some(program) = Self::opener_for(path) {',
+        '        if let Some(program) = Self::opener_for(path).filter(|_| false) {',
+        ['the_persons_choice_goes_before_the_default', 'opening_a_file_starts_what_the_user_chose_for_it'],
+    ),
+    (
+        'the default is looked for among no programs',
+        '        let app = known_programs(&self.app_dirs)\n            .into_iter()\n            .find(|app| app.id == id)?;',
+        '        let app = Vec::<desktopentry::App>::new()\n            .into_iter()\n            .find(|app| app.id == id)?;',
+        ['a_file_nobody_chose_a_program_for_opens_with_slateos_default'],
+    ),
+    (
+        "an entry's command line is not given the file",
+        '                &[desktopentry::Target::File(path.to_path_buf())],',
+        '                &[],',
+        ['a_file_nobody_chose_a_program_for_opens_with_slateos_default', 'open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'a program that runs in a terminal is started outside one',
+        '        let (program, args) = if app.terminal {',
+        '        let (program, args) = if false {',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'Open With offers nothing',
+        '            .map(|entry| self.programs_opening(&entry.path))',
+        '            .map(|_| Vec::new())',
+        ['open_with_offers_the_programs_that_open_the_type', 'an_unknown_kind_is_offered_the_hex_editor_and_a_folder_nothing'],
+    ),
+    (
+        "a folder is offered what opens its name's kind",
+        '            .filter(|entry| !entry.is_dir)\n            .map(|entry| self.programs_opening(&entry.path))',
+        '            .map(|entry| self.programs_opening(&entry.path))',
+        ['an_unknown_kind_is_offered_the_hex_editor_and_a_folder_nothing'],
+    ),
+    (
+        'Open With offers programs that do not open the kind',
+        '            .filter(|app| app.mime_types.iter().any(|m| m.eq_ignore_ascii_case(mime)))',
+        '            .filter(|_| true)',
+        ['an_unknown_kind_is_offered_the_hex_editor_and_a_folder_nothing'],
+    ),
+    (
+        'Open With does not put the default first',
+        '            list.insert(0, default);',
+        '            list.push(default);',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'the Open With row chosen starts the first program',
+        '            .and_then(|n| self.open_with.get(n))',
+        '            .and_then(|_| self.open_with.first())',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        "Open With's rows are counted from the submenu's own id",
+        '            .checked_sub(MENU_OPEN_WITH_BASE.saturating_add(1))',
+        '            .checked_sub(MENU_OPEN_WITH_BASE)',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'Open With is not reached',
+        '            || self.open_with_action(id)\n',
+        '',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'Open With is greyed where it has programs',
+        '            enabled: !self.open_with.is_empty(),',
+        '            enabled: false,',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'AltGr is taken for Ctrl over a folder',
+        '        let chord = textline::is_ctrl_chord(k.modifiers);',
+        '        let chord = k.modifiers.ctrl;',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord works the file list',
+        '        let plain = textline::is_plain(k.modifiers);',
+        '        let plain = true;',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord's letter is typed into the path",
+        '            if textline::is_alt_or_windows_chord(k.modifiers) {',
+        '            if false {',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if self.modal.is_none() && plain {',
+        '        if self.modal.is_none() {',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord reaches the list's plain keys",
+        '            _ if !plain => false,\n',
+        '',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr+A chooses all in the bin',
+        '        if k.key == Key::A && textline::is_ctrl_chord(k.modifiers) {',
+        '        if k.key == Key::A && k.modifiers.ctrl {',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'back is taken with AltGr or the Windows key',
+        '    k.modifiers.alt && !k.modifiers.ctrl && !k.modifiers.super_key',
+        '    k.modifiers.alt || k.modifiers.super_key',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord works the bin',
+        '        if !textline::is_plain(k.modifiers) {\n            return false;\n        }\n',
+        '',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord answers the taken-name prompt',
+        '            // modal.\n            Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => (true, None),\n',
+        '            // modal.\n',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord answers the failure prompt',
+        '            // Answered by a plain key, as the taken-name prompt is.\n            Event::Key(key) if key.pressed && !textline::is_plain(key.modifiers) => (true, None),\n',
+        '            // Answered by a plain key, as the taken-name prompt is.\n',
+        ['a_chord_is_not_the_file_lists_key_and_altgr_is_not_ctrl'],
+    ),
+    # -- the theme's widget style (c-e-a-theme-can-shape-the-controls) ------
+    (
+        'the scrollbar is drawn the same wherever the pointer is',
+        '            hovered: self.scrollbar_hovered,',
+        '            hovered: false,',
+        ['the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer'],
+    ),
+    (
+        'the pointer coming to the scrollbar is not noticed',
+        '            MouseEventKind::Move => self.hover_scrollbar(m.x, m.y),',
+        '            MouseEventKind::Move => false,',
+        ['the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer'],
+    ),
+    (
+        'the scrollbar stays lit after the pointer leaves the window',
+        '            MouseEventKind::Leave => std::mem::take(&mut self.scrollbar_hovered),',
+        '            MouseEventKind::Leave => false,',
+        ['the_scrollbar_follows_the_themes_style_and_lights_under_the_pointer'],
+    ),
+    (
+        "the address bar and the dialogs take the toolkit's focus width",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_address_bar_and_the_dialogs_take_the_users_focus_width'],
+    ),
+    (
+        "the New folder dialog takes the toolkit's focus width",
+        '        let mut dialog = InputDialog::prompt("New folder", "Name:", "")\n            .with_focus_ring_width(self.focus_ring_width);',
+        '        let mut dialog = InputDialog::prompt("New folder", "Name:", "");',
+        ['the_address_bar_and_the_dialogs_take_the_users_focus_width'],
+    ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "the card is modal for nothing",
+        '        if self.show_help {\n            match event {\n',
+        '        if false && self.show_help {\n            match event {\n',
+        [CARD_MODAL],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                    if closes {\n'
+        '                        self.show_help = false;\n'
+        '                    }\n'
+        '                    return closes;\n',
+        '                    if closes {\n'
+        '                        self.show_help = false;\n'
+        '                        return true;\n'
+        '                    }\n',
+        [CARD_MODAL],
+    ),
+    (
+        "? does not put the card away",
+        '                            || k.key == Key::Slash && k.modifiers.shift);\n',
+        '                            || false);\n',
+        [CARD_MODAL],
+    ),
+    (
+        "Escape does not put the card away",
+        '                        && (matches!(k.key, Key::F1 | Key::Escape)\n',
+        '                        && (matches!(k.key, Key::F1)\n',
+        [CARD_MODAL, 'the_shortcut_list_reaches_the_window'],
+    ),
+    (
+        "a press goes through the card",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                        self.show_help = false;\n'
+        '                        return true;\n'
+        '                    }\n',
+        '',
+        [CARD_MODAL],
+    ),
+    (
+        "only the left button puts the card away",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        [CARD_MODAL],
+    ),
+    (
+        "the wheel scrolls what the card covers",
+        '                    MouseEventKind::Scroll { .. } => return false,\n',
+        '',
+        [CARD_MODAL],
+    ),
+    (
+        # 2026-10-04: the toolkit's input dialog types the text of every
+        # key, a command's letter among it.
+        "a command is typed into a name box",
+        "        let command = matches!(event, Event::Key(key) if textline::is_command(key.modifiers));\n",
+        "        let command = false;\n",
+        ["a_command_is_not_typed_into_a_name_box"],
+    ),
 ]
 
 COLUMNS = [
@@ -382,6 +1057,30 @@ COLUMNS = [
         "            \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"webp\", \"ico\", \"cur\", \"tif\", \"tiff\",",
         ["an_avif_is_measured"],
     ),
+    (
+        'a click names a heading to the left of the one under it',
+        '        .find(|&(_, left, width)| x >= left && x < left + width)',
+        '        .find(|&(_, left, width)| x >= left + width)',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        "every heading starts at the header's left edge",
+        '            left += width;\n',
+        '',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        'the built-in set is not name, size, date modified',
+        '    pub const BUILT_IN: [ColumnId; 3] = [ColumnId::NAME, ColumnId::SIZE, ColumnId::DATE_MODIFIED];',
+        '    pub const BUILT_IN: [ColumnId; 3] = [ColumnId::NAME, ColumnId::DATE_MODIFIED, ColumnId::SIZE];',
+        ['a_folder_with_nothing_saved_shows_the_built_in_columns'],
+    ),
+    (
+        'showing the built-in set shows nothing new',
+        '        self.active_columns = Self::BUILT_IN.to_vec();\n',
+        '        let _ = Self::BUILT_IN;\n',
+        ['a_folder_with_nothing_saved_shows_the_built_in_columns'],
+    ),
 ]
 
 COLUMNPREFS = [
@@ -398,6 +1097,19 @@ COLUMNPREFS = [
         '    (ConflictPolicy::Rename, "ask", "Ask each time"),\n',
         [DEFAULT_ASK],
     ),
+    # -- what an operation does with a file it cannot do (2026-09-28) -----------
+    (
+        "a failed file is skipped unasked by default",
+        "        .unwrap_or(ErrorPolicy::Ask)",
+        "        .unwrap_or(ErrorPolicy::SkipAndContinue)",
+        [FAILURE_DEFAULT],
+    ),
+    (
+        "the failure choice is not kept",
+        "        doc.set_str(&ON_FAILURE, spelled);",
+        "        let _ = spelled;",
+        [FAILURE_REMEMBERED],
+    ),
 ]
 
 FILEOPS = [
@@ -410,9 +1122,9 @@ FILEOPS = [
     ),
     (
         "a waiting operation is stepped anyway",
-        "    pub fn step(&mut self) {\n        if self.question.is_some() {",
+        "    pub fn step(&mut self) {\n        if self.asking() {",
         "    pub fn step(&mut self) {\n        if false {",
-        [WAITS],
+        [WAITS, FAIL_ASKED],
     ),
     (
         "a waiting action is passed over",
@@ -438,6 +1150,98 @@ FILEOPS = [
         "            None => {}",
         [STOP],
     ),
+    # -- a failed file is asked about (2026-09-28) ------------------------------
+    (
+        "asking forgets a failed file",
+        "        self.question.is_some() || self.failed.is_some()",
+        "        self.question.is_some()",
+        [W_FAIL_ASKED],
+    ),
+    (
+        "a failure leaves no question",
+        "                        self.failed = Some(ErrorQuestion {",
+        "                        let _unused = Some(ErrorQuestion {",
+        [FAIL_ASKED],
+    ),
+    (
+        "a failed file is passed over while asking",
+        "                        // question is answered, as for a taken name.\n                        self.next = self.next.saturating_sub(1);",
+        "                        // question is answered, as for a taken name.\n                        let _unused = self.next;",
+        [FAIL_AGAIN],
+    ),
+    (
+        "a failure's answer is never taken",
+        "        let Some(failed) = self.failed.take() else {",
+        "        let Some(failed) = self.failed.clone() else {",
+        [FAIL_AGAIN],
+    ),
+    (
+        "Try again skips the file",
+        "            ErrorAnswer::TryAgain => {}\n            ErrorAnswer::Skip | ErrorAnswer::SkipAll => {",
+        "            ErrorAnswer::TryAgain | ErrorAnswer::Skip | ErrorAnswer::SkipAll => {",
+        [FAIL_AGAIN],
+    ),
+    (
+        "Skip tries the file again",
+        "                self.next = self.next.saturating_add(1);\n                if answer == ErrorAnswer::SkipAll {",
+        "                let _unused = self.next;\n                if answer == ErrorAnswer::SkipAll {",
+        [FAIL_SKIP],
+    ),
+    (
+        "Skip all asks again",
+        "                    self.error_policy_for_the_rest = Some(ErrorPolicy::SkipAndContinue);",
+        "                    let _unused = ErrorPolicy::SkipAndContinue;",
+        [FAIL_SKIP_ALL],
+    ),
+    (
+        "the policy for the rest is not read",
+        "        let error_policy = self\n            .error_policy_for_the_rest\n            .unwrap_or(self.plan.error_policy);",
+        "        let error_policy = self.plan.error_policy;",
+        [FAIL_SKIP_ALL],
+    ),
+    (
+        "Stop at a failure does not stop",
+        "                self.record_failure(&failed.path, &failed.error, true);\n                self.cancel();",
+        "                self.record_failure(&failed.path, &failed.error, true);\n                self.progress.state = OperationState::Running;",
+        [FAIL_STOP],
+    ),
+    (
+        "a skipped failure counts as one nobody saw",
+        "                self.record_failure(&failed.path, &failed.error, true);\n                self.next = self.next.saturating_add(1);",
+        "                self.record_failure(&failed.path, &failed.error, false);\n                self.next = self.next.saturating_add(1);",
+        [W_FAIL_ANSWERS],
+    ),
+    (
+        "a stop counts as a failure nobody saw",
+        "                self.record_failure(&failed.path, &failed.error, true);\n                self.cancel();",
+        "                self.record_failure(&failed.path, &failed.error, false);\n                self.cancel();",
+        [W_FAIL_STOP],
+    ),
+    (
+        "a failure skipped unasked counts as answered",
+        "                        self.record_failure(&action.src, &e.to_string(), false);",
+        "                        self.record_failure(&action.src, &e.to_string(), true);",
+        [W_FAIL_UNTOLD],
+    ),
+    (
+        "a failure is counted as skipped as well",
+        "    fn record_failure(&mut self, path: &Path, error: &str, answered: bool) {\n",
+        "    fn record_failure(&mut self, path: &Path, error: &str, answered: bool) {\n        self.skipped = self.skipped.saturating_add(1);\n",
+        [FAIL_COUNTS, FAIL_SKIP],
+    ),
+    (
+        "a file that failed part-way goes on from where it stood",
+        "                self.discard_cursor();\n                match error_policy {",
+        "                match error_policy {",
+        [FAIL_PART_WAY],
+    ),
+    (
+        "a cancel leaves the failure's question",
+        "        self.question = None;\n        self.failed = None;",
+        "        self.question = None;",
+        [FAIL_CANCEL],
+    ),
+
     (
         "a cancel leaves the question up",
         "    pub fn cancel(&mut self) {\n        self.question = None;",

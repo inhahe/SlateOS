@@ -1,0 +1,15 @@
+# The third-party code gui/video/opus carries (design-decisions 1433), read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate.
+
+# The decoder is libopus's, translated: its fixed-point decoder (CELT, SILK,
+# the Opus layer, multistream and projection), each source file naming the
+# libopus files it derives from. libopus's COPYING carries the BSD licence
+# and names the royalty-free patent licences Opus is subject to, so it
+# travels whole. The test streams in tests/data are this project's own
+# (tools/make_streams.c), not libopus's or the IETF's.
+libopus:
+  version: 1.5.2
+  licence: BSD-3-Clause
+  texts:
+    - libopus-COPYING

@@ -205,13 +205,19 @@ def failed_tests(stdout):
     unread the same way until 2026-09-27, when `apps/snapstore`'s store tests
     were the first a table named; they are read from the summary block that
     follows `failures:`, where every line is a test's name.
+
+    And a test in a module not called `tests` -- `apps/editor`'s
+    `undo_tests::name`, `external_merge_tests::name` -- went unread until
+    2026-09-28: the pattern above wants `tests::` as a whole path component.
+    Its rows were scored caught by a crash, or by whichever `tests::` test
+    also failed, as "WRONG TESTS".  Every line of the summary block is a
+    failed test's whole path, so the name is the part after its last `::`,
+    whatever the modules above it are called.
     """
     failed = set(re.findall(r"^    (?:[A-Za-z0-9_]+::)*tests::(\S+)$", stdout, re.M))
     for block in re.findall(r"^failures:\n((?:    \S+\n)+)", stdout, re.M):
         for line in block.splitlines():
-            name = line.strip()
-            if "::" not in name:
-                failed.add(name)
+            failed.add(line.strip().rsplit("::", 1)[-1])
     return failed
 
 

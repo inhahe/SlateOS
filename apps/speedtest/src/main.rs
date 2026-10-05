@@ -1813,6 +1813,19 @@ impl SpeedTestUI {
                 self.resize(*width as f32, *height as f32);
                 EventResult::Consumed
             }
+            // The list of keys is drawn over everything, so it takes the
+            // pointer as well as the keys: a press with any button puts it
+            // away and reaches nothing under it, and the wheel scrolls
+            // nothing it covers. A move passes, and lights nothing under it.
+            // (A press went through the list to the control drawn under it:
+            // Start began a test the reader could not see for the list.)
+            Event::Mouse(mouse_event) if self.show_help => match mouse_event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    EventResult::Consumed
+                }
+                _ => self.set_hover(None),
+            },
             Event::Mouse(mouse_event) => {
                 let x = mouse_event.x;
                 let y = mouse_event.y;
@@ -1863,15 +1876,36 @@ impl SpeedTestUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
-        if key.key == Key::F1 {
+        // Every key but Ctrl+E is taken plain, nothing held but Shift: a
+        // chord with Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+Escape cancelled a running test
+        // and Alt+Enter started one.
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
+        }
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
+                Key::E => {
+                    // Ctrl+E: export history.
+                    // In a real app this would open a save dialog; for now it
+                    // just builds the text (could be copied to clipboard).
+                    let _export = self.history.export_as_text();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
         match key.key {
             Key::Enter | Key::Space => {
@@ -1891,13 +1925,6 @@ impl SpeedTestUI {
                     return EventResult::Consumed;
                 }
                 EventResult::Ignored
-            }
-            Key::E if key.modifiers.ctrl => {
-                // Ctrl+E: export history.
-                // In a real app this would open a save dialog; for now it just
-                // builds the text (could be copied to clipboard).
-                let _export = self.history.export_as_text();
-                EventResult::Consumed
             }
             _ => EventResult::Ignored,
         }
@@ -1949,6 +1976,11 @@ impl SpeedTestUI {
 
     fn handle_mouse_move(&mut self, x: f32, y: f32) -> EventResult {
         let target = self.target_at(x, y);
+        self.set_hover(target)
+    }
+
+    /// Light what is under the pointer -- `target`, or nothing.
+    fn set_hover(&mut self, target: Option<Target>) -> EventResult {
         let start = target == Some(Target::Start);
         let export = target == Some(Target::Export);
         let row = match target {
@@ -2881,11 +2913,12 @@ impl App for SpeedTestUI {
     fn on_event(&mut self, event: &Event) -> Response {
         // Ctrl+Q closes the window. Escape does not: it cancels a running test,
         // which is the more useful answer to the key a user reaches for when a
-        // ten-second measurement is halfway through.
+        // ten-second measurement is halfway through. A Ctrl chord, not Ctrl
+        // held: AltGr+Q, a German `@`, arrives as Ctrl+Alt+Q, and closed it.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -3050,6 +3083,66 @@ mod tests {
         }
     }
 
+    /// **A key held with Alt or the Windows key is not the window's, and
+    /// AltGr+Q is not Ctrl+Q**: each such chord is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+Enter started a test and
+    /// Alt+Escape closed the server list; and AltGr+Q, a German `@`, closed
+    /// the window as Ctrl+Q does.
+    #[test]
+    fn a_chord_is_not_a_speed_test_key_and_altgr_is_not_ctrl() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut ui = SpeedTestUI::new();
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Enter, Key::Space, Key::F1, Key::E] {
+                assert_eq!(
+                    ui.handle_key(&chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert!(ui.phase.is_idle(), "{m:?} {k:?} started a test");
+                assert!(!ui.show_help, "{m:?} {k:?} raised the list of keys");
+            }
+        }
+        assert!(
+            !matches!(
+                ui.on_event(&Event::Key(chord(Key::Q, "@", altgr))),
+                Response::Exit
+            ),
+            "AltGr+Q closed the window"
+        );
+        assert!(
+            matches!(
+                ui.on_event(&Event::Key(chord(Key::Q, "q", Modifiers::ctrl()))),
+                Response::Exit
+            ),
+            "control: Ctrl+Q closes it"
+        );
+
+        // A chorded Escape closes neither the server list nor the list of
+        // keys.
+        ui.server_dropdown_open = true;
+        assert_eq!(
+            ui.handle_key(&chord(Key::Escape, "", Modifiers::alt())),
+            EventResult::Ignored
+        );
+        assert!(ui.server_dropdown_open, "Alt+Escape closed the server list");
+        ui.server_dropdown_open = false;
+        ui.handle_key(&chord(Key::F1, "", Modifiers::NONE));
+        assert!(ui.show_help, "control: F1 raises the list");
+        ui.handle_key(&chord(Key::Escape, "", Modifiers::super_key()));
+        ui.handle_key(&chord(Key::Enter, "", Modifiers::alt()));
+        assert!(ui.show_help, "a chorded Escape or Enter put the list away");
+    }
+
     /// **The card reaches the window, and no test starts behind it.**
     #[test]
     fn the_shortcut_list_reaches_the_window() {
@@ -3092,6 +3185,49 @@ mod tests {
             ui.phase, phase,
             "control: Enter does nothing even with the card down"
         );
+    }
+
+    /// **The list of keys takes a press rather than passing it on**, with
+    /// any button: it goes, and Start, drawn under it, starts nothing. The
+    /// wheel scrolls nothing it covers, and nothing under it is lit. The
+    /// control: with the list down, the same wheel scrolls and the same
+    /// press starts a test.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let mut ui = SpeedTestUI::new();
+            ui.handle_key(&probe::press(Key::F1));
+            let phase = ui.phase.clone();
+            probe::click_with(&mut ui, Target::Start, button);
+            assert!(!ui.show_help, "{button:?} did not put the list away");
+            assert_eq!(
+                ui.phase, phase,
+                "{button:?} started a test through the list"
+            );
+        }
+
+        let mut ui = ui_with_history(MAX_HISTORY);
+        ui.handle_key(&probe::press(Key::F1));
+        wheel_over_history(&mut ui, -1.0);
+        assert_eq!(
+            ui.history_scroll, 0.0,
+            "the wheel scrolled the history under the list"
+        );
+        assert!(ui.show_help, "the wheel put the list away");
+        hover(&mut ui, layout().history_list.y + 1.0);
+        assert_eq!(ui.history_hover, None, "a row under the list is lit");
+
+        ui.handle_key(&probe::press(Key::F1));
+        hover(&mut ui, layout().history_list.y + 1.0);
+        assert!(ui.history_hover.is_some(), "control: no row is lit");
+        wheel_over_history(&mut ui, -1.0);
+        assert!(
+            ui.history_scroll > 0.0,
+            "control: the wheel scrolls nothing"
+        );
+        let phase = ui.phase.clone();
+        probe::click(&mut ui, Target::Start);
+        assert_ne!(ui.phase, phase, "control: Start starts nothing");
     }
 
     /// A frame at roughly 60 Hz, the interval `oswindow` would hand us.

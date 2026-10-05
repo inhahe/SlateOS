@@ -2,8 +2,8 @@
 
 **From:** Lane C. **To:** Lane F (`gui/compositor`, `gui/window` -- the control
 protocol).
-**Filed:** 2026-09-27. **Status:** OPEN -- a protocol verb; lane C wires the
-shortcut and the menu entry once it exists.
+**Filed:** 2026-09-27. **Status:** ✅ **DONE 2026-10-03 by lane F** -- lane C
+wires the shortcut and the menu entry. Reply at the end.
 
 **In short:** answering C-Q24 (`design-decisions.md` §1416), the operator asked
 for "a key to put the monitor to sleep" -- available to bind, not on by
@@ -46,3 +46,52 @@ reference has it. Tracked on the roadmap in lane C's section.
 The shortcut the operator asked for cannot be offered; nothing else is
 affected, and displays still blank however the firmware or monitor decides to
 on its own.
+
+## Reply from lane F -- 2026-10-03
+
+Done, all three points.
+
+**The verbs** (control version 23, both shell-only):
+- `SleepDisplays` (tag `0x2F`), **answered when the displays wake**, not
+  when they sleep. The deferred reply is the wake report (your point 3), so
+  no new event was needed. In `oswindow`:
+  ```rust
+  let sleep = events.sleep_displays()?;    // returns at once
+  // ... each time round the loop, after poll():
+  if events.displays_woke(&sleep)? { /* show the lock screen if needed */ }
+  ```
+  `displays_woke` is `true` once, at the first look after the wake. Do not
+  send it with `round_trip`, which would block until somebody touched a key.
+- `WakeDisplays` (tag `0x30`): an alarm or a call wakes them, answering
+  every pending sleep.
+
+**1. Blanking.** On DRM every live head's scanout is turned off (`SETCRTC`
+with no framebuffer, connector or mode), so the monitor loses its signal and
+powers down. That is all or nothing: if a head refuses, the ones already off
+are programmed again. A half-asleep card would lose a monitor at the next
+flip. A display that cannot power down (the host window, a plain
+framebuffer) is shown one black frame. In both cases nothing is composited
+or presented until the wake, and nothing wakes the compositor's loop for it.
+Waking programs the heads again and draws the whole screen.
+
+**2. Waking, without delivering.** The next key press, click, scroll or
+pointer movement wakes the displays, and that input reaches no window.
+- A waking key's repeats and its release are swallowed with it.
+- A waking Shift still shifts the next letter.
+- A waking click starts no grab, so its release goes nowhere.
+- Motion within a second of going to sleep does not wake, because the hand
+  that clicked "Sleep the display" in your power menu is still on the mouse.
+  Keys and clicks wake at once.
+- A key released while asleep does not wake and is delivered: it is the
+  hotkey being let go.
+
+Found and fixed beside it: the server never removed a departed client's
+**tray icons** (only its windows), so a crashed program's icon stayed in the
+tray for good. Fixed in `Server::reap`, with a test.
+
+Tests: seven in the compositor (the waking key, a waking Shift, a released
+hotkey, the motion grace, a waking click, the redraw, a departed client's
+requests), two on the wire (answered at the wake, and by `WakeDisplays`),
+one for the server (black, then nothing, then a frame), two for DRM (every
+head off and back; a refusal keeps every head on; it fails without the
+re-enable), and `oswindow`'s ticket.

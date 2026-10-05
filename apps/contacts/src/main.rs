@@ -2737,12 +2737,20 @@ pub struct ContactsApp {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// What the pointer is over, so a text box under it can be drawn lit
+    /// (`track_pointer`).
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl ContactsApp {
     pub fn new() -> Self {
         Self {
             show_help: false,
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             last_file_action: None,
@@ -3076,16 +3084,11 @@ impl ContactsApp {
         if l.search.is_empty() {
             return;
         }
-        let focused = self.focus == Focus::Search;
-        f.push(fill(
-            l.search,
-            if focused {
-                self.palette.surface1
-            } else {
-                self.palette.surface0
-            },
-            8.0,
-        ));
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        let state = self.field_state(Target::Search, Focus::Search);
+        guitk::field::draw(f, &self.palette, l.search, state, self.focus_ring_width);
+        let focused = state.focused;
         let inner = inset(l.search, 10.0);
         let placeholder = self.search_query.is_empty() && !focused;
         let shown = if placeholder {
@@ -3792,7 +3795,17 @@ impl ContactsApp {
 
         let form = Rect::new(body.x, y, body.w, (btn_y - 10.0 - y).max(0.0));
         if !form.is_empty() {
-            f.clip(form);
+            // The clip is for the scroll, top and bottom. The boxes run the
+            // form's full width and a focus ring is drawn outside its box,
+            // so the clip is wider by the ring, or it would cut the ring's
+            // sides off; the panel's padding is wider than the widest one.
+            let ring = self.focus_ring_width.max(0.0).ceil();
+            f.clip(Rect::new(
+                form.x - ring,
+                form.y,
+                form.w + 2.0 * ring,
+                form.h,
+            ));
             let mut fy = form.y - self.scroll_offset;
             for field in FormField::ALL {
                 let tall = field == FormField::Notes;
@@ -3826,16 +3839,9 @@ impl ContactsApp {
                 );
                 fy += 14.0;
                 let box_r = Rect::new(form.x, fy, form.w, h);
-                let focused = self.focus == Focus::Field(field);
-                f.push(fill(
-                    box_r,
-                    if focused {
-                        self.palette.surface1
-                    } else {
-                        self.palette.surface0
-                    },
-                    6.0,
-                ));
+                let state = self.field_state(Target::Field(field), Focus::Field(field));
+                guitk::field::draw(f, &self.palette, box_r, state, self.focus_ring_width);
+                let focused = state.focused;
                 let value = self.field_value(field);
                 let inner = inset(box_r, 10.0);
                 let inner = Rect::new(inner.x, inner.y, inner.w, 20.0_f32.min(inner.h));
@@ -4349,6 +4355,7 @@ impl ContactsApp {
 
     /// Route an event to whatever the drawing pass put under it.
     fn route_event(&mut self, event: &Event, size: (f32, f32)) {
+        self.track_pointer(event, size);
         // The close question takes every key and click while it is up: a
         // keystroke that reached the form under it would be a change made
         // while being asked about the changes.
@@ -4385,11 +4392,56 @@ impl ContactsApp {
         }
     }
 
+    /// Follow the pointer, whatever is up: what it is over is drawn lit only
+    /// while nothing covers the window ([`Self::covered`]), but it is known
+    /// all the same, so the light is right the moment the cover goes.
+    fn track_pointer(&mut self, event: &Event, size: (f32, f32)) {
+        let Event::Mouse(mouse) = event else {
+            return;
+        };
+        match mouse.kind {
+            MouseEventKind::Move => {
+                self.hover = self.frame(size.0, size.1).hit_test(mouse.x, mouse.y);
+            }
+            MouseEventKind::Leave => self.hover = None,
+            _ => {}
+        }
+    }
+
+    /// Whether something drawn over the window takes its keys and presses --
+    /// the close question, the file dialog or the shortcut card -- so that
+    /// nothing under it lights or shows the keyboard.
+    fn covered(&self) -> bool {
+        self.question.is_some() || self.picker.is_open() || self.show_help
+    }
+
+    /// How a text box is drawn now: lit under the pointer, and marked while
+    /// it has the keyboard -- neither while something covers the window.
+    fn field_state(&self, target: Target, focus: Focus) -> guitk::field::State {
+        let open = !self.covered();
+        guitk::field::State {
+            hovered: open && self.hover == Some(target),
+            focused: open && self.focus == focus,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
     /// Route a press to the control the last frame drew at that point.
     ///
     /// The hit boxes come from a frame drawn at the same size, so a control
     /// the window was too small to draw is a control that cannot be pressed.
     fn handle_mouse(&mut self, event: &MouseEvent, size: (f32, f32)) {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // control drawn under it -- Delete included, which would remove
+            // a contact the reader cannot see for the card.
+            if matches!(event.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+            }
+            return;
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return;
         };
@@ -4847,19 +4899,26 @@ impl ContactsApp {
         // `Ctrl` pair is handled -- never sees the keys that dismiss it. The
         // first version of this went there and `Escape` could not close the
         // card.
-        if event.key == Key::F1 {
+        //
+        // Every key but the Ctrl chords below and what is typed is taken
+        // plain: a chord with Alt or the Windows key is the window's or the
+        // desktop's, and arrives carrying its key -- Alt+N started a new
+        // contact, Alt+Delete deleted one and Alt+Enter saved the form.
+        let plain = textline::is_plain(event.modifiers);
+        if event.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return;
         }
         if self.show_help {
             // Modal. Letting keys through would mean deleting a contact the
             // reader cannot see.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return;
         }
         match event.key {
+            _ if !plain => {}
             Key::Escape => {
                 if self.focus == Focus::None {
                     self.view = DetailView::Empty;
@@ -4903,9 +4962,12 @@ impl ContactsApp {
         // Printable text. `KeyEvent::text` is what the platform's keyboard
         // layout produced, shift and dead keys included; deriving a character
         // from the key code instead is what made a `+` impossible to type on
-        // any layout but the one the table was written for.
-        let typed = event.text.clone();
-        if !typed.is_empty() && !typed.chars().any(char::is_control) {
+        // any layout but the one the table was written for. Typed, not a
+        // command's letter -- a chord carries its letter as text, and Ctrl+S
+        // in a field typed an `s` instead of keeping the book -- and AltGr's
+        // characters among it.
+        if textline::types_into_field(event) {
+            let typed = event.text.clone();
             match self.focus {
                 Focus::Search => {
                     self.search_query.push_str(&typed);
@@ -4922,8 +4984,10 @@ impl ContactsApp {
 
         // The two that take a modifier come first: a guard on an or-pattern
         // applies to the whole of it, and `S` and `O` are already taken
-        // unmodified by Search and Cycle sort.
-        if event.modifiers.ctrl {
+        // unmodified by Search and Cycle sort. A Ctrl chord, not Ctrl held:
+        // AltGr arrives as Ctrl+Alt, and AltGr+S -- a Polish `ś` -- kept the
+        // book rather than typing.
+        if textline::is_ctrl_chord(event.modifiers) {
             match event.key {
                 // The book is kept as it changes, so there is nothing for
                 // Ctrl+S to save -- but it is the key people press to make
@@ -4941,7 +5005,10 @@ impl ContactsApp {
             return;
         }
 
-        // Nothing has the keyboard, so letters are shortcuts.
+        // Nothing has the keyboard, so letters are shortcuts -- plain ones.
+        if !plain {
+            return;
+        }
         match event.key {
             Key::N => self.start_new_contact(),
             Key::S => self.activate(Target::Search),
@@ -4963,6 +5030,10 @@ impl ContactsApp {
 impl App for ContactsApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5442,6 +5513,284 @@ mod tests {
             app.view, view,
             "control: N does nothing even with the card down"
         );
+    }
+
+    /// **A press while the card is up puts it away, and does nothing else.**
+    ///
+    /// It used to go straight through the card to the control drawn under
+    /// it -- Delete among them. The control at the end is the same press with
+    /// the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = ContactsApp::new();
+        app.load_sample_data();
+        let size = ContactsApp::SIZE;
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        let count = app.store.contacts.len();
+        let delete = guitk::probe::rect_of(&app, Target::DeleteContact).expect("a Delete button");
+        let (x, y) = delete.centre();
+
+        app.handle_event(&f1, size);
+        assert!(card_text(&app).contains("F1 closes this"));
+        app.click_at(x, y, MouseButton::Left, size);
+        assert_eq!(
+            app.store.contacts.len(),
+            count,
+            "the press went through the card and deleted a contact"
+        );
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "the press did not put the card away"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        app.handle_event(&f1, size);
+        app.click_at(x, y, MouseButton::Right, size);
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "a right-button press left the card up"
+        );
+
+        // A move under the card is not a press, and does not put it away.
+        app.handle_event(&f1, size);
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+            size,
+        );
+        assert!(card_text(&app).contains("F1 closes this"));
+        app.handle_event(&f1, size);
+
+        app.click_at(x, y, MouseButton::Left, size);
+        assert_eq!(
+            app.store.contacts.len(),
+            count - 1,
+            "control: the press deletes nothing even with the card down"
+        );
+    }
+
+    /// **The search box and the form's boxes are the toolkit's fields**
+    /// (lane C, c-e-a-theme-can-shape-the-controls): lit under the pointer
+    /// and out when it goes, marked at the user's focus width while they have
+    /// the keyboard -- and neither while the shortcut card, the file dialog
+    /// or the close question covers the window.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        use guitk::probe::{click, rect_of};
+        let size = ContactsApp::SIZE;
+        let mut app = ContactsApp::new();
+        app.load_sample_data();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let seq = |rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            want
+        };
+        let draws = |app: &ContactsApp, rect: Rect, s: State| {
+            let frame = app.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(rect, s)) && (s.focused || !has(&seq(rect, State { focused: true, ..s })))
+        };
+        // The caret: a bar two pixels wide, in the box, says where typing goes.
+        let caret_in = |app: &ContactsApp, rect: Rect| {
+            app.frame(size.0, size.1).commands().iter().any(|c| {
+                matches!(
+                    c,
+                    RenderCommand::FillRect { x, y, width, .. }
+                        if (*width - 2.0).abs() < f32::EPSILON && rect.contains(*x, *y)
+                )
+            })
+        };
+        let pointer = |app: &mut ContactsApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size);
+        };
+        let key = |app: &mut ContactsApp, k: Key| {
+            app.handle_event(
+                &Event::Key(KeyEvent {
+                    key: k,
+                    pressed: true,
+                    modifiers: guitk::event::Modifiers::NONE,
+                    text: String::new(),
+                }),
+                size,
+            );
+        };
+        let idle = State::default();
+        let lit = State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = State {
+            focused: true,
+            ..idle
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        // The search box: lit under the pointer, out when it moves off or
+        // leaves the window.
+        let search = rect_of(&app, Target::Search).expect("the search box is drawn");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's field"
+        );
+        let (x, y) = search.centre();
+        let off = search.y - 2.0;
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        assert!(
+            draws(&app, search, lit),
+            "the search box does not light under the pointer"
+        );
+        pointer(&mut app, x, off, MouseEventKind::Move);
+        assert!(
+            draws(&app, search, idle),
+            "the search box stays lit after the pointer moves off"
+        );
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave);
+        assert!(
+            draws(&app, search, idle),
+            "the search box stays lit after the pointer leaves the window"
+        );
+
+        // Pressed, it has the keyboard, and is marked at the user's width.
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        app.click_at(x, y, MouseButton::Left, size);
+        assert_eq!(app.focus, Focus::Search);
+        assert!(
+            draws(&app, search, both),
+            "the search box is not marked at the user's focus width"
+        );
+        assert!(caret_in(&app, search), "control: the caret must be drawn");
+
+        // The card takes the keys and the presses, so the box is neither lit
+        // nor marked under it, and has no caret. The pointer moves off while
+        // the card is up, and the box is out when the card goes.
+        key(&mut app, Key::F1);
+        assert!(
+            draws(&app, search, idle),
+            "the search box is lit or marked under the shortcut card"
+        );
+        assert!(
+            !caret_in(&app, search),
+            "the search box shows a caret under the shortcut card"
+        );
+        pointer(&mut app, x, off, MouseEventKind::Move);
+        key(&mut app, Key::F1);
+        assert!(
+            draws(&app, search, keyed),
+            "the pointer was not followed under the card"
+        );
+
+        // The file dialog takes them too.
+        app.open_file_dialog(false);
+        assert!(app.picker.is_open());
+        assert!(
+            draws(&app, search, idle),
+            "the search box is marked under the file dialog"
+        );
+        key(&mut app, Key::Escape);
+        assert!(!app.picker.is_open());
+        assert!(draws(&app, search, keyed));
+
+        // The form's boxes: a new contact's first box has the keyboard.
+        key(&mut app, Key::Escape);
+        click(&mut app, Target::AddContact);
+        assert_eq!(app.focus, Focus::Field(FormField::FirstName));
+        let first = rect_of(&app, Target::Field(FormField::FirstName)).expect("the first box");
+        let last = rect_of(&app, Target::Field(FormField::LastName)).expect("the second box");
+        assert!(
+            draws(&app, first, keyed),
+            "the form's box is not marked at the user's focus width"
+        );
+        assert!(draws(&app, last, idle));
+        let (lx, ly) = last.centre();
+        pointer(&mut app, lx, ly, MouseEventKind::Move);
+        assert!(
+            draws(&app, last, lit),
+            "the form's box does not light under the pointer"
+        );
+
+        // The form scrolls inside a clip, and the boxes run its full width:
+        // the ring, drawn outside its box, must be inside the clip in force.
+        let frame = app.frame(size.0, size.1);
+        let cmds = frame.commands();
+        let ring = seq(first, keyed);
+        let at = cmds
+            .windows(ring.len())
+            .position(|w| w == ring.as_slice())
+            .expect("the first box is drawn");
+        let clip = cmds[..at]
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => Some(Some(Rect::new(*x, *y, *width, *height))),
+                RenderCommand::PopClip => Some(None),
+                _ => None,
+            })
+            .flatten()
+            .expect("the form's boxes are drawn in a clip");
+        assert!(
+            clip.x <= first.x - width && clip.right() >= first.right() + width,
+            "the form's clip {clip:?} cuts the sides off the ring round {first:?}, {width} wide"
+        );
+
+        // The close question covers the form. It is asked only by a window
+        // that keeps its book, so this part runs on one.
+        settingsfile::testing::with_scratch_config("contacts-fields", |_| {
+            let mut app = ContactsApp::from_settings();
+            App::theme_changed(&mut app, &palette);
+            App::appearance_changed(&mut app, &settings);
+            click(&mut app, Target::AddContact);
+            typed_in(&mut app, "Half");
+            pointer(&mut app, lx, ly, MouseEventKind::Move);
+            assert!(draws(&app, first, keyed) && draws(&app, last, lit));
+            assert!(caret_in(&app, first), "control: the caret must be drawn");
+            App::on_event(&mut app, &Event::CloseRequested);
+            assert!(app.question.is_some(), "control: the question must be up");
+            assert!(
+                draws(&app, first, idle) && draws(&app, last, idle),
+                "a box is lit or marked under the close question"
+            );
+            assert!(
+                !caret_in(&app, first),
+                "the form's box shows a caret under the close question"
+            );
+            App::on_event(&mut app, &key_event(Key::Escape, false, ""));
+            assert!(app.question.is_none());
+            assert!(draws(&app, first, keyed) && draws(&app, last, lit));
+        });
     }
 
     #[test]
@@ -9547,6 +9896,64 @@ mod tests {
 
     fn press(app: &mut ContactsApp, key: Key) {
         app.handle_event(&key_event(key, false, ""), SIZE);
+    }
+
+    /// **A chord is neither a contacts key nor typing, and AltGr types**:
+    /// Alt+N started a new contact, Alt+Delete deleted the one showing and
+    /// Alt+Enter saved the form; in a field Ctrl+S typed an `s` rather than
+    /// keeping the book and Alt+W typed a `w`; and AltGr+S -- a Polish `ś` --
+    /// was taken for Ctrl+S.
+    #[test]
+    fn a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let held = |key: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = ContactsApp::new();
+        let id = app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+        app.view = DetailView::ViewContact(id);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for key in [Key::N, Key::Delete, Key::E, Key::Escape, Key::F1, Key::Tab] {
+                app.handle_event(&held(key, "", m), SIZE);
+            }
+        }
+        assert_eq!(app.store.contact_count(), 1, "a chord deleted the contact");
+        assert_eq!(
+            app.view,
+            DetailView::ViewContact(id),
+            "a chord changed the view"
+        );
+        assert_eq!(app.focus, Focus::None, "a chord gave a field the keys");
+        assert!(!app.show_help, "a chord raised the keys");
+        // On its own, so nothing after it can put the dialog away again:
+        // AltGr+E, typing nothing, is not Ctrl+E's export.
+        app.handle_event(&held(Key::E, "", altgr), SIZE);
+        assert!(!app.picker.is_open(), "AltGr+E opened the export dialog");
+
+        // A new contact's form: chords type nothing and do not save it;
+        // AltGr's `ś` is typed; Ctrl+S keeps the book rather than typing.
+        press(&mut app, Key::N);
+        assert_eq!(app.focus, Focus::Field(FormField::FirstName));
+        app.handle_event(&held(Key::W, "w", Modifiers::alt()), SIZE);
+        app.handle_event(&held(Key::W, "w", Modifiers::super_key()), SIZE);
+        app.handle_event(&held(Key::Enter, "", Modifiers::alt()), SIZE);
+        assert_eq!(app.store.contact_count(), 1, "Alt+Enter saved the form");
+        app.handle_event(&held(Key::S, "ś", altgr), SIZE);
+        app.handle_event(&held(Key::S, "s", Modifiers::ctrl()), SIZE);
+        assert_eq!(
+            app.edit_first_name, "ś",
+            "the field typed a command or lost AltGr's ś"
+        );
+        assert!(!app.picker.is_open(), "a key opened a dialog");
     }
 
     fn typed_in(app: &mut ContactsApp, text: &str) {

@@ -42,13 +42,17 @@ use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
+use guitk::undo::{Travel, UndoHistory};
 use pathtext::ShowPath;
 
 use oswindow::app::{self, App, Response};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -109,7 +113,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("B", "Show or hide the sidebar"),
     ("= / -", "Zoom in / out"),
     ("Ctrl+0", "Reset the view"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The map before / after this, on any branch",
+    ),
     ("Ctrl+F", "Find a node"),
     ("Ctrl+N", "A new map"),
     ("Ctrl+O", "Open a map or an outline"),
@@ -228,6 +236,11 @@ const ROOT_NODE_W: f32 = 180.0;
 const ROOT_NODE_H: f32 = 50.0;
 /// Maximum undo/redo steps.
 const MAX_UNDO: usize = 200;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 /// Horizontal spacing between parent and children in radial layout.
 const RADIAL_H_GAP: f32 = 60.0;
 /// Vertical spacing between sibling nodes.
@@ -481,7 +494,7 @@ pub enum Action {
 // ============================================================================
 
 /// A single mind map containing a tree of nodes.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MindMap {
     /// Name/title of this map.
     pub name: String,
@@ -498,8 +511,10 @@ pub struct MindMap {
     /// This map's history. It was the window's, replayed onto whichever map
     /// was showing -- and node numbers repeat from map to map, so undoing a
     /// change made on one map could delete a node of another.
-    pub undo_stack: VecDeque<Action>,
-    pub redo_stack: Vec<Action>,
+    ///
+    /// A tree, not a line: a change after an undo keeps what was undone as a
+    /// branch, reached with Alt+Z (C-Q24, `design-decisions.md` §1416).
+    pub history: UndoHistory<Action>,
     /// The map's own file, once it has one.
     pub document_path: Option<std::path::PathBuf>,
     /// Whether the map has changed since it was last saved or opened.
@@ -519,8 +534,7 @@ impl MindMap {
             root_id,
             id_gen: id_gen.clone(),
             id: 0,
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             document_path: None,
             dirty: false,
         }
@@ -1182,8 +1196,7 @@ fn mindmap_from_document(doc: &yamldoc::Document) -> Result<MindMap, String> {
             next: highest.saturating_add(1),
         },
         id: 0,
-        undo_stack: VecDeque::new(),
-        redo_stack: Vec::new(),
+        history: UndoHistory::new(UNDO_LIMIT),
         document_path: None,
         dirty: false,
     })
@@ -1417,6 +1430,10 @@ pub struct MindMapApp {
     pub edit_buffer: String,
     /// Whether we are in text editing mode.
     pub editing_node: Option<NodeId>,
+    /// How wide the mark is round a box while it has the keyboard -- the
+    /// node being renamed, the find bar's query: the user's focus width
+    /// (`App::appearance_changed`), the toolkit's until it is known.
+    pub focus_ring_width: f32,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1487,6 +1504,7 @@ impl MindMapApp {
             show_search: false,
             edit_buffer: String::new(),
             editing_node: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
         };
         // Auto-layout the initial map
         let cx = app.win_width / 2.0;
@@ -1960,32 +1978,61 @@ impl MindMapApp {
     fn push_undo(&mut self, action: Action) {
         let map = self.active_map_mut();
         map.dirty = true;
-        map.redo_stack.clear();
-        if map.undo_stack.len() >= MAX_UNDO {
-            map.undo_stack.pop_front();
-        }
-        map.undo_stack.push_back(action);
+        map.history.record(action);
     }
 
     /// Undo the last change to the map showing: that map's, from that map's
-    /// own history, whatever was done to other maps in between.
-    pub fn undo(&mut self) {
-        if let Some(action) = self.active_map_mut().undo_stack.pop_back() {
-            self.apply_reverse(&action);
-            let map = self.active_map_mut();
-            map.redo_stack.push(action);
-            // Undoing past a save leaves a map its file does not hold.
-            map.dirty = true;
-        }
+    /// own history, whatever was done to other maps in between. Answers
+    /// whether there was one.
+    pub fn undo(&mut self) -> bool {
+        let Some(action) = self.active_map_mut().history.undo() else {
+            return false;
+        };
+        self.apply_reverse(&action);
+        // Undoing past a save leaves a map its file does not hold.
+        self.active_map_mut().dirty = true;
+        true
     }
 
-    pub fn redo(&mut self) {
-        if let Some(action) = self.active_map_mut().redo_stack.pop() {
-            self.apply_forward(&action);
-            let map = self.active_map_mut();
-            map.undo_stack.push_back(action);
-            map.dirty = true;
+    /// Redo a change undone, on the branch the map is on. Answers whether
+    /// there was one.
+    pub fn redo(&mut self) -> bool {
+        let Some(action) = self.active_map_mut().history.redo() else {
+            return false;
+        };
+        self.apply_forward(&action);
+        self.active_map_mut().dirty = true;
+        true
+    }
+
+    /// Go to the map as it was before this version was first reached, on
+    /// whichever branch -- Alt+Z. Answers whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.active_map_mut().history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version of the map first reached after this one, on
+    /// whichever branch -- Alt+Shift+Z. Answers whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.active_map_mut().history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the map's history hands back, in
+    /// order.
+    fn travel(&mut self, steps: Vec<Travel<Action>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(action) => self.apply_reverse(&action),
+                Travel::Redo(action) => self.apply_forward(&action),
+            }
         }
+        if moved {
+            self.active_map_mut().dirty = true;
+        }
+        moved
     }
 
     fn apply_reverse(&mut self, action: &Action) {
@@ -2107,11 +2154,11 @@ impl MindMapApp {
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.active_map_ref().undo_stack.is_empty()
+        self.active_map_ref().history.can_undo()
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.active_map_ref().redo_stack.is_empty()
+        self.active_map_ref().history.can_redo()
     }
 
     // ========================================================================
@@ -2846,6 +2893,35 @@ impl MindMapApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own; a press, with any button,
+        // puts it away rather than reaching the node drawn under it; and the
+        // wheel zooms nothing it covers. It was modal for none of it -- Tab
+        // added a node under it and Delete took one, a click chose or moved
+        // a node, and the wheel zoomed. A move and a release still go
+        // through, so a drag begun before it ends.
+        if self.show_help {
+            match event {
+                Event::Key(key_ev) if key_ev.pressed => {
+                    let closes = matches!(key_ev.key, Key::F1 | Key::Escape)
+                        || key_ev.key == Key::Slash && key_ev.modifiers.shift;
+                    if closes {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
+                Event::Mouse(mouse_ev) => match mouse_ev.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
             Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
@@ -2945,7 +3021,30 @@ impl MindMapApp {
             return self.handle_key_search(key);
         }
         let ctrl = key.modifiers.ctrl;
+        let moved = |did: bool| {
+            if did {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        };
         match key.key {
+            // Alt+Z and Alt+Shift+Z: every version of the map there has been,
+            // in the order each was made -- the way back to a branch undone
+            // out of.
+            Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key => {
+                moved(if key.modifiers.shift {
+                    self.later()
+                } else {
+                    self.earlier()
+                })
+            }
+            // Any other key held with Alt or the Windows key is not this
+            // window's: Windows+ keys are the desktop's, and AltGr -- which
+            // arrives as Ctrl+Alt -- types a letter (Polish AltGr+Z is ż),
+            // which is no chord and must not be taken for what its plain key
+            // does either.
+            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,
             // `show_sidebar` gates the sidebar's draw and had no writer, so
             // the panel could never be closed. Safe as a plain key: the
             // editing and search modes above return before reaching here, so
@@ -2969,10 +3068,8 @@ impl MindMapApp {
                 self.show_help = !self.show_help;
                 EventResult::Consumed
             }
-            Key::Escape if self.show_help => {
-                self.show_help = false;
-                EventResult::Consumed
-            }
+            // (While the list is up its own keys never get here:
+            // `handle_event` takes every key the card is up for.)
             // Files. Save As before Save: the one with Shift is the more
             // particular, and would never be reached after.
             Key::S if ctrl && key.modifiers.shift => {
@@ -3057,23 +3154,10 @@ impl MindMapApp {
                 EventResult::Consumed
             }
             // Undo and redo, which the app already tracks and had no way to
-            // reach.
-            Key::Z if ctrl => {
-                if self.can_undo() {
-                    self.undo();
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
-            Key::Y if ctrl => {
-                if self.can_redo() {
-                    self.redo();
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
-            }
+            // reach. Ctrl+Shift+Z redoes, as Ctrl+Y does.
+            Key::Z if ctrl && key.modifiers.shift => moved(self.redo()),
+            Key::Z if ctrl => moved(self.undo()),
+            Key::Y if ctrl => moved(self.redo()),
             Key::F if ctrl => {
                 self.toggle_search();
                 EventResult::Consumed
@@ -3130,10 +3214,13 @@ impl MindMapApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // AltGr arrives as Ctrl+Alt and types -- Polish `ż` is
+                // AltGr+Z. A command carries its letter as text and types
+                // none of it: Ctrl or Alt on its own, the Windows key.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                self.edit_buffer.push_str(&key.text);
+                self.edit_buffer.extend(key.typed());
                 EventResult::Consumed
             }
         }
@@ -3163,11 +3250,13 @@ impl MindMapApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // As a node's text takes it: AltGr's letters, and no
+                // command's.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
                 let mut q = self.search_query.clone();
-                q.push_str(&key.text);
+                q.extend(key.typed());
                 self.set_search_query(q);
                 EventResult::Consumed
             }
@@ -3599,33 +3688,38 @@ impl MindMapApp {
         } else {
             NODE_FONT_SIZE
         };
-        let display_text = if is_editing {
-            format!("{}|", self.edit_buffer)
+        let weight = if is_root {
+            FontWeightHint::Bold
         } else {
-            node.text.clone()
+            FontWeightHint::Regular
         };
+        let size = font_size * self.zoom;
 
-        // Center the text approximately
-        let text_x = sx + 8.0;
-        let text_y = sy + sh / 2.0 - font_size / 2.0;
+        if is_editing {
+            // The text being typed, in the toolkit's field over the node with
+            // the caret after it. The caret was a `|` appended to the text --
+            // a character, measured and cut with the rest of it, the colour of
+            // the node's own text -- and there was no box.
+            self.render_node_editor(cmds, Rect::new(sx, sy, sw, sh), size, weight);
+        } else {
+            // Centred on its line: the line is the zoomed size's, where it was
+            // centred on the unzoomed size's half height.
+            let text_y = sy + (sh - text::line_height(size, weight)) / 2.0;
 
-        // Determine text color (dark on light backgrounds, light on dark)
-        let text_color = node_text_color(fill_color);
+            // Determine text color (dark on light backgrounds, light on dark)
+            let text_color = node_text_color(fill_color);
 
-        cmds.push(RenderCommand::Text {
-            x: text_x,
-            y: text_y,
-            text: display_text,
-            font_size: font_size * self.zoom,
-            color: text_color,
-            font_weight: if is_root {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            },
-            max_width: Some(sw - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            cmds.push(RenderCommand::Text {
+                x: sx + 8.0,
+                y: text_y,
+                text: node.text.clone(),
+                font_size: size,
+                color: text_color,
+                font_weight: weight,
+                max_width: Some(sw - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Collapse indicator for nodes with children
         if !node.children.is_empty() {
@@ -3880,34 +3974,108 @@ impl MindMapApp {
         }
     }
 
+    /// The box a node's text is typed into, over the node whose screen
+    /// rectangle is `node`: as wide as the node less a margin, a line high.
+    fn node_editor_rect(node: Rect, size: f32, weight: FontWeightHint) -> Rect {
+        let h = (text::line_height(size, weight) + 8.0).min(node.h);
+        Rect::new(
+            node.x + 4.0,
+            node.y + (node.h - h) / 2.0,
+            (node.w - 8.0).max(0.0),
+            h,
+        )
+    }
+
+    /// The node being renamed: the toolkit's field over it, with the
+    /// keyboard unless the shortcut list is over it, holding the typing with
+    /// the caret after it -- scrolled so the end being typed stays in view.
+    fn render_node_editor(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        node: Rect,
+        size: f32,
+        weight: FontWeightHint,
+    ) {
+        let r = Self::node_editor_rect(node, size, weight);
+        let state = field::State {
+            hovered: false,
+            focused: !self.show_help,
+            disabled: false,
+            invalid: false,
+        };
+        field::draw(cmds, &self.palette, r, state, self.focus_ring_width);
+        let line = text::line_height(size, weight);
+        let mut typed = RenderTree::new();
+        textedit::draw(
+            &mut typed,
+            &textedit::SingleLine {
+                text: &self.edit_buffer,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(self.edit_buffer.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: r.x + 4.0,
+                y: r.y + (r.h - line) / 2.0,
+                width: (r.w - 8.0).max(0.0),
+                line_height: line,
+                font_size: size,
+                weight,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(typed.commands);
+    }
+
     // ------ Search bar ------
 
+    /// The find bar, centred over the canvas's top.
+    fn search_bar_rect(&self) -> Rect {
+        let (w, h) = (300.0, 36.0);
+        Rect::new(
+            self.canvas_x() + (self.canvas_width() - w) / 2.0,
+            self.canvas_y() + 8.0,
+            w,
+            h,
+        )
+    }
+
+    /// The box the find bar's query is typed into: between "Search:" and the
+    /// result count.
+    fn search_box_rect(bar: Rect) -> Rect {
+        Rect::new(
+            bar.x + 64.0,
+            bar.y + 4.0,
+            (bar.w - 64.0 - 66.0).max(0.0),
+            bar.h - 8.0,
+        )
+    }
+
+    /// How the query's box is drawn now: with the keyboard while the bar is
+    /// up and no node is being renamed -- every key that types goes to it --
+    /// neither under the shortcut list, and red while the query finds
+    /// nothing. Never lit under the pointer: it has no press of its own.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.show_search && self.editing_node.is_none() && !self.show_help,
+            disabled: false,
+            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),
+        }
+    }
+
     fn render_search_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        let bar_width = 300.0f32;
-        let bar_height = 36.0f32;
-        let bx = self.canvas_x() + (self.canvas_width() - bar_width) / 2.0;
-        let by = self.canvas_y() + 8.0;
+        let bar = self.search_bar_rect();
+        let (bx, by, bar_width) = (bar.x, bar.y, bar.w);
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: bx,
-            y: by,
-            width: bar_width,
-            height: bar_height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        // Border
-        cmds.push(RenderCommand::StrokeRect {
-            x: bx,
-            y: by,
-            width: bar_width,
-            height: bar_height,
-            color: self.palette.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        // The toolkit's panel, in the theme's look: it was a grey slab with a
+        // blue edge whatever the theme said; the query's box says where the
+        // keyboard is now.
+        self.palette
+            .push_surface(cmds, bar.x, bar.y, bar.w, bar.h, 6.0, Surface::Panel);
 
         // Search icon text
         cmds.push(RenderCommand::Text {
@@ -3921,28 +4089,53 @@ impl MindMapApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Query text
-        let display = if self.search_query.is_empty() {
-            "type to search...".to_string()
-        } else {
-            self.search_query.clone()
-        };
-        let query_color = if self.search_query.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-
-        cmds.push(RenderCommand::Text {
-            x: bx + 70.0,
-            y: by + 10.0,
-            text: display,
-            font_size: 12.0,
-            color: query_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(bar_width - 110.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // The query, in the toolkit's field, with the caret after it --
+        // scrolled so the end being typed stays in view -- or, empty, what
+        // it is for.
+        let search = Self::search_box_rect(bar);
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, search, state, self.focus_ring_width);
+        let line = text::line_height(12.0, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            search.x + 6.0,
+            search.y + (search.h - line) / 2.0,
+            (search.w - 12.0).max(0.0),
+        );
+        if self.search_query.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "type to search...".to_string(),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut typed = RenderTree::new();
+        textedit::draw(
+            &mut typed,
+            &textedit::SingleLine {
+                text: &self.search_query,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: text::TextCursor::from(self.search_query.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: 12.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(typed.commands);
 
         // Result count
         if !self.search_query.is_empty() {
@@ -4082,6 +4275,10 @@ fn node_text_color(bg: Color) -> Color {
 // ============================================================================
 
 impl App for MindMapApp {
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
     }
@@ -4245,6 +4442,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1, `?` and Escape put it away and nothing else does or acts; a press
+    /// puts it away and does nothing else; the wheel zooms nothing under it.
+    /// Tab added a node under the card. The controls at the end are the same
+    /// key and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = MindMapApp::new();
+        let nodes = app.active_map_ref().node_count();
+        let selected = app.selected_node;
+        let zoom = app.zoom;
+        let wheel = mouse(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }, 0.0, 0.0);
+
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(
+            app.active_map_ref().node_count(),
+            nodes,
+            "Tab added a node under the card"
+        );
+        app.handle_event(&wheel);
+        assert!(
+            (app.zoom - zoom).abs() < f32::EPSILON,
+            "the wheel zoomed under the card"
+        );
+        assert!(
+            app.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Left),
+            20.0,
+            300.0,
+        ));
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.selected_node, selected,
+            "the press went through the card"
+        );
+
+        // Any button, and the card's own keys.
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&mouse(
+            MouseEventKind::Press(MouseButton::Right),
+            20.0,
+            300.0,
+        ));
+        assert!(!app.show_help, "a right-button press left the card up");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::shift(),
+            text: String::from("?"),
+        }));
+        assert!(!app.show_help, "? did not put the card away");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_help, "Escape did not put the card away");
+
+        app.handle_event(&wheel);
+        assert!(app.zoom > zoom, "control: the wheel zooms nothing at all");
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(
+            app.active_map_ref().node_count(),
+            nodes + 1,
+            "control: Tab adds nothing with the card down"
+        );
     }
 
     /// Maps chosen so that between them every advertised key has work to do.
@@ -4664,6 +4933,166 @@ mod tests {
         assert_eq!(app.handle_event(&press_ctrl(Key::Z)), EventResult::Ignored);
     }
 
+    // ---- The history: a tree, walked with Alt+Z (C-Q24) --------------------
+
+    fn with_modifiers(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn alt_z(shift: bool) -> Event {
+        with_modifiers(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    /// The names of the root's children, in order.
+    fn children_of_root(app: &MindMapApp) -> Vec<String> {
+        let map = app.active_map_ref();
+        map.node(map.root_id)
+            .map(|root| {
+                root.children
+                    .iter()
+                    .filter_map(|id| map.node(*id))
+                    .map(|n| n.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// **A change made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every version of the map there has been, in the order each was made,
+    /// marking it changed; Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_change_after_an_undo_keeps_the_undone_map_reachable_with_alt_z() {
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.add_child_to_selected(String::from("Kept"));
+        assert!(app.undo());
+        assert!(children_of_root(&app).is_empty());
+        app.selected_node = Some(root);
+        app.add_child_to_selected(String::from("Instead"));
+        assert!(!app.redo(), "redo went onto the branch left");
+        app.active_map_mut().dirty = false;
+        assert_eq!(app.handle_event(&alt_z(false)), EventResult::Consumed);
+        assert_eq!(
+            children_of_root(&app),
+            ["Kept"],
+            "the undone change was lost"
+        );
+        assert!(
+            app.active_map_ref().dirty,
+            "a journey did not mark the map changed"
+        );
+        app.handle_event(&alt_z(false));
+        assert!(children_of_root(&app).is_empty());
+        app.handle_event(&alt_z(true));
+        app.handle_event(&alt_z(true));
+        assert_eq!(children_of_root(&app), ["Instead"]);
+        assert_eq!(
+            app.handle_event(&alt_z(true)),
+            EventResult::Ignored,
+            "past the newest map"
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut app = MindMapApp::new();
+        let n = app.active_map_ref().nodes.len();
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(app.active_map_ref().nodes.len(), n);
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            app.handle_event(&with_modifiers(Key::Z, ctrl_shift)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_map_ref().nodes.len(), n + 1);
+    }
+
+    /// **AltGr is not Ctrl.** It arrives as Ctrl+Alt; what it types -- ż on
+    /// a Polish keyboard -- is not a chord, so AltGr+Z undoes nothing.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        let n = app.active_map_ref().nodes.len();
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, altgr));
+        assert_eq!(app.active_map_ref().nodes.len(), n, "AltGr+Z undid");
+    }
+
+    /// **Alt+Z held with the Windows key is the desktop's**, not a journey.
+    #[test]
+    fn alt_z_with_the_windows_key_goes_nowhere() {
+        let mut app = MindMapApp::new();
+        app.handle_event(&press(Key::Tab));
+        let n = app.active_map_ref().nodes.len();
+        let super_alt = Modifiers {
+            alt: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, super_alt));
+        assert_eq!(app.active_map_ref().nodes.len(), n, "Super+Alt+Z went back");
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is no shortcut
+    /// here.** Tab adds a child; AltGr+Tab, Alt+Tab (the desktop's window
+    /// switcher) and Windows+Tab must not.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            let mut app = MindMapApp::new();
+            let n = app.active_map_ref().nodes.len();
+            assert_eq!(
+                app.handle_event(&with_modifiers(Key::Tab, modifiers)),
+                EventResult::Ignored,
+                "{modifiers:?}"
+            );
+            assert_eq!(
+                app.active_map_ref().nodes.len(),
+                n,
+                "{modifiers:?}+Tab added a node"
+            );
+        }
+    }
+
     #[test]
     fn typing_in_the_search_box_searches_rather_than_editing_a_node() {
         let mut app = MindMapApp::new();
@@ -4679,6 +5108,67 @@ mod tests {
         assert_eq!(app.search_query, "");
         app.handle_event(&press(Key::Escape));
         assert!(!app.show_search);
+    }
+
+    fn held(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// **A node's text and the search box take what AltGr types, and no
+    /// command's letter.** AltGr arrives as Ctrl+Alt -- `ż` is AltGr+Z on a
+    /// Polish keyboard -- and both refused every key held with Ctrl. A
+    /// command carries its letter as text on a real machine (Ctrl+K arrives
+    /// as `k`, Alt+F as `f`), and both typed Alt's and the Windows key's.
+    #[test]
+    fn a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter() {
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let commands = [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ];
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.handle_event(&press(Key::F2));
+        let seeded = app.edit_buffer.clone();
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed
+        );
+        for (k, modifiers, text) in commands {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed into the node"
+            );
+        }
+        assert_eq!(app.edit_buffer, format!("{seeded}\u{17c}"));
+        app.handle_event(&press(Key::Escape));
+
+        app.handle_event(&press_ctrl(Key::F));
+        assert!(app.show_search);
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed
+        );
+        for (k, modifiers, text) in commands {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed into the search"
+            );
+        }
+        assert_eq!(app.search_query, "\u{17c}");
     }
 
     #[test]
@@ -5790,13 +6280,27 @@ mod tests {
         assert!(!app.can_redo());
     }
 
+    /// The history keeps the last `MAX_UNDO` changes and drops the oldest.
     #[test]
     fn test_app_undo_stack_limit() {
         let mut app = MindMapApp::new();
-        for i in 0..MAX_UNDO + 50 {
+        // Written out, not read from `MAX_UNDO`: a test that counts to the
+        // constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 200;
+        for i in 0..CAP + 50 {
             app.add_child_to_selected(format!("Node {i}"));
         }
-        assert!(app.active_map_ref().undo_stack.len() <= MAX_UNDO);
+        let mut undone = 0;
+        while undone <= CAP && app.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, CAP);
+        assert_eq!(
+            app.active_map_ref().nodes.len(),
+            51,
+            "not the map before the oldest change kept"
+        );
     }
 
     // ---- Search ----
@@ -6550,6 +7054,10 @@ mod tests {
         app.active_map_mut().dirty = false;
         app.handle_event(&press_ctrl(Key::Z));
         assert!(app.active_map_ref().dirty, "an undo did not mark the map");
+        // And so is redoing it.
+        app.active_map_mut().dirty = false;
+        app.handle_event(&press_ctrl(Key::Y));
+        assert!(app.active_map_ref().dirty, "a redo did not mark the map");
     }
 
     /// L marks the map only when it moves something.
@@ -7156,5 +7664,159 @@ mod tests {
         assert_eq!(click(&mut app, (600.0, status_line)), EventResult::Ignored);
         assert_eq!(app.selected_node, Some(root));
         assert!(matches!(app.drag, DragState::None));
+    }
+    // -- The node being renamed and the find bar's query are typed into the
+    //    toolkit's field (lane C, c-e-a-theme-can-shape-the-controls)
+
+    /// A window whose theme marks a field with the keyboard by a ring, at
+    /// two and a half times the toolkit's focus width.
+    fn ringed() -> (MindMapApp, Palette) {
+        let mut app = MindMapApp::new();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        (app, p)
+    }
+
+    /// Whether `app` draws exactly the toolkit's field for `rect` in `state`
+    /// -- and, unless `state` has the keyboard, not the focused one as well.
+    fn draws_box(app: &MindMapApp, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, app.focus_ring_width);
+            v
+        };
+        let cmds = app.render_commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// The box the root's text is typed into, as the window draws it.
+    fn root_editor(app: &MindMapApp) -> Rect {
+        let root = app.active_map_ref().root_id;
+        let (bx, by, bw, bh) = app.active_map_ref().node(root).expect("the root").bounds();
+        let (sx, sy) = app.canvas_to_screen(bx, by);
+        MindMapApp::node_editor_rect(
+            Rect::new(sx, sy, bw * app.zoom, bh * app.zoom),
+            ROOT_FONT_SIZE * app.zoom,
+            FontWeightHint::Bold,
+        )
+    }
+
+    /// **A node is renamed in the toolkit's field, with a caret.** The caret
+    /// was a `|` appended to the text -- a character, measured and cut with
+    /// the rest -- and there was no box.
+    #[test]
+    fn a_node_is_renamed_in_the_toolkits_field_with_a_caret() {
+        let (mut app, p) = ringed();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.start_editing();
+        let rect = root_editor(&app);
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&app, &p, rect, focused),
+            "the node being renamed is not the toolkit's field"
+        );
+        let cmds = app.render_commands();
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.ends_with('|'))),
+            "the caret is still a character"
+        );
+        let at = cmds
+            .iter()
+            .position(
+                |c| matches!(c, RenderCommand::RichText { text, .. } if text == "Central Idea"),
+            )
+            .expect("the name being typed is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the name: {other:?}"),
+        };
+        // The name fits its box, so nothing is scrolled and the caret is the
+        // name's width in from where the text starts: at the end being typed.
+        let size = ROOT_FONT_SIZE * app.zoom;
+        let name = text::measure("Central Idea", size, FontWeightHint::Bold);
+        assert!(name < rect.w - 8.0, "the name does not fit its box");
+        let end = rect.x + 4.0 + name;
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the name at {end}"
+        );
+
+        app.show_help = true;
+        assert!(
+            draws_box(&app, &p, rect, field::State::default()),
+            "the box keeps the keyboard's mark under the shortcut list"
+        );
+    }
+
+    /// **The find bar's query is typed into the toolkit's field**: with the
+    /// keyboard while the bar is up and no node is being renamed, and red
+    /// while the query finds nothing. The query was written straight onto a
+    /// grey bar with a blue edge, with no box and no caret.
+    #[test]
+    fn the_find_bars_box_is_the_toolkits_field() {
+        let (mut app, p) = ringed();
+        app.show_search = true;
+        let rect = MindMapApp::search_box_rect(app.search_bar_rect());
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&app, &p, rect, focused),
+            "the query's box does not have the keyboard"
+        );
+        for c in "zzqqxx".chars() {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: c.to_string(),
+            }));
+        }
+        assert!(app.search_results.is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(
+            draws_box(&app, &p, rect, red),
+            "a query that finds nothing does not turn the box red"
+        );
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.start_editing();
+        assert!(
+            draws_box(
+                &app,
+                &p,
+                rect,
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the find bar keeps the keyboard's mark while a node is renamed"
+        );
     }
 }

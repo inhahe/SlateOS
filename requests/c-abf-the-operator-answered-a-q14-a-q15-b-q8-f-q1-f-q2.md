@@ -24,6 +24,13 @@ Nothing here is lane C's to act on.
 F-Q1 is answered for AVIF; for HEIC the operator asks what, concretely, would
 be hard about letting users replace the library.
 
+**Recorded by lane F (2026-09-27; this line added 2026-10-03):** F-Q2 as
+`design-decisions.md` §1332 (VP9, hardware where found, a threaded CPU
+fallback); F-Q1's AVIF answer as §1333, AVIF since built (`gui/imagecodec`).
+The HEIC follow-up is answered in `open-questions.md` F-Q1, narrowed the same
+day. Nothing is hard about letting users swap the library, and the open
+question is the patents. F-Q1 stays open on that.
+
 ## Lane A
 
 > A-Q14: A

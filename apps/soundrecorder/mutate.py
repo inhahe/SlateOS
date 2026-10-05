@@ -122,8 +122,8 @@ MUTATIONS = [
     ),
     (
         "Right moves nothing",
-        "                    let step = if shift { 1.0 } else { 0.1 };",
-        "                    let step = if shift { 1.0 } else { 0.0 };",
+        "                let step = if shift { 1.0 } else { 0.1 };",
+        "                let step = if shift { 1.0 } else { 0.0 };",
         ["the_cursor_moves_by_the_keys"],
     ),
     (
@@ -206,6 +206,104 @@ MUTATIONS = [
         "                    self.chosen_entry != before.0 || matches!(key.key, Key::Up | Key::Down),",
         "                    false,",
         ["the_list_scrolls_and_follows_the_keys"],
+    ),
+    # -- the noise gate opens and shuts over its attack (2026-09-28) ----------------------------------
+    (
+        "the gate opens in one sample",
+        "                self.level.saturating_add(1).min(self.fully_open())",
+        "                self.fully_open()",
+        ["test_noise_gate_opens_over_its_attack"],
+    ),
+    (
+        "the gate shuts in one sample",
+        "            } else {\n                self.level.saturating_sub(1)\n            };",
+        "            } else {\n                0\n            };",
+        ["test_noise_gate_shuts_over_its_attack_after_its_hold"],
+    ),
+    (
+        "the gate opens in proportion to nothing",
+        "            .checked_mul(i64::from(self.level))",
+        "            .checked_mul(i64::from(full))",
+        ["test_noise_gate_opens_over_its_attack"],
+    ),
+    (
+        "the hold is not held",
+        "                self.release_counter = self.release_samples;\n                true",
+        "                self.release_counter = 0;\n                true",
+        ["test_noise_gate_shuts_over_its_attack_after_its_hold"],
+    ),
+    (
+        "a reset gate is still open",
+        "        self.release_counter = 0;\n        self.level = 0;",
+        "        self.release_counter = 0;",
+        ["test_noise_gate_reset"],
+    ),
+    (
+        "an open gate says it is shut",
+        "        self.is_open = self.level > 0;",
+        "        self.is_open = self.level == 0;",
+        ["test_noise_gate_loud_passes"],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {',
+        '        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape puts the list of keys away',
+        '            if plain && matches!(key.key, Key::Escape | Key::Enter) {',
+        '            if matches!(key.key, Key::Escape | Key::Enter) {',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the recorder',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_ctrl_chord(key);',
+        '        if key.modifiers.ctrl {\n            return self.handle_ctrl_chord(key);',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord works the recorder's keys",
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Enter names the marker',
+        '            Key::Enter if plain => self.commit_rename(),',
+        '            Key::Enter => self.commit_rename(),',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chorded Escape abandons the name',
+        '            Key::Escape if plain => self.rename = None,',
+        '            Key::Escape => self.rename = None,',
+        ['a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'Ctrl+Left nudges the cursor instead of going to the marker',
+        '            Key::Left | Key::Right => {\n                let forward = key.key == Key::Right;\n                self.with_open(|o| {\n                    o.to_marker(forward);\n                });',
+        '            Key::Left | Key::Right => {\n                let forward = key.key == Key::Right;\n                self.with_open(|o| o.nudge(if forward { 0.1 } else { -0.1 }));',
+        ['the_cursor_moves_by_the_keys', 'a_chord_is_not_a_recorder_key_and_altgr_is_not_ctrl'],
+    ),
+    # -- the marker-name field, the toolkit's (c-e-a-theme-can-shape-the-controls)
+    (
+        "the name field is drawn the same wherever the pointer is",
+        "                    self.render_field(f, input, name, self.hover == Some(Target::MarkerRow(i)))",
+        "                    self.render_field(f, input, name, false)",
+        ['the_marker_name_field_is_the_toolkits'],
+    ),
+    (
+        "the name field is not marked while a name is written",
+        "                hovered,\n                focused: true,",
+        "                hovered,\n                focused: false,",
+        ['the_marker_name_field_is_the_toolkits'],
+    ),
+    (
+        "the name field takes the toolkit's focus width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();",
+        "        let _ = settings;",
+        ['the_marker_name_field_is_the_toolkits'],
     ),
 ]
 

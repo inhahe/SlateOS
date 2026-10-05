@@ -575,14 +575,14 @@ MUTATIONS = [
     # ── Undo and redo ─────────────────────────────────────────────────────
     (
         "an empty history is still an undo",
-        "        let Some(change) = self.undo_stack.pop() else {\n            return EventResult::Ignored;\n        };",
-        "        let Some(change) = self.undo_stack.pop() else {\n            return EventResult::Consumed;\n        };",
+        "        let Some(change) = self.history.undo() else {\n            return EventResult::Ignored;\n        };",
+        "        let Some(change) = self.history.undo() else {\n            return EventResult::Consumed;\n        };",
         ["there_is_nothing_to_take_back_from_a_fresh_game"],
     ),
     (
         "an empty redo is still a redo",
-        "        let Some(change) = self.redo_stack.pop() else {\n            return EventResult::Ignored;\n        };",
-        "        let Some(change) = self.redo_stack.pop() else {\n            return EventResult::Consumed;\n        };",
+        "        let Some(change) = self.history.redo() else {\n            return EventResult::Ignored;\n        };",
+        "        let Some(change) = self.history.redo() else {\n            return EventResult::Consumed;\n        };",
         ["there_is_nothing_to_take_back_from_a_fresh_game"],
     ),
     (
@@ -604,39 +604,15 @@ MUTATIONS = [
         ["undoing_a_hint_gives_the_hint_back"],
     ),
     (
-        "an undone move cannot be redone",
-        "        self.redo_stack.push(change);",
-        "        let _ = change;",
-        ["undo_takes_a_digit_back_and_redo_puts_it_again"],
-    ),
-    (
-        "a redone move cannot be undone again",
-        "        self.undo_stack.push(change);\n        // A redo can fill the last empty cell",
-        "        let _ = change;\n        // A redo can fill the last empty cell",
-        ["undo_takes_a_digit_back_and_redo_puts_it_again"],
-    ),
-    (
         "a redo cannot win the game",
-        "        self.undo_stack.push(change);\n        // A redo can fill the last empty cell, and used not to be able to win:\n        // `check_completion` was called from the two places that wrote a digit\n        // forwards and from neither of the two that wrote one back.\n        self.check_completion();",
-        "        self.undo_stack.push(change);",
+        "        self.reapply(&change);\n        // A redo can fill the last empty cell, and used not to be able to win:\n        // `check_completion` was called from the two places that wrote a digit\n        // forwards and from neither of the two that wrote one back.\n        self.check_completion();",
+        "        self.reapply(&change);",
         ["a_redo_can_win_the_game"],
     ),
     (
-        "a fresh move keeps the moves that were undone",
-        "        self.undo_stack.push(change);\n        self.redo_stack.clear();",
-        "        self.undo_stack.push(change);",
-        ["a_fresh_move_throws_away_the_moves_that_were_undone"],
-    ),
-    (
         "the history grows for ever",
-        "        if self.undo_stack.len() > MAX_UNDO {\n            self.undo_stack.remove(0);\n        }",
-        "        if false {\n            self.undo_stack.remove(0);\n        }",
-        ["the_history_forgets_its_oldest_move_rather_than_growing_for_ever"],
-    ),
-    (
-        "the history forgets its newest move rather than its oldest",
-        "            self.undo_stack.remove(0);",
-        "            self.undo_stack.pop();",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO + 1) {",
         ["the_history_forgets_its_oldest_move_rather_than_growing_for_ever"],
     ),
     (
@@ -644,6 +620,49 @@ MUTATIONS = [
         "            Change::Hint { row, col, .. } => {\n                let answer = self.solution_at(row, col);",
         "            Change::Hint { row, col, old_value, .. } => {\n                let answer = old_value;",
         ["undoing_a_hint_gives_the_hint_back"],
+    ),
+    # ── The history as a tree, and its keys (C-Q24, §1416) ───────────────
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(change) => self.revert(&change),",
+        "                Travel::Undo(change) => self.reapply(&change),",
+        ["a_change_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.history.earlier();",
+        "        let steps = self.history.later();",
+        ["a_change_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "a journey that goes nowhere is a change",
+        "        if steps.is_empty() {\n            return EventResult::Ignored;",
+        "        if false {\n            return EventResult::Ignored;",
+        ["a_change_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "a journey cannot win the game",
+        "        // A journey can arrive at a full board as a redo can.\n        self.check_completion();",
+        "",
+        ["a_journey_can_win_the_game"],
+    ),
+    (
+        "Alt+Z is not a key",
+        "        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        "        if false && key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        ["a_change_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "                Intent::Later\n            } else {\n                Intent::Earlier",
+        "                Intent::Earlier\n            } else {\n                Intent::Earlier",
+        ["a_change_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "                Key::Z if key.modifiers.shift => Intent::Redo,\n",
+        "",
+        ["ctrl_shift_z_redoes"],
     ),
     # ── Winning ───────────────────────────────────────────────────────────
     (
@@ -1175,13 +1194,13 @@ MUTATIONS = [
     ),
     (
         "the undo key stays lit with nothing to take back",
-        "                    Target::Undo => !self.undo_stack.is_empty(),",
+        "                    Target::Undo => self.history.can_undo(),",
         "                    Target::Undo => true,",
         ["a_key_that_would_do_nothing_is_drawn_greyed_out"],
     ),
     (
         "the redo key stays lit with nothing to put back",
-        "                    Target::Redo => !self.redo_stack.is_empty(),",
+        "                    Target::Redo => self.history.can_redo(),",
         "                    Target::Redo => true,",
         ["a_key_that_would_do_nothing_is_drawn_greyed_out"],
     ),
@@ -1330,7 +1349,99 @@ MUTATIONS = [
         "        let color = ink.large;",
         ["every_digit_reads_on_the_square_under_it_in_either_theme"],
     ),
+    (
+        "the history keeps ten changes more",
+        "pub const MAX_UNDO: usize = 500;",
+        "pub const MAX_UNDO: usize = 510;",
+        ["the_history_forgets_its_oldest_move_rather_than_growing_for_ever"],
+    ),
+]
+
+CARD = "the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on"
+
+MUTATIONS += [
+    # -- The shortcut list is modal for the keys and the pointer (2026-10-04;
+    # known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches the board under the list of keys",
+        "        if self.show_help {\n"
+        "            let held = key.modifiers;\n"
+        "            let closes = !held.ctrl\n"
+        "                && !held.alt\n"
+        "                && !held.super_key\n"
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n"
+        "                    || key.key == Key::Slash && held.shift);\n"
+        "            if closes {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "F1 does not put the list of keys away",
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                && (matches!(key.key, Key::Escape)\n",
+        [CARD],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                && (matches!(key.key, Key::F1)\n",
+        [CARD],
+    ),
+    (
+        "? does not put the list of keys away",
+        "                    || key.key == Key::Slash && held.shift);\n",
+        ");\n",
+        [CARD],
+    ),
+    (
+        "a chorded Escape puts the list of keys away",
+        "            let closes = !held.ctrl\n"
+        "                && !held.alt\n",
+        "            let closes = !held.ctrl\n",
+        [CARD],
+    ),
+    (
+        "a press goes through the list of keys",
+        "        if self.show_help\n"
+        "            && matches!(\n"
+        "                event.kind,\n"
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n"
+        "            )\n"
+        "        {\n"
+        "            self.show_help = false;\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_)\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "        {\n"
+        "            self.show_help = false;\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n"
+        "        let MouseEventKind::Press(MouseButton::Left) = event.kind else {\n",
+        "        {\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n"
+        "        let MouseEventKind::Press(MouseButton::Left) = event.kind else {\n",
+        [CARD],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "sudoku", timeout=240))
+    # Substrings of the rows' names to run only those, as every other table
+    # takes them; none sweeps everything.
+    only = sys.argv[1:] or None
+    sys.exit(sweep(SRC, MUTATIONS, "sudoku", timeout=240, only=only))

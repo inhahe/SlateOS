@@ -1,0 +1,16 @@
+# laced.mkv: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 0 K__
+packet 0 10 K__
+packet 0 20 K__
+packet 0 30 K__
+packet 0 40 K__
+packet 0 50 K__
+seek 250
+packet 0 100 K__
+seek 550
+packet 0 100 K__
+seek 1200
+packet 0 100 K__
+seek 99000
+packet 0 100 K__

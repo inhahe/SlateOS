@@ -737,17 +737,34 @@ impl Calculator {
         self.update_display();
     }
 
-    /// Clear the current entry (CE) without clearing history.
+    /// Clear the current entry (CE): the number or constant being typed at the
+    /// end of the expression, and nothing before it -- `12 + 34` becomes
+    /// `12 + `, ready for another number. After `=` the entry is the answer,
+    /// and clearing it clears the lot. The history is kept, as it is by C.
+    ///
+    /// It cleared the whole expression, as C does, so the keypad's CE and C
+    /// were one key under two names.
     pub fn clear_entry(&mut self) {
+        if self.showing_result {
+            self.clear_all();
+            return;
+        }
+        // A prefix of the string, so its length is on a character boundary.
+        let kept = self
+            .expression
+            .trim_end_matches(|c: char| c.is_ascii_alphanumeric() || c == '.')
+            .len();
+        self.expression.truncate(kept);
+        self.update_display();
+    }
+
+    /// Clear everything (C): the expression, and any bracket left open. The
+    /// history is kept.
+    pub fn clear_all(&mut self) {
         self.expression.clear();
         self.display = String::from("0");
         self.showing_result = false;
         self.paren_depth = 0;
-    }
-
-    /// Clear everything (C).
-    pub fn clear_all(&mut self) {
-        self.clear_entry();
     }
 
     /// Evaluate the current expression and display the result.
@@ -1217,6 +1234,24 @@ impl Layout {
 // The window
 // ============================================================================
 
+/// The keys this window answers, as the F1 list shows them.
+///
+/// The keypad says what each button does, but not that the keyboard presses
+/// them, nor with which keys: Escape is C, Delete is CE, Enter is `=` and `^`
+/// is x^y, and none of that was written anywhere. F1 did nothing.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("0-9  .", "Type a number"),
+    ("+  -  *  /", "Add, subtract, times, divide"),
+    ("^", "Raise to a power (x^y)"),
+    ("%", "Percent"),
+    ("(  )", "Brackets"),
+    ("Enter", "Work it out (=)"),
+    ("Backspace", "Delete the last digit"),
+    ("Delete", "Clear the entry (CE)"),
+    ("Escape", "Clear everything (C)"),
+];
+
 /// The calculator plus the window it is drawn in.
 ///
 /// The window size lives here and nowhere else, and is only ever *recorded* --
@@ -1231,6 +1266,8 @@ pub struct CalculatorUi {
     history_scroll: usize,
     /// Banks fractions of a wheel notch so a trackpad's small deltas add up.
     wheel: wheel::Accumulator,
+    /// Whether the list of keys is up.
+    show_help: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1256,6 +1293,7 @@ impl CalculatorUi {
             window_height: WINDOW_HEIGHT,
             history_scroll: 0,
             wheel: wheel::Accumulator::default(),
+            show_help: false,
         }
     }
 
@@ -1290,6 +1328,18 @@ impl CalculatorUi {
         self.render_keys(&mut frame, &layout);
         if let Some(panel) = layout.history {
             self.render_history(&mut frame, panel);
+        }
+        // The list of keys over everything: it is the one thing on screen a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (layout.window.w, layout.window.h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         frame
@@ -1651,9 +1701,42 @@ impl CalculatorUi {
         }
     }
 
-    /// Act on a key press. Returns `true` when something changed.
+    /// Act on a key press. Returns `true` when something changed -- and,
+    /// while the list of keys is up, for every key, which the list takes.
     fn handle_key_event(&mut self, key: &KeyEvent) -> bool {
+        if !key.pressed {
+            return false;
+        }
+        // The list of keys first: it is drawn over the keypad, and modal while
+        // it is up -- a plain F1, `?` or Escape puts it away, and no other key
+        // reaches the sum under it. Nothing here types a `?`, so it raises the
+        // list as F1 does.
+        let plain = textline::is_plain(key.modifiers);
+        let asks = plain && (key.key == Key::F1 || key.key == Key::Slash && key.modifiers.shift);
+        if self.show_help {
+            if asks || plain && key.key == Key::Escape {
+                self.show_help = false;
+            }
+            return true;
+        }
+        if asks {
+            self.show_help = true;
+            return true;
+        }
         handle_key(&mut self.calc, key)
+    }
+
+    /// The pointer while the list of keys is up: a press with any button puts
+    /// it away and does nothing else -- the key under it is not pressed -- and
+    /// the wheel scrolls nothing it covers.
+    fn help_mouse(&mut self, kind: &MouseEventKind) -> EventResult {
+        match kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
     }
 
     /// Scroll the history panel. Returns `true` when it actually moved.
@@ -1736,6 +1819,14 @@ pub fn handle_button(calc: &mut Calculator, label: &str) {
 /// Returns `true` if the key was handled.
 pub fn handle_key(calc: &mut Calculator, key: &KeyEvent) -> bool {
     if !key.pressed {
+        return false;
+    }
+    // A command is not the calculator's: Ctrl or Alt on its own, or anything
+    // with the Windows key, is the window's or the desktop's chord, and
+    // arrives carrying its key's character -- Alt+5 typed a 5, and Alt+Enter
+    // worked the sum out. AltGr, which arrives as Ctrl+Alt, types: `^` and the
+    // brackets are AltGr on several layouts.
+    if textline::is_command(key.modifiers) {
         return false;
     }
 
@@ -1829,6 +1920,7 @@ fn handle_event(ui: &mut CalculatorUi, event: &Event) -> EventResult {
     }
 
     match event {
+        Event::Mouse(m) if ui.show_help => ui.help_mouse(&m.kind),
         Event::Mouse(m) => match m.kind {
             MouseEventKind::Press(MouseButton::Left) => result(ui.handle_click(m.x, m.y)),
             MouseEventKind::Scroll { dy, .. } => result(ui.handle_scroll(dy)),
@@ -2717,12 +2809,253 @@ mod tests {
     fn a_keystroke_that_names_no_key_is_left_for_someone_else() {
         let mut ui = CalculatorUi::new();
         // Not a calculator key: reporting it consumed would stop the desktop
-        // from ever seeing it.
+        // from ever seeing it. (F1 was the example, and raises the list of
+        // keys now.)
         assert_eq!(
-            probe::key(&mut ui, &probe::press(Key::F1)),
+            probe::key(&mut ui, &probe::press(Key::F3)),
             EventResult::Ignored
         );
         assert_eq!(ui.calc.expression, "");
+    }
+
+    /// The keystrokes a row of the list of keys names. The characters are
+    /// typed -- that is how this window reads them, from what a key types
+    /// rather than which key it is -- and the named keys are the toolkit's
+    /// reading of the label.
+    fn strokes_of(label: &str) -> Vec<KeyEvent> {
+        let typed = |chars: &str| {
+            chars
+                .chars()
+                .map(|c| probe::typing(&c.to_string()))
+                .collect()
+        };
+        match label {
+            "0-9  ." => typed("0123456789."),
+            "+  -  *  /" => typed("+-*/"),
+            "^" | "%" => typed(label),
+            "(  )" => typed("()"),
+            _ => guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")),
+        }
+    }
+
+    fn drawn_texts(ui: &CalculatorUi) -> Vec<String> {
+        ui.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window.**
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in strokes_of(label) {
+                let mut ui = CalculatorUi::new();
+                probe::type_str(&mut ui, "12");
+                assert_eq!(
+                    probe::key(&mut ui, &stroke),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {stroke:?}"
+                );
+            }
+        }
+    }
+
+    /// **What the list says each key does, it does**: Enter is `=`, `^` is
+    /// x^y, Delete is CE -- the number being typed, and the answer after `=`
+    /// -- and Escape is C, everything. CE cleared everything, as C does: the
+    /// keypad's two keys were one.
+    #[test]
+    fn the_keys_do_what_the_list_says() {
+        let mut ui = CalculatorUi::new();
+        let shown = |ui: &CalculatorUi| (ui.calc.expression.clone(), ui.calc.display.clone());
+        probe::type_str(&mut ui, "2^10");
+        probe::key(&mut ui, &probe::press(Key::Enter));
+        assert_eq!(
+            ui.calc.display, "1024",
+            "^ is not a power, or Enter is not ="
+        );
+        probe::type_str(&mut ui, "+56");
+        probe::key(&mut ui, &probe::press(Key::Delete));
+        assert_eq!(
+            ui.calc.expression, "1024 + ",
+            "Delete did not clear just the number being typed"
+        );
+        probe::type_str(&mut ui, "1");
+        probe::key(&mut ui, &probe::press(Key::Enter));
+        assert_eq!(ui.calc.display, "1025", "the sum did not go on after CE");
+        // An answer with a sign, which clearing the number at the end alone
+        // would leave behind.
+        probe::type_str(&mut ui, "-2000");
+        probe::key(&mut ui, &probe::press(Key::Enter));
+        assert_eq!(ui.calc.display, "-975");
+        probe::key(&mut ui, &probe::press(Key::Delete));
+        assert_eq!(
+            shown(&ui),
+            (String::new(), String::from("0")),
+            "CE after = did not clear the answer"
+        );
+        probe::type_str(&mut ui, "7*(23");
+        probe::key(&mut ui, &probe::press(Key::Delete));
+        assert_eq!(ui.calc.expression, "7 * (", "CE took more than the number");
+        assert_eq!(ui.calc.paren_depth, 1, "CE closed the bracket");
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert_eq!(
+            shown(&ui),
+            (String::new(), String::from("0")),
+            "Escape did not clear everything"
+        );
+        assert_eq!(ui.calc.paren_depth, 0, "C left a bracket open");
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut ui = CalculatorUi::new();
+        assert!(
+            !drawn_texts(&ui)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            probe::key(&mut ui, &probe::press_with(Key::F1, chord));
+            assert!(
+                !ui.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        probe::key(&mut ui, &probe::press(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn_texts(&ui), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        probe::key(&mut ui, &probe::press_with(Key::Escape, Modifiers::alt()));
+        assert!(ui.show_help, "Alt+Escape put the list away");
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert!(!ui.show_help, "Escape left the list up");
+        let question = KeyEvent {
+            modifiers: Modifiers::shift(),
+            ..probe::press(Key::Slash)
+        };
+        probe::key(&mut ui, &question);
+        assert!(ui.show_help, "? raised nothing");
+        probe::key(&mut ui, &question);
+        assert!(!ui.show_help, "? left the list up");
+        probe::key(&mut ui, &probe::press(Key::F1));
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(!ui.show_help, "F1 left the list up");
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of
+    /// the wheel reaches the sum under it -- Escape puts it away and clears
+    /// nothing. The keypad is the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut ui = CalculatorUi::new();
+        probe::type_str(&mut ui, "12");
+        probe::key(&mut ui, &probe::press(Key::F1));
+        probe::type_str(&mut ui, "34");
+        probe::key(&mut ui, &probe::press(Key::Backspace));
+        assert_eq!(
+            ui.calc.display, "12",
+            "typing reached the sum under the list"
+        );
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert!(!ui.show_help, "Escape left the list up");
+        assert_eq!(
+            ui.calc.display, "12",
+            "Escape cleared the sum as it put the list away"
+        );
+
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert_eq!(
+            probe::click(&mut ui, Target::Key("7")),
+            EventResult::Consumed
+        );
+        assert!(!ui.show_help, "the press did not put the list away");
+        assert_eq!(
+            ui.calc.display, "12",
+            "the press pressed the key under the list"
+        );
+        probe::key(&mut ui, &probe::press(Key::F1));
+        probe::click_with(&mut ui, Target::Key("7"), MouseButton::Right);
+        assert!(!ui.show_help, "a right-button press left the list up");
+
+        // The wheel, over a history long enough to scroll.
+        ui.calc.show_history = true;
+        for n in 0..20 {
+            ui.calc.history.push_back(HistoryEntry {
+                expression: format!("{n} + 0"),
+                result: n.to_string(),
+            });
+        }
+        probe::key(&mut ui, &probe::press(Key::F1));
+        let wheel = Event::Mouse(MouseEvent {
+            x: 5.0,
+            y: 5.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        assert_eq!(handle_event(&mut ui, &wheel), EventResult::Ignored);
+        assert_eq!(
+            ui.history_scroll, 0,
+            "the wheel scrolled the history under the list"
+        );
+        assert!(ui.show_help, "the wheel put the list away");
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert_eq!(handle_event(&mut ui, &wheel), EventResult::Consumed);
+        assert!(
+            ui.history_scroll > 0,
+            "the wheel does not scroll the history at all"
+        );
+        ui.calc.show_history = false;
+
+        // The keypad.
+        probe::click(&mut ui, Target::Key("7"));
+        assert_eq!(ui.calc.display, "127");
+    }
+
+    /// **A command is not typing**: Alt+5 is the window's, not a 5, and
+    /// Ctrl+Enter is not `=`; AltGr -- Ctrl+Alt -- types, as it does a bracket
+    /// on several layouts.
+    #[test]
+    fn a_command_is_not_typing() {
+        let mut ui = CalculatorUi::new();
+        probe::type_str(&mut ui, "1+2");
+        let before = ui.calc.expression.clone();
+        for modifiers in [Modifiers::alt(), Modifiers::ctrl(), Modifiers::super_key()] {
+            let five = KeyEvent {
+                modifiers,
+                ..probe::typing("5")
+            };
+            assert_eq!(
+                probe::key(&mut ui, &five),
+                EventResult::Ignored,
+                "{modifiers:?}+5"
+            );
+            assert_eq!(
+                probe::key(&mut ui, &probe::press_with(Key::Enter, modifiers)),
+                EventResult::Ignored,
+                "{modifiers:?}+Enter"
+            );
+        }
+        assert_eq!(
+            ui.calc.expression, before,
+            "a chord typed or worked the sum out"
+        );
+        let altgr = KeyEvent {
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            ..probe::typing("(")
+        };
+        assert_eq!(probe::key(&mut ui, &altgr), EventResult::Consumed);
+        assert_eq!(ui.calc.paren_depth, 1, "AltGr's bracket was not typed");
     }
 
     #[test]

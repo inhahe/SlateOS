@@ -397,6 +397,118 @@ MUTATIONS = [
         '        self.status_msg = String::from("Habit created!");',
         ["a_failed_write_is_reported"],
     ),
+    (
+        'an announced change is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        'a tracker that keeps nothing reads the file',
+        '        if !self.persist {\n            return false;\n        }\n        let shown = |app: &Self| {',
+        '        let shown = |app: &Self| {',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        'the selection stays in its place',
+        '        self.selected_habit = place(self, &now_shown, selected)',
+        '        self.selected_habit = None::<usize>',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        'a waiting delete stays in its place',
+        '        self.pending_delete = deleting.and_then(|id| self.habits.iter().position(|h| h.id == id));',
+        '        self.pending_delete = self.pending_delete.filter(|&i| i < self.habits.len());',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != self.habits\n    }',
+        '        false\n    }',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+]
+
+NAME_BOX = 'the_name_box_is_the_toolkits_field'
+CHORD = 'a_chord_is_not_typed_into_the_name_and_altgr_is'
+CARET = 'the_caret_follows_the_name'
+
+MUTATIONS += [
+    # The new habit's name box is the toolkit's field; chords are kept out
+    # of it and out of the window (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        'the name box never has the keyboard',
+        '            focused: !self.show_help,\n',
+        '            focused: false,\n',
+        [NAME_BOX, CARET],
+    ),
+    (
+        'the name box keeps its mark under the card',
+        '            focused: !self.show_help,\n',
+        '            focused: true,\n',
+        [NAME_BOX],
+    ),
+    (
+        'an empty name is not red',
+        '            invalid: self.create_name_missing,\n',
+        '            invalid: false,\n',
+        [NAME_BOX],
+    ),
+    (
+        'Enter on an empty name marks nothing',
+        '            self.create_name_missing = true;\n',
+        '',
+        [NAME_BOX],
+    ),
+    (
+        'the box stays red once there is a name',
+        '            self.create_name.push_str(key);\n            self.create_name_missing = false;\n',
+        '            self.create_name.push_str(key);\n',
+        [NAME_BOX],
+    ),
+    (
+        'a form opened again is red from the last one',
+        '                self.show_create_form = true;\n                self.create_name_missing = false;\n',
+        '                self.show_create_form = true;\n',
+        [NAME_BOX],
+    ),
+    (
+        'the focus mark is the toolkit\'s width, not the user\'s',
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [NAME_BOX],
+    ),
+    (
+        'Alt and Windows chords reach the window',
+        '                if textline::is_alt_or_windows_chord(key.modifiers) {\n                    return false;\n                }\n',
+        '',
+        [CHORD],
+    ),
+    (
+        'a Ctrl chord types its letter into the name',
+        '            _ if ctrl => {}\n',
+        '',
+        [CHORD],
+    ),
+    (
+        'AltGr is a Ctrl chord',
+        '                    textline::is_ctrl_chord(key.modifiers),\n',
+        '                    key.modifiers.ctrl,\n',
+        [CHORD],
+    ),
+    (
+        'the caret is at the start of the name',
+        '                cursor: guitk::text::TextCursor::from(self.create_name.len()),\n',
+        '                cursor: guitk::text::TextCursor::from(0),\n',
+        [CARET],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -1076,7 +1076,7 @@ fn parse_args(args: &[OsString]) -> Result<ParseOutcome, String> {
                         format!("invalid timeout value: {}", escape_unprintable(&raw))
                     })?;
             }
-            Opt::Operand(word) => config.urls.push(value_bytes(Some(word)).to_vec()),
+            Opt::Operand(word) => config.urls.push(value_bytes(Some(word))),
             // Every letter in SHORTS and every name in LONGS is handled above;
             // an unlisted one is refused by the parser before it reaches here.
             Opt::Short(_, _) | Opt::Long(_, _) => {}

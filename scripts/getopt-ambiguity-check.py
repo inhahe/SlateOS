@@ -70,7 +70,11 @@ candidate list to read back.  The readout came back empty and the gate said
 "utility missing?" about a utility that is installed — a diagnostic that sends
 the reader looking for a package rather than at the real difference.
 
-Those bins are listed in ``OWN_PARSER`` and compared through a second path: the
+GNU stty is the other kind: glibc's ``getopt_long``, silenced (``opterr = 0``),
+so ``stty --=x`` is handed back to stty as a setting and refused there.
+
+Those bins are listed in ``OWN_PARSER`` (and the silenced ones in
+``SILENT_GETOPT``) and compared through a second path: the
 names in ``<util> --help``, as an unordered *set*.  Unordered because the thing
 declaration order decides in glibc is which candidate a diagnostic names first,
 and these utilities print no candidates — so help-text order would be evidence
@@ -210,6 +214,24 @@ OWN_PARSER: dict[str, str] = {
     "ed": "GNU ed uses carg_parser, not glibc getopt_long, so it prints no "
           "candidate list for --=x to read back",
 }
+
+# Utilities that DO use glibc's getopt_long, but silenced: `opterr = 0`, so an
+# unknown or ambiguous option is handed back to the program instead of being
+# reported, and `--=x` reads back no candidate list -- only the program's own
+# answer to a word it did not recognise. Compared through the `--help` path
+# with `OWN_PARSER`, for the same reason: there is no order to read. Kept
+# separate because the reason is different, and so is what would make an entry
+# stale -- a release that stopped silencing getopt.
+SILENT_GETOPT: dict[str, str] = {
+    # stty.c: `opterr = 0;` before its loop, which hands every word it does not
+    # recognise back as a setting -- `stty --=x` is "invalid argument '--=x'".
+    "stty": "GNU stty sets opterr = 0 and hands unrecognised words back as "
+            "settings, so --=x is refused as an invalid argument with no "
+            "candidate list",
+}
+
+# Every utility whose table is read out of `--help` rather than off `--=x`.
+NO_CANDIDATE_LIST: dict[str, str] = {**OWN_PARSER, **SILENT_GETOPT}
 
 # Bins that have no `LONG_OPTIONS` table on purpose, and the reason. Without
 # this the sweep prints "not yet converted to coreutils::getopt?" for them,
@@ -846,13 +868,14 @@ cd /; rmdir "$d" 2>/dev/null || true
 
 def check(table: Table, runner: list[str]) -> list[str]:
     """Every way this bin's table disagrees with GNU's."""
-    if table.util in OWN_PARSER:
+    if table.util in NO_CANDIDATE_LIST:
         theirs_names = gnu_help_table(runner, table.gnu)
         if theirs_names is None:
+            listed = "OWN_PARSER" if table.util in OWN_PARSER else "SILENT_GETOPT"
             return [
                 f"{table.util}: could not read GNU's options out of --help "
-                f"(utility missing?). It is in OWN_PARSER because "
-                f"{OWN_PARSER[table.util]}, so --=x is not an option either."
+                f"(utility missing?). It is in {listed} because "
+                f"{NO_CANDIDATE_LIST[table.util]}, so --=x is not an option either."
             ]
         # Probing an exact name can run the option for real, which is why the
         # prefix sweep below skips them. Here it is unavoidable and narrow: the
@@ -1186,7 +1209,7 @@ def sweep(tree: gittree.Tree, wanted: set[str], runner: list[str]) -> int:
     # above -- a push that does not touch the bin should still catch it.
     stale_own_parser = [
         name
-        for name in sorted(OWN_PARSER)
+        for name in sorted(NO_CANDIDATE_LIST)
         if gnu_table(runner, GNU_NAME.get(name, name)) is not None
     ]
 
@@ -1220,11 +1243,12 @@ def sweep(tree: gittree.Tree, wanted: set[str], runner: list[str]) -> int:
         problems.append(line)
 
     for name in stale_own_parser:
+        listed = "OWN_PARSER" if name in OWN_PARSER else "SILENT_GETOPT"
         line = (
-            f"{name}: listed in OWN_PARSER, but --=x now reads back a candidate "
-            f"list, so it does use glibc getopt_long after all. Remove the "
-            f"entry -- it is costing the ordered comparison and the recorded "
-            f"reason ({OWN_PARSER[name]}) is no longer true."
+            f"{name}: listed in {listed}, but --=x now reads back a candidate "
+            f"list, so it does use glibc getopt_long, unsilenced, after all. "
+            f"Remove the entry -- it is costing the ordered comparison and the "
+            f"recorded reason ({NO_CANDIDATE_LIST[name]}) is no longer true."
         )
         print(line, flush=True)
         problems.append(line)

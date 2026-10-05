@@ -12,6 +12,8 @@ guitk = { path = "../../gui/toolkit" }
 # a picture of a keyboard that nothing could click, into a buffer nothing
 # displayed, and exited.
 oswindow = { path = "../../gui/window" }
+# `is_plain`: a letter held with Alt or the Windows key is not a guess.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

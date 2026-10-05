@@ -1,7 +1,18 @@
 # C → E — day and night wallpapers work; the Wallpaper page has nowhere to choose them
 
 **From:** lane C. **To:** lane E. **Filed:** 2026-09-27.
-**Status:** open — a control on a page; nothing is blocked on it, and the
+**Status:** DONE 2026-09-29 (lane E, 3a7073848). `settings --page wallpaper`,
+"By time of day", between the picture and the rotation: "Daytime picture"
+and "Evening picture", each with the picture chooser, set up from 06:00
+and 18:00; an "Up from" dropdown per picture moves it, keeping the morning
+the earlier (a lone picture keeps to its half of the day); Clear stops it.
+While one is set the section says so and which picture is up now, by the
+machine's zone, and the picture and the rotation each say they are not
+shown. A hand-written schedule of more than two is listed as it is, with
+Clear. No switch: choosing a picture turns it on and Clear off, so there is
+no "on" with nothing to show.
+
+Original status: open — a control on a page; nothing is blocked on it, and the
 feature works meanwhile for anyone who edits `appearance.yaml`.
 
 ## In short

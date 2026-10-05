@@ -27,7 +27,8 @@
 //! S (or Enter, since Save has the focus) saves, D does not, Escape cancels;
 //! Tab moves between the buttons as in any toolkit dialog. Every other key is
 //! swallowed: a keystroke that reached the document under the question would be
-//! a change made while being asked about the changes.
+//! a change made while being asked about the changes. Asked about changes to
+//! apply rather than save ([`Question::to_apply`]), A applies in place of S.
 
 use guitk::event::{Event, Key};
 use guitk::modal::{AlertDialog, ButtonRole, ButtonSet, DialogButton, DialogResult};
@@ -48,7 +49,8 @@ const FADE_DONE_MS: u64 = 1_000;
 /// The answers to the question.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
-    /// Save, then go on -- if the save works.
+    /// Save -- or apply, asked by [`Question::to_apply`] -- then go on, if
+    /// that works.
     Save,
     /// Go on without saving: the changes are lost.
     Discard,
@@ -68,21 +70,64 @@ pub enum Choice {
 pub struct Question<P> {
     dialog: AlertDialog,
     pending: P,
+    /// The key that keeps the changes, and the letter it types: S for
+    /// Save, A for Apply.
+    keep: (Key, char),
 }
+
+/// How the question is worded: what keeping the changes is called, and the
+/// key that does it.
+struct Wording {
+    title: &'static str,
+    keep: &'static str,
+    lose: &'static str,
+    key: (Key, char),
+}
+
+/// A document's changes, which are saved.
+const SAVE: Wording = Wording {
+    title: "Unsaved changes",
+    keep: "Save (S)",
+    lose: "Don't save (D)",
+    key: (Key::S, 's'),
+};
+
+/// A configuration's changes, which are applied: a network setting is not
+/// "saved" anywhere the user would recognise, and a button saying so would
+/// be read as writing a file.
+const APPLY: Wording = Wording {
+    title: "Changes not applied",
+    keep: "Apply (A)",
+    lose: "Don't apply (D)",
+    key: (Key::A, 'a'),
+};
 
 impl<P: Copy> Question<P> {
     /// Ask about unsaved changes. `message` says whose (see [`message_for`]),
     /// `prompt` what is about to happen -- "Save them before closing?".
     #[must_use]
     pub fn new(message: &str, prompt: &str, pending: P) -> Self {
+        Self::worded(&SAVE, message, prompt, pending)
+    }
+
+    /// Ask about changes that are made but not applied -- a configuration's
+    /// rather than a document's: Apply (A), Don't apply (D) or Cancel.
+    /// [`Choice::Save`] is the answer that applies them. `prompt` says what
+    /// is about to happen -- "Apply them before closing?".
+    #[must_use]
+    pub fn to_apply(message: &str, prompt: &str, pending: P) -> Self {
+        Self::worded(&APPLY, message, prompt, pending)
+    }
+
+    fn worded(wording: &Wording, message: &str, prompt: &str, pending: P) -> Self {
         let buttons = ButtonSet::custom(vec![
             // Each labelled with the key that answers it (`handle`).
-            DialogButton::new("Save (S)", DialogResult::Yes, ButtonRole::Primary),
+            DialogButton::new(wording.keep, DialogResult::Yes, ButtonRole::Primary),
             // In the error colour: the one answer that loses something.
-            DialogButton::new("Don't save (D)", DialogResult::No, ButtonRole::Destructive),
+            DialogButton::new(wording.lose, DialogResult::No, ButtonRole::Destructive),
             DialogButton::cancel(),
         ]);
-        let mut dialog = AlertDialog::warning("Unsaved changes", message)
+        let mut dialog = AlertDialog::warning(wording.title, message)
             .with_buttons(buttons)
             .with_detail(prompt)
             // A click beside the card answers nothing, as with any desktop's
@@ -91,7 +136,11 @@ impl<P: Copy> Question<P> {
             .with_click_outside_dismiss(false);
         dialog.show();
         dialog.tick(FADE_DONE_MS);
-        Self { dialog, pending }
+        Self {
+            dialog,
+            pending,
+            keep: wording.key,
+        }
     }
 
     /// What the question is holding up.
@@ -117,10 +166,12 @@ impl<P: Copy> Question<P> {
             && key.pressed
         {
             let typed = key.typed().next().map(|c| c.to_ascii_lowercase());
-            match (key.key, typed) {
-                (Key::S, _) | (_, Some('s')) => return Some(Choice::Save),
-                (Key::D, _) | (_, Some('d')) => return Some(Choice::Discard),
-                _ => {}
+            let (keep, letter) = self.keep;
+            if key.key == keep || typed == Some(letter) {
+                return Some(Choice::Save);
+            }
+            if key.key == Key::D || typed == Some('d') {
+                return Some(Choice::Discard);
             }
         }
         // What the dialog does with it is its business -- focus, hover,
@@ -256,6 +307,46 @@ mod tests {
         ] {
             assert_eq!(question().handle(&event), Some(expected), "{event:?}");
         }
+    }
+
+    /// **Changes to apply are asked about in those words**, and A applies
+    /// them where S would save: a network setting is not saved anywhere the
+    /// user would recognise. S is then just another key.
+    #[test]
+    fn a_question_to_apply_says_apply_and_answers_to_a() {
+        let apply =
+            || Question::to_apply(&message_for(&["eth0"]), "Apply them before closing?", 7_u8);
+        for (event, expected) in [
+            (press(Key::A), Some(Choice::Save)),
+            (typed('A'), Some(Choice::Save)),
+            (press(Key::Enter), Some(Choice::Save)),
+            (press(Key::D), Some(Choice::Discard)),
+            (press(Key::Escape), Some(Choice::Cancel)),
+            (press(Key::S), None),
+            (typed('s'), None),
+        ] {
+            assert_eq!(apply().handle(&event), expected, "{event:?}");
+        }
+        let mut q = apply();
+        let text = drawn(&mut q);
+        for label in [
+            "Changes not applied",
+            "Apply (A)",
+            "Don't apply (D)",
+            "Cancel",
+            "Apply them before closing?",
+        ] {
+            assert!(text.contains(label), "{label} is not drawn: {text}");
+        }
+        assert!(!text.contains("Save"), "{text}");
+        assert_eq!(q.pending(), 7);
+    }
+
+    /// The question to save answers to S and not to A.
+    #[test]
+    fn a_question_to_save_does_not_answer_to_a() {
+        assert_eq!(question().handle(&press(Key::A)), None);
+        assert_eq!(question().handle(&typed('a')), None);
     }
 
     /// Tab moves the focus, so Enter answers whichever button has it.

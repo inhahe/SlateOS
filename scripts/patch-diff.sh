@@ -186,6 +186,9 @@ printf 'alpha\ncaf\351 comment\nCHANGED\ndelta\n'        > "$mk/latin1.new"
 ( cd "$mk" && /usr/bin/diff -c --label x/a/base.txt --label y/a/base.txt \
     base.txt base.new ) > "$patches/c.patch" || true
 ( cd "$mk" && /usr/bin/diff base.txt base.new ) > "$patches/n.patch" || true
+# The same normal diff behind an `Index:` line naming its file: the header
+# that lets GNU recognise it with no file operand, and names the file to patch.
+{ printf 'Index: a/base.txt\n'; cat "$patches/n.patch"; } > "$patches/ni.patch"
 ( cd "$mk" && /usr/bin/diff -u --label x/a/base.txt --label y/a/base.txt \
     base.txt base.append ) > "$patches/append.patch" || true
 ( cd "$mk" && /usr/bin/diff -u --label x/a/long.txt --label y/a/long.txt \
@@ -367,6 +370,16 @@ run_case u0.patch -p1
 run_case u.patch -p1 -u
 run_case c.patch -c
 run_case n.patch -n
+# The same bare normal diff with nothing naming its file and no `-n`: GNU's
+# `need_header` (no file operand, no POSIXLY_CORRECT) passes over every line
+# that is not a header naming one, so it never sees the hunk -- `Only garbage
+# was found in the patch input.`, exit 2. An `Index:` header clears
+# `need_header` and names the file. (POSIXLY_CORRECT clears it too, but then
+# GNU asks for the file on /dev/tty even with stdout not a terminal -- POSIX
+# says to -- so that row waits on whatever terminal the harness has.)
+# (TD-B-PATCH-AUTO-DETECTS-A-BARE-NORMAL-DIFF-WHERE-GNU-CALLS-IT-GARBAGE)
+run_case n.patch
+run_case ni.patch
 run_case c.patch -p1 -u
 run_case u.patch -p1 -c
 run_case u.patch -p1 -n

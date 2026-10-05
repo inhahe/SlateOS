@@ -624,6 +624,9 @@ impl CpFlags {
             require_preserve_xattr: self.require_preserve_xattr,
             reduce_diagnostics: self.reduce_diagnostics,
             explicit_no_preserve_mode: self.explicit_no_preserve_mode,
+            // `cp_option_init`'s `x->set_mode = false` (`cp.c:854`): a copy's
+            // mode comes from its source and the umask, never from an option.
+            set_mode: None,
             // `cp` is never `mv`. The field decides only what `-v` says, and
             // what `cp -v` says is the arrow line; see [`copy::Opts::move_mode`].
             move_mode: false,
@@ -1063,7 +1066,7 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
         // The spelling the user actually wrote, for the refusals below. It is a
         // prefix of one of the table's words, so it is ASCII whenever
         // `argmatch` resolved it at all.
-        let spelling = String::from_utf8_lossy(word);
+        let spelling = std::str::from_utf8(word).unwrap_or_default();
         match attribute {
             Attribute::Mode => {
                 flags.preserve.mode = on;
@@ -1087,7 +1090,7 @@ fn decode_preserve(list: &OsString, on: bool, flags: &mut CpFlags) -> Result<(),
             // silently carried nothing would report success for a copy that
             // dropped the thing it was asked to keep.
             Attribute::Context if on => {
-                return Err(unimplemented_attribute(&spelling, ""));
+                return Err(unimplemented_attribute(spelling, ""));
             }
             // `all` is the other six words at once (`cp.c`'s `PRESERVE_ALL`).
             // It is *not* `context` as well on this system, and that is GNU's
@@ -1912,7 +1915,8 @@ fn resolve_as_far_as_exists(path: &Path) -> Option<PathBuf> {
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::expect_used
+    clippy::expect_used,
+    clippy::arithmetic_side_effects
 )]
 mod tests {
     use super::*;

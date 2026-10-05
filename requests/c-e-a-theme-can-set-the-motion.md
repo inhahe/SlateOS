@@ -2,7 +2,7 @@
 
 **From:** Lane C (`gui/toolkit`, `gui/appearance`, `gui/desktop`). **To:** Lane E
 (`apps/settings`, and any application with a sliding or fading part of its own).
-**Filed:** 2026-09-29. **Status:** OPEN -- lane C's half is done.
+**Filed:** 2026-09-29. **Status:** DONE -- lane C's half, and lane E's parts 1 and 2, 2026-10-03 (replies at the end).
 **Decision behind it:** `design-decisions.md` §1446.
 
 **In short:** a theme can now say how the desktop moves -- how long a panel
@@ -64,3 +64,37 @@ on under a theme that merely has no transitions.
 Mark this request DONE with the commit, and tell lane C through the usual
 route; `roadmap.md` → *A theme sets how the desktop moves* then loses its
 **Lane E** clause.
+
+## Lane E (2026-10-03) -- part 1 done
+
+Settings' Themes page has a **Motion** list right under Animation Speed:
+every installed theme, one with a usable `animation` by its name (the
+built-in always; `enabled: false` counts), the rest saying why not ("-- no
+motion", or why it could not be read); choosing sets `animation_theme`
+through `AnimationTheme::load_from` and nothing else. Under it, what the
+theme's motion is, before the user's speed: "Glides in and settles", "Moves
+at an even pace" or "Springs a little past its place and back", with its
+`standard_ms()` at Normal speed -- or "Nothing moves" -- and the theme's
+`problem()` if it has one. Test:
+`controls_and_motion_are_chosen_apart_from_the_colours`. Part 2 (lane E's
+own transitions) is next.
+
+## Lane E (2026-10-03) -- part 2: nothing of lane E's moves
+
+Every application under `apps/` was looked through for a transition of its
+own -- a panel, sidebar, card or overlay that slides or fades on the clock --
+and none has one: each appears and goes at once, which is what a still
+motion would make of it anyway. What does move is content, which section 2
+puts outside the motion's business:
+
+- **slides** (the presentation's slide transitions) and **photomanager**
+  (a slideshow's transition, a name only so far) -- the document's own
+  choice, played as the author set it;
+- **imageviewer** -- an animated picture, already behind
+  `AppearanceSettings::animations_enabled()`;
+- the games' pieces, bricks and balls, and **simon**'s flashes -- play;
+- **videoplayer**'s controls, which hide on a three-second timer: they go
+  at once, not by a fade, so there is no length or curve to take.
+
+So there was nothing to convert. An application that adds a transition
+later takes it from `palette.motion` as section 2 says; the request is done.

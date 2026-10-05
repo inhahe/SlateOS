@@ -237,13 +237,13 @@ MUTATIONS = [
     ),
     (
         "Escape does not stop editing",
-        "        if ev.key == Key::Escape {\n            doc.source = None;\n            return;\n        }",
-        "        if ev.key == Key::Escape {\n            return;\n        }",
+        "        if ev.key == Key::Escape && plain {\n            doc.source = None;\n            return;\n        }",
+        "        if ev.key == Key::Escape && plain {\n            return;\n        }",
         [ESCAPE],
     ),
     (
         "Tab is left to the text area, which ignores it",
-        "        let edited = if ev.key == Key::Tab && !ev.modifiers.ctrl && !ev.modifiers.shift {",
+        "        let edited = if ev.key == Key::Tab && plain && !ev.modifiers.shift {",
         "        let edited = if false {",
         [TAB],
     ),
@@ -444,6 +444,211 @@ MUTATIONS = [
         "        let read = match safeio::read_to_string_capped(path, MAX_OPEN_BYTES) {",
         "        let read = match safeio::read_to_string_capped(path, usize::MAX / 2) {",
         [TRUNC],
+    ),
+    (
+        'a chord raises the keys',
+        '        if !typing && plain {',
+        '        if !typing {',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(modifiers) {',
+        '        if modifiers.ctrl {',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into a value",
+        '                _ if textline::types_into_field(ev) => {\n                    if let Some(ch) = text\n                        && self.edit_buffer.len()',
+        '                _ if ev.types_text() => {\n                    if let Some(ch) = text\n                        && self.edit_buffer.len()',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        "a chord works a value's own keys",
+        '                _ if !plain => return,\n                Key::Escape => {\n                    self.cancel_edit();',
+        '                Key::Escape => {\n                    self.cancel_edit();',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '                _ if textline::types_into_field(ev) => {\n                    if let Some(ch) = text\n                        && self.search_query.len()',
+        '                _ if ev.types_text() => {\n                    if let Some(ch) = text\n                        && self.search_query.len()',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        "a chord works the search's own keys",
+        '                _ if !plain => return,\n                Key::Escape => {\n                    self.search_visible = false;',
+        '                Key::Escape => {\n                    self.search_visible = false;',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        'a chord works the views',
+        '        if !plain {\n            return;\n        }\n\n        // Enter edits the text itself',
+        '        // Enter edits the text itself',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the text',
+        '        if ev.key == Key::Escape && plain {',
+        '        if ev.key == Key::Escape {',
+        ['a_chord_is_neither_a_viewer_key_nor_typing'],
+    ),
+    (
+        'the root does not open by itself',
+        '        tree.set_expanded(&[NodeKey::Root], true, &nothing);\n',
+        '        let _ = &nothing;\n',
+        ['tree_build_simple_object', 'tree_expand_shows_children'],
+    ),
+    (
+        'a repeated key is one node',
+        '                        *nth = nth.saturating_add(1);\n',
+        '',
+        ['a_repeated_key_is_two_nodes'],
+    ),
+    (
+        'a match is not marked',
+        '        let label_tone = if self.matches.iter().any(|m| m.as_slice() == path) {',
+        '        let label_tone = if self.matches.is_empty() && !self.matches.is_empty() {',
+        ['a_search_match_is_marked'],
+    ),
+    (
+        'the next match is not revealed',
+        '        self.with_tree(|tree, source| tree.reveal(&path, source));',
+        '        self.with_tree(|tree, source| tree.refresh(source));',
+        ['the_next_match_is_opened_selected_and_scrolled_to'],
+    ),
+    (
+        'an edit starts from the text the tree shows',
+        '            .then(|| minify_json(value));',
+        '            .then(|| leaf_display(value).0);',
+        ['enter_and_enter_again_leaves_a_value_as_it_was'],
+    ),
+    (
+        'the value being edited is drawn nowhere',
+        '        self.render_tree_edit(cmds, doc);\n',
+        '',
+        ['the_value_being_edited_is_drawn_over_its_row'],
+    ),
+    (
+        'the row under the pointer is not followed',
+        '        self.tree_hover = match event.kind {\n            MouseEventKind::Leave => None,\n            _ => hover,\n        };',
+        '        let _ = hover;',
+        ['a_move_onto_another_row_redraws_and_one_within_it_does_not'],
+    ),
+    (
+        'a double-click on a value edits nothing',
+        '            if let TreeEvent::Activated(path) = happened {\n                self.activate_node(&path);\n            }',
+        '            let _ = happened;',
+        ['a_click_selects_and_a_double_click_opens_or_edits'],
+    ),
+    (
+        'the tree is drawn under the find bar',
+        '            top += SEARCH_BAR_HEIGHT;\n',
+        '',
+        ['the_find_bar_takes_its_own_clicks'],
+    ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "the card is modal for nothing",
+        '        if self.show_help {\n            match event {\n',
+        '        if false && self.show_help {\n            match event {\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                        return EventResult::Consumed;\n'
+        '                    }\n'
+        '                    return EventResult::Ignored;\n'
+        '                }\n'
+        '                Event::Mouse(mouse_ev) => match mouse_ev.kind {\n',
+        '                        return EventResult::Consumed;\n'
+        '                    }\n'
+        '                }\n'
+        '                Event::Mouse(mouse_ev) => match mouse_ev.kind {\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "? does not put the card away",
+        '                            || key_ev.key == Key::Slash && key_ev.modifiers.shift);\n',
+        '                            || false);\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "Escape does not put the card away",
+        '                        && (matches!(key_ev.key, Key::F1 | Key::Escape)\n',
+        '                        && (matches!(key_ev.key, Key::F1)\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "a press goes through the card",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n'
+        '                        self.show_help = false;\n'
+        '                        return EventResult::Consumed;\n'
+        '                    }\n',
+        '',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "only the left button puts the card away",
+        '                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n',
+        '                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n',
+        ['the_shortcut_card_takes_every_key_and_press_while_it_is_up'],
+    ),
+    (
+        "the wheel scrolls the tree the card covers",
+        '                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n',
+        '',
+        ['the_wheel_scrolls_no_tree_under_the_card'],
+    ),
+]
+
+FIND = "the_find_bars_box_is_the_toolkits_field"
+EDIT = "the_value_editor_is_the_toolkits_field_and_its_text_sits_in_its_box"
+
+MUTATIONS += [
+    # The find bar's box and the value editor are the toolkit's fields
+    # (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+    (
+        "the find box never has the keyboard",
+        "            focused: self.search_visible\n                && !self.show_help\n",
+        "            focused: false\n                && !self.show_help\n",
+        [FIND],
+    ),
+    (
+        "the find box keeps its mark under the key list",
+        "            focused: self.search_visible\n                && !self.show_help\n",
+        "            focused: self.search_visible\n",
+        [FIND],
+    ),
+    (
+        "the find box keeps its mark while a value is edited",
+        "                && self.editing_path.is_none()\n                && !self.source_is_open(),\n",
+        "                && !self.source_is_open(),\n",
+        [FIND],
+    ),
+    (
+        "a query that finds nothing is not red",
+        "            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),\n",
+        "            invalid: false,\n",
+        [FIND],
+    ),
+    (
+        "the value editor never has the keyboard",
+        "            focused: !self.show_help,\n",
+        "            focused: false,\n",
+        [EDIT],
+    ),
+    (
+        "the value hangs below its box",
+        "        let (x, y, w) = (r.x + 6.0, r.y + (r.h - line) / 2.0, (r.w - 12.0).max(0.0));\n",
+        "        let (x, y, w) = (r.x + 6.0, r.y + r.h * 0.7, (r.w - 12.0).max(0.0));\n",
+        [EDIT],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIND, EDIT],
     ),
 ]
 

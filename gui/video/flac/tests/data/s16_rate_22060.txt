@@ -1,0 +1,22 @@
+# s16_rate_22060.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 4096 4096 483 5878 22060 1 16 4412
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 4096 1 16 22060 fa51c96c3f83304c
+frame 4096 316 1 16 22060 ffb2c321a486ee89
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 4096 1 16 22060 fa51c96c3f83304c
+frame 4096 316 1 16 22060 ffb2c321a486ee89
+seek 1470
+frame 1470 2626 1 16 22060 733f314169cc09a3
+frame 4096 316 1 16 22060 ffb2c321a486ee89
+seek 2207
+frame 2207 1889 1 16 22060 5f98e97b44316082
+frame 4096 316 1 16 22060 ffb2c321a486ee89
+seek 4411
+frame 4411 1 1 16 22060 9f58bbd51ff8b968
+seek 4417
+seek-failed

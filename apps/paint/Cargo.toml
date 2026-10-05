@@ -8,6 +8,9 @@ pathtext = { path = "../pathtext" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
+# Whether a key is plain, a Ctrl chord, or Alt's or the Windows key's: the one
+# statement of each, where this file had its own.
+textline = { path = "../textline" }
 
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
@@ -20,6 +23,9 @@ imagecodec = { path = "../../gui/imagecodec" }
 pngwrite = { path = "../pngwrite" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
+# The undo history: whole pictures, kept as the toolkit's tree, so an edit
+# after undoing keeps what was undone (C-Q24, design-decisions §1416).
+statehistory = { path = "../statehistory" }
 
 # The same crate again with its `audit` counters on, so the tests can prove a
 # save really went through `safeio` and did not quietly regress to

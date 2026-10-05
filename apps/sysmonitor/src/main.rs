@@ -38,11 +38,16 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 use guitk::history::SampleHistory;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -71,6 +76,14 @@ const STATUS_BAR_HEIGHT: f32 = 24.0;
 const ROW_HEIGHT: f32 = 22.0;
 /// Height of column headers.
 const HEADER_HEIGHT: f32 = 24.0;
+/// The filter box's width.
+const FILTER_WIDTH: f32 = 220.0;
+/// The size the filter box's text is drawn at.
+const FILTER_TEXT_SIZE: f32 = 11.0;
+/// How far the filter box's text sits in from its left and right edges.
+const FILTER_TEXT_INSET: f32 = 8.0;
+/// The most characters the filter box holds.
+const FILTER_CAPACITY: usize = 256;
 /// Number of historical samples stored per metric.
 const GRAPH_HISTORY_LEN: usize = 120;
 /// Corner radius for cards/panels.
@@ -97,6 +110,25 @@ const ALERT_MAX_ROWS: usize = 5;
 
 /// Why a priority cannot be changed, in the words the status bar uses.
 const CANNOT_RENICE: &str = "this system cannot yet change another program's priority";
+
+/// The keys this window answers, as the F1 list shows them.
+///
+/// The window had no list at all -- the one application in the tree that
+/// answered F1 with nothing -- so Delete, which ends the selected process, was
+/// a key a reader could only find by pressing it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("1-6", "Overview, Processes, CPU, Memory, Disk or Network"),
+    ("Tab / Shift+Tab", "Next or previous tab"),
+    ("Up / Down", "Move through the processes"),
+    ("PageUp / PageDown", "Move ten processes at a time"),
+    ("Home / End", "First or last process"),
+    ("Delete", "End the selected process"),
+    ("F5", "Refresh now"),
+    ("Ctrl+F", "Jump to the filter box"),
+    ("Ctrl+R", "Change how often it refreshes"),
+    ("Escape", "Close the menu, or clear the filter"),
+];
 
 // ============================================================================
 // Ring buffer for time-series data
@@ -583,7 +615,19 @@ pub struct SysMonitorState {
     wheel: wheel::Accumulator,
     pub filter_text: String,
     pub filter_focused: bool,
+    /// The filter box's caret and selection, laid over `filter_text`, which
+    /// stays the truth: reloaded whenever the text changes under it.
+    filter_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the filter box, for Ctrl+V.
+    filter_clipboard: String,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
     pub context_menu: Option<ContextMenu>,
+    /// Whether the list of keys is up. Modal while it is: it takes every key
+    /// and every press.
+    pub show_help: bool,
 
     // -- Alert thresholds --
     pub thresholds: AlertThresholds,
@@ -654,7 +698,11 @@ impl SysMonitorState {
             wheel: wheel::Accumulator::default(),
             filter_text: String::new(),
             filter_focused: false,
+            filter_editor: TextInput::new(),
+            filter_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             context_menu: None,
+            show_help: false,
             thresholds: AlertThresholds::default(),
             active_alerts: Vec::new(),
             refresh_interval: RefreshInterval::TwoSeconds,
@@ -1139,8 +1187,50 @@ impl SysMonitorState {
             return EventResult::Ignored;
         }
 
+        // The list of keys, before the filter box: it is drawn over
+        // everything, and modal while it is up -- a plain F1, `?` or Escape
+        // puts it away and no other key reaches what it covers, where Delete
+        // would end the process under it.
+        let plain = textline::is_plain(key.modifiers);
+        let question = key.key == Key::Slash && key.modifiers.shift;
+        if self.show_help {
+            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        // F1 raises it from anywhere, the filter box included, because it is
+        // never typed; `?` is typed there, so it raises the list only from
+        // the window.
+        if plain && (key.key == Key::F1 || question && !self.filter_focused) {
+            self.show_help = true;
+            return EventResult::Consumed;
+        }
+
         if self.filter_focused {
             return self.handle_filter_key(key);
+        }
+
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
+                Key::F => {
+                    self.focus_filter();
+                    EventResult::Consumed
+                }
+                Key::R => {
+                    self.cycle_refresh_interval();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        // Every other key is taken plain, nothing held but Shift: a chord with
+        // Alt or the Windows key is the window's or the desktop's and arrives
+        // carrying its key -- Alt+Shift+Tab, the desktop's, changed the tab,
+        // and Alt+Escape cleared the filter.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -1183,14 +1273,6 @@ impl SysMonitorState {
             Key::F5 => {
                 self.refresh();
                 self.status_message = "Refreshed".to_string();
-                EventResult::Consumed
-            }
-            Key::F if key.modifiers.ctrl => {
-                self.filter_focused = true;
-                EventResult::Consumed
-            }
-            Key::R if key.modifiers.ctrl => {
-                self.cycle_refresh_interval();
                 EventResult::Consumed
             }
             // Navigation
@@ -1240,29 +1322,102 @@ impl SysMonitorState {
         }
     }
 
-    /// Handle keyboard input when the filter box is focused.
+    /// Handle keyboard input when the filter box is focused: it takes every
+    /// key, so Delete never reaches the process list behind it.
+    ///
+    /// Escape and Enter, plain, give the keyboard back; every other key is
+    /// the box's editor's (`textline::apply_key`) -- the caret keys,
+    /// Backspace and Delete, Ctrl+A, C, X and V, and typing, which knows a
+    /// command from AltGr. The box typed only ASCII -- `ü` and `ż` were
+    /// refused, though process names hold them -- and had no caret:
+    /// Backspace from the end was its only edit.
     fn handle_filter_key(&mut self, key: &KeyEvent) -> EventResult {
-        match key.key {
-            Key::Escape | Key::Enter => {
-                self.filter_focused = false;
-                EventResult::Consumed
-            }
-            Key::Backspace => {
-                self.filter_text.pop();
-                self.rebuild_visible_list();
-                EventResult::Consumed
-            }
-            _ => {
-                let allowed: String = key
-                    .typed()
-                    .filter(|ch| ch.is_ascii_graphic() || *ch == ' ')
-                    .collect();
-                if !allowed.is_empty() {
-                    self.filter_text.push_str(&allowed);
-                    self.rebuild_visible_list();
-                }
-                EventResult::Consumed
-            }
+        if matches!(key.key, Key::Escape | Key::Enter) && textline::is_plain(key.modifiers) {
+            self.filter_focused = false;
+            return EventResult::Consumed;
+        }
+        if self.filter_editor.text() != self.filter_text {
+            self.filter_editor.set_text(&self.filter_text);
+        }
+        let edit = textline::apply_key(
+            &mut self.filter_editor,
+            key,
+            FILTER_CAPACITY,
+            &self.filter_clipboard,
+            FILTER_TEXT_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.filter_clipboard = copied;
+        }
+        if self.filter_editor.text() != self.filter_text {
+            self.filter_text = self.filter_editor.text().to_owned();
+            self.rebuild_visible_list();
+        }
+        EventResult::Consumed
+    }
+
+    /// Give the filter box the keyboard, its caret after what it holds.
+    fn focus_filter(&mut self) {
+        self.filter_focused = true;
+        self.filter_editor.set_text(&self.filter_text);
+    }
+
+    /// Where the filter box is drawn, and pressed: at the right of the
+    /// process list's header.
+    pub fn filter_rect(&self) -> Rect {
+        let w = self.window_width as f32;
+        Rect::new(
+            w - FILTER_WIDTH - 8.0,
+            TAB_BAR_HEIGHT + 1.0,
+            FILTER_WIDTH,
+            HEADER_HEIGHT - 2.0,
+        )
+    }
+
+    /// Where the filter box's caret is drawn: the editor's while the box has
+    /// the keyboard (the end, if the text changed under the editor), the
+    /// start otherwise. One answer for the drawing and for a press.
+    fn filter_cursor(&self) -> TextCursor {
+        if !self.filter_focused {
+            TextCursor::default()
+        } else if self.filter_editor.text() == self.filter_text {
+            self.filter_editor.cursor()
+        } else {
+            TextCursor::from(self.filter_text.len())
+        }
+    }
+
+    /// A press in the filter box at `x`: it takes the keyboard, with the
+    /// caret under the pointer, measured against the box as it was drawn.
+    fn press_filter(&mut self, x: f32) {
+        let rect = self.filter_rect();
+        let drawn = self.filter_cursor();
+        self.filter_focused = true;
+        if self.filter_editor.text() != self.filter_text {
+            self.filter_editor.set_text(&self.filter_text);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.filter_text,
+            drawn,
+            (rect.w - 2.0 * FILTER_TEXT_INSET).max(0.0),
+            FILTER_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - FILTER_TEXT_INSET,
+        );
+        self.filter_editor.set_selection_anchor(None);
+        self.filter_editor.set_cursor(cursor);
+    }
+
+    /// How the filter box is drawn: with the keyboard's mark while it has
+    /// the keyboard -- not under the list of keys -- and red while what is
+    /// in it matches no process. Never lit under the pointer: this window
+    /// does not follow it.
+    fn filter_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.filter_focused && !self.show_help,
+            disabled: false,
+            invalid: !self.filter_text.is_empty() && self.visible_indices.is_empty(),
         }
     }
 
@@ -1270,6 +1425,20 @@ impl SysMonitorState {
     fn handle_mouse(&mut self, mouse: &guitk::event::MouseEvent) -> EventResult {
         let mx = mouse.x;
         let my = mouse.y;
+
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else, and the
+        // wheel scrolls nothing it covers. A move or a release passes.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
 
         // Context menu handling
         if let Some(menu) = self.context_menu.clone()
@@ -1296,6 +1465,15 @@ impl SysMonitorState {
         match &mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 self.context_menu = None;
+
+                // The filter box takes the keyboard, with the caret under the
+                // pointer; a press anywhere else takes it back. It could be
+                // reached only with Ctrl+F, and left only with Escape or Enter.
+                if self.active_tab == Tab::Processes && self.filter_rect().contains(mx, my) {
+                    self.press_filter(mx);
+                    return EventResult::Consumed;
+                }
+                self.filter_focused = false;
 
                 // Tab bar click
                 if my < TAB_BAR_HEIGHT {
@@ -1567,6 +1745,19 @@ impl SysMonitorState {
 
         // Context menu overlay
         self.render_context_menu(&mut tree);
+
+        // The list of keys over everything, the menu included: it is the one
+        // thing on screen a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         tree
     }
@@ -2029,6 +2220,59 @@ impl SysMonitorState {
 
     // -- Processes tab ---------------------------------------------------------------
 
+    /// The filter box's text -- what it holds, or what it is for, faint,
+    /// while it is empty -- and, with the keyboard, its caret and selection.
+    /// An empty box with the keyboard draws the caret before what it is for,
+    /// as the toolkit's own input dialog does.
+    fn render_filter_text(&self, tree: &mut RenderTree, rect: Rect, focused: bool) {
+        let line = text::line_height(FILTER_TEXT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + FILTER_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * FILTER_TEXT_INSET).max(0.0),
+        );
+        if self.filter_text.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: "Filter (Ctrl+F)".to_owned(),
+                color: self.palette.subtext0,
+                font_size: FILTER_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if focused {
+                textedit::push_caret(tree, x, y, line, self.palette.text, textedit::CARET_WIDTH);
+            }
+            return;
+        }
+        let editing = self.filter_focused && self.filter_editor.text() == self.filter_text;
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: &self.filter_text,
+                cursor: self.filter_cursor(),
+                selection_anchor: if editing {
+                    self.filter_editor.selection_anchor()
+                } else {
+                    None
+                },
+                focused,
+                x,
+                y,
+                width,
+                line_height: line,
+                font_size: FILTER_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
+
     fn render_processes_tab(&self, tree: &mut RenderTree) {
         let w = self.window_width as f32;
         // The top of the *header*, which is not the top of the rows: the rows
@@ -2036,69 +2280,14 @@ impl SysMonitorState {
         // distinction now, and this is only the filter box and column strip.
         let content_y = TAB_BAR_HEIGHT;
 
-        // Filter box
-        let filter_w = 220.0;
-        let filter_x = w - filter_w - 8.0;
-        let filter_h = HEADER_HEIGHT - 2.0;
-        let filter_border = if self.filter_focused {
-            self.palette.blue
-        } else {
-            self.palette.surface1
-        };
-        tree.push(RenderCommand::StrokeRect {
-            x: filter_x,
-            y: content_y + 1.0,
-            width: filter_w,
-            height: filter_h,
-            color: filter_border,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        self.palette.push_surface(
-            tree,
-            filter_x + 1.0,
-            content_y + 2.0,
-            filter_w - 2.0,
-            filter_h - 2.0,
-            2.0,
-            Surface::Card,
-        );
-
-        let filter_display = if self.filter_text.is_empty() {
-            "Filter (Ctrl+F)"
-        } else {
-            &self.filter_text
-        };
-        let filter_text_color = if self.filter_text.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        tree.push(RenderCommand::Text {
-            x: filter_x + 8.0,
-            y: content_y + 6.0,
-            text: filter_display.to_string(),
-            color: filter_text_color,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(filter_w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        if self.filter_focused {
-            // The caret sits where the glyphs actually end, not where a byte
-            // count guessed they would: a filter containing any non-ASCII
-            // character used to draw the caret well past its own text. It is
-            // held inside the box because the text itself is clipped there.
-            let typed = text::width(&self.filter_text, 11.0).min(filter_w - 16.0);
-            let cursor_x = filter_x + 8.0 + typed;
-            tree.fill_rect(
-                cursor_x,
-                content_y + 5.0,
-                1.0,
-                filter_h - 8.0,
-                self.palette.text,
-            );
-        }
+        // Filter box: the toolkit's field, with the toolkit's caret -- placed
+        // by measuring the glyphs, so a filter holding a non-ASCII character
+        // does not draw its caret past its own text.
+        let filter_w = FILTER_WIDTH;
+        let rect = self.filter_rect();
+        let state = self.filter_state();
+        field::draw(tree, &self.palette, rect, state, self.focus_ring_width);
+        self.render_filter_text(tree, rect, state.focused);
 
         // Column headers
         tree.fill_rect(
@@ -3516,6 +3705,10 @@ impl App for SysMonitorState {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         "System Monitor".to_owned()
     }
@@ -3680,6 +3873,90 @@ mod tests {
         );
     }
 
+    /// **A key held with Alt or the Windows key is not the monitor's, and
+    /// AltGr is not Ctrl**: each such chord is the window's or the desktop's
+    /// and arrives carrying its key -- Alt+Shift+Tab, the desktop's, changed
+    /// the tab, Alt+End moved the selection, Alt+Escape cleared the filter
+    /// and Alt+X typed an `x` into it; and AltGr+F focused the filter as
+    /// Ctrl+F does.
+    ///
+    /// Each key is asserted as it is pressed. Delete is left out: it sends a
+    /// signal.
+    #[test]
+    fn a_chord_is_neither_a_monitor_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let shift_alt = Modifiers {
+            shift: true,
+            ..Modifiers::alt()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut m = running();
+        m.filter_text = String::from("a");
+        m.rebuild_visible_list();
+        m.selected_index = Some(0);
+        let state = |m: &SysMonitorState| {
+            (
+                (m.active_tab, m.selected_index, m.scroll_offset),
+                (
+                    m.filter_text.clone(),
+                    m.filter_focused,
+                    m.context_menu.is_some(),
+                ),
+                (m.refresh_interval, m.status_message.clone()),
+            )
+        };
+        let before = state(&m);
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr, shift_alt] {
+            for k in [
+                Key::Tab,
+                Key::Num2,
+                Key::F5,
+                Key::PageDown,
+                Key::End,
+                Key::Down,
+                Key::Escape,
+                Key::F,
+                Key::R,
+            ] {
+                assert_eq!(
+                    m.handle_event(&chord(k, "", held)),
+                    EventResult::Ignored,
+                    "{held:?} {k:?} was taken"
+                );
+                assert_eq!(state(&m), before, "{held:?} {k:?} changed the monitor");
+            }
+        }
+
+        // The filter types what was typed, AltGr's `@` among it.
+        m.handle_event(&chord(Key::F, "f", Modifiers::ctrl()));
+        assert!(m.filter_focused, "control: Ctrl+F reaches the filter");
+        m.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        m.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+        m.handle_event(&chord(Key::F, "f", Modifiers::ctrl()));
+        m.handle_event(&chord(Key::Q, "@", altgr));
+        m.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        m.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
+        m.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
+        assert_eq!(
+            m.filter_text, "a@",
+            "the filter typed a command's letter, or lost AltGr's"
+        );
+        assert!(
+            m.filter_focused,
+            "a chorded Enter or Escape left the filter"
+        );
+    }
+
     #[test]
     fn the_initial_size_is_the_size_the_app_is_holding() {
         let m = running();
@@ -3747,34 +4024,221 @@ mod tests {
         app.active_tab = Tab::Processes;
         app.filter_focused = true;
         app.filter_text = String::from("\u{fc}ber");
+        let rect = app.filter_rect();
         let tree = app.render_tree();
-        // The caret is the one-pixel-wide fill pushed straight after the
-        // filter text, so find the text first and then look forward.
-        let text_i = tree
+        let carets: Vec<f32> = tree
             .commands
             .iter()
-            .position(|c| matches!(c, RenderCommand::Text { text, .. } if *text == app.filter_text))
-            .expect("filter text not drawn");
-        let text_origin = match tree.commands.get(text_i) {
-            Some(RenderCommand::Text { x, .. }) => *x,
-            _ => unreachable!("just matched a Text command"),
-        };
-        let caret = tree
-            .commands
-            .iter()
-            .skip(text_i)
-            .find_map(|c| match c {
-                RenderCommand::FillRect { x, width, .. } if (width - 1.0).abs() < 0.01 => Some(*x),
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, y1, x2, y2, .. }
+                    if (x1 - x2).abs() < f32::EPSILON
+                        && rect.contains(*x1, *y1)
+                        && rect.contains(*x2, *y2) =>
+                {
+                    Some(*x1)
+                }
                 _ => None,
             })
-            .expect("no caret drawn");
-        // The caret must sit exactly one measured string past the text origin.
-        // A byte count would put it a whole character out, because the u-umlaut
-        // is two bytes.
-        let expected = text_origin + text::width(&app.filter_text, 11.0);
+            .collect();
+        // The caret must sit exactly one measured string past the text's
+        // start. A byte count would put it a whole character out, because the
+        // u-umlaut is two bytes.
+        let expected = rect.x
+            + FILTER_TEXT_INSET
+            + text::measure(&app.filter_text, FILTER_TEXT_SIZE, FontWeightHint::Regular);
         assert!(
-            (caret - expected).abs() < 0.01,
-            "caret at {caret}, glyphs end at {expected}"
+            matches!(carets.as_slice(), [at] if (at - expected).abs() < 0.5),
+            "carets at {carets:?}, glyphs end at {expected}"
+        );
+    }
+
+    /// A key `k` typing `text`, held with `modifiers`.
+    fn filter_key(k: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// `text`, typed a character at a time.
+    fn type_into_filter(m: &mut SysMonitorState, text: &str) {
+        for ch in text.chars() {
+            m.handle_event(&filter_key(
+                Key::Unknown(0),
+                &ch.to_string(),
+                Modifiers::NONE,
+            ));
+        }
+    }
+
+    /// A left press at `(x, y)`.
+    fn press_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(guitk::event::MouseButton::Left),
+        })
+    }
+
+    /// **The filter box is the toolkit's field**: no mark until it has the
+    /// keyboard, then the theme's mark at the user's width -- not under the
+    /// list of keys -- and red while what is in it matches no process. A press
+    /// on it takes the keyboard, with the caret under the pointer; a press
+    /// elsewhere gives it back. Only Ctrl+F reached it.
+    #[test]
+    fn the_filter_box_is_the_toolkits_field() {
+        let mut m = running();
+        m.active_tab = Tab::Processes;
+        let mut p = m.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut m, &p);
+        oswindow::app::App::appearance_changed(
+            &mut m,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            m.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = m.filter_rect();
+        let draws = |m: &SysMonitorState, state: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, m.focus_ring_width);
+                v
+            };
+            let cmds = m.render_tree().commands;
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws(&m, idle),
+            "the filter box is not the toolkit's field, or has a mark"
+        );
+
+        let (cx, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        m.handle_event(&press_at(cx, cy));
+        assert!(
+            m.filter_focused,
+            "a press on the filter box did not take the keyboard"
+        );
+        assert!(draws(&m, focused), "the box with the keyboard has no mark");
+
+        type_into_filter(&mut m, "zz-no-such-process");
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(draws(&m, red), "a filter that matches nothing is not red");
+
+        m.handle_event(&filter_key(Key::F1, "", Modifiers::NONE));
+        assert!(
+            draws(
+                &m,
+                field::State {
+                    invalid: true,
+                    ..idle
+                }
+            ),
+            "the filter keeps its mark under the list of keys"
+        );
+        m.handle_event(&filter_key(Key::F1, "", Modifiers::NONE));
+
+        // A press at the start of what it holds puts the caret there.
+        m.handle_event(&press_at(rect.x + FILTER_TEXT_INSET + 1.0, cy));
+        type_into_filter(&mut m, "Q");
+        assert_eq!(
+            m.filter_text, "Qzz-no-such-process",
+            "the caret did not go where the press was"
+        );
+
+        // A press anywhere else gives the keyboard back.
+        m.handle_event(&press_at(5.0, rect.y + 200.0));
+        assert!(
+            !m.filter_focused,
+            "a press elsewhere left the filter the keyboard"
+        );
+    }
+
+    /// **The filter edits like a field and takes any letter**: Home and
+    /// Delete at the caret, Ctrl+A, X and V, a limit -- and `ü`, which it
+    /// refused, typing ASCII alone, though process names hold such letters.
+    #[test]
+    fn the_filter_edits_like_a_field_and_takes_any_letter() {
+        let mut m = running();
+        m.active_tab = Tab::Processes;
+        m.handle_event(&filter_key(Key::F, "f", Modifiers::ctrl()));
+        assert!(m.filter_focused, "control: Ctrl+F");
+        type_into_filter(&mut m, "\u{fc}ber");
+        assert_eq!(
+            m.filter_text, "\u{fc}ber",
+            "a letter outside ASCII was refused"
+        );
+        m.handle_event(&filter_key(Key::Home, "", Modifiers::NONE));
+        m.handle_event(&filter_key(Key::Delete, "", Modifiers::NONE));
+        assert_eq!(
+            m.filter_text, "ber",
+            "Home and Delete did not edit the start"
+        );
+        m.handle_event(&filter_key(Key::A, "", Modifiers::ctrl()));
+        m.handle_event(&filter_key(Key::X, "", Modifiers::ctrl()));
+        assert_eq!(m.filter_text, "", "Ctrl+A and Ctrl+X did not cut");
+        m.handle_event(&filter_key(Key::V, "", Modifiers::ctrl()));
+        m.handle_event(&filter_key(Key::V, "", Modifiers::ctrl()));
+        assert_eq!(m.filter_text, "berber", "Ctrl+V did not paste what was cut");
+
+        // The filter changed under the editor is edited as it now reads.
+        m.filter_text = String::from("init");
+        type_into_filter(&mut m, "!");
+        assert_eq!(
+            m.filter_text, "init!",
+            "the filter was edited as it used to read"
+        );
+
+        // Ctrl+F gives the box back with the caret at the end, wherever it
+        // was left.
+        m.handle_event(&filter_key(Key::Home, "", Modifiers::NONE));
+        m.handle_event(&filter_key(Key::Escape, "", Modifiers::NONE));
+        assert!(!m.filter_focused, "control: Escape gives the keyboard back");
+        m.handle_event(&filter_key(Key::F, "f", Modifiers::ctrl()));
+        type_into_filter(&mut m, "?");
+        assert_eq!(
+            m.filter_text, "init!?",
+            "Ctrl+F left the caret where it was"
+        );
+
+        m.filter_clipboard = "x".repeat(FILTER_CAPACITY + 5);
+        m.handle_event(&filter_key(Key::A, "", Modifiers::ctrl()));
+        m.handle_event(&filter_key(Key::V, "", Modifiers::ctrl()));
+        assert_eq!(
+            m.filter_text.chars().count(),
+            FILTER_CAPACITY,
+            "the filter holds more than its limit"
+        );
+
+        // Delete belongs to the box while it has the keyboard: it never ends
+        // the process under the selection.
+        let processes = m.processes.len();
+        m.handle_event(&filter_key(Key::Delete, "", Modifiers::NONE));
+        assert_eq!(
+            m.processes.len(),
+            processes,
+            "Delete reached the process list"
         );
     }
 
@@ -5119,6 +5583,161 @@ mod tests {
             y: 200.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         });
+    }
+
+    // -- The list of keys --
+
+    fn key_of(k: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn drawn_texts(app: &SysMonitorState) -> Vec<String> {
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window.**
+    ///
+    /// Pressed with nothing selected, so Delete -- which ends the selected
+    /// process, with a real signal on a Unix host -- has nothing to end.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = processes_tab(30);
+                app.selected_index = None;
+                assert_eq!(
+                    app.handle_key(&stroke),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = processes_tab(5);
+        assert!(
+            !drawn_texts(&app)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            app.handle_key(&key_of(Key::F1, chord, ""));
+            assert!(
+                !app.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        let missing = guitk::shortcut::missing_rows(&drawn_texts(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        app.handle_key(&key_of(Key::Escape, Modifiers::alt(), ""));
+        assert!(app.show_help, "Alt+Escape put the list away");
+        app.handle_key(&key_of(Key::Escape, Modifiers::NONE, ""));
+        assert!(!app.show_help, "Escape left the list up");
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(app.show_help, "? raised nothing");
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!app.show_help, "? left the list up");
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        assert!(!app.show_help, "F1 left the list up");
+    }
+
+    /// **`?` is typed into the filter box**, where it is a character, and F1
+    /// raises the list from there, where it never is.
+    #[test]
+    fn a_question_mark_is_typed_into_the_filter_and_f1_still_raises_the_list() {
+        let mut app = processes_tab(5);
+        app.handle_key(&key_of(Key::F, Modifiers::ctrl(), ""));
+        assert!(app.filter_focused);
+        app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!app.show_help, "? raised the list from the filter box");
+        assert_eq!(app.filter_text, "?", "? was not typed");
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        assert!(
+            app.show_help,
+            "F1 did not raise the list from the filter box"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of
+    /// the wheel reaches what it covers. F5 and Tab stand in for Delete,
+    /// which would end a process rather than fail an assertion. The controls
+    /// are the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut app = processes_tab(200);
+        let (rows_y, _) = rows_clip(&app);
+        let row = rows_y + ROW_HEIGHT / 2.0;
+        app.status_message = String::from("untouched");
+        let tab = app.active_tab;
+
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        app.handle_key(&key_of(Key::F5, Modifiers::NONE, ""));
+        app.handle_key(&key_of(Key::Tab, Modifiers::NONE, ""));
+        app.handle_key(&key_of(Key::F, Modifiers::ctrl(), ""));
+        assert!(
+            app.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(
+            app.status_message, "untouched",
+            "F5 refreshed under the list"
+        );
+        assert_eq!(app.active_tab, tab, "Tab changed the tab under it");
+        assert!(!app.filter_focused, "Ctrl+F took the filter box under it");
+        wheel(&mut app, -1.0);
+        assert_eq!(
+            app.scroll_offset, 0,
+            "the wheel scrolled the processes under it"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        press(&mut app, MouseButton::Left, row);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.selected_index, None,
+            "the press selected a process under it"
+        );
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
+        press(&mut app, MouseButton::Right, row);
+        assert!(!app.show_help, "a right-button press left the list up");
+        assert!(
+            app.context_menu.is_none(),
+            "a menu was raised under the list"
+        );
+
+        // The controls.
+        wheel(&mut app, -1.0);
+        assert!(
+            app.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        wheel(&mut app, 1.0);
+        press(&mut app, MouseButton::Left, row);
+        assert!(
+            app.selected_index.is_some(),
+            "control: the press selects nothing"
+        );
+        app.handle_key(&key_of(Key::F5, Modifiers::NONE, ""));
+        assert_ne!(app.status_message, "untouched", "control: F5 does nothing");
     }
 
     // -- The row area's edges --

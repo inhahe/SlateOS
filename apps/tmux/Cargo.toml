@@ -17,6 +17,9 @@ libcall = { path = "../../libcall" }
 # The status bar's clock goes through the zone rules, UTC until there is a
 # per-process zone to read, as every clock in the tree does.
 tzrules = { path = "../../tzrules" }
+# Whether a key is plain, a Ctrl chord or typing: the multiplexer's own keys
+# are plain, Ctrl+B is a Ctrl chord and not AltGr+B, and the prompt types.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `script::ScriptLink`, a shell made of a script, for the tests.

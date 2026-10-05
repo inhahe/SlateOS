@@ -1,0 +1,25 @@
+# s32_side_33bit.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 4096 4096 1628 9567 44100 2 32 8820
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 4096 2 32 44100 04fe74cb794b581f
+frame 4096 4096 2 32 44100 bd0cd985cf5c4fbf
+frame 8192 628 2 32 44100 433c37629cdc9c41
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 4096 2 32 44100 04fe74cb794b581f
+frame 4096 4096 2 32 44100 bd0cd985cf5c4fbf
+frame 8192 628 2 32 44100 433c37629cdc9c41
+seek 2940
+frame 2940 1156 2 32 44100 ff56aff29631ff49
+frame 4096 4096 2 32 44100 bd0cd985cf5c4fbf
+frame 8192 628 2 32 44100 433c37629cdc9c41
+seek 4411
+frame 4411 3781 2 32 44100 50e120d8cf59e210
+frame 8192 628 2 32 44100 433c37629cdc9c41
+seek 8819
+frame 8819 1 2 32 44100 be95a9ba0cb37d0c
+seek 8825
+seek-failed

@@ -20,6 +20,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::wheel;
@@ -511,6 +512,115 @@ const WINDOW_HEIGHT: f32 = 640.0;
 const HISTORY_ITEM_HEIGHT: f32 = 52.0;
 const HISTORY_LIST_TOP: f32 = 50.0;
 
+/// One row of an open unit list, and one favourite.
+const LIST_ROW_HEIGHT: f32 = 28.0;
+
+/// The space above the first row of an open unit list.
+const LIST_PAD: f32 = 4.0;
+
+/// The size the From box's text is drawn at, which is what places its caret.
+const INPUT_FONT: f32 = 14.0;
+
+/// Where every control of the main area is: one law for the drawing and for
+/// the press.
+///
+/// The press carried its own copy of the numbers, and the two had drifted:
+/// the From box answered twelve points below where it is drawn, both unit
+/// buttons and the favourites rows sixteen, the favourites toggle fourteen,
+/// the star forty, and the swap button -- drawn between the two boxes -- a
+/// hundred and fifteen, on the result panel, where nothing showed it. The
+/// window is a fixed size, so this is a set of constants with names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    /// The box the value is typed into.
+    from_box: Rect,
+    /// The box the result is shown in.
+    to_box: Rect,
+    /// The buttons that open the two unit lists.
+    from_unit: Rect,
+    to_unit: Rect,
+    /// The swap button: a circle, drawn and pressed inside this square.
+    swap: Rect,
+    /// The favourite star, drawn in the middle of this square.
+    star: Rect,
+    /// The button that shows or hides the favourites.
+    favourites_toggle: Rect,
+    /// The first favourite's row; the rest follow at [`LIST_ROW_HEIGHT`].
+    first_favourite: Rect,
+}
+
+impl Layout {
+    const fn new() -> Self {
+        let left = SIDEBAR_WIDTH;
+        let right = WINDOW_WIDTH - HISTORY_PANEL_WIDTH;
+        let column = 180.0;
+        Self {
+            from_box: Rect::new(left + 20.0, 88.0, column, 36.0),
+            to_box: Rect::new(right - 20.0 - column, 88.0, column, 36.0),
+            from_unit: Rect::new(left + 20.0, 134.0, column, 32.0),
+            to_unit: Rect::new(right - 20.0 - column, 134.0, column, 32.0),
+            swap: Rect::new(f32::midpoint(left, right) - 18.0, 97.0, 36.0, 36.0),
+            star: Rect::new(right - 52.0, 12.0, 40.0, 40.0),
+            favourites_toggle: Rect::new(left + 20.0, 356.0, 120.0, 28.0),
+            first_favourite: Rect::new(left + 20.0, 394.0, right - left - 40.0, LIST_ROW_HEIGHT),
+        }
+    }
+
+    /// The open unit list under a unit button, `rows` long.
+    fn unit_list(button: Rect, rows: usize) -> Rect {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a unit list is a dozen rows, far inside f32's exact range"
+        )]
+        let h = rows as f32 * LIST_ROW_HEIGHT + 2.0 * LIST_PAD;
+        Rect::new(button.x, button.bottom(), button.w, h)
+    }
+
+    /// Which row of `list` -- an open unit list `rows` long -- is at `(x, y)`.
+    fn unit_row_at(list: Rect, rows: usize, x: f32, y: f32) -> Option<usize> {
+        if !list.contains(x, y) {
+            return None;
+        }
+        let into = y - list.y - LIST_PAD;
+        if into < 0.0 {
+            return None;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "non-negative and bounded by the list's height"
+        )]
+        let row = (into / LIST_ROW_HEIGHT) as usize;
+        (row < rows).then_some(row)
+    }
+
+    /// The `i`th favourite's row.
+    fn favourite(self, i: usize) -> Rect {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a favourites list is short, far inside f32's exact range"
+        )]
+        let dy = i as f32 * LIST_ROW_HEIGHT;
+        self.first_favourite.translated(0.0, dy)
+    }
+
+    /// Which of `count` favourites is at `(x, y)`: only the rows drawn, which
+    /// stop at the window's bottom edge.
+    fn favourite_at(self, count: usize, x: f32, y: f32) -> Option<usize> {
+        (0..count)
+            .take_while(|&i| self.favourite(i).bottom() <= WINDOW_HEIGHT)
+            .find(|&i| self.favourite(i).contains(x, y))
+    }
+
+    /// Whether `(x, y)` is on the swap button's circle.
+    fn on_swap(self, x: f32, y: f32) -> bool {
+        let (cx, cy) = self.swap.centre();
+        let r = self.swap.w / 2.0;
+        let (dx, dy) = (x - cx, y - cy);
+        dx * dx + dy * dy <= r * r
+    }
+}
+
 /// Main application state.
 pub struct UnitConverterApp {
     /// Currently selected category.
@@ -545,6 +655,11 @@ pub struct UnitConverterApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
+    /// Where the pointer is, while it is over the window: the From box is
+    /// drawn lit under it.
+    pointer: Option<(f32, f32)>,
 }
 
 impl Default for UnitConverterApp {
@@ -571,6 +686,8 @@ impl UnitConverterApp {
             history_scroll: 0.0,
             show_favorites: false,
             from_focused: true,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            pointer: None,
         }
     }
 
@@ -834,92 +951,40 @@ impl UnitConverterApp {
             return false;
         }
 
-        // Main area (between sidebar and history panel).
-        let main_left = SIDEBAR_WIDTH;
-        let main_right = WINDOW_WIDTH - HISTORY_PANEL_WIDTH;
-
-        if x >= main_left && x < main_right {
-            // Swap button: centered horizontally, at y ~ 200.
-            let swap_cx = f32::midpoint(main_left, main_right);
-            let swap_cy: f32 = 230.0;
-            let swap_r: f32 = 18.0;
-            let dx = x - swap_cx;
-            let dy = y - swap_cy;
-            if dx * dx + dy * dy <= swap_r * swap_r {
-                self.swap_units();
-                return true;
-            }
-
-            // Favorite star button: right of the swap area.
-            let star_cx = main_right - 40.0;
-            let star_cy: f32 = 80.0;
-            if (x - star_cx).abs() < 20.0 && (y - star_cy).abs() < 20.0 {
-                self.toggle_favorite();
-                return true;
-            }
-
-            // "From" dropdown toggle.
-            let dd_from_x = main_left + 20.0;
-            let dd_from_y: f32 = 150.0;
-            let dd_from_w: f32 = 180.0;
-            let dd_from_h: f32 = 32.0;
-            if x >= dd_from_x
-                && x <= dd_from_x + dd_from_w
-                && y >= dd_from_y
-                && y <= dd_from_y + dd_from_h
-            {
-                self.from_dropdown_open = !self.from_dropdown_open;
-                self.to_dropdown_open = false;
-                return true;
-            }
-
-            // "To" dropdown toggle.
-            let dd_to_x = main_right - 20.0 - 180.0;
-            let dd_to_y: f32 = 150.0;
-            let dd_to_w: f32 = 180.0;
-            let dd_to_h: f32 = 32.0;
-            if x >= dd_to_x && x <= dd_to_x + dd_to_w && y >= dd_to_y && y <= dd_to_y + dd_to_h {
-                self.to_dropdown_open = !self.to_dropdown_open;
-                self.from_dropdown_open = false;
-                return true;
-            }
-
-            // Click on from input field to focus.
-            let input_x = main_left + 20.0;
-            let input_y: f32 = 100.0;
-            let input_w: f32 = 180.0;
-            let input_h: f32 = 36.0;
-            if x >= input_x && x <= input_x + input_w && y >= input_y && y <= input_y + input_h {
-                self.from_focused = true;
-                return true;
-            }
-
-            // Show favorites toggle.
-            let fav_btn_x = main_left + 20.0;
-            let fav_btn_y: f32 = 370.0;
-            let fav_btn_w: f32 = 120.0;
-            let fav_btn_h: f32 = 30.0;
-            if x >= fav_btn_x
-                && x <= fav_btn_x + fav_btn_w
-                && y >= fav_btn_y
-                && y <= fav_btn_y + fav_btn_h
-            {
-                self.show_favorites = !self.show_favorites;
-                return true;
-            }
-
-            // Favorite items click.
-            if self.show_favorites {
-                let fav_start_y: f32 = 410.0;
-                let fav_item_h: f32 = 28.0;
-                if x >= main_left + 20.0 && y >= fav_start_y {
-                    let idx = ((y - fav_start_y) / fav_item_h) as usize;
-                    if idx < self.favorites.len() {
-                        self.apply_favorite(idx);
-                        return true;
-                    }
-                }
-            }
+        // Main area (between sidebar and history panel): every control where
+        // it is drawn, from the same `Layout` the drawing reads.
+        let layout = Layout::new();
+        if layout.on_swap(x, y) {
+            self.swap_units();
+            return true;
+        }
+        if layout.star.contains(x, y) {
+            self.toggle_favorite();
+            return true;
+        }
+        if layout.from_unit.contains(x, y) {
+            self.from_dropdown_open = !self.from_dropdown_open;
+            self.to_dropdown_open = false;
+            return true;
+        }
+        if layout.to_unit.contains(x, y) {
+            self.to_dropdown_open = !self.to_dropdown_open;
+            self.from_dropdown_open = false;
+            return true;
+        }
+        if layout.from_box.contains(x, y) {
+            self.from_focused = true;
+            return true;
+        }
+        if layout.favourites_toggle.contains(x, y) {
+            self.show_favorites = !self.show_favorites;
+            return true;
+        }
+        if self.show_favorites
+            && let Some(idx) = layout.favourite_at(self.favorites.len(), x, y)
+        {
+            self.apply_favorite(idx);
+            return true;
         }
 
         // History panel clicks (right side).
@@ -933,25 +998,16 @@ impl UnitConverterApp {
 
     /// Handle clicks within open dropdowns.
     fn handle_dropdown_click(&mut self, x: f32, y: f32) -> bool {
-        let main_left = SIDEBAR_WIDTH;
-        let main_right = WINDOW_WIDTH - HISTORY_PANEL_WIDTH;
-        let units = units_for_category(self.selected_category);
+        let layout = Layout::new();
+        let rows = units_for_category(self.selected_category).len();
 
         if self.from_dropdown_open {
-            let dd_x = main_left + 20.0;
-            let dd_y: f32 = 182.0;
-            let dd_w: f32 = 180.0;
-            let item_h: f32 = 28.0;
-            let dd_h = units.len() as f32 * item_h;
-
-            if x >= dd_x && x <= dd_x + dd_w && y >= dd_y && y <= dd_y + dd_h {
-                let idx = ((y - dd_y) / item_h) as usize;
-                if idx < units.len() {
-                    self.from_unit_idx = idx;
-                    self.from_dropdown_open = false;
-                    self.do_convert();
-                    return true;
-                }
+            let list = Layout::unit_list(layout.from_unit, rows);
+            if let Some(idx) = Layout::unit_row_at(list, rows, x, y) {
+                self.from_unit_idx = idx;
+                self.from_dropdown_open = false;
+                self.do_convert();
+                return true;
             }
             // Click outside closes.
             self.from_dropdown_open = false;
@@ -959,20 +1015,12 @@ impl UnitConverterApp {
         }
 
         if self.to_dropdown_open {
-            let dd_x = main_right - 20.0 - 180.0;
-            let dd_y: f32 = 182.0;
-            let dd_w: f32 = 180.0;
-            let item_h: f32 = 28.0;
-            let dd_h = units.len() as f32 * item_h;
-
-            if x >= dd_x && x <= dd_x + dd_w && y >= dd_y && y <= dd_y + dd_h {
-                let idx = ((y - dd_y) / item_h) as usize;
-                if idx < units.len() {
-                    self.to_unit_idx = idx;
-                    self.to_dropdown_open = false;
-                    self.do_convert();
-                    return true;
-                }
+            let list = Layout::unit_list(layout.to_unit, rows);
+            if let Some(idx) = Layout::unit_row_at(list, rows, x, y) {
+                self.to_unit_idx = idx;
+                self.to_dropdown_open = false;
+                self.do_convert();
+                return true;
             }
             // Click outside closes.
             self.to_dropdown_open = false;
@@ -999,6 +1047,18 @@ impl UnitConverterApp {
             return;
         }
         self.history_scroll = (self.history_scroll + delta).clamp(0.0, self.max_history_scroll());
+    }
+
+    /// Follow the pointer: `Some` where it has moved to, `None` when it has
+    /// left the window.
+    fn point_at(&mut self, at: Option<(f32, f32)>) -> EventResult {
+        let lit = self.input_box_state().hovered;
+        self.pointer = at;
+        if self.input_box_state().hovered == lit {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
     }
 
     /// Handle a full event (mouse, key, etc.). Returns EventResult.
@@ -1035,6 +1095,10 @@ impl UnitConverterApp {
                         EventResult::Ignored
                     }
                 }
+                // Where the pointer is, so the From box is drawn lit under
+                // it. Only a change in the box's light is a redraw.
+                MouseEventKind::Move => self.point_at(Some((mouse.x, mouse.y))),
+                MouseEventKind::Leave => self.point_at(None),
                 _ => EventResult::Ignored,
             },
             _ => EventResult::Ignored,
@@ -1234,7 +1298,9 @@ impl UnitConverterApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Favorite star.
+        let layout = Layout::new();
+
+        // Favorite star, in the middle of the square a press on it lands in.
         let star_text = if self.is_current_favorite() {
             "\u{2605}" // filled star
         } else {
@@ -1246,8 +1312,8 @@ impl UnitConverterApp {
             self.palette.overlay0
         };
         tree.push(RenderCommand::Text {
-            x: main_right - 44.0,
-            y: 20.0,
+            x: layout.star.x + 8.0,
+            y: layout.star.y + 8.0,
             text: String::from(star_text),
             color: star_color,
             font_size: 22.0,
@@ -1268,41 +1334,25 @@ impl UnitConverterApp {
             overflow: TextOverflow::Clip,
         });
 
-        // From input field.
-        let input_x = main_left + 20.0;
-        let input_y: f32 = 88.0;
-        let input_w: f32 = 180.0;
-        let input_h: f32 = 36.0;
+        // From input field: the toolkit's field (lane C,
+        // c-e-a-theme-can-shape-the-controls), with its caret while it has
+        // the keys.
+        let from_state = self.input_box_state();
         self.render_input_field(
             tree,
-            input_x,
-            input_y,
-            input_w,
-            input_h,
+            layout.from_box,
             &self.from_input,
-            true,
+            from_state,
+            from_state.focused.then_some(self.from_cursor),
         );
 
         // From unit dropdown button.
-        let dd_x = main_left + 20.0;
-        let dd_y: f32 = 134.0;
-        let dd_w: f32 = 180.0;
-        let dd_h: f32 = 32.0;
         let from_label = from_unit.map_or("Select", |u| u.name);
-        self.render_dropdown_button(
-            tree,
-            dd_x,
-            dd_y,
-            dd_w,
-            dd_h,
-            from_label,
-            self.from_dropdown_open,
-        );
+        self.render_dropdown_button(tree, layout.from_unit, from_label, self.from_dropdown_open);
 
         // --- Swap button ---
-        let swap_cx = f32::midpoint(main_left, main_right);
-        let swap_cy: f32 = 115.0;
-        let swap_r: f32 = 18.0;
+        let (swap_cx, swap_cy) = layout.swap.centre();
+        let swap_r = layout.swap.w / 2.0;
         self.palette.push_surface(
             tree,
             swap_cx - swap_r,
@@ -1324,9 +1374,8 @@ impl UnitConverterApp {
         });
 
         // --- To section ---
-        let to_section_x = main_right - 20.0 - 180.0;
         tree.push(RenderCommand::Text {
-            x: to_section_x,
+            x: layout.to_box.x,
             y: 70.0,
             text: String::from("To"),
             color: self.palette.subtext0,
@@ -1342,27 +1391,19 @@ impl UnitConverterApp {
         } else {
             &self.to_display
         };
+        // The result takes no keys and no press: the same field, never lit
+        // and never marked, so the two boxes share the theme's shape.
         self.render_input_field(
             tree,
-            to_section_x,
-            input_y,
-            input_w,
-            input_h,
+            layout.to_box,
             result_text,
-            false,
+            guitk::field::State::default(),
+            None,
         );
 
         // To unit dropdown button.
         let to_label = to_unit.map_or("Select", |u| u.name);
-        self.render_dropdown_button(
-            tree,
-            to_section_x,
-            dd_y,
-            dd_w,
-            dd_h,
-            to_label,
-            self.to_dropdown_open,
-        );
+        self.render_dropdown_button(tree, layout.to_unit, to_label, self.to_dropdown_open);
 
         // --- Large result display ---
         let result_y: f32 = 190.0;
@@ -1454,15 +1495,15 @@ impl UnitConverterApp {
         });
 
         // --- Favorites toggle button ---
-        let fav_btn_y: f32 = 356.0;
-        let fav_btn_w: f32 = 120.0;
-        let fav_btn_h: f32 = 28.0;
+        let toggle = layout.favourites_toggle;
+        let fav_btn_y = toggle.y;
+        let fav_btn_w = toggle.w;
         self.palette.push_surface(
             tree,
-            main_left + 20.0,
-            fav_btn_y,
-            fav_btn_w,
-            fav_btn_h,
+            toggle.x,
+            toggle.y,
+            toggle.w,
+            toggle.h,
             6.0,
             if self.show_favorites {
                 Surface::Selected
@@ -1487,8 +1528,7 @@ impl UnitConverterApp {
 
         // --- Favorites list ---
         if self.show_favorites {
-            let fav_start_y: f32 = 394.0;
-            let fav_item_h: f32 = 28.0;
+            let fav_start_y = layout.first_favourite.y;
 
             if self.favorites.is_empty() {
                 tree.push(RenderCommand::Text {
@@ -1503,17 +1543,18 @@ impl UnitConverterApp {
                 });
             } else {
                 for (i, fav) in self.favorites.iter().enumerate() {
-                    let fy = fav_start_y + i as f32 * fav_item_h;
-                    if fy + fav_item_h > WINDOW_HEIGHT {
+                    let row = layout.favourite(i);
+                    if row.bottom() > WINDOW_HEIGHT {
                         break;
                     }
+                    let fy = row.y;
 
                     self.palette.push_surface(
                         tree,
-                        main_left + 20.0,
-                        fy,
-                        main_width - 40.0,
-                        fav_item_h - 4.0,
+                        row.x,
+                        row.y,
+                        row.w,
+                        row.h - 4.0,
                         4.0,
                         Surface::Card,
                     );
@@ -1546,35 +1587,19 @@ impl UnitConverterApp {
         });
     }
 
-    /// Render an input field (or read-only result field).
+    /// Draw a value box as the toolkit's field, in the theme's shape: the
+    /// From box the value is typed into, or the To box the result is shown in.
+    /// `caret` is the byte offset the From box's caret stands at, while it has
+    /// the keys.
     fn render_input_field(
         &self,
         tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
+        rect: Rect,
         text: &str,
-        focused: bool,
+        state: guitk::field::State,
+        caret: Option<usize>,
     ) {
-        let border_color = if focused {
-            self.palette.blue
-        } else {
-            self.palette.surface1
-        };
-
-        self.palette
-            .push_surface(tree, x, y, w, h, 8.0, Surface::Card);
-
-        tree.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: border_color,
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(8.0),
-        });
+        guitk::field::draw(tree, &self.palette, rect, state, self.focus_ring_width);
 
         let text_color = if text == "..." || text == "Invalid input" {
             self.palette.overlay0
@@ -1583,27 +1608,54 @@ impl UnitConverterApp {
         };
 
         tree.push(RenderCommand::Text {
-            x: x + 10.0,
-            y: y + 10.0,
+            x: rect.x + 10.0,
+            y: rect.y + 10.0,
             text: String::from(text),
             color: text_color,
-            font_size: 14.0,
+            font_size: INPUT_FONT,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(w - 20.0),
+            max_width: Some(rect.w - 20.0),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Cursor for focused input.
-        if focused && self.from_focused {
-            let cursor_x = x + 10.0 + self.from_cursor as f32 * 8.4;
+        // The caret, after the text before it as that text is drawn: it was
+        // placed a fixed 8.4 points a character, which drifts off the digits
+        // in any font but one. Kept inside the box for a value wider than it.
+        if let Some(at) = caret {
+            let before = text.get(..at).unwrap_or(text);
+            let cursor_x =
+                (rect.x + 10.0 + guitk::text::measure(before, INPUT_FONT, FontWeightHint::Regular))
+                    .min(rect.right() - 10.0);
             tree.push(RenderCommand::Line {
                 x1: cursor_x,
-                y1: y + 8.0,
+                y1: rect.y + 8.0,
                 x2: cursor_x,
-                y2: y + h - 8.0,
+                y2: rect.bottom() - 8.0,
                 color: self.palette.blue,
                 width: 1.5,
             });
+        }
+    }
+
+    /// Whether an open unit list holds the window: a press anywhere off it
+    /// closes it, and no key types while it is up.
+    fn list_open(&self) -> bool {
+        self.from_dropdown_open || self.to_dropdown_open
+    }
+
+    /// How the From box is drawn now: lit under the pointer, marked while the
+    /// keys type into it -- neither while a unit list is open -- and wrong
+    /// while what is in it is no number.
+    fn input_box_state(&self) -> guitk::field::State {
+        let open = !self.list_open();
+        guitk::field::State {
+            hovered: open
+                && self
+                    .pointer
+                    .is_some_and(|(x, y)| Layout::new().from_box.contains(x, y)),
+            focused: open && self.from_focused,
+            disabled: false,
+            invalid: !self.from_input.is_empty() && self.from_input.parse::<f64>().is_err(),
         }
     }
 
@@ -1611,13 +1663,11 @@ impl UnitConverterApp {
     fn render_dropdown_button(
         &self,
         tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
+        rect: Rect,
         label: &str,
         is_open: bool,
     ) {
+        let Rect { x, y, w, h } = rect;
         let bg = if is_open {
             self.palette.surface1
         } else {
@@ -1670,20 +1720,16 @@ impl UnitConverterApp {
 
     /// Render an open dropdown list overlay.
     fn render_dropdown(&self, tree: &mut RenderTree, is_from: bool) {
-        let main_left = SIDEBAR_WIDTH;
-        let main_right = WINDOW_WIDTH - HISTORY_PANEL_WIDTH;
-
-        let dd_x = if is_from {
-            main_left + 20.0
+        let layout = Layout::new();
+        let button = if is_from {
+            layout.from_unit
         } else {
-            main_right - 20.0 - 180.0
+            layout.to_unit
         };
-        let dd_y: f32 = 166.0;
-        let dd_w: f32 = 180.0;
-        let item_h: f32 = 28.0;
-
         let units = units_for_category(self.selected_category);
-        let dd_h = units.len() as f32 * item_h + 8.0;
+        let list = Layout::unit_list(button, units.len());
+        let (dd_x, dd_y, dd_w, dd_h) = (list.x, list.y, list.w, list.h);
+        let item_h = LIST_ROW_HEIGHT;
         let selected_idx = if is_from {
             self.from_unit_idx
         } else {
@@ -1712,7 +1758,7 @@ impl UnitConverterApp {
 
         // Items.
         for (i, unit) in units.iter().enumerate() {
-            let iy = dd_y + 4.0 + i as f32 * item_h;
+            let iy = dd_y + LIST_PAD + i as f32 * item_h;
             let is_sel = i == selected_idx;
 
             if is_sel {
@@ -1920,6 +1966,11 @@ impl UnitConverterApp {
 impl App for UnitConverterApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -2163,6 +2214,265 @@ mod tests {
     }
 
     use guitk::event::{Modifiers, MouseEvent};
+
+    // ========================================================================
+    // Every control where it is drawn
+    // ========================================================================
+
+    fn press_at(app: &mut UnitConverterApp, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// Where the window drew `text`: the first run of it, as drawn.
+    fn ink_of(app: &UnitConverterApp, text: &str) -> (f32, f32) {
+        app.render_tree()
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text: t,
+                    x,
+                    y,
+                    font_size,
+                    ..
+                } if t == text => Some((*x + 3.0, *y + font_size / 2.0)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text:?} is not drawn"))
+    }
+
+    /// **Every control answers where it is drawn.** The press carried its
+    /// own copy of the geometry, and it had drifted from the drawing: the
+    /// From box answered twelve points below its box, the unit buttons, the
+    /// unit lists and the favourites sixteen, the favourites toggle fourteen,
+    /// the star forty, and the swap button -- drawn between the two boxes --
+    /// a hundred and fifteen. Each press here is aimed at the control's ink,
+    /// read back off the frame, so the two cannot drift apart again.
+    #[test]
+    fn every_control_answers_where_it_is_drawn() {
+        let mut app = UnitConverterApp::new();
+        app.do_convert();
+        let (from, to) = (app.from_unit_idx, app.to_unit_idx);
+
+        // The swap button's arrows.
+        let (x, y) = ink_of(&app, "\u{21C4}");
+        press_at(&mut app, x, y);
+        assert_eq!(
+            (app.from_unit_idx, app.to_unit_idx),
+            (to, from),
+            "a press on the swap button swapped nothing"
+        );
+        press_at(&mut app, x, y);
+
+        // The star.
+        let (x, y) = ink_of(&app, "\u{2606}");
+        press_at(&mut app, x, y);
+        assert!(
+            app.is_current_favorite(),
+            "a press on the star kept nothing"
+        );
+
+        // The From unit button, and a row of its list.
+        let units = units_for_category(app.selected_category);
+        let from_name = units.get(from).map(|u| u.name).expect("the From unit");
+        let (x, y) = ink_of(&app, from_name);
+        press_at(&mut app, x, y);
+        assert!(
+            app.from_dropdown_open,
+            "a press on the From unit opened nothing"
+        );
+        let other = units
+            .iter()
+            .position(|u| u.name != from_name && u.name != units[to].name)
+            .expect("a third unit");
+        let tree = app.render_tree();
+        let (x, y) = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. } if text == units[other].name => {
+                    Some((*x + 3.0, *y + 4.0))
+                }
+                _ => None,
+            })
+            .expect("the open list draws the unit");
+        press_at(&mut app, x, y);
+        assert!(
+            !app.from_dropdown_open,
+            "a press on a row left the list open"
+        );
+        assert_eq!(
+            app.from_unit_idx, other,
+            "a press chose a unit other than the row's"
+        );
+
+        // The To unit button.
+        let to_name = units.get(to).map(|u| u.name).expect("the To unit");
+        let (x, y) = ink_of(&app, to_name);
+        press_at(&mut app, x, y);
+        assert!(
+            app.to_dropdown_open,
+            "a press on the To unit opened nothing"
+        );
+        press_at(&mut app, 1.0, 1.0);
+        assert!(!app.to_dropdown_open);
+
+        // The favourites toggle, and the favourite it shows.
+        let (x, y) = ink_of(&app, "\u{2606} Favorites");
+        press_at(&mut app, x, y);
+        assert!(app.show_favorites, "a press on the toggle showed nothing");
+        app.swap_units();
+        let label = app.favorites[0].label();
+        let (x, y) = ink_of(&app, &label);
+        press_at(&mut app, x, y);
+        // The favourite is the pair the star kept, before the list changed it.
+        assert_eq!(
+            (app.from_unit_idx, app.to_unit_idx),
+            (from, to),
+            "a press on the favourite did not apply it"
+        );
+
+        // The From box, at its top edge -- which answered nothing.
+        app.from_focused = false;
+        let r = Layout::new().from_box;
+        press_at(&mut app, r.x + 10.0, r.y + 2.0);
+        assert!(
+            app.from_focused,
+            "a press at the top of the From box missed it"
+        );
+    }
+
+    /// **The From box is the toolkit's field** (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer and out
+    /// when it goes, marked at the user's focus width while the keys type
+    /// into it, red while what is in it is no number -- and neither lit nor
+    /// marked while a unit list is open. The To box is the same field, never
+    /// lit and never marked.
+    #[test]
+    fn the_from_box_is_the_toolkits_field() {
+        use guitk::field::State;
+        let mut app = UnitConverterApp::new();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let layout = Layout::new();
+        let draws = |app: &UnitConverterApp, rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            let mut mark: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(
+                &mut mark,
+                &palette,
+                rect,
+                State { focused: true, ..s },
+                width,
+            );
+            let cmds = app.render_tree().commands;
+            let has = |w: &[RenderCommand]| !w.is_empty() && cmds.windows(w.len()).any(|c| c == w);
+            has(&want) && (s.focused || !has(&mark))
+        };
+        let pointer = |app: &mut UnitConverterApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+        };
+        let keyed = State {
+            focused: true,
+            ..State::default()
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+        let (bx, by) = layout.from_box.centre();
+
+        assert!(
+            draws(&app, layout.from_box, keyed),
+            "the From box is not marked with the keys"
+        );
+        assert!(
+            draws(&app, layout.to_box, State::default()),
+            "the To box is not the field"
+        );
+        assert_eq!(
+            pointer(&mut app, bx, by, MouseEventKind::Move),
+            EventResult::Consumed,
+            "the light came on without a redraw"
+        );
+        assert!(
+            draws(&app, layout.from_box, both),
+            "the From box does not light under the pointer"
+        );
+        pointer(&mut app, 1.0, 1.0, MouseEventKind::Move);
+        assert!(
+            draws(&app, layout.from_box, keyed),
+            "the light stayed when the pointer moved off"
+        );
+        pointer(&mut app, bx, by, MouseEventKind::Move);
+        pointer(&mut app, bx, by, MouseEventKind::Leave);
+        assert!(
+            draws(&app, layout.from_box, keyed),
+            "the light stayed when the pointer left"
+        );
+
+        // An open unit list holds the window: no light, no mark.
+        pointer(&mut app, bx, by, MouseEventKind::Move);
+        app.from_dropdown_open = true;
+        assert!(
+            draws(&app, layout.from_box, State::default()),
+            "the box shows past an open list"
+        );
+        app.from_dropdown_open = false;
+
+        // Not a number: the box says so.
+        app.from_input = String::from("1.2.3");
+        app.from_cursor = app.from_input.len();
+        assert!(
+            draws(
+                &app,
+                layout.from_box,
+                State {
+                    invalid: true,
+                    ..both
+                }
+            ),
+            "the box does not say its value is no number"
+        );
+    }
+
+    /// **The caret stands after the text before it, as drawn.** It was placed
+    /// a fixed 8.4 points a character, which drifts off the digits in any
+    /// font but one.
+    #[test]
+    fn the_caret_stands_where_the_text_before_it_ends() {
+        let mut app = UnitConverterApp::new();
+        app.from_input = String::from("1234.5");
+        app.from_cursor = 3;
+        let r = Layout::new().from_box;
+        let want = r.x + 10.0 + guitk::text::measure("123", INPUT_FONT, FontWeightHint::Regular);
+        let caret = app
+            .render_tree()
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Line { x1, y1, .. } if r.contains(*x1, *y1) => Some(*x1),
+                _ => None,
+            })
+            .expect("the caret is drawn in the box");
+        assert!(
+            (caret - want).abs() < 0.01,
+            "the caret is at {caret}, not {want}"
+        );
+    }
 
     // ========================================================================
     // History panel scrolling

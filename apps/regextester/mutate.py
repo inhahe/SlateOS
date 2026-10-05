@@ -94,14 +94,14 @@ MUTATIONS = [
     # -- matches --------------------------------------------------------------------------
     (
         "F3 does nothing",
-        "        if key.key == Key::F3 {",
-        "        if key.key == Key::F3 && false {",
+        "        if key.key == Key::F3 && plain {",
+        "        if key.key == Key::F3 && plain && false {",
         ["stepping_through_matches_brings_the_current_one_into_both_views"],
     ),
     (
         "Enter in the pattern does not step",
-        "                    Key::Down | Key::Enter => {",
-        "                    Key::Down => {",
+        "                    Key::Down | Key::Enter if plain => {",
+        "                    Key::Down if plain => {",
         ["enter_and_the_arrows_step_through_matches_from_the_pattern"],
     ),
     (
@@ -283,6 +283,138 @@ MUTATIONS = [
         "        let mut right = self.window_width - PADDING;",
         "        let mut right = WINDOW_WIDTH - PADDING;",
         ["the_toolbar_is_laid_out_at_the_size_it_is_given"],
+    ),
+    (
+        'an announced change is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        'an entry deleted elsewhere stays',
+        '        self.library\n            .retain(|e| e.category != PatternCategory::Custom);\n',
+        '',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        'the selection stays in its place',
+        '        self.selected_library_entry = selected.and_then(|(category, name)| {',
+        '        let _kept_in_place = selected.and_then(|(category, name)| {',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != self.library\n    }',
+        '        false\n    }',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        'a chord raises the list of keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'Alt+Escape puts the list of keys away',
+        '            if key.key == Key::Escape && plain {\n'
+        '                self.show_help = false;\n',
+        '            if key.key == Key::Escape {\n'
+        '                self.show_help = false;\n',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'a key reaches what the list of keys covers',
+        '        if self.show_help {\n'
+        '            if key.key == Key::Escape && plain {\n'
+        '                self.show_help = false;\n'
+        '                return true;\n'
+        '            }\n'
+        '            return false;\n'
+        '        }\n',
+        '        if key.key == Key::Escape && plain && self.show_help {\n'
+        '            self.show_help = false;\n'
+        '            return true;\n'
+        '        }\n',
+        ['the_shortcut_list_takes_every_key_while_it_is_up'],
+    ),
+    (
+        'a chord on F3 steps through the matches',
+        '        if key.key == Key::F3 && plain {',
+        '        if key.key == Key::F3 {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(key.modifiers)\n            && let Some(done) = self.handle_chord(key)',
+        '        if key.modifiers.ctrl\n            && let Some(done) = self.handle_chord(key)',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        "a chord works the library's keys",
+        '            _ if !plain => false,\n',
+        '',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'Alt+Tab moves between the fields',
+        '        if key.key == Key::Tab && plain {',
+        '        if key.key == Key::Tab {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'a chord steps to the next match from the pattern',
+        '                    Key::Down | Key::Enter if plain => {',
+        '                    Key::Down | Key::Enter => {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'a chord steps to the previous match from the pattern',
+        '                    Key::Up if plain => {',
+        '                    Key::Up => {',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'Alt+Escape cancels the save',
+        '            Key::Escape if plain => {\n                self.save_name = None;',
+        '            Key::Escape => {\n                self.save_name = None;',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    (
+        'Alt+Enter saves',
+        '            Key::Enter if plain => self.confirm_save(),',
+        '            Key::Enter => self.confirm_save(),',
+        ['a_chord_is_neither_a_tester_key_nor_typing'],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'a pattern that does not compile is not drawn red',
+        '            self.compile_error.is_some(),\n',
+        '            false,\n',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a text box is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(target),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a name the library refused is not drawn red',
+        '        self.draw_box(f, field, true, self.save_error.is_some(), Target::SaveName);',
+        '        self.draw_box(f, field, true, false, Target::SaveName);',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
     ),
 ]
 

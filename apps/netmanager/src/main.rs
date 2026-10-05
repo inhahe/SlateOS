@@ -43,14 +43,19 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use unsaved::{Choice, Question};
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
@@ -225,7 +230,12 @@ pub struct IpConfig {
     pub subnet_mask: String,
     pub gateway: String,
     pub dns_servers: Vec<String>,
-    pub dhcp_enabled: bool,
+    /// Whether the interface takes its addresses from DHCP: on, off -- set
+    /// by hand -- or `None`, nothing says. The kernel's `/proc/net` does
+    /// not, so every interface read from it starts at `None`; it started at
+    /// "on", which disabled its address boxes and read "DHCP: Enabled" on
+    /// the IP tab while Properties, rightly, read "Not reported".
+    pub dhcp_enabled: Option<bool>,
 }
 
 impl Default for IpConfig {
@@ -235,7 +245,7 @@ impl Default for IpConfig {
             subnet_mask: String::from("255.255.255.0"),
             gateway: String::new(),
             dns_servers: Vec::new(),
-            dhcp_enabled: true,
+            dhcp_enabled: None,
         }
     }
 }
@@ -243,7 +253,7 @@ impl Default for IpConfig {
 impl IpConfig {
     /// Validate basic IP configuration fields.
     fn validate(&self) -> Result<(), String> {
-        if !self.dhcp_enabled {
+        if self.dhcp_enabled != Some(true) {
             if self.ip_address.is_empty() {
                 return Err("IP address is required for static configuration".into());
             }
@@ -575,14 +585,34 @@ pub struct NetManagerApp {
     /// shows the last page instead of a blank sidebar, because
     /// [`scroll_window::visible`] clamps the *result* and leaves this alone.
     pub sidebar_scroll: usize,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     /// Which text field the keyboard is typing into, if any.
     ///
     /// `None` means keystrokes are navigation, not text. Kept as an explicit
     /// field rather than inferred from `editing_ip` because the DNS input is
     /// typeable on a tab where nothing is "being edited".
-    /// Whether the shortcut card is up.
-    pub show_help: bool,
     pub focus: Option<Field>,
+    /// The focused box's caret and selection, laid over its text.
+    ///
+    /// The box's string ([`Self::field_mut`]) stays the truth -- Apply,
+    /// Cancel and Add read it and reset it -- and this is the editor over it
+    /// while it has the keyboard. Whenever the string has changed under it
+    /// (Add empties the DNS box; Edit reloads the addresses), the next key or
+    /// press reloads it with the caret at the end, so the caret never points
+    /// into text that is no longer there.
+    editor: TextInput,
+    /// What the last copy or cut took, from any box.
+    clipboard: String,
+    /// The text box under the pointer, if any: its edge is warmed.
+    pub hover: Option<Field>,
+    /// How wide the mark is round a box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
+    /// The question asked before an edit Apply has not sent is lost, and
+    /// what it is holding up.
+    question: Option<Question<Leaving>>,
     /// Carries the fraction of a row a wheel event is worth.
     ///
     /// Rounding each event on its own would discard it, and a precision
@@ -923,7 +953,7 @@ fn interface_of(a: &hwquery::NetworkAdapterInfo, id: u32) -> NetworkInterface {
             subnet_mask: address_value(&a.subnet),
             gateway: address_value(&a.gateway),
             dns_servers,
-            dhcp_enabled: true,
+            dhcp_enabled: None,
         },
         state: match a.up {
             Some(true) => ConnectionState::Connected,
@@ -1002,6 +1032,11 @@ impl NetManagerApp {
             sidebar_scroll: 0,
             show_help: false,
             focus: None,
+            editor: TextInput::new(),
+            clipboard: String::new(),
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            question: None,
             wheel: wheel::Accumulator::default(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             listing: Listing::NotRead,
@@ -1040,7 +1075,18 @@ impl NetManagerApp {
     /// A failed read empties the list rather than keeping the last one: rows
     /// that stay after a read that could not see them would be shown as
     /// current when nothing says they are.
+    ///
+    /// The selection follows its interface by name, as the Wi-Fi selection
+    /// follows its SSID: a re-read can reorder the list or drop rows, and an
+    /// index kept across one points at whichever interface now sits there.
+    ///
+    /// An open editor keeps what has been typed into it while its interface
+    /// is still listed: Refresh, and the re-read after Enable or Disable,
+    /// reloaded the configuration from the interface and threw the edit away
+    /// with the editor still open. If the interface has gone, so has the
+    /// edit, and the status says so.
     pub fn read_interfaces_from(&mut self, provider: &dyn hwquery::HardwareProvider) {
+        let selected = self.selected_iface().map(|iface| iface.name.clone());
         match provider.query_network() {
             Ok(adapters) => {
                 self.interfaces = adapters
@@ -1055,14 +1101,42 @@ impl NetManagerApp {
                 self.listing = Listing::Unreadable(why.to_string());
             }
         }
-        self.selected_interface = self
-            .selected_interface
+        let found = selected
+            .as_deref()
+            .and_then(|name| self.interfaces.iter().position(|iface| iface.name == name));
+        self.selected_interface = found
+            .unwrap_or(self.selected_interface)
             .min(self.interfaces.len().saturating_sub(1));
+        let dropped = match (self.editing_ip, found) {
+            // Still there: the edit stands.
+            (true, Some(_)) => {
+                self.finish_reading();
+                return;
+            }
+            (true, None) => selected,
+            (false, _) => None,
+        };
+        self.editing_ip = false;
+        if self.focus.is_some_and(|field| !self.field_enabled(field)) {
+            self.focus = None;
+        }
         self.edit_ip_config = self
             .interfaces
             .get(self.selected_interface)
             .map(|iface| iface.ip_config.clone())
             .unwrap_or_default();
+        self.finish_reading();
+        if let Some(name) = dropped {
+            self.status_message = format!(
+                "{name} is no longer listed, and its unapplied changes went with it. {}",
+                self.status_message
+            );
+        }
+    }
+
+    /// The status line after a read: the selected interface's summary, or
+    /// why there is none.
+    fn finish_reading(&mut self) {
         self.status_message = self.interfaces.get(self.selected_interface).map_or_else(
             || match &self.listing {
                 Listing::Unreadable(why) => format!("Could not read the interfaces: {why}"),
@@ -1212,10 +1286,18 @@ impl NetManagerApp {
         };
         let name = iface.name.clone();
         let config = &self.edit_ip_config;
-        if config.dhcp_enabled {
-            return Err(format!(
-                "Cannot switch {name} to DHCP from here: the dhcpcd command does that, run as an administrator"
-            ));
+        if config.dhcp_enabled == Some(true) {
+            // Two refusals, because "cannot switch to DHCP" is untrue when
+            // the switch was on from the start and nobody moved it.
+            return Err(if iface.ip_config.dhcp_enabled == Some(true) {
+                String::from(
+                    "DHCP is switched on, and Apply sends nothing under DHCP: switch it off to set a static configuration (the dhcpcd command manages DHCP, run as an administrator)",
+                )
+            } else {
+                format!(
+                    "Cannot switch {name} to DHCP from here: the dhcpcd command does that, run as an administrator"
+                )
+            });
         }
         let field = |label: &str, text: &str| {
             octets(text).ok_or_else(|| format!("Not an address: {label} {text}"))
@@ -1272,8 +1354,145 @@ impl NetManagerApp {
         }
     }
 
-    /// Add a DNS server to the edited IP config.
+    /// Whether the DNS servers can be changed here: not while the
+    /// configuration being edited has DHCP switched on, since Apply sends
+    /// nothing under DHCP -- a list edited then is a change nothing can
+    /// make.
+    pub fn dns_editable(&self) -> bool {
+        self.edit_ip_config.dhcp_enabled != Some(true)
+    }
+
+    /// Open the editor on the selected interface, if it is not open: a
+    /// change to the configuration is an edit, which only the editor's Apply
+    /// sends and only its Cancel takes back.
+    ///
+    /// A DNS server added on the DNS tab used to change the configuration
+    /// with the editor closed. Nothing could send it -- there was no Apply on
+    /// that tab -- and Edit, on the IP tab, reloaded the configuration from
+    /// the interface and threw it away.
+    fn begin_edit(&mut self) {
+        if !self.editing_ip {
+            self.start_editing_ip();
+        }
+    }
+
+    /// Whether the open edit has changes Apply has not sent: an editor
+    /// opened and left as it was is not one.
+    pub fn unapplied(&self) -> bool {
+        self.editing_ip
+            && self
+                .selected_iface()
+                .is_some_and(|iface| iface.ip_config != self.edit_ip_config)
+    }
+
+    /// Leave the open edit -- for another interface, or to close the
+    /// window -- asking first if it has changes Apply has not sent: Apply
+    /// them, drop them, or stay. Choosing another interface reloaded the
+    /// editor from it, and Escape and the window's X closed the window,
+    /// each throwing the changes away without a word.
+    fn leave(&mut self, to: Leaving) -> Action {
+        if !self.unapplied() {
+            return self.go(to);
+        }
+        let message = self.selected_iface().map_or_else(
+            || String::from("The configuration has changes that are not applied."),
+            |iface| format!("{} has changes that are not applied.", iface.name),
+        );
+        let prompt = match to {
+            Leaving::Close => "Apply them before closing?",
+            Leaving::Interface(_) => "Apply them before choosing another interface?",
+        };
+        // The list of keys would be drawn over the question it cannot answer.
+        self.show_help = false;
+        self.question = Some(Question::to_apply(&message, prompt, to));
+        Action::Redraw
+    }
+
+    /// Do what the open edit was left for, the edit settled.
+    fn go(&mut self, to: Leaving) -> Action {
+        match to {
+            Leaving::Close => Action::Quit,
+            Leaving::Interface(index) => {
+                self.select_interface(index);
+                self.focus = None;
+                Action::Redraw
+            }
+        }
+    }
+
+    /// Offer `event` to the question about an unapplied edit, which has
+    /// every key and press while it is up: what reached the window under it
+    /// would be a change made while being asked about the changes.
+    fn ask(&mut self, event: &Event) -> Action {
+        let Some(question) = self.question.as_mut() else {
+            return Action::None;
+        };
+        match question.handle(event) {
+            Some(choice) => {
+                let to = question.pending();
+                self.question = None;
+                self.answer(choice, to)
+            }
+            None => Action::Redraw,
+        }
+    }
+
+    /// Act on the answer to the question about an unapplied edit.
+    ///
+    /// Apply goes on only if the kernel takes the change: a refusal stays,
+    /// with the edit open and the reason on the status line. Its re-read can
+    /// reorder the list, so the interface being chosen is found again by
+    /// name, and "Applied to ..." stays on the status line over the newly
+    /// chosen interface's summary.
+    fn answer(&mut self, choice: Choice, to: Leaving) -> Action {
+        match choice {
+            Choice::Save => {
+                let target = match to {
+                    Leaving::Interface(index) => {
+                        self.interfaces.get(index).map(|iface| iface.name.clone())
+                    }
+                    Leaving::Close => None,
+                };
+                if let Err(why) = self.apply_ip_config() {
+                    self.status_message = why;
+                    return Action::Redraw;
+                }
+                self.focus = None;
+                match to {
+                    Leaving::Close => Action::Quit,
+                    Leaving::Interface(_) => {
+                        let applied = std::mem::take(&mut self.status_message);
+                        if let Some(index) = target.and_then(|name| {
+                            self.interfaces.iter().position(|iface| iface.name == name)
+                        }) {
+                            self.select_interface(index);
+                        }
+                        self.status_message = applied;
+                        Action::Redraw
+                    }
+                }
+            }
+            // Going drops the edit: choosing an interface loads it into a
+            // closed editor, and closing is closing.
+            Choice::Discard => self.go(to),
+            Choice::Cancel => Action::Redraw,
+        }
+    }
+
+    /// Why the DNS servers cannot be changed now, if they cannot.
+    fn dns_locked(&self) -> Result<(), String> {
+        if self.dns_editable() {
+            Ok(())
+        } else {
+            Err(String::from(
+                "DHCP is switched on, and Apply sends nothing under DHCP: switch it off on the IP Configuration tab to set the DNS servers",
+            ))
+        }
+    }
+
+    /// Add a DNS server to the edited IP config, opening the editor.
     pub fn add_dns_server(&mut self, server: &str) -> Result<(), String> {
+        self.dns_locked()?;
         if server.is_empty() {
             return Err("DNS server address is empty".into());
         }
@@ -1287,27 +1506,34 @@ impl NetManagerApp {
         {
             return Err("DNS server already in list".into());
         }
+        self.begin_edit();
         self.edit_ip_config.dns_servers.push(server.to_string());
         Ok(())
     }
 
-    /// Remove a DNS server by index from the edited IP config.
+    /// Remove a DNS server by index from the edited IP config, opening the
+    /// editor.
     pub fn remove_dns_server(&mut self, index: usize) -> Result<(), String> {
+        self.dns_locked()?;
         if index >= self.edit_ip_config.dns_servers.len() {
             return Err("DNS server index out of range".into());
         }
+        self.begin_edit();
         self.edit_ip_config.dns_servers.remove(index);
         Ok(())
     }
 
-    /// Move a DNS server up in priority (lower index = higher priority).
+    /// Move a DNS server up in priority (lower index = higher priority),
+    /// opening the editor.
     pub fn move_dns_up(&mut self, index: usize) -> Result<(), String> {
+        self.dns_locked()?;
         if index == 0 {
             return Err("Already at top".into());
         }
         if index >= self.edit_ip_config.dns_servers.len() {
             return Err("Index out of range".into());
         }
+        self.begin_edit();
         // `index` is known non-zero above, so the saturation never fires; it is
         // written this way so the subtraction cannot underflow even if the
         // guard above is ever changed.
@@ -1317,8 +1543,9 @@ impl NetManagerApp {
         Ok(())
     }
 
-    /// Move a DNS server down in priority.
+    /// Move a DNS server down in priority, opening the editor.
     pub fn move_dns_down(&mut self, index: usize) -> Result<(), String> {
+        self.dns_locked()?;
         // A row at `usize::MAX` cannot have one below it, so an overflow here
         // is the same answer as "already at bottom" rather than a panic.
         let below = index
@@ -1327,6 +1554,7 @@ impl NetManagerApp {
         if below >= self.edit_ip_config.dns_servers.len() {
             return Err("Already at bottom".into());
         }
+        self.begin_edit();
         self.edit_ip_config.dns_servers.swap(index, below);
         Ok(())
     }
@@ -1644,6 +1872,15 @@ pub enum Field {
     Mask,
     Gateway,
     DnsInput,
+}
+
+/// What the question about an unapplied edit is holding up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leaving {
+    /// The window closing: Escape, or its X.
+    Close,
+    /// The interface at this index in the sidebar being chosen.
+    Interface(usize),
 }
 
 /// What a click at a point means.
@@ -2277,82 +2514,36 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
     y = render_section_title(frame, &app.palette, "IP Configuration", lx, y);
 
     // DHCP toggle
-    let dhcp_label = if ip.dhcp_enabled {
-        "DHCP: Enabled"
-    } else {
-        "DHCP: Disabled (Static)"
+    // What Properties says when nothing reports it, rather than a guess.
+    let dhcp_label = match ip.dhcp_enabled {
+        Some(true) => "DHCP: Enabled",
+        Some(false) => "DHCP: Disabled (Static)",
+        None => "DHCP: Not reported",
     };
-    let dhcp = render_toggle_row(frame, &app.palette, dhcp_label, ip.dhcp_enabled, lx, y);
+    let dhcp = render_toggle_row(
+        frame,
+        &app.palette,
+        dhcp_label,
+        ip.dhcp_enabled == Some(true),
+        lx,
+        y,
+    );
     frame.hit(Target::DhcpToggle, dhcp);
     y += FIELD_HEIGHT + 8.0;
 
-    // IP fields (dimmed if DHCP is on and not editing)
-    let field_color = if ip.dhcp_enabled && !app.editing_ip {
-        app.palette.overlay0
-    } else {
-        app.palette.text
-    };
-
-    let ip_fields: &[(&str, &str, Field)] = &[
-        ("IP Address:", &ip.ip_address, Field::Ip),
-        ("Subnet Mask:", &ip.subnet_mask, Field::Mask),
-        ("Gateway:", &ip.gateway, Field::Gateway),
-    ];
-
-    for (label, value, field) in ip_fields {
-        let editing = app.editing_ip;
-        let value = if editing && app.focus == Some(*field) {
-            // The caret is drawn into the text rather than as a separate
-            // command, so that a field with focus is distinguishable in the
-            // render tree — which is the only thing a test can see.
-            format!("{value}_")
-        } else {
-            (*value).to_string()
-        };
-        let box_rect = render_editable_field(
-            frame,
-            &app.palette,
-            label,
-            &value,
-            lx,
-            vx,
-            y,
-            field_color,
-            editing,
-        );
-        if editing {
-            // Only while editing: outside edit mode the boxes are not drawn,
-            // and a click target with nothing under it is a trap.
-            frame.hit(Target::Focus(*field), box_rect);
-        }
+    for (label, field) in [
+        ("IP Address:", Field::Ip),
+        ("Subnet Mask:", Field::Mask),
+        ("Gateway:", Field::Gateway),
+    ] {
+        render_address_row(frame, app, label, field, (lx, vx, y));
         y += FIELD_HEIGHT + 6.0;
     }
 
     // Buttons
     y += 12.0;
     if app.editing_ip {
-        let apply = render_button(
-            frame,
-            &app.palette,
-            "Apply",
-            lx,
-            y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            app.palette.green,
-        );
-        frame.hit(Target::ApplyIp, apply);
-        let cancel = render_button(
-            frame,
-            &app.palette,
-            "Cancel",
-            lx + BUTTON_WIDTH + 12.0,
-            y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            app.palette.red,
-        );
-        frame.hit(Target::CancelIp, cancel);
+        render_apply_cancel(frame, app, lx, y);
     } else {
         let edit = render_button(
             frame,
@@ -2366,6 +2557,34 @@ fn render_tab_ip_config(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32
         );
         frame.hit(Target::EditIp, edit);
     }
+}
+
+/// The editor's Apply and Cancel, side by side from `lx`, `y`: on the IP tab
+/// and on the DNS tab, since both edit the one configuration that Apply
+/// sends whole.
+fn render_apply_cancel(frame: &mut Frame, app: &NetManagerApp, lx: f32, y: f32) {
+    let apply = render_button(
+        frame,
+        &app.palette,
+        "Apply",
+        lx,
+        y,
+        BUTTON_WIDTH,
+        BUTTON_HEIGHT,
+        app.palette.green,
+    );
+    frame.hit(Target::ApplyIp, apply);
+    let cancel = render_button(
+        frame,
+        &app.palette,
+        "Cancel",
+        lx + BUTTON_WIDTH + 12.0,
+        y,
+        BUTTON_WIDTH,
+        BUTTON_HEIGHT,
+        app.palette.red,
+    );
+    frame.hit(Target::CancelIp, cancel);
 }
 
 /// Render the DNS tab content.
@@ -2435,7 +2654,12 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
                 overflow: TextOverflow::Clip,
             });
 
-            // Up/Down/Remove buttons (small)
+            // Up/Down/Remove buttons (small) -- none under DHCP, which sets
+            // the list.
+            if !app.dns_editable() {
+                y += DNS_ROW_HEIGHT + 2.0;
+                continue;
+            }
             let btn_y = y + 3.0;
             let btn_x = lx + pw - SECTION_PADDING * 2.0 - 100.0;
 
@@ -2469,63 +2693,32 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         }
     }
 
-    // Add DNS input
     y += 12.0;
+    if !app.dns_editable() {
+        // Said rather than left to be discovered: the list has no buttons,
+        // and the reason is on another tab.
+        frame.push(RenderCommand::Text {
+            x: lx,
+            y,
+            text: String::from(
+                "DHCP is switched on, and Apply sends nothing under it. Switch it off on the IP Configuration tab to set these.",
+            ),
+            color: app.palette.subtext0,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((pw - SECTION_PADDING * 2.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        return;
+    }
+
+    // Add DNS input
     y = render_section_title(frame, &app.palette, "Add DNS Server", lx, y);
 
-    // Input field
+    // The box the address is typed into.
     let input = Rect::new(lx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
-    let focused = app.focus == Some(Field::DnsInput);
-    app.palette.push_surface(
-        frame,
-        input.x,
-        input.y,
-        input.w,
-        input.h,
-        4.0,
-        Surface::Card,
-    );
-    frame.push(RenderCommand::StrokeRect {
-        x: input.x,
-        y: input.y,
-        width: input.w,
-        height: input.h,
-        // A focused box is outlined in the accent colour, so that typing has
-        // somewhere visible to go before the first character arrives.
-        color: if focused {
-            app.palette.blue
-        } else {
-            app.palette.overlay0
-        },
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    render_text_box(frame, app, Field::DnsInput, input, "e.g. 8.8.8.8");
     frame.hit(Target::Focus(Field::DnsInput), input);
-    let typed = if focused {
-        format!("{}_", app.dns_input)
-    } else {
-        app.dns_input.clone()
-    };
-    let dns_display = if app.dns_input.is_empty() && !focused {
-        "e.g. 8.8.8.8"
-    } else {
-        &typed
-    };
-    let dns_color = if app.dns_input.is_empty() && !focused {
-        app.palette.overlay0
-    } else {
-        app.palette.text
-    };
-    frame.push(RenderCommand::Text {
-        x: lx + 8.0,
-        y: y + 7.0,
-        text: dns_display.to_string(),
-        color: dns_color,
-        font_size: 12.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(FIELD_INPUT_WIDTH - 16.0),
-        overflow: TextOverflow::Ellipsis,
-    });
 
     // Add button
     let add = render_button(
@@ -2539,6 +2732,12 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         app.palette.green,
     );
     frame.hit(Target::DnsAdd, add);
+
+    // A change to the list opens the editor; its Apply and Cancel are here
+    // as well as on the IP tab, beside the change they send or take back.
+    if app.editing_ip {
+        render_apply_cancel(frame, app, lx, y + FIELD_HEIGHT + 16.0);
+    }
 }
 
 /// Render the WiFi tab content.
@@ -3254,71 +3453,134 @@ fn render_field_row(
     });
 }
 
-/// Render an editable field row with input box styling.
-///
-/// Returns the input box, so the caller can record it as a click target
-/// without measuring it a second time.
-// label + value strings + 3 geometry floats + color + editing flag + tree.
-// Grouping would not help.
-#[allow(clippy::too_many_arguments)]
-fn render_editable_field(
+/// One address row of the IP tab, its top at `y`: the label at `lx`, and at
+/// `vx` the address -- in the toolkit's field while the editor is open,
+/// plain text (dimmed under DHCP) otherwise.
+fn render_address_row(
     frame: &mut Frame,
-    pal: &Palette,
+    app: &NetManagerApp,
     label: &str,
-    value: &str,
-    lx: f32,
-    vx: f32,
-    y: f32,
-    color: Color,
-    editing: bool,
-) -> Rect {
+    field: Field,
+    (lx, vx, y): (f32, f32, f32),
+) {
     frame.push(RenderCommand::Text {
         x: lx,
         y: y + 6.0,
         text: label.to_string(),
-        color: pal.subtext0,
+        color: app.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,
     });
-
-    let box_rect = Rect::new(vx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
-    if editing {
-        // Input box background
-        pal.push_surface(
-            frame,
-            box_rect.x,
-            box_rect.y,
-            box_rect.w,
-            box_rect.h,
-            4.0,
-            Surface::Card,
-        );
-        frame.push(RenderCommand::StrokeRect {
-            x: box_rect.x,
-            y: box_rect.y,
-            width: box_rect.w,
-            height: box_rect.h,
-            color: pal.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+    if app.editing_ip {
+        let rect = Rect::new(vx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
+        render_text_box(frame, app, field, rect, "");
+        // Only a box that can take the keyboard is a target: a press on a
+        // disabled one would do nothing, and a target that does nothing is a
+        // trap.
+        if app.field_enabled(field) {
+            frame.hit(Target::Focus(field), rect);
+        }
+        return;
     }
-
-    let display = if value.is_empty() { "---" } else { value };
+    let value = app.field_text(field);
     frame.push(RenderCommand::Text {
-        x: vx + if editing { 8.0 } else { 0.0 },
+        x: vx,
         y: y + 7.0,
-        text: display.to_string(),
-        color,
+        text: if value.is_empty() { "---" } else { value }.to_string(),
+        color: if app.edit_ip_config.dhcp_enabled == Some(true) {
+            app.palette.overlay0
+        } else {
+            app.palette.text
+        },
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(FIELD_INPUT_WIDTH - 10.0),
         overflow: TextOverflow::Ellipsis,
     });
+}
 
-    box_rect
+/// The size a box's text is drawn at.
+const BOX_TEXT_SIZE: f32 = 12.0;
+
+/// How far a box's text sits in from either side of the box.
+const BOX_TEXT_INSET: f32 = 8.0;
+
+/// The most characters an address box holds: room for any address, IPv6's
+/// longest among them, and a stop for a paste of something that is not one.
+const ADDRESS_CAPACITY: usize = 64;
+
+/// How wide the text in a box drawn at `rect` may run before it scrolls.
+fn box_text_width(rect: Rect) -> f32 {
+    (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0)
+}
+
+/// The box `field` at `rect`: the toolkit's field, in the state
+/// [`NetManagerApp::box_state`] says, holding the box's text -- with the
+/// caret and the selection while it has the keyboard, scrolled to keep the
+/// caret in view -- or `placeholder`, grey, while it is empty and idle.
+fn render_text_box(
+    frame: &mut Frame,
+    app: &NetManagerApp,
+    field: Field,
+    rect: Rect,
+    placeholder: &str,
+) {
+    let state = app.box_state(field);
+    field::draw(frame, &app.palette, rect, state, app.focus_ring_width);
+    let text = app.field_text(field);
+    let line = text::line_height(BOX_TEXT_SIZE, FontWeightHint::Regular);
+    let (tx, ty, tw) = (
+        rect.x + BOX_TEXT_INSET,
+        rect.y + (rect.h - line) / 2.0,
+        box_text_width(rect),
+    );
+    if text.is_empty() && !state.focused && !placeholder.is_empty() {
+        frame.push(RenderCommand::Text {
+            x: tx,
+            y: ty,
+            text: placeholder.to_string(),
+            color: app.palette.subtext0,
+            font_size: BOX_TEXT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(tw),
+            overflow: TextOverflow::Ellipsis,
+        });
+        return;
+    }
+    // The editor's selection, while the box has the keyboard and the editor
+    // still holds the box's text.
+    let selection_anchor = if app.focus == Some(field) && app.editor.text() == text {
+        app.editor.selection_anchor()
+    } else {
+        None
+    };
+    let mut typed = RenderTree::new();
+    textedit::draw(
+        &mut typed,
+        &textedit::SingleLine {
+            text,
+            cursor: app.drawn_cursor(field),
+            selection_anchor,
+            focused: state.focused,
+            x: tx,
+            y: ty,
+            width: tw,
+            line_height: line,
+            font_size: BOX_TEXT_SIZE,
+            weight: FontWeightHint::Regular,
+            color: if state.disabled {
+                app.palette.overlay0
+            } else {
+                app.palette.text
+            },
+            selection_bg: app.palette.accent,
+            selection_fg: app.palette.crust,
+            caret_width: textedit::CARET_WIDTH,
+        },
+    );
+    frame.extend(typed.commands);
 }
 
 /// Render a toggle indicator row.
@@ -3499,30 +3761,112 @@ impl NetManagerApp {
         }
     }
 
-    /// Give a field the keyboard.
+    /// The text behind a box: [`Self::field_mut`] for reading.
+    fn field_text(&self, field: Field) -> &str {
+        match field {
+            Field::Ip => &self.edit_ip_config.ip_address,
+            Field::Mask => &self.edit_ip_config.subnet_mask,
+            Field::Gateway => &self.edit_ip_config.gateway,
+            Field::DnsInput => &self.dns_input,
+        }
+    }
+
+    /// Whether `field` can take the keyboard now.
     ///
-    /// The three IP fields only accept focus while the IP config is being
-    /// edited: outside edit mode their boxes are not drawn, and a caret in an
-    /// invisible box is a keystroke going somewhere the user cannot see.
+    /// Nothing can while DHCP is switched on: Apply sends nothing under
+    /// DHCP, so the boxes are drawn disabled. Otherwise the DNS box always
+    /// can -- a server added opens the editor -- and the three address boxes
+    /// only while the editor is open: outside it their boxes are not drawn,
+    /// and a caret in an invisible box is a keystroke going somewhere the
+    /// user cannot see.
+    fn field_enabled(&self, field: Field) -> bool {
+        match field {
+            Field::DnsInput => self.dns_editable(),
+            Field::Ip | Field::Mask | Field::Gateway => {
+                self.editing_ip && self.edit_ip_config.dhcp_enabled != Some(true)
+            }
+        }
+    }
+
+    /// Give a field the keyboard, its caret at the end of its text.
     fn focus_field(&mut self, field: Field) -> Action {
-        if field != Field::DnsInput && !self.editing_ip {
+        if !self.field_enabled(field) {
             return Action::None;
         }
         if self.focus == Some(field) {
             return Action::None;
         }
         self.focus = Some(field);
+        self.load_editor(field);
         Action::Redraw
     }
 
-    /// The field after `field` in tab order, staying within the same tab's
-    /// fields — Tab out of the DNS box goes nowhere, because there is nowhere
-    /// on that tab for it to go.
-    fn next_field(field: Field) -> Field {
-        match field {
-            Field::Ip => Field::Mask,
-            Field::Mask => Field::Gateway,
-            Field::Gateway | Field::DnsInput => Field::Ip,
+    /// Load the editor from `field`'s text, the caret at its end.
+    fn load_editor(&mut self, field: Field) {
+        let text = self.field_text(field).to_owned();
+        self.editor.set_text(&text);
+    }
+
+    /// Reload the editor from `field`'s text if the text has changed under
+    /// it -- from outside the box, by Add or Edit or a test.
+    fn sync_editor(&mut self, field: Field) {
+        if self.editor.text() != self.field_text(field) {
+            self.load_editor(field);
+        }
+    }
+
+    /// Where `field`'s caret is drawn: the editor's while the box has the
+    /// keyboard (its end, if the text changed under the editor), and the
+    /// start of the text otherwise -- an idle box shows the beginning of its
+    /// address. One answer for the drawing and for a press, so a press lands
+    /// on the character drawn under it however the box was scrolled.
+    fn drawn_cursor(&self, field: Field) -> TextCursor {
+        if self.focus != Some(field) {
+            return TextCursor::default();
+        }
+        let text = self.field_text(field);
+        if self.editor.text() == text {
+            self.editor.cursor()
+        } else {
+            TextCursor::from(text.len())
+        }
+    }
+
+    /// How the box `field` is drawn.
+    ///
+    /// Lit under the pointer, and with the keyboard's mark while it has the
+    /// keyboard -- not under the shortcut card, which covers it. Disabled
+    /// while it cannot take the keyboard: an address box under DHCP. Red
+    /// while what is in it would be refused: an address box holding
+    /// something that is not an address, or the DNS box holding one, or a
+    /// server already listed. An empty box is not red: it is not wrong yet,
+    /// only not filled in, and Apply says so if it matters.
+    fn box_state(&self, field: Field) -> field::State {
+        let enabled = self.field_enabled(field);
+        let text = self.field_text(field);
+        let refused = !is_valid_ipv4(text)
+            || (field == Field::DnsInput
+                && self.edit_ip_config.dns_servers.iter().any(|s| s == text));
+        field::State {
+            hovered: enabled && self.hover == Some(field),
+            focused: enabled && self.focus == Some(field) && !self.show_help,
+            disabled: !enabled,
+            invalid: enabled && !text.is_empty() && refused,
+        }
+    }
+
+    /// The box after `field` in tab order -- or before it, `backwards` --
+    /// round the three address boxes. The DNS box is the only box on its
+    /// tab, so Tab keeps it: the address boxes are on another tab, and a
+    /// keystroke sent to a box that is not drawn goes somewhere the user
+    /// cannot see. (Tab out of the DNS box used to move the keyboard to the
+    /// address box on the IP tab, with the DNS tab still showing.)
+    fn next_field(field: Field, backwards: bool) -> Field {
+        match (field, backwards) {
+            (Field::Ip, false) | (Field::Gateway, true) => Field::Mask,
+            (Field::Mask, false) | (Field::Ip, true) => Field::Gateway,
+            (Field::Gateway, false) | (Field::Mask, true) => Field::Ip,
+            (Field::DnsInput, _) => Field::DnsInput,
         }
     }
 
@@ -3597,9 +3941,13 @@ impl NetManagerApp {
                 Action::Redraw
             }
             Target::Interface(i) => {
-                self.select_interface(i);
-                self.focus = None;
-                Action::Redraw
+                // The interface already chosen is not a choice: choosing it
+                // again reloaded it, and threw an open edit away.
+                if i == self.selected_interface {
+                    self.focus = None;
+                    return Action::Redraw;
+                }
+                self.leave(Leaving::Interface(i))
             }
             Target::Tab(tab) => {
                 self.set_tab(tab);
@@ -3614,12 +3962,23 @@ impl NetManagerApp {
                 if !self.editing_ip {
                     self.start_editing_ip();
                 }
-                self.edit_ip_config.dhcp_enabled = !self.edit_ip_config.dhcp_enabled;
+                // Not reported moves to on, as off does: the switch is drawn
+                // off for both.
+                self.edit_ip_config.dhcp_enabled =
+                    Some(self.edit_ip_config.dhcp_enabled != Some(true));
+                // Under DHCP the address boxes are disabled, and a disabled
+                // box does not keep the keyboard.
+                if self.focus.is_some_and(|field| !self.field_enabled(field)) {
+                    self.focus = None;
+                }
                 Action::Redraw
             }
             Target::EditIp => {
                 self.start_editing_ip();
-                self.focus = Some(Field::Ip);
+                // The address box takes the keyboard -- unless the
+                // configuration is DHCP's, whose boxes are disabled.
+                self.focus = None;
+                self.focus_field(Field::Ip);
                 Action::Redraw
             }
             Target::ApplyIp => {
@@ -3709,7 +4068,9 @@ impl NetManagerApp {
         match self.add_dns_server(&typed) {
             Ok(()) => {
                 self.dns_input.clear();
-                self.status_message = format!("Added DNS server {typed}");
+                // Added to the edit, not yet to the interface: "Added" on its
+                // own read as done.
+                self.status_message = format!("Added DNS server {typed}: Apply sends it");
             }
             Err(why) => self.status_message = why,
         }
@@ -3731,7 +4092,8 @@ impl NetManagerApp {
             return Action::None;
         }
         let (width, height) = size;
-        let Some(target) = render_frame(self, width, height).hit_test(x, y) else {
+        let frame = render_frame(self, width, height);
+        let Some(target) = frame.hit_test(x, y) else {
             // Clicking bare background puts the caret away, so a stray
             // keystroke afterwards does not land in a field the user has
             // stopped looking at.
@@ -3741,23 +4103,61 @@ impl NetManagerApp {
             }
             return Action::None;
         };
+        if let Target::Focus(field) = target {
+            // A press in a box puts the caret where it landed, which needs
+            // the box as it was drawn: the frame that answered the hit-test
+            // has it.
+            if let Some(rect) = frame.rect_of(|t| *t == target) {
+                return self.press_field(field, rect, x);
+            }
+        }
         self.activate(target)
+    }
+
+    /// The box under the pointer at `x`, `y` -- none while the shortcut card
+    /// is over everything.
+    fn field_at(&self, x: f32, y: f32, size: (f32, f32)) -> Option<Field> {
+        if self.show_help {
+            return None;
+        }
+        match render_frame(self, size.0, size.1).hit_test(x, y) {
+            Some(Target::Focus(field)) => Some(field),
+            _ => None,
+        }
+    }
+
+    /// Light the box under the pointer, and answer whether that changed.
+    fn set_hover(&mut self, over: Option<Field>) -> Action {
+        if over == self.hover {
+            return Action::None;
+        }
+        self.hover = over;
+        Action::Redraw
     }
 
     /// Route a keystroke.
     pub fn handle_key(&mut self, key: &KeyEvent) -> Action {
+        // Here rather than only in `handle_event`, so that no way in can go
+        // round it.
+        if self.question.is_some() {
+            return self.ask(&Event::Key(key.clone()));
+        }
         if !key.pressed {
             return Action::None;
         }
+        // Every binding here is on a key itself, so a chord is none of them:
+        // Alt's chords are the window's and the Windows key's the desktop's,
+        // and each arrives carrying its key -- Alt+Escape quit.
+        let plain = textline::is_plain(key.modifiers);
 
         // Above the field branch, which takes every character and returns.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return Action::Redraw;
         }
         if self.show_help {
             // Modal, and Escape especially: on this window it quits.
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return Action::Redraw;
@@ -3766,9 +4166,12 @@ impl NetManagerApp {
         if let Some(field) = self.focus {
             return self.handle_key_in_field(key, field);
         }
+        if !plain {
+            return Action::None;
+        }
 
         match key.key {
-            Key::Escape => Action::Quit,
+            Key::Escape => self.leave(Leaving::Close),
             Key::Down => self.move_selection(1),
             Key::Up => self.move_selection(-1),
             Key::Right => self.move_tab(1),
@@ -3791,18 +4194,28 @@ impl NetManagerApp {
     }
 
     /// A keystroke while a text field holds the keyboard.
+    ///
+    /// Escape, Tab (Shift+Tab backwards) and Enter are the window's, plain;
+    /// every other key is the editor's -- the caret keys, Backspace and
+    /// Delete, Ctrl+A, C, X and V, and typing (`textline::apply_key`, which
+    /// knows a command from typing: a chord arrives carrying its letter, and
+    /// Ctrl+S typed an `s` into the address).
     fn handle_key_in_field(&mut self, key: &KeyEvent, field: Field) -> Action {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.focus = None;
                 Action::Redraw
             }
-            Key::Tab => {
-                let next = Self::next_field(field);
-                self.focus = Some(next);
-                Action::Redraw
+            Key::Tab if plain => {
+                let next = Self::next_field(field, key.modifiers.shift);
+                if next == field {
+                    return Action::None;
+                }
+                self.focus = None;
+                self.focus_field(next)
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 if field == Field::DnsInput {
                     self.commit_dns_input();
                 } else {
@@ -3810,24 +4223,79 @@ impl NetManagerApp {
                 }
                 Action::Redraw
             }
-            Key::Backspace => {
-                if self.field_mut(field).pop().is_some() {
-                    Action::Redraw
-                } else {
-                    Action::None
-                }
-            }
-            _ => {
-                // `typed()` already drops the control characters that Enter,
-                // Tab, Escape and Backspace produce on most layouts, so an
-                // unmatched key cannot smuggle a `\r` into an address.
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return Action::None;
-                }
-                self.field_mut(field).push_str(&typed);
-                Action::Redraw
-            }
+            _ => self.edit_field(key, field),
+        }
+    }
+
+    /// Apply an editing key to the box `field`, and say whether anything
+    /// changed that shows.
+    fn edit_field(&mut self, key: &KeyEvent, field: Field) -> Action {
+        self.sync_editor(field);
+        let before = (
+            self.editor.text().to_owned(),
+            self.editor.cursor(),
+            self.editor.selection_anchor(),
+        );
+        let clipboard = self.clipboard.clone();
+        let done = textline::apply_key(
+            &mut self.editor,
+            key,
+            ADDRESS_CAPACITY,
+            &clipboard,
+            BOX_TEXT_SIZE,
+        );
+        if let Some(copied) = done.copied {
+            self.clipboard = copied;
+        }
+        let typed = self.editor.text() != before.0;
+        if typed {
+            *self.field_mut(field) = self.editor.text().to_owned();
+        }
+        if typed || self.editor.cursor() != before.1 || self.editor.selection_anchor() != before.2 {
+            Action::Redraw
+        } else {
+            Action::None
+        }
+    }
+
+    /// A press on the box `field`, drawn at `rect`: it takes the keyboard,
+    /// with the caret under the pointer at `x`.
+    fn press_field(&mut self, field: Field, rect: Rect, x: f32) -> Action {
+        if !self.field_enabled(field) {
+            return Action::None;
+        }
+        // Measured against the box as it was drawn, before the press.
+        let drawn = self.drawn_cursor(field);
+        let before = (
+            self.focus,
+            self.editor.cursor(),
+            self.editor.selection_anchor(),
+        );
+        if self.focus == Some(field) {
+            self.sync_editor(field);
+        } else {
+            self.focus = Some(field);
+            self.load_editor(field);
+        }
+        let cursor = textedit::cursor_at_click(
+            self.editor.text(),
+            drawn,
+            box_text_width(rect),
+            BOX_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - BOX_TEXT_INSET,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+        if (
+            self.focus,
+            self.editor.cursor(),
+            self.editor.selection_anchor(),
+        ) == before
+        {
+            Action::None
+        } else {
+            Action::Redraw
         }
     }
 
@@ -3847,8 +4315,7 @@ impl NetManagerApp {
         if next == self.selected_interface {
             return Action::None;
         }
-        self.select_interface(next);
-        Action::Redraw
+        self.leave(Leaving::Interface(next))
     }
 
     /// Move to the next or previous detail tab, wrapping.
@@ -3876,9 +4343,34 @@ impl NetManagerApp {
 
     /// Route a whole event.
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
+        // The question about an unapplied edit has every press while it is
+        // up (and every key: `handle_key` asks first).
+        if self.question.is_some() && matches!(event, Event::Mouse(_)) {
+            return self.ask(event);
+        }
         match event {
+            // The shortcut card is drawn over everything, so it takes the
+            // pointer as well as the keys: a press with any button puts it
+            // away and reaches nothing under it, and the wheel scrolls
+            // nothing it covers. A move or a release passes -- neither is a
+            // press. (A press went through the card to the control drawn
+            // under it -- Refresh, Apply, a DNS server's X.)
+            Event::Mouse(mouse) if self.show_help => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                // The wheel scrolls nothing the card covers, and nothing
+                // under the card is lit.
+                _ => self.set_hover(None),
+            },
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
+                MouseEventKind::Move | MouseEventKind::Enter => {
+                    let over = self.field_at(mouse.x, mouse.y, size);
+                    self.set_hover(over)
+                }
+                MouseEventKind::Leave => self.set_hover(None),
                 MouseEventKind::Scroll { dy, .. } => {
                     // Only the sidebar scrolls, so a wheel anywhere scrolls it
                     // rather than nothing. The accumulator keeps the fractions
@@ -3894,7 +4386,7 @@ impl NetManagerApp {
                 _ => Action::None,
             },
             Event::Key(key) => self.handle_key(key),
-            Event::CloseRequested => Action::Quit,
+            Event::CloseRequested => self.leave(Leaving::Close),
             _ => Action::None,
         }
     }
@@ -3936,7 +4428,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.255.0".into(),
                 gateway: "192.168.1.1".into(),
                 dns_servers: vec!["8.8.8.8".into(), "8.8.4.4".into(), "1.1.1.1".into()],
-                dhcp_enabled: true,
+                dhcp_enabled: Some(true),
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(1000),
@@ -3956,7 +4448,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.255.0".into(),
                 gateway: "192.168.1.1".into(),
                 dns_servers: vec!["8.8.8.8".into()],
-                dhcp_enabled: true,
+                dhcp_enabled: Some(true),
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(300),
@@ -3976,7 +4468,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.255.0".into(),
                 gateway: "10.0.0.1".into(),
                 dns_servers: vec!["10.0.0.1".into()],
-                dhcp_enabled: false,
+                dhcp_enabled: Some(false),
             },
             state: ConnectionState::Disconnected,
             speed_mbps: None,
@@ -3996,7 +4488,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.0.0".into(),
                 gateway: String::new(),
                 dns_servers: Vec::new(),
-                dhcp_enabled: false,
+                dhcp_enabled: Some(false),
             },
             state: ConnectionState::Connected,
             speed_mbps: Some(10000),
@@ -4016,7 +4508,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.0.0.0".into(),
                 gateway: String::new(),
                 dns_servers: Vec::new(),
-                dhcp_enabled: false,
+                dhcp_enabled: Some(false),
             },
             state: ConnectionState::Connected,
             speed_mbps: None,
@@ -4036,7 +4528,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 subnet_mask: "255.255.0.0".into(),
                 gateway: String::new(),
                 dns_servers: Vec::new(),
-                dhcp_enabled: false,
+                dhcp_enabled: Some(false),
             },
             state: ConnectionState::Disconnected,
             speed_mbps: None,
@@ -4160,6 +4652,10 @@ impl App for NetManagerApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn wants_waker(&self) -> bool {
         true
     }
@@ -4196,9 +4692,12 @@ impl App for NetManagerApp {
             return Response::Redraw;
         }
         match self.handle_event(event, self.window_size) {
+            Action::Quit => Response::Exit,
+            // A close that is being asked about first: the window stays, with
+            // the question drawn, until an answer brings the `Exit`.
+            _ if matches!(event, Event::CloseRequested) => Response::KeepOpen,
             Action::None => Response::Idle,
             Action::Redraw => Response::Redraw,
-            Action::Quit => Response::Exit,
         }
     }
 
@@ -4207,7 +4706,15 @@ impl App for NetManagerApp {
         // `Resize` arrives, so this is the only place the real size is known
         // on frame one.
         self.window_size = (width, height);
-        render_frame(self, width, height).into_tree()
+        let mut tree = render_frame(self, width, height).into_tree();
+        // Over everything, and drawn here rather than in `render_frame`:
+        // drawing is what places the question's buttons, which needs it
+        // mutable.
+        let palette = self.palette;
+        if let Some(question) = self.question.as_mut() {
+            question.render(&palette, width, height, &mut tree);
+        }
+        tree
     }
 }
 
@@ -4223,12 +4730,23 @@ impl Probe for NetManagerApp {
         render_frame(self, size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(guitk::event::MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
-    fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> Action {
-        self.handle_key(key)
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -4329,7 +4847,10 @@ mod tests {
     #[test]
     fn test_ip_config_default() {
         let cfg = IpConfig::default();
-        assert!(cfg.dhcp_enabled);
+        assert_eq!(
+            cfg.dhcp_enabled, None,
+            "nothing has said whether DHCP is on"
+        );
         assert!(cfg.ip_address.is_empty());
         assert_eq!(cfg.subnet_mask, "255.255.255.0");
         assert!(cfg.dns_servers.is_empty());
@@ -4338,7 +4859,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_dhcp_ok() {
         let cfg = IpConfig {
-            dhcp_enabled: true,
+            dhcp_enabled: Some(true),
             ..IpConfig::default()
         };
         assert!(cfg.validate().is_ok());
@@ -4347,7 +4868,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_static_missing_ip() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: String::new(),
             ..IpConfig::default()
         };
@@ -4357,7 +4878,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_static_invalid_ip() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: "999.999.999.999".into(),
             subnet_mask: "255.255.255.0".into(),
             ..IpConfig::default()
@@ -4368,7 +4889,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_static_valid() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: "192.168.1.100".into(),
             subnet_mask: "255.255.255.0".into(),
             gateway: "192.168.1.1".into(),
@@ -4380,7 +4901,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_bad_dns() {
         let cfg = IpConfig {
-            dhcp_enabled: true,
+            dhcp_enabled: Some(true),
             dns_servers: vec!["not-an-ip".into()],
             ..IpConfig::default()
         };
@@ -4390,7 +4911,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_bad_gateway() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: "10.0.0.1".into(),
             subnet_mask: "255.255.255.0".into(),
             gateway: "bad".into(),
@@ -4402,7 +4923,7 @@ mod tests {
     #[test]
     fn test_ip_config_validate_empty_gateway_ok() {
         let cfg = IpConfig {
-            dhcp_enabled: false,
+            dhcp_enabled: Some(false),
             ip_address: "10.0.0.1".into(),
             subnet_mask: "255.255.255.0".into(),
             gateway: String::new(),
@@ -4730,7 +5251,7 @@ mod tests {
     fn test_apply_ip_config_valid() {
         let mut app = NetManagerApp::with_sample_data();
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = "10.0.0.50".into();
         app.edit_ip_config.subnet_mask = "255.255.255.0".into();
         app.edit_ip_config.gateway = "10.0.0.1".into();
@@ -4752,14 +5273,14 @@ mod tests {
     fn test_apply_ip_config_invalid() {
         let mut app = NetManagerApp::with_sample_data();
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = "bad".into();
         assert!(app.apply_ip_config().is_err());
     }
 
     #[test]
     fn test_add_dns_server_valid() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let before = app.edit_ip_config.dns_servers.len();
         // Use an address NOT already in the default config (which seeds 8.8.8.8,
         // 8.8.4.4 and 1.1.1.1); add_dns_server correctly rejects duplicates.
@@ -4769,26 +5290,26 @@ mod tests {
 
     #[test]
     fn test_add_dns_server_empty() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         assert!(app.add_dns_server("").is_err());
     }
 
     #[test]
     fn test_add_dns_server_invalid() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         assert!(app.add_dns_server("not.valid.ip.addr").is_err());
     }
 
     #[test]
     fn test_add_dns_server_duplicate() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         // 8.8.8.8 is already in the default list
         assert!(app.add_dns_server("8.8.8.8").is_err());
     }
 
     #[test]
     fn test_remove_dns_server() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let before = app.edit_ip_config.dns_servers.len();
         assert!(app.remove_dns_server(0).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers.len(), before - 1);
@@ -4796,13 +5317,13 @@ mod tests {
 
     #[test]
     fn test_remove_dns_server_out_of_bounds() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         assert!(app.remove_dns_server(999).is_err());
     }
 
     #[test]
     fn test_move_dns_up() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let second = app.edit_ip_config.dns_servers[1].clone();
         assert!(app.move_dns_up(1).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers[0], second);
@@ -4810,13 +5331,13 @@ mod tests {
 
     #[test]
     fn test_move_dns_up_at_top() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         assert!(app.move_dns_up(0).is_err());
     }
 
     #[test]
     fn test_move_dns_down() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let first = app.edit_ip_config.dns_servers[0].clone();
         assert!(app.move_dns_down(0).is_ok());
         assert_eq!(app.edit_ip_config.dns_servers[1], first);
@@ -4824,7 +5345,7 @@ mod tests {
 
     #[test]
     fn test_move_dns_down_at_bottom() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         let last = app.edit_ip_config.dns_servers.len() - 1;
         assert!(app.move_dns_down(last).is_err());
     }
@@ -5609,7 +6130,7 @@ mod tests {
     /// four lines in every program, so they live in the toolkit — see
     /// [`guitk::probe`] for what each one guarantees. Imported under their
     /// bare names because that is what the tests below already say.
-    use guitk::probe::{click, press, rect_of, type_str, typing};
+    use guitk::probe::{click, press, press_with, rect_of, type_str, typing};
 
     /// **Every key the card advertises is answered by this window.**
     #[test]
@@ -6141,7 +6662,7 @@ mod tests {
         let (dir, mut app) = app_on(ETH0_UP);
         app.configure = obliging;
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = String::from("10.0.2.99");
         app.edit_ip_config.gateway = String::new();
         app.edit_ip_config.dns_servers = vec![String::from("1.1.1.1"), String::from("9.9.9.9")];
@@ -6185,7 +6706,7 @@ mod tests {
         let (_dir, mut app) = app_on(ETH0_UP);
         app.configure = refusing;
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = String::from("10.0.2.99");
         let why = app.apply_ip_config().expect_err("the kernel refused");
         assert!(why.contains("administrator rights"), "{why}");
@@ -6203,10 +6724,73 @@ mod tests {
         let (_dir, mut app) = app_on(ETH0_UP);
         app.configure = obliging;
         app.start_editing_ip();
-        app.edit_ip_config.dhcp_enabled = true;
+        app.edit_ip_config.dhcp_enabled = Some(true);
         let why = app.apply_ip_config().expect_err("DHCP is refused");
         assert!(why.contains("dhcpcd"), "{why}");
         assert!(asked().is_empty(), "something was sent for DHCP");
+    }
+
+    /// **An interface whose DHCP nothing reports opens as that**: the IP tab
+    /// reads "DHCP: Not reported", as Properties does, and its address boxes
+    /// and DNS list can be changed -- what Apply sends is the configuration
+    /// typed. It opened with the switch on, its boxes disabled, so nothing
+    /// could be applied until a switch that was never on was turned off. The
+    /// switch, pressed, goes on and then off.
+    #[test]
+    fn an_interface_whose_dhcp_nothing_reports_opens_as_not_reported() {
+        let says = |app: &NetManagerApp, s: &str| {
+            render_frame(app, SIZE.0, SIZE.1)
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == s))
+        };
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.configure = obliging;
+        assert_eq!(app.edit_ip_config.dhcp_enabled, None, "DHCP was guessed");
+        app.set_tab(DetailTab::IpConfig);
+        assert!(says(&app, "DHCP: Not reported"), "the IP tab guesses");
+        click(&mut app, Target::EditIp);
+        assert_eq!(app.focus, Some(Field::Ip), "the address box is disabled");
+        click(&mut app, Target::Tab(DetailTab::Dns));
+        assert!(
+            rect_of(&app, Target::Focus(Field::DnsInput)).is_some(),
+            "the DNS list cannot be changed"
+        );
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+        assert_eq!(app.apply_ip_config(), Ok(()), "Apply refused");
+        assert_eq!(asked().len(), 1, "Apply sent nothing");
+
+        let (_dir, mut app) = app_on(ETH0_UP);
+        app.set_tab(DetailTab::IpConfig);
+        click(&mut app, Target::DhcpToggle);
+        assert_eq!(app.edit_ip_config.dhcp_enabled, Some(true));
+        assert!(says(&app, "DHCP: Enabled"));
+        click(&mut app, Target::DhcpToggle);
+        assert_eq!(app.edit_ip_config.dhcp_enabled, Some(false));
+        assert!(says(&app, "DHCP: Disabled (Static)"));
+    }
+
+    /// **The DHCP refusal says what happened**: "cannot switch to DHCP"
+    /// when the switch was moved to DHCP, and "DHCP is switched on" when it
+    /// was on from the start -- "cannot switch" is untrue of a switch nobody
+    /// moved.
+    #[test]
+    fn the_dhcp_refusal_says_whether_the_switch_was_moved() {
+        let mut app = NetManagerApp::with_sample_data();
+        assert_eq!(
+            app.edit_ip_config.dhcp_enabled,
+            Some(true),
+            "the first interface is DHCP's"
+        );
+        app.start_editing_ip();
+        let why = app.apply_ip_config().expect_err("DHCP is refused");
+        assert!(why.starts_with("DHCP is switched on"), "{why}");
+
+        let mut app = configured_by_hand();
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = Some(true);
+        let why = app.apply_ip_config().expect_err("DHCP is refused");
+        assert!(why.starts_with("Cannot switch Ethernet 1 to DHCP"), "{why}");
     }
 
     /// **Enable and Disable reach the kernel**: an interface that is up is
@@ -6389,8 +6973,7 @@ mod tests {
 
     #[test]
     fn the_edit_button_opens_the_editor_and_apply_writes_it_back() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
 
         assert!(
             rect_of(&app, Target::ApplyIp).is_none(),
@@ -6404,7 +6987,6 @@ mod tests {
         for _ in 0..64 {
             app.handle_key(&press(Key::Backspace));
         }
-        app.edit_ip_config.dhcp_enabled = false;
         type_str(&mut app, "10.0.0.7");
 
         click(&mut app, Target::ApplyIp);
@@ -6426,7 +7008,7 @@ mod tests {
         let mut app = NetManagerApp::with_sample_data();
         app.set_tab(DetailTab::IpConfig);
         click(&mut app, Target::EditIp);
-        app.edit_ip_config.dhcp_enabled = false;
+        app.edit_ip_config.dhcp_enabled = Some(false);
         app.edit_ip_config.ip_address = "999.1.1.1".into();
 
         click(&mut app, Target::ApplyIp);
@@ -6457,10 +7039,374 @@ mod tests {
         assert_eq!(app.focus, None);
     }
 
+    // -- An edit Apply has not sent is not lost without a question
+
+    /// Every string the window draws, the question over it included.
+    fn shown(app: &mut NetManagerApp) -> String {
+        App::render(app, SIZE.0, SIZE.1)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The sample window on the IP tab, with Ethernet 1's address changed in
+    /// the editor and not applied, and nothing holding the keyboard.
+    fn with_an_unapplied_edit() -> NetManagerApp {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::IpConfig);
+        click(&mut app, Target::EditIp);
+        app.edit_ip_config.ip_address = String::from("10.9.9.9");
+        app.focus = None;
+        assert!(app.unapplied());
+        app
+    }
+
+    /// **Choosing another interface asks about an unapplied edit** -- by a
+    /// press or by the keys -- where it reloaded the editor from the new
+    /// interface and threw the change away. Cancel stays as it was; Don't
+    /// apply drops the change and chooses.
+    #[test]
+    fn choosing_another_interface_asks_about_an_unapplied_edit() {
+        let mut app = with_an_unapplied_edit();
+        click(&mut app, Target::Interface(1));
+        assert!(
+            app.question.is_some(),
+            "the edit was left without a question"
+        );
+        assert_eq!(app.selected_interface, 0, "chosen before the answer");
+        let text = shown(&mut app);
+        assert!(
+            text.contains("Ethernet 1 has changes that are not applied."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Apply them before choosing another interface?"),
+            "{text}"
+        );
+
+        // A press under the question reaches nothing.
+        click(&mut app, Target::Tab(DetailTab::Dns));
+        assert_eq!(
+            app.active_tab,
+            DetailTab::IpConfig,
+            "a press went under the question"
+        );
+        assert!(app.question.is_some());
+
+        app.handle_key(&press(Key::Escape));
+        assert!(app.question.is_none(), "Cancel left the question up");
+        assert_eq!(app.selected_interface, 0);
+        assert!(app.editing_ip);
+        assert_eq!(
+            app.edit_ip_config.ip_address, "10.9.9.9",
+            "Cancel lost the edit"
+        );
+
+        app.handle_key(&press(Key::Down));
+        assert!(
+            app.question.is_some(),
+            "Down left the edit without a question"
+        );
+        app.handle_key(&press(Key::D));
+        assert!(app.question.is_none());
+        assert_eq!(app.selected_interface, 1, "Don't apply did not choose");
+        assert!(!app.editing_ip, "the dropped edit is still open");
+    }
+
+    /// An editor opened and left as it was is no edit to ask about, and
+    /// choosing the interface already chosen is no choice: it reloaded the
+    /// interface and threw an open edit away.
+    #[test]
+    fn only_an_unapplied_edit_is_asked_about_and_only_when_it_would_go() {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::IpConfig);
+        click(&mut app, Target::EditIp);
+        assert!(!app.unapplied());
+        click(&mut app, Target::Interface(1));
+        assert!(
+            app.question.is_none(),
+            "an untouched editor was asked about"
+        );
+        assert_eq!(app.selected_interface, 1);
+
+        let mut app = with_an_unapplied_edit();
+        click(&mut app, Target::Interface(0));
+        assert!(app.question.is_none(), "the interface already chosen asked");
+        assert!(app.editing_ip);
+        assert_eq!(
+            app.edit_ip_config.ip_address, "10.9.9.9",
+            "choosing it again threw the edit away"
+        );
+    }
+
+    /// **Apply, from the question, sends the edit and then goes on** -- to
+    /// the interface being chosen, found again by name after the re-read
+    /// the change brings, with "Applied" left on the status line.
+    #[test]
+    fn apply_from_the_question_sends_the_edit_and_then_goes() {
+        let wlan0 = "Interface: wlan0  (UP)\n  MAC:     52:54:00:00:00:01\n  IPv4:    10.0.3.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.3.2\n  DNS:     10.0.3.3\n";
+        let (dir, mut app) = app_on(&format!("{ETH0_UP}{wlan0}"));
+        app.configure = obliging;
+        app.set_tab(DetailTab::IpConfig);
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = Some(false);
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+
+        click(&mut app, Target::Interface(1));
+        assert!(app.question.is_some());
+        // The kernel lists wlan0 first after the change: the interface being
+        // chosen is wlan0, wherever it now sits.
+        the_kernel_now_says(&dir, &format!("{wlan0}{ETH0_UP}"));
+        app.handle_key(&press(Key::A));
+        assert_eq!(asked().len(), 1, "Apply sent nothing");
+        assert_eq!(asked()[0].ip, Some([10, 0, 2, 99]));
+        assert_eq!(app.selected_iface().map(|i| i.name.as_str()), Some("wlan0"));
+        assert!(!app.editing_ip);
+        assert!(
+            app.status_message.starts_with("Applied to eth0"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// A refusal, from the question, stays: the edit open on the same
+    /// interface, the reason on the status line.
+    #[test]
+    fn a_refused_apply_from_the_question_stays_with_the_edit() {
+        let wlan0 = "Interface: wlan0  (UP)\n  MAC:     52:54:00:00:00:01\n";
+        let (_dir, mut app) = app_on(&format!("{ETH0_UP}{wlan0}"));
+        app.configure = refusing;
+        app.set_tab(DetailTab::IpConfig);
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = Some(false);
+        app.edit_ip_config.ip_address = String::from("10.0.2.99");
+
+        click(&mut app, Target::Interface(1));
+        app.handle_key(&press(Key::A));
+        assert!(app.question.is_none());
+        assert_eq!(app.selected_iface().map(|i| i.name.as_str()), Some("eth0"));
+        assert!(app.editing_ip, "a refused Apply closed the editor");
+        assert_eq!(app.edit_ip_config.ip_address, "10.0.2.99");
+        assert!(
+            app.status_message.contains("administrator"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// **Closing over an unapplied edit asks first**, the window's X and
+    /// Escape alike, and the window stays open until the answer. With no
+    /// edit -- the control -- it closes.
+    #[test]
+    fn closing_with_an_unapplied_edit_asks_and_keeps_the_window_open() {
+        let mut app = with_an_unapplied_edit();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert!(app.question.is_some());
+        assert!(shown(&mut app).contains("Apply them before closing?"));
+        assert_eq!(app.on_event(&Event::Key(press(Key::D))), Response::Exit);
+
+        let mut app = with_an_unapplied_edit();
+        assert_eq!(app.handle_key(&press(Key::Escape)), Action::Redraw);
+        assert!(app.question.is_some(), "Escape closed over the edit");
+        app.handle_key(&press(Key::Escape));
+        assert!(app.question.is_none(), "Cancel left the question up");
+        assert!(app.editing_ip);
+
+        let mut app = configured_by_hand();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+        assert_eq!(app.handle_key(&press(Key::Escape)), Action::Quit);
+    }
+
+    /// The sample window with its first interface -- Ethernet 1, and its
+    /// three DNS servers -- configured by hand rather than by DHCP. The DNS
+    /// list can be changed only under a static configuration, since Apply
+    /// sends nothing under DHCP.
+    fn configured_by_hand() -> NetManagerApp {
+        let mut app = NetManagerApp::with_sample_data();
+        app.interfaces[0].ip_config.dhcp_enabled = Some(false);
+        app.select_interface(0);
+        assert_eq!(app.edit_ip_config.dns_servers.len(), 3);
+        app
+    }
+
+    /// **While DHCP is switched on the DNS list cannot be changed, and says
+    /// why**: no buttons on its rows, no box to type a server into, a line
+    /// saying where the switch is -- and a change asked for anyway is
+    /// refused with the reason, the editor still closed. A list changed then
+    /// was a change Apply would never send.
+    #[test]
+    fn under_dhcp_the_dns_list_cannot_be_changed_and_says_why() {
+        let mut app = NetManagerApp::with_sample_data();
+        assert_eq!(
+            app.edit_ip_config.dhcp_enabled,
+            Some(true),
+            "the first interface is DHCP's"
+        );
+        app.set_tab(DetailTab::Dns);
+        assert!(!app.edit_ip_config.dns_servers.is_empty());
+        for target in [
+            Target::DnsRemove(0),
+            Target::DnsDown(0),
+            Target::Focus(Field::DnsInput),
+            Target::DnsAdd,
+        ] {
+            assert!(
+                rect_of(&app, target).is_none(),
+                "{target:?} is offered under DHCP"
+            );
+        }
+        let says = render_frame(&app, SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Switch it off on the IP Configuration tab")));
+        assert!(says, "the list does not say why it cannot be changed");
+
+        let before = app.edit_ip_config.dns_servers.clone();
+        let refused = app.add_dns_server("9.9.9.9").expect_err("added under DHCP");
+        assert!(refused.contains("DHCP is switched on"), "{refused}");
+        assert!(app.remove_dns_server(0).is_err());
+        assert!(app.move_dns_down(0).is_err());
+        assert_eq!(app.edit_ip_config.dns_servers, before);
+        assert!(!app.editing_ip, "a refused change opened the editor");
+    }
+
+    /// **A change to the DNS list opens the editor, whose Apply is on the DNS
+    /// tab as well.** The list was changed with the editor closed: there was
+    /// no Apply on the DNS tab to send it, the status said "Added" as if it
+    /// were done, and Edit on the IP tab reloaded the configuration from the
+    /// interface and threw the change away.
+    #[test]
+    fn a_dns_change_opens_the_editor_and_the_dns_tab_can_apply_it() {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::Dns);
+        assert!(!app.editing_ip);
+        assert!(
+            rect_of(&app, Target::ApplyIp).is_none(),
+            "Apply before any change"
+        );
+
+        click(&mut app, Target::Focus(Field::DnsInput));
+        type_str(&mut app, "9.9.9.9");
+        click(&mut app, Target::DnsAdd);
+        assert!(app.editing_ip, "the change left the editor closed");
+        assert!(
+            app.status_message.contains("Apply sends it"),
+            "the status reads as done: {}",
+            app.status_message
+        );
+        assert!(
+            rect_of(&app, Target::ApplyIp).is_some(),
+            "no Apply on the DNS tab"
+        );
+        assert!(
+            rect_of(&app, Target::CancelIp).is_some(),
+            "no Cancel on the DNS tab"
+        );
+
+        // The IP tab offers the open edit's Apply, not an Edit that reloads.
+        app.set_tab(DetailTab::IpConfig);
+        assert!(
+            rect_of(&app, Target::EditIp).is_none(),
+            "Edit is offered over the change"
+        );
+        assert!(rect_of(&app, Target::ApplyIp).is_some());
+        assert!(
+            app.edit_ip_config
+                .dns_servers
+                .iter()
+                .any(|s| s == "9.9.9.9")
+        );
+
+        // Cancel, from the DNS tab, takes it back.
+        app.set_tab(DetailTab::Dns);
+        click(&mut app, Target::CancelIp);
+        assert!(!app.editing_ip);
+        assert!(
+            !app.edit_ip_config
+                .dns_servers
+                .iter()
+                .any(|s| s == "9.9.9.9"),
+            "Cancel kept the change"
+        );
+
+        // Removing and reordering open it too.
+        click(&mut app, Target::DnsDown(0));
+        assert!(app.editing_ip, "a move down left the editor closed");
+        click(&mut app, Target::CancelIp);
+        click(&mut app, Target::DnsUp(1));
+        assert!(app.editing_ip, "a move up left the editor closed");
+        click(&mut app, Target::CancelIp);
+        click(&mut app, Target::DnsRemove(0));
+        assert!(app.editing_ip, "a removal left the editor closed");
+    }
+
+    /// **A re-read keeps an open edit**, and the selection follows its
+    /// interface by name. Refresh, and the re-read after Enable or Disable,
+    /// reloaded the configuration from the interface and threw the edit
+    /// away with the editor still open. An edit whose interface has gone
+    /// goes with it, and the status says so.
+    #[test]
+    fn a_reread_keeps_an_open_edit_while_its_interface_is_listed() {
+        let wlan0 = "Interface: wlan0  (UP)\n  MAC:     52:54:00:00:00:01\n  IPv4:    10.0.3.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.3.2\n  DNS:     10.0.3.3\n";
+        let (dir, mut app) = app_on(&format!("{ETH0_UP}{wlan0}"));
+        assert_eq!(app.interfaces.len(), 2);
+        app.select_interface(1);
+        app.start_editing_ip();
+        app.edit_ip_config.dhcp_enabled = Some(false);
+        app.edit_ip_config.ip_address = String::from("10.0.3.99");
+
+        // wlan0 is listed first now: the selection follows it, and the edit
+        // stands.
+        the_kernel_now_says(&dir, &format!("{wlan0}{ETH0_UP}"));
+        app.read_interfaces();
+        assert_eq!(app.selected_iface().map(|i| i.name.as_str()), Some("wlan0"));
+        assert!(app.editing_ip, "the re-read closed the editor");
+        assert_eq!(
+            app.edit_ip_config.ip_address, "10.0.3.99",
+            "the re-read threw the edit away"
+        );
+
+        // wlan0 is gone: so is its edit, and the status says so.
+        the_kernel_now_says(&dir, ETH0_UP);
+        app.read_interfaces();
+        assert!(!app.editing_ip, "an edit outlived its interface");
+        assert_eq!(app.selected_iface().map(|i| i.name.as_str()), Some("eth0"));
+        assert_eq!(app.edit_ip_config.ip_address, "10.0.2.15");
+        assert!(
+            app.status_message.contains("wlan0 is no longer listed"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// A window on the IP tab of br0, an interface configured by hand, whose
+    /// address boxes take the keyboard once the editor is open. (The first
+    /// interface is DHCP's, whose boxes are disabled.)
+    fn on_a_static_interface() -> NetManagerApp {
+        let mut app = NetManagerApp::with_sample_data();
+        let br0 = app
+            .interfaces
+            .iter()
+            .position(|i| i.name == "br0")
+            .expect("the sample data has br0");
+        app.select_interface(br0);
+        assert_eq!(
+            app.edit_ip_config.dhcp_enabled,
+            Some(false),
+            "br0 is configured by hand"
+        );
+        app.set_tab(DetailTab::IpConfig);
+        app
+    }
+
     #[test]
     fn the_ip_fields_only_take_the_keyboard_while_the_editor_is_open() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
 
         assert!(
             rect_of(&app, Target::Focus(Field::Ip)).is_none(),
@@ -6477,8 +7423,7 @@ mod tests {
 
     #[test]
     fn tab_walks_the_ip_fields_and_typing_lands_in_the_focused_one() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
         click(&mut app, Target::EditIp);
         app.edit_ip_config.subnet_mask.clear();
         let address_before = app.edit_ip_config.ip_address.clone();
@@ -6496,13 +7441,22 @@ mod tests {
         assert_eq!(app.focus, Some(Field::Gateway));
         app.handle_key(&press(Key::Tab));
         assert_eq!(app.focus, Some(Field::Ip), "tab order did not come round");
+
+        // Shift+Tab walks it backwards.
+        let back = guitk::probe::shift(Key::Tab);
+        app.handle_key(&back);
+        assert_eq!(app.focus, Some(Field::Gateway), "Shift+Tab went forwards");
+        app.handle_key(&back);
+        assert_eq!(app.focus, Some(Field::Mask));
+        app.handle_key(&back);
+        assert_eq!(app.focus, Some(Field::Ip));
     }
 
     #[test]
     fn escape_in_a_field_puts_the_caret_away_rather_than_closing_the_window() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
         click(&mut app, Target::EditIp);
+        assert_eq!(app.focus, Some(Field::Ip), "Edit put the caret nowhere");
 
         assert_eq!(app.handle_key(&press(Key::Escape)), Action::Redraw);
         assert_eq!(app.focus, None);
@@ -6512,25 +7466,439 @@ mod tests {
         assert_eq!(app.handle_key(&press(Key::Escape)), Action::Quit);
     }
 
+    /// The caret drawn after `text` -- the `Line` straight after the text,
+    /// across its line -- or `None` for none.
+    fn caret_after(app: &NetManagerApp, text: &str) -> Option<f32> {
+        let frame = render_frame(app, SIZE.0, SIZE.1);
+        let cmds = frame.commands();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text: t, .. } if t == text))?;
+        match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => Some(*x1),
+            _ => None,
+        }
+    }
+
     #[test]
     fn a_focused_field_shows_a_caret_so_the_keyboard_has_somewhere_visible_to_go() {
-        let mut app = NetManagerApp::with_sample_data();
-        app.set_tab(DetailTab::IpConfig);
+        let mut app = on_a_static_interface();
         click(&mut app, Target::EditIp);
         app.edit_ip_config.ip_address = "1.2.3.4".into();
 
-        let carets = |app: &NetManagerApp| {
-            render_frame(app, SIZE.0, SIZE.1)
+        assert_eq!(app.focus, Some(Field::Ip));
+        let caret = caret_after(&app, "1.2.3.4").expect("the focused address drew no caret");
+        assert!(
+            !render_frame(&app, SIZE.0, SIZE.1)
                 .commands()
                 .iter()
-                .filter(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "1.2.3.4_"))
-                .count()
-        };
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.ends_with('_'))),
+            "the caret is still a character"
+        );
+        // After the address: the text changed under the editor, so the caret
+        // went to its end.
+        let rect = rect_of(&app, Target::Focus(Field::Ip)).expect("the box");
+        let end = rect.x
+            + BOX_TEXT_INSET
+            + text::measure("1.2.3.4", BOX_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the address at {end}"
+        );
 
-        app.focus = Some(Field::Ip);
-        assert_eq!(carets(&app), 1, "the focused address drew no caret");
-        app.focus = Some(Field::Gateway);
-        assert_eq!(carets(&app), 0, "an unfocused address drew a caret");
+        click(&mut app, Target::Focus(Field::Gateway));
+        assert_eq!(
+            caret_after(&app, "1.2.3.4"),
+            None,
+            "an unfocused address drew a caret"
+        );
+    }
+
+    // -- The boxes are the toolkit's field, edited by the toolkit's editor
+    //    (lane C, c-e-a-theme-can-shape-the-controls)
+
+    /// Whether the window draws exactly the toolkit's field for `rect` in
+    /// `state` -- and, unless `state` has the keyboard, not the focused one
+    /// as well (an unfocused box's commands are a prefix of a focused
+    /// one's). A disabled box draws no focus mark either way, so for one
+    /// the two are the same drawing.
+    fn draws_box(app: &NetManagerApp, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, &app.palette, rect, s, app.focus_ring_width);
+            v
+        };
+        let frame = render_frame(app, SIZE.0, SIZE.1);
+        let cmds = frame.commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        let focused = seq(field::State {
+            focused: true,
+            ..state
+        });
+        has(&seq(state)) && (state.focused || focused == seq(state) || !has(&focused))
+    }
+
+    /// A mouse event at `x`, `y`.
+    fn mouse(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(guitk::event::MouseEvent { x, y, kind })
+    }
+
+    /// A window whose theme marks a box with the keyboard by a ring, at two
+    /// and a half times the toolkit's focus width.
+    fn ringed() -> NetManagerApp {
+        let mut app = NetManagerApp::with_sample_data();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app
+    }
+
+    /// **The DNS box is the toolkit's field**: lit under the pointer, with
+    /// the keyboard in the theme's mark at the user's width, red while what
+    /// is in it would be refused -- not an address, or one already listed --
+    /// and giving up its mark under the shortcut card. It was a card-coloured
+    /// box with a blue edge and an `_` for a caret.
+    #[test]
+    fn the_dns_box_is_the_toolkits_field() {
+        let mut app = ringed();
+        app.interfaces[0].ip_config.dhcp_enabled = Some(false);
+        app.select_interface(0);
+        app.set_tab(DetailTab::Dns);
+        let rect = rect_of(&app, Target::Focus(Field::DnsInput)).expect("the DNS box");
+        let idle = field::State::default();
+        assert!(
+            draws_box(&app, rect, idle),
+            "the DNS box is not the toolkit's field"
+        );
+
+        let (cx, cy) = rect.centre();
+        assert_eq!(
+            app.handle_event(&mouse(cx, cy, MouseEventKind::Move), SIZE),
+            Action::Redraw
+        );
+        let lit = field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws_box(&app, rect, lit),
+            "the box under the pointer is not lit"
+        );
+        app.handle_event(&mouse(cx, cy, MouseEventKind::Leave), SIZE);
+        assert!(
+            draws_box(&app, rect, idle),
+            "the box stayed lit with the pointer gone"
+        );
+
+        click(&mut app, Target::Focus(Field::DnsInput));
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws_box(&app, rect, focused),
+            "the box with the keyboard has no mark"
+        );
+
+        type_str(&mut app, "9.9.");
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(draws_box(&app, rect, red), "half an address is not red");
+        type_str(&mut app, "9.9");
+        assert!(draws_box(&app, rect, focused), "an address is red");
+        assert!(
+            app.edit_ip_config
+                .dns_servers
+                .iter()
+                .any(|s| s == "8.8.8.8"),
+            "the sample lists 8.8.8.8"
+        );
+        app.handle_key(&guitk::probe::ctrl(Key::A));
+        type_str(&mut app, "8.8.8.8");
+        assert_eq!(app.dns_input, "8.8.8.8");
+        assert!(
+            draws_box(&app, rect, red),
+            "a server already listed is not red"
+        );
+
+        app.handle_key(&press(Key::F1));
+        assert!(
+            draws_box(
+                &app,
+                rect,
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the box keeps the keyboard's mark under the shortcut card"
+        );
+    }
+
+    /// **A chord is a command, not typing, and the caret keys edit.** A
+    /// command arrives carrying its letter as text, so the box typed it:
+    /// Ctrl+S put an `s` in the address. AltGr arrives as Ctrl+Alt, and
+    /// types. And the box had no caret to move -- Backspace from the end was
+    /// the only edit there was.
+    #[test]
+    fn a_chord_is_not_typed_into_a_box_and_the_caret_keys_edit_it() {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::Dns);
+        click(&mut app, Target::Focus(Field::DnsInput));
+        type_str(&mut app, "8.8.4.4");
+
+        for (key, text, modifiers) in [
+            (Key::S, "s", Modifiers::ctrl()),
+            (Key::X, "x", Modifiers::alt()),
+            (
+                Key::E,
+                "e",
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        ] {
+            app.handle_key(&KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_string(),
+            });
+            assert_eq!(
+                app.dns_input, "8.8.4.4",
+                "{modifiers:?} {key:?} typed into the box"
+            );
+        }
+        app.handle_key(&KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: String::from("5"),
+        });
+        assert_eq!(app.dns_input, "8.8.4.45", "AltGr did not type");
+
+        app.handle_key(&press(Key::Backspace));
+        app.handle_key(&press(Key::Home));
+        app.handle_key(&press(Key::Delete));
+        type_str(&mut app, "9");
+        assert_eq!(
+            app.dns_input, "9.8.4.4",
+            "Home and Delete did not edit the start"
+        );
+        app.handle_key(&guitk::probe::ctrl(Key::A));
+        type_str(&mut app, "1.1.1.1");
+        assert_eq!(
+            app.dns_input, "1.1.1.1",
+            "typing did not replace the selection"
+        );
+    }
+
+    /// **The window's keys are plain keys**: F1 with Ctrl is not the card,
+    /// and Escape with Alt -- the window's own chord -- does not quit.
+    #[test]
+    fn a_chord_is_none_of_the_windows_keys() {
+        let mut app = NetManagerApp::with_sample_data();
+        app.handle_key(&press_with(Key::F1, Modifiers::ctrl()));
+        assert!(!app.show_help, "Ctrl+F1 raised the card");
+        assert_eq!(
+            app.handle_key(&press_with(Key::Escape, Modifiers::alt())),
+            Action::None,
+            "Alt+Escape quit"
+        );
+        let tab = app.active_tab;
+        app.handle_key(&press_with(Key::Right, Modifiers::alt()));
+        assert_eq!(app.active_tab, tab, "Alt+Right changed tab");
+        // Control: the keys themselves.
+        app.handle_key(&press(Key::Right));
+        assert_ne!(app.active_tab, tab);
+        app.handle_key(&press(Key::F1));
+        assert!(app.show_help);
+    }
+
+    /// **A press in a box puts the caret under the pointer**, not at the
+    /// end: at the start of the text, a press before its first character.
+    #[test]
+    fn a_press_in_a_box_puts_the_caret_under_the_pointer() {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::Dns);
+        app.dns_input = String::from("8.8.4.4");
+        let rect = rect_of(&app, Target::Focus(Field::DnsInput)).expect("the DNS box");
+        let y = rect.centre().1;
+
+        let left = MouseEventKind::Press(MouseButton::Left);
+        app.handle_event(&mouse(rect.x + BOX_TEXT_INSET + 1.0, y, left.clone()), SIZE);
+        assert_eq!(app.focus, Some(Field::DnsInput));
+        type_str(&mut app, "1");
+        assert_eq!(
+            app.dns_input, "18.8.4.4",
+            "the caret did not go where the press was"
+        );
+
+        app.handle_event(&mouse(rect.right() - 2.0, y, left), SIZE);
+        type_str(&mut app, "2");
+        assert_eq!(
+            app.dns_input, "18.8.4.42",
+            "a press past the end did not reach it"
+        );
+    }
+
+    /// **Tab in the DNS box keeps the keyboard on its tab.** It moved it to
+    /// the address box on the IP tab, which is not drawn while the DNS tab
+    /// is, so what was typed next went somewhere nobody could see.
+    #[test]
+    fn tab_in_the_dns_box_keeps_the_keyboard_on_its_tab() {
+        let mut app = configured_by_hand();
+        app.set_tab(DetailTab::Dns);
+        click(&mut app, Target::Focus(Field::DnsInput));
+        assert_eq!(app.handle_key(&press(Key::Tab)), Action::None);
+        assert_eq!(
+            app.focus,
+            Some(Field::DnsInput),
+            "Tab sent the keyboard to a box on another tab"
+        );
+        type_str(&mut app, "1");
+        assert_eq!(app.dns_input, "1");
+    }
+
+    /// **Under DHCP the address boxes are disabled**: drawn so, no target,
+    /// and no keyboard -- the addresses are the DHCP server's to give, and
+    /// Apply would send none of them. Switching DHCP on takes the keyboard
+    /// from the box that had it.
+    #[test]
+    fn under_dhcp_the_address_boxes_are_disabled_and_take_no_keyboard() {
+        let mut app = NetManagerApp::with_sample_data();
+        app.set_tab(DetailTab::IpConfig);
+        assert_eq!(
+            app.edit_ip_config.dhcp_enabled,
+            Some(true),
+            "the first interface is DHCP's"
+        );
+        click(&mut app, Target::EditIp);
+        assert!(app.editing_ip);
+        assert_eq!(
+            app.focus, None,
+            "Edit gave the keyboard to a box DHCP fills in"
+        );
+        assert!(
+            rect_of(&app, Target::Focus(Field::Ip)).is_none(),
+            "a disabled box is a target"
+        );
+        assert_eq!(app.activate(Target::Focus(Field::Ip)), Action::None);
+
+        click(&mut app, Target::DhcpToggle);
+        assert_eq!(app.edit_ip_config.dhcp_enabled, Some(false));
+        let rect = rect_of(&app, Target::Focus(Field::Ip)).expect("a static box takes a press");
+        click(&mut app, Target::Focus(Field::Ip));
+        assert_eq!(app.focus, Some(Field::Ip));
+
+        click(&mut app, Target::DhcpToggle);
+        assert_eq!(app.focus, None, "a disabled box kept the keyboard");
+        let disabled = field::State {
+            disabled: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(&app, rect, disabled),
+            "the box under DHCP is not drawn disabled"
+        );
+        let before = app.edit_ip_config.ip_address.clone();
+        type_str(&mut app, "9");
+        assert_eq!(app.edit_ip_config.ip_address, before);
+    }
+
+    /// **An address box is red while it holds something that is not an
+    /// address**, and not while it is empty: an empty gateway is "none".
+    #[test]
+    fn an_address_box_is_red_while_it_is_not_an_address() {
+        let mut app = on_a_static_interface();
+        click(&mut app, Target::EditIp);
+        let rect = rect_of(&app, Target::Focus(Field::Gateway)).expect("the gateway box");
+        click(&mut app, Target::Focus(Field::Gateway));
+        app.handle_key(&guitk::probe::ctrl(Key::A));
+        type_str(&mut app, "10.0.0.");
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_box(
+                &app,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "half a gateway is not red"
+        );
+        type_str(&mut app, "1");
+        assert!(draws_box(&app, rect, focused), "a gateway is red");
+        app.handle_key(&guitk::probe::ctrl(Key::A));
+        app.handle_key(&press(Key::Backspace));
+        assert_eq!(app.edit_ip_config.gateway, "");
+        assert!(draws_box(&app, rect, focused), "an empty gateway is red");
+    }
+
+    /// **The shortcut card takes a press rather than passing it on**, with
+    /// any button: it goes, and the tab drawn under it is not chosen. The
+    /// wheel scrolls nothing it covers. The control: with the card down, the
+    /// same press chooses the tab and the same wheel scrolls the list.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let mut app = NetManagerApp::with_sample_data();
+            let rect = rect_of(&app, Target::Tab(DetailTab::Dns)).expect("the DNS tab");
+            let (x, y) = rect.centre();
+            app.handle_key(&press(Key::F1));
+            assert!(app.show_help);
+            assert_eq!(
+                app.handle_event(&mouse(x, y, MouseEventKind::Press(button)), SIZE),
+                Action::Redraw
+            );
+            assert!(!app.show_help, "{button:?} did not put the card away");
+            assert_ne!(
+                app.active_tab,
+                DetailTab::Dns,
+                "{button:?} went through the card to the tab under it"
+            );
+        }
+
+        let mut app = NetManagerApp::with_sample_data();
+        let rect = rect_of(&app, Target::Tab(DetailTab::Dns)).expect("the DNS tab");
+        let (x, y) = rect.centre();
+        let wheel = MouseEventKind::Scroll { dx: 0.0, dy: -3.0 };
+        app.handle_key(&press(Key::F1));
+        app.handle_event(&mouse(x, y, wheel.clone()), SIZE);
+        assert_eq!(
+            app.sidebar_scroll, 0,
+            "the wheel scrolled the list under the card"
+        );
+        assert!(app.show_help, "the wheel put the card away");
+
+        app.handle_key(&press(Key::F1));
+        app.handle_event(&mouse(x, y, wheel), SIZE);
+        assert_ne!(app.sidebar_scroll, 0, "control: the wheel scrolls nothing");
+        click(&mut app, Target::Tab(DetailTab::Dns));
+        assert_eq!(
+            app.active_tab,
+            DetailTab::Dns,
+            "control: the press chose nothing"
+        );
     }
 
     #[test]
@@ -6538,13 +7906,16 @@ mod tests {
         // Enter, Tab, Escape and Backspace all produce text on most layouts
         // (`\r`, `\t`, `\x1b`, `\x08`). A field that appends whatever arrives
         // fills with unprintable bytes the first time someone presses Escape.
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
 
         for text in ["\r", "\t", "\x1b", "\u{8}"] {
             app.handle_key(&KeyEvent {
-                key: Key::F1,
+                // Not F1, which is the card's: a key that reaches the box.
+                // (It was F1, so every one of these opened or closed the
+                // card and none reached the box this test is about.)
+                key: Key::Unknown(0),
                 pressed: true,
                 modifiers: Modifiers::NONE,
                 text: text.to_string(),
@@ -6555,7 +7926,7 @@ mod tests {
 
     #[test]
     fn a_key_release_types_nothing() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
 
@@ -6567,7 +7938,7 @@ mod tests {
 
     #[test]
     fn the_dns_box_takes_typing_and_add_moves_it_into_the_list() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.len();
 
@@ -6583,11 +7954,17 @@ mod tests {
             Some("9.9.9.9")
         );
         assert_eq!(app.dns_input, "", "the box kept what it had already added");
+
+        // The box still has the keyboard, and what is typed next starts
+        // afresh: the editor over it does not bring the added address back.
+        assert_eq!(app.focus, Some(Field::DnsInput));
+        type_str(&mut app, "1.0.0.1");
+        assert_eq!(app.dns_input, "1.0.0.1", "the added address came back");
     }
 
     #[test]
     fn enter_in_the_dns_box_adds_without_reaching_for_the_button() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.len();
 
@@ -6600,7 +7977,7 @@ mod tests {
 
     #[test]
     fn a_rejected_dns_address_stays_in_the_box_with_the_reason_on_screen() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         let before = app.edit_ip_config.dns_servers.clone();
 
@@ -6622,7 +7999,7 @@ mod tests {
 
     #[test]
     fn backspace_removes_the_last_character_typed() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
         type_str(&mut app, "8.8");
@@ -6638,8 +8015,11 @@ mod tests {
 
     #[test]
     fn the_dns_reorder_buttons_move_the_row_they_sit_on() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
+        // An edit under way: with the editor closed, the list is the
+        // interface's, and the first change reloads it from there.
+        app.start_editing_ip();
         app.edit_ip_config.dns_servers = vec!["1.1.1.1".into(), "2.2.2.2".into(), "3.3.3.3".into()];
 
         click(&mut app, Target::DnsDown(0));
@@ -6657,7 +8037,7 @@ mod tests {
     fn the_first_row_has_no_up_button_and_the_last_has_no_down_button() {
         // A button drawn where the operation cannot succeed is a button that
         // answers a click with an error message.
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         app.edit_ip_config.dns_servers = vec!["1.1.1.1".into(), "2.2.2.2".into()];
 
@@ -6861,7 +8241,7 @@ mod tests {
 
     #[test]
     fn a_click_on_bare_background_puts_the_caret_away() {
-        let mut app = NetManagerApp::with_sample_data();
+        let mut app = configured_by_hand();
         app.set_tab(DetailTab::Dns);
         click(&mut app, Target::Focus(Field::DnsInput));
         assert_eq!(app.focus, Some(Field::DnsInput));

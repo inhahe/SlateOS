@@ -29,6 +29,7 @@ THUMBS = "test_scanner_scan_thumbnail_cache"
 WHOSE = "the_home_categories_look_in_the_users_own_home"
 PLACED = "home_is_placed_under_the_scan_base"
 NO_HOME = "without_a_home_the_home_categories_find_nothing"
+BOX = "a_categorys_box_is_the_toolkits_check_box"
 
 MUTATIONS = [
     (
@@ -79,7 +80,44 @@ MUTATIONS = [
         "",
         [BIN],
     ),
+    # -- the toolkit's check box (c-e-the-toolkit-has-switches-checkboxes-...)
+    (
+        "a category's box is drawn the same wherever the pointer is",
+        "            hovered: self.hovered_row == Some(index),",
+        "            hovered: false,",
+        [BOX],
+    ),
+    (
+        "the pointer is not followed",
+        "                let over = self.row_at(&self.layout(), mouse.x, mouse.y);",
+        "                let over = None::<usize>;",
+        [BOX],
+    ),
+    (
+        "the pointer leaving the window leaves its row lit",
+        "                return if self.hovered_row.take().is_some() {",
+        "                return if self.hovered_row.is_some() {",
+        [BOX],
+    ),
+    # -- the shortcut card's hold on the pointer
+    (
+        "a press goes through the shortcut card",
+        "        if self.show_help {\n"
+        "            if matches!(mouse.kind, MouseEventKind::Press(_)) {\n",
+        "        if false {\n"
+        "            if matches!(mouse.kind, MouseEventKind::Press(_)) {\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "only the left button puts the card away",
+        "            if matches!(mouse.kind, MouseEventKind::Press(_)) {\n"
+        "                self.show_help = false;\n",
+        "            if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {\n"
+        "                self.show_help = false;\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "diskcleanup", timeout=900))
+    only = sys.argv[1:] or None
+    sys.exit(sweep(SRC, MUTATIONS, "diskcleanup", timeout=900, only=only))

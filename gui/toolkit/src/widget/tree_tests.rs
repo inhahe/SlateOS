@@ -694,3 +694,134 @@ fn content_wider_than_its_view_scrolls_sideways() {
     });
     assert!(across, "{:?}", tree.render().commands);
 }
+
+/// **A turn of the wheel a scroll view cannot take goes to the one round
+/// it**: an inner view with nothing to scroll leaves the wheel to the outer.
+#[test]
+fn a_turn_the_inner_view_cannot_take_goes_to_the_outer() {
+    let mut inner = Widget::scroll_view().with_child(Widget::label("Short"));
+    inner.style.min_height = Some(50.0);
+    inner.style.max_height = Some(50.0);
+    let mut outer = Widget::scroll_view().with_child(inner);
+    for i in 0..20 {
+        outer = outer.with_child(Widget::button(&format!("Item {i}")));
+    }
+    outer.style.min_height = Some(100.0);
+    outer.style.max_height = Some(100.0);
+    let mut tree = tree_of(vec![outer]);
+    let outer = &tree.root.children[0];
+    let inner = &outer.children[0];
+    let (x, y) = (
+        outer.layout.x + inner.layout.x + 10.0,
+        outer.layout.y + inner.layout.y + 10.0,
+    );
+    assert!(inner.contains(x - outer.layout.x, y - outer.layout.y));
+    tree.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+    assert!(scrolled(&tree, 0) > 0.0);
+}
+
+/// **What a scroll view holds shrinking pulls its scroll back**: scrolled to
+/// the end of twenty buttons, it is scrolled no further than five allow once
+/// fifteen are gone -- and so sideways, for content grown narrower.
+#[test]
+fn shrinking_content_pulls_the_scroll_back() {
+    let mut tree = scrolling_tree();
+    let (x, y) = centre(&tree, 0);
+    for _ in 0..100 {
+        tree.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+    }
+    assert_eq!(scrolled(&tree, 0), 560.0 - 100.0);
+    tree.root.children[0].children.truncate(5);
+    tree.layout();
+    assert_eq!(scrolled(&tree, 0), 5.0 * 28.0 - 100.0);
+
+    let mut wide = Widget::label("A very wide label");
+    wide.style.min_width = Some(900.0);
+    let mut view = Widget::scroll_view().with_child(wide);
+    view.style.min_height = Some(100.0);
+    view.style.max_height = Some(100.0);
+    let mut tree = tree_of(vec![view]);
+    let (x, y) = centre(&tree, 0);
+    for _ in 0..100 {
+        tree.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 1.0, dy: 0.0 }));
+    }
+    let sideways = |tree: &WidgetTree| match tree.root.children[0].kind {
+        WidgetKind::ScrollView { scroll_x, .. } => scroll_x,
+        ref other => panic!("not a scroll view: {other:?}"),
+    };
+    assert_eq!(sideways(&tree), 900.0 - 300.0);
+    tree.root.children[0].children[0].style.min_width = Some(400.0);
+    tree.layout();
+    assert_eq!(sideways(&tree), 400.0 - 300.0);
+}
+
+/// **Two bars leave the corner between them, and the bar across shows how
+/// much of the content's width is in view and where**: each drawn exactly as
+/// the scrollbar module draws a track that stops short of the corner, its
+/// thumb sized and placed by the view's width and sideways scroll.
+#[test]
+fn two_bars_leave_the_corner_and_show_where() {
+    let mut big = Widget::label("A very wide label");
+    big.style.min_width = Some(900.0);
+    big.style.min_height = Some(600.0);
+    let mut view = Widget::scroll_view().with_child(big);
+    view.style.min_height = Some(100.0);
+    view.style.max_height = Some(100.0);
+    let mut tree = tree_of(vec![view]);
+    let (x, y) = centre(&tree, 0);
+    // Some way across, so the thumb is neither at its start nor its end.
+    tree.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 1.0, dy: 0.0 }));
+    let view = &tree.root.children[0];
+    let WidgetKind::ScrollView {
+        scroll_x,
+        scroll_y,
+        content_width,
+        content_height,
+    } = view.kind
+    else {
+        panic!("not a scroll view");
+    };
+    assert!(
+        scroll_x > 0.0 && scroll_x < content_width - 300.0,
+        "{scroll_x}"
+    );
+    let (cx, cy) = view.content_origin();
+    let (cw, ch) = (view.layout.width, view.layout.height);
+    let bar = crate::scrollbar::WIDTH;
+    let state = crate::scrollbar::BarState {
+        hovered: view.is_hovered(),
+        dragging: false,
+    };
+    let p = dark();
+    let down_track = Rect::new(cx + cw - bar, cy, bar, ch - bar);
+    let mut down = Vec::new();
+    crate::scrollbar::draw(
+        &mut down,
+        &p,
+        down_track,
+        crate::scrollbar::thumb_of(
+            down_track,
+            ch / content_height,
+            scroll_y / (content_height - ch),
+            crate::scrollbar::MIN_THUMB,
+        ),
+        state,
+    );
+    let across_track = Rect::new(cx, cy + ch - bar, cw - bar, bar);
+    let mut across = Vec::new();
+    crate::scrollbar::draw_across(
+        &mut across,
+        &p,
+        across_track,
+        crate::scrollbar::thumb_across(
+            across_track,
+            cw / content_width,
+            scroll_x / (content_width - cw),
+            crate::scrollbar::MIN_THUMB,
+        ),
+        state,
+    );
+    let drawn = tree.render().commands;
+    assert!(draws(&drawn, &down), "{drawn:?}");
+    assert!(draws(&drawn, &across), "{drawn:?}");
+}

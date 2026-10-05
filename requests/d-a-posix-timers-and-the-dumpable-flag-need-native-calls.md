@@ -43,9 +43,9 @@ operation argument, as lane A prefers:
 - a process's timers are not inherited by `fork` and are deleted by `exec`,
   as POSIX says.
 
-**Meanwhile:** lane D will make the library's `timer_create` answer
+**Meanwhile:** since 2026-10-05 the library's `timer_create` answers
 `ENOSYS` after its argument checks, as the Linux ABI does, instead of
-succeeding with a timer that never fires. Callers fall back on that answer:
+succeeding with a timer that never fires (design-decisions 1170). Callers fall back on that answer:
 GNU `timeout` falls back to `alarm` on exactly it. Nothing on the image
 calls `timer_create` today; the interpreter's binary carries the symbol only
 because it shares an archive member with time functions it does call.
@@ -62,8 +62,8 @@ takes 0 or 1 and refuses anything else `EINVAL`, as Linux's `prctl` does --
 so that the native `prctl` and the Linux ABI's agree on one flag, and
 `/proc` and `ptrace` can consult it the day they do.
 
-**Meanwhile:** lane D will keep the flag in the library, as it keeps
-`no_new_privs` (`posix/src/unistd.rs`): `PR_SET_DUMPABLE` 0 or 1 accepted,
+**Meanwhile:** since 2026-10-05 the library keeps the flag itself, as it
+keeps `no_new_privs` (`posix/src/unistd.rs`): `PR_SET_DUMPABLE` 0 or 1 accepted,
 `PR_GET_DUMPABLE` answered from it, 2 and above `EINVAL`. That is exact for
 the one thing the flag does on SlateOS today -- be read back -- and the
 native call replaces it when it lands.

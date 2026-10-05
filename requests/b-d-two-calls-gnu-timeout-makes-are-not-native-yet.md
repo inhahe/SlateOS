@@ -1,6 +1,6 @@
 # B → D: two calls GNU `timeout` makes that the native library does not carry out yet
 
-**Status:** OPEN — half done 2026-10-05 (`prctl`); timers wait on lane A -- see the end.
+**Status:** ✅ DONE 2026-10-05 by lane D -- `prctl` accepted; `timer_create` answers `ENOSYS`, and timers that fire are asked of lane A. See the end.
 
 **From:** lane B. **Date:** 2026-10-02.
 
@@ -104,7 +104,11 @@ the kernel on either ABI -- the Linux ABI's `timer_create` checks its
 arguments and then answers `ENOSYS`, so it is not the implementation this
 file took it for. `requests/d-a-posix-timers-and-the-dumpable-flag-need-
 native-calls.md` asks for native per-process timers (and a native route to
-the dumpable flag). Meanwhile lane D will make `timer_create` answer
-`ENOSYS` after its argument checks, rather than succeed with a timer that
-never fires: the honest answer of the two this file names, and the one
-`timeout`'s source falls back on.
+the dumpable flag). Meanwhile `timer_create` answers `ENOSYS` after its
+argument checks, and the other four `EINVAL` (`posix/src/time.rs`,
+design-decisions 1170), rather than succeed with a timer that never fires:
+the honest answer of the two this file names, and the one `timeout`'s
+source falls back on without a word. It warns on any other errno, and on
+any failure of `timer_settime`, which is why the refusal is at creation
+and not at arming. Closed with it:
+`known-issues-resolved/B-POSIX-TIMER-SETTIME-REPORTS-SUCCESS-AND-ARMS-NOTHING.md`.

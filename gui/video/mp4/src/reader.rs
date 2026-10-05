@@ -7,9 +7,15 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 use crate::Error;
 
+/// How much a [`Reader`] reads ahead at first: enough that reading the boxes
+/// and a file's samples through takes few reads.
+const READ_AHEAD: usize = 64 * 1024;
+
 /// Reads a seekable source, keeping its position.
 pub(crate) struct Reader<R> {
-    inner: BufReader<R>,
+    /// The source, read ahead into a buffer. `None` only inside
+    /// [`Reader::set_read_ahead`], while the buffer is changed.
+    inner: Option<BufReader<R>>,
     pos: u64,
     len: u64,
 }
@@ -20,10 +26,38 @@ impl<R: Read + Seek> Reader<R> {
         let len = source.seek(SeekFrom::End(0))?;
         source.seek(SeekFrom::Start(0))?;
         Ok(Self {
-            inner: BufReader::with_capacity(64 * 1024, source),
+            inner: Some(BufReader::with_capacity(READ_AHEAD, source)),
             pos: 0,
             len,
         })
+    }
+
+    fn source(&mut self) -> Result<&mut BufReader<R>, Error> {
+        self.inner.as_mut().ok_or(Error::Io(io::ErrorKind::Other))
+    }
+
+    /// Read ahead `bytes` at a time from here on.
+    ///
+    /// # Errors
+    ///
+    /// When the source cannot be put back where reading is; reading goes on
+    /// as it was.
+    pub(crate) fn set_read_ahead(&mut self, bytes: usize) -> Result<(), Error> {
+        let bytes = bytes.max(1);
+        if self.inner.as_ref().is_some_and(|r| r.capacity() == bytes) {
+            return Ok(());
+        }
+        let Some(mut old) = self.inner.take() else {
+            return Err(Error::Io(io::ErrorKind::Other));
+        };
+        // The source back where reading is -- what was read ahead let go --
+        // before it is taken out of its buffer.
+        if let Err(e) = old.seek(SeekFrom::Start(self.pos)) {
+            self.inner = Some(old);
+            return Err(e.into());
+        }
+        self.inner = Some(BufReader::with_capacity(bytes, old.into_inner()));
+        Ok(())
     }
 
     /// The position of the next byte.
@@ -46,11 +80,13 @@ impl<R: Read + Seek> Reader<R> {
         if pos > self.len {
             return Err(Error::Truncated);
         }
-        match i64::try_from(pos).ok().zip(i64::try_from(self.pos).ok()) {
+        let delta = i64::try_from(pos).ok().zip(i64::try_from(self.pos).ok());
+        let source = self.source()?;
+        match delta {
             // Within reach of the buffer: keep it.
-            Some((to, from)) => self.inner.seek_relative(to.wrapping_sub(from))?,
+            Some((to, from)) => source.seek_relative(to.wrapping_sub(from))?,
             None => {
-                self.inner.seek(SeekFrom::Start(pos))?;
+                source.seek(SeekFrom::Start(pos))?;
             }
         }
         self.pos = pos;
@@ -68,7 +104,7 @@ impl<R: Read + Seek> Reader<R> {
         if n > self.remaining() {
             return Err(Error::Truncated);
         }
-        self.inner.read_exact(buf).map_err(|e| match e.kind() {
+        self.source()?.read_exact(buf).map_err(|e| match e.kind() {
             io::ErrorKind::UnexpectedEof => Error::Truncated,
             kind => Error::Io(kind),
         })?;

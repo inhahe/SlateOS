@@ -3852,7 +3852,7 @@ lane C's `guitk`.
       over the other tracks' blocks unread, as FFmpeg passes over a
       discarded stream's, and `set_read_ahead` suits the reading to it;
       `videocodec`'s sound and subtitle readers read 4% of a 1080p film, not
-      all of it again beside the pictures.
+      all of it again beside the pictures. MP4's demuxer the same.
   - `[x]` A frame-level API for a player (`gui/video/codec`, crate
     `videocodec`, design-decisions §1346): `Video::open(file)`, then
     `next_frame()` -- each picture in order with its time, duration and

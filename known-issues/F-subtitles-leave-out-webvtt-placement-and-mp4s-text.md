@@ -23,6 +23,5 @@ bottom centre. An MP4 film's subtitles are not found at all.
 from disk alongside the player, every video and sound packet's bytes to reach
 a few kilobytes of cues. The Matroska demuxer now passes over the other
 tracks' blocks unread, and a subtitle or sound reader reads ahead 1 KiB:
-4.3% of a 1080p film read for its subtitles (design-decisions §1361). An
-MP4 film's sound is still read with every sample of its pictures, until the
-MP4 demuxer discards tracks the same way.
+4.3% of a 1080p film read for its subtitles (design-decisions §1361); an MP4
+film's sound reads 3.8% of it the same way.

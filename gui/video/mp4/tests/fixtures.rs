@@ -780,3 +780,114 @@ fn seeks_in_edit_before_key_shows() {
 fn seeks_in_edit_at_shown_key() {
     seeks_as_ffmpeg_does("edit_at_shown_key.mp4");
 }
+
+/// Every packet of a demuxer, to the end.
+fn every_packet(d: &mut Demuxer<File>) -> Vec<mp4::Packet> {
+    let mut all = Vec::new();
+    while let Some(p) = d.next_packet().unwrap() {
+        all.push(p);
+    }
+    all
+}
+
+/// A track read alone (`Demuxer::select_tracks`) gives exactly the packets it
+/// gives among the others, in every fixture the demuxer opens: the others'
+/// samples, passed over unread, still take their turns.
+#[test]
+fn a_track_selected_alone_gives_the_packets_it_gives_among_the_others() {
+    let mut differ = Vec::new();
+    let mut checked = 0;
+    for entry in std::fs::read_dir(data("")).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if !(name.ends_with(".mp4") || name.ends_with(".mov")) {
+            continue;
+        }
+        let Ok(mut d) = Demuxer::open(File::open(data(&name)).unwrap()) else {
+            continue;
+        };
+        let all = every_packet(&mut d);
+        for track in 0..d.tracks().len() {
+            let mut alone = Demuxer::open(File::open(data(&name)).unwrap()).unwrap();
+            alone.select_tracks(Some(&[track]));
+            let got = every_packet(&mut alone);
+            let want: Vec<_> = all.iter().filter(|p| p.track == track).cloned().collect();
+            if got != want {
+                differ.push(format!(
+                    "{name} track {track}: {} packets, {} wanted",
+                    got.len(),
+                    want.len()
+                ));
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "{} of {checked} differ:\n{}",
+        differ.len(),
+        differ.join("\n")
+    );
+    assert!(checked > 60, "only {checked} tracks checked");
+}
+
+/// A source that counts the bytes read from it, and the reads.
+struct Counted {
+    inner: File,
+    read: std::rc::Rc<std::cell::Cell<(u64, u64)>>,
+}
+
+impl std::io::Read for Counted {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let (bytes, reads) = self.read.get();
+        self.read.set((bytes + n as u64, reads + 1));
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for Counted {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+/// How much of a real film each track read alone reads, at each read-ahead:
+/// `MP4_FILM=film.mp4 cargo test --release -p mp4 --test fixtures --
+/// --ignored --nocapture film`.
+#[test]
+#[ignore = "a measurement, over a film of the caller's"]
+fn film_read_track_by_track() {
+    let path = std::env::var("MP4_FILM").expect("MP4_FILM names a film");
+    let size = std::fs::metadata(&path).unwrap().len();
+    let tracks = Demuxer::open(File::open(&path).unwrap())
+        .unwrap()
+        .tracks()
+        .len();
+    let selections = std::iter::once(None).chain((0..tracks).map(Some));
+    for selection in selections {
+        for ahead in [64 * 1024, 16 * 1024, 4096, 1024] {
+            let read = std::rc::Rc::new(std::cell::Cell::new((0, 0)));
+            let source = Counted {
+                inner: File::open(&path).unwrap(),
+                read: read.clone(),
+            };
+            let mut d = Demuxer::open(source).unwrap();
+            d.set_read_ahead(ahead).unwrap();
+            if let Some(n) = selection {
+                d.select_tracks(Some(&[n]));
+            }
+            read.set((0, 0));
+            let start = std::time::Instant::now();
+            let mut packets = 0;
+            while d.next_packet().unwrap().is_some() {
+                packets += 1;
+            }
+            let (bytes, reads) = read.get();
+            println!(
+                "track {selection:?}, {ahead} ahead: {packets} packets, {bytes} of {size} bytes read ({:.1}%) in {reads} reads, {:?}",
+                bytes as f64 * 100.0 / size as f64,
+                start.elapsed()
+            );
+        }
+    }
+}

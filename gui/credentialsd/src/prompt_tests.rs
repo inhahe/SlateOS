@@ -9,15 +9,18 @@
     clippy::arithmetic_side_effects
 )]
 
+use std::io;
 use std::path::PathBuf;
 
-use credentials::service::{Asking, Choice, Picked, Program, Said, Scope};
+use credentials::service::{Asking, Choice, Picked, Program, Prompt, Said, Scope};
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::render::{RenderCommand, RenderTree};
 use oswindow::app::{App, Response};
 
-use super::{ARMING, AskApp, AskButton, AskFocus, ChooseApp, ChooseButton, is_hidden, shown};
+use super::{
+    ARMING, AskApp, AskButton, AskFocus, ChooseApp, ChooseButton, WindowPrompt, is_hidden, shown,
+};
 
 fn mail() -> Program {
     Program {
@@ -466,4 +469,51 @@ fn a_long_list_scrolls() {
     let most = choose_app(&program, &[rows.clone(), rows.clone()].concat());
     assert!(many.initial_size().1 > few.initial_size().1);
     assert_eq!(many.initial_size().1, most.initial_size().1);
+}
+
+/// Arm a window, as the time it stands open does.
+fn armed(app: &mut dyn App) {
+    let ms = u64::try_from(ARMING.as_millis()).unwrap();
+    app.on_event(&Event::Tick { elapsed_ms: ms });
+}
+
+/// **A window that could not be put up, or was gone before an answer, is a
+/// user who could not be asked** -- the failure kept for the service's log,
+/// once -- and a window answered is its answer.
+#[test]
+fn a_window_unanswered_is_a_user_not_asked() {
+    let program = mail();
+    let asked = asking(&program, "bank.example", false);
+    let offered = [Choice {
+        target: "https://bank.example",
+        username: "ann",
+    }];
+
+    let mut failing = WindowPrompt::new().with_show(|_| Err(io::ErrorKind::NotFound.into()));
+    assert!(matches!(failing.ask(&asked), Said::CouldNotAsk));
+    assert_eq!(
+        failing.take_failure().map(|e| e.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+    assert!(failing.take_failure().is_none());
+    assert_eq!(failing.choose(&asked, &offered), Picked::CouldNotAsk);
+
+    let mut closed = WindowPrompt::new().with_show(|_| Ok(()));
+    assert!(matches!(closed.ask(&asked), Said::CouldNotAsk));
+    assert_eq!(closed.choose(&asked, &offered), Picked::CouldNotAsk);
+    assert!(closed.take_failure().is_none());
+
+    let mut refusing = WindowPrompt::new().with_show(|app| {
+        armed(app);
+        app.on_event(&key(Key::Enter, "\r"));
+        Ok(())
+    });
+    assert!(matches!(refusing.ask(&asked), Said::Refuse));
+    let mut picking = WindowPrompt::new().with_show(|app| {
+        armed(app);
+        app.on_event(&key(Key::Down, ""));
+        app.on_event(&key(Key::Enter, "\r"));
+        Ok(())
+    });
+    assert_eq!(picking.choose(&asked, &offered), Picked::Login(0));
 }

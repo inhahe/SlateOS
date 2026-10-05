@@ -1097,11 +1097,25 @@ impl App for ChooseApp {
 
 // --- On the display -------------------------------------------------------
 
+/// How a window is put up and run until it is done: on the user's display,
+/// or -- for a test -- by whatever drives it.
+pub type Show = fn(&mut dyn App) -> io::Result<()>;
+
 /// The service's prompt on the user's display.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WindowPrompt {
     /// Why the last window could not be shown, for the service's log.
     failure: Option<io::Error>,
+    show: Show,
+}
+
+impl Default for WindowPrompt {
+    fn default() -> Self {
+        Self {
+            failure: None,
+            show: on_the_display,
+        }
+    }
 }
 
 impl WindowPrompt {
@@ -1111,6 +1125,14 @@ impl WindowPrompt {
         Self::default()
     }
 
+    /// The same prompt, its windows put up by `show`: for a test, which
+    /// drives a window with the events a user would make.
+    #[must_use]
+    pub fn with_show(mut self, show: Show) -> Self {
+        self.show = show;
+        self
+    }
+
     /// Why the last question could not be put, if it could not: taken.
     pub fn take_failure(&mut self) -> Option<io::Error> {
         self.failure.take()
@@ -1118,18 +1140,20 @@ impl WindowPrompt {
 }
 
 /// Open `app`'s window on the user's display and run it until it is done.
-fn show(app: &mut impl App) -> io::Result<()> {
+fn on_the_display(app: &mut dyn App) -> io::Result<()> {
     let link = oswindow::connect()?;
     let mut events = oswindow::EventLoop::new(link);
     let window =
-        oswindow::app::open(&mut events, app).map_err(|e| io::Error::other(e.to_string()))?;
+        oswindow::app::open(&mut events, &*app).map_err(|e| io::Error::other(e.to_string()))?;
     oswindow::app::drive(&mut events, window, app).map_err(|e| io::Error::other(e.to_string()))
 }
 
 impl Prompt for WindowPrompt {
+    /// The user's answer -- or, for a window that could not be put up or
+    /// was gone before they answered, [`Said::CouldNotAsk`].
     fn ask(&mut self, asking: &Asking<'_>) -> Said {
         let mut app = AskApp::new(asking);
-        match show(&mut app) {
+        match (self.show)(&mut app) {
             Ok(()) => app.take_said().unwrap_or(Said::CouldNotAsk),
             Err(e) => {
                 self.failure = Some(e);
@@ -1138,9 +1162,11 @@ impl Prompt for WindowPrompt {
         }
     }
 
+    /// The user's pick -- or, as for [`ask`](Self::ask),
+    /// [`Picked::CouldNotAsk`].
     fn choose(&mut self, asking: &Asking<'_>, choices: &[Choice<'_>]) -> Picked {
         let mut app = ChooseApp::new(asking, choices);
-        match show(&mut app) {
+        match (self.show)(&mut app) {
             Ok(()) => app.take_picked().unwrap_or(Picked::CouldNotAsk),
             Err(e) => {
                 self.failure = Some(e);

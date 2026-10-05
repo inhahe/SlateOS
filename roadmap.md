@@ -4013,12 +4013,13 @@ lane C's `guitk`.
     with lane E). SubRip as ffmpeg reads it; ASS and SSA as libass shows
     them -- styles from the script, sizes scaled to SRT's 288 lines,
     libass's resets, weights and alignments, drawings and comments hidden;
-    WebVTT, WebM's and Matroska's, as its specification reads it. Eight
-    fixtures (ffmpeg and mkvmerge muxing; 325 cues) held to ffmpeg's SRT
-    cue for cue but for 53 departures, each checked against libass, HTML or
-    the specification; seeks give the cues still showing. Pictures of text
-    are refused by name. Not yet: WebVTT's placement, MP4's text tracks
-    (`known-issues/F-subtitles-leave-out-webvtt-placement-and-mp4s-text.md`).
+    WebVTT, WebM's and Matroska's, as its specification reads it, its cue
+    settings placing the cue. Eight fixtures (ffmpeg and mkvmerge muxing;
+    347 cues) held to ffmpeg's SRT cue for cue but for 69 departures, each
+    checked against libass, HTML or the specification; seeks give the cues
+    still showing. Pictures of text are refused by name. Not yet: MP4's
+    text tracks
+    (`known-issues/F-subtitles-leave-out-mp4s-text-tracks-and-pictures-of-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,
   beside the TCP one. The point is the peer's identity: the kernel attests a

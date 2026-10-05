@@ -135,8 +135,9 @@ pub(crate) struct Sample {
     /// MP4's edit list leaves out.
     pub discard: bool,
     pub data: Vec<u8>,
-    /// WebM's alpha channel for the frame: its `BlockAdditional` 1.
-    pub alpha: Option<Vec<u8>>,
+    /// Matroska's `BlockAdditional` 1: for a WebM video frame, its alpha
+    /// channel; for an `S_TEXT/WEBVTT` cue, its settings and identifier.
+    pub addition: Option<Vec<u8>>,
     /// The codec setup this packet and those after it decode with, where it
     /// changes (an MP4 track of several sample entries).
     pub new_config: Option<Vec<u8>>,
@@ -481,7 +482,7 @@ impl<R: Read + Seek> Container<R> {
     pub(crate) fn next_packet(&mut self) -> Result<Option<Sample>, ContainerError> {
         match self {
             Self::Matroska(d) => Ok(d.next_packet()?.map(|p| {
-                let alpha = p
+                let addition = p
                     .additions
                     .into_iter()
                     .find(|(id, _)| *id == 1)
@@ -493,7 +494,7 @@ impl<R: Read + Seek> Container<R> {
                     keyframe: p.keyframe,
                     discard: false,
                     data: p.data,
-                    alpha,
+                    addition,
                     new_config: None,
                     discard_padding: p.discard_padding,
                     discard_samples: 0,
@@ -512,7 +513,7 @@ impl<R: Read + Seek> Container<R> {
                     keyframe: p.keyframe,
                     discard: p.discard,
                     data: p.data,
-                    alpha: None,
+                    addition: None,
                     new_config: p.new_config,
                     discard_padding: 0,
                     discard_samples: 0,
@@ -542,7 +543,7 @@ impl<R: Read + Seek> Container<R> {
                     keyframe: true,
                     discard: false,
                     data: frame.to_vec(),
-                    alpha: None,
+                    addition: None,
                     new_config: None,
                     discard_padding: 0,
                     discard_samples: p.discard_padding,
@@ -655,7 +656,7 @@ impl<R: Read + Seek> OggFile<R> {
             keyframe: true,
             discard: false,
             data: p.data,
-            alpha: None,
+            addition: None,
             new_config,
             discard_padding: 0,
             discard_samples: u64::from(p.discard_padding),

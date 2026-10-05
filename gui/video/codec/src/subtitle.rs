@@ -208,12 +208,22 @@ impl<R: Read + Seek> Subtitles<R> {
             let text = match &self.reader {
                 Reader::SubRip => write(subrip::ops(text)),
                 Reader::WebVtt { webm } => {
-                    let cue = if *webm { webm_cue(text) } else { Some(text) };
-                    let Some(cue) = cue else {
+                    let cue = if *webm {
+                        webm_cue(text)
+                    } else {
+                        // Matroska's settings are the first line of the
+                        // block's addition, where it has one; one that is
+                        // not UTF-8 places nothing.
+                        let addition = sample.addition.as_deref().unwrap_or_default();
+                        let settings = core::str::from_utf8(addition)
+                            .map_or("", |a| a.split('\n').next().unwrap_or(""));
+                        Some((settings, text))
+                    };
+                    let Some((settings, cue)) = cue else {
                         self.damaged = self.damaged.saturating_add(1);
                         continue;
                     };
-                    write(webvtt::ops(cue.trim_end_matches(['\r', '\n'])))
+                    write(webvtt::ops(cue.trim_end_matches(['\r', '\n']), settings))
                 }
                 Reader::Ass(script) => {
                     let Some(text) = ass::cue(script, text) else {
@@ -249,20 +259,23 @@ impl<R: Read + Seek> Subtitles<R> {
     }
 }
 
-/// The text of a WebM WebVTT block -- the cue's identifier, its settings,
-/// then its text, the first two each ending in `\n` or `\r\n` -- as ffmpeg's
-/// demuxer takes it apart (`matroska_parse_webvtt`); `None` for a block
-/// without both lines.
-fn webm_cue(block: &str) -> Option<&str> {
-    let line = |s: &str| -> Option<usize> {
+/// The settings and the text of a WebM WebVTT block -- the cue's identifier,
+/// its settings, then its text, the first two each ending in `\n` or
+/// `\r\n` -- as ffmpeg's demuxer takes it apart (`matroska_parse_webvtt`);
+/// `None` for a block without both lines.
+fn webm_cue(block: &str) -> Option<(&str, &str)> {
+    // A line: where its text ends, and where the next line begins.
+    let line = |s: &str| -> Option<(usize, usize)> {
         let end = s.find(['\r', '\n'])?;
         let rest = s.get(end..)?;
         let rest = rest.strip_prefix('\r').unwrap_or(rest);
         rest.strip_prefix('\n')?;
-        Some(s.len().saturating_sub(rest.len()).saturating_add(1))
+        Some((end, s.len().saturating_sub(rest.len()).saturating_add(1)))
     };
-    let after_identifier = block.get(line(block)?..)?;
-    after_identifier.get(line(after_identifier)?..)
+    let (_, after_identifier) = line(block)?;
+    let rest = block.get(after_identifier..)?;
+    let (settings_end, after_settings) = line(rest)?;
+    Some((rest.get(..settings_end)?, rest.get(after_settings..)?))
 }
 
 /// A cue's steps as SRT markup.
@@ -280,10 +293,10 @@ mod tests {
 
     #[test]
     fn a_webm_block_is_its_identifier_its_settings_then_its_text() {
-        assert_eq!(webm_cue("\n\ntext"), Some("text"));
+        assert_eq!(webm_cue("\n\ntext"), Some(("", "text")));
         assert_eq!(
             webm_cue("id\r\nline:0\nfirst\nsecond"),
-            Some("first\nsecond")
+            Some(("line:0", "first\nsecond"))
         );
         assert_eq!(webm_cue("id\nno settings line"), None);
         assert_eq!(webm_cue("id\rsettings\ntext"), None);

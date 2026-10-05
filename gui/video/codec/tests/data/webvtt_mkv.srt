@@ -68,3 +68,47 @@ it's A 'q'
 00:00:25,000 --> 00:00:26,000
 <b><i>xy</i>z</b>
 
+18
+00:00:26,500 --> 00:00:27,500
+{\an8}top by line number
+
+19
+00:00:28,000 --> 00:00:29,000
+bottom by line number
+
+20
+00:00:29,500 --> 00:00:30,500
+{\an5}seven lines down: the middle
+
+21
+00:00:31,000 --> 00:00:32,000
+{\an5}middle by percentage
+
+22
+00:00:32,500 --> 00:00:33,500
+{\an1}left, as YouTube writes it
+
+23
+00:00:34,000 --> 00:00:35,000
+{\an3}right aligned
+
+24
+00:00:35,500 --> 00:00:36,500
+{\an7}top left
+
+25
+00:00:37,000 --> 00:00:38,000
+{\an9}top right
+
+26
+00:00:38,500 --> 00:00:39,500
+{\an1}centred a fifth across: left
+
+27
+00:00:40,000 --> 00:00:41,000
+vertical, put where a cue without settings goes
+
+28
+00:00:41,500 --> 00:00:42,500
+a setting the specification passes over
+

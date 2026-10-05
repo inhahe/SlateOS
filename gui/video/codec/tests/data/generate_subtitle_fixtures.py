@@ -293,6 +293,21 @@ WEBVTT = [
     "<b><i>x</b>y</i>z",
 ]
 
+# Cues placed by their settings, which ffmpeg ignores: (settings, text).
+WEBVTT_PLACED = [
+    ("line:0", "top by line number"),
+    ("line:-1", "bottom by line number"),
+    ("line:7", "seven lines down: the middle"),
+    ("line:50%", "middle by percentage"),
+    ("align:start position:0%", "left, as YouTube writes it"),
+    ("align:end", "right aligned"),
+    ("line:10% align:left", "top left"),
+    ("line:0 position:90% align:end", "top right"),
+    ("align:center position:20%", "centred a fifth across: left"),
+    ("vertical:rl line:0", "vertical, put where a cue without settings goes"),
+    ("line:0,bottom", "a setting the specification passes over"),
+]
+
 # --- Cues that overlap, for seeking: (start ms, end ms, text) ---
 OVERLAP = [
     (1000, 10000, "long, under the next two"),
@@ -403,6 +418,16 @@ DEPARTURES = {
         16: "it's A 'q'",
         # `</b>` with `<i>` innermost is passed over.
         17: '<b><i>xy</i>z</b>',
+        # Placed by their settings, as the specification lays them out, in
+        # the third of the picture each way their text's anchor falls in.
+        18: '{\\an8}top by line number',
+        20: '{\\an5}seven lines down: the middle',
+        21: '{\\an5}middle by percentage',
+        22: '{\\an1}left, as YouTube writes it',
+        23: '{\\an3}right aligned',
+        24: '{\\an7}top left',
+        25: '{\\an9}top right',
+        26: '{\\an1}centred a fifth across: left',
     },
 }
 # Matroska's WebVTT is WebM's cues, so its answers too; and mkvmerge stores
@@ -513,8 +538,10 @@ def main():
                      for i, (style, text) in enumerate(SSA))
     make("ssa", "ssa", SSA_HEADER + events, "mkv", muxer="mkvmerge")
 
-    vtt = "WEBVTT\n\n" + "".join(f"{vtt_time(1000 + 1500 * i)} --> {vtt_time(2000 + 1500 * i)}\n{text}\n\n"
-                                  for i, text in enumerate(WEBVTT))
+    cues = [("", text) for text in WEBVTT] + WEBVTT_PLACED
+    vtt = "WEBVTT\n\n" + "".join(f"{vtt_time(1000 + 1500 * i)} --> {vtt_time(2000 + 1500 * i)}"
+                                  f"{' ' + settings if settings else ''}\n{text}\n\n"
+                                  for i, (settings, text) in enumerate(cues))
     make("webvtt", "vtt", vtt, "webm")
     make("webvtt_mkv", "vtt", vtt, "mkv", muxer="mkvmerge", answer_from="webvtt")
 

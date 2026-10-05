@@ -55,6 +55,7 @@ use crate::control::{
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
 use crate::submit::encode_submit_into;
+use crate::tray::TraySpec;
 use crate::window_list::{WindowInfo, WindowList};
 
 /// A duplex byte pipe to the compositor.
@@ -555,20 +556,16 @@ impl<T: Transport> Connection<T> {
     /// adding a second icon, which is what makes a changing battery level one
     /// icon instead of a growing row of them.
     ///
+    /// `icon` is sent as it is. An empty [`app_id`](TraySpec::app_id) stays
+    /// empty here; `oswindow`'s loop fills in the program's declared name.
+    ///
     /// # Errors
     ///
-    /// As [`confirm`](Self::confirm).
-    pub fn set_tray_icon(
-        &mut self,
-        id: u32,
-        glyph: &str,
-        tooltip: &str,
-    ) -> Result<(), ClientError<T::Error>> {
-        self.confirm(RequestBody::SetTrayIcon {
-            id,
-            glyph: glyph.to_string(),
-            tooltip: tooltip.to_string(),
-        })
+    /// As [`confirm`](Self::confirm): [`ClientError::Refused`] when this
+    /// program has its share of the tray, or the tray is full (see
+    /// [`RequestBody::SetTrayIcon`]).
+    pub fn set_tray_icon(&mut self, id: u32, icon: TraySpec) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::SetTrayIcon { id, icon })
     }
 
     /// Take this program's icon out of the tray.

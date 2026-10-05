@@ -6176,8 +6176,11 @@ impl Compositor {
     /// on this -- it compares encoded frames -- but a caller that wants to know
     /// should not have to encode one to find out.
     ///
-    /// The glyph and tooltip are cut to their bounds ([`truncate_text`]), so
-    /// what is stored, compared and sent is always what the wire can carry.
+    /// The glyph, tooltip and program name are cut to their bounds
+    /// ([`truncate_text`]), so what is stored, compared and sent is always
+    /// what the wire can carry. The icon name needs no cut: an
+    /// [`IconName`](guiremote::tray::IconName) is within its bound by
+    /// construction.
     ///
     /// # Errors
     ///
@@ -6190,21 +6193,29 @@ impl Compositor {
         &mut self,
         owner: u64,
         id: u32,
-        glyph: &str,
-        tooltip: &str,
+        spec: &guiremote::tray::TraySpec,
     ) -> CompositorResult<bool> {
-        let glyph = truncate_text(glyph, guiremote::tray::MAX_GLYPH_BYTES);
-        let tooltip = truncate_text(tooltip, guiremote::tray::MAX_TOOLTIP_BYTES);
+        use guiremote::tray::{MAX_APP_ID_BYTES, MAX_GLYPH_BYTES, MAX_TOOLTIP_BYTES, TrayIcon};
+        let icon = TrayIcon::new(
+            owner,
+            id,
+            truncate_text(&spec.glyph, MAX_GLYPH_BYTES),
+            truncate_text(&spec.tooltip, MAX_TOOLTIP_BYTES),
+        )
+        .with_app_id(truncate_text(&spec.app_id, MAX_APP_ID_BYTES))
+        .with_icon_name(spec.icon_name);
         if let Some(existing) = self
             .tray_icons
             .iter_mut()
             .find(|i| i.owner == owner && i.id == id)
         {
-            if existing.glyph == glyph && existing.tooltip == tooltip {
+            // The whole icon, so a field added to it is compared without
+            // anyone remembering to: a program switching only its theme icon
+            // has changed what the shell draws.
+            if *existing == icon {
                 return Ok(false);
             }
-            existing.glyph = glyph;
-            existing.tooltip = tooltip;
+            *existing = icon;
             return Ok(true);
         }
         // The client's share first: it is the bound a program can be told
@@ -6223,8 +6234,7 @@ impl Compositor {
             // program, because one of them registered too many.
             return Err(CompositorError::TrayFull);
         }
-        self.tray_icons
-            .push(guiremote::tray::TrayIcon::new(owner, id, glyph, tooltip));
+        self.tray_icons.push(icon);
         Ok(true)
     }
 

@@ -1361,8 +1361,7 @@ mod tests {
         let seq = conn
             .send(RequestBody::SetTrayIcon {
                 id: 1,
-                glyph: "B".to_string(),
-                tooltip: "Battery".to_string(),
+                icon: guiremote::tray::TraySpec::new("B".to_string(), "Battery".to_string()),
             })
             .expect("send");
         await_reply(&mut server, &mut compositor, &mut conn, seq);

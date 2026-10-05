@@ -312,6 +312,11 @@ pub trait App {
     /// Which program this is, for anything that configures a program rather
     /// than a window.
     ///
+    /// Declared to the loop when the window opens
+    /// ([`EventLoop::set_app_id`](crate::EventLoop::set_app_id)), so the
+    /// program's tray icons carry it as its windows do -- the name the shell
+    /// remembers where a user put them by.
+    ///
     /// The default is the executable's file stem, lower-cased — `terminal` for
     /// `/usr/bin/terminal`, `settings` for `settings.exe` — which is both what
     /// a user would type into a window rule and what the process is actually
@@ -615,8 +620,11 @@ pub fn open<T: Transport, A: App + ?Sized>(
     app: &A,
 ) -> Result<u64, Error<T>> {
     let (width, height) = app.initial_size();
+    // Declared to the loop rather than only to this window: the program's
+    // tray icons carry it too, as does any other window it opens -- one name
+    // for the program everywhere the shell keys on one.
+    events.set_app_id(app.app_id());
     WindowBuilder::new(app.title(), width, height)
-        .app_id(app.app_id())
         .resizable(app.resizable())
         .build(events)
 }
@@ -1699,6 +1707,9 @@ mod tests {
         let w = events.window(window).expect("the loop should know it");
         assert_eq!(w.app_id(), "slateos-editor");
         assert_eq!(w.title(), "Untitled 1");
+        // Declared to the loop as well, so the program's tray icons carry the
+        // same name as its window.
+        assert_eq!(events.app_id(), "slateos-editor");
     }
 
     /// An editor with unsaved work, as `apps/markdowneditor` is one: the first

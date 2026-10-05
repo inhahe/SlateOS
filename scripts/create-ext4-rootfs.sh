@@ -1111,6 +1111,23 @@ spike_rebuild_if_behind() {
     echo "[rootfs] $name rebuilt."
 }
 
+# Is the Oils spec bundle's harness the tree's? Byte for byte, file by file:
+# the driver, the harness and the helpers ported from Python 2, against the
+# copies build/oils-spec/ carries (scripts/oils-spec/bundle.sh). Its staleness
+# is content, not a libc link: the bundle is data and Python, recorded on
+# Linux by the harness it carries, so a harness that has moved on since makes
+# it another harness's expectations.
+oils_spec_current() {
+    local have="$ROOT_DIR/build/oils-spec/usr/share/oils-spec" src="$ROOT_DIR/scripts/oils-spec" f
+    for f in sh_spec.py run_all.py; do
+        cmp -s "$src/$f" "$have/$f" || return 1
+    done
+    for f in "$src"/bin/*.py; do
+        cmp -s "$f" "$have/spec/bin/${f##*/}" || return 1
+    done
+    return 0
+}
+
 if [ "${NO_SPIKE_REBUILD:-0}" = "1" ]; then
     echo "[rootfs] NOTE: NO_SPIKE_REBUILD=1 — not rebuilding stale spike artifacts."
     echo "[rootfs]       The staleness gates below still apply, so nothing stale ships."
@@ -1154,6 +1171,22 @@ else
     # against the new libc.a and stages the stripped binary again.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/oils-for-unix-slateos.elf" \
         scripts/oils-spike/slatelink.sh
+    # Oils' spec tests are behind when the harness they carry is not the
+    # tree's (oils_spec_current). Rebuilding records the Linux expectations
+    # again, about seven minutes, which is the point: expectations recorded by
+    # another harness are not this one's. Absent stays absent, as above.
+    if [ -f "$ROOT_DIR/build/oils-spec/usr/share/oils-spec/run_all.py" ] \
+       && ! oils_spec_current; then
+        echo "[rootfs] the Oils spec bundle carries an older harness than scripts/oils-spec/ — rebuilding it"
+        if ! ( cd "$ROOT_DIR" && bash scripts/oils-spec/bundle.sh ) \
+                > /tmp/spike-rebuild-oils-spec.log 2>&1; then
+            echo "[rootfs] ERROR: scripts/oils-spec/bundle.sh failed while rebuilding the spec bundle."
+            echo "[rootfs]        Last 20 lines of /tmp/spike-rebuild-oils-spec.log:"
+            tail -20 /tmp/spike-rebuild-oils-spec.log | sed 's/^/[rootfs]        | /'
+            exit 1
+        fi
+        echo "[rootfs] the Oils spec bundle rebuilt."
+    fi
 fi
 
 # --- GNU bash 5.2, cross-compiled and linked against OUR OWN libc -------------
@@ -1392,6 +1425,47 @@ if [ -e "$OILS_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $OILS_SLATE not found — /bin/oils-for-unix and /bin/ysh will be absent"
     echo "[rootfs]       (build it with: wsl -d Ubuntu --exec bash scripts/oils-spike/run.sh)"
+fi
+
+# --- Oils' spec tests --------------------------------------------------------
+# Upstream's 223 spec files -- about 4,000 cases of "this script must print
+# this and exit with that" -- with lane B's Python 3 port of upstream's harness
+# and the same run recorded on Linux, so a run here reports only what behaves
+# differently from Linux (scripts/oils-spec/, and
+# requests/b-ad-oils-spec-tests-on-the-image.md). The operator's §1043 has them
+# run on SlateOS before genuine Oils becomes the default shell:
+#     python3 /usr/share/oils-spec/run_all.py
+#
+# Built by scripts/oils-spec/bundle.sh into build/oils-spec/, a tree rooted as
+# the image is; about 1.3 MB. They test /bin/oils-for-unix and nothing else, so
+# they are staged only beside it, and need /bin/python3 with its standard
+# library to run. Absent is a NOTE. Without expected/ tables -- bundle.sh found
+# no native Oils to record them with -- they are staged with a WARNING: a run
+# then reports failures, not differences from Linux. A bundle whose harness is
+# not the tree's was rebuilt by the pass above; reaching here with one means
+# that pass was skipped, and that is a WARNING too.
+OILS_SPEC="$ROOT_DIR/build/oils-spec"
+if [ -f "$OILS_SPEC/usr/share/oils-spec/run_all.py" ] && [ -e "$STAGE/bin/oils-for-unix" ]; then
+    cp -r "$OILS_SPEC/." "$STAGE/"
+    echo "[rootfs] staged Oils' spec tests: /usr/share/oils-spec" \
+         "($(ls "$OILS_SPEC"/usr/share/oils-spec/spec/*.test.sh | wc -l) spec files," \
+         "$(du -sb "$OILS_SPEC" | cut -f1) bytes)"
+    if ! ls "$OILS_SPEC"/usr/share/oils-spec/expected/*.tsv >/dev/null 2>&1; then
+        echo "[rootfs] WARNING: the Oils spec bundle has no expected/ tables: a run reports"
+        echo "[rootfs]          failures, not differences from Linux. bundle.sh records them"
+        echo "[rootfs]          when it finds a native Oils (scripts/oils-spec/validate.sh builds one)."
+    fi
+    if ! oils_spec_current; then
+        echo "[rootfs] WARNING: the Oils spec bundle carries an older harness than scripts/oils-spec/:"
+        echo "[rootfs]          its expectations are another harness's. Rebuild it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/oils-spec/bundle.sh"
+    fi
+elif [ -f "$OILS_SPEC/usr/share/oils-spec/run_all.py" ]; then
+    echo "[rootfs] NOTE: Oils' spec tests are built but /bin/oils-for-unix is not staged —"
+    echo "[rootfs]       leaving them off: they test that program and nothing else."
+else
+    echo "[rootfs] NOTE: $OILS_SPEC not found — Oils' spec tests will be absent"
+    echo "[rootfs]       (build them with: wsl -d Ubuntu --exec bash scripts/oils-spec/bundle.sh)"
 fi
 
 # --- eSpeak NG 1.52, likewise linked against OUR OWN libc --------------------

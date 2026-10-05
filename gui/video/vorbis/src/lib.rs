@@ -7,7 +7,9 @@
 //! first packet, and the first after [`Decoder::reset`], completes none).
 //! [`Comments::parse`] reads the comment header's tags. Packets come from
 //! the stream's container: Ogg pages, or Matroska blocks with the headers
-//! in the track's private data.
+//! in the track's private data. [`Blocks`] is for the container's side: a
+//! packet's block size, read from its first bits without decoding it, by
+//! which a demuxer times packets.
 //!
 //! Translated from Tremor (the integer decoder in Xiph's `tremor`
 //! repository), copyright Xiph.Org, used under its BSD licence
@@ -16,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 mod bitpack;
+mod blocks;
 mod codebook;
 mod decoder;
 mod floor0;
@@ -30,6 +33,7 @@ mod window;
 
 use std::fmt;
 
+pub use blocks::{Block, Blocks};
 pub use decoder::Decoder;
 pub use info::{Comments, Info};
 

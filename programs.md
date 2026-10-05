@@ -13,7 +13,7 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**461 programs; 304 on the image, 6 carried inside the kernel.**
+**462 programs; 305 on the image, 6 carried inside the kernel.**
 
 ## Userland utilities and services (`userspace/`, lane B) -- 297
 
@@ -497,17 +497,20 @@ two disagree.
 |---|---|---|---|---|
 | `kernel` | Kernel entry point. |  |  |  |
 
-## Ported programs (`scripts/*-spike/`, lane D) -- 9
+## Ported programs (`scripts/`, the rootfs recipe's) -- 10
 
-Upstream C and C++ programs, cross-built against SlateOS's own C library,
-each by its port's scripts. The image carries them when their port has
-been built on the machine that makes it.
+Programs that are no cargo target, each built by its own scripts and
+staged by `scripts/create-ext4-rootfs.sh`: upstream C and C++ programs
+cross-built against SlateOS's own C library (`scripts/*-spike/`, lane D),
+and programs another lane's script assembles. The image carries each
+when it has been built on the machine that makes it.
 
-| Program | What it does | On image | Port | Other names |
+| Program | What it does | On image | Built by | Other names |
 |---|---|---|---|---|
 | `bash` | GNU bash 5.2, the shell. | yes | `scripts/bash-spike/` |  |
 | `cmake` | CMake 4.4.3, the build-system generator. | yes | `scripts/cmake-spike/` |  |
 | `espeak-ng` | eSpeak NG 1.52.0, the speech synthesizer. | yes | `scripts/espeak-spike/` |  |
+| `fastpy` | fastpy, which compiles a Python program into a native SlateOS program. | yes | `scripts/fastpy-slateos-bundle.py` |  |
 | `ld.lld` | LLVM 20.1.8's linker, lld. | yes | `scripts/llvm-spike/` |  |
 | `llc` | LLVM 20.1.8's code generator: LLVM IR to an object file. | yes | `scripts/llvm-spike/` |  |
 | `make` | GNU make 4.4.1, the build tool. | yes | `scripts/make-spike/` |  |

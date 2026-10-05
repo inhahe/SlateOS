@@ -204,8 +204,12 @@ def kernel_embedded() -> set[str]:
 
 
 # A ported program's line in `create-ext4-rootfs.sh`, above the block that
-# stages it: the paths it is installed at, what it does, and its port.
-PORT_MARK = re.compile(r"^# PROGRAM: (.+?) -- (.+) \((scripts/[A-Za-z0-9_.-]+/)\)$")
+# stages it: the paths it is installed at, what it does, and what builds it --
+# a port's directory (`scripts/bash-spike/`) or, for a program one script
+# builds, that script (`scripts/fastpy-slateos-bundle.py`, since 2026-10-05).
+PORT_MARK = re.compile(
+    r"^# PROGRAM: (.+?) -- (.+) \((scripts/[A-Za-z0-9_.-]+(?:/|\.py|\.sh))\)$"
+)
 
 
 def parse_ports(text: str) -> list[dict]:
@@ -233,6 +237,7 @@ def parse_ports(text: str) -> list[dict]:
             "name": names[0],
             "crate": "",
             "dir": m.group(3).rstrip("/"),
+            "src": m.group(3),
             "desc": m.group(2),
             "others": names[1:],
         })
@@ -366,15 +371,18 @@ def render(progs: list[dict], ported: list[dict]) -> str:
             placed.add(id(p))
         lines.append("")
     if ported:
-        lines += [f"## Ported programs (`scripts/*-spike/`, lane D) -- {len(ported)}", "",
-                  "Upstream C and C++ programs, cross-built against SlateOS's own C library,",
-                  "each by its port's scripts. The image carries them when their port has",
-                  "been built on the machine that makes it.", "",
-                  "| Program | What it does | On image | Port | Other names |",
+        lines += [f"## Ported programs (`scripts/`, the rootfs recipe's) -- {len(ported)}", "",
+                  "Programs that are no cargo target, each built by its own scripts and",
+                  "staged by `scripts/create-ext4-rootfs.sh`: upstream C and C++ programs",
+                  "cross-built against SlateOS's own C library (`scripts/*-spike/`, lane D),",
+                  "and programs another lane's script assembles. The image carries each",
+                  "when it has been built on the machine that makes it.", "",
+                  "| Program | What it does | On image | Built by | Other names |",
                   "|---|---|---|---|---|"]
         for p in sorted(ported, key=lambda x: x["name"]):
             extra = ", ".join(f"`{a}`" for a in p["others"])
-            lines.append(f"| `{p['name']}` | {p['desc']} | yes | `{p['dir']}/` | {extra} |")
+            src = p.get("src", p["dir"] + "/")
+            lines.append(f"| `{p['name']}` | {p['desc']} | yes | `{src}` | {extra} |")
         lines.append("")
     rest = [p for p in progs if id(p) not in placed]
     if rest:
@@ -423,6 +431,13 @@ def selftest() -> int:
     except SystemExit:
         refused = True
     expect("a port's line naming a path nothing stages is refused", refused, True)
+    recipe = ("# PROGRAM: /bin/fastpy -- Compiles Python. (scripts/fastpy-slateos-bundle.py)\n"
+              'chmod 0755 "$STAGE/bin/fastpy"\n')
+    expect("a program one script builds names the script",
+           [(p["name"], p["src"]) for p in parse_ports(recipe)],
+           [("fastpy", "scripts/fastpy-slateos-bundle.py")])
+    expect("a script not ending .py or .sh is no port's line",
+           parse_ports("# PROGRAM: /bin/x -- X. (scripts/x.txt)\n"), [])
     print(f"selftest: {bad} failure(s)")
     return 1 if bad else 0
 

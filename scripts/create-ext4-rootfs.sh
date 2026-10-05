@@ -1590,6 +1590,58 @@ else
     echo "[rootfs]       wsl -d Ubuntu -- bash scripts/llvm-spike/run.sh)"
 fi
 
+# --- fastpy, lane B's Python compiler: built here, from its checkout ----------
+# `fastpy hello.py -o hello` on SlateOS: /bin/python3 runs the compiler, and
+# LLVM's tools above make an object and then a program of the IR it writes,
+# linked against fastpy's C runtime and libc.a. What goes on the image is lane
+# B's to define (scripts/fastpy-slateos-bundle.py;
+# requests/b-d-fastpy-on-slateos-needs-llvm-tools.md):
+#
+#   /bin/fastpy                              the command, a #!/bin/python3 script
+#   /usr/lib/fastpy/                         the compiler, llvmlite's IR builder,
+#                                            and BUNDLE, what they were built from
+#   /usr/lib/x86_64-slateos/libfastpy_rt.a   fastpy's C runtime
+#
+# Built on every run, not staged from a copy made earlier, so it is never
+# stale: nine seconds, the runtime compiled by zig only when fastpy's sources
+# have moved. WSL's python3 is 3.12, the image's, so the .pyc files come too,
+# checked-hash, which a copy that drops modification times leaves valid.
+#
+# Staged only beside /bin/python3 and LLVM's three tools, without which it
+# compiles nothing; and left off with a warning when the bundle cannot be
+# built (no fastpy checkout, no llvmlite, no zig): an image without the
+# compiler is still an image. The bundle's own compile of hello.py, run
+# under WSL on python3's built-in modules with python312.zip as its only
+# standard library, is what showed the image holds every module it imports.
+# PROGRAM: /bin/fastpy -- fastpy, which compiles a Python program into a native SlateOS program. (scripts/fastpy-slateos-bundle.py)
+FASTPY_LOG=/tmp/rootfs-fastpy-bundle.log
+if [ -e "$STAGE/bin/python3" ] && [ -e "$STAGE/bin/opt" ] && [ -e "$STAGE/bin/llc" ] \
+        && [ -e "$STAGE/bin/ld.lld" ]; then
+    FASTPY_TREE="$(mktemp -d /tmp/rootfs-fastpy.XXXXXX)"
+    # In an `if`, so `set -e` is off for the whole subshell: worktree.sh is
+    # written for scripts without it. It names zig, which packs the runtime.
+    if ( . "$ROOT_DIR/scripts/lib/worktree.sh" && slate_ensure_zig \
+            && FASTPY_ZIG="$SLATE_ZIG" "${SYSROOT_PY:-python3}" \
+                "$ROOT_DIR/scripts/fastpy-slateos-bundle.py" --out "$FASTPY_TREE/tree" \
+       ) > "$FASTPY_LOG" 2>&1; then
+        cp -r "$FASTPY_TREE/tree/." "$STAGE/"
+        # A tree built on NTFS carries no execute bit; this one is built in
+        # /tmp, but the mode is the recipe's to be sure of.
+        chmod 0755 "$STAGE/bin/fastpy"
+        echo "[rootfs] staged fastpy: /bin/fastpy, /usr/lib/fastpy/," \
+             "/usr/lib/x86_64-slateos/libfastpy_rt.a"
+        sed 's/^/[rootfs]   /' "$FASTPY_TREE/tree/usr/lib/fastpy/BUNDLE"
+    else
+        echo "[rootfs] WARNING: fastpy's bundle did not build, so /bin/fastpy will be absent." >&2
+        echo "[rootfs]          The end of $FASTPY_LOG:" >&2
+        tail -8 "$FASTPY_LOG" | sed 's/^/[rootfs]          | /' >&2
+    fi
+    rm -rf "$FASTPY_TREE"
+else
+    echo "[rootfs] NOTE: /bin/fastpy will be absent: it needs /bin/python3 and LLVM's opt,"
+    echo "[rootfs]       llc and ld.lld, and not all of them are staged"
+fi
+
 # --- .pc fixtures for the pkgconf self-test -----------------------------------
 # `/bin/pkgconf --version` proves the binary loads, relocates, runs main and
 # exits 0. It does not prove pkgconf *works*, because the thing pkgconf does is

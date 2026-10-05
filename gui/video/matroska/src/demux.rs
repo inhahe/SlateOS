@@ -201,6 +201,9 @@ pub struct Demuxer<R> {
     /// While walking for key frames: those found, in place of packets.
     indexing: Option<Vec<Cue>>,
     walk: Walk,
+    /// The tracks whose packets are given out ([`Demuxer::select_tracks`]);
+    /// `None` for every track.
+    selected: Option<Vec<u64>>,
 }
 
 /// FFmpeg's count of master elements open around a top-level element read
@@ -334,6 +337,7 @@ impl<R: Read + Seek> Demuxer<R> {
                 next: None,
                 start: None,
             },
+            selected: None,
         };
         d.read_description(segment.end())?;
         if let Some(at) = d.first_cluster {
@@ -364,6 +368,36 @@ impl<R: Read + Seek> Demuxer<R> {
     /// The tracks FFmpeg reads, in the file's order.
     pub fn tracks(&self) -> &[Track] {
         &self.tracks
+    }
+
+    /// From here on, give out only the packets of `tracks` (by
+    /// [`Track::number`]); `None` gives out every track's again.
+    ///
+    /// Another track's block is passed over once its header has named its
+    /// track, its bytes never read -- as FFmpeg passes over the blocks of a
+    /// stream it discards, which then count for nothing: not in a seek's
+    /// dropping of what comes before its time, nor among the key frames a
+    /// seek without Cues walks to (so seek only a selected track). A program
+    /// reading one stream through a handle of its own -- the sound, or the
+    /// subtitles, beside the pictures -- then reads that stream's bytes
+    /// alone, not the whole file's again.
+    pub fn select_tracks(&mut self, tracks: Option<&[u64]>) {
+        self.selected = tracks.map(<[u64]>::to_vec);
+    }
+
+    /// Read ahead `bytes` at a time from here on: 64 KiB at first
+    /// ([`crate::ebml::READ_AHEAD`]), which reads a file through in few
+    /// reads. A program reading one track of several ([`Self::select_tracks`])
+    /// passes over most blocks, and each costs it a read of this much past
+    /// it: the less it reads ahead the less of the file it reads, at about
+    /// one read a block either way.
+    ///
+    /// # Errors
+    ///
+    /// When the source cannot be put back where reading is; reading goes on
+    /// as it was.
+    pub fn set_read_ahead(&mut self, bytes: usize) -> Result<(), Error> {
+        self.r.set_read_ahead(bytes)
     }
 
     /// The file's metadata, as FFmpeg gives it: `title`, `encoder` and
@@ -885,9 +919,12 @@ impl<R: Read + Seek> Demuxer<R> {
                         };
                     }
                     ids::SIMPLE_BLOCK => {
-                        let data = self.r.binary(h.size, MAX_BINARY)?;
-                        if !data.is_empty() {
-                            self.block(&data, h.data, timestamp, start, None)?;
+                        let selected = self.selected.as_deref();
+                        if !passed_over(&mut self.r, &h, &self.declared, selected)? {
+                            let data = self.r.binary(h.size, MAX_BINARY)?;
+                            if !data.is_empty() {
+                                self.block(&data, h.data, timestamp, start, None)?;
+                            }
                         }
                     }
                     ids::BLOCK_GROUP => {
@@ -916,6 +953,9 @@ impl<R: Read + Seek> Demuxer<R> {
             additions: Vec::new(),
         };
         let last_good = &mut self.last_good;
+        let (declared, selected) = (&self.declared, self.selected.as_deref());
+        // A block of a track not selected: its additions are not read either.
+        let mut passing = false;
         self.r.children(h, |r, c| {
             if counts(Level::Group, c) {
                 *last_good = c.start;
@@ -923,8 +963,12 @@ impl<R: Read + Seek> Demuxer<R> {
             match c.id {
                 ids::BLOCK => {
                     pos = c.data;
-                    data = r.binary(c.size, MAX_BINARY)?;
+                    passing = passed_over(r, c, declared, selected)?;
+                    if !passing {
+                        data = r.binary(c.size, MAX_BINARY)?;
+                    }
                 }
+                ids::BLOCK_ADDITIONS if passing => {}
                 ids::BLOCK_DURATION => g.duration = r.uint(c.size, 0)?,
                 ids::REFERENCE_BLOCK => {
                     // The reference itself does not matter, only that there
@@ -1365,6 +1409,34 @@ enum Level {
     Additions,
     /// A child of a `BlockMore`.
     More,
+}
+
+/// Whether the block `h` -- a `SimpleBlock` or a `BlockGroup`'s `Block` -- is
+/// one [`Demuxer::select_tracks`] passes over: a declared track's that is not
+/// selected. Its track number is read from its first bytes, and reading goes
+/// back to where they begin. One whose header does not read, or names a track
+/// not declared, is not passed over: read whole, it meets its damage as
+/// before.
+fn passed_over<R: Read + Seek>(
+    r: &mut Reader<R>,
+    h: &Header,
+    declared: &[(u64, Option<Timing>)],
+    selected: Option<&[u64]>,
+) -> Result<bool, Error> {
+    let (Some(selected), Size::Known(size)) = (selected, h.size) else {
+        return Ok(false);
+    };
+    // A track number is eight bytes at most.
+    let mut head = [0u8; 8];
+    let Some(head) = head.get_mut(..usize::try_from(size.min(8)).unwrap_or(0)) else {
+        return Ok(false);
+    };
+    r.read_into(head)?;
+    r.seek_to(h.data)?;
+    let Some((_, number)) = crate::ebml::vint_in(head) else {
+        return Ok(false);
+    };
+    Ok(declared.iter().any(|(n, _)| *n == number) && !selected.contains(&number))
 }
 
 /// Whether FFmpeg counts `h` good where it stands -- an element its syntax

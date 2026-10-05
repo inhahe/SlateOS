@@ -41,6 +41,15 @@ const PROBE: u64 = 1 << 20;
 /// EBML's magic, with which every Matroska and WebM file begins.
 const EBML: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 
+/// How far ahead a reader of one small track -- sound, subtitles -- reads a
+/// Matroska file, where it passes over most of the bytes: each block passed
+/// over costs a read of this much past it. Measured on a minute of 1080p
+/// film at 5 Mbit/s (`gui/video/matroska/tests/beyond_ffprobe.rs`,
+/// `film_read_track_by_track`): its sound or its subtitles alone read 82% of
+/// the file 64 KiB ahead, 7.7% 2 KiB ahead and 4.3% 1 KiB ahead, at about a
+/// read a video frame; 512 bytes ahead read no less, in twice the reads.
+pub(crate) const PASSING_READ_AHEAD: usize = 1024;
+
 /// A file being read.
 // Each boxed: the two differ in size by hundreds of bytes, and a `Video`
 // holds one for as long as it plays.
@@ -357,6 +366,31 @@ impl<R: Read + Seek> Container<R> {
                 .into_iter()
                 .collect(),
         }
+    }
+
+    /// From here on, give out only the packets of the track `key` names, and
+    /// read ahead `read_ahead` bytes at a time if given. Matroska's other
+    /// blocks are passed over unread once their header names their track, as
+    /// FFmpeg passes over a discarded stream's (`matroska::Demuxer::
+    /// select_tracks`); MP4's and Ogg's other packets are read as before, for
+    /// the caller to drop.
+    ///
+    /// # Errors
+    ///
+    /// The container's own, when the source cannot be put back where reading
+    /// is.
+    pub(crate) fn read_only(
+        &mut self,
+        key: u64,
+        read_ahead: Option<usize>,
+    ) -> Result<(), ContainerError> {
+        if let Self::Matroska(d) = self {
+            d.select_tracks(Some(&[key]));
+            if let Some(bytes) = read_ahead {
+                d.set_read_ahead(bytes)?;
+            }
+        }
+        Ok(())
     }
 
     /// The file's subtitle tracks, in the file's order: Matroska's, its

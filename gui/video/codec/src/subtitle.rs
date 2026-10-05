@@ -128,7 +128,7 @@ impl<R: Read + Seek> Subtitles<R> {
     }
 
     fn open_with(source: R, track: Option<u64>) -> Result<Self, Error> {
-        let demuxer = Container::open(source)?;
+        let mut demuxer = Container::open(source)?;
         let tracks = demuxer.subtitles();
         let chosen: &SubtitleTrack = match track {
             Some(n) => tracks.iter().find(|t| t.number == n),
@@ -147,6 +147,9 @@ impl<R: Read + Seek> Subtitles<R> {
             },
             format => return Err(Error::SubtitleFormat(format)),
         };
+        // The track's own packets only, a film's pictures and sound passed
+        // over unread: a few kilobytes of cues do not read the film again.
+        demuxer.read_only(chosen.key, Some(crate::container::PASSING_READ_AHEAD))?;
         Ok(Self {
             key: chosen.key,
             info: SubtitleInfo {

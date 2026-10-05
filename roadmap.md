@@ -3844,6 +3844,11 @@ lane C's `guitk`.
       to ffprobe's -- chapters with FFmpeg's ends, attachments (cover art,
       fonts) read when asked for. For lane E's player and probe:
       `requests/f-e-matroska-gives-chapters-tags-and-attachments.md`.
+    - `[x]` One track read alone (2026-10-05, §1361): `select_tracks` passes
+      over the other tracks' blocks unread, as FFmpeg passes over a
+      discarded stream's, and `set_read_ahead` suits the reading to it;
+      `videocodec`'s sound and subtitle readers read 4% of a 1080p film, not
+      all of it again beside the pictures.
   - `[x]` A frame-level API for a player (`gui/video/codec`, crate
     `videocodec`, design-decisions §1346): `Video::open(file)`, then
     `next_frame()` -- each picture in order with its time, duration and

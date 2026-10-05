@@ -250,14 +250,21 @@ fn row_444<D: Depth>(
     }
 }
 
-/// `I212ToARGBRow_C`: a 12-bit row whose chroma is at half width, each
-/// chroma sample used for the two pixels over it -- nearest-neighbour, the
-/// only way libyuv converts 12-bit 4:2:0 (`I012ToARGBMatrix`).
-fn row_212(k: &Constants, y: &[u16], u: &[u16], v: &[u16], out: &mut [u32]) {
-    for (pair, (y, (&u, &v))) in out.chunks_mut(2).zip(y.chunks(2).zip(u.iter().zip(v))) {
-        for (out, &y) in pair.iter_mut().zip(y) {
-            *out = yuv_pixel(k, Twelve::y32(y), Twelve::uv8(u), Twelve::uv8(v)) | OPAQUE;
+/// A chroma row at half width doubled into `dst`, each sample used for the
+/// two pixels over it: nearest-neighbour, as `I212ToARGBRow_C` reads its
+/// chroma. In exact pairs, which the compiler interleaves eight at a time
+/// (`punpcklwd`), and an odd last pixel after them.
+fn up2_nearest(src: &[u16], dst: &mut [u16]) {
+    let mut pairs = dst.chunks_exact_mut(2);
+    let mut samples = src.iter();
+    for (pair, &s) in pairs.by_ref().zip(samples.by_ref()) {
+        if let [a, b] = pair {
+            *a = s;
+            *b = s;
         }
+    }
+    if let (Some(last), Some(&s)) = (pairs.into_remainder().first_mut(), samples.next()) {
+        *last = s;
     }
 }
 
@@ -491,16 +498,46 @@ pub fn i444<D: Depth>(
 /// `I012ToARGBMatrix`: 12-bit 4:2:0, each chroma sample used for the 2x2
 /// pixels over it. Never with alpha: libyuv has no such function, so libavif
 /// adds the alpha itself.
+///
+/// libyuv's row, `I212ToARGBRow_C`, takes each chroma sample for the two
+/// pixels over it as it goes. Here the chroma rows are doubled first and the
+/// 4:4:4 row runs over them: the same pixels, from a loop the compiler runs
+/// several pixels at a time, where a pair of pixels to a chroma sample kept
+/// it to one -- a 1080p frame took 30 ms on one thread.
 pub fn i012(k: &Constants, planes: &Planes<'_, u16>, width: usize, rows: Rows, out: &mut [u32]) {
+    let mut u_full = vec![0u16; width];
+    let mut v_full = vec![0u16; width];
+    // The chroma row the doubled rows hold, and how many pixels of it: the
+    // two rows of a pair share it.
+    let mut doubled: Option<(usize, usize)> = None;
     for (row, out) in (rows.first..).zip(out.chunks_exact_mut(width.max(1))) {
         let chroma = row / 2;
-        row_212(
-            k,
+        let (y, u, v) = (
             planes.y.row(row),
             planes.u.row(chroma),
             planes.v.row(chroma),
-            out,
         );
+        // The pixels libyuv's row writes: as many as each input has, two to
+        // a chroma sample.
+        let n = out
+            .len()
+            .min(y.len())
+            .min(u.len().saturating_mul(2))
+            .min(v.len().saturating_mul(2));
+        let (Some(u_full), Some(v_full), Some(y), Some(out)) = (
+            u_full.get_mut(..n),
+            v_full.get_mut(..n),
+            y.get(..n),
+            out.get_mut(..n),
+        ) else {
+            continue;
+        };
+        if doubled != Some((chroma, n)) {
+            up2_nearest(u, u_full);
+            up2_nearest(v, v_full);
+            doubled = Some((chroma, n));
+        }
+        row_444::<Twelve>(k, y, u_full, v_full, None, out);
     }
 }
 
@@ -778,6 +815,56 @@ mod tests {
         assert_eq!(out[0], out[1]);
         assert_ne!(out[1], out[2]);
         assert_eq!(out[0], out[3]);
+    }
+
+    /// `I212ToARGBRow_C` as it was ported first, a pair of pixels to each
+    /// chroma sample: what [`i012`]'s doubled rows must reproduce.
+    fn row_212_reference(k: &Constants, y: &[u16], u: &[u16], v: &[u16], out: &mut [u32]) {
+        for (pair, (y, (&u, &v))) in out.chunks_mut(2).zip(y.chunks(2).zip(u.iter().zip(v))) {
+            for (out, &y) in pair.iter_mut().zip(y) {
+                *out = yuv_pixel(k, Twelve::y32(y), Twelve::uv8(u), Twelve::uv8(v)) | OPAQUE;
+            }
+        }
+    }
+
+    /// Numerical Recipes' generator.
+    fn lcg(seed: &mut u32) -> u32 {
+        *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        *seed >> 8
+    }
+
+    #[test]
+    fn twelve_bit_420_matches_libyuv_s_row_on_random_pictures() {
+        let mut seed = 0x0012_0420;
+        for case in 0..400 {
+            let width = 1 + (lcg(&mut seed) % 70) as usize;
+            let height = 1 + (lcg(&mut seed) % 9) as usize;
+            let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+            // Past 12 bits too, now and then, as a damaged stream gives.
+            let sample = |seed: &mut u32| -> u16 {
+                let s = lcg(seed);
+                (if s.is_multiple_of(8) { s } else { s % 4096 }) as u16
+            };
+            let y: Vec<u16> = (0..width * height).map(|_| sample(&mut seed)).collect();
+            let u: Vec<u16> = (0..cw * ch).map(|_| sample(&mut seed)).collect();
+            let v: Vec<u16> = (0..cw * ch).map(|_| sample(&mut seed)).collect();
+            let (y, u, v) = (plane(width, &y), plane(cw, &u), plane(cw, &v));
+            let k = [I601, JPEG, H709, F709, BT2020, V2020][case % 6];
+            let planes = Planes {
+                y: y.view(),
+                u: u.view(),
+                v: v.view(),
+                a: None,
+            };
+            let mut got = vec![0u32; width * height];
+            i012(&k, &planes, width, Rows::all(height), &mut got);
+            let mut want = vec![0u32; width * height];
+            for (row, out) in want.chunks_exact_mut(width).enumerate() {
+                let c = row / 2;
+                row_212_reference(&k, y.row(row), u.row(c), v.row(c), out);
+            }
+            assert_eq!(got, want, "case {case}: {width}x{height}");
+        }
     }
 
     #[test]

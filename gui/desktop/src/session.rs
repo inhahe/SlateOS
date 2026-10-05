@@ -109,6 +109,12 @@ use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
 /// `design-decisions.md` §521 §1.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
+/// The title of the notice saying something the desktop keeps could not be
+/// written -- a layout, the start menu's pins, the Run box's history, the
+/// notifications -- the body naming which, and why
+/// ([`ShellSession::report_save`]).
+const NOT_SAVED_TITLE: &str = "Not saved";
+
 /// Whether `held` -- what a slot last asked the decoding thread for, as an
 /// image id and a path -- is the request `job` answers.
 ///
@@ -2879,6 +2885,11 @@ impl<T: Transport> ShellSession<T> {
     /// something that had nothing to do with the wallpaper -- until the next
     /// wallpaper that loaded cleared it, after which the same failure was
     /// news again on every change.
+    ///
+    /// Titled [`NOT_SAVED_TITLE`], the body saying what: the title said
+    /// "Desktop layout not saved" while the layouts were all it reported,
+    /// and went on saying it of the start menu's pins, the Run box's
+    /// history and the notifications.
     fn report_save(&mut self, what: &'static str, saved: std::io::Result<()>) {
         let err = match saved {
             Ok(()) => {
@@ -2891,7 +2902,7 @@ impl<T: Transport> ShellSession<T> {
         if self.save_errors.get(what) == Some(&message) {
             return;
         }
-        self.post_desktop_notice("Desktop layout not saved", &message);
+        self.post_desktop_notice(NOT_SAVED_TITLE, &message);
         self.save_errors.insert(what, message);
     }
 

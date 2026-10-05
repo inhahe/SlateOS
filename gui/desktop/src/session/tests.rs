@@ -6786,7 +6786,7 @@ fn an_icon_layout_that_cannot_be_saved_says_so_once_beside_a_failing_widget_layo
                 .notifications
                 .notifications()
                 .iter()
-                .filter(|n| n.title == "Desktop layout not saved")
+                .filter(|n| n.title == super::NOT_SAVED_TITLE)
                 .map(|n| n.body.clone())
                 .collect()
         };
@@ -6865,7 +6865,7 @@ fn a_widget_layout_that_cannot_be_saved_says_so_once_and_not_as_the_wallpaper() 
                 .notifications
                 .notifications()
                 .iter()
-                .filter(|n| n.title == "Desktop layout not saved")
+                .filter(|n| n.title == super::NOT_SAVED_TITLE)
                 .map(|n| n.body.clone())
                 .collect()
         };

@@ -1850,7 +1850,7 @@ _2026-09-28 (`design-decisions.md` §1435): the axis exists -- a theme's `widget
   window-title overflow so tabs and titles behave identically.
 
 ##### Tier 3 — Sound Scheme (nice-to-have, add later)
-- [ ] System sounds: notification, error, login, logout, empty recycle bin, etc.
+- [-] System sounds: notification, error, login, logout, empty recycle bin, etc. -- *2026-10-05 (`design-decisions.md` §1476): `gui/sound` plays a sound file (WAV, Ogg Vorbis, Ogg Opus) through the kernel's ALSA device, converting to the mixer's 48 kHz stereo, and synthesizes a sound for each common event (message, information, warning, error, bell, complete, trash emptied, screen capture, device added and removed, login, logout, power, battery low, volume) for a theme with none. Not yet heard on SlateOS: native programs have no way to the device and the mixer is not emptied into a card (`requests/e-ad-no-application-can-reach-the-sound-device.md`, the kernel's). Choosing the sound -- the `sounds` theme axis, on/off, volume -- and playing it at the shell's events follow.*
 - [ ] Small OGG files bundled in theme directory, or reference a separate sound scheme package
 - [ ] Optional — many users run silent, but themes that pair colors with sounds are more cohesive
 

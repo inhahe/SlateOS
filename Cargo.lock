@@ -3785,6 +3785,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sound"
+version = "0.1.0"
+dependencies = [
+ "ogg",
+ "opus",
+ "scratchdir",
+ "vorbis",
+]
+
+[[package]]
 name = "soundrecorder"
 version = "0.1.0"
 dependencies = [

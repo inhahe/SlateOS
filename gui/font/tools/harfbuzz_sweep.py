@@ -434,6 +434,18 @@ CORPUS = [
     "\\u07ca\\u07cb\\u07cc",
     "\\u0712\\u0713\\u0714",
     "\\u1820\\u1821\\u1822",
+    # --- emoji sequences ---
+    #
+    # A colour face draws these as one picture only if the shaper forms the
+    # ligature the face writes for the whole sequence: a family joined by
+    # ZWJs, a flag from two regional indicators, a keycap from a digit, VS16
+    # and the enclosing keycap, a hand with its skin tone. A face without them
+    # draws the parts, which is a different question with the same answer
+    # from both halves.
+    "\\U0001f468\\u200d\\U0001f469\\u200d\\U0001f467",
+    "\\U0001f1fa\\U0001f1f8",
+    "1\\ufe0f\\u20e3",
+    "\\U0001f44d\\U0001f3fd",
     # --- language ---
     #
     # A language selects a LangSysRecord in place of the script's default

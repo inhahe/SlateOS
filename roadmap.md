@@ -3674,6 +3674,24 @@ lane C's `guitk`.
   own buckets, matched on signature rather than by string so a regression
   cannot hide inside an exemption; that is what took `differ` from 1178 to 2
   and made the last two findable at all.
+  Strings the corpus had never asked found four more disagreements
+  (2026-10-05, §1359):
+  - A legacy `kern` table is now read across marks, as `hb_kern_machine_t`
+    reads it with `IgnoreMarks`, and inside the positioning pass, so an
+    attached accent stays on its letter. About ninety faces kern `T́o`
+    differently otherwise.
+  - A never-drawn glyph loses its advance before the attachments are
+    resolved. Otherwise an accent after an undrawable VS16 landed a letter
+    to the left, in 157 faces.
+  - Where a face classifies its glyphs, mark-ness comes from the `GDEF` class
+    alone. Linux Libertine's Graphite build and DejaVu Sans Mono Bold Oblique
+    then keep their accents' widths, as HarfBuzz does.
+  - Syriac's shaper is called off by `DFLT` alone, and a run whose shaper is
+    called off takes no joining forms.
+  The corpus gains those strings, words of N'Ko, Syriac and Mongolian, and
+  emoji sequences: a ZWJ family, a flag, a keycap and a skin tone. That makes
+  556 faces × 122 strings, with `differ` 0 and `misplaced` 1 (the same
+  survivor), at the em, at 16 ppem and at `wght=700`.
 
 - `[F]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619). **Measured 2026-09-13: this is the only way

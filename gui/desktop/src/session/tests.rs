@@ -8330,6 +8330,101 @@ fn a_menu_turned_on_elsewhere_is_offered_at_the_next_right_click() {
     });
 }
 
+/// **The user's window rules are read when the session starts and again when
+/// their file changes, and a rule that cannot be read says so** -- in a notice
+/// naming it, on each read that finds it. A file removed is the defaults.
+#[test]
+fn window_rules_are_read_at_start_and_on_change_and_a_bad_one_says_so() {
+    settingsfile::testing::with_scratch_config("session-window-rules", |_root| {
+        let path = settingsfile::path_for(windowrules::file::CONFIG_NAME).expect("a settings path");
+        std::fs::create_dir_all(path.parent().expect("a folder")).expect("mkdir");
+        std::fs::write(
+            &path,
+            "rules:\n  mail on desktop 2:\n    app: mail\n    desktop: 2\n  \
+             typo:\n    app: notes\n    can-clos: false\n",
+        )
+        .expect("write");
+        let (mut session, desktop, _turn) = session();
+        let names = |session: &Session| -> Vec<String> {
+            session
+                .shell()
+                .rules
+                .rules()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect()
+        };
+        let notices = |session: &Session| -> Vec<(String, String)> {
+            session
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .filter(|n| n.title.contains("window rule"))
+                .map(|n| (n.title.clone(), n.body.clone()))
+                .collect()
+        };
+        let announce = |session: &Session| {
+            let name = guitk::event::SettingsName::new(windowrules::file::CONFIG_NAME.as_bytes())
+                .expect("a settings name");
+            desktop.borrow_mut().send_input(&[InputEvent::new(
+                session.background().window(),
+                guitk::event::Event::SettingsChanged {
+                    group: SettingsGroup::Program(name),
+                },
+            )]);
+        };
+
+        // Read at start: the good rule held, the typo told.
+        assert_eq!(names(&session), ["mail on desktop 2"]);
+        let said = notices(&session);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].0, "A window rule is not applied");
+        assert!(said[0].1.starts_with("\"typo\": "), "{said:?}");
+
+        // Settings writes the rules, and the change is announced and read. A
+        // file with nothing wrong in it says nothing.
+        std::fs::write(
+            &path,
+            "rules:\n  notes:\n    app: notes\n    taskbar: false\n",
+        )
+        .expect("write");
+        announce(&session);
+        session.pump().expect("pump");
+        assert_eq!(names(&session), ["notes"]);
+        assert_eq!(notices(&session).len(), 1);
+
+        // The typo is back: said again, since the file was read again with it.
+        std::fs::write(
+            &path,
+            "rules:\n  typo:\n    app: notes\n    can-clos: false\n",
+        )
+        .expect("write");
+        announce(&session);
+        session.pump().expect("pump");
+        assert!(
+            names(&session).is_empty(),
+            "the rules are what the file says"
+        );
+        assert_eq!(notices(&session).len(), 2);
+
+        // An announcement with no change to the file is not news.
+        announce(&session);
+        session.pump().expect("pump");
+        assert_eq!(notices(&session).len(), 2);
+
+        // The file removed: the defaults.
+        std::fs::remove_file(&path).expect("rm");
+        announce(&session);
+        session.pump().expect("pump");
+        let defaults: Vec<String> = windowrules::default_rules()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names(&session), defaults);
+    });
+}
+
 /// **Ctrl+click on a desktop icon adds it to the selection**, and a plain
 /// click replaces it. The Ctrl arrives stamped on the click's envelope by
 /// the compositor, never as a key: the desktop's surface hardly ever has the

@@ -2047,6 +2047,17 @@ live.
   then the daemon that registers the service, and deleting the old store's
   own vault and cipher (`gui/credentials/src/main.rs`).
 
+- `[C]` **Window rules are kept, in a file the desktop reads** -- done
+  2026-10-05 (`design-decisions.md` §1465). The rules that place a program's
+  windows as they open lived only while the desktop ran. They are kept in
+  `window-rules.yaml` now -- each rule under its name, the one nearest the
+  top winning -- read when the desktop starts and again whenever the file
+  changes; a rule that cannot be read is left out whole and said in a
+  notification. The model, the engine and the file moved to their own crate,
+  `gui/windowrules`, so Settings can use them without the shell. **Lane E:**
+  the page in Settings (`requests/c-e-a-window-rules-page-in-settings.md`),
+  after which the shell's undrawn panel is deleted.
+
 - `[C]` **A settings service that tells open windows when a setting
   changes** -- **done 2026-09-28** (C-Q26, §1418, §1434). Beside
   `gui/settingsfile`, never in front of it: saving stays a program writing its

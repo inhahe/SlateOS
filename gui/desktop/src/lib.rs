@@ -2265,6 +2265,10 @@ pub struct DesktopShell {
     service_choices: servicemenus::Choices,
     /// `context-menus.yaml`, which the Settings application's page writes.
     service_watch: config::Watcher,
+    /// `window-rules.yaml`, the user's window rules: read into
+    /// [`rules`](Self::rules) by [`poll_window_rules`](Self::poll_window_rules)
+    /// at the start of the session and whenever it changes after.
+    rules_watch: config::Watcher,
     /// The open icon menu's service-menu items and the files it was opened
     /// on. See [`ServiceOffer`].
     service_offer: ServiceOffer,
@@ -2540,6 +2544,11 @@ pub struct DesktopShell {
     /// It could not have been wired sooner — its two program criteria were a
     /// process name and a window class, neither of which existed anywhere in
     /// this system. See `design-decisions.md` §569.
+    ///
+    /// The rules are the user's, from `window-rules.yaml`
+    /// (`windowrules::file`), once [`poll_window_rules`](Self::poll_window_rules)
+    /// has read it -- and the built-in defaults before that, and for a user
+    /// whose file says nothing about rules.
     pub rules: window_rules::WindowRulesManager,
 
     /// Which chord does what.
@@ -2851,6 +2860,7 @@ impl DesktopShell {
             service_menus: servicemenus::Scan::default(),
             service_choices: servicemenus::Choices::default(),
             service_watch: config::Watcher::new(servicemenus::CONFIG_NAME),
+            rules_watch: config::Watcher::new(windowrules::file::CONFIG_NAME),
             service_offer: ServiceOffer::default(),
             open_with_offer: None,
             widget_drag: None,
@@ -6527,20 +6537,19 @@ impl DesktopShell {
 
     /// Turn the actions a rule matched into asks the compositor understands.
     ///
-    /// Five of [`RuleActions`](window_rules::RuleActions)'s seventeen fields
-    /// have somewhere to go. Two of those — `skip_taskbar` and `skip_alt_tab` —
-    /// are the shell's own business and are handled by the caller; the three
-    /// here need the compositor.
+    /// Fifteen of [`RuleActions`](window_rules::RuleActions)'s seventeen
+    /// fields have somewhere to go. Two of those — `skip_taskbar` and
+    /// `skip_alt_tab` — are the shell's own business and are handled by the
+    /// caller; the thirteen here need the compositor, each through a request
+    /// only a shell may send about another program's window (`ShellMove`,
+    /// `ShellSetOpacity`, `ShellSetWindowPolicy` and the rest).
     ///
-    /// The twelve that are missing are missing on purpose, not by oversight.
-    /// `position` and `size` are the loudest: the control protocol's `Move` and
-    /// `Resize` resolve against the *sender's own* window, so the shell cannot
-    /// use them on somebody else's, and placement is the compositor's to decide
-    /// (§506) — the shell is not even told the display bounds. `always_on_top`,
-    /// `opacity`, `no_decorations`, `prevent_close` and the rest have no
-    /// request at all. They are stored, exported and shown, and doing nothing
-    /// visible is a better failure than a shell that moves windows to the
-    /// wrong place. See `known-issues.md`
+    /// The two that are missing are missing on purpose, not by oversight.
+    /// `target_monitor` waits on the compositor modelling more than one
+    /// display, and `no_decorations` on a request to take a frame away -- a
+    /// window's decorations are its own program's choice, made when it is
+    /// created. They are stored and shown, and doing nothing visible is a
+    /// better failure than a guess. See `known-issues.md`
     /// `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
     fn rule_requests(
         id: WindowId,
@@ -13079,6 +13088,35 @@ impl DesktopShell {
         let changed = choices != self.service_choices;
         self.service_choices = choices;
         changed
+    }
+
+    /// Read `window-rules.yaml` if it changed since the last look -- or for
+    /// the first time -- and hold the rules it says from the next window on.
+    ///
+    /// A file that says nothing about rules, or no file at all, is the
+    /// defaults (`windowrules::default_rules`). Windows already open stay as
+    /// they are: a rule is applied to a window as it arrives, in
+    /// [`apply_window_list`](Self::apply_window_list). A rule read again
+    /// unchanged keeps what it has done -- its count, and a once-rule's being
+    /// used -- as
+    /// [`replace_rules`](window_rules::WindowRulesManager::replace_rules)
+    /// says.
+    ///
+    /// Answers `None` when the file had not changed, and otherwise the rules
+    /// it has that cannot be read, each with why: they are not applied
+    /// (`windowrules::file` says why a rule is left out whole), and the caller
+    /// is the one to tell the user -- the session does, with
+    /// [`window_rules::problems_notice`].
+    pub fn poll_window_rules(&mut self) -> Option<Vec<windowrules::file::Problem>> {
+        let doc = self.rules_watch.poll()?;
+        let (rules, problems) = match windowrules::file::read(&doc) {
+            Some(loaded) => (loaded.rules, loaded.problems),
+            None => (windowrules::default_rules(), Vec::new()),
+        };
+        // Nothing is dropped for the cap: `read` stops at `MAX_RULES` and
+        // reports the rest as problems, and there are fewer defaults than that.
+        let _ = self.rules.replace_rules(rules);
+        Some(problems)
     }
 
     /// The program an icon starts, as the taskbar spells one, if it is a

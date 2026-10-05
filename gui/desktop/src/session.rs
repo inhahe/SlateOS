@@ -947,6 +947,9 @@ impl<T: Transport> ShellSession<T> {
         // whenever the Settings application writes them. Whether they
         // changed matters to nothing yet -- no menu is open.
         let _ = session.shell.poll_service_choices();
+        // The user's window rules, before the first window list can arrive
+        // and be judged by the defaults instead.
+        session.adopt_window_rules();
         session.repaint()?;
         Ok(session)
     }
@@ -1462,9 +1465,25 @@ impl<T: Transport> ShellSession<T> {
         self.wallpaper_error = why;
     }
 
+    /// Read the user's window rules if their file changed -- or for the first
+    /// time -- and tell them of any that cannot be read
+    /// ([`window_rules::problems_notice`](crate::window_rules::problems_notice)):
+    /// every one on the error stream, and a few in a notice.
+    fn adopt_window_rules(&mut self) {
+        let Some(problems) = self.shell.poll_window_rules() else {
+            return;
+        };
+        for problem in &problems {
+            eprintln!("desktop: {problem}");
+        }
+        if let Some((title, body)) = crate::window_rules::problems_notice(&problems) {
+            self.post_desktop_notice(&title, &body);
+        }
+    }
+
     /// Post news from the desktop about itself: a wallpaper that could not be
     /// shown, a layout that could not be saved, a colour theme that could not
-    /// be used.
+    /// be used, a window rule that could not be read.
     ///
     /// One definition for all of them, so they cannot drift apart in who they
     /// name as the sender or how urgent they claim to be. Each caller decides
@@ -3414,6 +3433,14 @@ impl<T: Transport> ShellSession<T> {
                 group: SettingsGroup::Program(name),
             } if name.as_str() == servicemenus::CONFIG_NAME => {
                 let _ = self.shell.poll_service_choices();
+            }
+            // The window rules changed: in Settings, or by hand. They apply to
+            // windows as they arrive, so nothing on screen moves now -- unless
+            // a rule cannot be read, which is told in a notice.
+            Event::SettingsChanged {
+                group: SettingsGroup::Program(name),
+            } if name.as_str() == windowrules::file::CONFIG_NAME => {
+                self.adopt_window_rules();
             }
             _ => {}
         }

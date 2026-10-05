@@ -1,9 +1,18 @@
-## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- **now one of seventeen**
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- **now two of seventeen**
 
 **Update 2026-09-07: sixteen of the seventeen work.** Eleven of the twelve
 this entry describes were built in one session, in the order the entry's own
 increment list proposed. What remains is `target_monitor`, which waits on
 multi-monitor support and is the one the entry always put last.
+
+**Correction 2026-10-05: fifteen, not sixteen.** `no_decorations` has no
+request either -- the table below always said so, and
+`DesktopShell::rule_requests` sends nothing for it. A window's frame is set by
+its own program in its `WindowSpec` when it is created; taking it away needs a
+shell request of the `ShellSetWindowPolicy` kind, and a compositor that can
+drop a frame from a live window. The count above was found wrong while
+correcting two doc comments that still said "five of seventeen"
+(`gui/desktop/src/lib.rs` `rule_requests`, `gui/desktop/src/window_rules.rs`).
 
 The title is left as it was written. It is wrong now and that is the point:
 renaming it would lose the thing worth remembering, which is that a settings
@@ -48,7 +57,9 @@ nothing. There is no error and no greyed-out control: the rule simply has no
 effect, and the only way to find out is to write one and watch nothing happen.
 
 **Where:** `gui/desktop/src/window_rules.rs` (the `rule_actions!` field list,
-~line 255) declares the seventeen. `gui/desktop/src/lib.rs`
+~line 255) declares the seventeen -- since 2026-10-05 it is
+`gui/windowrules/src/lib.rs`, the crate the rules moved to when they gained a
+file (§1465). `gui/desktop/src/lib.rs`
 `DesktopShell::rule_requests` turns the five that work into `ShellRequest`s.
 `gui/remote/src/control.rs` is the protocol that would have to grow for the
 rest.

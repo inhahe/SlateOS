@@ -897,6 +897,7 @@ dependencies = [
  "settingsfile",
  "settingswatch",
  "tzrules",
+ "windowrules",
  "yamldoc",
 ]
 
@@ -4716,6 +4717,14 @@ name = "whois"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "windowrules"
+version = "0.1.0"
+dependencies = [
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

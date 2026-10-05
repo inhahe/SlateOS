@@ -104,6 +104,11 @@ yamldoc = { path = "../../yamldoc" }
 # two processes cannot disagree about what the user chose. The shell paints
 # from it (DesktopTheme::from_settings) and hosts the panel that edits it.
 appearance = { path = "../appearance" }
+# The window rules: the model, the engine that applies them when a window
+# arrives, and `window-rules.yaml`, which the shell loads at start and
+# reloads when Settings changes it. Shared with Settings so the two
+# processes cannot disagree about what a rule file says.
+windowrules = { path = "../windowrules" }
 # The installed programs' desktop entries: what the start menu lists, under
 # which folder, with which picture, and how each starts.
 desktopentry = { path = "../desktopentry" }

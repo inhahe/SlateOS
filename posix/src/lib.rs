@@ -377,6 +377,7 @@ pub mod execinfo;
 pub(crate) mod exit_list;
 pub mod fcntl;
 pub mod fcntl_ops;
+pub(crate) mod fdname;
 pub mod fdtable;
 pub mod fenv;
 pub mod file;

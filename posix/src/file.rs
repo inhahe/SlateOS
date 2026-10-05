@@ -122,10 +122,25 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     // be wrong for the third", which is right: nothing about these two
     // paths needs to reach the filesystem, and putting them here keeps the
     // kernel's namespace free of nodes that are really syscalls.
-    if let Some(fd) = open_pty_device(resolved.get(..resolved_len).unwrap_or(&[]), flags) {
+    let resolved = resolved.get(..resolved_len).unwrap_or(&[]);
+    if let Some(fd) = open_pty_device(resolved, flags) {
         return fd;
     }
+    // `/dev/fd/N`, `/dev/stdin` and kin, and `/proc/self/fd`: this process's
+    // own descriptors, which only this library knows (`crate::fdname`).
+    if let Some(fd) = crate::fdname::open(resolved, flags, mode) {
+        return fd;
+    }
+    open_resolved(resolved, flags, mode)
+}
 
+/// The kernel's half of [`open`]: `resolved` -- absolute and normalised, as
+/// `resolve_or_err` makes it -- opened through `SYS_FS_OPEN_MODE` and entered
+/// in the descriptor table. What `open` does once no name this library
+/// answers itself has claimed the path; [`crate::fdname`] calls it for the
+/// kernel's own `/proc/<pid>/fd`, which `open` would hand straight back.
+pub(crate) fn open_resolved(resolved: &[u8], flags: i32, mode: ModeT) -> Fd {
+    let resolved_len = resolved.len();
     let native_flags = translate_open_flags(flags);
 
     // Compute the umask-masked create mode only when O_CREAT is present;
@@ -2049,6 +2064,45 @@ pub extern "C" fn closefrom(lowfd: i32) {
 /// `follow` selects `SYS_FS_STAT` (follow the final symlink) versus
 /// `SYS_FS_LSTAT` (do not follow).  Returns 0 on success, or -1 with
 /// `errno` set on failure.
+/// `crate::fdname`'s `stat` (`follow`) or `lstat` for `path`, if it names one
+/// of this process's own descriptors -- `/dev/fd/N`, `/dev/stdin`, the
+/// directory -- and `None` for any other path, or one that does not resolve,
+/// which the caller's own resolution then reports.
+fn fdname_stat(path: *const u8, buf: *mut Stat, follow: bool) -> Option<i32> {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_or_err(path, &mut resolved)?;
+    crate::fdname::stat(resolved.get(..len)?, buf, follow)
+}
+
+/// `statx`'s answer for one of `crate::fdname`'s names: `(result, whether
+/// raw holds a kernel record)`, or `None` for any other path. Through a
+/// descriptor's link (`follow`) it is that descriptor's own record, its birth
+/// time included, exactly as `statx(fd, "", AT_EMPTY_PATH, ...)` reads it; a
+/// link itself, or the directory, is what `crate::fdname::stat` makes.
+fn statx_fdname(
+    path: *const u8,
+    follow: bool,
+    st: &mut Stat,
+    raw: &mut [u8; crate::stat::KERNEL_STAT_LEN],
+) -> Option<(i32, bool)> {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_or_err(path, &mut resolved)?;
+    let named = resolved.get(..len)?;
+    if follow {
+        if let Some(n) = crate::fdname::descriptor_of(named) {
+            if fdtable::get_fd(n).is_none() {
+                errno::set_errno(errno::ENOENT);
+                return Some((-1, false));
+            }
+            return Some(match stat_fd_raw(n, raw) {
+                Some(ret) => (ret, true),
+                None => (fstat(n, &raw mut *st), false),
+            });
+        }
+    }
+    crate::fdname::stat(named, &raw mut *st, follow).map(|ret| (ret, false))
+}
+
 fn stat_path_raw(
     path: *const u8,
     follow: bool,
@@ -2113,6 +2167,9 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
+    }
+    if let Some(ret) = fdname_stat(path, buf, true) {
+        return ret;
     }
 
     let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
@@ -2208,6 +2265,9 @@ pub extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
+    }
+    if let Some(ret) = fdname_stat(path, buf, false) {
+        return ret;
     }
 
     let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
@@ -2388,6 +2448,16 @@ pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> Ssiz
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
     };
+    let named = resolved.get(..resolved_len).unwrap_or(&[]);
+    if crate::fdname::classify(named, crate::process::getpid()).is_some() {
+        // SAFETY: `buf` is non-null (checked above) and the caller asserts it
+        // holds `bufsiz` writable bytes, as readlink's contract says; the
+        // slice lives for this call only.
+        let out = unsafe { core::slice::from_raw_parts_mut(buf, bufsiz) };
+        if let Some(ret) = crate::fdname::readlink(named, out) {
+            return ret;
+        }
+    }
 
     let ret = syscall4(
         SYS_FS_READLINK,
@@ -2890,6 +2960,9 @@ pub extern "C" fn access(path: *const u8, mode: i32) -> i32 {
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
     };
+    if let Some(ret) = crate::fdname::access(resolved.get(..resolved_len).unwrap_or(&[]), mode) {
+        return ret;
+    }
 
     // Use stat to check if the file exists.
     let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
@@ -3889,6 +3962,17 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
         // absolute path, and `AT_FDCWD` names no descriptor to pin. `open`
         // resolves both against this libc's own cwd, which is the answer.
         return open(path, flags, mode);
+    }
+    // The directory of descriptors is this library's, not the kernel's: a
+    // name in it is one of this process's descriptors (`crate::fdname`), so
+    // it is resolved by the directory's path, not by asking the kernel's
+    // `/proc/<pid>/fd`, which lists nothing for a native process.
+    if crate::fdname::is_descriptor_dir(dirfd) {
+        let mut full = [0u8; crate::unistd::PATH_MAX];
+        if resolve_dirfd_path(dirfd, path, &mut full) == 0 {
+            return -1;
+        }
+        return open(full.as_ptr(), flags, mode);
     }
     // A real descriptor and a relative name: the case the pin is for. Ask the
     // kernel to walk from the *handle* rather than gluing the caller's name
@@ -8085,15 +8169,22 @@ pub extern "C" fn statx(
             return ret;
         }
     } else {
-        let ret = if dirfd == AT_FDCWD || is_absolute_path(path) {
-            stat_path_raw(path, follow, &mut raw)
+        let mut full = [0u8; crate::unistd::PATH_MAX];
+        let named = if dirfd == AT_FDCWD || is_absolute_path(path) {
+            path
         } else {
-            let mut full = [0u8; crate::unistd::PATH_MAX];
             let len = resolve_dirfd_path(dirfd, path, &mut full);
             if len == 0 {
                 return -1;
             }
-            stat_path_raw(full.as_ptr(), follow, &mut raw)
+            full.as_ptr()
+        };
+        let ret = match statx_fdname(named, follow, &mut st, &mut raw) {
+            Some((ret, raw_ok)) => {
+                have_raw = raw_ok;
+                ret
+            }
+            None => stat_path_raw(named, follow, &mut raw),
         };
         if ret != 0 {
             return ret;

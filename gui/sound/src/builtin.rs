@@ -15,9 +15,10 @@
 //! Each tone is a soft bell: a fundamental with three quieter overtones,
 //! each fading faster than the one below it, after a three-millisecond rise
 //! that keeps the start from clicking. Arrivals rise and departures fall --
-//! a message, a device plugged in and logging in go up; an error, a device
-//! taken out and logging out come down -- and the recycle bin and the
-//! screenshot are noise, shaped like what they name. Every sound peaks at
+//! a message, a device plugged in, a network connected and logging in go
+//! up; an error, a device taken out, a network lost and logging out come
+//! down -- and the recycle bin and the screenshot are noise, shaped like
+//! what they name. Every sound peaks at
 //! -6 dBFS ([`PEAK`]) and ends in a short fade, so none ends on a click.
 //!
 //! # Which events
@@ -85,11 +86,15 @@ pub enum BuiltIn {
     BatteryLow,
     /// `audio-volume-change`: the tick a volume control makes.
     VolumeChange,
+    /// `network-connectivity-established`.
+    NetworkConnected,
+    /// `network-connectivity-lost`, and `-error`: a connection that failed.
+    NetworkLost,
 }
 
 impl BuiltIn {
     /// Every built-in sound.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::Message,
         Self::Information,
         Self::Question,
@@ -107,6 +112,8 @@ impl BuiltIn {
         Self::PowerUnplug,
         Self::BatteryLow,
         Self::VolumeChange,
+        Self::NetworkConnected,
+        Self::NetworkLost,
     ];
 
     /// The sound's own name in the freedesktop sound naming specification.
@@ -130,6 +137,8 @@ impl BuiltIn {
             Self::PowerUnplug => "power-unplug",
             Self::BatteryLow => "battery-low",
             Self::VolumeChange => "audio-volume-change",
+            Self::NetworkConnected => "network-connectivity-established",
+            Self::NetworkLost => "network-connectivity-lost",
         }
     }
 
@@ -168,6 +177,8 @@ impl BuiltIn {
             "power-unplug" => Self::PowerUnplug,
             "battery-low" | "battery-caution" => Self::BatteryLow,
             "audio-volume-change" => Self::VolumeChange,
+            "network-connectivity-established" => Self::NetworkConnected,
+            "network-connectivity-lost" | "network-connectivity-error" => Self::NetworkLost,
             _ => return None,
         })
     }
@@ -259,6 +270,9 @@ impl BuiltIn {
                 1.0,
             ),
             Self::VolumeChange => tones(&[note(0.0, C6, 0.035)], 0.08, 0.5),
+            // A fifth, low and soft: the network is background, not news.
+            Self::NetworkConnected => tones(&[note(0.0, A4, 0.16), note(0.09, E5, 0.3)], 0.45, 0.6),
+            Self::NetworkLost => tones(&[note(0.0, E5, 0.16), note(0.09, A4, 0.3)], 0.45, 0.6),
         };
         Audio {
             rate: RATE,

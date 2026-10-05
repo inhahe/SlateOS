@@ -81,6 +81,22 @@ fn every_sound_answers_to_its_names() {
     );
 }
 
+/// **No two sounds are alike**: each event is told apart by ear.
+#[test]
+fn no_two_sounds_are_alike() {
+    let rendered: Vec<(BuiltIn, Audio)> = BuiltIn::ALL.iter().map(|&s| (s, s.render())).collect();
+    for (i, (a, audio_a)) in rendered.iter().enumerate() {
+        for (b, audio_b) in &rendered[i + 1..] {
+            assert_ne!(audio_a.samples, audio_b.samples, "{a:?} and {b:?}");
+        }
+    }
+    assert_eq!(
+        BuiltIn::for_event("network-connectivity-error"),
+        Some(BuiltIn::NetworkLost),
+        "a connection that failed is one lost"
+    );
+}
+
 /// **An event with no sound of its own sounds as its name cut at the last
 /// hyphen**, and so on -- the specification's fallback -- and one no cut
 /// of which has a sound has none.

@@ -373,7 +373,7 @@ impl FrameDecoder {
             match h.channel_assignment {
                 ChannelAssignment::Independent => {}
                 ChannelAssignment::LeftSide | ChannelAssignment::MidSide if channel == 1 => {
-                    bps += 1
+                    bps += 1;
                 }
                 ChannelAssignment::RightSide if channel == 0 => bps += 1,
                 _ => {}

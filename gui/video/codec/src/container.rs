@@ -1,14 +1,20 @@
-//! The file's container -- Matroska (WebM among them), MP4 or Ogg -- told
-//! apart by its first bytes as FFmpeg tells them, and read through one face:
+//! The file's container -- Matroska (WebM among them), MP4, Ogg, or a
+//! native FLAC file -- told apart by its first bytes as FFmpeg tells them,
+//! and read through one face:
 //! its video tracks described alike ([`Track`]), its sound tracks
 //! ([`SoundTrack`]), its packets given alike ([`Sample`]), and a seek.
 //!
 //! **Telling them apart.** A Matroska file begins with EBML's magic, and
 //! FFmpeg's Matroska probe asks for it at the very start; an Ogg file with a
-//! page, as FFmpeg's Ogg probe asks (`ogg::probe`); anything else is MP4
-//! when FFmpeg's MP4 probe would take it for one (`mp4::probe`, over as
-//! much of the file as FFmpeg reads to decide, a mebibyte), and otherwise
-//! not a file this plays.
+//! page, as FFmpeg's Ogg probe asks (`ogg::probe`); a FLAC file with its
+//! `fLaC` marker, past an ID3v2 tag as libavformat skips one before probing;
+//! anything else is MP4 when FFmpeg's MP4 probe would take it for one
+//! (`mp4::probe`, over as much of the file as FFmpeg reads to decide, a
+//! mebibyte), and otherwise not a file this plays.
+//!
+//! **A FLAC file** is read by libFLAC's reader (`flac::Reader`), which finds
+//! its frames by decoding them: it gives no packets, and `Sound` takes its
+//! frames from it directly.
 //!
 //! **Ogg's times** are its demuxer's, which leaves a packet untimed where
 //! the file does (after the first on a stream's last page); those are
@@ -34,6 +40,7 @@ pub(crate) enum Container<R> {
     Matroska(Box<matroska::Demuxer<R>>),
     Mp4(Box<mp4::Demuxer<R>>),
     Ogg(Box<OggFile<R>>),
+    Flac(Box<flac::Reader<R>>),
 }
 
 /// An Ogg file, and the times libavformat would fill in for its packets.
@@ -177,6 +184,8 @@ impl<R: Read + Seek> Container<R> {
             let demuxer = ogg::Demuxer::open(source)?;
             let next = vec![None; demuxer.streams().len()];
             Ok(Self::Ogg(Box::new(OggFile { demuxer, next })))
+        } else if is_flac(&head) {
+            Ok(Self::Flac(Box::new(flac::Reader::open(source)?)))
         } else if mp4::probe(&head) {
             Ok(Self::Mp4(Box::new(mp4::Demuxer::open(source)?)))
         } else {
@@ -207,6 +216,7 @@ impl<R: Read + Seek> Container<R> {
                 .filter(|(_, s)| s.codec == ogg::Codec::Theora)
                 .filter_map(|(i, s)| theora_track(i, s))
                 .collect(),
+            Self::Flac(_) => Vec::new(),
         }
     }
 
@@ -276,6 +286,22 @@ impl<R: Read + Seek> Container<R> {
                 .enumerate()
                 .filter_map(|(i, s)| ogg_sound(&f.demuxer, i, s))
                 .collect(),
+            Self::Flac(r) => r
+                .metadata()
+                .stream_info
+                .map(|info| SoundTrack {
+                    number: 1,
+                    key: 0,
+                    codec: SoundCodec::Flac,
+                    config: Vec::new(),
+                    enabled: true,
+                    default: true,
+                    time_base: (1, u64::from(info.sample_rate.max(1))),
+                    codec_delay: 0,
+                    seek_pre_roll: 0,
+                })
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -300,6 +326,13 @@ impl<R: Read + Seek> Container<R> {
                     Some(time::duration_to_ns(ticks, f.demuxer.time_base(i)?))
                 })
                 .max(),
+            // STREAMINFO's count of samples, where it gives one.
+            Self::Flac(r) => {
+                let info = r.metadata().stream_info?;
+                (info.total_samples > 0 && info.sample_rate > 0).then(|| {
+                    time::duration_to_ns(info.total_samples, (1, u64::from(info.sample_rate)))
+                })
+            }
         }
     }
 
@@ -351,6 +384,8 @@ impl<R: Read + Seek> Container<R> {
                 }))
             }
             Self::Ogg(f) => Ok(f.next_sample()?),
+            // Its frames are `Sound`'s to read (`flac::Reader`).
+            Self::Flac(_) => Ok(None),
         }
     }
 
@@ -383,8 +418,30 @@ impl<R: Read + Seek> Container<R> {
                 f.next.iter_mut().for_each(|n| *n = None);
                 Ok(())
             }
+            // `Sound` seeks its reader itself, to the sample.
+            Self::Flac(_) => Ok(()),
         }
     }
+}
+
+/// Whether `head` -- a file's first bytes -- begins a FLAC file: its `fLaC`
+/// marker, at the start or past an ID3v2 tag (ten bytes, then its size in
+/// four bytes of seven bits).
+fn is_flac(head: &[u8]) -> bool {
+    if head.starts_with(b"fLaC") {
+        return true;
+    }
+    if !head.starts_with(b"ID3") {
+        return false;
+    }
+    let Some(size) = head.get(6..10) else {
+        return false;
+    };
+    let size = size
+        .iter()
+        .fold(0usize, |s, &b| s << 7 | usize::from(b & 0x7f));
+    head.get(10usize.saturating_add(size)..)
+        .is_some_and(|rest| rest.starts_with(b"fLaC"))
 }
 
 impl<R: Read + Seek> OggFile<R> {
@@ -441,6 +498,12 @@ fn ogg_sound<R: Read + Seek>(
         ogg::Codec::Speex => SoundCodec::Other,
         _ => return None,
     };
+    // FLAC's packets are untimed here: their frames carry their own sample
+    // numbers, at STREAMINFO's rate.
+    let flac_rate = (codec == SoundCodec::Flac)
+        .then(|| s.headers.first().and_then(|h| crate::sound::flac_info(h)))
+        .flatten()
+        .map(|info| (1, u64::from(info.sample_rate.max(1))));
     Some(SoundTrack {
         number: u64::try_from(index).ok()?.checked_add(1)?,
         key: u64::try_from(index).ok()?,
@@ -448,7 +511,9 @@ fn ogg_sound<R: Read + Seek>(
         config: sound_config(s.codec, &s.headers),
         enabled: true,
         default: true,
-        time_base: demuxer.time_base(index).unwrap_or((1, 1)),
+        time_base: flac_rate
+            .or_else(|| demuxer.time_base(index))
+            .unwrap_or((1, 1)),
         // Opus's pre-skip comes with the first packet (`Sample::skip_samples`),
         // as FFmpeg's demuxer gives it.
         codec_delay: 0,

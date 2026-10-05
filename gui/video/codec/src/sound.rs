@@ -66,9 +66,22 @@
 //! after another on one clock, the decoder made afresh at each link from its
 //! headers (FFmpeg's times start again at every link).
 //!
-//! What plays: Opus and Vorbis, in Matroska, WebM and Ogg; Opus in MP4. A
-//! file whose sound is AAC, FLAC or MP3 is refused by the codec's name
-//! ([`crate::Error::SoundCodec`]).
+//! **FLAC.** A `.flac` file is read by libFLAC's reader, ported
+//! (`gui/video/flac`): its frames as libFLAC gives them -- each at its first
+//! sample's time, damage met as libFLAC meets it (a damaged frame dropped,
+//! and the gap it leaves between two that decoded filled with silence) --
+//! and a seek to the exact sample. FLAC in Ogg, Matroska and MP4 comes a
+//! frame a packet, decoded by libFLAC's frame decoder; a packet that does
+//! not decode is silence as long as the last block, as for Vorbis. FLAC has
+//! no delay and no padding: nothing is trimmed.
+//!
+//! **Samples** are `i32`s at the stream's own depth
+//! ([`SoundInfo::bits_per_sample`]): 16 bits for Opus and Vorbis, whose
+//! reference decoders give 16, and FLAC's own -- 24-bit audio stays 24-bit.
+//!
+//! What plays: Opus and Vorbis, in Matroska, WebM and Ogg; Opus in MP4; FLAC
+//! in `.flac` files, Ogg, Matroska and MP4. A file whose sound is AAC or MP3
+//! is refused by the codec's name ([`crate::Error::SoundCodec`]).
 
 use std::io::{Read, Seek};
 
@@ -88,10 +101,14 @@ pub struct SoundInfo {
     /// track ID): what [`Sound::open_track`] takes.
     pub track: u64,
     pub codec: SoundCodec,
-    /// Samples a second: 48 000 for Opus; a Vorbis stream's own.
+    /// Samples a second: 48 000 for Opus; a Vorbis or FLAC stream's own.
     pub sample_rate: u32,
     /// Channels a sample, interleaved in that order in a block.
     pub channels: usize,
+    /// The bits a sample has: 16 for Opus and Vorbis; a FLAC stream's own
+    /// depth (4 to 32). A block's samples are at this scale: a 24-bit
+    /// sample runs from -8 388 608 to 8 388 607.
+    pub bits_per_sample: u32,
     /// How long the file plays, in nanoseconds, if it says.
     pub duration: Option<u64>,
 }
@@ -101,8 +118,9 @@ pub struct SoundInfo {
 pub struct Block {
     /// When its first sample plays, in nanoseconds on the file's clock.
     pub time: i64,
-    /// Its samples: [`SoundInfo::channels`] to a sample, interleaved.
-    pub samples: Vec<i16>,
+    /// Its samples: [`SoundInfo::channels`] to a sample, interleaved, each
+    /// [`SoundInfo::bits_per_sample`] bits.
+    pub samples: Vec<i32>,
 }
 
 /// What decodes the track's packets.
@@ -111,6 +129,10 @@ enum Decoder {
     /// Boxed: it is 376 bytes where it stands, an Opus decoder (which
     /// boxes its own state) 16.
     Vorbis(Box<vorbis::Decoder>),
+    /// FLAC frames, one a packet (Ogg, Matroska, MP4).
+    Flac(Box<flac::Decoder>),
+    /// A `.flac` file, whose reader (the container) decodes its frames.
+    FlacFile,
 }
 
 /// A file's sound track, decoded block by block.
@@ -142,8 +164,14 @@ pub struct Sound<R> {
     next_ticks: i64,
     /// A seek's time, while what decodes before it is passed by.
     target: Option<i64>,
-    /// Where the decoder writes: the most samples one packet holds.
+    /// Where Opus and Vorbis decode to: the most samples one packet holds.
     pcm: Vec<i16>,
+    /// Where FLAC's frames go, interleaved.
+    wide: Vec<i32>,
+    /// A `.flac` file's errors counted so far.
+    flac_errors: usize,
+    /// A seek past the end of a `.flac` file: nothing more to give.
+    ended: bool,
     /// Samples a channel the last block decoded had: how long a damaged
     /// Vorbis packet is concealed for.
     last_samples: usize,
@@ -227,7 +255,8 @@ impl<R: Read + Seek> Sound<R> {
     fn open_with(source: R, track: Option<u64>) -> Result<Self, Error> {
         let mut demuxer = Container::open(source)?;
         let sounds = demuxer.sounds();
-        let decodable = |c: SoundCodec| matches!(c, SoundCodec::Opus | SoundCodec::Vorbis);
+        let decodable =
+            |c: SoundCodec| matches!(c, SoundCodec::Opus | SoundCodec::Vorbis | SoundCodec::Flac);
         let chosen: &SoundTrack = match track {
             Some(n) => sounds.iter().find(|t| t.number == n),
             // Decodable first, then enabled, then marked default; the file's
@@ -237,6 +266,7 @@ impl<R: Read + Seek> Sound<R> {
                 .min_by_key(|t| (!decodable(t.codec), !t.enabled, !t.default)),
         }
         .ok_or(Error::NoSound)?;
+        let mut bits = 16;
         let (decoder, rate, channels, pre_skip, max_packet) = match chosen.codec {
             SoundCodec::Opus => {
                 let head = opus::Head::parse(&chosen.config)
@@ -265,6 +295,38 @@ impl<R: Read + Seek> Sound<R> {
                     max,
                 )
             }
+            SoundCodec::Flac => {
+                let (decoder, info) = match &demuxer {
+                    Container::Flac(reader) => {
+                        let info = reader
+                            .metadata()
+                            .stream_info
+                            .ok_or(Error::Flac(flac::Status::BadMetadata))?;
+                        (Decoder::FlacFile, info)
+                    }
+                    _ => {
+                        let info = flac_info(&chosen.config)
+                            .ok_or(Error::Flac(flac::Status::BadMetadata))?;
+                        (
+                            Decoder::Flac(Box::new(flac::Decoder::new(Some(&info)))),
+                            info,
+                        )
+                    }
+                };
+                bits = info.bits_per_sample;
+                (
+                    decoder,
+                    u64::from(info.sample_rate.max(1)),
+                    info.channels as usize,
+                    0,
+                    // A frame holds at most 65 535 samples a channel.
+                    if info.max_block_size > 0 {
+                        info.max_block_size as usize
+                    } else {
+                        65_535
+                    },
+                )
+            }
             other => return Err(Error::SoundCodec(other)),
         };
         let start_skip = if chosen.codec_delay > 0 {
@@ -278,6 +340,7 @@ impl<R: Read + Seek> Sound<R> {
             codec: chosen.codec,
             sample_rate: u32::try_from(rate).unwrap_or(u32::MAX),
             channels,
+            bits_per_sample: bits,
             duration: demuxer.duration(),
         };
         let (key, time_base) = (chosen.key, chosen.time_base);
@@ -291,7 +354,7 @@ impl<R: Read + Seek> Sound<R> {
                 (1, rate),
                 (1, 1_000_000_000),
             )),
-            Decoder::Opus(_) => chosen.seek_pre_roll,
+            Decoder::Opus(_) | Decoder::Flac(_) | Decoder::FlacFile => chosen.seek_pre_roll,
         };
         // The track's first packet: where the start's skip comes off.
         let mut pending = None;
@@ -316,6 +379,9 @@ impl<R: Read + Seek> Sound<R> {
             next_ticks: 0,
             target: None,
             pcm: vec![0; max_packet.saturating_mul(channels)],
+            wide: Vec::new(),
+            flac_errors: 0,
+            ended: false,
             last_samples: 0,
             damaged: 0,
             last_damage: None,
@@ -335,6 +401,9 @@ impl<R: Read + Seek> Sound<R> {
     /// decode is not an error: it is concealed (see the module
     /// documentation).
     pub fn next_block(&mut self) -> Result<Option<Block>, Error> {
+        if matches!(self.decoder, Decoder::FlacFile) {
+            return self.next_flac_frame();
+        }
         loop {
             let sample = match self.pending.take() {
                 Some(s) => s,
@@ -360,6 +429,12 @@ impl<R: Read + Seek> Sound<R> {
     /// [`Error::Container`] when the source fails, or the track cannot be
     /// sought in.
     pub fn seek(&mut self, time: i64) -> Result<(), Error> {
+        if let Container::Flac(reader) = &mut self.demuxer {
+            // To the sample: the first at or after the time.
+            let sample = samples_before(0, time, self.rate);
+            self.ended = !reader.seek(sample)?;
+            return Ok(());
+        }
         let from = time.saturating_sub(i64::try_from(self.pre_roll).unwrap_or(i64::MAX));
         self.demuxer
             .seek(self.key, time::to_ticks(from, self.time_base))?;
@@ -367,6 +442,8 @@ impl<R: Read + Seek> Sound<R> {
         match &mut self.decoder {
             Decoder::Opus(d) => d.reset(),
             Decoder::Vorbis(d) => d.reset(),
+            // A FLAC frame stands alone.
+            Decoder::Flac(_) | Decoder::FlacFile => {}
         }
         self.last_samples = 0;
         self.skip = 0;
@@ -395,6 +472,22 @@ impl<R: Read + Seek> Sound<R> {
                 .ok_or(Error::Opus(opus::Error::BadArgument))
                 .and_then(|h| h.decoder(OPUS_RATE as u32).map_err(Error::Opus))
                 .map(|d| (d.channels(), OPUS_RATE, OPUS_MAX_PACKET, Decoder::Opus(d))),
+            Decoder::Flac(_) => flac_info(config)
+                .ok_or(Error::Flac(flac::Status::BadMetadata))
+                .map(|info| {
+                    let max = if info.max_block_size > 0 {
+                        info.max_block_size as usize
+                    } else {
+                        65_535
+                    };
+                    (
+                        info.channels as usize,
+                        u64::from(info.sample_rate.max(1)),
+                        max,
+                        Decoder::Flac(Box::new(flac::Decoder::new(Some(&info)))),
+                    )
+                }),
+            Decoder::FlacFile => return,
             Decoder::Vorbis(_) => xiph_headers(config)
                 .ok_or(Error::Vorbis(vorbis::Error::BadHeader))
                 .and_then(|[id, _, setup]| vorbis::Decoder::new(id, setup).map_err(Error::Vorbis))
@@ -445,6 +538,27 @@ impl<R: Read + Seek> Sound<R> {
                     ))
                 }
             },
+            Decoder::Flac(d) => match d.decode(data) {
+                Ok((_, channels_in)) => {
+                    let n = channels_in.first().map_or(0, |c| c.len());
+                    self.wide.clear();
+                    for i in 0..n {
+                        for c in &channels_in {
+                            self.wide.push(c.get(i).copied().unwrap_or(0));
+                        }
+                    }
+                    Ok(n)
+                }
+                Err(e) => {
+                    // Silence, as long as the last block.
+                    let n = self.last_samples;
+                    self.wide.clear();
+                    self.wide.resize(n.saturating_mul(channels), 0);
+                    Err((Error::Flac(e), n))
+                }
+            },
+            // Its frames come from its reader, never as packets.
+            Decoder::FlacFile => Ok(0),
             Decoder::Vorbis(d) => match d.decode(data, &mut self.pcm) {
                 Ok(n) => Ok(n),
                 Err(e) => {
@@ -573,9 +687,76 @@ impl<R: Read + Seek> Sound<R> {
                 packet_ticks.saturating_add(rescale_i(start, (1, rate), self.time_base)),
                 self.time_base,
             ),
-            samples: self.pcm.get(from..to)?.to_vec(),
+            samples: self.samples(from, to)?,
         })
     }
+
+    /// The decoded samples `from..to`, from whichever buffer the decoder
+    /// wrote.
+    fn samples(&self, from: usize, to: usize) -> Option<Vec<i32>> {
+        match self.decoder {
+            Decoder::Flac(_) | Decoder::FlacFile => self.wide.get(from..to).map(<[i32]>::to_vec),
+            Decoder::Opus(_) | Decoder::Vorbis(_) => self
+                .pcm
+                .get(from..to)
+                .map(|s| s.iter().map(|&v| i32::from(v)).collect()),
+        }
+    }
+
+    /// A `.flac` file's next frame, from its reader: at its first sample's
+    /// time, its errors counted as damage.
+    fn next_flac_frame(&mut self) -> Result<Option<Block>, Error> {
+        if self.ended {
+            return Ok(None);
+        }
+        let Container::Flac(reader) = &mut self.demuxer else {
+            return Ok(None);
+        };
+        let Some(frame) = reader.next_frame()? else {
+            return Ok(None);
+        };
+        let start = frame.header.sample_number;
+        let n = frame.channels.first().map_or(0, |c| c.len());
+        let mut samples = Vec::with_capacity(n.saturating_mul(frame.channels.len()));
+        for i in 0..n {
+            for c in &frame.channels {
+                samples.push(c.get(i).copied().unwrap_or(0));
+            }
+        }
+        let errors: Vec<flac::Status> = reader.errors().skip(self.flac_errors).collect();
+        self.flac_errors = self.flac_errors.saturating_add(errors.len());
+        if let Some(&last) = errors.last() {
+            self.damaged = self.damaged.saturating_add(errors.len() as u64);
+            self.last_damage = Some(Error::Flac(last));
+        }
+        let ticks = i64::try_from(start).unwrap_or(i64::MAX);
+        Ok(Some(Block {
+            time: time::to_ns(ticks, (1, self.rate)),
+            samples,
+        }))
+    }
+}
+
+/// A FLAC stream's STREAMINFO from the setup its container gives: Ogg
+/// FLAC's first packet (`\x7fFLAC`, its version and header count, `fLaC`,
+/// the block), Matroska's private data (`fLaC`, the blocks), MP4's `dfLa`
+/// body (its version and flags, the blocks), or the block's body alone.
+pub(crate) fn flac_info(config: &[u8]) -> Option<flac::StreamInfo> {
+    let blocks = if config.starts_with(b"\x7fFLAC") {
+        config.get(13..)?
+    } else if config.starts_with(b"fLaC") {
+        config.get(4..)?
+    } else if config.len() == 34 {
+        return flac::StreamInfo::parse(config);
+    } else {
+        config.get(4..)?
+    };
+    // The first block, STREAMINFO (type 0): its 4-byte header, then its body.
+    let (&kind, rest) = blocks.split_first()?;
+    if kind & 0x7f != 0 {
+        return None;
+    }
+    flac::StreamInfo::parse(rest.get(3..)?)
 }
 
 /// `av_rescale_q(a, from, to)`: `a` of `from` units in `to` units, rounded to

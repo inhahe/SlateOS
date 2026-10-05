@@ -4,9 +4,12 @@
 Each fixture NAME.EXT (.webm, .mka, .mp4, .opus or .ogg; no two of the same
 NAME) gets NAME.sound.txt: its sound as a player should be given it --
 
-    track N channels C rate R
+    track N channels C rate R [bits B]
     block TIME_NS SAMPLES          one a decoded block, in order
-    pcm BYTES FNV1A64              the blocks' samples, 16-bit little-endian
+    pcm BYTES FNV1A64              the blocks' samples, each little-endian
+                                   in as many bytes as its depth needs (2
+                                   for 16 bits, the depth where bits is
+                                   missing)
 
 `tests/sound.rs` holds `videocodec::Sound` to those lines.
 
@@ -29,6 +32,9 @@ Where the answers come from -- none of it from the crate itself:
   times FFmpeg starts again at every link, is each link's answer made from
   that link alone, its times moved on to follow the last link's end
   (`chain_answer`).
+- **FLAC's samples** are FFmpeg's decode of it (`ffmpeg -f s32le`): FLAC is
+  lossless, so every correct decoder's samples are the same samples, and
+  gui/video/flac is held to libFLAC itself in its own tests.
 - **Their samples.** For Opus, libopus 1.5.2's fixed-point decoder
   (gui/video/opus's `tools/reference.c`, built in WSL as its header says,
   the decoder `gui/video/opus` is held to bit for bit) decodes the packets
@@ -117,6 +123,18 @@ FIXTURES = [
     # reckons from a start a packet late is more than the last packet holds.
     ("vorbis_ogg_one_page.ogg", [SINE.format(a=0.3, f=330), SINE.format(a=0.3, f=495)], 0.71,
      "libvorbis", 44100, ["-q:a", "3"]),
+    # FLAC: a native file at 16 bits and at 24, and in Matroska (5.1), MP4 and
+    # Ogg.
+    ("flac_stereo.flac", [SINE.format(a=0.3, f=330) + "+" + CLICKS, SINE.format(a=0.3, f=550)], 1.37,
+     "flac", 44100, ["-sample_fmt", "s16"]),
+    ("flac_24bit.flac", [SINE.format(a=0.3, f=440), SINE.format(a=0.25, f=660) + "+" + CLICKS], 0.83,
+     "flac", 96000, ["-sample_fmt", "s32", "-bits_per_raw_sample", "24"]),
+    ("flac_51.mka", [SINE.format(a=0.2, f=200 + 110 * c) for c in range(6)], 0.61,
+     "flac", 48000, ["-sample_fmt", "s16"]),
+    ("flac_mp4.mp4", [SINE.format(a=0.3, f=330), SINE.format(a=0.3, f=495)], 0.71,
+     "flac", 44100, ["-sample_fmt", "s16"]),
+    ("flac_ogg.oga", [SINE.format(a=0.3, f=262), SINE.format(a=0.3, f=392) + "+" + CLICKS], 0.77,
+     "flac", 44100, ["-sample_fmt", "s16"]),
 ]
 
 # Chained Ogg files: each link made as a file of its own (name, signal,
@@ -212,11 +230,12 @@ def packet_key(p):
     return (p.get("pts"), p.get("size"))
 
 
-def write_answer(name, stream, frames, pcm):
+def write_answer(name, stream, frames, pcm, bits=16):
     """NAME.sound.txt: the track, FFmpeg's blocks, and the samples' digest."""
     channels = int(stream["channels"])
     num, den = (int(x) for x in stream["time_base"].split("/"))
-    lines = [f"track {stream['index'] + 1} channels {channels} rate {stream['sample_rate']}"]
+    depth = f" bits {bits}" if bits != 16 else ""
+    lines = [f"track {stream['index'] + 1} channels {channels} rate {stream['sample_rate']}{depth}"]
     for f in frames:
         ticks = int(f["pts"])
         lines.append(f"block {ticks * 1_000_000_000 * num // den} {f['nb_samples']}")
@@ -477,6 +496,30 @@ def encode(ffmpeg, name, chans, seconds, encoder, rate, opts):
          "-fflags", "+bitexact", name])
 
 
+def flac_answer(name, ffmpeg, ffprobe):
+    """A FLAC fixture's answer: FFmpeg's blocks and its decode of them --
+    as libFLAC's, FLAC being lossless -- each sample in as many bytes as its
+    depth needs."""
+    info = json.loads(run([ffprobe, "-hide_banner", "-loglevel", "error", "-select_streams", "a",
+                           "-show_streams", "-of", "json", name]))
+    stream = info["streams"][0]
+    bits = int(stream.get("bits_per_raw_sample") or 16)
+    frames = json.loads(run([ffprobe, "-hide_banner", "-loglevel", "error", "-select_streams", "a",
+                             "-show_frames", "-show_entries", "frame=pts,nb_samples",
+                             "-of", "json", name]))["frames"]
+    wide = run([ffmpeg, "-hide_banner", "-loglevel", "error", "-i", name, "-map", "0:a:0",
+                "-c:a", "pcm_s32le", "-f", "s32le", "-"])
+    width = (bits + 7) // 8
+    pcm = bytearray()
+    for i in range(0, len(wide), 4):
+        v = int.from_bytes(wide[i:i + 4], "little", signed=True) >> (32 - bits)
+        pcm += (v & ((1 << (8 * width)) - 1)).to_bytes(width, "little")
+    total = sum(int(f["nb_samples"]) for f in frames)
+    if total * int(stream["channels"]) * width != len(pcm):
+        sys.exit(f"{name}: {total} samples in FFmpeg's frames, {len(pcm)} bytes decoded")
+    write_answer(name, stream, frames, bytes(pcm), bits)
+
+
 def last_granule(data):
     """An Ogg file's last page's granule position."""
     at = data.rfind(b"OggS")
@@ -540,6 +583,8 @@ def main():
                 PATCHES[name](name)
         if encoder == "libvorbis":
             vorbis_answer(name, ffmpeg, ffprobe, args.vorbis_reference)
+        elif encoder == "flac":
+            flac_answer(name, ffmpeg, ffprobe)
         else:
             opus_answer(name, ffprobe, args.reference)
     for name, links in CHAINS.items():

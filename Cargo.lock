@@ -4523,6 +4523,7 @@ dependencies = [
 name = "videocodec"
 version = "0.1.0"
 dependencies = [
+ "flac",
  "matroska",
  "md5",
  "mp4",

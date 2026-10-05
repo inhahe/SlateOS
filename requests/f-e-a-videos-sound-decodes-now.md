@@ -5,7 +5,8 @@
 Vorbis)
 **Updated:** 2026-10-04, lane F -- Vorbis plays too; the sample rate is now
 the stream's; Opus in MP4; Ogg files -- `.opus`, `.ogg`, `.oga` -- for the
-music player as well (below, "Update").
+music player as well; FLAC, and samples as `i32` at the stream's depth
+(below, "Update").
 
 **In short:** the video player can have its file's sound: `videocodec::Sound`,
 opened on the same file as `videocodec::Video`, gives back the sound block
@@ -115,3 +116,30 @@ What may touch the player or the music player:
 
 Design-decisions §1353 says where Ogg's times differ from FFmpeg's and why
 (FFmpeg mistimes some Vorbis packets, and short Vorbis files by a packet).
+
+## Update, 2026-10-04: FLAC -- and a block's samples are `i32` now
+
+`Sound::open` plays FLAC: `.flac` files (read by libFLAC's own reader,
+ported: `gui/video/flac`, held to libFLAC bit for bit on its own fixtures and
+on all 86 of the IETF's conformance files) and FLAC in Ogg (`.oga`), Matroska
+and MP4. With the Ogg update above, the music player can open and play its
+`.flac`, `.ogg`, `.oga` and `.opus` files through `Sound` alone.
+
+**What changes for a caller -- please read before using `Sound`:**
+
+- **`Block::samples` is `Vec<i32>`** (it was `Vec<i16>`), each sample at the
+  stream's own depth, given by the new **`SoundInfo::bits_per_sample`**: 16
+  for Opus and Vorbis (the values the `i16`s had), the stream's for FLAC --
+  24-bit audio runs from -8 388 608 to 8 388 607. To feed a 16-bit device,
+  shift right by `bits_per_sample - 16` (better, dither first); to feed a
+  32-bit one, shift left by `32 - bits_per_sample`. Nothing in lane E used
+  `Sound` yet, so nothing breaks.
+- **`SoundCodec::Flac`** is decoded now; `SoundCodec::Mp3` and `Aac` remain
+  refused by name.
+- **`Error::Flac(flac::Status)`** for a FLAC frame that would not decode (it
+  is concealed, as other damage is, and counted in `Sound::damaged`), and
+  **`ContainerError::Flac`** for a `.flac` file that cannot be read.
+
+For tags and cover art a music player shows, `flac::Reader::open(file)?
+.metadata()` gives a `.flac` file's Vorbis comments (`comments.get("TITLE")`)
+and pictures (`pictures`, the front cover `kind == 3`) directly.

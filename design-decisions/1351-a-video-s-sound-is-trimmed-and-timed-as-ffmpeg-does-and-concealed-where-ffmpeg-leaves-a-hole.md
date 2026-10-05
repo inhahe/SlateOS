@@ -134,8 +134,28 @@ Seven fixtures (Opus stereo and 5.1, Vorbis with mistimed packets at 44.1
 and 22.05 kHz, a one-page Vorbis stream, chained Opus and chained Vorbis)
 are held to their answers, with seeks.
 
+**FLAC, and samples of more than 16 bits, 2026-10-04.** FLAC plays
+(`gui/video/flac`, libFLAC ported, §1354): `.flac` files through libFLAC's
+own reader -- its frames, its handling of damage (a damaged frame dropped and
+the gap it leaves filled with silence), a seek to the exact sample -- and
+FLAC in Ogg, Matroska and MP4 a frame a packet, a damaged one silence as
+long as the last block. FLAC has no delay and no padding; each block is at
+its frame's first sample. Five fixtures (16-bit and 24-bit `.flac`, 5.1 in
+Matroska, MP4, Ogg) are held to ffprobe's blocks and FFmpeg's samples
+(FLAC being lossless, any correct decoder's), and are bit-exact after seeks.
+
+- **A block's samples are `i32`s now, at the stream's own depth**
+  (`SoundInfo::bits_per_sample`): FLAC is often 24-bit, and cutting it to
+  16 would throw away what the file is for. Opus and Vorbis stay 16-bit
+  (their reference decoders give 16); a 24-bit sample runs to +-8 388 608.
+  *Alternatives:* 16 bits for everything (simplest for a sound card, lossy
+  for hi-res FLAC); floats (lossless to 24 bits, lossy at 32, and the
+  decoders' exact outputs would be checked through a conversion); a block
+  type per depth (every caller handles each). Nothing outside lane F used
+  `Sound` yet, so the type changed with nothing to migrate.
+
 **What it does not do yet.** AAC (MP4's commonest codec) is refused by
-name, as are FLAC and MP3; and nothing plays the samples: the speakers need the kernel's PCM
+name, as is MP3; and nothing plays the samples: the speakers need the kernel's PCM
 interface (`kernel/src/audio_alsa.rs`, lane A's) reachable from a
 program.
 

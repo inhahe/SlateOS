@@ -3900,8 +3900,12 @@ lane C's `guitk`.
       odd depths and rates, damage of nine kinds, with seeks) and on all 86
       of the IETF's conformance files (`tools/ietf.py`). design-decisions
       §1354.
-    - `[ ]` FLAC in `videocodec::Sound`: `.flac` files, and FLAC in Ogg,
-      Matroska and MP4 -- the music player's lossless files.
+    - `[x]` FLAC in `videocodec::Sound`: `.flac` files through libFLAC's
+      reader (damage met as libFLAC meets it, seeks to the sample), and FLAC
+      in Ogg, Matroska and MP4 a frame a packet; blocks are `i32` samples at
+      the stream's depth now (`SoundInfo::bits_per_sample`), so 24-bit FLAC
+      stays 24-bit. Five fixtures, bit-exact after seeks. design-decisions
+      §1351, §1354.
     - `[-]` In `videocodec`, and out to the speakers: a file's sound decoded
       beside its pictures.
       - `[x]` `videocodec::Sound`: a Matroska or WebM file's Opus track,

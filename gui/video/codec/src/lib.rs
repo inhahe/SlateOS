@@ -42,12 +42,13 @@
 //! decoded, with their time on the same clock, for the program to play and
 //! to show the pictures by. Opus and Vorbis, in Matroska and WebM -- WebM's
 //! sound --, Opus in MP4, and Ogg files' (`.opus`, `.ogg`, `.oga`, and an
-//! `.ogv` film's sound; chained files played as one), through
-//! `gui/video/opus`, libopus's decoder, and `gui/video/vorbis`, Tremor, each
+//! `.ogv` film's sound; chained files played as one); FLAC, in `.flac` files
+//! and in Ogg, Matroska and MP4 -- through `gui/video/opus`, libopus's
+//! decoder, `gui/video/vorbis`, Tremor, and `gui/video/flac`, libFLAC, each
 //! ported and held to its reference sample for sample; the codec delay, an
 //! MP4 edit list's priming and each packet's discard padding dropped, and
 //! the blocks timed, as FFmpeg drops and times them (`tests/sound.rs`).
-//! A file whose sound is AAC, FLAC or MP3 is refused by the codec's name.
+//! A file whose sound is AAC or MP3 is refused by the codec's name.
 //!
 //! # Colour
 //!
@@ -190,16 +191,19 @@ pub enum ContainerError {
     Mp4(mp4::Error),
     /// An Ogg file that could not be read.
     Ogg(ogg::Error),
+    /// A native FLAC file that could not be read.
+    Flac(flac::Error),
 }
 
 impl fmt::Display for ContainerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown => f.write_str("the file is not a Matroska, WebM, MP4 or Ogg file"),
+            Self::Unknown => f.write_str("the file is not a Matroska, WebM, MP4, Ogg or FLAC file"),
             Self::Io(kind) => write!(f, "the file cannot be read: {kind}"),
             Self::Matroska(e) => write!(f, "{e}"),
             Self::Mp4(e) => write!(f, "{e}"),
             Self::Ogg(e) => write!(f, "{e}"),
+            Self::Flac(e) => write!(f, "{e}"),
         }
     }
 }
@@ -224,6 +228,12 @@ impl From<ogg::Error> for ContainerError {
     }
 }
 
+impl From<flac::Error> for ContainerError {
+    fn from(e: flac::Error) -> Self {
+        Self::Flac(e)
+    }
+}
+
 /// A sound codec: those decoded here, and the commonest of the rest, so that
 /// a file in one is refused by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,7 +242,6 @@ pub enum SoundCodec {
     Vorbis,
     /// Not decoded here yet.
     Aac,
-    /// Not decoded here yet.
     Flac,
     /// Not decoded here yet.
     Mp3,
@@ -288,6 +297,9 @@ pub enum Error {
     /// A Vorbis track's headers (its codec private data) are not Vorbis's,
     /// or a packet did not decode.
     Vorbis(vorbis::Error),
+    /// A FLAC track's setup is not a FLAC stream's description, or a frame
+    /// did not decode (as libFLAC would report it).
+    Flac(flac::Status),
 }
 
 impl fmt::Display for Error {
@@ -314,6 +326,7 @@ impl fmt::Display for Error {
             Self::SoundCodec(c) => write!(f, "the sound is {c}, which is not decoded here yet"),
             Self::Opus(e) => write!(f, "the sound could not be decoded: {e}"),
             Self::Vorbis(e) => write!(f, "the sound could not be decoded: {e}"),
+            Self::Flac(e) => write!(f, "the sound could not be decoded: {e}"),
         }
     }
 }
@@ -341,5 +354,11 @@ impl From<mp4::Error> for Error {
 impl From<ogg::Error> for Error {
     fn from(e: ogg::Error) -> Self {
         Self::Container(ContainerError::Ogg(e))
+    }
+}
+
+impl From<flac::Error> for Error {
+    fn from(e: flac::Error) -> Self {
+        Self::Container(ContainerError::Flac(e))
     }
 }

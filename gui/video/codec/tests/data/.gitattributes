@@ -1,2 +1,4 @@
 *.ogg binary
 *.opus binary
+*.flac binary
+*.oga binary

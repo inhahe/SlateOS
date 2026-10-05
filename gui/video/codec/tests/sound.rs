@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use videocodec::{Error, Sound, SoundCodec};
 
-const FIXTURES: [&str; 18] = [
+const FIXTURES: [&str; 23] = [
     "opus_stereo.webm",
     "opus_mono_voip.webm",
     "opus_short_frames.mka",
@@ -45,6 +45,11 @@ const FIXTURES: [&str; 18] = [
     "vorbis_ogg_one_page.ogg",
     "opus_ogg_chained.opus",
     "vorbis_ogg_chained.ogg",
+    "flac_stereo.flac",
+    "flac_24bit.flac",
+    "flac_51.mka",
+    "flac_mp4.mp4",
+    "flac_ogg.oga",
 ];
 
 fn data(name: &str) -> PathBuf {
@@ -59,6 +64,8 @@ struct Expected {
     track: u64,
     channels: usize,
     rate: u32,
+    /// Bits a sample: 16 where the answer does not say.
+    bits: u32,
     /// Each block's time (ns) and samples a channel.
     blocks: Vec<(i64, usize)>,
     bytes: usize,
@@ -72,6 +79,7 @@ fn expected(name: &str) -> Expected {
         track: 0,
         channels: 0,
         rate: 0,
+        bits: 16,
         blocks: Vec::new(),
         bytes: 0,
         digest: 0,
@@ -83,6 +91,9 @@ fn expected(name: &str) -> Expected {
                 e.track = f[1].parse().unwrap();
                 e.channels = f[3].parse().unwrap();
                 e.rate = f[5].parse().unwrap();
+                if f.get(6) == Some(&"bits") {
+                    e.bits = f[7].parse().unwrap();
+                }
             }
             "block" => e
                 .blocks
@@ -101,9 +112,25 @@ fn expected(name: &str) -> Expected {
 fn codec(name: &str) -> SoundCodec {
     if name.starts_with("opus") {
         SoundCodec::Opus
+    } else if name.starts_with("flac") {
+        SoundCodec::Flac
     } else {
         SoundCodec::Vorbis
     }
+}
+
+/// The blocks' samples as the answers digest them: each little-endian, in
+/// as many bytes as its depth needs (FLAC's MD5's layout).
+fn pcm_bytes(blocks: &[videocodec::Block], bits: u32) -> Vec<u8> {
+    let width = bits.div_ceil(8) as usize;
+    blocks
+        .iter()
+        .flat_map(|b| {
+            b.samples
+                .iter()
+                .flat_map(move |s| s.to_le_bytes().into_iter().take(width))
+        })
+        .collect()
 }
 
 fn fnv1a64(data: &[u8]) -> u64 {
@@ -130,8 +157,14 @@ fn every_fixture_plays_as_ffmpeg_and_its_reference_decoder_play_it() {
         let sound = Sound::open(File::open(data(name)).unwrap()).unwrap();
         let info = sound.info();
         assert_eq!(
-            (info.track, info.channels, info.sample_rate, info.codec),
-            (e.track, e.channels, e.rate, codec(name)),
+            (
+                info.track,
+                info.channels,
+                info.sample_rate,
+                info.codec,
+                info.bits_per_sample
+            ),
+            (e.track, e.channels, e.rate, codec(name), e.bits),
             "{name}: the track"
         );
         let got = blocks(name);
@@ -140,14 +173,11 @@ fn every_fixture_plays_as_ffmpeg_and_its_reference_decoder_play_it() {
             .map(|b| (b.time, b.samples.len() / e.channels))
             .collect();
         assert_eq!(times, e.blocks, "{name}: the blocks, as FFmpeg times them");
-        let pcm: Vec<u8> = got
-            .iter()
-            .flat_map(|b| b.samples.iter().flat_map(|s| s.to_le_bytes()))
-            .collect();
+        let pcm = pcm_bytes(&got, e.bits);
         assert_eq!(
             (pcm.len(), fnv1a64(&pcm)),
             (e.bytes, e.digest),
-            "{name}: the samples, as libopus or Tremor decodes them"
+            "{name}: the samples, as libopus, Tremor or libFLAC decodes them"
         );
     }
 }
@@ -169,7 +199,7 @@ fn a_seek_to_the_start_plays_the_file_from_its_first_sample() {
 }
 
 /// How far `ours` is from `theirs`, in dB of signal to error (110 for none).
-fn snr(ours: &[i16], theirs: &[i16]) -> f64 {
+fn snr(ours: &[i32], theirs: &[i32]) -> f64 {
     let (mut err, mut sig) = (0f64, 0f64);
     for (&a, &b) in ours.iter().zip(theirs) {
         err += (f64::from(a) - f64::from(b)).powi(2);
@@ -197,8 +227,9 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
     // 30 dB inside ten blocks -- a block out of place is near 0. A Vorbis
     // decoder remembers nothing but the last block, which the pre-roll
     // decodes: its blocks are the whole decode's, to the bit, from the
-    // first. (A seek that reaches back to the stream's start decodes what
-    // opening it decodes, to the bit.)
+    // first; a FLAC frame stands alone, and a `.flac` file's reader seeks to
+    // the sample. (A seek that reaches back to the stream's start decodes
+    // what opening it decodes, to the bit.)
     for name in [
         "opus_stereo.webm",
         "opus_mono_voip.webm",
@@ -214,6 +245,11 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
         "vorbis_ogg_mono_22k.ogg",
         "opus_ogg_chained.opus",
         "vorbis_ogg_chained.ogg",
+        "flac_stereo.flac",
+        "flac_24bit.flac",
+        "flac_51.mka",
+        "flac_mp4.mp4",
+        "flac_ogg.oga",
     ] {
         let e = expected(name);
         let channels = e.channels;
@@ -247,7 +283,7 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
                 theirs.len(),
                 "{name} at {t}: the block's length"
             );
-            if codec(name) == SoundCodec::Vorbis {
+            if codec(name) != SoundCodec::Opus {
                 assert_eq!(
                     first.samples, theirs,
                     "{name} at {t}: the first block's samples"
@@ -263,7 +299,7 @@ fn a_seek_starts_at_the_first_sample_at_or_after_its_time() {
                     (w.time, w.samples.len()),
                     "{name} at {t}: block {next}"
                 );
-                if codec(name) == SoundCodec::Vorbis {
+                if codec(name) != SoundCodec::Opus {
                     assert_eq!(
                         ours.samples, w.samples,
                         "{name} at {t}: block {next}'s samples"

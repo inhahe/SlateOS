@@ -1,6 +1,9 @@
 ## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER -- FIXED, and this entry was three weeks stale
 
-**Status: OPEN 2026-08-16, UNBLOCKED 2026-08-21** (lane C).
+**Status:** FIXED (lane C) -- opened 2026-08-16, unblocked 2026-08-21 by
+§541; the arrows move by the screen in the toolkit's fields and dialogs, on
+`main` since, and pinned by the two end-to-end tests below. Filed among the
+resolved 2026-10-05.
 
 **The question this waited on has been answered.** C-Q2 was decided by the
 operator on 2026-08-21 -- **visual**, the screen direction -- and written up as

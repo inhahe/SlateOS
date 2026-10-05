@@ -142,8 +142,7 @@ fn past_the_budget_a_mask_keeps_nothing() {
     ))
     .unwrap();
     let drawn_with = |budget: usize| {
-        let mut renderer =
-            super::super::SvgRenderer::new(4, 4, &doc.defs, &doc.reused, &doc.clips, &doc.masks);
+        let mut renderer = super::super::SvgRenderer::new(4, 4, &doc);
         renderer.scratch_budget = budget;
         let buffer = doc.draw(renderer);
         buffer.chunks_exact(4).map(|p| p[3]).max().unwrap()
@@ -262,8 +261,7 @@ fn masks_nest_as_deep_as_clip_paths() {
 /// alpha.
 fn alphas_from(svg: &str, uses: usize, depth: usize) -> Vec<u8> {
     let doc = SvgDocument::parse(svg).unwrap();
-    let mut renderer =
-        super::super::SvgRenderer::new(4, 4, &doc.defs, &doc.reused, &doc.clips, &doc.masks);
+    let mut renderer = super::super::SvgRenderer::new(4, 4, &doc);
     renderer.reuse_budget = uses;
     renderer.depth = depth;
     doc.draw(renderer).chunks_exact(4).map(|p| p[3]).collect()
@@ -296,8 +294,9 @@ fn a_masks_uses_come_out_of_the_drawings_budget() {
 fn a_masks_content_is_drawn_no_deeper_than_the_drawing() {
     let svg = masked(r#"<mask id="m"><rect width="4" height="4" fill="white"/></mask>"#);
     // The root is the first container, the masked square the second; its
-    // mask's content would be the third.
+    // mask's content is the fourth, inside the group that passes the mask's
+    // style down to it.
     let limit = super::super::MAX_DRAWN_DEPTH;
-    assert_eq!(alphas_from(&svg, 100, limit - 2)[0], 0);
-    assert_eq!(alphas_from(&svg, 100, limit - 3)[0], 255);
+    assert_eq!(alphas_from(&svg, 100, limit - 3)[0], 0);
+    assert_eq!(alphas_from(&svg, 100, limit - 4)[0], 255);
 }

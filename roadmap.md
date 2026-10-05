@@ -2175,7 +2175,10 @@ live.
   units, by its `clip-rule`, clips within clips multiplying. And `<style>`
   sheets, so a drawing coloured by CSS classes, as Illustrator writes them,
   is no longer drawn in black; and masks, the shine glossy icons fade
-  through a gradient. Still not drawn: patterns and filters.
+  through a gradient; and (2026-10-05) patterns, a tile repeated to paint a
+  shape -- the checkerboard behind an image editor's picture -- and XML
+  namespaces, so a document written `<svg:rect>` is drawn. Still not drawn:
+  filters.
 
 - `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
   §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's

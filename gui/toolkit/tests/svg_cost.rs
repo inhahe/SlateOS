@@ -4,9 +4,10 @@
 //! menu's, the taskbar's, a folder of files in the file manager -- at login,
 //! at every theme change, and whenever one is asked for at a new size. The
 //! renderer learned gradients, `<use>`, clip paths, viewport clipping and
-//! masks on 2026-10-01, each of which puts work on every pixel it covers: a
-//! gradient colour per pixel, a mask byte per pixel per clip, a mask's content
-//! drawn a second time. This measures the five shapes of icon that work
+//! masks on 2026-10-01, and patterns on 2026-10-05, each of which puts work on
+//! every pixel it covers: a gradient colour per pixel, a mask byte per pixel
+//! per clip, a mask's content drawn a second time, a pattern's tile drawn and
+//! read at every pixel. This measures the six shapes of icon that work
 //! produces, at a taskbar's size and a large one.
 //!
 //! # What it cost when it was written
@@ -21,6 +22,7 @@
 //! | clipped | 2 126 | 43 269 |
 //! | reused | 1 666 | 21 269 |
 //! | masked (measured with masks, later the same day) | 2 444 | 56 312 |
+//! | patterned (measured with patterns, 2026-10-05) | 2 934 | 81 668 |
 //!
 //! # Why the ceilings are where they are
 //!
@@ -104,12 +106,22 @@ const MASKED: &str = r##"<svg viewBox="0 0 48 48"><defs>
 <rect width="48" height="48" rx="8" fill="#3a6ea5"/>
 <g mask="url(#shine)"><ellipse cx="24" cy="12" rx="20" ry="10" fill="#fff"/><path d="M4 10 h40 v6 h-40 z" fill="#8bb3e3"/></g></svg>"##;
 
+/// A transparency checkerboard behind a picture, as image editors' icons draw
+/// one: a pattern's tile drawn once and read at every pixel it paints.
+const PATTERNED: &str = r##"<svg viewBox="0 0 48 48"><defs>
+<pattern id="checks" patternUnits="userSpaceOnUse" width="8" height="8">
+<rect width="8" height="8" fill="#fff"/><rect width="4" height="4" fill="#ccc"/><rect x="4" y="4" width="4" height="4" fill="#ccc"/></pattern></defs>
+<rect x="2" y="2" width="44" height="44" rx="4" fill="url(#checks)"/>
+<circle cx="24" cy="24" r="12" fill="#3a6ea5" opacity="0.8"/></svg>"##;
+
 /// **Drawing an icon stays cheap**: each shape of icon, at a taskbar's 48
 /// pixels and at 256, under its ceiling.
 #[test]
 fn drawing_an_icon_stays_cheap() {
     // Ceilings in microseconds: twenty times what was measured.
-    let cases: [(&str, &str, u32, u32, f64); 10] = [
+    let cases: [(&str, &str, u32, u32, f64); 12] = [
+        ("patterned", PATTERNED, 48, 20, 60_000.0),
+        ("patterned", PATTERNED, 256, 5, 1_650_000.0),
         ("masked", MASKED, 48, 20, 50_000.0),
         ("masked", MASKED, 256, 5, 1_100_000.0),
         ("flat", FLAT, 48, 20, 25_000.0),

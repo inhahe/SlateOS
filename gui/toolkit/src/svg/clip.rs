@@ -118,6 +118,12 @@ impl<'x> Referable<'x> {
         self.places.get(id).copied()
     }
 
+    /// The place of the element whose `id` is `id`, if it is one of these --
+    /// as an `href` names one.
+    pub(super) fn place_of(&self, id: &str) -> Option<usize> {
+        self.places.get(id).copied()
+    }
+
     /// What a `clip-path` value says, of a document's `<clipPath>`s.
     pub(super) fn clip(&self, value: &str) -> Option<Clip> {
         self.place(value).map(Clip::Path)

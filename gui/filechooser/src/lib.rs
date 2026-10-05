@@ -26,5 +26,6 @@ pub mod client;
 pub mod protocol;
 pub mod service;
 
-pub use client::{Connect, Picker, SystemConnect};
+pub use client::Picker;
 pub use protocol::{Filter, Mode, Reply, Request, SERVICE};
+pub use svcconn::{Connect, NoConn, SystemConnect};

@@ -33,82 +33,20 @@
 //! something that is not an answer), the toolkit's dialog comes up then: the
 //! user asked to choose a file, and still gets to.
 
-use std::ffi::OsStr;
-use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::task::Waker;
-use std::time::Duration;
-
 use guiremote::client::Transport;
 use guitk::dialog::{DialogMode, FileDialog, FilePicker, Picked};
 use guitk::event::{Event, Key};
 use guitk::palette::Palette;
 use guitk::render::RenderCommand;
+use std::ffi::OsStr;
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::Waker;
 
-use crate::protocol::{self, Decoded, Filter, Mode, Reply, Request};
+use svcconn::{Connect, SystemConnect, Waiting};
 
-/// How a [`Picker`] reaches the file chooser.
-pub trait Connect {
-    /// One connection to it.
-    type Conn: Transport<Error = io::Error> + Send + 'static;
-
-    /// A connection to the chooser, or `None` where there is none to ask.
-    ///
-    /// # Errors
-    ///
-    /// A failure other than the chooser's absence -- out of descriptors, a
-    /// fault -- which the picker answers by drawing the toolkit's dialog all
-    /// the same.
-    fn connect(&self) -> io::Result<Option<Self::Conn>>;
-}
-
-/// The system's file chooser: the [`SERVICE`](crate::protocol::SERVICE)
-/// registered with SlateOS; none anywhere else.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemConnect;
-
-impl Connect for SystemConnect {
-    #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
-    type Conn = guiremote::channel::ChannelConn;
-    #[cfg(not(all(target_os = "linux", target_vendor = "slateos")))]
-    type Conn = NoConn;
-
-    #[cfg(all(target_os = "linux", target_vendor = "slateos"))]
-    fn connect(&self) -> io::Result<Option<Self::Conn>> {
-        match guiremote::channel::ChannelConn::connect(protocol::SERVICE) {
-            Ok(conn) => Ok(Some(conn)),
-            Err(e) if guiremote::channel::connect_failure_means_absent(&e) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    #[cfg(not(all(target_os = "linux", target_vendor = "slateos")))]
-    fn connect(&self) -> io::Result<Option<Self::Conn>> {
-        Ok(None)
-    }
-}
-
-/// The connection there is to the file chooser where there is none: a type
-/// with no values, so nothing can be sent on it.
-#[derive(Debug)]
-pub enum NoConn {}
-
-impl Transport for NoConn {
-    type Error = io::Error;
-
-    fn read(&mut self, _buf: &mut Vec<u8>) -> io::Result<usize> {
-        match *self {}
-    }
-
-    fn write(&mut self, _bytes: &[u8]) -> io::Result<()> {
-        match *self {}
-    }
-}
-
-/// How long the worker waiting for an answer sleeps between looks at
-/// whether it is still wanted.
-const WAIT_SLICE: Duration = Duration::from_millis(200);
+use crate::protocol::{self, Filter, Mode, Reply, Request};
 
 /// What the worker and the picker share: the answer, once it has come, and
 /// whether the picker still wants it.
@@ -339,7 +277,7 @@ impl<C: Connect> Picker<C> {
         let frame = protocol::encode_request(request).ok()?;
         // No chooser, or one that cannot be reached: the toolkit's dialog,
         // which is the answer to every failure here.
-        let mut conn = self.connect.connect().ok()??;
+        let mut conn = self.connect.connect(protocol::SERVICE).ok()??;
         conn.write(&frame).ok()?;
         let shared = Arc::new(Shared::default());
         let worker = Arc::clone(&shared);
@@ -397,34 +335,11 @@ fn await_reply<T: Transport<Error = io::Error>>(
     mut conn: T,
     shared: &Shared,
 ) -> Option<io::Result<Reply>> {
-    if let Err(e) = conn.set_wait_timeout(Some(WAIT_SLICE)) {
-        return Some(Err(e));
-    }
-    let mut received = Vec::new();
-    loop {
-        if shared.abandoned.load(Ordering::Acquire) {
-            return None;
-        }
-        if let Err(e) = conn.read(&mut received) {
-            return Some(Err(e));
-        }
-        match protocol::decode_reply(&received) {
-            Decoded::Complete(reply, _) => return Some(Ok(reply)),
-            Decoded::Malformed => {
-                return Some(Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "the file chooser answered something that is not an answer",
-                )));
-            }
-            Decoded::Partial => {}
-        }
-        if !conn.is_open() {
-            return Some(Err(io::ErrorKind::UnexpectedEof.into()));
-        }
-        if let Err(e) = conn.wait() {
-            return Some(Err(e));
-        }
-    }
+    let waiting = Waiting {
+        patience: None,
+        abandoned: Some(&shared.abandoned),
+    };
+    svcconn::read_frame(&mut conn, protocol::decode_reply, waiting).transpose()
 }
 
 #[cfg(test)]

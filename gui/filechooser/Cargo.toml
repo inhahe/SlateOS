@@ -13,6 +13,9 @@ guiremote = { path = "../remote" }
 # The frame and its bounded fields, shared with the credential service's
 # protocol.
 msgframe = { path = "../msgframe" }
+# Connecting to the chooser by name, and reading one framed message off the
+# connection.
+svcconn = { path = "../svcconn" }
 
 [lints]
 workspace = true

@@ -21,8 +21,9 @@ use guiremote::client::Transport;
 use guitk::dialog::{DialogMode, FileDialog, Picked};
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use super::{Connect, NoConn, Picker, SystemConnect};
+use super::Picker;
 use crate::protocol::{self, Decoded, Filter, MAX_PATH, Mode, Reply, Request};
+use svcconn::{Connect, NoConn, SystemConnect};
 
 /// What the stand-in chooser and the picker's connection share.
 #[derive(Debug, Default)]
@@ -115,11 +116,15 @@ impl Stand {
     }
 }
 
-impl Connect for Arc<Stand> {
+/// How a picker reaches the stand-in.
+#[derive(Debug)]
+struct Chooser(Arc<Stand>);
+
+impl Connect for Chooser {
     type Conn = End;
 
-    fn connect(&self) -> io::Result<Option<End>> {
-        Ok(self.present.then(|| End(Arc::clone(&self.line))))
+    fn connect(&self, _service: &str) -> io::Result<Option<End>> {
+        Ok(self.0.present.then(|| End(Arc::clone(&self.0.line))))
     }
 }
 
@@ -143,10 +148,10 @@ fn eventually(done: impl Fn() -> bool) {
 }
 
 /// A picker asking `stand`, with a counting waker.
-fn picker_for(stand: &Arc<Stand>) -> (Picker<Arc<Stand>>, Arc<Count>) {
+fn picker_for(stand: &Arc<Stand>) -> (Picker<Chooser>, Arc<Count>) {
     let count = Arc::new(Count::default());
-    let picker =
-        Picker::with_connect(Arc::clone(stand)).with_waker(Waker::from(Arc::clone(&count)));
+    let picker = Picker::with_connect(Chooser(Arc::clone(stand)))
+        .with_waker(Waker::from(Arc::clone(&count)));
     (picker, count)
 }
 
@@ -191,7 +196,7 @@ fn where_there_is_no_chooser_the_toolkits_dialog_is_drawn() {
     // The no-connection type's one property: it has no values.
     assert!(
         SystemConnect
-            .connect()
+            .connect(crate::SERVICE)
             .is_ok_and(|conn: Option<NoConn>| conn.is_none())
     );
 }

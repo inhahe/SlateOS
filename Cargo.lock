@@ -1219,6 +1219,7 @@ dependencies = [
  "guiremote",
  "guitk",
  "msgframe",
+ "svcconn",
 ]
 
 [[package]]
@@ -3985,6 +3986,14 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+]
+
+[[package]]
+name = "svcconn"
+version = "0.1.0"
+dependencies = [
+ "guiremote",
+ "msgframe",
 ]
 
 [[package]]

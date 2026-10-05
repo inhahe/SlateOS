@@ -16,20 +16,18 @@
 //! the protocol's bounds.
 
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use guiremote::client::Transport;
+use svcconn::Waiting;
 
-use crate::protocol::{self, Decoded, Reply, Request};
+use crate::protocol::{self, Reply, Request};
 
 /// How long [`Asked::read`] waits for a request on a fresh connection: a
 /// program sends one as soon as it connects, so this is generous for any
 /// that means to, and short enough that one that never does cannot hold the
 /// chooser.
 pub const REQUEST_PATIENCE: Duration = Duration::from_secs(5);
-
-/// How long one wait for a request's bytes lasts, so the patience is kept.
-const WAIT_SLICE: Duration = Duration::from_millis(100);
 
 /// Register as the system's file chooser.
 ///
@@ -59,36 +57,14 @@ impl<T: Transport<Error = io::Error>> Asked<T> {
     /// program hung up first; `InvalidData` if what it sent is not a request,
     /// or is more than one; and the transport's own errors.
     pub fn read(mut conn: T, patience: Duration) -> io::Result<Self> {
-        conn.set_wait_timeout(Some(WAIT_SLICE.min(patience)))?;
-        let deadline = Instant::now().checked_add(patience);
-        let mut received = Vec::new();
-        loop {
-            conn.read(&mut received)?;
-            match protocol::decode_request(&received) {
-                Decoded::Complete(request, used) if used == received.len() => {
-                    return Ok(Self { request, conn });
-                }
-                Decoded::Complete(..) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "a program sent more than one request",
-                    ));
-                }
-                Decoded::Malformed => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "a program sent something that is not a request",
-                    ));
-                }
-                Decoded::Partial => {}
-            }
-            if !conn.is_open() {
-                return Err(io::ErrorKind::UnexpectedEof.into());
-            }
-            if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
-                return Err(io::ErrorKind::TimedOut.into());
-            }
-            conn.wait()?;
+        let waiting = Waiting {
+            patience: Some(patience),
+            abandoned: None,
+        };
+        match svcconn::read_frame(&mut conn, protocol::decode_request, waiting)? {
+            Some(request) => Ok(Self { request, conn }),
+            // Nothing here gives up waiting, so this is never read.
+            None => Err(io::ErrorKind::Interrupted.into()),
         }
     }
 

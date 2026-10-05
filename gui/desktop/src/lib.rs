@@ -12595,20 +12595,25 @@ impl DesktopShell {
             self.focus.record_suppressed();
             notif.silent = true;
         }
+        // Its program's rule in the Notifications settings: whether it pops
+        // up, and whether it sounds.
+        let rule = self.notif.settings.rule_for(&notif.app_name);
         // Popped up as it arrives -- unless silenced, which is exactly "do
-        // not show me", or unless the pane is open, where it is in front of
-        // the user already. The toast carries the id the pane files it
+        // not show me"; unless its program's banner is off, which asks for
+        // the list alone; or unless the pane is open, where it is in front
+        // of the user already. The toast carries the id the pane files it
         // under, so opening one marks the other read.
         let pop_up =
-            (!notif.silent && !self.notifications.pane_state().is_visible()).then(|| notif.clone());
+            (!notif.silent && rule.banner && !self.notifications.pane_state().is_visible())
+                .then(|| notif.clone());
         // Heard as it arrives -- unless focus assist silenced it, or its
-        // program's rule in the Notifications settings turns its sound off.
-        // Not tied to the toast: the rule's sound and banner are separate
-        // switches, and a sound with no banner (hear it now, read it later)
-        // is a choice a user can make. Nor to the pane being shut: a card
-        // added to a list the user is reading is easily missed.
+        // program's rule turns its sound off. Not tied to the toast: the
+        // rule's sound and banner are separate switches, and a sound with no
+        // banner (hear it now, read it later) is a choice a user can make.
+        // Nor to the pane being shut: a card added to a list the user is
+        // reading is easily missed.
         if !notif.silent
-            && self.notif.settings.rule_for(&notif.app_name).sound
+            && rule.sound
             && let Some(name) = event_sounds::for_notification(notif.priority)
         {
             self.event_sounds.sound(&self.appearance, name);
@@ -19619,6 +19624,44 @@ mod overview_wiring_tests {
                 notifsettings::Importance::Silent,
                 "the choice was applied in memory and never written"
             );
+        });
+    }
+
+    /// **A program whose banner is off goes to the list alone**: nothing pops
+    /// up for it, the pane keeps it, and another program's still pops up.
+    ///
+    /// The pane's "Banner" switch was written to `notifications.yaml`, shown
+    /// on the program's card, and read by nothing -- every notification
+    /// popped up whatever it said.
+    #[test]
+    fn a_program_with_its_banner_off_pops_up_nothing() {
+        appearance::config::testing::with_scratch_config("shell-pane-banner", |_root| {
+            let mut s = shell();
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Banner,
+                notif_pane::SettingValue::Bool(false),
+            );
+            let chat = s.notify(notif(1, "Chat"));
+            assert!(
+                s.toasts.ids().is_empty(),
+                "Chat popped up with its banner off"
+            );
+            assert!(
+                s.notifications.notifications().iter().any(|n| n.id == chat),
+                "the list lost it"
+            );
+            let mail = s.notify(notif(2, "Mail"));
+            assert_eq!(s.toasts.ids(), [mail], "another program's did not pop up");
+
+            // And the switch back on lets Chat's next one up.
+            s.apply_app_notification_setting(
+                "Chat",
+                notif_pane::AppSettingKind::Banner,
+                notif_pane::SettingValue::Bool(true),
+            );
+            let again = s.notify(notif(3, "Chat"));
+            assert!(s.toasts.ids().contains(&again));
         });
     }
 

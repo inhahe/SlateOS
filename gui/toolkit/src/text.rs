@@ -446,6 +446,22 @@ pub fn available_mono_families() -> Vec<String> {
     font_db().monospaced_families()
 }
 
+/// Whether `family` is installed on this system: whether [`set_font_family`]
+/// has a face to draw in. What a choice among families asks before choosing
+/// -- a theme's recommendations, tried in order -- and what a font page asks
+/// to say which of them a user would need to install.
+#[must_use]
+pub fn family_installed(family: &str) -> bool {
+    font_db().has_family(family)
+}
+
+/// Whether `family` has a fixed-pitch face on this system: whether a terminal
+/// drawn in it keeps its grid. `false` for a family that is not installed.
+#[must_use]
+pub fn family_fixed_pitch(family: &str) -> bool {
+    font_db().is_fixed_pitch(family)
+}
+
 /// Runs `f` with the font for `size` and `weight`.
 ///
 /// Poisoning is ignored deliberately. The guarded value is a cache of
@@ -2241,6 +2257,27 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **A family is installed, and fixed-pitch, as this system's font list
+    /// says** -- the picker's lists and these answers come from one index,
+    /// so a family a picker offers is one these call installed, and a
+    /// terminal picker's are fixed-pitch. Whatever the host has installed;
+    /// a name no font has is neither.
+    #[test]
+    fn a_family_is_installed_as_the_pickers_list_it() {
+        for family in available_families() {
+            assert!(family_installed(&family), "{family} is listed");
+            assert!(
+                family_installed(&family.to_uppercase()),
+                "{family}: names match in any case"
+            );
+        }
+        for family in available_mono_families() {
+            assert!(family_fixed_pitch(&family), "{family} is a terminal's");
+        }
+        assert!(!family_installed("NoSuchFamily-8f3a2c"));
+        assert!(!family_fixed_pitch("NoSuchFamily-8f3a2c"));
+    }
 
     /// **The process's fallbacks are what its font directories resolve to**,
     /// in that order -- the property that makes the compositor's cache,

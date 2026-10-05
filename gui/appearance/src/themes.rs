@@ -129,6 +129,7 @@ use yamldoc::Document;
 
 mod animation;
 mod decorations;
+mod fonts;
 mod panel;
 mod values;
 mod wallpaper;
@@ -136,6 +137,7 @@ mod widgets;
 
 pub use animation::AnimationTheme;
 pub use decorations::DecorationTheme;
+pub use fonts::{FONTS_SECTION, FontNames, FontTheme};
 pub use panel::PanelTheme;
 pub use wallpaper::{WALLPAPERS_DIR, WALLPAPERS_SECTION, WallpaperNames, WallpaperTheme};
 pub use widgets::WidgetTheme;
@@ -360,6 +362,8 @@ pub enum ThemeError {
     /// The file was read but recommends no wallpaper that is in the theme's
     /// folder.
     NoWallpapers,
+    /// The file was read but has no usable `fonts` section.
+    NoFonts,
 }
 
 impl fmt::Display for ThemeError {
@@ -380,6 +384,7 @@ impl fmt::Display for ThemeError {
             Self::NoDecorations => f.write_str("sets no window frames"),
             Self::NoPanel => f.write_str("sets no taskbar panel"),
             Self::NoWallpapers => f.write_str("recommends no wallpaper"),
+            Self::NoFonts => f.write_str("recommends no fonts"),
         }
     }
 }
@@ -438,6 +443,10 @@ pub struct ThemeFile {
     /// ([`WallpaperTheme`] finds them); `None` when it has no such section,
     /// or one that names no picture.
     pub wallpapers: Option<WallpaperNames>,
+    /// The fonts its `fonts` section recommends, as it names them
+    /// ([`FontTheme`] chooses among them); `None` when it has no such
+    /// section, or one that names no family.
+    pub fonts: Option<FontNames>,
     /// What in it was not understood and so was ignored -- a colour this
     /// desktop has no role for, a value that is not a colour. For the theme's
     /// author, and for a theme browser to show them: the theme is used without
@@ -475,6 +484,7 @@ pub fn parse(text: &str) -> ThemeFile {
     let decorations = decorations::read(&doc, &mut warnings);
     let panel = panel::read(&doc, &mut warnings);
     let wallpapers = wallpaper::read(&doc, &mut warnings);
+    let fonts = fonts::read(&doc, &mut warnings);
     ThemeFile {
         meta,
         colors,
@@ -483,6 +493,7 @@ pub fn parse(text: &str) -> ThemeFile {
         decorations,
         panel,
         wallpapers,
+        fonts,
         warnings: warnings.finish(),
     }
 }
@@ -712,10 +723,10 @@ pub(crate) fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
 
 /// What the settings read from `doc` depend on besides the document itself:
 /// the files of the themes chosen for the axes read with them -- the colours,
-/// the widget style, the animation, the window frames, the taskbar panel and
-/// the wallpapers -- where each was found, and what it holds; and which of
-/// the wallpaper theme's recommended pictures are there. The dependency
-/// fingerprint of [`crate::watcher`].
+/// the widget style, the animation, the window frames, the taskbar panel, the
+/// wallpapers and the fonts -- where each was found, and what it holds; and
+/// which of the wallpaper theme's recommended pictures are there. The
+/// dependency fingerprint of [`crate::watcher`].
 ///
 /// A theme chosen for several axes is one file, and is counted once.
 pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
@@ -728,6 +739,7 @@ pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
         crate::decoration_theme_name(doc),
         crate::panel_theme_name(doc),
         crate::wallpaper_theme_name(doc),
+        crate::font_theme_name(doc),
     ]
     .into_iter()
     .flatten()
@@ -960,6 +972,11 @@ pub struct ThemeInfo {
     /// The pictures its [`WALLPAPERS_DIR`] bundles, by name: what a list can
     /// offer as pictures to choose, recommended or not.
     pub wallpapers: Vec<PathBuf>,
+    /// The fonts its `fonts` section recommends, by role, in the order they
+    /// are tried: what a font page shows, with which of them this machine
+    /// has (`guitk::text::family_installed`). Empty for the built-in theme,
+    /// which recommends none.
+    pub fonts: FontNames,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -1031,6 +1048,16 @@ impl ThemeInfo {
     #[must_use]
     pub fn provides_wallpapers(&self) -> bool {
         self.problem.is_none() && self.has_wallpapers
+    }
+
+    /// Whether it can be chosen for the fonts axis: it was read, and
+    /// recommends a family -- installed here or not, since a family is
+    /// installed where it is used and a font page offers to install it. Not
+    /// the built-in theme, which recommends none -- choosing it is choosing
+    /// your own fonts.
+    #[must_use]
+    pub fn provides_fonts(&self) -> bool {
+        self.problem.is_none() && !self.fonts.is_empty()
     }
 }
 
@@ -1122,6 +1149,7 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             has_panel: true,
             has_wallpapers: false,
             wallpapers: Vec::new(),
+            fonts: FontNames::default(),
             warnings: Vec::new(),
             problem: None,
         }
@@ -1130,7 +1158,9 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
     // motion, window frames and taskbar panel are compiled in: it covers both
     // modes, draws every icon, control, frame and bar, moves everything, and
     // cannot fail to load. And it recommends no wallpaper: choosing it for
-    // that axis is choosing your own picture (`WallpaperTheme::built_in`).
+    // that axis is choosing your own picture (`WallpaperTheme::built_in`) --
+    // and no font: choosing it for the fonts is choosing your own
+    // (`FontTheme::built_in`).
     info.has_dark = true;
     info.has_light = true;
     info.has_widget_style = true;
@@ -1138,6 +1168,7 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
     info.has_decorations = true;
     info.has_panel = true;
     info.has_wallpapers = false;
+    info.fonts = FontNames::default();
     info.problem = None;
     info
 }
@@ -1172,6 +1203,7 @@ fn describe(
                     .any(|name| confined(&dir, name).is_some_and(|path| path.is_file()))
             });
             let wallpapers = wallpaper::bundled(&dir);
+            let fonts = file.fonts.unwrap_or_default();
             ThemeInfo {
                 id: id.to_owned(),
                 name: file.meta.name.clone().unwrap_or(shown),
@@ -1184,6 +1216,7 @@ fn describe(
                 has_panel: file.panel.is_some(),
                 has_wallpapers,
                 wallpapers,
+                fonts,
                 dir: Some(dir),
                 meta: file.meta,
                 screenshots,
@@ -1205,6 +1238,7 @@ fn describe(
             has_panel: false,
             has_wallpapers: false,
             wallpapers: wallpaper::bundled(&dir),
+            fonts: FontNames::default(),
             dir: Some(dir),
             warnings: Vec::new(),
             problem: Some(err),

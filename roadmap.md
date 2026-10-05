@@ -2201,6 +2201,23 @@ live.
   Background page that chooses it
   (`requests/c-e-a-themes-wallpapers-on-the-background-page.md`).
 
+- `[-]` `[C]` **A theme recommends its fonts** (`design-decisions.md` §1472;
+  `roadmap-detailed.md` *Tier 2 -- Font Preferences*) -- lane C's half done
+  2026-10-05. A theme names the families it was designed with in a `fonts`
+  section -- for the desktop's text and for code, each a list tried in order
+  -- without shipping them, as a font's licence seldom allows; chosen as
+  `theme.fonts: <name>`, the first of each list the machine has takes the
+  place of the user's own font, and the user's own stays where none is
+  installed. Read, listed (`ThemeInfo::fonts`), checked by `themecheck` and
+  resolved (`AppearanceSettings::fonts_with_theme`). **Not drawn yet**:
+  `fonts_in_use()`, which the shell applies, answers with the user's own
+  until the compositor and the applications' event loop apply through it
+  too, so that no two processes measure and draw in different faces.
+  **Lane F:** those two lines (`requests/c-f-apply-the-fonts-in-use.md`);
+  lane C then turns the theme on in one place. **Lane E:** the Fonts page
+  that chooses it and offers to install what is missing
+  (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`).
+
 - `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
   -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
   pictures -- the folder the start menu's Pictures place opens -- in name

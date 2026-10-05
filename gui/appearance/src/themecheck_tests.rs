@@ -1050,3 +1050,119 @@ fn a_file_marked_to_run_is_reported() {
         "marked as a program",
     );
 }
+
+// ─── Fonts ──────────────────────────────────────────────────────────────────
+
+/// The checker, asking about fonts as `installed` and `fixed_pitch` answer
+/// rather than as this machine would: what a machine has installed is no
+/// fixture.
+fn checked_with_fonts(
+    theme: &Theme,
+    installed: fn(&str) -> bool,
+    fixed_pitch: fn(&str) -> bool,
+) -> Report {
+    let mut checker = Checker::new(&theme.dir);
+    checker.fonts = FontQuestions {
+        installed,
+        fixed_pitch,
+    };
+    checker.run();
+    checker.finish()
+}
+
+/// **A theme's fonts are said against this machine's**: a family it lacks is
+/// a note -- the theme is used where it may be installed -- a fixed-pitch
+/// recommendation that is installed and is not fixed-pitch is a warning, and
+/// a section naming any family covers the axis, installed or not.
+#[test]
+fn fonts_are_said_against_the_machines() {
+    let theme = Theme::tidy();
+    theme.write(
+        "theme.yaml",
+        format!("{TIDY}fonts:\n  ui: [Inter, Cantarell]\n  mono: [Fira Code, Cantarell]\n"),
+    );
+    let report = checked_with_fonts(
+        &theme,
+        |family| family == "Cantarell" || family == "Fira Code",
+        |family| family == "Fira Code",
+    );
+    assert_said(
+        &report,
+        Severity::Note,
+        "theme.yaml",
+        "`Inter` (`fonts.ui`) is not installed here",
+    );
+    assert!(
+        !said(&report, Severity::Note, "theme.yaml", "`Cantarell`"),
+        "{}",
+        listing(&report)
+    );
+    assert_said(
+        &report,
+        Severity::Warning,
+        "theme.yaml",
+        "`Cantarell` (`fonts.mono`) is not fixed-pitch",
+    );
+    assert!(
+        !said(&report, Severity::Warning, "theme.yaml", "`Fira Code`"),
+        "{}",
+        listing(&report)
+    );
+    assert!(
+        report.covers.contains(&themes::FONTS_SECTION),
+        "{:?}",
+        report.covers
+    );
+
+    // None of them here: notes, no warning -- a family not installed is not
+    // known to be proportional -- and the axis still covered.
+    let none = checked_with_fonts(&theme, |_| false, |_| false);
+    assert!(
+        !said(&none, Severity::Warning, "theme.yaml", "fixed-pitch"),
+        "{}",
+        listing(&none)
+    );
+    assert_said(
+        &none,
+        Severity::Note,
+        "theme.yaml",
+        "`Fira Code` (`fonts.mono`) is not installed here",
+    );
+    assert!(none.covers.contains(&themes::FONTS_SECTION));
+}
+
+/// **Fonts are an axis now, not a planned one**: a theme claiming them and
+/// recommending none is told so, and a section that names no family sets
+/// nothing.
+#[test]
+fn fonts_are_an_axis_a_theme_can_claim() {
+    let claims = Theme::tidy();
+    claims.write(
+        "theme.yaml",
+        TIDY.replace(
+            "supports: [colors, icons]",
+            "supports: [colors, icons, fonts]",
+        ),
+    );
+    let report = claims.check();
+    assert_said(
+        &report,
+        Severity::Warning,
+        "theme.yaml",
+        "lists `fonts`, but the theme sets no fonts",
+    );
+    assert!(
+        !said(&report, Severity::Note, "theme.yaml", "no axis for yet"),
+        "{}",
+        listing(&report)
+    );
+
+    let empty = Theme::tidy();
+    empty.write("theme.yaml", format!("{TIDY}fonts:\n  title: Georgia\n"));
+    assert_said(
+        &empty.check(),
+        Severity::Warning,
+        "theme.yaml",
+        "`fonts` sets nothing this desktop can use",
+    );
+}

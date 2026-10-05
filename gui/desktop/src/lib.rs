@@ -3044,13 +3044,16 @@ impl DesktopShell {
         // the default face and had it drawn in the user's: a wider face ran
         // the taskbar's labels past their tiles, a narrower one was cut where
         // it fitted, and centred text sat off centre. Every application
-        // applies them the same way (`oswindow`'s `hand_over`).
+        // applies them the same way (`oswindow`'s `hand_over`). Through
+        // `fonts_in_use`, the one answer every process is to draw from, so
+        // that a chosen font theme reaches the shell the moment it reaches
+        // the compositor (design-decisions §1472).
         //
         // The outcome is not acted on: a family this machine does not have
         // leaves the working face in place -- in the compositor too, which
         // looks in the same font directories -- and the Settings font page is
         // where that is said.
-        let _ = appearance.fonts.apply();
+        let _ = appearance.fonts_in_use().apply();
         self.theme = DesktopTheme::from_settings(&appearance);
         // How things move, to every animator the shell owns: the animation
         // theme at the user's speed (design-decisions §1446). Pushed from here

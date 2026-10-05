@@ -659,8 +659,9 @@ unsafe fn is_delim(c: u8, delim: *const u8) -> bool {
 /// Each error number's text in the C locale, which is glibc's to the letter
 /// (`posix/tools/oracle/strname_harness.py`); None for a number that is no
 /// error's -- 41 and 58, which Linux left unused, and past 133. The one table
-/// [`strerror`], [`strerrordesc_np`] and [`sys_errlist`] all read.
-const fn error_text(errnum: i32) -> Option<&'static core::ffi::CStr> {
+/// [`strerror`], [`strerrordesc_np`] and [`sys_errlist`] all read -- and
+/// printf's `%m`.
+pub(crate) const fn error_text(errnum: i32) -> Option<&'static core::ffi::CStr> {
     Some(match errnum {
         0 => c"Success",
         1 => c"Operation not permitted",

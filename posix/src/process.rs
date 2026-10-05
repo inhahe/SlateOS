@@ -1594,8 +1594,9 @@ pub(crate) fn ctty_get_fg() -> PidT {
 /// is not a terminal, `EINVAL` for a negative group, and otherwise
 /// [`ctty_set_fg`] (or, for a pty master, its terminal's group).  Until
 /// 2026-09-26 it accepted any open descriptor -- a regular file's included --
-/// and refused a group of 0 itself; the kernel refuses that now, and Linux
-/// answers it `ESRCH` once the terminal checks pass (requested of lane A).
+/// and refused a group of 0 itself; the kernel decides that now, and since
+/// lane A's f4f5778ba answers it as Linux does, `ESRCH` once the terminal
+/// checks pass.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
     crate::ioctl::ioctl(
@@ -1612,11 +1613,17 @@ pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
 /// to reach real kernel state: the job must be able to see that it is now
 /// in the foreground.  The kernel enforces that `pgrp` names a live process
 /// group *in our own session* — otherwise any process could steal another
-/// session's terminal by naming one of its groups — refuses a `pgrp` of 0 or
-/// less with `EINVAL`, and stops a background caller with `SIGTTOU`.
+/// session's terminal by naming one of its groups — refuses a `pgrp` less
+/// than 0 with `EINVAL`, and stops a background caller with `SIGTTOU`. A
+/// `pgrp` of 0 goes through the terminal's checks, as in Linux's
+/// `tiocspgrp`, and is then `ESRCH`, since no group is 0: lane A's
+/// f4f5778ba (2026-10-01), which `requests/d-a-tcsetpgrp-of-group-0-and-a-
+/// terminal-that-is-not-ours.md` asked for. Before it the kernel refused 0
+/// with `EINVAL` too, up front.
 ///
-/// Errors: `EINVAL` (`pgrp <= 0`), `ENOTTY` (no controlling terminal),
-/// `EPERM` (`pgrp` is not a live group in our session).
+/// Errors: `EINVAL` (`pgrp < 0`), `ENOTTY` (no controlling terminal),
+/// `ESRCH` (`pgrp` is 0), `EPERM` (`pgrp` is not a live group in our
+/// session).
 pub(crate) fn ctty_set_fg(pgrp: PidT) -> i32 {
     #[cfg(target_os = "none")]
     {
@@ -1630,9 +1637,19 @@ pub(crate) fn ctty_set_fg(pgrp: PidT) -> i32 {
     }
     #[cfg(not(target_os = "none"))]
     {
-        // The kernel's own first check (`sys_tty_set_pgrp`), modelled.
-        if pgrp <= 0 {
+        // The kernel's checks (`sys_tty_set_pgrp`), modelled, in its order:
+        // a negative group, then the terminal, then group 0, which no
+        // process holds.
+        if pgrp < 0 {
             errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        if pgrp == 0 {
+            errno::set_errno(if host_pg::ctty_fg() == 0 {
+                errno::ENOTTY
+            } else {
+                errno::ESRCH
+            });
             return -1;
         }
         if host_pg::ctty_set_fg(pgrp) {
@@ -4468,11 +4485,13 @@ mod tests {
     }
 
     #[test]
-    fn test_tcsetpgrp_rejects_zero() {
+    fn test_tcsetpgrp_of_group_zero_is_esrch() {
+        // No process group is 0: past the terminal checks it is ESRCH, as
+        // in Linux's `tiocspgrp` and lane A's kernel since f4f5778ba.
         reset_pg();
         ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(0, 0), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
         // Original value should be unchanged.
         assert_eq!(tcgetpgrp(0), 42);
     }
@@ -4553,14 +4572,19 @@ mod tests {
 
     #[test]
     fn test_bad_argument_beats_missing_terminal() {
-        // A malformed pgid is EINVAL even with no terminal: the argument
+        // A negative pgid is EINVAL even with no terminal: the argument
         // gate runs first, so a caller learns what is actually wrong with
         // its call rather than a fact about its session.
         reset_pg();
         ensure_pg_test_fds();
         host_pg::ctty_detach();
-        assert_eq!(tcsetpgrp(0, 0), -1);
+        assert_eq!(tcsetpgrp(0, -1), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Group 0 is not malformed, only absent, and the terminal is checked
+        // before it, as in Linux's `tiocspgrp`: ENOTTY here, ESRCH with a
+        // terminal.
+        assert_eq!(tcsetpgrp(0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTTY);
     }
 
     #[test]
@@ -12856,12 +12880,12 @@ mod tests {
     // ---- Per-error class: bad pgrp (fd valid) ----
 
     #[test]
-    fn test_tcsetpgrp_zero_pgrp_open_fd_returns_einval() {
+    fn test_tcsetpgrp_zero_pgrp_open_fd_returns_esrch() {
         reset_pg();
         ensure_pg_test_fds();
         crate::errno::set_errno(0);
         assert_eq!(tcsetpgrp(0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
@@ -12954,10 +12978,10 @@ mod tests {
         ensure_pg_test_fds();
         // First set it to a known value.
         assert_eq!(tcsetpgrp(0, 555), 0);
-        // Then try a bad pgrp.
+        // Then try a group nobody holds.
         crate::errno::set_errno(0);
         assert_eq!(tcsetpgrp(0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
         // Value unchanged.
         assert_eq!(tcgetpgrp(0), 555);
     }

@@ -2,9 +2,11 @@
 
 **From:** Lane B. **To:** Lane C (`tzrules/src/source.rs`, its author) and
 Lane D (`posix/src/tz.rs`, which adopted it on 2026-09-28).
-**Filed:** 2026-10-01. **Status:** OPEN for lane D -- lane C's half done
-2026-10-01 (`tzrules::tz_plan`, lane C's answer at the end); lane D's is to
-move `posix/src/tz.rs` onto it, after which lane C deletes `tz_source`.
+**Filed:** 2026-10-01. **Status:** OPEN for lane B only -- lane C's half done
+2026-10-01 (`tzrules::tz_plan`, lane C's answer at the end); lane D's done
+2026-10-01 (the libc reads `TZ` through glibc's own code, ported, no longer
+through `tz_source` -- lane D's note after lane C's). Lane C deletes
+`tz_source` once nothing calls it.
 
 ## In short
 
@@ -150,3 +152,23 @@ this request's.
 `tz_plan`: `plan.file()` for the file to try (`System` being your
 `localtime` path), else `plan.rule()` through `parse_tz` with `posixrules`,
 and `None` as UTC named `UTC`. Your tests remain the check that nothing moved.
+
+## Lane D — the libc's half done, 2026-10-01
+
+The libc no longer reads `TZ` through `tz_source`. It reads it as glibc's
+`tzset_internal` does, ported from glibc 2.39's own source with the rest of
+its timezone code (design-decisions §1165,
+`requests/b-d-the-libc-reads-tz-unlike-glibc-and-now-unlike-date.md`):
+- a file before a rule;
+- a `:` that is dropped and means nothing more;
+- `TZ=` read as the file `Universal`.
+
+Both of your examples are scenarios in `posix/tools/oracle/tz_harness.py`,
+and the libc gives glibc's answer to each: `EST5EDT` with and without the
+zoneinfo file, and `:EST5EDT` the same way. So for 1990-03-20 12:00 UTC a C
+program here reads `07:00 EST`, as on Linux.
+
+What is left is lane C's: `tz_source` itself, for the desktop's clock. If
+one reader for all three is still the aim, `posix/src/tz.rs` is `no_std`, and
+its resolution (`State::tzset_internal`) could move into `tzrules` whole --
+say if you want it.

@@ -59210,3 +59210,29 @@ is already waiting, not whether the setter exists.
   `requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md` item 3.
   **Then:** nothing to change here -- boot the repair entry with an account
   marked to sign in by itself and confirm the login screen shows.
+
+## Lane D — what waits on lane A's next two publishes (2026-10-01)
+
+- **Open, waiting on lane A's publish now pending** (it carries 1090, 1093,
+  1094 and the generic C-fixture rung). Lane D's halves are written and
+  host-tested in scratch: 157 (the exec close list, now naming kept-shared
+  handles too, as lane A asked), 158 (record locks, `lockf`, utmp's bounded
+  wait, `services/ctest-record-locks`), 160 (`flock` through the handle), the
+  fixtures `ctest-exec-cloexec` and `ctest-python-stdlib`.
+  **Trigger:** `origin/main` has `SYS_FS_RECORD_LOCK` in
+  `kernel/src/syscall/number.rs`. **Then:** merge it, apply them, boot,
+  publish. 160 must not land before: on a kernel without 1094, `flock`
+  answers `ENOSYS`.
+- **Open, same trigger: st_nlink of an unlinked open file.**
+  `stat.rs`'s `fill_from_fsstat` turns a reported link count of 0 into 1,
+  because 0 meant "not provided". After lane A's publish it means one thing:
+  the file's last name is gone and a handle still holds it (lane A checked
+  every filesystem's producer, 2026-10-01); SQLite and `tail -F` look for
+  exactly that 0. **Then:** drop the mapping and its test
+  (`test_fill_from_fsstat_zero_nlinks_defaults_to_one`), and check a native
+  `fstat` after `unlink` in a boot.
+- **Open, waiting on lane A's publish after that: `F_SETFL`'s `O_APPEND`.**
+  known-issues D-POSIX-APPEND-SET-BY-FCNTL-IS-A-SEEK-THEN-A-WRITE. **Trigger:**
+  `SYS_FS_SET_STATUS_FLAGS` (1095) on `origin/main`. **Then:** `F_SETFL`
+  sends the description's flags in native `OpenFlags` bits; `write` keeps its
+  `SEEK_END` only where the call answered `ENOSYS`.

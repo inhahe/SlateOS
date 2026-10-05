@@ -75,6 +75,7 @@ will close them myself as each one goes on.
 | Fixture | Its request | Grants | Seconds |
 |---|---|---|---|
 | `ctest-obstack` | -- (this one) | - | 30 |
+| `ctest-argp` | -- (filed with argp, 2026-10-01; its scratch files are in `/tmp`) | file | 120 |
 | `ctest-aio` | `d-a-run-the-ctest-aio-fixture.md` | file | 30 |
 | `ctest-cwd-umask` | `d-a-run-the-ctest-cwd-umask-fixture.md` | file | 60 |
 | `ctest-cxx-throw` | `d-a-run-ctest-cxx-throw.md` | - | 30 |

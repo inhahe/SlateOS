@@ -3844,8 +3844,15 @@ lane C's `guitk`.
     - `[x]` Faster than libvpx's C: motion compensation and the loop
       filter written in lanes the compiler vectorises, 1.99 G instructions
       for 20 frames of 1080p against libvpx C's 6.46 G (its SIMD's 0.86 G;
-      `tests/bench.rs`). Its row threads are not ported:
-      `known-issues/F-vp8-decodes-on-one-thread.md`.
+      `tests/bench.rs`). On one thread about 60% of its SIMD's speed:
+      `known-issues/F-vp8-on-one-thread-is-about-60-percent-of-libvpx-simd.md`.
+    - `[x]` Rows on threads, as libvpx's: a frame of several token
+      partitions decodes its macroblock rows on up to one thread a core,
+      the single thread's pictures bit for bit (every vector and damage case
+      at several thread counts, every buffer compared); 2.6 times as fast on
+      eight threads as on one. Each row in a band of its own, rows
+      exchanging edges through mailboxes of atomic words: no `unsafe`.
+      design-decisions.md §1356.
     - `[x]` In `videocodec`: WebM's VP8, alpha included, coloured as FFmpeg
       reads VP8 (BT.601 at any size, its clamping bit the range); five
       fixtures held to ffmpeg and libavif frame by frame.

@@ -15,7 +15,9 @@
 //! macroblock in a version-3 stream whose chroma vector, rounded to whole
 //! pixels, points more than 19 pixels out keeps whatever its chroma blocks
 //! held before. That is reproduced too, from the frame that held the buffer
-//! before.
+//! before ([`Prior`]) -- on one thread: a frame with such a macroblock does
+//! not decode on several, whose rows decode where nothing the buffer held
+//! is.
 //!
 //! Translated into Rust from libvpx v1.17.0's `vp8/common/reconinter.c` and
 //! `vp8/common/filter.c` (copyright the WebM project authors), used under

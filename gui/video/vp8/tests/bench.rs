@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! python gui/video/vp9/tools/fetch_vectors.py
-//! python gui/video/vp8/tools/make_bench_stream.py
+//! python gui/video/vp8/tools/make_bench_stream.py --vpxenc <libvpx's vpxenc, with VP8>
 //! cargo test -p vp8 --target x86_64-pc-windows-gnu --release --test bench -- --ignored --nocapture
 //! ```
 //!

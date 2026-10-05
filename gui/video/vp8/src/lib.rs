@@ -41,6 +41,8 @@
 //! - `inter`: motion-compensated prediction from reference frames.
 //! - `loopfilter`: smoothing across block edges.
 //! - `frame`: the planes frames are decoded into, borders and all.
+//! - `threading`: a frame's macroblock rows on several threads, when it has
+//!   several token partitions.
 //! - `decoder`: the frame loop -- the four buffers the frame being decoded
 //!   and the three references share, and which frames show.
 //!
@@ -53,10 +55,18 @@
 //! saturation where libvpx's C clamps, every position of an edge at once, a
 //! vertical edge's pixels transposed into lanes first. There is no
 //! hand-written SIMD and no `unsafe`. On 1080p film (`tests/bench.rs`) that
-//! is faster than libvpx's C and about a third of the speed of its SIMD, on
-//! one thread. Not here: libvpx's decoding of macroblock rows on several
-//! threads, which it does for streams of several token partitions
-//! (`known-issues/F-vp8-decodes-on-one-thread.md`).
+//! is 2.7 times as fast as libvpx's C and about 60% of the speed of its
+//! SIMD, on one thread (`known-issues/F-vp8-on-one-thread-is-about-60-percent-of-libvpx-simd.md`).
+//!
+//! A frame of several token partitions decodes its macroblock rows on
+//! threads of their own, as libvpx's does ([`Decoder::set_threads`]; a new
+//! decoder uses every core): each row a few macroblocks behind the one
+//! above, sharing nothing with the others but what crosses the edge between
+//! two rows, and making the single thread's pictures, bit for bit
+//! (`threading`). The same film in eight partitions decodes 2.6 times as
+//! fast on eight threads as on one, and faster than libvpx's SIMD on as
+//! many. A frame of one partition -- what encoders make unless asked for
+//! more -- decodes on one thread, in libvpx too.
 //!
 //! # What a hostile stream can do
 //!

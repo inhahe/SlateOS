@@ -6,7 +6,9 @@
 //! reference frame), its residual added, and each row loop-filtered once the
 //! row below it is reconstructed, since intra prediction reads unfiltered
 //! pixels. The borders are then filled with copies of the edges, for the
-//! frames that will predict from this one.
+//! frames that will predict from this one. A frame of several partitions
+//! does its rows on several threads instead (`threading`), to the same
+//! pixels.
 //!
 //! What lasts between frames is here too ([`Common`]): the probabilities a
 //! frame may keep for the next, the segmentation and loop filter settings,

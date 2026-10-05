@@ -727,6 +727,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "credentialsd"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "credentials",
+ "guitk",
+ "oswindow",
+ "pathcodec",
+ "secret",
+]
+
+[[package]]
 name = "credmanager"
 version = "0.1.0"
 dependencies = [

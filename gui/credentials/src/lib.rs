@@ -19,11 +19,12 @@
 //!   handed, and [`service::serve`], one connection answered.
 //! - [`matching`]: which saved login a target is about.
 //!
-//! The service's two remaining parts are its prompt window and its vault --
-//! the password manager's own, shared by lane E
-//! (`requests/c-e-share-the-password-vault-with-the-credential-service.md`).
-//! Until both exist nothing registers [`SERVICE`], and a program that asks
-//! is told there is no service.
+//! The windows the service asks the user with are `gui/credentialsd`'s, so
+//! that a program linking this crate to ask for a password links no widget
+//! library. What is left is the vault -- the password manager's own, shared
+//! by lane E (`requests/c-e-share-the-password-vault-with-the-credential-service.md`)
+//! -- and the daemon over it. Until both exist nothing registers [`SERVICE`],
+//! and a program that asks is told there is no service.
 //!
 //! The binary beside this library (`src/main.rs`) is the credential store
 //! that came before §1417, with a vault of its own under a home-made cipher

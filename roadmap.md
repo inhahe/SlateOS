@@ -2033,11 +2033,15 @@ live.
   program's `ask`, and the service's judgement -- key, then the user asked
   (once / until the vault locks / refuse, the master password typed into the
   same prompt), quiet after a refusal, the best login -- tested against
-  stand-ins for the kernel, the vault and the prompt. **Left:** the prompt
-  window; the vault, **waiting on lane E** to share the password manager's
+  stand-ins for the kernel, the vault and the prompt. The prompt's windows
+  are built too (`gui/credentialsd`): the program and what it asks for,
+  shown whole with nothing invisible left unspelled, a password field that
+  keeps the master password as a `Secret` (`guitk::secretinput`), and no
+  key or click taken for the first 600 ms. **Left:** the vault, **waiting
+  on lane E** to share the password manager's
   (`requests/c-e-share-the-password-vault-with-the-credential-service.md`);
   then the daemon that registers the service, and deleting the old store's
-  own vault and cipher (`src/main.rs`).
+  own vault and cipher (`gui/credentials/src/main.rs`).
 
 - `[C]` **A settings service that tells open windows when a setting
   changes** -- **done 2026-09-28** (C-Q26, §1418, §1434). Beside

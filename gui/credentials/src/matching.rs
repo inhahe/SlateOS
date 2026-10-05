@@ -46,8 +46,10 @@ fn schemes_agree(stored: &str, asked: &str) -> bool {
     }
 }
 
-/// The domain of `target`: its host, without scheme, user, port or path.
-fn domain(target: &str) -> &str {
+/// The domain of `target`: its host, without scheme, user, port or path --
+/// the part matching compares, and so the part a prompt must show whole.
+#[must_use]
+pub fn domain(target: &str) -> &str {
     let rest = without_scheme(target);
     let authority = rest.split('/').next().unwrap_or(rest);
     let host = authority

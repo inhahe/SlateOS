@@ -238,6 +238,21 @@ pub enum Said {
         /// The master password typed; read only when the vault is locked.
         master: Option<Secret>,
     },
+    /// Nothing: the user could not be asked -- no display to show the
+    /// prompt on, or it went before they answered. A refusal, but not the
+    /// user's, so the program is not quieted for it.
+    CouldNotAsk,
+}
+
+/// Which login the user picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Picked {
+    /// The choice at this index.
+    Login(usize),
+    /// None of them.
+    Nothing,
+    /// Nothing: the user could not be asked, as for [`Said::CouldNotAsk`].
+    CouldNotAsk,
 }
 
 /// The user, asked.
@@ -246,8 +261,8 @@ pub trait Prompt {
     fn ask(&mut self, asking: &Asking<'_>) -> Said;
 
     /// Which of `choices` -- logins matching equally -- the program may
-    /// have: `None` for none of them.
-    fn choose(&mut self, asking: &Asking<'_>, choices: &[Choice<'_>]) -> Option<usize>;
+    /// have.
+    fn choose(&mut self, asking: &Asking<'_>, choices: &[Choice<'_>]) -> Picked;
 }
 
 /// Why an ask ended as it did: for the service's log and for tests, never
@@ -262,6 +277,8 @@ pub enum Why {
     Quiet,
     /// The user refused.
     Refused,
+    /// The user could not be asked.
+    CouldNotAsk,
     /// The master password was wrong [`TRIES`] times.
     WrongPassword,
     /// The vault holds no login for what was asked.
@@ -390,8 +407,10 @@ impl<V: Vault, P: Prompt> Service<V, P> {
                 locked,
                 wrong,
             };
-            let Said::Allow { scope, master } = self.prompt.ask(&asking) else {
-                return self.refused_by_user(program, Why::Refused);
+            let (scope, master) = match self.prompt.ask(&asking) {
+                Said::Allow { scope, master } => (scope, master),
+                Said::Refuse => return self.refused_by_user(program, Why::Refused),
+                Said::CouldNotAsk => return Outcome::refused(Why::CouldNotAsk),
             };
             if locked {
                 let Some(master) = master else {
@@ -424,12 +443,14 @@ impl<V: Vault, P: Prompt> Service<V, P> {
                         wrong: false,
                         ..asking
                     };
-                    match self
-                        .prompt
-                        .choose(&asking, &choices)
-                        .and_then(|at| several.get(at))
-                    {
+                    let picked = match self.prompt.choose(&asking, &choices) {
+                        Picked::Login(at) => several.get(at),
+                        Picked::Nothing => None,
+                        Picked::CouldNotAsk => return Outcome::refused(Why::CouldNotAsk),
+                    };
+                    match picked {
                         Some(login) => *login,
+                        // None of them, or one not offered.
                         None => {
                             let until = (self.clock)().checked_add(QUIET);
                             if let Some(until) = until {

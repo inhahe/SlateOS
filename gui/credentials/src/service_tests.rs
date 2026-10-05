@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use guiremote::client::Transport;
 
 use super::{
-    Asking, Choice, Outcome, Peer, Program, Prompt, QUIET, Said, SavedLogin, Scope, Service, TRIES,
-    Vault, Why, serve,
+    Asking, Choice, Outcome, Peer, Picked, Program, Prompt, QUIET, Said, SavedLogin, Scope,
+    Service, TRIES, Vault, Why, serve,
 };
 use crate::protocol::{self, Answer, Decoded, MAX_USERNAME, Query, Secret};
 
@@ -181,7 +181,7 @@ struct Shown {
 #[derive(Debug, Default)]
 struct Script {
     says: VecDeque<Said>,
-    picks: VecDeque<Option<usize>>,
+    picks: VecDeque<Picked>,
     shown: Vec<Shown>,
     offered: Vec<Vec<(String, String)>>,
 }
@@ -196,7 +196,7 @@ impl User {
     }
 
     /// Will pick `pick` when asked to choose.
-    fn will_pick(&self, pick: Option<usize>) {
+    fn will_pick(&self, pick: Picked) {
         self.0.borrow_mut().picks.push_back(pick);
     }
 
@@ -229,7 +229,7 @@ impl Prompt for User {
             .expect("the user was asked more than the test said")
     }
 
-    fn choose(&mut self, _asking: &Asking<'_>, choices: &[Choice<'_>]) -> Option<usize> {
+    fn choose(&mut self, _asking: &Asking<'_>, choices: &[Choice<'_>]) -> Picked {
         let mut script = self.0.borrow_mut();
         script.offered.push(
             choices
@@ -439,6 +439,21 @@ fn a_refusal_quiets_the_program_for_a_while() {
     assert_eq!(r.user.times_asked(), 3);
 }
 
+/// **A user who could not be asked has refused nothing**: the program is
+/// refused, saying why, and asks again at once -- not quieted.
+#[test]
+fn a_user_who_could_not_be_asked_refused_nothing() {
+    let mut r = rig(bank());
+    let mail = Asker::holding("/bin/mail");
+    let query = ask_for("bank.example");
+    r.user.will([Said::CouldNotAsk]);
+    let outcome = r.service.answer(&mail, &query);
+    assert_eq!((given(&outcome), outcome.why), (None, Why::CouldNotAsk));
+    r.user.will([allow(Scope::Once, MASTER)]);
+    assert_eq!(r.service.answer(&mail, &query).why, Why::Allowed);
+    assert_eq!(r.user.times_asked(), 2);
+}
+
 /// **Allowing with no master password typed, while the vault is locked, is
 /// a refusal** -- the vault is not touched.
 #[test]
@@ -613,7 +628,7 @@ fn the_best_login_is_given_and_a_tie_is_the_users_to_break() {
         scope: Scope::Once,
         master: None,
     }]);
-    r.user.will_pick(Some(1));
+    r.user.will_pick(Picked::Login(1));
     assert_eq!(
         given(&r.service.answer(&mail, &either)).as_deref(),
         Some("pw-3")
@@ -630,20 +645,28 @@ fn the_best_login_is_given_and_a_tie_is_the_users_to_break() {
         scope: Scope::Once,
         master: None,
     }]);
-    r.user.will_pick(Some(2));
+    r.user.will_pick(Picked::Login(2));
     let outcome = r.service.answer(&mail, &either);
     assert_eq!((given(&outcome), outcome.why), (None, Why::Refused));
     assert_eq!(r.service.answer(&mail, &either).why, Why::Quiet);
     // Picking none refuses.
-    let mut r = rig(logins);
+    let mut r = rig(logins.clone());
     r.user.will([allow(Scope::UntilLocked, MASTER)]);
-    r.user.will_pick(None);
+    r.user.will_pick(Picked::Nothing);
     let outcome = r.service.answer(&mail, &either);
     assert_eq!((given(&outcome), outcome.why), (None, Why::Refused));
     // ... and allows nothing until locked.
     r.clock.pass(QUIET);
     r.user.will([Said::Refuse]);
     assert_eq!(r.service.answer(&mail, &query).why, Why::Refused);
+    // A user who could not be asked to pick refused nothing: not quieted.
+    let mut r = rig(logins);
+    r.user.will([allow(Scope::Once, MASTER)]);
+    r.user.will_pick(Picked::CouldNotAsk);
+    let outcome = r.service.answer(&mail, &either);
+    assert_eq!((given(&outcome), outcome.why), (None, Why::CouldNotAsk));
+    r.user.will([Said::Refuse]);
+    assert_eq!(r.service.answer(&mail, &either).why, Why::Refused);
 }
 
 /// **A target the vault holds nothing for is refused** -- unasked while the

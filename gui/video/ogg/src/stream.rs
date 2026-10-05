@@ -40,6 +40,13 @@
 //!   before the gap.
 //! - *An empty Opus packet* is a packet (RFC 7845's way of saying one was
 //!   lost); FFmpeg stops reading the stream at it.
+//! - *A Vorbis stream of one page* -- its first page its last, as a stream
+//!   of a second or less is -- starts with its first sound at granule 0, as
+//!   the Vorbis I specification (A.2) and libvorbis start it, its first
+//!   packet (which only primes the decoder) its own length before that.
+//!   FFmpeg starts that first packet at 0, a packet's length late, and so
+//!   cuts as much too much off the end -- or, where the cut then comes to more
+//!   than the last packet holds, nothing, playing the encoder's padding.
 
 #![allow(
     clippy::arithmetic_side_effects,
@@ -442,6 +449,8 @@ impl State {
             })
             .collect();
         self.previous_block = previous;
+        // Whether this page's first data packet is the stream's first.
+        let at_start = self.untouched;
         self.untouched = false;
         // Whether the page's last packet ends on it, rather than running on.
         let whole_last = page.lacing.last().is_none_or(|&l| l < 255);
@@ -464,11 +473,14 @@ impl State {
                 out.push(self.packet(index, None, 0, false, packet, 0));
                 continue;
             }
+            let first_of_stream = at_start && k == 1;
             // Where nothing gives this packet a start, it is reckoned back
             // from the page's granule: its length and those after it.
+            let mut reckoned = false;
             if (self.anchor.is_none() || self.anchor == Some(0)) && !eos {
                 if let Some(g) = granule {
                     self.anchor = Some(g.saturating_sub(rest));
+                    reckoned = true;
                     // FFmpeg's guard against a broken file (its ticket
                     // 3710): a page at granule 0 holding sound is untimed.
                     if codec == Codec::Vorbis && g == 0 && rest != 0 {
@@ -477,9 +489,20 @@ impl State {
                     self.final_pts = None;
                 }
             }
+            // A Vorbis stream whose first page gives nothing to reckon back
+            // from -- it is also the last, as a stream short enough for one
+            // page is -- starts where the Vorbis I specification starts it
+            // (A.2): its first sound, the second packet's, at granule 0; the
+            // first packet, which only primes the decoder, its own length
+            // before that. FFmpeg starts the first packet at 0, a packet's
+            // length late, and so cuts that much too much off the end -- or,
+            // where the cut is then more than the last packet holds, nothing.
+            if codec == Codec::Vorbis && first_of_stream && !reckoned && self.anchor == Some(0) {
+                self.anchor = Some(0i64.saturating_sub(as_signed(length.unwrap_or(0))));
+            }
             let mut duration = length.unwrap_or(0);
             let corrupt = length.is_none() && !packet.data.is_empty();
-            let as_i64 = |d: u64| i64::try_from(d).unwrap_or(i64::MAX);
+            let as_i64 = as_signed;
             let pts = self.anchor.take().map(|a| a.saturating_sub(pre_skip));
             let mut discard = 0u64;
             match codec {
@@ -620,6 +643,11 @@ impl State {
             new_headers: self.pending_headers.take(),
         }
     }
+}
+
+/// A length as a signed count of ticks.
+fn as_signed(n: u64) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 /// An Opus packet's length at 48 kHz, from its TOC byte (RFC 6716 §3.1),

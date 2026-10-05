@@ -1,6 +1,6 @@
 # vorbis_chained_link1.ogg: what the Ogg demuxer makes of it (generate_fixtures.py).
 stream 0 vorbis 1/44100
-packet 0 0 128 69 3832 _ 6b2cfcb0b9d29b4340f56dbba4d1ebe3 0 0 -
+packet 0 -128 128 69 3832 _ 6b2cfcb0b9d29b4340f56dbba4d1ebe3 0 0 -
 packet 0 N/A 576 116 3832 _ 41229a2e35a29d7b30b92ffc7b795c78 0 0 -
 packet 0 N/A 1024 74 3832 _ 6eed1617c00f581e5b92a84711a58e32 0 0 -
 packet 0 N/A 1024 73 3832 _ 8c0145b7de5d2d8786a8e48c54e414fc 0 0 -
@@ -28,4 +28,4 @@ packet 0 N/A 1024 75 3832 _ 493821bc094e0636d1263fe8468978d0 0 0 -
 packet 0 N/A 1024 73 3832 _ f6a720a5d41e1431e4cfdd2e685451d3 0 0 -
 packet 0 N/A 1024 73 3832 _ 4f2ebaf6247c53d06d2e523556009ced 0 0 -
 packet 0 N/A 1024 280 3832 _ 697ebda9a5089ec0968a28771ddbb5e8 0 0 -
-packet 0 N/A 455 477 3832 _ 8fb42df2a1d3ba41f256fdf9926912f0 0 569 -
+packet 0 N/A 583 477 3832 _ 8fb42df2a1d3ba41f256fdf9926912f0 0 441 -

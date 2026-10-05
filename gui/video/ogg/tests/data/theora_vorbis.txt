@@ -1,4 +1,4 @@
-# theora_vorbis.ogv: what the Ogg demuxer makes of it (generate_fixtures.py).
+# theora_vorbis.ogv: what the Ogg demuxer makes of it (generate_fixtures.py); 1 Vorbis packets retimed.
 stream 0 theora 1/10
 stream 1 vorbis 1/44100
 packet 0 N/A 0 1161 7336 _ d295b86e1de260d9820e4c24f9571274 0 0 -
@@ -10,7 +10,7 @@ packet 0 N/A 0 141 8529 _ 34003f2bd9f26be547c68eea81828bf8 0 0 -
 packet 0 N/A 0 135 8529 _ 3101768b73b33e87f70a132c88db4ecd 0 0 -
 packet 0 N/A 0 133 8529 _ 42e8125a77f17ebcfce7ac722bfa5b73 0 0 -
 packet 0 N/A 0 132 8529 _ 959164195fbe12a59dfaeb1f916e210b 0 0 -
-packet 1 0 128 66 9517 _ 42e9f059c87451cdd9e7388a9648b52f 0 0 -
+packet 1 -128 128 66 9517 _ 42e9f059c87451cdd9e7388a9648b52f 0 0 -
 packet 1 N/A 128 66 9517 _ 8c69b91e315eebf857c4ede59bbbb47a 0 0 -
 packet 1 N/A 128 47 9517 _ cf41432c2a5f31219bfddba3e99c2a76 0 0 -
 packet 1 N/A 576 144 9517 _ c82797ba9fe8f9b22d043e6fa1e763e8 0 0 -
@@ -80,4 +80,4 @@ packet 1 N/A 128 68 9517 _ 6c2de51a474be7164cac68b0cee224c1 0 0 -
 packet 1 N/A 128 63 9517 _ a9d4b9fd31498156851970c1c468dddf 0 0 -
 packet 1 N/A 576 127 9517 _ 1b52c746c1d5c4a38d6332e99f7cb36d 0 0 -
 packet 1 N/A 1024 86 9517 _ a68f4c86be68cbe9cd28abb5a7cca444 0 0 -
-packet 1 N/A 714 208 9517 _ 4cb7f2b31a70873fa9757f0bbd3e4e09 0 310 -
+packet 1 N/A 842 208 9517 _ 4cb7f2b31a70873fa9757f0bbd3e4e09 0 182 -

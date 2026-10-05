@@ -31,6 +31,13 @@ Where the answers come from -- none of it from the crate:
     packet it changes is that case: a short block after a long one, not the
     first to end on its page, on a page that is not the stream's last, and
     FFmpeg's length the short block's half.
+  - *A Vorbis stream of one page* (its first page its last). FFmpeg takes it
+    to start at granule 0 with its first packet, which decodes to nothing;
+    the crate, as the Vorbis I specification does, with its first sound,
+    the first packet its own length before. The first packet's time is
+    moved back by its length, and the last packet's trimming and length
+    reckoned again from there -- checked, as every last packet is, against
+    what Tremor decodes from it.
   - *A chained file.* FFmpeg starts each link's times again; the crate
     moves them on. Each link is made as a file of its own first, and its
     answer is that file's, its positions moved by the bytes before it, its
@@ -270,17 +277,31 @@ def correct_vorbis(data, answer, stream, serial):
     ident = next(p[0] for p in packets(data, serial) if p[0][:1] == b"\x01")
     short, long = 1 << (ident[28] & 15), 1 << (ident[28] >> 4)
     changed = 0
+    # A stream of one page: its first data packet ends on its last page.
+    one_page = bool(page_list[ours[0][1]][1] & 4)
+    shift = 0
+    if one_page:
+        if theirs[0]["pts"] != 0:
+            sys.exit(f"stream {stream}: one page, and FFmpeg's first packet at {theirs[0]['pts']}, not 0")
+        shift = theirs[0]["duration"]
+        theirs[0]["pts"] = -shift
+        changed += 1
     for k, ((_bytes, page_index, first), p, count) in enumerate(zip(ours, theirs, counts)):
         last = k == len(theirs) - 1
-        if last and p["discard"]:
+        if last and (p["discard"] or one_page):
             # FFmpeg's length of the last packet is what its page's granule
             # leaves of it -- negative where the granule ends before the
             # packet starts, which FFmpeg's unsigned length wraps to 2^32
-            # less it. The crate gives 0.
+            # less it (the crate gives 0) -- and what runs past the granule,
+            # Tremor's samples less that, is its trimming.
             length = p["duration"] - (1 << 32) if p["duration"] >= 1 << 31 else p["duration"]
-            if length + p["discard"] != count:
-                sys.exit(f"stream {stream}: the last packet lasts {length} + {p['discard']}, Tremor {count}")
-            p["duration"] = max(length, 0)
+            past = count - length
+            if p["discard"] != max(past, 0):
+                sys.exit(f"stream {stream}: the last packet lasts {length}, trimmed {p['discard']}, Tremor {count}")
+            # A stream of one page, its start moved back: its end comes
+            # that much later in its last packet.
+            length, past = length + shift, past - shift
+            p["duration"], p["discard"] = max(length, 0), max(past, 0)
             continue
         if k == 0 or p["duration"] == count:
             continue

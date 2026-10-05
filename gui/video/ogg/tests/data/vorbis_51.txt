@@ -1,6 +1,6 @@
-# vorbis_51.ogg: what the Ogg demuxer makes of it (generate_fixtures.py).
+# vorbis_51.ogg: what the Ogg demuxer makes of it (generate_fixtures.py); 1 Vorbis packets retimed.
 stream 0 vorbis 1/48000
-packet 0 0 128 114 7395 _ 74180c79172970e5c0a279197ac22842 0 0 -
+packet 0 -128 128 114 7395 _ 74180c79172970e5c0a279197ac22842 0 0 -
 packet 0 N/A 576 287 7395 _ d0c7838e56408ee1cf16ba8de4c8016a 0 0 -
 packet 0 N/A 1024 225 7395 _ 04e339a0151036c6875e13b78a5e9c37 0 0 -
 packet 0 N/A 1024 221 7395 _ e801c027edde8101d6e4b3ed926de138 0 0 -
@@ -44,4 +44,4 @@ packet 0 N/A 1024 218 7395 _ 6ca63c99995551f22c578a0d051a4760 0 0 -
 packet 0 N/A 1024 223 7395 _ 28f9a66eeed1e3f7c8041b4ca9e5c930 0 0 -
 packet 0 N/A 1024 221 7395 _ 0cc8fcae7981127911f69497bb55421b 0 0 -
 packet 0 N/A 1024 432 7395 _ a10310192fdeef46cd5e873ceed22b61 0 0 -
-packet 0 N/A 0 376 7395 _ 427820da861171e6329ff589c0d95855 0 1056 -
+packet 0 N/A 96 376 7395 _ 427820da861171e6329ff589c0d95855 0 928 -

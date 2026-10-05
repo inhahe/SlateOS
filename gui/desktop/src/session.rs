@@ -2577,6 +2577,13 @@ impl<T: Transport> ShellSession<T> {
             let saved = self.shell.save_run_history();
             self.report_save("The Run box's history", saved);
         }
+        // And the notifications, which one arriving, read or dismissed has
+        // changed. A failure is said once (`report_save`), and the notice
+        // saying it is retried with the next change rather than looping.
+        if self.shell.notification_history_dirty() {
+            let saved = self.shell.save_notification_history();
+            self.report_save("The notifications", saved);
+        }
 
         // The shell writes `appearance.yaml` itself for the quick toggles --
         // night light is one -- and the compositor reads that file rather than
@@ -2711,6 +2718,9 @@ impl<T: Transport> ShellSession<T> {
         // that looks like it was never saved, and the user's only recourse is
         // to set it a second time and distrust it.
         self.shell.load_notification_rules();
+        // And the notifications themselves, kept from before the desktop
+        // started -- after the rules, which say how long they are kept.
+        self.shell.load_notification_history();
         // Quiet hours saved before the last logout are in force now if the
         // hour says so. Without this the desktop would be noisy from login
         // until whatever else happened to tick it, which at three in the

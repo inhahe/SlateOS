@@ -2166,6 +2166,17 @@ live.
   for once C-Q32 settles which of the two notification systems stays (the
   separate `gui/notifications` program is started by nothing).
 
+- `[x]` `[C]` **Notifications outlive the desktop** (`design-decisions.md`
+  §1468) -- done 2026-10-05. What the notification pane holds is written to
+  the user's data directory whenever it changes -- one arriving, read,
+  dismissed, cleared -- and put back when the desktop next starts, read or
+  unread as it was left, without popping up again. A notification older
+  than a week is forgotten; how long is `history.days` in
+  `notifications.yaml` (0 to 365, 0 keeping nothing), honoured on disk the
+  moment it is saved. **Next:** a control for it on the Settings
+  application's Notifications page, asked of lane E
+  (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+
 - `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
   -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
   pictures -- the folder the start menu's Pictures place opens -- in name

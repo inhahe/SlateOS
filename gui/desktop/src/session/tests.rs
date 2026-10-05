@@ -823,6 +823,44 @@ fn a_command_run_from_the_run_box_is_there_next_session() {
     });
 }
 
+/// **A notification is still in the pane after the desktop restarts**: the
+/// session writes the notifications once they change, and a session started
+/// again reads them back -- both halves through sessions, for the reason
+/// `a_session_starts_with_what_was_saved` gives.
+#[test]
+fn a_notification_is_still_there_after_the_desktop_restarts() {
+    settingsfile::testing::with_scratch_config("session-notif-history", |_root| {
+        let (mut first, _d1, _turn) = session();
+        first.shell_mut().notify(crate::notif_pane::Notification {
+            id: 0,
+            app_name: "Mail".to_owned(),
+            title: "Kept across a restart".to_owned(),
+            body: String::new(),
+            timestamp: datetimesettings::clock::now_utc_secs(),
+            priority: crate::notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        });
+        first.pump().expect("pump");
+        drop(first);
+
+        // As a user's desktop starts (`start_for_user`): the saved settings,
+        // the notification rules among them, and then what they keep.
+        let (mut restarted, _d2, _turn) = session();
+        restarted.load_appearance();
+        assert!(
+            restarted
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .any(|n| n.title == "Kept across a restart"),
+            "the notification did not come back"
+        );
+    });
+}
+
 /// **"Show desktop" asks for every window**: a press on the strip sends the
 /// compositor one request per window, not the first alone.
 #[test]
@@ -8030,6 +8068,16 @@ fn press_toasts_at(session: &mut Session, x: f32, y: f32) {
 /// mapped exactly while there is a toast.
 #[test]
 fn a_notice_pops_up_and_goes_by_itself() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-a-notice-pops-up-and-goes-by-itself",
+        |_root| a_notice_pops_up_and_goes_by_itself_here(),
+    );
+}
+
+/// The body of [`a_notice_pops_up_and_goes_by_itself`].
+fn a_notice_pops_up_and_goes_by_itself_here() {
     let (mut session, _desktop, _turn) = session();
     let panel = session.panel().window();
     assert!(!session.toasts_shown, "a surface up with no toast on it");
@@ -8071,6 +8119,16 @@ fn a_notice_pops_up_and_goes_by_itself() {
 /// translated by that.
 #[test]
 fn the_toasts_surface_is_exactly_the_stack() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-the-toasts-surface-is-exactly-the-stack",
+        |_root| the_toasts_surface_is_exactly_the_stack_here(),
+    );
+}
+
+/// The body of [`the_toasts_surface_is_exactly_the_stack`].
+fn the_toasts_surface_is_exactly_the_stack_here() {
     let (mut session, _desktop, _turn) = session();
     session.post_desktop_notice("One", "First.");
     session.post_desktop_notice("Two", "Second.");
@@ -8114,6 +8172,16 @@ fn the_toasts_surface_is_exactly_the_stack() {
 /// press on its close button leaves the notification unread.
 #[test]
 fn a_press_on_a_toast_opens_its_notification() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-a-press-on-a-toast-opens-its-notificatio",
+        |_root| a_press_on_a_toast_opens_its_notification_here(),
+    );
+}
+
+/// The body of [`a_press_on_a_toast_opens_its_notification`].
+fn a_press_on_a_toast_opens_its_notification_here() {
     let (mut session, _desktop, _turn) = session();
     let id = session
         .shell_mut()
@@ -8174,6 +8242,16 @@ fn a_press_on_a_toast_opens_its_notification() {
 /// exactly "do not show me".
 #[test]
 fn do_not_disturb_files_a_notification_and_pops_up_nothing() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-do-not-disturb-files-a-notification-and-",
+        |_root| do_not_disturb_files_a_notification_and_pops_up_nothing_here(),
+    );
+}
+
+/// The body of [`do_not_disturb_files_a_notification_and_pops_up_nothing`].
+fn do_not_disturb_files_a_notification_and_pops_up_nothing_here() {
     let (mut session, _desktop, _turn) = session();
     session
         .shell_mut()
@@ -8193,6 +8271,16 @@ fn do_not_disturb_files_a_notification_and_pops_up_nothing() {
 /// open is in it, not popped up over it.
 #[test]
 fn the_open_pane_takes_the_place_of_the_toasts() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-the-open-pane-takes-the-place-of-the-toa",
+        |_root| the_open_pane_takes_the_place_of_the_toasts_here(),
+    );
+}
+
+/// The body of [`the_open_pane_takes_the_place_of_the_toasts`].
+fn the_open_pane_takes_the_place_of_the_toasts_here() {
     let (mut session, _desktop, _turn) = bound_session();
     let panel = session.panel().window();
     session.post_desktop_notice("Before", "Popped up.");
@@ -8217,6 +8305,16 @@ fn the_open_pane_takes_the_place_of_the_toasts() {
 /// for whoever is at it. It is filed, and waits.
 #[test]
 fn nothing_pops_up_on_the_login_screen() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-nothing-pops-up-on-the-login-screen",
+        |_root| nothing_pops_up_on_the_login_screen_here(),
+    );
+}
+
+/// The body of [`nothing_pops_up_on_the_login_screen`].
+fn nothing_pops_up_on_the_login_screen_here() {
     let (mut session, _desktop, _dir, _turn) = session_with_login();
     assert!(session.is_locked());
     session.post_desktop_notice("Private", "For the user only.");

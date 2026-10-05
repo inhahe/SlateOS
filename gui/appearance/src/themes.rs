@@ -117,7 +117,6 @@ use guitk::motion::Motion;
 use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors, syntax_roles};
 use guitk::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
@@ -278,19 +277,11 @@ impl ThemeDirs {
     }
 }
 
-/// `$XDG_DATA_HOME/slateos/themes`, or `$HOME/.local/share/slateos/themes`.
+/// `$XDG_DATA_HOME/slateos/themes`, or `$HOME/.local/share/slateos/themes`:
+/// `themes` in the user's data directory, which `settingsfile` finds for
+/// everything kept there.
 fn user_dir() -> Option<PathBuf> {
-    let data = match env::var_os("XDG_DATA_HOME") {
-        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
-        _ => {
-            let home = env::var_os("HOME")?;
-            if home.is_empty() {
-                return None;
-            }
-            PathBuf::from(home).join(".local").join("share")
-        }
-    };
-    Some(data.join("slateos").join("themes"))
+    crate::config::data_dir().map(|data| data.join("themes"))
 }
 
 /// Whether `id` can name a theme: a single ordinary path component, so that

@@ -10,6 +10,9 @@ guitk = { path = "../toolkit" }
 # The transport: a SlateOS channel to the chooser service, through the same
 # `Transport` the display protocol uses.
 guiremote = { path = "../remote" }
+# The frame and its bounded fields, shared with the credential service's
+# protocol.
+msgframe = { path = "../msgframe" }
 
 [lints]
 workspace = true

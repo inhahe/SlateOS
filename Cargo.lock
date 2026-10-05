@@ -1218,6 +1218,7 @@ version = "0.1.0"
 dependencies = [
  "guiremote",
  "guitk",
+ "msgframe",
 ]
 
 [[package]]
@@ -2517,6 +2518,10 @@ version = "0.1.0"
 dependencies = [
  "md5",
 ]
+
+[[package]]
+name = "msgframe"
+version = "0.1.0"
 
 [[package]]
 name = "musicplayer"

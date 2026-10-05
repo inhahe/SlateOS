@@ -22,8 +22,10 @@
 //! filters, bytes left over -- is [`Decoded::Malformed`], never read in part.
 
 use std::ffi::OsString;
-use std::fmt;
 use std::path::{Path, PathBuf};
+
+pub use msgframe::{Decoded, TooLarge};
+use msgframe::{Protocol, Reader, Writer};
 
 /// The name the file chooser registers, and programs connect to.
 pub const SERVICE: &str = "org.slateos.FileChooser";
@@ -50,7 +52,12 @@ pub const MAX_PATTERN: usize = 128;
 /// refused for its size.
 pub const MAX_FRAME: usize = 1 << 20;
 
-const MAGIC: &[u8; 3] = b"SFC";
+/// The protocol: its mark, its version and its longest frame.
+const PROTOCOL: Protocol = Protocol {
+    mark: b"SFC",
+    version: VERSION,
+    max_frame: MAX_FRAME,
+};
 const KIND_REQUEST: u8 = 1;
 const KIND_REPLY: u8 = 2;
 const OUTCOME_CANCELLED: u8 = 0;
@@ -135,29 +142,6 @@ pub enum Reply {
     },
 }
 
-/// A message that would break the bounds, and so cannot be sent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TooLarge;
-
-impl fmt::Display for TooLarge {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a file chooser message larger than the protocol allows")
-    }
-}
-
-impl std::error::Error for TooLarge {}
-
-/// What reading a frame from the front of some bytes found.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Decoded<T> {
-    /// Not all of a frame yet: read more.
-    Partial,
-    /// A message, and how many bytes its frame took.
-    Complete(T, usize),
-    /// Not a message this protocol sends: give up on the connection.
-    Malformed,
-}
-
 /// `request` as a frame.
 ///
 /// # Errors
@@ -165,11 +149,11 @@ pub enum Decoded<T> {
 /// [`TooLarge`] if a field is past its bound, a path or name is not one
 /// (a NUL; a `/` in the name), or the filter index is past the filters.
 pub fn encode_request(request: &Request) -> Result<Vec<u8>, TooLarge> {
-    let mut out = Writer::new(KIND_REQUEST);
+    let mut out = Writer::new(PROTOCOL, KIND_REQUEST);
     out.u8(request.mode.code());
     out.u64(request.owner);
     out.text(&request.title, MAX_TEXT)?;
-    out.path(&request.start, true)?;
+    write_path(&mut out, &request.start, true)?;
     let name = path_bytes(Path::new(&request.name));
     if !is_name(name) {
         return Err(TooLarge);
@@ -202,7 +186,7 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, TooLarge> {
 /// [`TooLarge`] if the path is past [`MAX_PATH`], empty, relative or holds a
 /// NUL, or the filter index does not fit the protocol.
 pub fn encode_reply(reply: &Reply) -> Result<Vec<u8>, TooLarge> {
-    let mut out = Writer::new(KIND_REPLY);
+    let mut out = Writer::new(PROTOCOL, KIND_REPLY);
     match reply {
         Reply::Cancelled => out.u8(OUTCOME_CANCELLED),
         Reply::Chosen { path, filter } => {
@@ -210,7 +194,7 @@ pub fn encode_reply(reply: &Reply) -> Result<Vec<u8>, TooLarge> {
                 return Err(TooLarge);
             }
             out.u8(OUTCOME_CHOSEN);
-            out.path(path, false)?;
+            write_path(&mut out, path, false)?;
             out.u8(u8::try_from(*filter).map_err(|_| TooLarge)?);
         }
     }
@@ -220,56 +204,20 @@ pub fn encode_reply(reply: &Reply) -> Result<Vec<u8>, TooLarge> {
 /// The request at the front of `bytes`, if a whole frame of one is there.
 #[must_use]
 pub fn decode_request(bytes: &[u8]) -> Decoded<Request> {
-    decode(bytes, KIND_REQUEST, read_request)
+    msgframe::decode(bytes, PROTOCOL, KIND_REQUEST, read_request)
 }
 
 /// The reply at the front of `bytes`, if a whole frame of one is there.
 #[must_use]
 pub fn decode_reply(bytes: &[u8]) -> Decoded<Reply> {
-    decode(bytes, KIND_REPLY, read_reply)
-}
-
-/// The message of kind `kind` at the front of `bytes`, its fields read by
-/// `read`.
-fn decode<T>(bytes: &[u8], kind: u8, read: fn(&mut Reader<'_>) -> Option<T>) -> Decoded<T> {
-    let Some(prefix) = bytes.get(..4) else {
-        return Decoded::Partial;
-    };
-    let mut length = [0u8; 4];
-    length.copy_from_slice(prefix);
-    let Ok(length) = usize::try_from(u32::from_le_bytes(length)) else {
-        return Decoded::Malformed;
-    };
-    if length > MAX_FRAME {
-        return Decoded::Malformed;
-    }
-    let Some(end) = length.checked_add(4) else {
-        return Decoded::Malformed;
-    };
-    let Some(message) = bytes.get(4..end) else {
-        return Decoded::Partial;
-    };
-    let mut reader = Reader {
-        bytes: message,
-        at: 0,
-    };
-    let header = reader.take(MAGIC.len()) == Some(MAGIC.as_slice())
-        && reader.u8() == Some(VERSION)
-        && reader.u8() == Some(kind);
-    if !header {
-        return Decoded::Malformed;
-    }
-    match read(&mut reader) {
-        Some(value) if reader.at == message.len() => Decoded::Complete(value, end),
-        _ => Decoded::Malformed,
-    }
+    msgframe::decode(bytes, PROTOCOL, KIND_REPLY, read_reply)
 }
 
 fn read_request(r: &mut Reader<'_>) -> Option<Request> {
     let mode = Mode::from_code(r.u8()?)?;
     let owner = r.u64()?;
     let title = r.text(MAX_TEXT)?;
-    let start = r.path(true)?;
+    let start = read_path(r, true)?;
     let name = r.bytes(MAX_NAME)?;
     if !is_name(name) {
         return None;
@@ -307,7 +255,7 @@ fn read_reply(r: &mut Reader<'_>) -> Option<Reply> {
     match r.u8()? {
         OUTCOME_CANCELLED => Some(Reply::Cancelled),
         OUTCOME_CHOSEN => {
-            let path = r.path(false)?;
+            let path = read_path(r, false)?;
             let filter = usize::from(r.u8()?);
             path.is_absolute().then_some(Reply::Chosen { path, filter })
         }
@@ -351,113 +299,23 @@ fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
-/// A message being written: its fields after the header, and the frame's
-/// length put in front when it is finished.
-struct Writer {
-    out: Vec<u8>,
+/// `path`'s bytes into `out`: no NUL in it, and empty only where
+/// `may_be_empty`.
+fn write_path(out: &mut Writer, path: &Path, may_be_empty: bool) -> Result<(), TooLarge> {
+    let bytes = path_bytes(path);
+    if bytes.contains(&0) || (bytes.is_empty() && !may_be_empty) {
+        return Err(TooLarge);
+    }
+    out.bytes(bytes, MAX_PATH)
 }
 
-impl Writer {
-    fn new(kind: u8) -> Self {
-        let mut out = vec![0; 4];
-        out.extend_from_slice(MAGIC);
-        out.push(VERSION);
-        out.push(kind);
-        Self { out }
+/// A path from `r`: no NUL in it, and empty only where `may_be_empty`.
+fn read_path(r: &mut Reader<'_>, may_be_empty: bool) -> Option<PathBuf> {
+    let bytes = r.bytes(MAX_PATH)?;
+    if bytes.contains(&0) || (bytes.is_empty() && !may_be_empty) {
+        return None;
     }
-
-    fn u8(&mut self, value: u8) {
-        self.out.push(value);
-    }
-
-    fn u64(&mut self, value: u64) {
-        self.out.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn bytes(&mut self, bytes: &[u8], max: usize) -> Result<(), TooLarge> {
-        if bytes.len() > max {
-            return Err(TooLarge);
-        }
-        let length = u16::try_from(bytes.len()).map_err(|_| TooLarge)?;
-        self.out.extend_from_slice(&length.to_le_bytes());
-        self.out.extend_from_slice(bytes);
-        Ok(())
-    }
-
-    fn text(&mut self, text: &str, max: usize) -> Result<(), TooLarge> {
-        self.bytes(text.as_bytes(), max)
-    }
-
-    /// A path: no NUL in it, and empty only where `may_be_empty`.
-    fn path(&mut self, path: &Path, may_be_empty: bool) -> Result<(), TooLarge> {
-        let bytes = path_bytes(path);
-        if bytes.contains(&0) || (bytes.is_empty() && !may_be_empty) {
-            return Err(TooLarge);
-        }
-        self.bytes(bytes, MAX_PATH)
-    }
-
-    fn finish(mut self) -> Result<Vec<u8>, TooLarge> {
-        let length = self.out.len().saturating_sub(4);
-        if length > MAX_FRAME {
-            return Err(TooLarge);
-        }
-        let length = u32::try_from(length).map_err(|_| TooLarge)?;
-        if let Some(prefix) = self.out.get_mut(..4) {
-            prefix.copy_from_slice(&length.to_le_bytes());
-        }
-        Ok(self.out)
-    }
-}
-
-/// A message being read, field by field; every read `None` past its end.
-struct Reader<'b> {
-    bytes: &'b [u8],
-    at: usize,
-}
-
-impl<'b> Reader<'b> {
-    fn take(&mut self, count: usize) -> Option<&'b [u8]> {
-        let end = self.at.checked_add(count)?;
-        let taken = self.bytes.get(self.at..end)?;
-        self.at = end;
-        Some(taken)
-    }
-
-    fn u8(&mut self) -> Option<u8> {
-        self.take(1)?.first().copied()
-    }
-
-    fn u64(&mut self) -> Option<u64> {
-        let mut value = [0u8; 8];
-        value.copy_from_slice(self.take(8)?);
-        Some(u64::from_le_bytes(value))
-    }
-
-    fn bytes(&mut self, max: usize) -> Option<&'b [u8]> {
-        let mut length = [0u8; 2];
-        length.copy_from_slice(self.take(2)?);
-        let length = usize::from(u16::from_le_bytes(length));
-        if length > max {
-            return None;
-        }
-        self.take(length)
-    }
-
-    fn text(&mut self, max: usize) -> Option<String> {
-        std::str::from_utf8(self.bytes(max)?)
-            .ok()
-            .map(str::to_owned)
-    }
-
-    /// A path: no NUL in it, and empty only where `may_be_empty`.
-    fn path(&mut self, may_be_empty: bool) -> Option<PathBuf> {
-        let bytes = self.bytes(MAX_PATH)?;
-        if bytes.contains(&0) || (bytes.is_empty() && !may_be_empty) {
-            return None;
-        }
-        path_from_bytes(bytes)
-    }
+    path_from_bytes(bytes)
 }
 
 #[cfg(test)]

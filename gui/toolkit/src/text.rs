@@ -378,12 +378,22 @@ pub fn ensure_family(cache: &mut FontCache, name: FamilyName) -> bool {
     if missing.contains(name) {
         return false;
     }
+    #[cfg(test)]
+    SEARCHES.with(|n| n.set(n.get().saturating_add(1)));
     if install_family_as(cache, FontFamily::Named(name), name.as_str()) {
         true
     } else {
         missing.note(name);
         false
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// How many times [`ensure_family`] searched the font index on this
+    /// thread: what shows a test that a name remembered as missing is not
+    /// searched for again. Per thread, so tests beside it do not count.
+    static SEARCHES: Cell<usize> = const { Cell::new(0) };
 }
 
 /// The family names [`ensure_family`] found no font for, earliest first.
@@ -2579,9 +2589,18 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner)
                 .contains(name)
         );
+        // Remembered: asking again, in any cache, does not search again.
+        let searched = SEARCHES.with(Cell::get);
         let mut cache = FontCache::new();
         assert!(!ensure_family(&mut cache, name));
         assert!(!cache.has_face(Family::Named(name), Weight::Regular));
+        let _ = measure_in(NAMED_SAMPLE, 20.0, FontWeightHint::Regular, family);
+        assert_eq!(SEARCHES.with(Cell::get), searched, "searched again");
+        // A name never asked about is searched for, once.
+        let other = FamilyName::new("Slate Test Family Also Missing 91c2").unwrap();
+        assert!(!ensure_family(&mut cache, other));
+        assert!(!ensure_family(&mut cache, other));
+        assert_eq!(SEARCHES.with(Cell::get), searched + 1);
     }
 
     /// **Ensuring a family a second time loads nothing**: the fonts already

@@ -229,6 +229,27 @@ fn typing_narrows_the_families_and_lands_on_the_first() {
     assert_eq!(p.family_view.selected(), Some(0));
 }
 
+/// **Names that start with the text come before names that only contain
+/// it**, whatever order the families are listed in -- typing "a" reaches
+/// Arial before Bahnschrift.
+#[test]
+fn names_that_start_with_the_text_come_first() {
+    // "Corbel" has no "a", so the search does not list the choice and lands
+    // on the first family it does list.
+    let mut p = picker_over(
+        &["Bahnschrift", "Candara", "Noto Sans", "Arial", "Corbel"],
+        FontChoice::new("Corbel", FontWeightHint::Regular, 13),
+    );
+    assert_eq!(
+        type_text(&mut p, "a"),
+        changed_to("Arial", FontWeightHint::Regular, 13)
+    );
+    assert_eq!(
+        p.shown().collect::<Vec<_>>(),
+        ["Arial", "Bahnschrift", "Candara", "Noto Sans"]
+    );
+}
+
 /// **The family chosen stays while the search still lists it**, even when
 /// it is not the first listed.
 #[test]

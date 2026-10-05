@@ -3612,6 +3612,20 @@ pub extern "C" fn clock_getcpuclockid(pid: PidT, clock_id: *mut ClockidT) -> i32
 mod tests {
     use super::*;
 
+    /// GNU make's configure probe for a standard `gettimeofday` ("checking for
+    /// standard gettimeofday"), which `scripts/make-spike/run.sh` answers `yes`
+    /// for SlateOS (`ac_cv_func_gettimeofday`) without running it: the
+    /// timeval filled with a time after the epoch, and 0 returned.
+    #[test]
+    fn make_configures_gettimeofday_probe_passes() {
+        let mut t = Timeval {
+            tv_sec: -1,
+            tv_usec: -1,
+        };
+        assert_eq!(gettimeofday(&raw mut t, core::ptr::null_mut()), 0);
+        assert!(t.tv_sec >= 0 && t.tv_usec >= 0, "{t:?}");
+    }
+
     #[test]
     fn stime_of_null_is_einval() {
         errno::set_errno(0);

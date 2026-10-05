@@ -3316,6 +3316,19 @@ mod tests {
     // strcoll — locale-aware string comparison (C locale = strcmp)
     // -----------------------------------------------------------------------
 
+    /// GNU make's configure probe for a working `strcoll`
+    /// (`AC_FUNC_STRCOLL`), which `scripts/make-spike/run.sh` answers `yes`
+    /// for SlateOS (`ac_cv_func_strcoll_works`) without running it.
+    #[test]
+    fn make_configures_strcoll_probe_passes() {
+        // SAFETY: NUL-terminated literals.
+        unsafe {
+            assert!(strcoll(b"abc\0".as_ptr(), b"def\0".as_ptr()) < 0);
+            assert!(strcoll(b"ABC\0".as_ptr(), b"DEF\0".as_ptr()) < 0);
+            assert!(strcoll(b"123\0".as_ptr(), b"456\0".as_ptr()) < 0);
+        }
+    }
+
     #[test]
     fn test_strcoll_equal() {
         assert_eq!(unsafe { strcoll(b"abc\0".as_ptr(), b"abc\0".as_ptr()) }, 0);

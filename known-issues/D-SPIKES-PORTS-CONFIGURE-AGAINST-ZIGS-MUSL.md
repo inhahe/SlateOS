@@ -1,6 +1,6 @@
 ## D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL — the ported programs' configure scripts look for functions in zig's musl, not in our libc, so each port is built for a C library it does not run on (lane D, 2026-10-05)
 
-**Status:** OPEN — CPython's fixed (known-issues-resolved/D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md); make, coreutils and bash to do.
+**Status:** OPEN — CPython's fixed (known-issues-resolved/D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md) and make's (2026-10-05, below); coreutils and bash to do.
 
 **In short:** before a program is built, its `configure` script asks the C
 library what it can do -- is there a `renameat2`, an `fts_open`, an
@@ -20,7 +20,7 @@ differently, than our library allows.
 |---|---|---|
 | coreutils 9.5 (gnulib) | `canonicalize_file_name`, `error`, `fts_open`, `group_member`, `random_r`, `rawmemchr`, `renameat2`, `rpmatch`, `sysctl`, `timespec_getres`, `wmempcpy` | gnulib compiles its own replacement for each; its `renameat2` cannot make `RENAME_NOREPLACE` atomic, so `mv -n` can still clobber in a race |
 | bash 5.2 | `arc4random`, `argz_count`, `argz_next`, `argz_stringify` | none that shows: `$SRANDOM` reaches `arc4random` only when `getrandom` fails |
-| GNU make 4.4.1 | `sigsetmask` | none that shows |
+| GNU make 4.4.1 | `sigsetmask` | none that shows -- fixed, see the end |
 | pkgconf 2.3.0 | none | |
 | CPython 3.12.3 | `close_range`, `getwd`, `sem_clockwait`, `tmpnam_r`, and five run tests | fixed: see the resolved entry |
 
@@ -40,3 +40,22 @@ gets checked against ours rather than taken. A port whose tests need a
 runnable binary to check itself (`stdlib.sh`'s control interpreter) gets one
 linked against musl from the same objects, with the functions musl lacks
 stood in, as CPython's `control-shim.c` does.
+
+**GNU make, fixed 2026-10-05.** `scripts/make-spike/run.sh` configures through
+the wrapper, with `--build` and `--host`. Measured first, three ways, each
+configure's `config.cache` diffed: given `--host` alone, as before, configure
+had seen its test programs run on Linux and decided it was *not*
+cross-compiling, so every test it runs ran against musl; through the wrapper
+it finds `sigsetmask`, and four run tests are left to answer. Each is now
+answered with what the same test gives on glibc 2.39, natively, which is what
+ours does -- `ac_cv_func_gettimeofday`, `ac_cv_func_strcoll_works`,
+`make_cv_synchronous_posix_spawn` and `am_cv_func_iconv_works`, all `yes` --
+and each is pinned by a host test of its probe (`cargo test -p posix
+make_configures`). The guesses would have said no to the first three, and so
+taken make off `posix_spawn` and onto fork and exec. make links with nothing
+missing or duplicated, `USE_POSIX_SPAWN` and `HAVE_SIGSETMASK` set.
+
+Configuring through the wrapper first needed the wrapper fixed: it put
+`posix/include` in front of the build's own `-I` directories, which hid make's
+own `lib/glob.h` (gnulib's, as coreutils' will be) and stopped the build. It
+comes after them now (`scripts/test-link-wrappers.sh` case 5).

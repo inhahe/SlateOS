@@ -3333,6 +3333,41 @@ mod exec_probe {
 
 #[cfg(test)]
 mod tests {
+    /// GNU make's configure probe for a `posix_spawn` that fails
+    /// synchronously, which `scripts/make-spike/run.sh` answers `yes` for
+    /// SlateOS (`make_cv_synchronous_posix_spawn`) without running it: a
+    /// program that does not exist is `ENOENT` from the call itself, with no
+    /// pid asked for. make spawns its commands only when this holds, and
+    /// forks and execs them otherwise.
+    ///
+    /// The host has no filesystem calls -- its `SYS_FS_OPEN` answers "no such
+    /// syscall" -- so the probe's own `ENOENT` cannot be produced here. What
+    /// the answer rests on can be: `posix_spawn` returns the error of reading
+    /// the program, from the call itself, before any process exists and with a
+    /// null pid; and a file the kernel has not got (`NotFound`) is `ENOENT`.
+    #[test]
+    fn make_configures_posix_spawn_probe_fails_from_the_call() {
+        let path = b"./xxx-non-existent\0";
+        let argv: [*const u8; 2] = [path.as_ptr(), core::ptr::null()];
+        let mut scratch = [0u8; 64];
+        let loading = load_program(path.as_ptr(), argv.as_ptr(), &[], &mut scratch)
+            .err()
+            .expect("there is no such program to load");
+        let rc = posix_spawn(
+            core::ptr::null_mut(),
+            path.as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            argv.as_ptr(),
+            crate::environ::current_environ(),
+        );
+        assert_eq!(rc, loading, "posix_spawn answers the load's own error");
+        assert_eq!(
+            native_to_posix_err(crate::errno::native::NOT_FOUND),
+            crate::errno::ENOENT
+        );
+    }
+
     /// No pidfds, so no pidfd spawn: `ENOSYS`, the child not started and
     /// `*pidfd` not written.
     #[test]

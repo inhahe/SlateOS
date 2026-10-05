@@ -34,6 +34,7 @@ use crate::Error;
 use crate::decodeframe::{self, Common, FrameError, Refs};
 use crate::frame::Frame;
 use crate::header;
+use crate::threading::{MIN_MACROBLOCKS_PER_THREAD, Threading};
 
 /// The largest picture this decoder accepts by default, in luma samples:
 /// 8192 x 4352, as gui/video/vp9's. libvpx accepts any size VP8 can code
@@ -146,7 +147,7 @@ pub struct Decoder {
     golden: usize,
     altref: usize,
     /// How many threads a frame's macroblock rows may decode on.
-    threads: usize,
+    threading: Threading,
 }
 
 impl Default for Decoder {
@@ -170,7 +171,11 @@ impl Decoder {
             last: 1,
             golden: 2,
             altref: 3,
-            threads: std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+            threading: Threading {
+                threads: std::thread::available_parallelism()
+                    .map_or(1, std::num::NonZeroUsize::get),
+                min_macroblocks: MIN_MACROBLOCKS_PER_THREAD,
+            },
         }
     }
 
@@ -190,16 +195,28 @@ impl Decoder {
     /// A frame's token partitions are what decode in parallel, a row of
     /// macroblocks to each, so a frame of one partition -- what encoders
     /// make unless asked for more (`vpxenc --token-parts`) -- decodes on
-    /// one thread whatever this says, as libvpx's do. The pictures are the
-    /// same however many threads make them.
+    /// one thread whatever this says, as libvpx's do. A small frame decodes
+    /// on fewer than this too: a thread for each 150 macroblocks at most
+    /// (16x16 pixels each; a 640x360 picture has 920), below which starting
+    /// a thread costs more than it saves. The pictures are the same however
+    /// many threads make them.
     pub fn set_threads(&mut self, threads: usize) {
-        self.threads = threads.max(1);
+        self.threading.threads = threads.max(1);
     }
 
     /// How many threads the decoder may use.
     #[must_use]
     pub fn threads(&self) -> usize {
-        self.threads
+        self.threading.threads
+    }
+
+    /// Give a thread as few as `macroblocks` macroblocks a frame (0: any
+    /// number), rather than the 150 below which threads cost more than they
+    /// save: for tests and measurements, which decode small frames on
+    /// threads to see that they make the same pictures, or what they cost.
+    #[doc(hidden)]
+    pub fn set_min_macroblocks_per_thread(&mut self, macroblocks: usize) {
+        self.threading.min_macroblocks = macroblocks;
     }
 
     /// Decode one frame (one block of a container) and return the picture
@@ -320,7 +337,7 @@ impl Decoder {
                     &mut frame,
                     stale.as_deref(),
                     &refs,
-                    self.threads,
+                    self.threading,
                 )
             }
             _ => Err(FrameError::Error(Error::Corrupt(
@@ -549,6 +566,9 @@ mod tests {
             .map(|threads| {
                 let mut d = Decoder::new();
                 d.set_threads(threads);
+                // The committed vectors are far too small to be given
+                // threads otherwise.
+                d.set_min_macroblocks_per_thread(0);
                 d
             })
             .collect();
@@ -557,12 +577,12 @@ mod tests {
             let results: Vec<_> = decoders.iter_mut().map(|d| d.decode(frame)).collect();
             let what = format!("{name}, frame {i}");
             for (d, r) in decoders.iter().zip(&results).skip(1) {
+                let threads = d.threads();
                 assert!(
                     shown(&results[0]) == shown(r),
-                    "{what} on {} threads",
-                    d.threads
+                    "{what} on {threads} threads"
                 );
-                assert_same_state(&decoders[0], d, &format!("{what} on {} threads", d.threads));
+                assert_same_state(&decoders[0], d, &format!("{what} on {threads} threads"));
             }
             if hold {
                 for (h, r) in held.iter_mut().zip(results) {
@@ -586,6 +606,29 @@ mod tests {
             "only {} frames decoded on threads",
             now - threaded
         );
+    }
+
+    #[test]
+    fn a_small_frame_decodes_on_one_thread_unless_told_otherwise() {
+        let vectors = committed_vectors();
+        let (_, frames) = vectors
+            .iter()
+            .find(|(name, _)| name == "vp80-04-partitions-1406.ivf")
+            .unwrap();
+        let decode = |min_macroblocks| {
+            let (threaded, _) = crate::threading::TALLY.get();
+            let mut d = Decoder::new();
+            d.set_threads(8);
+            d.set_min_macroblocks_per_thread(min_macroblocks);
+            for frame in frames {
+                d.decode(frame).unwrap();
+            }
+            crate::threading::TALLY.get().0 - threaded
+        };
+        // 176x144: 99 macroblocks, too few for a second thread.
+        assert_eq!(decode(MIN_MACROBLOCKS_PER_THREAD), 0);
+        // Eight partitions, nine rows: threads, when allowed any frame.
+        assert_eq!(decode(0), frames.len());
     }
 
     #[test]

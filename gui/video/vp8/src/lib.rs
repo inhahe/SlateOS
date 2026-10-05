@@ -63,10 +63,11 @@
 //! decoder uses every core): each row a few macroblocks behind the one
 //! above, sharing nothing with the others but what crosses the edge between
 //! two rows, and making the single thread's pictures, bit for bit
-//! (`threading`). The same film in eight partitions decodes 2.6 times as
-//! fast on eight threads as on one, and faster than libvpx's SIMD on as
-//! many. A frame of one partition -- what encoders make unless asked for
-//! more -- decodes on one thread, in libvpx too.
+//! (`threading`). The same film in eight partitions decodes 2.9 times as
+//! fast on eight threads as on one (2.5 times at 720p, 1.6 at 360p; smaller
+//! pictures, which a thread costs more than it saves, stay on one). A frame
+//! of one partition -- what encoders make unless asked for more -- decodes
+//! on one thread, in libvpx too.
 //!
 //! # What a hostile stream can do
 //!

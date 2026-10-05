@@ -276,10 +276,17 @@ pub(crate) fn decode_mb_rows(
     partitions: &[BoolDecoder<'_>],
     new: &mut Frame,
     refs: &Refs<'_>,
-    threads: usize,
+    threading: Threading,
 ) -> Option<bool> {
     let (mb_rows, mb_cols) = (rows.mb_rows, rows.mb_cols);
-    let workers = threads.min(partitions.len()).min(mb_rows);
+    let per_thread = (mb_rows * mb_cols)
+        .checked_div(threading.min_macroblocks)
+        .unwrap_or(usize::MAX);
+    let workers = threading
+        .threads
+        .min(partitions.len())
+        .min(mb_rows)
+        .min(per_thread);
     if workers < 2 || mb_cols == 0 || above.len() != mb_cols {
         return None;
     }
@@ -449,14 +456,34 @@ impl Drop for Stopper<'_, '_, '_> {
     }
 }
 
-/// How many times a thread waiting for the row above spins, and then
-/// yields, before it sleeps. A row is rarely more than a macroblock or two
-/// (a few microseconds) from what the row below needs, too short a wait to
-/// sleep through, as libvpx's `vp8_atomic_spin_wait` does; but libvpx's
-/// threads spin and yield for ever, which starves the row they wait on
-/// when there are more threads than free cores.
+/// How many times a thread waiting for the row above spins before it
+/// sleeps: about a microsecond. A row is rarely more than a macroblock or
+/// two from what the row below needs, so a short spin often saves a sleep
+/// and a wake-up. libvpx's threads spin and yield for ever
+/// (`vp8_atomic_spin_wait`), which starves the row they wait on when there
+/// are more threads than free cores; and a yield is worse than a sleep on a
+/// busy machine: Windows' `SwitchToThread` hands the core to any other
+/// ready thread for the rest of its time slice, which cost this decoder 35
+/// ms a frame against 0.4 on one thread while it yielded.
 const SPINS: u32 = 20;
-const YIELDS: u32 = 10;
+
+/// The fewest macroblocks a thread is given a frame's worth of, on
+/// average: fewer, and starting the thread and filling the wavefront cost
+/// more than the thread saves. Measured on 8-partition film (an i7-8700K):
+/// 320x180, 240 macroblocks, was slower on any number of threads than on
+/// one; 480x270, 510, gained 10% on three or four and lost on eight;
+/// 640x360, 920, gained most on six. A decoder's own is
+/// [`Threading::min_macroblocks`].
+pub(crate) const MIN_MACROBLOCKS_PER_THREAD: usize = 150;
+
+/// How many threads a frame's rows may decode on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Threading {
+    /// At most this many...
+    pub(crate) threads: usize,
+    /// ... and at most one per this many macroblocks (0: no limit).
+    pub(crate) min_macroblocks: usize,
+}
 
 /// Wait, as the thread of row `me`, until the row writing `mailbox` as
 /// `mb_row` has made `steps` steps, returning how many it has made; `None`
@@ -479,8 +506,6 @@ fn wait(
         }
         if tries < SPINS {
             std::hint::spin_loop();
-        } else if tries < SPINS + YIELDS {
-            std::thread::yield_now();
         } else {
             me.asleep.store(true, Ordering::SeqCst);
             let now = mailbox.progress.load(Ordering::SeqCst);

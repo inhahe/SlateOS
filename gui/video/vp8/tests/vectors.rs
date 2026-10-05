@@ -49,6 +49,8 @@ fn check(path: &Path, threads: usize) -> Result<usize, String> {
     let want = common::read_md5s(&common::md5_path(path))?;
     let mut d = Decoder::new();
     d.set_threads(threads);
+    // The vectors are small: without this, threads would not be used.
+    d.set_min_macroblocks_per_thread(0);
     let mut n = 0usize;
     for (i, frame) in v.frames.iter().enumerate() {
         let picture = d.decode(frame).map_err(|e| format!("frame {i}: {e}"))?;

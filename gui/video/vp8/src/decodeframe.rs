@@ -55,7 +55,7 @@ use crate::tables::{
     AC_QLOOKUP, COEF_UPDATE_PROBS, DC_QLOOKUP, DEFAULT_COEF_PROBS, DEFAULT_MV_CONTEXT,
     UV_MODE_PROB, YMODE_PROB,
 };
-use crate::threading;
+use crate::threading::{self, Threading};
 use crate::tokens::{self, CoefProbs, Context};
 
 /// The probabilities a frame may update and the next frame keep: the parts
@@ -286,8 +286,8 @@ pub(crate) struct Refs<'a> {
 
 /// Decode `data` into `new`: libvpx's `vp8_decode_frame`. `stale` is what
 /// `new`'s buffer held before, if `new` is not that buffer. The macroblock
-/// rows decode on up to `threads` threads. Returns whether the frame is
-/// corrupt: decoded past the end of a partition, or predicted from a
+/// rows decode on threads as `threading` allows. Returns whether the frame
+/// is corrupt: decoded past the end of a partition, or predicted from a
 /// corrupt frame.
 pub(crate) fn decode_frame(
     c: &mut Common,
@@ -295,7 +295,7 @@ pub(crate) fn decode_frame(
     new: &mut Frame,
     stale: Option<&Frame>,
     refs: &Refs<'_>,
-    threads: usize,
+    threading: Threading,
 ) -> Result<bool, FrameError> {
     let [b0, b1, b2, ..] = *data else {
         return Err(corrupt("a frame shorter than its three-byte tag"));
@@ -473,7 +473,7 @@ pub(crate) fn decode_frame(
         &mut partitions,
         (new, stale),
         refs,
-        threads,
+        threading,
     );
     let corrupted = bc.has_error() || corrupt_tokens;
 
@@ -621,9 +621,9 @@ impl Residual {
 
 /// Decode, predict, reconstruct and filter every macroblock into `new`,
 /// whose buffer held `stale` before if it is not that buffer: libvpx's
-/// `decode_mb_rows`, or its `vp8mt_decode_mb_rows` on up to `threads`
-/// threads when the frame has several token partitions. Returns whether a
-/// token partition ran dry or a reference was corrupt.
+/// `decode_mb_rows`, or its `vp8mt_decode_mb_rows` on threads as
+/// `threading` allows when the frame has several token partitions. Returns
+/// whether a token partition ran dry or a reference was corrupt.
 fn decode_mb_rows(
     rows: &Rows<'_>,
     grid: &mut ModeGrid,
@@ -631,10 +631,10 @@ fn decode_mb_rows(
     partitions: &mut [BoolDecoder<'_>],
     (new, stale): (&mut Frame, Option<&Frame>),
     refs: &Refs<'_>,
-    threads: usize,
+    threading: Threading,
 ) -> bool {
     if let Some(corrupted) =
-        threading::decode_mb_rows(rows, grid, above, partitions, new, refs, threads)
+        threading::decode_mb_rows(rows, grid, above, partitions, new, refs, threading)
     {
         return corrupted;
     }
@@ -1055,7 +1055,10 @@ mod tests {
                     &mut partitions,
                     (&mut new, stale.as_ref()),
                     &refs,
-                    threads,
+                    Threading {
+                        threads,
+                        min_macroblocks: 0,
+                    },
                 );
                 let skips: Vec<bool> = grid.cells.iter().map(|m| m.mb_skip_coeff).collect();
                 (corrupted, new, skips, above)

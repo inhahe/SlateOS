@@ -70,6 +70,8 @@ fn parse_mutation(s: &str) -> Mutation {
 fn decode_damaged(frames: &[Vec<u8>], mutations: &[Mutation], threads: usize) -> Vec<String> {
     let mut d = Decoder::new();
     d.set_threads(threads);
+    // The vectors are small: without this, threads would not be used.
+    d.set_min_macroblocks_per_thread(0);
     let mut out = Vec::new();
     for (i, original) in frames.iter().enumerate().take(LIMIT) {
         let mut frame = original.clone();
@@ -201,6 +203,7 @@ fn heavily_damaged_streams_never_panic() {
         for round in 0..40 {
             let mut d = Decoder::new();
             d.set_threads([1, 3, 8][round % 3]);
+            d.set_min_macroblocks_per_thread(0);
             for frame in &frames {
                 let mut f = frame.clone();
                 // Up to eight flips, sometimes a cut, now and then a frame

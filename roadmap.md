@@ -3849,10 +3849,10 @@ lane C's `guitk`.
     - `[x]` Rows on threads, as libvpx's: a frame of several token
       partitions decodes its macroblock rows on up to one thread a core,
       the single thread's pictures bit for bit (every vector and damage case
-      at several thread counts, every buffer compared); 2.6 times as fast on
-      eight threads as on one. Each row in a band of its own, rows
-      exchanging edges through mailboxes of atomic words: no `unsafe`.
-      design-decisions.md §1356.
+      at several thread counts, every buffer compared); 2.9 times as fast on
+      eight threads as on one at 1080p, 1.6 at 360p, smaller pictures left
+      on one. Each row in a band of its own, rows exchanging edges through
+      mailboxes of atomic words: no `unsafe`. design-decisions.md §1356.
     - `[x]` In `videocodec`: WebM's VP8, alpha included, coloured as FFmpeg
       reads VP8 (BT.601 at any size, its clamping bit the range); five
       fixtures held to ffmpeg and libavif frame by frame.

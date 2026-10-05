@@ -14,8 +14,9 @@ code, which the decoder forbids. Instead each thread decodes its row into
 a private copy and writes it into the frame piece the row owns; what a row
 needs from the row above -- its bottom pixels, unfiltered, and later its
 filtered last rows -- is posted in a small shared mailbox the row below
-reads. On the 1080p test film in eight partitions this is 2.6 times as fast
-on eight threads as on one.
+reads. On the 1080p test film in eight partitions this is 2.9 times as fast
+on eight threads as on one (2.5 times at 720p, 1.6 at 360p); pictures too
+small to share -- under about 150 blocks a thread -- stay on one.
 
 **What was decided** (`gui/video/vp8/src/threading.rs`):
 
@@ -25,7 +26,10 @@ on eight threads as on one.
   passes to the next row that reads it under a mutex that, because rows
   finish in order and `n` is at most the partition count, is never
   contended. `Decoder::set_threads`; a new decoder uses every core, as
-  VP9's does.
+  VP9's does -- but a thread only for each 150 macroblocks of the frame,
+  below which a thread costs more than it saves: 320x180 (240
+  macroblocks) was slower on any number of threads than on one, 480x270
+  (510) gained 10-15% on three, 640x360 (920) 1.6 times on six.
 - **A band per thread:** the row and the four rows above it that its loop
   filter reaches. Each macroblock is filtered as soon as the one to its
   right is decoded; the row below predicts from a copy of this row's bottom
@@ -38,8 +42,10 @@ on eight threads as on one.
 - **Mailboxes of atomic words, not channels:** per row, a progress count
   (released after the words it promises; libvpx's `mt_current_mb_col`) and
   each macroblock's token contexts, bottom row and last rows. A reader
-  spins about a microsecond, yields a little, then sleeps until the row it
-  waits on wakes it.
+  spins about a microsecond, then sleeps until the row it waits on wakes
+  it. It never yields: on a busy machine Windows' `SwitchToThread` hands
+  the core to another process for the rest of a time slice, which made
+  176x144 frames take 35 ms on two threads against 0.4 ms on one.
 - **The version-3 macroblock whose chroma libvpx leaves as the buffer held
   it** cannot be decoded in a band, which holds nothing of the buffer. A
   thread meeting one stops the others and the frame decodes again on one
@@ -53,13 +59,18 @@ on eight threads as on one.
   corruption (§1339). libvpx's shared frame, written by every thread at
   rows' boundaries, cannot be expressed without it.
 - *Measured against the alternatives* (1080p film, eight partitions, a
-  machine at about 90% load, best of interleaved rounds):
+  machine at about 90% load from other work, best of interleaved rounds;
+  speed-ups over one thread):
 
 | Design | 2 threads | 4 threads | 8 threads |
 |---|---|---|---|
 | a channel message per macroblock (first version) | 1.16-1.25x | 1.8x | 2.5x |
 | mailboxes, spinning and yielding as libvpx does | 1.33x | 1.95x | 1.4x |
-| mailboxes, spinning briefly, then sleeping (this) | 1.43x | 1.98x | 2.6x |
+| mailboxes, spinning briefly, then sleeping (this) | 1.2-1.4x | 1.9-2.0x | 2.5-2.9x |
+
+  The last row's range runs from that load to a quiet machine (the
+  benchmark at high priority): 13.98 ms a frame on one thread, 4.83 on
+  eight.
 
   A message per macroblock cost 100-160 ns to send, plus moving 200-byte
   messages and waking a parked receiver; spinning without end starved the

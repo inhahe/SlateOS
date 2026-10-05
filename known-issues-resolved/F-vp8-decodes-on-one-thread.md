@@ -17,21 +17,24 @@ modes, wild vectors and noise partitions, at 2, 3 and 8 threads against
 one, including the version-3 macroblock that sends a frame back to one
 thread.
 
-**Measured** (`gui/video/vp8/tests/bench.rs`, the 1080p film coded in
-eight partitions, `tools/make_bench_stream.py --vpxenc`; an i7-8700K at
-about 90% load from other work, so each figure is the best of six
-interleaved rounds):
+**Measured** (film coded in eight partitions, `tools/make_bench_stream.py
+--vpxenc` and the same at smaller sizes; an i7-8700K, the benchmark at high
+priority so that the other work on the machine does not decide it; best of
+four interleaved rounds, frames a second):
 
-| Threads | This port, fps | libvpx SIMD, fps | libvpx C, fps |
-|---|---|---|---|
-| 1 | 72.3 | 136.4 | 28.1 |
-| 2 | 103.1 | 191.8 | 44.2 |
-| 4 | 143.1 | 245.5 | 61.0 |
-| 6 | 181.5 | -- | -- |
-| 8 | 189.5 | 161.4 | 28.8 |
+| Threads | 1080p | 720p | 640x360 | 480x270 |
+|---|---|---|---|---|
+| 1 | 71.5 | 164.4 | 585.7 | 969.8 |
+| 2 | 84.9 | 196.6 | 665.2 | 1025.2 |
+| 4 | 138.4 | 288.6 | 840.9 | 1151.8 (3) |
+| 8 | 206.9 | 407.4 | 913.5 (6) | 1212.3 (3) |
 
-On this loaded machine libvpx's threads, which spin and yield while they
-wait, ran slower on eight than on four; these sleep after a short spin.
+(In brackets: threads used, at most one per 150 macroblocks; smaller
+pictures, 320x180 included, decode on one.) libvpx on the 1080p stream, at
+normal priority on the loaded machine: 136.4, 191.8, 245.5 and 161.4 frames
+a second with its SIMD on 1, 2, 4 and 8 threads; 28.1, 44.2, 61.0 and 28.8
+as plain C. Its threads spin and yield while they wait and ran slower on
+eight than on four; these sleep after a short spin and never yield.
 
 ---
 

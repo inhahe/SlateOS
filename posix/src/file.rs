@@ -8169,14 +8169,24 @@ pub extern "C" fn statx(
     }
 
     sx.stx_blksize = st.st_blksize as u32;
-    // Device numbers: split st_dev/st_rdev into major/minor.
-    sx.stx_dev_major = (st.st_dev >> 8) as u32;
-    sx.stx_dev_minor = (st.st_dev & 0xFF) as u32;
-    sx.stx_rdev_major = (st.st_rdev >> 8) as u32;
-    sx.stx_rdev_minor = (st.st_rdev & 0xFF) as u32;
+    (sx.stx_dev_major, sx.stx_dev_minor) = split_dev(st.st_dev);
+    (sx.stx_rdev_major, sx.stx_rdev_minor) = split_dev(st.st_rdev);
 
     sx.stx_mask = filled;
     0
+}
+
+/// A `dev_t`'s major and minor numbers, as glibc's `major` and `minor` take
+/// them apart -- the numbers Linux's `statx` reports.
+///
+/// The split was `dev >> 8` and `dev & 0xff` until 2026-10-01: Linux's
+/// sixteen-bit form of the 1990s, which gets any minor past 255 wrong. It
+/// did no harm while `st_dev` was always 0.
+fn split_dev(dev: DevT) -> (u32, u32) {
+    (
+        crate::crt::gnu_dev_major(dev),
+        crate::crt::gnu_dev_minor(dev),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -13895,6 +13905,21 @@ mod tests {
     // -----------------------------------------------------------------------
     // statx
     // -----------------------------------------------------------------------
+
+    /// `statx`'s device numbers are glibc's `major` and `minor` of the
+    /// `dev_t`, past 255 too: the old split, `dev >> 8` and `dev & 0xff`,
+    /// made minor 300 under major 0 into major 4096, minor 44.
+    #[test]
+    fn statx_splits_a_device_as_major_and_minor_do() {
+        use crate::crt::gnu_dev_makedev;
+        for (major, minor) in [(0, 0), (0, 300), (0, 0x05_1234), (8, 1), (259, 65_536)] {
+            assert_eq!(
+                split_dev(gnu_dev_makedev(major, minor)),
+                (major, minor),
+                "{major}:{minor}"
+            );
+        }
+    }
 
     #[test]
     fn test_statx_null_buf() {

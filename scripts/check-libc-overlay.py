@@ -178,6 +178,10 @@ OVERLAY_TYPES: dict[str, str] = {
     "regmatch_t": "regex.h",
     "struct obstack": "obstack.h",
     "struct _obstack_chunk": "obstack.h",
+    "struct argp_option": "argp.h",
+    "struct argp": "argp.h",
+    "struct argp_child": "argp.h",
+    "struct argp_state": "argp.h",
 }
 
 # C type -> (glibc's layout as the reference has it, the overlay's, why), each

@@ -37,6 +37,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/bootstrap-worktree.sh` | bootstrap-worktree.sh — make a fresh worktree or clone able to build and boot. |
 | `scripts/build-iso.sh` | Build the kernel and create a bootable ISO image using Limine. |
 | `scripts/build-usb-image.py` | Build a real, GPT-partitioned, UEFI-bootable raw disk image for SlateOS. |
+| `scripts/build-userland.py` | Build every program the userland workspace makes, for SlateOS's /bin. |
 | `scripts/c-maybe-probe.py` | Measure GNU's `c_maybe_quoting_style`, in both the plain form and the form |
 | `scripts/cal-diff.sh` | Differential test: our `cal` against util-linux `cal`. |
 | `scripts/calc-diff.sh` | Differential test: our bc and dc against GNU bc 1.07.1 and GNU dc 1.4.1. |
@@ -506,4 +507,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_496 scripts._
+_497 scripts._

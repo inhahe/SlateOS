@@ -3980,6 +3980,43 @@ pub fn capture_std_stream(stream: *mut u8, f: impl FnOnce()) -> std::vec::Vec<u8
     sink
 }
 
+/// What `f` writes to standard output and to standard error, both caught at
+/// once, as [`capture_std_stream`] catches one -- for code whose answer goes
+/// to one and its complaints to the other in a single call (argp's).
+#[cfg(test)]
+pub fn capture_std_streams(f: impl FnOnce()) -> (std::vec::Vec<u8>, std::vec::Vec<u8>) {
+    let _g = lock_std_streams_for_test();
+    let (Some(out), Some(err)) = (
+        stream_to_file(stdout_stream()),
+        stream_to_file(stderr_stream()),
+    ) else {
+        panic!("capture_std_streams: no standard streams");
+    };
+    let mut out_sink: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut err_sink: std::vec::Vec<u8> = std::vec::Vec::new();
+    {
+        // SAFETY: static streams, which outlive the guards; locked in one
+        // order, standard output first.
+        let _lo = unsafe { locked(out) };
+        // SAFETY: as above.
+        let _le = unsafe { locked(err) };
+        // SAFETY: locked.
+        first_use(unsafe { &mut *out });
+        // SAFETY: locked.
+        first_use(unsafe { &mut *err });
+        // SAFETY: locked; the sinks outlive the swaps, undone first.
+        let _so = unsafe { Swapped::new(out, (&raw mut out_sink).cast()) };
+        // SAFETY: as above.
+        let _se = unsafe { Swapped::new(err, (&raw mut err_sink).cast()) };
+        f();
+        // SAFETY: locked.
+        unsafe { sync(out) };
+        // SAFETY: locked.
+        unsafe { sync(err) };
+    }
+    (out_sink, err_sink)
+}
+
 /// A stream's far end swapped for [`capture_std_stream`]'s sink, and put
 /// back when this is dropped.
 #[cfg(test)]

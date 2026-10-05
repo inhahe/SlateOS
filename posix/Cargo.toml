@@ -22,6 +22,17 @@ tzrules = { path = "../tzrules" }
 # hex-float parsers lgamma.rs spells CORE-MATH's constants with, as its C
 # does; it changes no code, only what is visible.
 libm = { path = "vendor/libm", features = ["unstable-public-internals"] }
+# How many terminal columns a character takes: lane B's table, which the
+# terminal and every Rust program measure with, so a C program lays text out
+# as they do (requests/b-d-libc-wcwidth-should-answer-from-the-one-width-table.md;
+# design-decisions §1042). `no_std` and dependency-free, as the libc needs.
+charwidth = { path = "../userspace/charwidth" }
+
+# The journal record's one spelling. `syslog.rs` writes it with an escaper of
+# its own -- the libc has no allocator for this crate's `String`s -- and its
+# tests hold that copy to this original, byte for byte.
+[dev-dependencies]
+journalrec = { path = "../userspace/journalrec" }
 
 [lints]
 workspace = true

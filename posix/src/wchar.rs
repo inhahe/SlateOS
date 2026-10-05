@@ -828,123 +828,32 @@ pub unsafe extern "C" fn wcrtomb(s: *mut u8, wc: WcharT, ps: *mut MbstateT) -> u
 // Display width
 // ---------------------------------------------------------------------------
 
-/// Return the display width of a wide character.
+/// The number of terminal columns `wc` takes: `charwidth`'s answer, the one
+/// table SlateOS measures text with -- the terminal draws by it, and every
+/// Rust program lays text out by it, so a C program must agree or the same
+/// line is aligned two ways on one screen (lane B's
+/// `requests/b-d-libc-wcwidth-should-answer-from-the-one-width-table.md`).
 ///
-/// Returns -1 for non-printable, 0 for null, 1 for printable ASCII,
-/// 2 for CJK (basic heuristic using Unicode block ranges).
+/// - 0 for `L'\0'`, as every C library returns;
+/// - -1 for a control character (C0, DEL, C1), and for a `wchar_t` that is
+///   not a Unicode scalar value -- a surrogate, a value past U+10FFFF, a
+///   negative one -- as glibc returns;
+/// - otherwise 0, 1 or 2, by design-decisions §1042's policy: gnulib's where
+///   gnulib and glibc disagree (the soft hyphen takes no column; the prepended
+///   concatenation marks take one; Hangul Jamo Extended-B's conjoining letters
+///   take none), and Unicode 18.0's data, newer than glibc 2.39's.
+///
+/// The libc decodes UTF-8 whatever `setlocale` reports, so a width per
+/// Unicode is what every character `mbrtowc` can produce needs.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
     if wc == 0 {
         return 0;
     }
-    // C0 and C1 control characters (0x00-0x1F, 0x7F, 0x80-0x9F).
-    if wc < 32 || wc == 0x7f || (0x80..=0x9f).contains(&wc) {
+    let Some(c) = u32::try_from(wc).ok().and_then(char::from_u32) else {
         return -1;
-    }
-    // Zero-width characters: combining marks, joiners, soft hyphen, BOM, etc.
-    #[allow(clippy::manual_range_contains)]
-    if (wc >= 0x0300 && wc <= 0x036f)   // Combining Diacritical Marks
-        || (wc >= 0x0483 && wc <= 0x0489) // Cyrillic combining marks
-        || (wc >= 0x0591 && wc <= 0x05bd) // Hebrew combining marks
-        || wc == 0x05bf
-        || (wc >= 0x05c1 && wc <= 0x05c2)
-        || (wc >= 0x05c4 && wc <= 0x05c5)
-        || wc == 0x05c7
-        || (wc >= 0x0600 && wc <= 0x0605) // Arabic marks
-        || (wc >= 0x0610 && wc <= 0x061a)
-        || (wc >= 0x064b && wc <= 0x065f)
-        || wc == 0x0670
-        || (wc >= 0x06d6 && wc <= 0x06dd)
-        || (wc >= 0x06df && wc <= 0x06e4)
-        || (wc >= 0x06e7 && wc <= 0x06e8)
-        || (wc >= 0x06ea && wc <= 0x06ed)
-        || wc == 0x070f
-        || (wc >= 0x0730 && wc <= 0x074a)
-        || (wc >= 0x07a6 && wc <= 0x07b0)
-        || (wc >= 0x0900 && wc <= 0x0902) // Devanagari combining
-        || wc == 0x093c || wc == 0x0941
-        || (wc >= 0x0941 && wc <= 0x0948)
-        || wc == 0x094d
-        || (wc >= 0x0951 && wc <= 0x0957)
-        || (wc >= 0x0962 && wc <= 0x0963)
-        || (wc >= 0x1ab0 && wc <= 0x1aff) // Combining Diacritical Marks Extended
-        || (wc >= 0x1dc0 && wc <= 0x1dff) // Combining Diacritical Marks Supplement
-        || (wc >= 0x20d0 && wc <= 0x20ff) // Combining Marks for Symbols
-        || (wc >= 0xfe00 && wc <= 0xfe0f) // Variation Selectors
-        || (wc >= 0xfe20 && wc <= 0xfe2f) // Combining Half Marks
-        || wc == 0x00ad   // Soft hyphen (zero-width in most renderers)
-        || wc == 0x200b   // Zero-width space
-        || wc == 0x200c   // Zero-width non-joiner
-        || wc == 0x200d   // Zero-width joiner
-        || wc == 0x200e   // Left-to-right mark
-        || wc == 0x200f   // Right-to-left mark
-        || wc == 0x2028   // Line separator (format char)
-        || wc == 0x2029   // Paragraph separator (format char)
-        || (wc >= 0x202a && wc <= 0x202e) // Bidi formatting
-        || (wc >= 0x2060 && wc <= 0x2064) // Invisible operators
-        || (wc >= 0x2066 && wc <= 0x206f) // Bidi isolates
-        || wc == 0xfeff   // BOM / zero-width no-break space
-        || (wc >= 0xe0100 && wc <= 0xe01ef)
-    // Variation Selectors Supplement
-    {
-        return 0;
-    }
-    // CJK Unified Ideographs and common fullwidth / wide ranges.
-    #[allow(clippy::manual_range_contains)]
-    if (wc >= 0x1100 && wc <= 0x115f)   // Hangul Jamo
-        || (wc >= 0x231a && wc <= 0x231b) // Watch, Hourglass (emoji)
-        || wc == 0x2329 || wc == 0x232a  // Angle brackets
-        || (wc >= 0x23e9 && wc <= 0x23ec) // Emoji
-        || wc == 0x23f0 || wc == 0x23f3
-        || (wc >= 0x25fd && wc <= 0x25fe) // Medium small squares
-        || (wc >= 0x2614 && wc <= 0x2615) // Umbrella, Hot beverage
-        || (wc >= 0x2648 && wc <= 0x2653) // Zodiac signs
-        || wc == 0x267f || wc == 0x2693
-        || wc == 0x26a1
-        || (wc >= 0x26aa && wc <= 0x26ab)
-        || (wc >= 0x26bd && wc <= 0x26be)
-        || (wc >= 0x26c4 && wc <= 0x26c5)
-        || wc == 0x26ce || wc == 0x26d4
-        || wc == 0x26ea
-        || (wc >= 0x26f2 && wc <= 0x26f3)
-        || wc == 0x26f5 || wc == 0x26fa
-        || wc == 0x26fd || wc == 0x2702
-        || wc == 0x2705
-        || (wc >= 0x2708 && wc <= 0x270d)
-        || wc == 0x270f
-        || (wc >= 0x2753 && wc <= 0x2755)
-        || wc == 0x2757
-        || (wc >= 0x2795 && wc <= 0x2797)
-        || wc == 0x27b0 || wc == 0x27bf
-        || (wc >= 0x2b1b && wc <= 0x2b1c)
-        || wc == 0x2b50 || wc == 0x2b55
-        || (wc >= 0x2e80 && wc <= 0xa4cf && wc != 0x303f) // CJK
-        || (wc >= 0xac00 && wc <= 0xd7a3) // Hangul Syllables
-        || (wc >= 0xf900 && wc <= 0xfaff) // CJK Compat Ideographs
-        || (wc >= 0xfe10 && wc <= 0xfe19) // CJK Vertical Forms
-        || (wc >= 0xfe30 && wc <= 0xfe6f) // CJK Compatibility Forms + Small Form Variants
-        || (wc >= 0xff01 && wc <= 0xff60) // Fullwidth forms
-        || (wc >= 0xffe0 && wc <= 0xffe6) // Fullwidth signs
-        || wc == 0x1f004 // Mahjong Tile
-        || wc == 0x1f0cf                 // Playing Card
-        || wc == 0x1f18e
-        || (wc >= 0x1f191 && wc <= 0x1f19a)
-        || (wc >= 0x1f200 && wc <= 0x1f202)
-        || (wc >= 0x1f210 && wc <= 0x1f23b)
-        || (wc >= 0x1f240 && wc <= 0x1f248)
-        || (wc >= 0x1f250 && wc <= 0x1f251)
-        || (wc >= 0x1f300 && wc <= 0x1f64f) // Misc Symbols & Emoticons
-        || (wc >= 0x1f680 && wc <= 0x1f6ff) // Transport & Map Symbols
-        || (wc >= 0x1f900 && wc <= 0x1f9ff) // Supplemental Symbols
-        || (wc >= 0x1fa00 && wc <= 0x1fa6f)
-        || (wc >= 0x1fa70 && wc <= 0x1faff)
-        || (wc >= 0x20000 && wc <= 0x2fffd) // CJK Extension B+
-        || (wc >= 0x30000 && wc <= 0x3fffd)
-    // CJK Extension G+
-    {
-        return 2;
-    }
-    1
+    };
+    charwidth::char_width(c).map_or(-1, |n| i32::try_from(n).unwrap_or(-1))
 }
 
 /// Return the display width of a wide string.
@@ -973,98 +882,154 @@ pub unsafe extern "C" fn wcswidth(s: *const WcharT, n: usize) -> i32 {
 
 // ---------------------------------------------------------------------------
 // Wide character classification (wctype.h)
+//
+// glibc's `C.UTF-8`: glibc's rules, applied to the system's Unicode data,
+// generated into `wctype_tables.rs` by `posix/tools/wctype_gen.py`
+// (design-decisions §1167). The library decodes UTF-8 whatever `setlocale`
+// reports, so every character `mbrtowc` can produce has its classes and its
+// case. Eight classes are stored; the other four follow from them and from
+// ASCII, as glibc's rules make them: `digit` and `xdigit` are ASCII's alone,
+// as C requires; `alnum` is `alpha` or `digit`; `punct` is `graph` and
+// neither.
 // ---------------------------------------------------------------------------
 
-/// Check if wide character is alphanumeric.
+use crate::wctype_tables as tables;
+
+/// The stored class bits of `wc`, from the run that holds it. A `wchar_t`
+/// that is not a code point -- negative, `WEOF`, past U+10FFFF -- is in no
+/// class.
+fn class_bits(wc: WcharT) -> u32 {
+    let Ok(cp) = u32::try_from(wc) else {
+        return 0;
+    };
+    if cp > 0x10_FFFF {
+        return 0;
+    }
+    let runs = &tables::CLASS_RUNS;
+    let i = runs.partition_point(|&run| run >> 8 <= cp);
+    i.checked_sub(1)
+        .and_then(|i| runs.get(i))
+        .map_or(0, |&run| run & 0xff)
+}
+
+/// Whether `wc` is one of C's ten decimal digits, the only ones `iswdigit`
+/// may answer for.
+fn is_ascii_digit(wc: WcharT) -> bool {
+    (0x30..=0x39).contains(&wc)
+}
+
+/// Check if wide character is alphanumeric: alphabetic, or a digit.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswalnum(wc: WcharT) -> i32 {
-    i32::from(matches!(wc, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a))
+    i32::from(class_bits(wc) & tables::ALPHA != 0 || is_ascii_digit(wc))
 }
 
-/// Check if wide character is alphabetic.
+/// Check if wide character is alphabetic: Unicode's `Alphabetic`, and the
+/// decimal digits of every other script, which C forbids `iswdigit` to own.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswalpha(wc: WcharT) -> i32 {
-    i32::from(matches!(wc, 0x41..=0x5a | 0x61..=0x7a))
+    i32::from(class_bits(wc) & tables::ALPHA != 0)
 }
 
-/// Check if wide character is a digit.
+/// Check if wide character is a digit: `0` to `9` and nothing else, as C
+/// requires.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswdigit(wc: WcharT) -> i32 {
-    i32::from(matches!(wc, 0x30..=0x39))
+    i32::from(is_ascii_digit(wc))
 }
 
-/// Check if wide character is a hex digit.
+/// Check if wide character is a hex digit: `[0-9A-Fa-f]`, as C requires.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswxdigit(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x30..=0x39 | 0x41..=0x46 | 0x61..=0x66))
 }
 
-/// Check if wide character is whitespace.
+/// Check if wide character is whitespace: C's six, the line and paragraph
+/// separators, and the spaces that may break a line (not U+00A0 and its
+/// no-break kin).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswspace(wc: WcharT) -> i32 {
-    i32::from(matches!(wc, 0x09..=0x0d | 0x20))
+    i32::from(class_bits(wc) & tables::SPACE != 0)
 }
 
-/// Check if wide character is a blank (space or tab).
+/// Check if wide character is a blank: tab, and the spaces that may break a
+/// line.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswblank(wc: WcharT) -> i32 {
-    i32::from(matches!(wc, 0x09 | 0x20))
+    i32::from(class_bits(wc) & tables::BLANK != 0)
 }
 
-/// Check if wide character is printable.
-///
-/// Returns nonzero for printable characters (0x20-0x7E and above 0x9F).
-/// C1 control characters (0x80-0x9F) are NOT printable.
+/// Check if wide character is printable: assigned, and not a control, a
+/// surrogate, or the line or paragraph separator.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswprint(wc: WcharT) -> i32 {
-    i32::from(wc >= 0x20 && wc != 0x7f && !(0x80..=0x9f).contains(&wc))
+    i32::from(class_bits(wc) & tables::PRINT != 0)
 }
 
-/// Check if wide character is a control character.
-///
-/// Returns nonzero for C0 controls (0x00-0x1F), DEL (0x7F),
-/// and C1 controls (0x80-0x9F).
+/// Check if wide character is a control character: C0, DEL, C1, and the
+/// line and paragraph separators.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswcntrl(wc: WcharT) -> i32 {
-    i32::from(wc < 0x20 || wc == 0x7f || (0x80..=0x9f).contains(&wc))
+    i32::from(class_bits(wc) & tables::CNTRL != 0)
 }
 
-/// Check if wide character is uppercase.
+/// Check if wide character is uppercase: it has a lower case, or Unicode
+/// calls it `Uppercase`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswupper(wc: WcharT) -> i32 {
-    i32::from(matches!(wc, 0x41..=0x5a))
+    i32::from(class_bits(wc) & tables::UPPER != 0)
 }
 
-/// Check if wide character is lowercase.
+/// Check if wide character is lowercase: it has an upper case, or Unicode
+/// calls it `Lowercase`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswlower(wc: WcharT) -> i32 {
-    i32::from(matches!(wc, 0x61..=0x7a))
+    i32::from(class_bits(wc) & tables::LOWER != 0)
 }
 
-/// Check if wide character is punctuation.
+/// Check if wide character is punctuation: graphic, and neither alphabetic
+/// nor a digit.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswpunct(wc: WcharT) -> i32 {
-    i32::from(iswprint(wc) != 0 && iswspace(wc) == 0 && iswalnum(wc) == 0)
+    let bits = class_bits(wc);
+    i32::from(bits & tables::GRAPH != 0 && bits & tables::ALPHA == 0 && !is_ascii_digit(wc))
 }
 
-/// Check if wide character is a graph character (printable, not space).
+/// Check if wide character is graphic: printable, and not a space.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswgraph(wc: WcharT) -> i32 {
-    i32::from(iswprint(wc) != 0 && wc != 0x20)
+    i32::from(class_bits(wc) & tables::GRAPH != 0)
 }
 
-/// Convert wide character to lowercase.
+/// `wc` moved by the run of `runs` that covers it, or `wc` itself.
+fn map_case(wc: WcharT, runs: &[(u32, u32, i32, bool)]) -> WcharT {
+    let Ok(cp) = u32::try_from(wc) else {
+        return wc;
+    };
+    let i = runs.partition_point(|&(first, ..)| first <= cp);
+    let Some(&(first, last, delta, every_other)) = i.checked_sub(1).and_then(|i| runs.get(i))
+    else {
+        return wc;
+    };
+    // `first <= cp` by the search, so the difference is the offset in the run.
+    if cp > last || (every_other && cp.wrapping_sub(first) % 2 != 0) {
+        return wc;
+    }
+    cp.checked_add_signed(delta)
+        .and_then(|to| WcharT::try_from(to).ok())
+        .unwrap_or(wc)
+}
+
+/// Convert wide character to lowercase: Unicode's simple lowercase mapping.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn towlower(wc: WcharT) -> WcharT {
-    if iswupper(wc) != 0 { wc + 32 } else { wc }
+    map_case(wc, &tables::TO_LOWER)
 }
 
-/// Convert wide character to uppercase.
+/// Convert wide character to uppercase: Unicode's simple uppercase mapping.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn towupper(wc: WcharT) -> WcharT {
-    if iswlower(wc) != 0 { wc - 32 } else { wc }
+    map_case(wc, &tables::TO_UPPER)
 }
 
 // ---------------------------------------------------------------------------
@@ -4879,6 +4844,268 @@ mod tests {
         // Emoji in SMP should be width 2.
         assert_eq!(wcwidth(0x1f600), 2); // 😀
         assert_eq!(wcwidth(0x1f680), 2); // 🚀
+    }
+
+    // -----------------------------------------------------------------------
+    // Classes and case: glibc's C.UTF-8 (wctype_oracle.txt)
+    // -----------------------------------------------------------------------
+
+    /// What `posix/tools/oracle/wctype_harness.py` saw glibc 2.39 answer
+    /// under `C.UTF-8`, for every code point: the class runs (bits in the
+    /// harness's order), and the lower and upper mappings that move.
+    static WCTYPE_ORACLE: &str = include_str!("wctype_oracle.txt");
+
+    /// The twelve classifiers, in the oracle's bit order.
+    const CLASSIFIERS: [(&str, extern "C" fn(WcharT) -> i32); 12] = [
+        ("alnum", iswalnum),
+        ("alpha", iswalpha),
+        ("blank", iswblank),
+        ("cntrl", iswcntrl),
+        ("digit", iswdigit),
+        ("graph", iswgraph),
+        ("lower", iswlower),
+        ("print", iswprint),
+        ("punct", iswpunct),
+        ("space", iswspace),
+        ("upper", iswupper),
+        ("xdigit", iswxdigit),
+    ];
+
+    /// Whether Unicode assigned `cp` after glibc's data was made.
+    fn assigned_since_glibc(cp: u32) -> bool {
+        crate::wctype_tables::ASSIGNED_SINCE_GLIBC
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&cp))
+    }
+
+    /// Every code point's twelve classes and both mappings are glibc's,
+    /// but where Unicode has moved on since glibc's data: a character
+    /// assigned since -- which glibc must then give no class and no case,
+    /// checked here -- or one of the few dozen the generator lists by name
+    /// as changed.
+    #[test]
+    fn every_class_and_case_is_glibcs_but_where_unicode_moved_on() {
+        let mut masks = std::vec![0u32; 0x11_0000];
+        let mut lower = std::collections::HashMap::new();
+        let mut upper = std::collections::HashMap::new();
+        let mut lines = WCTYPE_ORACLE.lines();
+        assert_eq!(lines.next(), Some("glibc 2.39 C.UTF-8"));
+        for line in lines {
+            let words: std::vec::Vec<&str> = line.split(' ').collect();
+            let hex = |i: usize| u32::from_str_radix(words[i], 16).expect("hex");
+            match words[0] {
+                "class" => masks[hex(1) as usize..=hex(2) as usize].fill(hex(3)),
+                "lower" => {
+                    lower.insert(hex(1), hex(2));
+                }
+                "upper" => {
+                    upper.insert(hex(1), hex(2));
+                }
+                other => panic!("an oracle line of kind {other}"),
+            }
+        }
+        let (mut compared, mut assigned, mut changed) = (0u32, 0u32, 0u32);
+        for cp in 0..=0x10_FFFFu32 {
+            if assigned_since_glibc(cp) {
+                // A character here, nothing in glibc's data.
+                assert_eq!(masks[cp as usize], 0, "glibc classifies U+{cp:04X}");
+                assert!(
+                    !lower.contains_key(&cp) && !upper.contains_key(&cp),
+                    "U+{cp:04X}"
+                );
+                assigned += 1;
+                continue;
+            }
+            if crate::wctype_tables::CHANGED_SINCE_GLIBC.contains(&cp) {
+                changed += 1;
+                continue;
+            }
+            let wc = cp as WcharT;
+            for (bit, (name, test)) in CLASSIFIERS.iter().enumerate() {
+                let want = masks[cp as usize] & (1 << bit) != 0;
+                assert_eq!(test(wc) != 0, want, "isw{name}(U+{cp:04X})");
+            }
+            assert_eq!(
+                towlower(wc) as u32,
+                *lower.get(&cp).unwrap_or(&cp),
+                "towlower(U+{cp:04X})"
+            );
+            assert_eq!(
+                towupper(wc) as u32,
+                *upper.get(&cp).unwrap_or(&cp),
+                "towupper(U+{cp:04X})"
+            );
+            compared += 1;
+        }
+        assert_eq!(compared + assigned + changed, 0x11_0000);
+        assert_eq!(
+            changed as usize,
+            crate::wctype_tables::CHANGED_SINCE_GLIBC.len()
+        );
+    }
+
+    /// Unicode 18.0 where glibc's data is 15.1: a letter assigned since is a
+    /// letter here, and has its case.
+    #[test]
+    fn a_letter_newer_than_glibcs_data_is_a_letter() {
+        // U+1C89 CYRILLIC CAPITAL LETTER TJE, Unicode 16.0, lower U+1C8A.
+        assert_ne!(iswalpha(0x1c89), 0);
+        assert_ne!(iswupper(0x1c89), 0);
+        assert_eq!(towlower(0x1c89), 0x1c8a);
+        assert_eq!(towupper(0x1c8a), 0x1c89);
+    }
+
+    /// Letters, cases and spaces past ASCII: what a ported C program needs
+    /// to compare words case-insensitively and to split them.
+    #[test]
+    fn classes_and_case_past_ascii() {
+        assert_ne!(iswalpha(0xe9), 0); // é
+        assert_ne!(iswlower(0xe9), 0);
+        assert_eq!(towupper(0xe9), 0xc9);
+        assert_eq!(towlower(0xc9), 0xe9);
+        assert_eq!(towupper(0xdf), 0xdf); // ß has no single upper case
+        assert_ne!(iswlower(0xdf), 0);
+        assert_eq!(towlower(0x130), 0x69); // İ: Unicode's simple mapping
+        assert_eq!(towupper(0x3c2), 0x3a3); // final sigma
+        assert_ne!(iswalpha(0x4e00), 0); // 一
+        assert_eq!(iswupper(0x4e00) | iswlower(0x4e00), 0);
+        assert_ne!(iswalpha(0x0660), 0); // ARABIC-INDIC DIGIT ZERO: alpha, not digit
+        assert_eq!(iswdigit(0x0660), 0);
+        assert_ne!(iswalnum(0x0660), 0);
+        assert_ne!(iswspace(0x3000), 0); // IDEOGRAPHIC SPACE
+        assert_ne!(iswblank(0x3000), 0);
+        assert_eq!(iswspace(0xa0), 0); // NO-BREAK SPACE: not a space
+        assert_ne!(iswpunct(0xa0), 0);
+        assert_ne!(iswspace(0x2028), 0); // LINE SEPARATOR
+        assert_ne!(iswcntrl(0x2028), 0);
+        assert_eq!(iswprint(0x2028), 0);
+        assert_ne!(iswpunct(0x2014), 0); // EM DASH
+        assert_ne!(iswprint(0xe000), 0); // private use
+    }
+
+    /// Nothing that is not a code point is in a class or has a case:
+    /// `WEOF`, a negative value, a surrogate, a value past U+10FFFF.
+    #[test]
+    fn what_is_not_a_character_has_no_class_and_no_case() {
+        for wc in [-1, WcharT::MIN, 0xd800, 0xdfff, 0x11_0000, WcharT::MAX] {
+            for (name, test) in CLASSIFIERS {
+                assert_eq!(test(wc), 0, "isw{name}({wc:#x})");
+            }
+            assert_eq!(towlower(wc), wc);
+            assert_eq!(towupper(wc), wc);
+        }
+    }
+
+    /// `iswctype` and `towctrans` answer as the functions they name, and the
+    /// `_l` forms as the plain ones.
+    #[test]
+    fn the_generic_and_locale_forms_agree_with_the_functions() {
+        for cp in [
+            0x41u32, 0xe9, 0x3c3, 0x4e00, 0x3000, 0x2028, 0x1c89, 0x10ffff,
+        ] {
+            let wc = cp as WcharT;
+            for (name, test) in CLASSIFIERS {
+                let mut cname = name.as_bytes().to_vec();
+                cname.push(0);
+                // SAFETY: `cname` is NUL-terminated.
+                let class = unsafe { wctype(cname.as_ptr()) };
+                assert_ne!(class, 0, "{name}");
+                assert_eq!(iswctype(wc, class) != 0, test(wc) != 0, "{name} U+{cp:04X}");
+            }
+            // SAFETY: both names are NUL-terminated.
+            let (lo, up) = unsafe {
+                (
+                    wctrans(b"tolower\0".as_ptr()),
+                    wctrans(b"toupper\0".as_ptr()),
+                )
+            };
+            assert_eq!(towctrans(wc, lo), towlower(wc));
+            assert_eq!(towctrans(wc, up), towupper(wc));
+            assert_eq!(iswalpha_l(wc, 0), iswalpha(wc));
+            assert_eq!(towlower_l(wc, 0), towlower(wc));
+            assert_eq!(towupper_l(wc, 0), towupper(wc));
+        }
+    }
+
+    /// The case runs' every-other-code-point form: Latin Extended-A
+    /// alternates capital and small, and only the capitals move down.
+    #[test]
+    fn a_strided_case_run_moves_only_its_own_code_points() {
+        assert_eq!(towlower(0x100), 0x101); // Ā -> ā
+        assert_eq!(towlower(0x101), 0x101); // ā stays
+        assert_eq!(towupper(0x101), 0x100);
+        assert_eq!(towupper(0x100), 0x100);
+        assert_eq!(towlower(0x17d), 0x17e); // Ž -> ž
+    }
+
+    /// Every character's width is `charwidth`'s, the table the terminal and
+    /// every Rust program measure with -- all 1,112,064 of them, so a range
+    /// the libc reads differently cannot hide between examples.
+    #[test]
+    fn wcwidth_is_charwidths_for_every_character() {
+        let mut checked = 0u32;
+        for cp in 1..=0x10_FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let want = charwidth::char_width(c).map_or(-1, |n| n as i32);
+            assert_eq!(wcwidth(cp as WcharT), want, "U+{cp:04X}");
+            checked += 1;
+        }
+        assert_eq!(checked, 0x10_FFFF - 0x800, "every scalar value but U+0000");
+        assert_eq!(wcwidth(0), 0);
+    }
+
+    /// The places §1042 leaves glibc 2.39 on purpose: the soft hyphen takes
+    /// no column, a prepended concatenation mark takes one, a conjoining
+    /// letter of Hangul Jamo Extended-B takes none, and a character newer
+    /// than glibc's Unicode is measured by its own data.
+    #[test]
+    fn wcwidth_departs_from_glibc_where_the_one_table_does() {
+        assert_eq!(wcwidth(0x00ad), 0); // soft hyphen: glibc 1
+        assert_eq!(wcwidth(0x0600), 1); // ARABIC NUMBER SIGN: a visible sign
+        assert_eq!(wcwidth(0xd7b0), 0); // HANGUL JUNGSEONG O-YEO: glibc 1
+        assert_eq!(wcwidth(0x1fa8a), 2); // an emoji since Unicode 16
+    }
+
+    /// What is not a Unicode scalar value has no width: the surrogates, a
+    /// value past U+10FFFF, a negative one -- as glibc answers.
+    #[test]
+    fn wcwidth_of_what_is_not_a_character_is_minus_one() {
+        for wc in [
+            0xd800,
+            0xdbff,
+            0xdc00,
+            0xdfff,
+            0x11_0000,
+            0x7fff_ffff,
+            -1,
+            WcharT::MIN,
+        ] {
+            assert_eq!(wcwidth(wc), -1, "{wc:#x}");
+        }
+    }
+
+    /// `wcswidth` sums the widths of at most `n` characters, stopping at a
+    /// NUL, and is -1 when any of them has none.
+    #[test]
+    fn wcswidth_sums_and_refuses_a_widthless_character() {
+        let text: [WcharT; 6] = [0x61, 0x4e00, 0x0301, 0x1f600, 0x00ad, 0];
+        // SAFETY: `text` holds six characters, the last a NUL.
+        unsafe {
+            assert_eq!(wcswidth(text.as_ptr(), 6), 1 + 2 + 0 + 2 + 0);
+            assert_eq!(wcswidth(text.as_ptr(), 2), 1 + 2);
+            assert_eq!(wcswidth(text.as_ptr(), 0), 0);
+        }
+        let control: [WcharT; 3] = [0x61, 0x1b, 0];
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(wcswidth(control.as_ptr(), 3), -1);
+            assert_eq!(wcswidth(control.as_ptr(), 1), 1);
+        }
+        let surrogate: [WcharT; 2] = [0xd800, 0];
+        // SAFETY: as above.
+        unsafe { assert_eq!(wcswidth(surrogate.as_ptr(), 2), -1) };
     }
 
     // -----------------------------------------------------------------------

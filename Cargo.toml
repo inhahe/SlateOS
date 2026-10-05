@@ -19,6 +19,7 @@ members = [
     "gui/video/codec",
     "gui/video/flac",
     "gui/video/matroska",
+    "gui/video/mp3",
     "gui/video/mp4",
     "gui/video/ogg",
     "gui/video/opus",

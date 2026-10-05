@@ -2499,6 +2499,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp3"
+version = "0.1.0"
+
+[[package]]
 name = "mp4"
 version = "0.1.0"
 dependencies = [

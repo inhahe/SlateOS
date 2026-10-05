@@ -3906,6 +3906,18 @@ lane C's `guitk`.
       the stream's depth now (`SoundInfo::bits_per_sample`), so 24-bit FLAC
       stays 24-bit. Five fixtures, bit-exact after seeks. design-decisions
       §1351, §1354.
+    - `[x]` The MP3 decoder, `gui/video/mp3`: minimp3's decoder ported --
+      MPEG-1, -2 and -2.5, Layers I, II and III, free format, every stereo
+      mode -- and held to minimp3 (built without SIMD) sample for sample,
+      its sync and resync included: 42 files made here (LAME, shine,
+      FFmpeg's MP2 encoder, twolame, Layer I made up field by field; damage
+      of seven kinds), minimp3's 83 vectors (`tests/vectors.rs`), 600
+      fuzzed files. Two misread bits read as the standard says, the
+      reference patched to match. design-decisions §1355.
+    - `[ ]` MP3 in `videocodec::Sound`: `.mp3` files (an ID3v2 tag passed
+      over, the Xing/LAME frame's gapless delay and padding trimmed as
+      FFmpeg trims them, seeks), and MP3 in Matroska and MP4 -- the music
+      player's commonest files.
     - `[-]` In `videocodec`, and out to the speakers: a file's sound decoded
       beside its pictures.
       - `[x]` `videocodec::Sound`: a Matroska or WebM file's Opus track,

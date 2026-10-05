@@ -1605,6 +1605,10 @@ live.
   **Still open: the other ~56 crates.** 987 `const NAME: Color` declarations
   over 68 crates was the original count; the twelve were the visible end of it.
   Thirteen more crates already have a `Palette` in scope and are nearly free.
+  *(2026-10-05: those crates are all under `apps/`, lane E's since the
+  six-lane split, so what is left of this item is lane E's to do; lane C's
+  part -- `appearance::palette_check::assert_drawn_from`, the check each
+  crate adopts as its fix and its guard -- is done and on `main`.)*
 
   **The ~43 games are C-Q16 and are not part of this.** Their chrome follows
   the theme either way; whether the *board* should is a question about taste

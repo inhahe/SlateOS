@@ -876,7 +876,11 @@ unsafe impl Sync for TzPtr {}
 /// glibc -- and then wherever glibc's code puts it, which is not only
 /// `tzset`: a `localtime` in a zoneinfo zone moves it to the names in force
 /// around the instant converted ([`crate::tz`]).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+///
+/// The target's only: on the host the three are per test thread, as the
+/// zone they describe is (`host_tz_globals` in this file).
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
 pub static mut tzname: [TzPtr; 2] = [TzPtr(c"GMT".as_ptr().cast()), TzPtr(c"GMT".as_ptr().cast())];
 
 /// Seconds **west** of UTC for standard time.
@@ -885,7 +889,8 @@ pub static mut tzname: [TzPtr; 2] = [TzPtr(c"GMT".as_ptr().cast()), TzPtr(c"GMT"
 /// so New York's `timezone` is `18000` while its `tm_gmtoff` is `-18000`.
 /// POSIX defines it in terms of *standard* time, so it does not move when DST
 /// is in effect.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
 pub static mut timezone: i64 = 0;
 
 /// Whether daylight saving is ever in effect in the current zone.
@@ -893,8 +898,43 @@ pub static mut timezone: i64 = 0;
 /// Note "ever", not "now": POSIX defines this as a property of the zone, so it
 /// is 1 all year round for a zone with DST rules.  Use `tm_isdst` to ask about
 /// a particular instant.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
 pub static mut daylight: i32 = 0;
+
+/// The host build's `tzname`, `timezone` and `daylight`: per test thread, as
+/// the zone they describe is ([`crate::tz`]). Nothing outside this crate
+/// links the host build, so these need not be the C ABI's statics -- and
+/// shared, they would be every concurrent test's at once.
+#[cfg(not(target_os = "none"))]
+mod host_tz_globals {
+    /// `([tzname[0], tzname[1]], timezone, daylight)`.
+    pub(super) type Globals = ([*const u8; 2], i64, i32);
+
+    std::thread_local! {
+        static GLOBALS: core::cell::Cell<Globals> = const {
+            core::cell::Cell::new(([c"GMT".as_ptr().cast(), c"GMT".as_ptr().cast()], 0, 0))
+        };
+    }
+
+    pub(super) fn set(globals: Globals) {
+        // A failed `try_with` means the thread is shutting down, and its
+        // zone with it.
+        let _ = GLOBALS.try_with(|g| g.set(globals));
+    }
+
+    #[cfg(test)]
+    pub(super) fn get() -> Globals {
+        GLOBALS.with(core::cell::Cell::get)
+    }
+}
+
+/// `tzname`, `timezone` and `daylight` as a C program would read them:
+/// `([tzname[0], tzname[1]], timezone, daylight)`, this test thread's.
+#[cfg(test)]
+pub(crate) fn tz_globals_for_test() -> ([*const u8; 2], i64, i32) {
+    host_tz_globals::get()
+}
 
 /// Initialize timezone information from the `TZ` environment variable.
 ///
@@ -911,6 +951,7 @@ pub extern "C" fn tzset() {
 
 /// Set the three POSIX zone globals: what [`crate::tz`]'s code leaves them as.
 pub(crate) fn set_tz_globals(std: *const u8, dst: *const u8, west: i64, ever_dst: i32) {
+    #[cfg(target_os = "none")]
     // SAFETY: these are the C-visible zone globals, which POSIX specifies as
     // unsynchronised and modifiable by `tzset`.  Each write is a single
     // pointer- or word-sized store to a process-lifetime static.
@@ -919,6 +960,8 @@ pub(crate) fn set_tz_globals(std: *const u8, dst: *const u8, west: i64, ever_dst
         (*core::ptr::addr_of_mut!(timezone)) = west;
         (*core::ptr::addr_of_mut!(daylight)) = ever_dst;
     }
+    #[cfg(not(target_os = "none"))]
+    host_tz_globals::set(([std, dst], west, ever_dst));
 }
 
 // ---------------------------------------------------------------------------
@@ -3615,23 +3658,18 @@ mod tests {
         }
     }
 
-    /// Serialises every test whose result depends on the process-global
-    /// timezone.
+    /// Installs a zone for the length of a test, and puts the previous `TZ`
+    /// back on drop.
     ///
-    /// The zone is derived from `TZ` in the process environment, so a
-    /// test that installs a zone races any concurrent test that converts
-    /// between UTC and local time (`mktime`, `timelocal`, `localtime`,
-    /// `ctime`).  Both kinds of test must hold this guard: the ones that
-    /// install a zone via [`TzGuard::set`], the zone-agnostic ones via
-    /// [`TzGuard::utc`] so they get the UTC they assume regardless of
-    /// what ran before them.  The lock is the same one the `environ`
-    /// tests use, because those mutate `TZ`'s backing store.
-    ///
-    /// On drop the previous `TZ` value and the installed zone are
-    /// restored, so a failing test cannot leak a zone into its
-    /// successors.
+    /// The zone, like the environment it is read from, is per test thread
+    /// on the host (`crate::tz`, `crate::perprocess`), so this serialises
+    /// nothing: a test that installs no zone reads a fresh process's, UTC,
+    /// whatever the tests beside it install. Until 2026-10-05 the zone was
+    /// shared, every zone-reading test had to hold this as a lock, and the
+    /// one that did not failed at random
+    /// (`known-issues-resolved/D-POSIX-HOST-TESTS-SHARE-ONE-TIME-ZONE.md`).
+    /// [`TzGuard::utc`] still says which zone a test assumes.
     struct TzGuard {
-        _env: std::sync::MutexGuard<'static, ()>,
         saved: Option<std::vec::Vec<u8>>,
     }
 
@@ -3639,10 +3677,9 @@ mod tests {
         /// Install `tz` (a POSIX TZ string, no trailing NUL) for the
         /// duration of the test.
         fn set(tz: &[u8]) -> Self {
-            let guard = crate::environ::lock_env_for_test();
             let saved = crate::environ::getenv_bytes(b"TZ").map(<[u8]>::to_vec);
             Self::put(tz);
-            Self { _env: guard, saved }
+            Self { saved }
         }
 
         /// Install UTC — the zone the timezone-agnostic tests assume.
@@ -5480,24 +5517,57 @@ mod tests {
         assert_eq!(dst_name, b"MST");
     }
 
+    /// The zone is per test thread on the host, as the environment is: one
+    /// set on another thread is not this thread's, and a thread that sets
+    /// none reads glibc's default for a process with no `TZ` and no
+    /// `/etc/localtime` -- UTC, in both `tzname`s. Until 2026-10-05 the zone
+    /// was one for every test, and a test that read it without taking
+    /// [`TzGuard`] read whatever a neighbour had set
+    /// (`known-issues-resolved/D-POSIX-HOST-TESTS-SHARE-ONE-TIME-ZONE.md`).
+    #[test]
+    fn test_a_zone_set_on_another_thread_is_not_this_threads() {
+        let other = std::thread::spawn(|| {
+            let _tz = TzGuard::set(b"EST5EDT,M3.2.0,M11.1.0");
+            let (west, ever_dst, std_name, dst_name) = zone_globals();
+            let mut tm = zero_tm();
+            // 2026-07-01 16:00 UTC is noon in New York's summer.
+            let t: TimeT = 1_782_921_600;
+            // SAFETY: both pointers are to live locals of the right types.
+            assert!(!unsafe { localtime_r(&raw const t, &raw mut tm) }.is_null());
+            (west, ever_dst, std_name, dst_name, tm.tm_hour)
+        });
+        let (west, ever_dst, std_name, dst_name, hour) = other.join().unwrap();
+        assert_eq!((west, ever_dst, hour), (5 * 3600, 1, 12));
+        assert_eq!(
+            (std_name.as_slice(), dst_name.as_slice()),
+            (&b"EST"[..], &b"EDT"[..])
+        );
+
+        // This thread set none, before or after.
+        tzset();
+        let (west, ever_dst, std_name, dst_name) = zone_globals();
+        assert_eq!((west, ever_dst), (0, 0));
+        assert_eq!(
+            (std_name.as_slice(), dst_name.as_slice()),
+            (&b"UTC"[..], &b"UTC"[..])
+        );
+        let mut tm = zero_tm();
+        let t: TimeT = 1_782_921_600;
+        // SAFETY: both pointers are to live locals of the right types.
+        assert!(!unsafe { localtime_r(&raw const t, &raw mut tm) }.is_null());
+        assert_eq!(tm.tm_hour, 16);
+    }
+
     /// Snapshot the four C-visible zone globals as owned values:
     /// `(timezone, daylight, tzname[0], tzname[1])`.
     ///
-    /// Read through raw pointers because taking a reference to a
-    /// `static mut` is unsound; the caller must hold a [`TzGuard`], which
-    /// is what makes the read race-free.
+    /// This test thread's, as a C program would read them
+    /// (`crate::time::tz_globals_for_test`).
     fn zone_globals() -> (i64, i32, std::vec::Vec<u8>, std::vec::Vec<u8>) {
-        // SAFETY: plain word-sized reads of process-lifetime statics,
-        // serialised against every writer by the caller's `TzGuard`.
-        unsafe {
-            let names = core::ptr::addr_of!(tzname).read();
-            (
-                core::ptr::addr_of!(timezone).read(),
-                core::ptr::addr_of!(daylight).read(),
-                cstr(names[0].0),
-                cstr(names[1].0),
-            )
-        }
+        let (names, west, ever_dst) = crate::time::tz_globals_for_test();
+        // SAFETY: each name is NUL-terminated, in this thread's name arena
+        // or a literal, and outlives the copy.
+        unsafe { (west, ever_dst, cstr(names[0]), cstr(names[1])) }
     }
 
     /// Copy a NUL-terminated libc string into an owned `Vec`.

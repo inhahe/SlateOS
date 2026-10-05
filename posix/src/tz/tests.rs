@@ -8,18 +8,21 @@
 //! the file system the host build cannot open (its file calls are `ENOSYS`):
 //! [`file_id`] and [`load_zone_file`] are the test build's.
 
-use std::sync::Mutex;
 use std::vec::Vec;
 
-use super::{FileId, State, TzFile, ZONE_FILE};
+use super::{FileId, State, TzFile, zone_file};
 use crate::time::Tm;
 
 // ---------------------------------------------------------------------------
 // The files
 // ---------------------------------------------------------------------------
 
-/// The test build's file system: path, bytes.
-static FILES: Mutex<Vec<(Vec<u8>, Vec<u8>)>> = Mutex::new(Vec::new());
+std::thread_local! {
+    /// The test build's file system: path, bytes. Per test thread, as the
+    /// zone that reads it is: one test's files are no other test's.
+    static FILES: core::cell::RefCell<Vec<(Vec<u8>, Vec<u8>)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
 
 /// `path` without its NUL, and with each run of `/` one `/`, as the kernel
 /// reads it -- `TZDIR=/usr/share/zoneinfo/` makes glibc open `…//…`.
@@ -36,36 +39,28 @@ fn normalise(path: &[u8]) -> Vec<u8> {
 
 /// Make these the only files there are.
 fn install_files(files: &[(Vec<u8>, Vec<u8>)]) {
-    let mut fs = FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    fs.clear();
-    fs.extend(files.iter().map(|(p, b)| (normalise(p), b.clone())));
+    FILES.with_borrow_mut(|fs| {
+        fs.clear();
+        fs.extend(files.iter().map(|(p, b)| (normalise(p), b.clone())));
+    });
 }
 
 /// The test build's `stat`: a file's identity -- its place in the table, and
 /// a fixed time -- or `None` when there is no such file.
 pub(super) fn file_id(path: &[u8]) -> Option<FileId> {
     let want = normalise(path);
-    let fs = FILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let i = fs.iter().position(|(p, _)| *p == want)?;
+    let i = FILES.with_borrow(|fs| fs.iter().position(|(p, _)| *p == want))?;
     Some((1, u64::try_from(i).ok()?.checked_add(1)?, 0))
 }
 
-/// The test build's read of a zone file into [`ZONE_FILE`].
+/// The test build's read of a zone file into [`zone_file`].
 pub(super) fn load_zone_file(path: &[u8]) -> Option<(TzFile<'static>, FileId)> {
     let want = normalise(path);
     let id = file_id(path)?;
-    let bytes = {
-        let fs = FILES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        fs.iter().find(|(p, _)| *p == want)?.1.clone()
-    };
+    let bytes =
+        FILES.with_borrow(|fs| fs.iter().find(|(p, _)| *p == want).map(|(_, b)| b.clone()))?;
     // SAFETY: the caller holds the zone lock, which guards the buffer.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(ZONE_FILE) };
+    let buf = unsafe { &mut *zone_file() };
     buf.get_mut(..bytes.len())?.copy_from_slice(&bytes);
     Some((super::parse_zone_file(bytes.len())?, id))
 }
@@ -124,18 +119,8 @@ fn dehex(text: &str) -> Option<Vec<u8>> {
 
 /// `globals ()` of the harness.
 fn globals() -> String {
-    // SAFETY: plain reads of the C-visible variables; the caller holds the
-    // environment lock, which serialises every writer.
-    unsafe {
-        let names = core::ptr::addr_of!(crate::time::tzname).read();
-        format!(
-            "{} {} {} {}",
-            hex(names[0].0),
-            hex(names[1].0),
-            core::ptr::addr_of!(crate::time::timezone).read(),
-            core::ptr::addr_of!(crate::time::daylight).read()
-        )
-    }
+    let (names, west, ever_dst) = crate::time::tz_globals_for_test();
+    format!("{} {} {} {}", hex(names[0]), hex(names[1]), west, ever_dst)
 }
 
 /// `marked ()` of the harness: every field recognisable.
@@ -379,13 +364,11 @@ fn a_full_arena_refuses_the_name() {
 
 /// `tzname[0]` and `timezone` as they stand.
 fn std_name_and_west() -> (Vec<u8>, i64) {
-    // SAFETY: reads of the C-visible variables under the environment lock.
-    unsafe {
-        let names = core::ptr::addr_of!(crate::time::tzname).read();
-        let p = names[0].0;
-        let name = core::slice::from_raw_parts(p, crate::string::strlen(p)).to_vec();
-        (name, core::ptr::addr_of!(crate::time::timezone).read())
-    }
+    let (names, west, _) = crate::time::tz_globals_for_test();
+    let p = names[0];
+    // SAFETY: a NUL-terminated name in this thread's arena, or a literal.
+    let name = unsafe { core::slice::from_raw_parts(p, crate::string::strlen(p)) };
+    (name.to_vec(), west)
 }
 
 #[test]

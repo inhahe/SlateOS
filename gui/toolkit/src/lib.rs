@@ -46,6 +46,7 @@ pub mod event;
 pub mod field;
 pub mod filetypes;
 pub mod fontdb;
+pub mod fontpicker;
 pub mod frame;
 pub mod grab;
 pub mod grid;

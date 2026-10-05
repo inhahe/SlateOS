@@ -49,6 +49,38 @@ const FONT_EXTENSIONS: [&str; 4] = ["ttf", "ttc", "otf", "otc"];
 /// symlink cycle or a misconfigured path from walking the whole disk.
 const MAX_DEPTH: u32 = 6;
 
+/// The weight at which a face counts as bold for [`FontDb::has_bold`]: CSS's
+/// semibold. A family whose heaviest upright face is 600 draws its bold text
+/// in that face -- CSS matching for 700 takes the heaviest below when nothing
+/// is heavier -- so it has a bold.
+pub const BOLD_WEIGHT: u16 = 600;
+
+/// The weights `face` draws ([`FaceInfo::weights`]): its `wght` axis's range
+/// if it has one, else `weight` -- its `OS/2` weight -- twice.
+fn weight_range(face: &Face, weight: u16) -> (u16, u16) {
+    face.variation_axes()
+        .and_then(|axes| axes.axes().iter().find(|axis| axis.tag == *b"wght"))
+        .map_or((weight, weight), |axis| {
+            (css_weight(axis.min, weight), css_weight(axis.max, weight))
+        })
+}
+
+/// An axis value as a CSS weight: rounded and held to 1 to 1000, or
+/// `otherwise` for a value that is not a number -- a damaged `fvar` is one
+/// face's problem, not a reason to drop it.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "rounded and clamped to 1..=1000 first"
+)]
+fn css_weight(value: f32, otherwise: u16) -> u16 {
+    if value.is_finite() {
+        value.round().clamp(1.0, 1000.0) as u16
+    } else {
+        otherwise
+    }
+}
+
 /// One installed face, as much of it as selection needs.
 ///
 /// Deliberately does not hold the file contents. The point of the index is to
@@ -80,6 +112,16 @@ pub struct FaceInfo {
     pub display: Vec<String>,
     /// Weight, slant and width, from the face's own `OS/2` table.
     pub style: Style,
+    /// The lightest and the heaviest weight the face draws, on the CSS
+    /// scale: its `OS/2` weight twice for a face of one weight, its `wght`
+    /// axis's range for a variable one -- Open Sans's single file draws 300
+    /// to 800.
+    ///
+    /// Kept beside [`style`](Self::style) because the two answer different
+    /// questions: a variable file's `OS/2` weight is its default instance's,
+    /// 400, which is right for choosing the file for regular text and wrong
+    /// for "can this family be drawn bold" ([`FontDb::has_bold`]).
+    pub weights: (u16, u16),
     /// Whether every glyph advances by the same width.
     ///
     /// Recorded here rather than asked for later because the scan already
@@ -190,11 +232,13 @@ impl FontDb {
         if families.is_empty() {
             return;
         }
+        let style = face.style();
         self.faces.push(FaceInfo {
             path: path.to_path_buf(),
             families: families.into_iter().collect(),
             display: display.into_iter().collect(),
-            style: face.style(),
+            weights: weight_range(&face, style.weight),
+            style,
             monospaced: face.is_monospaced(),
         });
     }
@@ -282,6 +326,22 @@ impl FontDb {
         self.faces
             .iter()
             .any(|face| face.monospaced && face.matches(family))
+    }
+
+    /// Whether `family` has an upright face that draws bold -- a bold file,
+    /// or a variable one whose weight axis reaches [`BOLD_WEIGHT`]. What a
+    /// font picker asks before offering "Bold": a family without one draws
+    /// its bold text in its regular face, since nothing here emboldens a
+    /// face that has no bold. `false` for a family that is not installed.
+    ///
+    /// Upright only: the render tree draws no italic, so an italic-only bold
+    /// would never be drawn.
+    #[must_use]
+    pub fn has_bold(&self, family: &str) -> bool {
+        let wanted = family.trim().to_lowercase();
+        self.faces.iter().any(|face| {
+            !face.style.italic && face.weights.1 >= BOLD_WEIGHT && face.families.contains(&wanted)
+        })
     }
 
     /// The best file for `family` at `want`, or `None` if the family is not
@@ -424,6 +484,9 @@ mod tests {
                     italic: *italic,
                     width: *width,
                 },
+                // One weight, as a static file draws; a test of a variable
+                // face sets the range itself.
+                weights: (*weight, *weight),
                 // Proportional unless a test says otherwise, so the existing
                 // entries keep their shape. `db_mono` is how a test says
                 // otherwise.
@@ -839,5 +902,78 @@ mod tests {
         assert!(matches!(err, LoadError::Unreadable { .. }), "{err}");
         // The message names the file, so a user can act on it.
         assert!(err.to_string().contains("file.ttf"), "{err}");
+    }
+
+    /// **A family has a bold when an upright face of it reaches semibold** --
+    /// a bold file, or a variable one whose axis does -- whatever the
+    /// capitals asked with; not for an italic-only bold, nor a family that is
+    /// not installed.
+    #[test]
+    fn a_family_has_a_bold_when_an_upright_face_reaches_semibold() {
+        let mut db = db(&[
+            ("arial.ttf", &["Arial"], 400, false, 5),
+            ("arialbd.ttf", &["Arial"], 700, false, 5),
+            ("semi.ttf", &["Semi"], 400, false, 5),
+            ("semisb.ttf", &["Semi"], 600, false, 5),
+            ("light.ttf", &["Light Only"], 300, false, 5),
+            ("medium.ttf", &["Light Only"], 500, false, 5),
+            ("slanted.ttf", &["Slanted"], 400, false, 5),
+            ("slantedbi.ttf", &["Slanted"], 700, true, 5),
+            ("open.ttf", &["Open Variable"], 400, false, 5),
+            ("thin.ttf", &["Thin Variable"], 400, false, 5),
+        ]);
+        for face in &mut db.faces {
+            if face.path.ends_with("open.ttf") {
+                face.weights = (300, 800);
+            }
+            if face.path.ends_with("thin.ttf") {
+                face.weights = (100, 500);
+            }
+        }
+        assert!(db.has_bold("Arial"));
+        assert!(db.has_bold(" arial "), "trimmed, any capitals");
+        assert!(db.has_bold("Semi"), "a semibold is the bold");
+        assert!(!db.has_bold("Light Only"), "500 is not bold");
+        assert!(!db.has_bold("Slanted"), "its only bold is italic");
+        assert!(db.has_bold("Open Variable"), "the axis reaches bold");
+        assert!(!db.has_bold("Thin Variable"), "the axis stops short");
+        assert!(!db.has_bold("Nowhere"));
+    }
+
+    /// **A face's weights are its axis's range when it is variable, and its
+    /// own weight otherwise** -- read from files the host has, when it has
+    /// them: Windows' Bahnschrift is one variable file, 300 to 700.
+    #[test]
+    fn a_variable_face_draws_its_axis_range() {
+        let fonts = std::env::var_os("WINDIR").map(|w| Path::new(&w).join("Fonts"));
+        let Some(fonts) = fonts.filter(|d| d.is_dir()) else {
+            return;
+        };
+        let mut db = FontDb::new();
+        for file in ["bahnschrift.ttf", "arial.ttf"] {
+            db.add_file(&fonts.join(file));
+        }
+        for face in db.faces() {
+            if face.matches("Bahnschrift") {
+                assert_eq!(face.weights, (300, 700), "{}", face.path.display());
+                assert_eq!(face.style.weight, 400, "the default instance's");
+            } else {
+                assert_eq!(face.weights, (face.style.weight, face.style.weight));
+            }
+        }
+        if db.faces().iter().any(|f| f.matches("Bahnschrift")) {
+            assert!(db.has_bold("Bahnschrift"));
+        }
+    }
+
+    /// **An axis value becomes a CSS weight**, rounded and held to 1 to
+    /// 1000, and one that is not a number gives way to the face's own.
+    #[test]
+    fn an_axis_value_becomes_a_css_weight() {
+        assert_eq!(css_weight(299.6, 400), 300);
+        assert_eq!(css_weight(0.0, 400), 1);
+        assert_eq!(css_weight(5000.0, 400), 1000);
+        assert_eq!(css_weight(f32::NAN, 400), 400);
+        assert_eq!(css_weight(f32::INFINITY, 700), 700);
     }
 }

@@ -538,6 +538,15 @@ pub fn family_fixed_pitch(family: &str) -> bool {
     font_db().is_fixed_pitch(family)
 }
 
+/// Whether `family` can be drawn bold here: it has an upright bold face, or
+/// a variable one whose weight reaches bold ([`FontDb::has_bold`]). A family
+/// without one draws its bold text in its regular face. `false` for a family
+/// that is not installed. What a font picker asks before offering "Bold".
+#[must_use]
+pub fn family_has_bold(family: &str) -> bool {
+    font_db().has_bold(family)
+}
+
 /// The size, in pixels, the toolkit's controls are laid out for: ordinary
 /// interface text at the size it is drawn when the user has chosen none
 /// (`appearance`'s `fonts.ui_size`, 13 by default).

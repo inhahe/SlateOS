@@ -2447,9 +2447,9 @@ _Themes are simpler to vet than apps — they can't execute code. The process is
 - [ ] Zero custom infrastructure needed initially — a Git repo with CI is free, version-controlled, and community-reviewable
 
 #### Automated Validation (CI on PR)
-- [ ] Schema validation: does the YAML match the theme schema? Are all required color slots filled?
-- [ ] Asset validation: images are valid PNG/SVG under size limit, sound files are valid OGG/FLAC under duration/size limit, no executable content, no embedded scripts
-- [ ] Contrast checking: automated WCAG contrast ratio checks (text-on-background, text-on-surface, etc.). Does not reject — flags accessibility warnings for the author to see
+- [-] Schema validation: does the YAML match the theme schema? Are all required color slots filled? — *2026-10-05 (§1469): the check exists, `themecheck` (`appearance::themecheck`): the file read by the desktop's own reader, what it ignores reported, sections and `meta` keys nothing reads, sections that set nothing, `meta.supports` against what the theme covers, and the colours a theme leaves to the built-in one (a note: none are required). Running it on each pull request is the repository's CI, which does not exist yet.*
+- [-] Asset validation: images are valid PNG/SVG under size limit, sound files are valid OGG/FLAC under duration/size limit, no executable content, no embedded scripts — *2026-10-05 (§1469): in `themecheck`: icons drawn by the desktop's renderer and cursors read by its reader, each within the reader's limit; screenshots decoded, up to 4 MiB; no program or script by name or first bytes, no SVG with a script, event attribute, `foreignObject` or outside reference; no link leading out of the folder. Sound files wait on a sounds axis -- nothing reads one yet, so one is reported as a file nothing reads.*
+- [-] Contrast checking: automated WCAG contrast ratio checks (text-on-background, text-on-surface, etc.). Does not reject — flags accessibility warnings for the author to see — *2026-10-05 (§1469): in `themecheck`, as warnings: each text ink, code colour and terminal foreground the theme sets, against every ground any style draws text on, under the 4.5:1 floor -- naming the worst ground, the ratio, and the colour the palette draws instead.*
 - [ ] Preview rendering: CI job renders standardized screenshots (taskbar, file manager, settings app, terminal, a dialog box) using the actual theme colors and widget styles, so reviewers don't need to install the theme
 
 #### Human Review (Light Touch)

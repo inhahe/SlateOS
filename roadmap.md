@@ -2177,6 +2177,19 @@ live.
   application's Notifications page, asked of lane E
   (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
 
+- `[x]` `[C]` **A theme is checked before it is installed or shared**
+  (`design-decisions.md` §1469; `roadmap-detailed.md` §4.6, *Automated
+  Validation*) -- done 2026-10-05. `themecheck FOLDER...` (and
+  `appearance::themecheck::check` for an installer) says what in a theme the
+  desktop would refuse, ignore or adjust, judged by the desktop's own readers:
+  errors for a program or script, an SVG with a script or an outside
+  reference, a link out of the folder, a file past a reader's limit, an icon
+  or cursor it cannot read, a screenshot that is no picture; warnings for
+  what the theme file's reader ignores, sections and keys nothing reads,
+  `meta.supports` against what the theme covers, text the palette must
+  darken to read, files nothing reads; `--strict` fails on warnings, as a
+  repository would. **Next:** the repository and its CI, which do not exist.
+
 - `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
   -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
   pictures -- the folder the start menu's Pictures place opens -- in name

@@ -121,6 +121,14 @@ pub struct AppEntry {
     /// The kinds of file it opens (`MimeType`), as its entry lists them:
     /// what puts it in a file's "Open with" (see [`Self::opens`]).
     pub mime_types: Vec<String>,
+    /// The folder it starts in -- its entry's `Path` -- when that names one
+    /// from the root; `None` starts it wherever the desktop was started.
+    ///
+    /// Until 2026-10-05 `Path` was read into the entry and never reached a
+    /// launch: a program whose entry said `Path=/opt/game` -- as a program
+    /// that finds its data beside it does -- started in the desktop's folder,
+    /// and could not find its own files.
+    pub work_dir: Option<std::path::PathBuf>,
 }
 
 /// A kind of file, as a program's `MimeType` is matched against it.
@@ -195,6 +203,15 @@ impl AppEntry {
             desktop_id: Some(app.id),
             wm_class: app.startup_wm_class,
             mime_types: app.mime_types,
+            // From the root only: a relative `Path` is relative to nothing a
+            // launch knows, and would mean whatever folder the desktop
+            // happened to be started in. `has_root`, not `is_absolute`, so
+            // `/opt/game` is a folder from the root on the development host
+            // too, where an absolute path needs a drive.
+            work_dir: app
+                .path
+                .map(std::path::PathBuf::from)
+                .filter(|dir| dir.has_root()),
         })
     }
 
@@ -290,7 +307,8 @@ impl AppEntry {
     }
 
     /// Start the command line `argv`, program first -- inside a terminal
-    /// when the entry says it runs in one.
+    /// when the entry says it runs in one, and in its folder
+    /// ([`work_dir`](Self::work_dir)) when it names one.
     fn launch_line(&self, argv: Vec<std::ffi::OsString>) -> crate::hotkeys::Launch {
         use std::ffi::OsString;
         let mut argv = argv.into_iter();
@@ -302,19 +320,20 @@ impl AppEntry {
         if self.terminal {
             // `-e`, as xterm and every terminal that copied it take a
             // command: the rest of the line is the program and its
-            // arguments, each its own argument.
+            // arguments, each its own argument. The terminal starts in the
+            // entry's folder, and the program inside it with it.
             let mut args = vec![OsString::from("-e"), program];
             args.extend(argv);
             return crate::hotkeys::Launch {
                 program: std::path::PathBuf::from(TERMINAL),
                 args,
-                dir: None,
+                dir: self.work_dir.clone(),
             };
         }
         crate::hotkeys::Launch {
             program: std::path::PathBuf::from(program),
             args: argv.collect(),
-            dir: None,
+            dir: self.work_dir.clone(),
         }
     }
 }
@@ -689,6 +708,43 @@ mod tests {
         let parsed = desktopentry::DesktopEntry::parse(text.as_bytes()).unwrap();
         let app = desktopentry::App::from_entry(&parsed, "fixture.desktop", None).unwrap();
         AppEntry::from_desktop(app).unwrap()
+    }
+
+    /// **A program starts in the folder its entry's `Path` names** -- with
+    /// nothing to open, on files, from its jump list, and inside a terminal
+    /// -- and a `Path` that names no folder from the root is no folder.
+    #[test]
+    fn a_program_starts_in_the_folder_its_entry_names() {
+        let at = std::path::PathBuf::from("/opt/game");
+        let game = entry(
+            "[Desktop Entry]\nType=Application\nName=Game\nExec=game %f\nPath=/opt/game\n\
+             Actions=editor;\n[Desktop Action editor]\nName=Level editor\nExec=game --edit\n",
+        );
+        assert_eq!(game.work_dir.as_deref(), Some(at.as_path()));
+        assert_eq!(game.launch().dir.as_deref(), Some(at.as_path()));
+        let opening = game.launch_opening(&[std::path::Path::new("/home/me/level.map")]);
+        assert!(
+            opening
+                .iter()
+                .all(|launch| launch.dir.as_deref() == Some(at.as_path()))
+        );
+        assert_eq!(
+            game.launch_action("editor").unwrap().dir.as_deref(),
+            Some(at.as_path())
+        );
+
+        let in_terminal = entry(
+            "[Desktop Entry]\nType=Application\nName=Top\nExec=top\nTerminal=true\nPath=/var/log\n",
+        );
+        let launch = in_terminal.launch();
+        assert_eq!(launch.program, std::path::PathBuf::from(TERMINAL));
+        assert_eq!(launch.dir, Some(std::path::PathBuf::from("/var/log")));
+
+        let relative = entry("[Desktop Entry]\nType=Application\nName=X\nExec=x\nPath=data\n");
+        assert_eq!(relative.work_dir, None);
+        assert_eq!(relative.launch().dir, None);
+        let none = entry("[Desktop Entry]\nType=Application\nName=X\nExec=x\n");
+        assert_eq!(none.launch().dir, None);
     }
 
     /// **A jump list offers the actions with a command line, each with its

@@ -8,6 +8,10 @@
 # theme. Then choose it in Settings, or set `theme.colors: <name>` in
 # ~/.config/slateos/appearance.yaml.
 #
+# `themecheck <its folder>` then says what in it the desktop would refuse,
+# ignore or adjust -- a colour that is not one, text too faint to read, an icon
+# that draws nothing -- before you use it or share it.
+#
 # `colors` is dark mode and `colors-light` is light mode. A theme with only one
 # of the two is shown in that mode whichever the user has chosen. `terminal` and
 # `terminal-light` are a terminal's colours for the same two modes, `syntax` and

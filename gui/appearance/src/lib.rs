@@ -64,6 +64,8 @@ pub mod cursors;
 
 pub mod panel;
 
+pub mod themecheck;
+
 /// Where settings files live and how they are replaced.
 ///
 /// This was `appearance::config` before it was a crate of its own, and it is

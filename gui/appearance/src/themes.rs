@@ -152,6 +152,24 @@ pub const BUILT_IN_NAME: &str = "Aero";
 /// The file inside a theme's directory.
 pub const FILE_NAME: &str = "theme.yaml";
 
+/// The section describing a theme rather than setting anything: its name,
+/// author and the rest of [`ThemeMeta`].
+pub const META_SECTION: &str = "meta";
+
+/// The keys of the [`META_SECTION`] that are read, one per field of
+/// [`ThemeMeta`] -- held to it by a test, so a field added there is a key
+/// listed here, and the theme checker (`crate::themecheck`) does not call a
+/// key it reads ignored.
+pub const META_KEYS: [&str; 7] = [
+    "name",
+    "author",
+    "version",
+    "license",
+    "tags",
+    "screenshots",
+    "supports",
+];
+
 /// Where the system's themes are installed.
 pub const SYSTEM_DIR: &str = "/usr/share/slateos/themes";
 
@@ -424,13 +442,13 @@ pub fn parse(text: &str) -> ThemeFile {
     let doc = Document::parse(text);
     let mut warnings = Warnings::default();
     let meta = ThemeMeta {
-        name: scalar(&doc, &["meta", "name"]),
-        author: scalar(&doc, &["meta", "author"]),
-        version: scalar(&doc, &["meta", "version"]),
-        license: scalar(&doc, &["meta", "license"]),
-        tags: list(&doc, &["meta", "tags"]),
-        screenshots: list(&doc, &["meta", "screenshots"]),
-        supports: list(&doc, &["meta", "supports"]),
+        name: scalar(&doc, &[META_SECTION, "name"]),
+        author: scalar(&doc, &[META_SECTION, "author"]),
+        version: scalar(&doc, &[META_SECTION, "version"]),
+        license: scalar(&doc, &[META_SECTION, "license"]),
+        tags: list(&doc, &[META_SECTION, "tags"]),
+        screenshots: list(&doc, &[META_SECTION, "screenshots"]),
+        supports: list(&doc, &[META_SECTION, "supports"]),
     };
     let colors = ThemeColors {
         dark: read_colors(&doc, DARK_SECTION, &mut warnings),
@@ -615,7 +633,7 @@ fn read_section(
 
 /// A value as a warning quotes it: whole if short, cut and marked if not, so
 /// a quarter-megabyte value cannot become a quarter-megabyte message.
-fn quoted(value: &str) -> String {
+pub(crate) fn quoted(value: &str) -> String {
     let mut chars = value.chars();
     let head: String = chars.by_ref().take(MAX_QUOTED_CHARS).collect();
     if chars.next().is_some() {
@@ -658,7 +676,7 @@ fn read_theme_file(path: &Path) -> Result<ThemeFile, ThemeError> {
 }
 
 /// The bytes of the theme file at `path`, within [`MAX_FILE_BYTES`].
-fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
+pub(crate) fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
     let unreadable = |e: std::io::Error| ThemeError::Unreadable(e.to_string());
     let file = fs::File::open(path).map_err(unreadable)?;
     let size = file.metadata().map_err(unreadable)?.len();
@@ -1139,7 +1157,7 @@ fn describe(
 
 /// `name` resolved inside `dir`, if it stays there: relative, and made only
 /// of ordinary components (and `.`).
-fn confined(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn confined(dir: &Path, name: &str) -> Option<PathBuf> {
     let relative = Path::new(name);
     let inside = !name.is_empty()
         && relative

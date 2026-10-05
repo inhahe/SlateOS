@@ -418,6 +418,8 @@ pub fn available_in(roots: &[PathBuf]) -> Vec<CursorThemeInfo> {
     list
 }
 
+// `pub(crate)` for its XCursor builder, which the theme checker's tests
+// build their cursors with too.
 #[cfg(test)]
 #[path = "cursors_tests.rs"]
-mod tests;
+pub(crate) mod tests;

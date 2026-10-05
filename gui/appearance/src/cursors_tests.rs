@@ -22,7 +22,7 @@ use super::*;
 /// One image of a file under construction: `side` pixels square, every pixel
 /// `pixel`.
 #[derive(Clone, Copy)]
-struct Img {
+pub(crate) struct Img {
     nominal: u32,
     side: u32,
     hot: (u32, u32),
@@ -31,7 +31,7 @@ struct Img {
 }
 
 /// An image of `nominal` drawn `nominal` square with every pixel `pixel`.
-fn img(nominal: u32, pixel: u32) -> Img {
+pub(crate) fn img(nominal: u32, pixel: u32) -> Img {
     Img {
         nominal,
         side: nominal,
@@ -49,7 +49,7 @@ fn le(out: &mut Vec<u8>, words: &[u32]) {
 
 /// An XCursor file: a comment, then `images` in this order -- each its own
 /// chunk, named by its own table entry.
-fn xcursor(images: &[Img]) -> Vec<u8> {
+pub(crate) fn xcursor(images: &[Img]) -> Vec<u8> {
     const COMMENT: &[u8] = b"made for a test";
     let count = u32::try_from(images.len() + 1).unwrap();
     let table_end = 16 + 12 * count;

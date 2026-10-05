@@ -1,0 +1,5 @@
+# chunked_at_ffmpeg_tts_limit.mp4: what ffprobe makes of it (generate_fixtures.py).
+stream 0 afx0 1/48000 48000Hz/1 3072 -
+packet 0 0 0 1024 2048 12892 K__ 3bf7073ef5d30847aad46437be06c62b 0
+packet 0 1024 1024 1024 2048 14940 K__ 3bf7073ef5d30847aad46437be06c62b 0
+packet 0 2048 2048 1024 2048 16988 K__ 3bf7073ef5d30847aad46437be06c62b 0

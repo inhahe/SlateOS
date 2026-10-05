@@ -3903,6 +3903,12 @@ lane C's `guitk`.
         turn; and what a track says of its picture (colour, pixel shape,
         display matrix, clean aperture), held to ffprobe over 28 files more.
         It carries FFmpeg's licence (LGPL): open-questions F-Q7.
+      - `[x]` A file's claims held to its length: its tracks index at most a
+        sample a byte of it between them, FFmpeg's own ceilings kept exactly
+        -- after the fuzzer found a 734-byte file that asked for 46 GB.
+        Eighteen files claiming more than they hold or FFmpeg can index,
+        each read as ffprobe reads it; a fuzz target of the demuxer's own.
+        design-decisions §1364.
       - `[x]` In `videocodec`: a file opened by what it is -- EBML's magic,
         or FFmpeg's MP4 probe -- and played the same way through one
         container layer: MP4's edit lists obeyed (frames before a cut

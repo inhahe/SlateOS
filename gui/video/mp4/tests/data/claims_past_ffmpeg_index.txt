@@ -1,0 +1,2 @@
+# claims_past_ffmpeg_index.mp4: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vfx0 1/10240 64x48 12288 10240/1

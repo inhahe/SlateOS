@@ -7,7 +7,7 @@
 use std::io::{Read, Seek};
 
 use crate::Error;
-use crate::index::{DISCARD, Edit, Entry, KEYFRAME, Stream, Stsc, Tts};
+use crate::index::{DISCARD, Edit, Entry, INDEX_ALLOC, KEYFRAME, Stream, Stsc, TTS_LIMIT, Tts};
 use crate::rational::{self, Q};
 use crate::reader::Reader;
 use crate::track::{
@@ -146,11 +146,18 @@ pub(crate) struct Parser<'a, R> {
     /// The track `tfhd` named, in `frag_streams`.
     frag_current: Option<usize>,
     depth: u32,
+    /// How many more entries the tracks' indexes may take between them: one
+    /// a byte of the file, as every sample of a real file is at least a byte
+    /// of it. A table claiming more is held to it, so that memory follows
+    /// the file's length however many samples its tables claim.
+    entries_left: u64,
 }
 
 impl<'a, R: Read + Seek> Parser<'a, R> {
     pub(crate) fn new(r: &'a mut Reader<R>) -> Self {
+        let entries_left = r.len();
         Self {
+            entries_left,
             r,
             time_scale: 0,
             movie_matrix: [[0; 3]; 3],
@@ -446,7 +453,7 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 .map_or(Codec::Other, |d| d.codec),
         );
         if let Some(sc) = self.streams.get_mut(index) {
-            sc.build_index(advanced, movie_scale, codec);
+            sc.build_index(advanced, movie_scale, codec, &mut self.entries_left);
         }
         if let (Some(sc), Some(d)) = (self.streams.get(index), self.descriptions.get_mut(index))
             && sc.kind == Kind::Video
@@ -1502,6 +1509,12 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         self.r.u8()?;
         let flags = self.r.u24()?;
         let entries = self.r.u32()?;
+        // FFmpeg refuses a run that would take its table of the samples'
+        // times past its ceiling...
+        let timed = u64::try_from(sc.tts.len()).unwrap_or(u64::MAX);
+        if u64::from(entries).saturating_add(timed) >= u64::from(TTS_LIMIT) {
+            return Err(Error::Invalid("a trun of more samples than FFmpeg indexes"));
+        }
         let data_offset = if flags & TRUN_DATA_OFFSET != 0 {
             self.r.u32()?.cast_signed()
         } else {
@@ -1534,6 +1547,11 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         if entries == 0 {
             return Ok(());
         }
+        // ... and one whose index it cannot allocate.
+        let indexed = u64::try_from(sc.index.len()).unwrap_or(u64::MAX);
+        if indexed.saturating_add(u64::from(entries)) > u64::from(INDEX_ALLOC) {
+            return Err(Error::Invalid("a trun of more samples than FFmpeg indexes"));
+        }
         let per = u64::from(flags & TRUN_SAMPLE_DURATION != 0)
             + u64::from(flags & TRUN_SAMPLE_SIZE != 0)
             + u64::from(flags & TRUN_SAMPLE_FLAGS != 0)
@@ -1541,6 +1559,10 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         if u64::from(entries).saturating_mul(per * 4) > self.r.remaining() {
             return Err(Error::Truncated);
         }
+        // Past the room the file's length leaves, a sample is one the file
+        // has no bytes for: not indexed, but its time and bytes still move
+        // the run on, as FFmpeg's do.
+        let kept = entries.min(u32::try_from(self.entries_left).unwrap_or(u32::MAX));
         let mut prev_dts = sc.index.last().map(|e| e.timestamp);
         let mut distance = 0u32;
         if flags & TRUN_SAMPLE_CTS != 0 {
@@ -1548,6 +1570,20 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         }
         sc.has_stts = true;
         for n in 0..entries {
+            if n >= kept && per == 0 {
+                // The rest are the defaults alike, none of them in the box:
+                // where they take the run, at once -- refused as FFmpeg
+                // refuses the first of them to pass the end of time.
+                let rest = i128::from(entries - n);
+                let end = i128::from(dts) + rest * i128::from(frag.duration);
+                if frag.size == 0 || end > i128::from(i64::MAX) {
+                    return Err(Error::Invalid("a trun sample"));
+                }
+                dts = i64::try_from(end).unwrap_or(i64::MAX);
+                let bytes = i64::try_from(rest * i128::from(frag.size)).unwrap_or(i64::MAX);
+                offset = offset.saturating_add(bytes);
+                break;
+            }
             let mut sample_duration = frag.duration;
             let mut sample_size = frag.size;
             let mut sample_flags = if n == 0 { first_flags } else { frag.flags };
@@ -1568,28 +1604,32 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 return Ok(());
             };
             sc.dts_shift = update_dts_shift(sc.dts_shift, cts);
-            let keyframe = sample_flags & (FRAG_SAMPLE_IS_NON_SYNC | FRAG_SAMPLE_DEPENDS_YES) == 0;
-            let mut entry_flags = 0;
-            if keyframe {
-                distance = 0;
-                entry_flags |= KEYFRAME;
+            if n < kept {
+                let keyframe =
+                    sample_flags & (FRAG_SAMPLE_IS_NON_SYNC | FRAG_SAMPLE_DEPENDS_YES) == 0;
+                let mut entry_flags = 0;
+                if keyframe {
+                    distance = 0;
+                    entry_flags |= KEYFRAME;
+                }
+                if prev_dts.is_some_and(|p| p >= dts) {
+                    entry_flags |= DISCARD;
+                }
+                sc.index.push(Entry {
+                    pos: offset,
+                    timestamp: dts,
+                    size: sample_size,
+                    min_distance: distance,
+                    flags: entry_flags,
+                });
+                sc.tts.push(Tts {
+                    count: 1,
+                    offset: cts,
+                    duration: sample_duration,
+                });
+                self.entries_left = self.entries_left.saturating_sub(1);
+                distance = distance.saturating_add(1);
             }
-            if prev_dts.is_some_and(|p| p >= dts) {
-                entry_flags |= DISCARD;
-            }
-            sc.index.push(Entry {
-                pos: offset,
-                timestamp: dts,
-                size: sample_size,
-                min_distance: distance,
-                flags: entry_flags,
-            });
-            sc.tts.push(Tts {
-                count: 1,
-                offset: cts,
-                duration: sample_duration,
-            });
-            distance = distance.saturating_add(1);
             if dts.checked_add(i64::from(sample_duration)).is_none() || sample_size == 0 {
                 return Err(Error::Invalid("a trun sample"));
             }
@@ -1669,52 +1709,60 @@ fn sanity_check(sc: &Stream) -> Sanity {
 
 /// FFmpeg's repair of an `stsc`: from the last entry back, an entry out of
 /// order or zero is replaced by the next valid one, or patched if last.
+/// FFmpeg keeps the three numbers in signed ints, so a word of 2^31 or
+/// more is a negative one there, and repaired as one.
 fn repair_stsc(stsc: &mut Vec<Stsc>) {
+    let signed = |e: Stsc| {
+        (
+            e.first.cast_signed(),
+            e.count.cast_signed(),
+            e.id.cast_signed(),
+        )
+    };
     let mut i = stsc.len();
     while i > 0 {
         i = i.saturating_sub(1);
-        let first_min = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
+        let first_min = i32::try_from(i).unwrap_or(i32::MAX).saturating_add(1);
         let Some(cur) = stsc.get(i).copied() else {
             break;
         };
-        let next = stsc.get(i.wrapping_add(1)).copied();
-        let prev = i.checked_sub(1).and_then(|p| stsc.get(p)).copied();
-        let bad = next.is_some_and(|n| cur.first >= n.first)
-            || prev.is_some_and(|p| cur.first <= p.first)
-            || cur.first < first_min
-            || cur.count < 1
-            || cur.id < 1;
+        let (first, count, id) = signed(cur);
+        let next = stsc.get(i.wrapping_add(1)).copied().map(signed);
+        let prev = i
+            .checked_sub(1)
+            .and_then(|p| stsc.get(p))
+            .copied()
+            .map(signed);
+        let bad = next.is_some_and(|n| first >= n.0)
+            || prev.is_some_and(|p| first <= p.0)
+            || first < first_min
+            || count < 1
+            || id < 1;
         if !bad {
             continue;
         }
-        match next {
+        let fixed = match next {
             None => {
-                if cur.count == 0 && i > 0 {
+                if count == 0 && i > 0 {
                     stsc.truncate(i);
                     continue;
                 }
-                let mut fixed = cur;
-                fixed.first = fixed.first.max(first_min);
+                let mut first = first.max(first_min);
                 if let Some(p) = prev
-                    && fixed.first <= p.first
+                    && first <= p.0
                 {
-                    fixed.first = p.first.saturating_add(1).min(i32::MAX.cast_unsigned());
+                    first = p.0.saturating_add(1);
                 }
-                fixed.count = fixed.count.max(1);
-                fixed.id = fixed.id.max(1);
-                if let Some(e) = stsc.get_mut(i) {
-                    *e = fixed;
-                }
+                (first, count.max(1), id.max(1))
             }
-            Some(n) => {
-                if let Some(e) = stsc.get_mut(i) {
-                    *e = Stsc {
-                        first: n.first.saturating_sub(1),
-                        count: n.count,
-                        id: n.id,
-                    };
-                }
-            }
+            Some(n) => (n.0.saturating_sub(1), n.1, n.2),
+        };
+        if let Some(e) = stsc.get_mut(i) {
+            *e = Stsc {
+                first: fixed.0.cast_unsigned(),
+                count: fixed.1.cast_unsigned(),
+                id: fixed.2.cast_unsigned(),
+            };
         }
     }
 }
@@ -1935,13 +1983,88 @@ mod tests {
     #![allow(
         clippy::unwrap_used,
         clippy::indexing_slicing,
-        reason = "a test: a failure should be loud"
+        clippy::arithmetic_side_effects,
+        reason = "a test: a failure should be loud, and its numbers are a fixture's"
     )]
 
     use super::*;
 
     fn run(first: u32, count: u32, id: u32) -> Stsc {
         Stsc { first, count, id }
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+
+    /// Each box in `data`: its type and the whole box.
+    fn boxes(data: &[u8]) -> Vec<(&[u8], &[u8])> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at + 8 <= data.len() {
+            let size =
+                usize::try_from(u32::from_be_bytes(data[at..at + 4].try_into().unwrap())).unwrap();
+            out.push((&data[at + 4..at + 8], &data[at..at + size]));
+            at += size;
+        }
+        out
+    }
+
+    /// The tracks `data` holds, read as `Demuxer::open` reads them.
+    fn streams(data: Vec<u8>) -> Vec<Stream> {
+        let mut r = Reader::new(std::io::Cursor::new(data)).unwrap();
+        let mut p = Parser::new(&mut r);
+        p.read_header().unwrap();
+        core::mem::take(&mut p.streams)
+    }
+
+    #[test]
+    fn a_files_tracks_take_no_more_entries_than_it_has_bytes() {
+        // (The fixtures claiming FFmpeg's whole index are not among these:
+        // a sweep breaking the room would have them take gigabytes.)
+        for name in [
+            "found_tx3g_claims_billions.mp4",
+            "claims_a_million.mp4",
+            "trun_claims_a_million.mp4",
+            // Two runs: a million claimed, then five each giving its size.
+            "trun_runs_claim_millions.mp4",
+            "chunked_total_wraps.mp4",
+            "edits_repeat.mp4",
+        ] {
+            let data = fixture(name);
+            let len = data.len();
+            let entries: usize = streams(data).iter().map(|s| s.index.len()).sum();
+            assert!(entries <= len, "{name}: {entries} entries in {len} bytes");
+        }
+        // Twenty tracks, each claiming a million samples: the room is the
+        // file's, not each track's.
+        let data = fixture("claims_a_million.mp4");
+        let top = boxes(&data);
+        let moov = top.iter().find(|b| b.0 == b"moov").unwrap().1;
+        let inner = boxes(&moov[8..]);
+        let mvhd = inner.iter().find(|b| b.0 == b"mvhd").unwrap().1;
+        let trak = inner.iter().find(|b| b.0 == b"trak").unwrap().1;
+        let body: Vec<u8> = [mvhd, &trak.repeat(20)].concat();
+        let size = u32::try_from(body.len() + 8).unwrap().to_be_bytes();
+        let mut file = Vec::new();
+        for (kind, whole) in &top {
+            if *kind == b"moov" {
+                file.extend_from_slice(&size);
+                file.extend_from_slice(b"moov");
+                file.extend_from_slice(&body);
+            } else {
+                file.extend_from_slice(whole);
+            }
+        }
+        let len = file.len();
+        let s = streams(file);
+        assert_eq!(s.len(), 20);
+        let entries: usize = s.iter().map(|s| s.index.len()).sum();
+        assert!(entries <= len, "{entries} entries in {len} bytes");
+        assert!(
+            entries * 2 > len,
+            "the room used, not refused: {entries} of {len}"
+        );
     }
 
     #[test]
@@ -1971,6 +2094,25 @@ mod tests {
         let mut s = vec![run(0, 4, 0)];
         repair_stsc(&mut s);
         assert_eq!(s, [run(1, 4, 1)]);
+        // Words of 2^31 or more are FFmpeg's negative ints: a count and an
+        // entry patched to 1, and a first chunk replaced as out of order.
+        let mut s = vec![run(1, 0xFFFF_FC01, 0xFFFF_FFFF)];
+        repair_stsc(&mut s);
+        assert_eq!(s, [run(1, 1, 1)]);
+        let mut s = vec![run(1, 0xFFFF_FC01, 1)];
+        repair_stsc(&mut s);
+        assert_eq!(s, [run(1, 1, 1)], "the count alone negative");
+        let mut s = vec![run(0x8000_0000, 2, 1), run(3, 5, 1)];
+        repair_stsc(&mut s);
+        assert_eq!(s, [run(2, 5, 1), run(3, 5, 1)]);
+        // A last entry after one at the highest chunk an int holds: moved
+        // there too, as no higher is left, and the one before it put below.
+        let mut s = vec![run(1, 2, 1), run(0x7FFF_FFFF, 2, 1), run(5, 2, 1)];
+        repair_stsc(&mut s);
+        assert_eq!(
+            s,
+            [run(1, 2, 1), run(0x7FFF_FFFE, 2, 1), run(0x7FFF_FFFF, 2, 1)]
+        );
     }
 
     #[test]

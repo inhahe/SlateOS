@@ -1,0 +1,2 @@
+# trun_past_ffmpeg_index.mp4: ffprobe refuses it (trun_past_ffmpeg_index.mp4: Cannot allocate memory) (generate_fixtures.py).
+refused

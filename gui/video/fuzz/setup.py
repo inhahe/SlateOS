@@ -20,7 +20,8 @@ FUZZ = os.path.join(HOME, "fuzz")
 TREE = os.path.join(FUZZ, "tree")
 
 # The harness's own dependencies, and every crate they reach by `path`.
-ROOTS = ["gui/imagecodec", "gui/video/codec", "gui/video/matroska", "gui/video/vp8", "gui/video/vp9"]
+ROOTS = ["gui/imagecodec", "gui/video/codec", "gui/video/matroska", "gui/video/mp4", "gui/video/vp8",
+         "gui/video/vp9"]
 PATH_DEP = re.compile(r'path\s*=\s*"([^"]+)"')
 
 
@@ -144,6 +145,10 @@ counts["sound"] = sum(add_files("sound", s) for s in (
 ))
 counts["matroska"] = add_files("matroska", "gui/video/matroska/tests/data") + add_files(
     "matroska", "gui/video/vp9/tests/data", (".webm",))
+# MP4 and QuickTime: the demuxer's own fixtures -- ffmpeg's files and the
+# hand-written ones that exercise each table -- and videocodec's.
+counts["mp4"] = add_files("mp4", "gui/video/mp4/tests/data", (".mp4", ".mov")) + add_files(
+    "mp4", "gui/video/codec/tests/data", (".mp4", ".mov", ".m4a"))
 
 # The subtitle fixtures: SubRip, ASS, SSA and WebVTT tracks, ffmpeg's and
 # mkvmerge's; MP4's timed text; Blu-ray's PGS and DVD's VobSub pictures.

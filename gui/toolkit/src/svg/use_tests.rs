@@ -304,3 +304,13 @@ fn a_symbol_is_cut_to_its_viewport() {
 <rect x="-1" y="-1" width="4" height="3"/></symbol><use href="#s" width="10" height="10"/></svg>"##;
     assert_eq!(painted(roomy, 10, 10), 100);
 }
+
+/// **A symbol's cut ends with it**: what follows a `<use>` of a symbol is
+/// not cut to the symbol's viewport.
+#[test]
+fn a_symbols_cut_ends_with_it() {
+    let svg = r##"<svg viewBox="0 0 20 20"><symbol id="s"><rect width="5" height="5"/></symbol>
+<use href="#s" width="2" height="2"/><rect x="10" y="10" width="5" height="5"/></svg>"##;
+    // The symbol's square cut to its 2 by 2 viewport, then the whole square.
+    assert_eq!(painted(svg, 20, 20), 4 + 25);
+}

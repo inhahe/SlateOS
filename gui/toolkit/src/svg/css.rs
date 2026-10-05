@@ -40,8 +40,10 @@
 //! are read, a selector of more than [`MAX_COMPOUNDS`] parts selects nothing,
 //! each element is tried only against the rules whose rightmost part names
 //! its id, one of its classes or its type (or names none), and all matching
-//! together takes at most [`MAX_STEPS`] steps -- past which the rest of the
-//! document is left unstyled rather than the drawing left unfinished.
+//! and merging together takes at most [`MAX_STEPS`] steps -- a step a rule
+//! tried, an ancestor tried for one, a byte of declarations merged into an
+//! element -- past which the rest of the document is left unstyled rather
+//! than the drawing left unfinished.
 
 use std::collections::HashMap;
 
@@ -53,7 +55,8 @@ const MAX_RULES: usize = 4096;
 /// The most parts -- compounds -- one selector may have.
 const MAX_COMPOUNDS: usize = 8;
 
-/// The most steps all of a document's matching may take.
+/// The most steps all of a document's matching and merging may take: a step
+/// a rule tried, an ancestor tried for one, a byte merged into a `style`.
 const MAX_STEPS: usize = 20_000_000;
 
 /// What a comment leaves in a sheet until the sheet is read: a character
@@ -125,7 +128,15 @@ impl Facts {
                 .map(str::to_owned),
             classes: elem
                 .attr("class")
-                .map(|c| c.split_ascii_whitespace().map(str::to_owned).collect())
+                .map(|c| {
+                    // Each class once: a class worn twice is worn, and
+                    // trying its rules twice would merge them twice.
+                    let mut classes: Vec<String> =
+                        c.split_ascii_whitespace().map(str::to_owned).collect();
+                    classes.sort_unstable();
+                    classes.dedup();
+                    classes
+                })
                 .unwrap_or_default(),
         }
     }
@@ -243,21 +254,40 @@ impl Sheet {
             .collect();
         if !matched.is_empty() {
             matched.sort_by_key(|rule| (rule.specificity, rule.order));
-            // Weakest first, since what reads a property takes the last of
-            // it (but an important one over any that is not): the rules,
-            // the element's own declarations, the rules' important ones, and
-            // its own important ones -- which CSS weighs above any rule's.
             let (own, own_important) = elem.attr("style").map(declarations).unwrap_or_default();
-            let mut style = String::new();
-            for rule in &matched {
-                style.push_str(&rule.normal);
+            // What is merged comes out of the budget matching spends: a
+            // sheet's declarations copied into every element they select
+            // could otherwise make a document of a megabyte gigabytes of
+            // styles. Out of budget, this element and the rest are left
+            // unstyled.
+            let size = matched.iter().fold(
+                own.len().saturating_add(own_important.len()),
+                |size, rule| {
+                    size.saturating_add(rule.normal.len())
+                        .saturating_add(rule.important.len())
+                },
+            );
+            match steps.checked_sub(size) {
+                Some(left) => {
+                    *steps = left;
+                    // Weakest first, since what reads a property takes the
+                    // last of it (but an important one over any that is
+                    // not): the rules, the element's own declarations, the
+                    // rules' important ones, and its own important ones --
+                    // which CSS weighs above any rule's.
+                    let mut style = String::with_capacity(size);
+                    for rule in &matched {
+                        style.push_str(&rule.normal);
+                    }
+                    style.push_str(&own);
+                    for rule in &matched {
+                        style.push_str(&rule.important);
+                    }
+                    style.push_str(&own_important);
+                    set_style(elem, style);
+                }
+                None => *steps = 0,
             }
-            style.push_str(&own);
-            for rule in &matched {
-                style.push_str(&rule.important);
-            }
-            style.push_str(&own_important);
-            set_style(elem, style);
         }
         ancestors.push(facts);
         for child in &mut elem.children {
@@ -583,7 +613,12 @@ fn matches(selector: &Selector, facts: &Facts, ancestors: &[Facts], steps: &mut 
     let Some(own) = selector.compounds.first() else {
         return false;
     };
-    if *steps == 0 || !own.matches(facts) {
+    // Each rule tried costs a step, as each ancestor tried for one does.
+    let Some(left) = steps.checked_sub(1) else {
+        return false;
+    };
+    *steps = left;
+    if !own.matches(facts) {
         return false;
     }
     let Some(outermost) = selector.compounds.len().checked_sub(1) else {

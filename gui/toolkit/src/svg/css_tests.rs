@@ -64,6 +64,12 @@ fn the_cascade_is_csss() {
     assert_eq!(colour(&specific), LIME);
     let later = styled(".a{fill:red} .a{fill:blue}", &rect(""));
     assert_eq!(colour(&later), BLUE);
+    // The later of two as specific, though the earlier is found first: an
+    // element's classes are tried in an order of their own, the rules
+    // weighed in the sheet's.
+    let classes = |sheet: &str| styled(sheet, r#"<rect class="a b" width="4" height="4"/>"#);
+    assert_eq!(colour(&classes(".b{fill:red} .a{fill:lime}")), LIME);
+    assert_eq!(colour(&classes(".a{fill:red} .b{fill:lime}")), LIME);
     let important = styled(".a{fill:red !important}", &rect(r#"style="fill:lime""#));
     assert_eq!(colour(&important), RED);
 }
@@ -311,4 +317,36 @@ fn a_declarations_importance_is_csss() {
         Some("blue")
     );
     assert_eq!(declared("fill: !important; fill:", "fill"), None);
+}
+
+/// Every `style` under `elem`, in bytes.
+fn styled_bytes(elem: &super::XmlElement) -> usize {
+    elem.attr("style").map_or(0, str::len) + elem.children.iter().map(styled_bytes).sum::<usize>()
+}
+
+/// **What a sheet merges is bounded**: a universal rule with a long block,
+/// over many elements, merges at most [`super::MAX_STEPS`] bytes in all --
+/// where it would merge forty million -- and an element wearing a class many
+/// times takes its rule once.
+#[test]
+fn what_a_sheet_merges_is_bounded() {
+    let block = "stroke-width:1;".repeat(1400);
+    let elements = "<g/>".repeat(2000);
+    let svg = format!(r#"<svg viewBox="0 0 4 4"><style>*{{{block}}}</style>{elements}</svg>"#);
+    let mut root = super::super::parse_xml(&svg).unwrap().remove(0);
+    Sheet::of(&root).apply(&mut root);
+    let merged = styled_bytes(&root);
+    assert!(merged > 0 && merged <= super::MAX_STEPS, "{merged}");
+    // The elements first in the document are styled; the budget ran out on
+    // the rest.
+    assert!(root.children[1].attr("style").is_some());
+    assert!(root.children[1999].attr("style").is_none());
+
+    let worn = format!(
+        r#"<svg viewBox="0 0 4 4"><style>.a{{fill:lime}}</style><rect class="{}"/></svg>"#,
+        "a ".repeat(1000)
+    );
+    let mut root = super::super::parse_xml(&worn).unwrap().remove(0);
+    Sheet::of(&root).apply(&mut root);
+    assert_eq!(root.children[1].attr("style"), Some("fill:lime;"));
 }

@@ -21,7 +21,11 @@
 //!
 //! A `mask` that names no `<mask>` masks nothing, as CSS Masking says; one
 //! measured against a box with no area keeps nothing. A mask whose content
-//! uses masks is followed as deep as clip paths are, [`super::MAX_CLIP_DEPTH`].
+//! uses masks is followed as deep as clip paths are, [`super::MAX_CLIP_DEPTH`],
+//! and every mask's scratch surface comes out of one budget for the drawing
+//! ([`super::SCRATCH_PER_PIXEL`] pixels for each of its own): past it, a mask
+//! keeps nothing -- so a mask whose content is masked by itself many times
+//! over costs no more than so many surfaces.
 //!
 //! Not drawn: a `mask` on a `<mask>` itself.
 

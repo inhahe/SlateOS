@@ -1,6 +1,7 @@
 ## TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES (lane C, 2026-10-05)
 
-**Status:** OPEN
+**Status:** OPEN -- markers done 2026-10-05 (`gui/toolkit/src/svg/marker.rs`, the
+first of the three parts below); text and pictures remain.
 
 **In short:** the toolkit's SVG renderer, which draws every icon theme's
 pictures, thumbnails and the image viewer's SVG files, now draws everything

@@ -42,6 +42,10 @@
 //!   its fill is drawn on a layer of its own and faded whole, so what it
 //!   overlaps of itself does not show through; a shape with one paint is
 //!   that paint faded, with no layer
+//! - Markers: `marker-start`, `marker-mid` and `marker-end` (and `marker` in
+//!   a style) put a `<marker>`'s content on a path's, line's, polyline's or
+//!   polygon's vertices, facing the path where it says `orient="auto"` (the
+//!   `marker` module says what of them is drawn)
 //! - Container elements: the outermost svg, its viewBox fitted to the pixels
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
 //!   viewport of its own; g (with inheritance)
@@ -76,6 +80,7 @@ mod effects;
 mod filter;
 #[cfg(test)]
 mod layer_tests;
+mod marker;
 mod mask;
 #[cfg(test)]
 mod namespace_tests;
@@ -89,6 +94,7 @@ mod viewport_tests;
 pub use clip::Clip;
 use clip::{ClipPath, MAX_CLIP_DEPTH, Mask, Referable, clip_path_frame, may_clip};
 use filter::{FilterDef, FilterLists, MAX_FILTER_PIXELS, Target};
+use marker::{MarkerDef, Orient, Reference};
 use mask::{MaskDef, kept, mask_frame};
 use paint::{Defs, Gradient};
 use pattern::{MAX_TILE_SIDE, PatternDef, Tile};
@@ -1190,6 +1196,31 @@ pub struct SvgStyle {
     /// The filters the element's `filter` applies, by the place of that
     /// list among the document's: not inherited.
     pub filter: Option<usize>,
+    /// The `<marker>` on a shape's first vertex, its middle ones and its
+    /// last: `None` where the element does not say, which inherits.
+    pub marker_start: Option<MarkerRef>,
+    pub marker_mid: Option<MarkerRef>,
+    pub marker_end: Option<MarkerRef>,
+}
+
+/// What a `marker-start`, `marker-mid` or `marker-end` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerRef {
+    /// No marker: `none`, or a reference to no `<marker>`.
+    None,
+    /// The `<marker>` at this place among the document's.
+    Marker(usize),
+}
+
+impl MarkerRef {
+    /// The place of the marker it names, if it names one.
+    #[must_use]
+    pub const fn place(self) -> Option<usize> {
+        match self {
+            Self::None => None,
+            Self::Marker(place) => Some(place),
+        }
+    }
 }
 
 impl Default for SvgStyle {
@@ -1209,6 +1240,9 @@ impl Default for SvgStyle {
             clip: None,
             mask: None,
             filter: None,
+            marker_start: None,
+            marker_mid: None,
+            marker_end: None,
         }
     }
 }
@@ -1324,6 +1358,9 @@ pub struct SvgDocument {
     /// What each `filter` value applies -- places among [`Self::filters`],
     /// in order -- at the places [`SvgStyle::filter`] gives.
     filter_lists: Vec<Vec<usize>>,
+    /// Its `<marker>`s, at the places [`SvgStyle::marker_start`] and the
+    /// others give.
+    markers: Vec<MarkerDef>,
 }
 
 /// The user-space rectangle an `<svg>` element shows, `(x, y, width,
@@ -1392,6 +1429,7 @@ impl SvgDocument {
         // Every `filter` value read once, against the `<filter>`s by `id`.
         let filter_ids = Referable::collect(first, &by_id, "filter");
         let filter_lists = FilterLists::collect(first, &filter_ids);
+        let marker_ids = Referable::collect(first, &by_id, "marker");
         let tables = Tables {
             defs: &defs,
             reusable: &reusable,
@@ -1399,6 +1437,7 @@ impl SvgDocument {
             masks: &mask_ids,
             patterns: &pattern_ids,
             filter_lists: &filter_lists,
+            markers: &marker_ids,
         };
         let builder = Builder {
             tables: &tables,
@@ -1432,6 +1471,11 @@ impl SvgDocument {
             .iter()
             .map(|elem| filter::build_filter(elem, (view_w, view_h), &content_of))
             .collect();
+        let markers = marker_ids
+            .elements
+            .iter()
+            .map(|elem| build_marker(elem, builder.inner()))
+            .collect();
         let root = build_node(first, builder)?;
         let FilterLists {
             lists, functions, ..
@@ -1446,6 +1490,7 @@ impl SvgDocument {
             patterns,
             filters,
             filter_lists: lists,
+            markers,
         })
     }
 
@@ -1507,6 +1552,8 @@ struct ResolvedStyle {
     opacity: f32,
     fill_opacity: f32,
     stroke_opacity: f32,
+    /// The markers on a shape's first, middle and last vertices.
+    markers: [Option<usize>; 3],
 }
 
 impl Default for ResolvedStyle {
@@ -1523,12 +1570,14 @@ impl Default for ResolvedStyle {
             opacity: 1.0,
             fill_opacity: 1.0,
             stroke_opacity: 1.0,
+            markers: [None; 3],
         }
     }
 }
 
 impl ResolvedStyle {
     fn with_overrides(&self, style: &SvgStyle) -> Self {
+        let [start, mid, end] = self.markers;
         Self {
             fill: style.fill.unwrap_or(self.fill),
             fill_rule: style.fill_rule.unwrap_or(self.fill_rule),
@@ -1540,7 +1589,17 @@ impl ResolvedStyle {
             opacity: self.opacity * style.opacity,
             fill_opacity: style.fill_opacity.unwrap_or(self.fill_opacity),
             stroke_opacity: style.stroke_opacity.unwrap_or(self.stroke_opacity),
+            markers: [
+                style.marker_start.map_or(start, MarkerRef::place),
+                style.marker_mid.map_or(mid, MarkerRef::place),
+                style.marker_end.map_or(end, MarkerRef::place),
+            ],
         }
+    }
+
+    /// Whether it puts a marker on any vertex.
+    fn has_markers(&self) -> bool {
+        self.markers.iter().any(Option::is_some)
     }
 
     /// [`with_overrides`](Self::with_overrides), but with the element's own
@@ -1687,17 +1746,18 @@ impl Extent {
 
 /// Whether what `node` draws can lay one part of itself over another -- so
 /// that an opacity on the whole is not the same as one on each part: a
-/// container's children can, and a shape's stroke its fill, where it has
-/// both. A shape with one paint, faded, is exactly that paint faded, and
-/// needs no layer.
+/// container's children can; a shape's stroke its fill, where it has both;
+/// and its markers either. A shape with one paint and no markers, faded, is
+/// exactly that paint faded, and needs no layer.
 fn overlaps_itself(node: &SvgNode, parent_style: &ResolvedStyle) -> bool {
     match node {
         SvgNode::Svg { .. } | SvgNode::Group { .. } | SvgNode::Use { .. } => true,
         _ => style_of(node).is_some_and(|style| {
             let resolved = parent_style.with_overrides(style);
-            resolved.fill_paint().is_some()
+            (resolved.fill_paint().is_some()
                 && resolved.stroke_paint().is_some()
-                && resolved.stroke_width > 0.0
+                && resolved.stroke_width > 0.0)
+                || (resolved.has_markers() && marker::markable(node))
         }),
     }
 }
@@ -2389,6 +2449,8 @@ struct Tables<'b> {
     patterns: &'b Referable<'b>,
     /// What each `filter` value in the document applies.
     filter_lists: &'b FilterLists,
+    /// The document's `<marker>`s, by `id`, for a `marker-*` that names one.
+    markers: &'b Referable<'b>,
 }
 
 /// What building an element's node needs beyond the element: what the whole
@@ -2674,6 +2736,23 @@ fn build_mask(elem: &XmlElement, b: Builder<'_>) -> MaskDef {
         luminance,
         children: vec![inheriting(elem, b, children)],
     }
+}
+
+/// A `<marker>`, built: its viewport, reference point and facing, and its
+/// content, drawn as any content is, inheriting from the marker -- whose
+/// percentages are of its view box, or else of its size. A child that
+/// cannot be built is left out, as a mask's is.
+fn build_marker(elem: &XmlElement, b: Builder<'_>) -> MarkerDef {
+    let mut def = marker::marker_frame(elem);
+    let viewport = def.view_box.map_or(def.size, |(_, _, w, h)| (w, h));
+    let inner = Builder { viewport, ..b };
+    let children = elem
+        .children
+        .iter()
+        .filter_map(|child| build_node(child, inner).ok())
+        .collect();
+    def.content = vec![inheriting(elem, b, children)];
+    def
 }
 
 /// The `<pattern>` at `place` among `ids`, built: its tile and transform from
@@ -3257,7 +3336,37 @@ fn parse_style_attrs(elem: &XmlElement, b: Builder<'_>) -> Result<SvgStyle, SvgE
         clip: property(elem, "clip-path").and_then(|value| b.tables.clips.clip(value)),
         mask: property(elem, "mask").and_then(|value| b.tables.masks.place(value)),
         filter: property(elem, "filter").and_then(|value| b.tables.filter_lists.place(value)),
+        marker_start: marker_property(elem, "marker-start", b.tables.markers),
+        marker_mid: marker_property(elem, "marker-mid", b.tables.markers),
+        marker_end: marker_property(elem, "marker-end", b.tables.markers),
     })
+}
+
+/// What an element says of the marker property `name`: its own declaration
+/// in `style`, else the `marker` shorthand there, else the presentation
+/// attribute -- as CSS ranks them, the shorthand being a property only
+/// `style` may set. [`MarkerRef::None`] for `none` or a reference to no
+/// `<marker>`; `None` where it says nothing it can read, which inherits.
+fn marker_property(elem: &XmlElement, name: &str, markers: &Referable<'_>) -> Option<MarkerRef> {
+    let from_style = |property: &str| {
+        elem.attr("style")
+            .and_then(|style| declared(style, property))
+    };
+    let value = from_style(name)
+        .or_else(|| from_style("marker"))
+        .or_else(|| elem.attr(name).map(str::trim))?
+        .trim();
+    if value == "none" {
+        Some(MarkerRef::None)
+    } else if value.starts_with("url(") {
+        Some(
+            markers
+                .place(value)
+                .map_or(MarkerRef::None, MarkerRef::Marker),
+        )
+    } else {
+        None
+    }
 }
 
 /// An opacity: a number or a percentage, held to 0 to 1; `None` for
@@ -3466,28 +3575,47 @@ fn flatten_quadratic(
     flatten_cubic(x0, y0, cx1, cy1, cx2, cy2, x2, y2, flatness, output);
 }
 
-/// Approximate an elliptical arc with line segments.
-fn flatten_arc(
-    cursor_x: f32,
-    cursor_y: f32,
+/// An elliptical arc in centre form: what a path's `A` command describes
+/// by its ends.
+struct ArcCenter {
+    cx: f32,
+    cy: f32,
+    /// The radii, grown where the command's were too small to reach.
     rx: f32,
     ry: f32,
+    cos_phi: f32,
+    sin_phi: f32,
+    /// Where it starts, and how far it turns -- negative the other way.
+    theta1: f32,
+    dtheta: f32,
+}
+
+/// The arc from `from` to `to` with `radii`, turned `x_rotation` degrees and
+/// with its `(large_arc, sweep)` flags, in centre form -- SVG's endpoint to
+/// centre conversion -- or `None` where it is a straight line (a radius of
+/// nought) or nothing (ends that are one point, which SVG says omits the
+/// arc).
+fn arc_center(
+    from: (f32, f32),
+    radii: (f32, f32),
     x_rotation: f32,
-    large_arc: bool,
-    sweep: bool,
-    target_x: f32,
-    target_y: f32,
-    scale: f32,
-    output: &mut Vec<(f32, f32)>,
-) {
+    (large_arc, sweep): (bool, bool),
+    to: (f32, f32),
+) -> Option<ArcCenter> {
     // Implementation of the SVG arc endpoint-to-center parameterization
     // Reference: https://www.w3.org/TR/SVG/implnote.html#ArcImplementationNotes
-
-    let mut rx = rx.abs();
-    let mut ry = ry.abs();
-    if rx < 1e-10 || ry < 1e-10 {
-        output.push((target_x, target_y));
-        return;
+    let ((cursor_x, cursor_y), (target_x, target_y)) = (from, to);
+    let mut rx = radii.0.abs();
+    let mut ry = radii.1.abs();
+    // The specification's test is of identical ends, not nearly so: an arc
+    // between two points a hair apart is a whole ellipse's worth of turn.
+    #[allow(
+        clippy::float_cmp,
+        reason = "SVG omits an arc whose ends are identical, exactly"
+    )]
+    let one_point = cursor_x == target_x && cursor_y == target_y;
+    if rx < 1e-10 || ry < 1e-10 || one_point {
+        return None;
     }
 
     let phi = x_rotation * PI / 180.0;
@@ -3547,19 +3675,57 @@ fn flatten_arc(
     } else if sweep && dtheta < 0.0 {
         dtheta += 2.0 * PI;
     }
+    Some(ArcCenter {
+        cx,
+        cy,
+        rx,
+        ry,
+        cos_phi,
+        sin_phi,
+        theta1,
+        dtheta,
+    })
+}
 
+/// Approximate an elliptical arc with line segments. One with a radius of
+/// nought is a straight line to its end; one whose ends are one point is
+/// omitted, as SVG says -- it went round from where the centre form's
+/// angle of nought put it, and drew a spike a radius long.
+fn flatten_arc(
+    cursor_x: f32,
+    cursor_y: f32,
+    rx: f32,
+    ry: f32,
+    x_rotation: f32,
+    large_arc: bool,
+    sweep: bool,
+    target_x: f32,
+    target_y: f32,
+    scale: f32,
+    output: &mut Vec<(f32, f32)>,
+) {
+    let Some(arc) = arc_center(
+        (cursor_x, cursor_y),
+        (rx, ry),
+        x_rotation,
+        (large_arc, sweep),
+        (target_x, target_y),
+    ) else {
+        output.push((target_x, target_y));
+        return;
+    };
     // Approximate with line segments, as many as the arc needs at the size it
     // is drawn -- `scale` carries its radius to device pixels. It was a fixed
     // one per eighth of a turn, which a large icon showed as corners.
-    let n_segs = curve_segments(rx.max(ry) * scale, dtheta);
-    let step = dtheta / n_segs as f32;
+    let n_segs = curve_segments(arc.rx.max(arc.ry) * scale, arc.dtheta);
+    let step = arc.dtheta / n_segs as f32;
 
     for i in 1..=n_segs {
-        let theta = theta1 + step * i as f32;
+        let theta = arc.theta1 + step * i as f32;
         let cos_t = theta.cos();
         let sin_t = theta.sin();
-        let px = cos_phi * rx * cos_t - sin_phi * ry * sin_t + cx;
-        let py = sin_phi * rx * cos_t + cos_phi * ry * sin_t + cy;
+        let px = arc.cos_phi * arc.rx * cos_t - arc.sin_phi * arc.ry * sin_t + arc.cx;
+        let py = arc.sin_phi * arc.rx * cos_t + arc.cos_phi * arc.ry * sin_t + arc.cy;
         output.push((px, py));
     }
 }
@@ -4205,6 +4371,12 @@ struct SvgRenderer<'d> {
     /// The most pixels one filter is computed over: [`MAX_FILTER_PIXELS`],
     /// but for a test of a smaller cap.
     filter_pixels: usize,
+    /// The `<marker>`s being drawn now, outermost first: one met again
+    /// inside itself is drawn once, and not again inside itself. While any
+    /// is, nodes drawn count toward [`MAX_REUSED_NODES`], as inside a
+    /// `<use>`: a marker on every vertex of a long path is a document
+    /// multiplying itself.
+    marking: Vec<usize>,
     /// What the clips and masks around the node being drawn leave of each
     /// pixel: coverage is multiplied by it. `None` where nothing is clipped.
     mask: Option<Rc<Mask>>,
@@ -4272,6 +4444,7 @@ impl<'d> SvgRenderer<'d> {
             pattern_depth: 0,
             scratch_budget,
             filter_pixels: MAX_FILTER_PIXELS,
+            marking: Vec::new(),
             mask: None,
         }
     }
@@ -4296,6 +4469,7 @@ impl<'d> SvgRenderer<'d> {
         scratch.mask_depth = self.mask_depth;
         scratch.pattern_depth = self.pattern_depth;
         scratch.filter_pixels = self.filter_pixels;
+        scratch.marking.clone_from(&self.marking);
         Some(scratch)
     }
 
@@ -4322,7 +4496,7 @@ impl<'d> SvgRenderer<'d> {
         if self.depth >= MAX_DRAWN_DEPTH {
             return;
         }
-        if !self.drawing.is_empty() {
+        if !self.drawing.is_empty() || !self.marking.is_empty() {
             let Some(left) = self.reuse_budget.checked_sub(1) else {
                 return;
             };
@@ -4659,6 +4833,10 @@ impl<'d> SvgRenderer<'d> {
                 };
                 let combined = transform.then(local_transform(node));
                 let resolved = parent_style.with_overrides(style);
+                // A marker's content can reach anywhere its viewport is set.
+                if resolved.has_markers() && marker::markable(node) {
+                    return false;
+                }
                 // Half the stroke's width, as far as a miter or a square cap
                 // can carry it -- along the axis the transform stretches most.
                 let margin = if resolved.stroke_paint().is_some() {
@@ -5065,6 +5243,106 @@ impl<'d> SvgRenderer<'d> {
         let resolved = parent_style.with_own(style, own_opacity);
         let outline = shape_outline(node, combined);
         self.paint(&outline, &resolved, combined);
+        // After the fill and the stroke, as SVG paints them.
+        if resolved.has_markers() && marker::markable(node) {
+            self.draw_markers(node, combined, &resolved);
+        }
+    }
+
+    /// Draw the markers `style` puts on the vertices of the shape `node`,
+    /// whose own user space `transform` carries to the pixels: the start
+    /// marker on the first, the end marker on the last, the middle marker on
+    /// every other -- one vertex taking both ends where it is the only one.
+    fn draw_markers(&mut self, node: &SvgNode, transform: Transform, style: &ResolvedStyle) {
+        let [start, mid, end] = style.markers;
+        let vertices = marker::vertices(node);
+        let last = vertices.len().saturating_sub(1);
+        for (i, vertex) in vertices.iter().enumerate() {
+            let at = if i == 0 {
+                [start, if i == last { end } else { None }]
+            } else if i == last {
+                [end, None]
+            } else {
+                [mid, None]
+            };
+            for place in at.into_iter().flatten() {
+                self.draw_marker(place, node, vertex, i == 0, transform, style.stroke_width);
+            }
+        }
+    }
+
+    /// Draw the `<marker>` at `place` on `vertex` of the shape `node`, whose
+    /// own user space `transform` carries to the pixels: its viewport set on
+    /// the vertex at its reference point, turned as its `orient` says and
+    /// sized in `stroke_width`s or user units, its content fitted into the
+    /// viewport by its view box and cut to the viewport unless its overflow
+    /// is visible. Nothing for a marker with no area, or inside itself.
+    fn draw_marker(
+        &mut self,
+        place: usize,
+        node: &SvgNode,
+        vertex: &marker::Vertex,
+        at_start: bool,
+        transform: Transform,
+        stroke_width: f32,
+    ) {
+        let doc = self.doc;
+        let Some(def) = doc.markers.get(place) else {
+            return;
+        };
+        let (mw, mh) = def.size;
+        if self.marking.contains(&place) || !(mw > 0.0 && mh > 0.0) {
+            return;
+        }
+        let angle = match def.orient {
+            Orient::Auto => vertex.angle,
+            Orient::AutoStartReverse if at_start => vertex.angle + PI,
+            Orient::AutoStartReverse => vertex.angle,
+            Orient::Angle(angle) => angle,
+        };
+        let scale = if def.in_stroke_widths {
+            stroke_width
+        } else {
+            1.0
+        };
+        let fit = match def.view_box {
+            Some(view_box) => match fit_view_box(view_box, def.aspect, (0.0, 0.0, mw, mh)) {
+                Some(fit) => fit,
+                None => return,
+            },
+            None => Transform::IDENTITY,
+        };
+        // The reference point, in the view box's units -- or a place along
+        // it -- carried into the viewport.
+        let (bx, by, bw, bh) = def.view_box.unwrap_or((0.0, 0.0, mw, mh));
+        let at = |reference: Reference, origin: f32, extent: f32| match reference {
+            Reference::At(v) => v,
+            Reference::Along(t) => origin + t * extent,
+        };
+        let (rx, ry) = fit.apply(at(def.reference.0, bx, bw), at(def.reference.1, by, bh));
+        let viewport = transform
+            .then(Transform::translate(vertex.x, vertex.y))
+            .then(Transform::rotate(angle))
+            .then(Transform::scale(scale, scale))
+            .then(Transform::translate(-rx, -ry));
+        let outer = def.clip.then(|| {
+            let cut = Clip::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: mw,
+                height: mh,
+            };
+            self.push_clip(cut, node, viewport)
+        });
+        self.marking.push(place);
+        let content = viewport.then(fit);
+        for child in &def.content {
+            self.render_node(child, content, &ResolvedStyle::default());
+        }
+        self.marking.pop();
+        if let Some(Some(OuterMask(outer))) = outer {
+            self.mask = outer;
+        }
     }
 
     /// Fill and stroke one shape, `subpaths` in device space, as `style` says.

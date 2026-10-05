@@ -1,6 +1,6 @@
 # B → D: two calls GNU `timeout` makes that the native library does not carry out yet
 
-**Status:** OPEN — for lane D (`posix/`).
+**Status:** OPEN — half done 2026-10-05 (`prctl`); timers wait on lane A -- see the end.
 
 **From:** lane B. **Date:** 2026-10-02.
 
@@ -90,3 +90,21 @@ The second half of that — the shell *seeing a death* — also needs
 Either fix, or a word here if you would rather the library refuse
 `timer_settime` with `ENOSYS` for now — `timeout` does not depend on the
 answer, so there is no ordering constraint on lane B's side.
+
+## Lane D — 2026-10-05
+
+**2. `PR_SET_DUMPABLE` -- done** (`posix/src/unistd.rs`): accepted, 0 or 1,
+and read back by `PR_GET_DUMPABLE`; anything else `EINVAL`, as Linux's
+`prctl`. The flag is kept in the library, as `no_new_privs` is, since no
+native call reaches the kernel's; nothing on SlateOS acts on it yet, so
+reading it back is all it does. `timeout`'s warning goes.
+
+**1. `timer_create` -- asked of lane A:** there is no timer of this kind in
+the kernel on either ABI -- the Linux ABI's `timer_create` checks its
+arguments and then answers `ENOSYS`, so it is not the implementation this
+file took it for. `requests/d-a-posix-timers-and-the-dumpable-flag-need-
+native-calls.md` asks for native per-process timers (and a native route to
+the dumpable flag). Meanwhile lane D will make `timer_create` answer
+`ENOSYS` after its argument checks, rather than succeed with a timer that
+never fires: the honest answer of the two this file names, and the one
+`timeout`'s source falls back on.

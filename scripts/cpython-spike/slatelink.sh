@@ -95,15 +95,27 @@ echo "MISSING_BY_SET_DIFFERENCE=$(wc -l < "$SLATE_TMP/cpython_missing_static.txt
 echo "--- the list ---"
 cat "$SLATE_TMP/cpython_missing_static.txt"
 
-# -nostdlib: we want SlateOS's libc, not zig's musl.
-# libc.a twice: it is Rust-built and its intra-archive references are not
-# topologically ordered, so a second pass is cheaper than --start-group.
-# libstubs.a is deliberately NOT linked — it and libc.a each carry a panic
+# SlateOS's libc and nothing else: scripts/lib/worktree.sh's link wrapper,
+# zig's ld.lld itself, given CPython's own inputs and then our libc.a, with
+# zig's C++ runtime ahead of it and zig's compiler runtime behind it, which
+# is zig's own order (the wrapper's comment says why the order matters). Not
+# zig's cc driver with -nostdlib, as until 2026-10-01: that puts zig's own
+# musl libc.a behind every link, where it would supply whatever ours lacks
+# instead of a missing symbol being reported -- so MISSING_AT_LINK below
+# could read 0 while the set difference above named symbols our libc does
+# not define (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
+# libstubs.a is deliberately NOT linked -- it and libc.a each carry a panic
 # handler and collide on __rustc::rust_begin_unwind (same as bash/pkgconf).
+#
+# The outputs are removed first: ld.lld leaves an existing one alone when a
+# link fails, and the check below would then stage the last run's
+# interpreter as this one's -- with a fresh mtime, so create-ext4-rootfs.sh's
+# staleness gate, which compares mtimes with libc.a's, would pass it.
 echo "=== attempting the real link ==="
-"$SLATE_CC" -static -nostdlib -o python-slateos Programs/python.o "$LIBPY" \
+slate_make_link_wrappers "$WORK/bin" "$SYSCOPY" || exit 1
+rm -f python-slateos python-slateos.shippable
+"$SLATE_LINK_CC" -o python-slateos Programs/python.o "$LIBPY" \
     "${EXTRA_A[@]}" \
-    "$SYSCOPY/libc.a" "$SYSCOPY/libc.a" "$SYSCOPY/libunwind.a" \
     2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 
@@ -157,4 +169,5 @@ if [ -x python-slateos ]; then
     echo "SLATE_CPYTHON_BUILT"
 else
     echo "NO_SLATE_BINARY"
+    exit 1
 fi

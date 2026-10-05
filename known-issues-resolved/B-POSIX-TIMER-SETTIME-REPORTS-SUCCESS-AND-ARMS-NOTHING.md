@@ -1,6 +1,6 @@
 ## B-POSIX-TIMER-SETTIME-REPORTS-SUCCESS-AND-ARMS-NOTHING (lane B, 2026-10-02; the fix is lane D's)
 
-**Status:** OPEN -- lane D's to fix; `timeout` works around it with `setitimer`.
+**Status:** FIXED 2026-10-05
 
 **In short:** a C program on SlateOS that asks for a timer with
 `timer_create` and `timer_settime` -- "send me `SIGALRM` in five seconds" --
@@ -31,3 +31,17 @@ references all three of `timer_create`, `timer_settime` and `timer_delete`.
 `CLOCK_MONOTONIC` with `SIGEV_SIGNAL` -- or, until that exists, fail with
 `ENOSYS` so that a caller can fall back. Asked in
 `requests/b-d-two-calls-gnu-timeout-makes-are-not-native-yet.md`.
+
+**Fixed (2026-10-05, lane D):** the second of those two answers.
+`timer_create` checks its arguments in Linux's order and answers `ENOSYS`;
+`timer_settime`, `timer_gettime`, `timer_delete` and `timer_getoverrun`
+answer `EINVAL`, there being no timer for an id to name. No call reports a
+timer armed any more. GNU `timeout`'s own source falls back to `alarm`
+without a word on exactly that answer, and warns on any other -- pinned by
+`test_gnu_timeout_falls_back_to_alarm_without_a_warning` in
+`posix/src/time.rs`. The kernel's Linux ABI turned out to have no timers
+either: its `timer_create` makes these same checks and then answers
+`ENOSYS`, so "real ones" above was the checks only. Timers that fire need
+the kernel, and `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`
+asks lane A for them; design-decisions 1170 says why the library does not
+build them on the one interval timer meanwhile.

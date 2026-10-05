@@ -1145,6 +1145,11 @@ else
     # stdlib.sh stays a manual step, and the gate below still names it.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/python-slateos.elf" \
         scripts/cpython-spike/slatelink.sh
+    # LLVM's relink is a minute: slatelink.sh links the objects run.sh compiled
+    # against the new libc.a and stages all three tools again. One artifact
+    # stands for the three, which are always linked and staged together.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/opt-slateos.elf" \
+        scripts/llvm-spike/slatelink.sh
 fi
 
 # --- GNU bash 5.2, cross-compiled and linked against OUR OWN libc -------------
@@ -1508,6 +1513,14 @@ if [ -e "$PY_SLATE" ] && [ -e "$PY_ZIP" ]; then
             echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
             PY_STALE=1
         fi
+        # A warning and not a stale stdlib: python3 runs without it, and a zip
+        # packed before 2026-10-05 lacks it in every worktree that has one.
+        if ! unzip -l "$PY_ZIP" '_sysconfigdata_*.py' >/dev/null 2>&1; then
+            echo "[rootfs] WARNING: python312.zip has no _sysconfigdata_*.py, so on the image"
+            echo "[rootfs]          sysconfig.get_config_var() and get_path() raise"
+            echo "[rootfs]          ModuleNotFoundError. Python still runs; repack it:"
+            echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
+        fi
     else
         echo "[rootfs] NOTE: no unzip — skipping the python312.zip shape checks"
     fi
@@ -1524,6 +1537,109 @@ elif [ -e "$PY_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $PY_SLATE not found — /bin/python3 will be absent"
     echo "[rootfs]       (build it with scripts/cpython-spike/, see its README)"
+fi
+
+# --- LLVM 20.1.8's opt, llc and ld.lld, linked against OUR OWN libc -----------
+# The back half of a compiler, which fastpy needs on SlateOS: it writes LLVM IR
+# and runs these three to make a program of it
+# (requests/b-d-fastpy-on-slateos-needs-llvm-tools.md; scripts/llvm-spike/).
+#
+#   /bin/opt                         the IR optimizer
+#   /bin/llc                         IR to an object file
+#   /bin/ld.lld                      the linker
+#   /usr/lib/x86_64-slateos/libc.a   the C library a program is linked with
+#
+# The three come from one build and are staged together or not at all: an llc
+# without the opt whose output it reads, or a linker without both, is not a
+# toolchain. libc.a is the sysroot's -- the one they and every port on this
+# image were linked against -- and fastpy's link line names
+# -L/usr/lib/x86_64-slateos -lc.
+#
+# Staleness, as for every port: slatelink.sh relinks the three against a newer
+# libc.a (spike_rebuild_if_behind, above), and a stale one is refused below.
+# PROGRAM: /bin/opt -- LLVM 20.1.8's IR optimizer. (scripts/llvm-spike/)
+# PROGRAM: /bin/llc -- LLVM 20.1.8's code generator: LLVM IR to an object file. (scripts/llvm-spike/)
+# PROGRAM: /bin/ld.lld -- LLVM 20.1.8's linker, lld. (scripts/llvm-spike/)
+LLVM_OPT="$ROOT_DIR/build/spike/opt-slateos.elf"
+LLVM_LLC="$ROOT_DIR/build/spike/llc-slateos.elf"
+LLVM_LLD="$ROOT_DIR/build/spike/ld.lld-slateos.elf"
+LLVM_STALE=0
+if [ -e "$LLVM_OPT" ] && [ -e "$LLVM_LLC" ] && [ -e "$LLVM_LLD" ]; then
+    cp -L "$LLVM_OPT" "$STAGE/bin/opt"
+    cp -L "$LLVM_LLC" "$STAGE/bin/llc"
+    cp -L "$LLVM_LLD" "$STAGE/bin/ld.lld"
+    mkdir -p "$STAGE/usr/lib/x86_64-slateos"
+    cp "$SYSROOT_LIBC" "$STAGE/usr/lib/x86_64-slateos/libc.a"
+    echo "[rootfs] staged LLVM 20.1.8 (linked against our libc.a): /bin/opt, /bin/llc," \
+         "/bin/ld.lld + /usr/lib/x86_64-slateos/libc.a"
+    for f in "$LLVM_OPT" "$LLVM_LLC" "$LLVM_LLD"; do
+        if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$f" ]; then
+            echo "[rootfs] WARNING: $(basename "$f") is OLDER than the sysroot libc.a -- it links"
+            echo "[rootfs]          a stale libc. Relink it, a minute:"
+            echo "[rootfs]            wsl -d Ubuntu -- bash scripts/llvm-spike/slatelink.sh"
+            LLVM_STALE=1
+        fi
+    done
+elif [ -e "$LLVM_OPT" ] || [ -e "$LLVM_LLC" ] || [ -e "$LLVM_LLD" ]; then
+    echo "[rootfs] WARNING: build/spike holds some of LLVM's three tools but not all --"
+    echo "[rootfs]          staging none. Build them together:"
+    echo "[rootfs]            wsl -d Ubuntu -- bash scripts/llvm-spike/run.sh"
+else
+    echo "[rootfs] NOTE: LLVM's tools are not in build/spike -- /bin/opt, /bin/llc and"
+    echo "[rootfs]       /bin/ld.lld will be absent (build them with"
+    echo "[rootfs]       wsl -d Ubuntu -- bash scripts/llvm-spike/run.sh)"
+fi
+
+# --- fastpy, lane B's Python compiler: built here, from its checkout ----------
+# `fastpy hello.py -o hello` on SlateOS: /bin/python3 runs the compiler, and
+# LLVM's tools above make an object and then a program of the IR it writes,
+# linked against fastpy's C runtime and libc.a. What goes on the image is lane
+# B's to define (scripts/fastpy-slateos-bundle.py;
+# requests/b-d-fastpy-on-slateos-needs-llvm-tools.md):
+#
+#   /bin/fastpy                              the command, a #!/bin/python3 script
+#   /usr/lib/fastpy/                         the compiler, llvmlite's IR builder,
+#                                            and BUNDLE, what they were built from
+#   /usr/lib/x86_64-slateos/libfastpy_rt.a   fastpy's C runtime
+#
+# Built on every run, not staged from a copy made earlier, so it is never
+# stale: nine seconds, the runtime compiled by zig only when fastpy's sources
+# have moved. WSL's python3 is 3.12, the image's, so the .pyc files come too,
+# checked-hash, which a copy that drops modification times leaves valid.
+#
+# Staged only beside /bin/python3 and LLVM's three tools, without which it
+# compiles nothing; and left off with a warning when the bundle cannot be
+# built (no fastpy checkout, no llvmlite, no zig): an image without the
+# compiler is still an image. The bundle's own compile of hello.py, run
+# under WSL on python3's built-in modules with python312.zip as its only
+# standard library, is what showed the image holds every module it imports.
+# PROGRAM: /bin/fastpy -- fastpy, which compiles a Python program into a native SlateOS program. (scripts/fastpy-slateos-bundle.py)
+FASTPY_LOG=/tmp/rootfs-fastpy-bundle.log
+if [ -e "$STAGE/bin/python3" ] && [ -e "$STAGE/bin/opt" ] && [ -e "$STAGE/bin/llc" ] \
+        && [ -e "$STAGE/bin/ld.lld" ]; then
+    FASTPY_TREE="$(mktemp -d /tmp/rootfs-fastpy.XXXXXX)"
+    # In an `if`, so `set -e` is off for the whole subshell: worktree.sh is
+    # written for scripts without it. It names zig, which packs the runtime.
+    if ( . "$ROOT_DIR/scripts/lib/worktree.sh" && slate_ensure_zig \
+            && FASTPY_ZIG="$SLATE_ZIG" "${SYSROOT_PY:-python3}" \
+                "$ROOT_DIR/scripts/fastpy-slateos-bundle.py" --out "$FASTPY_TREE/tree" \
+       ) > "$FASTPY_LOG" 2>&1; then
+        cp -r "$FASTPY_TREE/tree/." "$STAGE/"
+        # A tree built on NTFS carries no execute bit; this one is built in
+        # /tmp, but the mode is the recipe's to be sure of.
+        chmod 0755 "$STAGE/bin/fastpy"
+        echo "[rootfs] staged fastpy: /bin/fastpy, /usr/lib/fastpy/," \
+             "/usr/lib/x86_64-slateos/libfastpy_rt.a"
+        sed 's/^/[rootfs]   /' "$FASTPY_TREE/tree/usr/lib/fastpy/BUNDLE"
+    else
+        echo "[rootfs] WARNING: fastpy's bundle did not build, so /bin/fastpy will be absent." >&2
+        echo "[rootfs]          The end of $FASTPY_LOG:" >&2
+        tail -8 "$FASTPY_LOG" | sed 's/^/[rootfs]          | /' >&2
+    fi
+    rm -rf "$FASTPY_TREE"
+else
+    echo "[rootfs] NOTE: /bin/fastpy will be absent: it needs /bin/python3 and LLVM's opt,"
+    echo "[rootfs]       llc and ld.lld, and not all of them are staged"
 fi
 
 # --- .pc fixtures for the pkgconf self-test -----------------------------------
@@ -2114,6 +2230,22 @@ if [ "$ESPEAK_STALE" -gt 0 ]; then
         echo "[rootfs]        that is no longer in the build. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/espeak-spike/slatelink.sh"
         echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$LLVM_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: LLVM's tools are stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike's LLVM tools are STALE."
+        echo "[rootfs]        They link an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/opt, /bin/llc and /bin/ld.lld on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink them, a"
+        echo "[rootfs]        minute from the objects already compiled:"
+        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/llvm-spike/slatelink.sh"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

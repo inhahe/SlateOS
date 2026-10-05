@@ -46,6 +46,12 @@
 //! around the instant converted, and one past the last transition sets all
 //! three from the file's footer rule.
 //!
+//! On the host the state is per test thread, as the environment it reads
+//! `TZ` from is ([`crate::perprocess`]): libtest runs every test on its own
+//! thread of one process, and the zone one test sets must not be the zone
+//! the tests beside it read. A test that sets none reads a fresh process's,
+//! UTC. The target, one process, has one.
+//!
 //! # Where it differs, each on purpose
 //!
 //! * **A `TZ` naming a file through a `..` component is never read**, where
@@ -92,8 +98,9 @@ impl Locked {
 
     #[allow(clippy::unused_self)]
     fn state(&mut self) -> &mut State {
-        // SAFETY: the lock is held, so this is the only reference to STATE.
-        unsafe { &mut *core::ptr::addr_of_mut!(STATE) }
+        // SAFETY: the lock is held, so this is the only reference to the
+        // state -- the process's, or on the host this test thread's.
+        unsafe { &mut *state_storage() }
     }
 }
 
@@ -107,23 +114,30 @@ impl Drop for Locked {
 // Names: __tzstring
 // ---------------------------------------------------------------------------
 
-/// Bytes of [`ARENA`]: every distinct zone name a process meets, kept for the
-/// life of the process as glibc keeps them. tzdata has under 300 distinct
-/// designations, and suffixes are shared, so this is many times enough.
+/// Bytes of the name arena ([`arena_storage`]): every distinct zone name a
+/// process meets, kept for the life of the process as glibc keeps them.
+/// tzdata has under 300 distinct designations, and suffixes are shared, so
+/// this is many times enough.
 const ARENA_CAP: usize = 8 * 1024;
 
-/// The names, each NUL-terminated, one after another.
-static mut ARENA: [u8; ARENA_CAP] = [0; ARENA_CAP];
-/// How much of [`ARENA`] is in use.
-static mut ARENA_USED: usize = 0;
+crate::perprocess::process_global! {
+    /// The names, each NUL-terminated, one after another: the process's, or
+    /// on the host this test thread's, as the rest of the state is.
+    fn arena_storage() -> [u8; ARENA_CAP] = [0; ARENA_CAP];
+    /// How much of [`arena_storage`] is in use.
+    fn arena_used_storage() -> usize = 0;
+}
 
-/// A NUL-terminated name with the life of the process: in [`ARENA`], or one
-/// of the literals below. `tzname[]` and `tm_zone` hand these out.
+/// A NUL-terminated name with the life of the process: in the arena
+/// ([`arena_storage`]), or one of the literals below. `tzname[]` and
+/// `tm_zone` hand these out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Name(*const u8);
 
-// SAFETY: a `Name` points into immutable static storage (the arena only ever
-// grows past what it hands out).
+// SAFETY: a `Name` points at bytes that are never written again (the arena
+// only ever grows past what it hands out), in storage that lives as long as
+// anything able to hold the name: the process, or on the host the test
+// thread whose arena it is, which hands no name to another thread.
 unsafe impl Send for Name {}
 // SAFETY: as above.
 unsafe impl Sync for Name {}
@@ -160,12 +174,7 @@ impl Name {
 /// `malloc`.
 fn tzstring(s: &[u8]) -> Option<Name> {
     // SAFETY: called only with the lock held, which is the arena's guard.
-    let (arena, used) = unsafe {
-        (
-            &mut *core::ptr::addr_of_mut!(ARENA),
-            &mut *core::ptr::addr_of_mut!(ARENA_USED),
-        )
-    };
+    let (arena, used) = unsafe { (&mut *arena_storage(), &mut *arena_used_storage()) };
     let s = s.split(|&b| b == 0).next().unwrap_or(&[]);
     let mut start = 0usize;
     while start < *used {
@@ -285,7 +294,10 @@ struct State {
     localtime_offset: i64,
 }
 
-static mut STATE: State = State::FRESH;
+crate::perprocess::process_global! {
+    /// glibc's statics: the process's, or on the host this test thread's.
+    fn state_storage() -> State = State::FRESH;
+}
 
 impl State {
     /// A fresh process's.
@@ -1237,13 +1249,16 @@ fn zone_path(name: &[u8]) -> Option<ZonePath> {
     Some(out)
 }
 
-/// Capacity of [`ZONE_FILE`]: four times tzdata's largest file. A larger one
+/// Capacity of [`zone_file`]: four times tzdata's largest file. A larger one
 /// is refused rather than cut short: half a transition table renders times
 /// confidently wrong.
 const ZONE_FILE_CAP: usize = 16 * 1024;
 
-/// The bytes of the zoneinfo file in use, which [`TzFile`] reads in place.
-static mut ZONE_FILE: [u8; ZONE_FILE_CAP] = [0; ZONE_FILE_CAP];
+crate::perprocess::process_global! {
+    /// The bytes of the zoneinfo file in use, which [`TzFile`] reads in
+    /// place: the process's, or on the host this test thread's.
+    fn zone_file() -> [u8; ZONE_FILE_CAP] = [0; ZONE_FILE_CAP];
+}
 
 /// A file's identity, as glibc compares one: device, inode, modification time.
 type FileId = (u64, u64, i64);
@@ -1263,7 +1278,7 @@ fn file_id(path: &[u8]) -> Option<FileId> {
     Some((st.st_dev, st.st_ino, st.st_mtim.tv_sec))
 }
 
-/// Read the NUL-terminated `path` into [`ZONE_FILE`] and parse it: the view,
+/// Read the NUL-terminated `path` into [`zone_file`] and parse it: the view,
 /// and the file's identity. `None` if it cannot be read, does not fit, or is
 /// not TZif.
 #[cfg(not(test))]
@@ -1283,7 +1298,7 @@ fn load_zone_file(path: &[u8]) -> Option<(TzFile<'static>, FileId)> {
         st.st_mtim.tv_sec,
     ));
     // SAFETY: called with the lock held, which guards the buffer.
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(ZONE_FILE) };
+    let buf = unsafe { &mut *zone_file() };
     let mut len = 0usize;
     let ok = loop {
         let Some(rest) = buf.get_mut(len..) else {
@@ -1313,11 +1328,11 @@ fn load_zone_file(path: &[u8]) -> Option<(TzFile<'static>, FileId)> {
     Some((parse_zone_file(len)?, id?))
 }
 
-/// Parse the first `len` bytes of [`ZONE_FILE`].
+/// Parse the first `len` bytes of [`zone_file`].
 fn parse_zone_file(len: usize) -> Option<TzFile<'static>> {
     // SAFETY: an immutable view of the buffer the loader just filled, which
     // the next load -- under the same lock -- is the only thing to change.
-    let bytes = unsafe { &*core::ptr::addr_of!(ZONE_FILE) };
+    let bytes = unsafe { &*zone_file() };
     TzFile::parse(bytes.get(..len)?)
 }
 
@@ -1758,7 +1773,7 @@ pub(crate) fn reset_for_test() {
     // SAFETY: the lock is held; the arena's names from earlier tests are
     // dropped with the state that pointed at them.
     unsafe {
-        *core::ptr::addr_of_mut!(ARENA_USED) = 0;
+        *arena_used_storage() = 0;
     }
     publish(&lock.state().globals);
 }

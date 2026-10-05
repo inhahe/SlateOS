@@ -91,7 +91,7 @@ fn col(v: i32) -> usize {
 unsafe fn params(state: *const ArgpState) -> Params {
     let mut p = DEFAULTS;
     // SAFETY: a C string.
-    let var = unsafe { crate::environ::getenv(c"ARGP_HELP_FMT".as_ptr().cast()) };
+    let var = unsafe { crate::environ::lookup(c"ARGP_HELP_FMT".as_ptr().cast()) };
     if var.is_null() {
         return p;
     }

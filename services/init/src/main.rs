@@ -6,6 +6,8 @@
 //! ## Current Functionality
 //!
 //! - Prints a welcome banner via `SYS_CONSOLE_WRITE`.
+//! - Names the machine from `/etc/hostname`, before any service starts
+//!   (systemd's `hostname_setup()`; the reading is `lib.rs`'s).
 //! - Runs a poll-based main loop that interleaves keyboard input with
 //!   service health monitoring.
 //! - Built-in commands: `help`, `echo`, `exit`, `ls`, `cat`, `stat`,
@@ -97,6 +99,7 @@ const SYS_FS_MKDIR: u64 = 604;
 const SYS_FS_RMDIR: u64 = 605;
 const SYS_FS_STAT: u64 = 606;
 const SYS_LOG_READ: u64 = 102;
+const SYS_HOSTNAME_SET: u64 = 1072;
 
 /// Directory entry size from kernel (name[256] + size[4] + type[1] + pad[3]).
 const FS_DIR_ENTRY_SIZE: usize = 264;
@@ -2187,6 +2190,44 @@ const POLL_INTERVAL_IDLE_NS: u64 = 50_000_000;
 /// 100 ms — balance between responsiveness and CPU usage.
 const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
 
+/// Name the machine from `/etc/hostname`, as systemd's `hostname_setup()`
+/// does: before anything that reads the name once and keeps it -- a service's
+/// first log line, a shell's `$HOSTNAME` -- since every boot otherwise comes
+/// up `localhost`, the kernel's default, whatever the machine was named
+/// (`requests/b-d-init-should-set-the-host-name-from-etc-hostname.md`).
+///
+/// No file, or one with no name in it, leaves the kernel's name, as systemd
+/// falls back to its default; a line that is not a host name is reported
+/// and leaves it too ([`init::read_etc_hostname`] says why).
+fn apply_etc_hostname() {
+    let mut buf = [0u8; 1024];
+    let n = fs_read_file(b"/etc/hostname", &mut buf);
+    let Ok(len) = usize::try_from(n) else {
+        return;
+    };
+    let file = buf.get(..len).unwrap_or(&[]);
+    match init::read_etc_hostname(file) {
+        init::EtcHostname::Name(name) => {
+            let rc = syscall2(SYS_HOSTNAME_SET, name.as_ptr() as u64, name.len() as u64);
+            if rc < 0 {
+                print("[init] /etc/hostname: the kernel refused the name (error ");
+                print_i64(rc);
+                print(")\n");
+            } else {
+                print("[init] Host name set to ");
+                console_write(name);
+                print(" (/etc/hostname)\n");
+            }
+        }
+        init::EtcHostname::Empty => {}
+        init::EtcHostname::Invalid(line) => {
+            print("[init] /etc/hostname: \"");
+            console_write(line);
+            print("\" is not a host name; keeping the kernel's\n");
+        }
+    }
+}
+
 /// Load the startup service list from `/etc/startup.conf`.
 ///
 /// Not `/etc/services`: that name is the IANA port/protocol database that
@@ -2391,6 +2432,8 @@ pub extern "C" fn _start() -> ! {
     print("  Userspace init process (PID 1)\n");
     print("=======================================\n");
     print("\n");
+
+    apply_etc_hostname();
 
     let mut registry = ServiceRegistry::new();
 

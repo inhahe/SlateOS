@@ -749,8 +749,8 @@ type HomeOf<'h> = &'h dyn Fn(&[u8]) -> Option<Owned>;
 fn system_home(user: &[u8]) -> Option<Owned> {
     let dir: *const u8 = if user.is_empty() {
         // SAFETY: a C string literal.
-        let h = unsafe { crate::environ::getenv(c"HOME".as_ptr().cast()) };
-        // SAFETY: getenv's answer: NULL or a C string.
+        let h = unsafe { crate::environ::lookup(c"HOME".as_ptr().cast()) };
+        // SAFETY: lookup's answer: NULL or a C string.
         if !h.is_null() && unsafe { *h } != 0 {
             h
         } else {

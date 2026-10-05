@@ -145,7 +145,7 @@ pub unsafe extern "C" fn getwd(buf: *mut u8) -> *mut u8 {
         return core::ptr::null_mut();
     }
     let max = crate::unistd::PATH_MAX;
-    if !crate::unistd::getcwd(buf, max).is_null() {
+    if !crate::unistd::copy_cwd(buf, max).is_null() {
         return buf;
     }
     let e = crate::errno::get_errno();

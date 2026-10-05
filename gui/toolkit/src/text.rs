@@ -2470,6 +2470,69 @@ mod tests {
         );
     }
 
+    /// **An emoji neither resizes nor overflows its line**
+    /// (`roadmap-detailed.md` §3.5, "unlike Qt"): a line's height is the
+    /// interface face's whatever face draws a character in it, so a line
+    /// with an emoji is laid out as tall as one without -- and the emoji,
+    /// drawn from the colour face at the text's size, keeps its ink inside
+    /// that line. On a machine with no emoji face the character falls back
+    /// further, and its ink is held to the same line.
+    #[test]
+    fn an_emoji_neither_resizes_nor_overflows_its_line() {
+        let size = 16.0;
+        let line = line_height(size, FontWeightHint::Regular);
+        let above = ascent_in(size, FontWeightHint::Regular, FontFamily::Ui);
+        let (w, h) = (80_u32, 120_u32);
+        let before = blank(w, h);
+        let mut pixels = before.clone();
+        let top = 40.0;
+        let mut surface = Surface {
+            pixels: &mut pixels,
+            width: w,
+            height: h,
+        };
+        draw_into(
+            &mut surface,
+            "\u{1F600}",
+            4.0,
+            top + above,
+            size,
+            FontWeightHint::Regular,
+            Color::WHITE,
+        );
+        let inked: Vec<u32> = (0..h)
+            .filter(|&y| {
+                (0..w).any(|x| {
+                    let i = (y * w + x) as usize;
+                    pixels[i] != before[i]
+                })
+            })
+            .collect();
+        assert!(!inked.is_empty(), "the emoji drew nothing");
+        let (first, last) = (inked[0] as f32, *inked.last().unwrap() as f32);
+        assert!(
+            first >= top - 1.0 && last <= top + line + 1.0,
+            "the emoji's ink covers rows {first} to {last}, outside its line, {top} to {}",
+            top + line
+        );
+
+        // Where a colour face is installed, it is what drew: the text was
+        // white, so a pixel of another hue is the emoji face's own colour --
+        // the face at the text's size, not a box in the text's ink.
+        let emoji_face = fallback_families().iter().any(|family| {
+            DEFAULT_FALLBACK_FAMILIES
+                .get(1)
+                .is_some_and(|group| group.contains(family))
+        });
+        if emoji_face {
+            let coloured = pixels.iter().zip(&before).any(|(&px, &was)| {
+                let (r, g, b) = ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+                px != was && (r.abs_diff(g) > 40 || g.abs_diff(b) > 40 || r.abs_diff(b) > 40)
+            });
+            assert!(coloured, "an emoji face is installed and drew no colour");
+        }
+    }
+
     /// The property the whole module exists for: what is drawn is as wide as
     /// what was measured, because both come from one font cache.
     #[test]

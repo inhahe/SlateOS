@@ -53,6 +53,7 @@ use yamldoc::Document;
 
 use crate::cursors::{self, xcursor};
 use crate::icons;
+use crate::sounds;
 use crate::themes::{self, ThemeError, ThemeFile, ThemeMeta};
 use crate::{
     Palette, StripStyle, SurfaceStyle, TEXT_CONTRAST_FLOOR, THEME_ROLES, ThemeColors,
@@ -80,7 +81,7 @@ pub const MAX_DEPTH: usize = 8;
 
 /// Every axis a theme can cover, by the name `meta.supports` gives it: the
 /// sections that carry one and the folders that do.
-pub const AXES: [&str; 11] = [
+pub const AXES: [&str; 12] = [
     themes::DARK_SECTION,
     themes::TERMINAL_DARK_SECTION,
     themes::SYNTAX_DARK_SECTION,
@@ -92,12 +93,8 @@ pub const AXES: [&str; 11] = [
     themes::FONTS_SECTION,
     icons::ICONS_DIR,
     cursors::CURSORS_DIR,
+    sounds::AXIS,
 ];
-
-/// Axes the theme format names that this desktop does not have yet --
-/// `roadmap-detailed.md`'s sounds. A theme listing one is ahead of the
-/// desktop, not wrong.
-const PLANNED_AXES: [&str; 1] = ["sounds"];
 
 /// The sections the theme file is read for.
 const SECTIONS: [&str; 13] = [
@@ -115,6 +112,12 @@ const SECTIONS: [&str; 13] = [
     themes::WALLPAPERS_SECTION,
     themes::FONTS_SECTION,
 ];
+
+/// Whether `bytes` begin as a WAV file: a RIFF file of form `WAVE` -- the
+/// player's own test (`sound::wav::is_wav`), which the tests hold this to.
+fn is_wav(bytes: &[u8]) -> bool {
+    bytes.get(..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WAVE")
+}
 
 /// The largest wallpaper read to see that it is a picture. Not a limit the
 /// desktop has -- it decodes whatever the compositor could hold -- but the
@@ -419,10 +422,11 @@ impl Checker {
         let has_file = self.is_entry(Path::new(themes::FILE_NAME), &[Kind::File, Kind::Link]);
         let has_icons = self.is_entry(Path::new(icons::ICONS_DIR), &[Kind::Dir]);
         let has_cursors = self.is_entry(Path::new(cursors::CURSORS_DIR), &[Kind::Dir]);
-        if !has_file && !has_icons && !has_cursors {
+        let has_sounds = self.is_entry(Path::new(sounds::STEREO_DIR), &[Kind::Dir]);
+        if !has_file && !has_icons && !has_cursors && !has_sounds {
             self.error(
                 "",
-                "holds no `theme.yaml`, no `icons/` and no `cursors/`: it is not a theme",
+                "holds no `theme.yaml`, no `icons/`, no `cursors/` and no `stereo/`: it is not a theme",
             );
             return;
         }
@@ -439,6 +443,9 @@ impl Checker {
         if has_cursors {
             self.check_cursors();
         }
+        if has_sounds {
+            self.check_sounds();
+        }
         self.check_wallpapers(file.as_ref().and_then(|file| file.wallpapers.as_ref()));
         self.check_fonts(file.as_ref().and_then(|file| file.fonts.as_ref()));
         if let Some(file) = &file {
@@ -450,7 +457,7 @@ impl Checker {
         if self.covers.is_empty() {
             self.error(
                 "",
-                "sets nothing this desktop can use: no colours, no section it reads, no icon it can draw and no cursor it can read",
+                "sets nothing this desktop can use: no colours, no section it reads, no icon it can draw, no cursor and no sound it can read",
             );
         } else if let Some(file) = &file {
             self.check_supports(&file.meta);
@@ -984,11 +991,6 @@ impl Checker {
                         format!("`meta.supports` lists `{axis}`, but the theme sets no {axis} this desktop can use"),
                     );
                 }
-            } else if PLANNED_AXES.contains(&claim.as_str()) {
-                self.note(
-                    at,
-                    format!("`meta.supports` lists `{claim}`, which this desktop has no axis for yet: nothing reads it"),
-                );
             } else {
                 self.warning(
                     at,
@@ -1244,6 +1246,126 @@ impl Checker {
                     format!(
                         "is larger than the {} bytes a cursor may be: the desktop passes it over",
                         cursors::MAX_CURSOR_BYTES
+                    ),
+                );
+                false
+            }
+            Err(err) => {
+                self.error(&at, format!("could not be read ({err})"));
+                false
+            }
+        }
+    }
+
+    /// The theme's sounds: `stereo/<event>.<ext>`, as the sound theme
+    /// specification lays them out and [`sounds::SoundTheme`] looks for them.
+    ///
+    /// Not decoded, unlike an icon or a cursor: the decoder is the player's
+    /// (`gui/sound`), which this crate does not depend on. What the player
+    /// would refuse before decoding is checked -- a name nothing asks for, an
+    /// extension it does not try, a file past its size, one that is not the
+    /// container its extension says -- and the tests hold those to the
+    /// player's own (`themecheck_tests.rs`).
+    fn check_sounds(&mut self) {
+        let dir = Path::new(sounds::STEREO_DIR);
+        // A sound theme's `index.theme` names its directories and the themes
+        // it inherits from: accounted for, as a cursor theme's is.
+        let index = PathBuf::from(sounds::INDEX_FILE);
+        if self.is_entry(&index, &[Kind::File, Kind::Link]) {
+            self.accounted.insert(index);
+        }
+        let inside: Vec<Entry> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.rel.starts_with(dir) && entry.rel != dir)
+            .cloned()
+            .collect();
+        let mut usable = 0_usize;
+        for entry in inside {
+            self.accounted.insert(entry.rel.clone());
+            if entry.rel.parent() != Some(dir) {
+                continue;
+            }
+            if entry.kind == Kind::Dir {
+                self.warning(
+                    &place(&entry.rel),
+                    format!(
+                        "is a folder inside `{}/`, which the desktop does not look in",
+                        sounds::STEREO_DIR
+                    ),
+                );
+            } else if self.check_sound(&entry.rel) {
+                usable = usable.saturating_add(1);
+            }
+        }
+        if usable > 0 {
+            self.covers.insert(sounds::AXIS);
+        }
+    }
+
+    /// One file in `stereo/`: whether the desktop would play it -- or, for
+    /// `.disabled`, honour it.
+    fn check_sound(&mut self, rel: &Path) -> bool {
+        let at = place(rel);
+        let (Some(stem), Some(extension)) = (
+            rel.file_stem().and_then(OsStr::to_str),
+            rel.extension().and_then(OsStr::to_str),
+        ) else {
+            self.warning(
+                &at,
+                "is not named `<event>.<extension>`, so nothing asks for it",
+            );
+            return false;
+        };
+        if !sounds::is_valid_name(stem) {
+            self.warning(
+                &at,
+                "is not named as an event is asked for -- lower-case letters, digits, `-` and `_` -- so nothing asks for it",
+            );
+            return false;
+        }
+        if !sounds::EXTENSIONS.contains(&extension) {
+            let tried: Vec<String> = sounds::EXTENSIONS
+                .iter()
+                .map(|e| format!("`.{e}`"))
+                .collect();
+            self.warning(
+                &at,
+                format!(
+                    "is not read: the desktop tries {} and nothing else",
+                    tried.join(", ")
+                ),
+            );
+            return false;
+        }
+        if extension == "disabled" {
+            // Its presence is the whole of it: the event is silent.
+            return true;
+        }
+        if !self.readable(rel) {
+            return false;
+        }
+        match read_within(&self.root.join(rel), sounds::MAX_SOUND_BYTES) {
+            Ok(Some(bytes)) => {
+                let (fits, kind) = if extension == "wav" {
+                    (is_wav(&bytes), "WAV")
+                } else {
+                    (bytes.starts_with(b"OggS"), "Ogg")
+                };
+                if !fits {
+                    self.error(
+                        &at,
+                        format!("is not the {kind} file its name says: the desktop cannot play it"),
+                    );
+                }
+                fits
+            }
+            Ok(None) => {
+                self.error(
+                    &at,
+                    format!(
+                        "is larger than the {} bytes a sound may be: the desktop does not play it",
+                        sounds::MAX_SOUND_BYTES
                     ),
                 );
                 false

@@ -338,8 +338,8 @@ fn what_a_shared_theme_should_say_about_itself() {
 }
 
 /// **`meta.supports` is held to what the theme covers**: an axis listed and
-/// not set, one set and not listed, one this desktop has no axis for yet,
-/// and a word that is no axis.
+/// not set -- `sounds` as much as `cursors`, now that it is one -- one set
+/// and not listed, and a word that is no axis.
 #[test]
 fn meta_supports_is_held_to_what_the_theme_covers() {
     let theme = Theme::tidy();
@@ -363,7 +363,12 @@ fn meta_supports_is_held_to_what_the_theme_covers() {
         "theme.yaml",
         "sets `terminal`, which",
     );
-    assert_said(&report, Severity::Note, "theme.yaml", "lists `sounds`");
+    assert_said(
+        &report,
+        Severity::Warning,
+        "theme.yaml",
+        "lists `sounds`, but",
+    );
     assert_said(
         &report,
         Severity::Warning,
@@ -605,6 +610,128 @@ fn cursors_are_read_as_the_desktop_reads_them() {
     assert!(!report.findings.iter().any(|f| f.place == "index.theme"));
     assert!(!report.findings.iter().any(|f| f.place == "cursors/default"));
     assert_eq!(report.covers, ["cursors"]);
+}
+
+// ─── Sounds ─────────────────────────────────────────────────────────────────
+
+/// The start of an Ogg file, as far as the checker looks.
+const OGG: &[u8] = b"OggS\0\x02\0\0\0\0\0\0\0\0";
+
+/// The start of a WAV file, as far as the checker looks.
+const WAV: &[u8] = b"RIFF\x24\0\0\0WAVEfmt ";
+
+/// **A folder of sounds alone is a theme, and its sounds are its `stereo`
+/// files**: Ogg and WAV that are what their names say, and a `.disabled`
+/// that silences an event; its `index.theme` is no stray file.
+#[test]
+fn a_folder_of_sounds_is_a_theme() {
+    let theme = Theme::empty("chimes");
+    theme
+        .write("stereo/bell.oga", OGG)
+        .write("stereo/message-new-instant.wav", WAV)
+        .write("stereo/trash-empty.disabled", "")
+        .write(
+            "index.theme",
+            "[Sound Theme]\nName=Chimes\nDirectories=stereo\n",
+        );
+    let report = theme.check();
+    assert!(report.passes(), "{}", listing(&report));
+    assert_eq!(report.covers, ["sounds"]);
+    for place in [
+        "stereo/bell.oga",
+        "stereo/message-new-instant.wav",
+        "stereo/trash-empty.disabled",
+        "index.theme",
+    ] {
+        assert!(!report.findings.iter().any(|f| f.place == place), "{place}");
+    }
+}
+
+/// **What the player would refuse is said**: a name no event has, an
+/// extension it does not try, a file that is not what its name says, a
+/// folder it does not look in, a file past the size it reads.
+#[test]
+fn what_the_player_would_refuse_is_said() {
+    let theme = Theme::tidy();
+    theme
+        .write("stereo/Bell.oga", OGG)
+        .write("stereo/complete.mp3", "ID3")
+        .write("stereo/dialog-error.oga", "not ogg at all")
+        .write("stereo/dialog-warning.wav", OGG)
+        .write("stereo/more/inner.oga", OGG)
+        .write("stereo/noextension", OGG);
+    let huge = vec![b'O'; usize::try_from(sounds::MAX_SOUND_BYTES).unwrap() + 1];
+    theme.write("stereo/screen-capture.oga", huge);
+    let report = theme.check();
+    assert!(!report.passes());
+    assert_said(
+        &report,
+        Severity::Warning,
+        "stereo/Bell.oga",
+        "not named as an event",
+    );
+    assert_said(
+        &report,
+        Severity::Warning,
+        "stereo/complete.mp3",
+        "the desktop tries `.disabled`",
+    );
+    assert_said(
+        &report,
+        Severity::Error,
+        "stereo/dialog-error.oga",
+        "not the Ogg file",
+    );
+    assert_said(
+        &report,
+        Severity::Error,
+        "stereo/dialog-warning.wav",
+        "not the WAV file",
+    );
+    assert_said(
+        &report,
+        Severity::Warning,
+        "stereo/more",
+        "does not look in",
+    );
+    assert_said(
+        &report,
+        Severity::Warning,
+        "stereo/noextension",
+        "not named `<event>.<extension>`",
+    );
+    assert_said(
+        &report,
+        Severity::Error,
+        "stereo/screen-capture.oga",
+        "larger than",
+    );
+    assert!(!report.covers.contains(&"sounds"), "nothing there plays");
+}
+
+/// **The checker's sound checks are the player's own**: the same size
+/// limit, the same test of a WAV file, and an Ogg file the checker passes
+/// is one the player decodes -- lane F's fixture -- where bytes it fails
+/// are refused by the player too.
+#[test]
+fn the_sound_checks_are_the_players() {
+    assert_eq!(sounds::MAX_SOUND_BYTES, sound::MAX_FILE_BYTES);
+    for bytes in [
+        WAV,
+        OGG,
+        b"RIFF\0\0\0\0AVI ".as_slice(),
+        b"RIF".as_slice(),
+        b"",
+    ] {
+        assert_eq!(super::is_wav(bytes), sound::wav::is_wav(bytes), "{bytes:?}");
+    }
+    let fixture: &[u8] = include_bytes!("../../video/vorbis/tests/data/mono_q3.ogg");
+    assert!(fixture.starts_with(b"OggS"));
+    assert!(sound::decode::decode(fixture).is_ok());
+    assert!(matches!(
+        sound::decode::decode(b"not ogg at all"),
+        Err(sound::DecodeError::Unrecognised)
+    ));
 }
 
 // ─── Links ──────────────────────────────────────────────────────────────────

@@ -62,6 +62,8 @@ pub mod decorations;
 
 pub mod cursors;
 
+pub mod sounds;
+
 pub mod panel;
 
 pub mod themecheck;
@@ -80,6 +82,7 @@ use core::time::Duration;
 use datetimesettings::Tz;
 pub use daywindow::{DailyWindow, TimeOfDay};
 use guitk::color::Color;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
@@ -1120,6 +1123,72 @@ impl AnimationSpeed {
 }
 
 // ============================================================================
+// Sound settings
+// ============================================================================
+
+/// The volume system sounds play at until the user chooses: a little under
+/// full, so a chime does not startle at a volume set for music.
+pub const DEFAULT_SOUND_VOLUME: f32 = 0.8;
+
+/// The user's sounds: on or off, how loud, and their own sound for an event
+/// -- the `sounds` section of `appearance.yaml`. Which theme the rest come
+/// from is [`AppearanceSettings::sound_theme`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundSettings {
+    /// Whether events make sounds at all.
+    pub enabled: bool,
+    /// How loud they are, 0 to 1.
+    pub volume: f32,
+    /// The user's own choice for an event, by its sound naming
+    /// specification name, over the theme's: `sounds.events.<name>` in the
+    /// file, an absolute path or `off`.
+    pub events: BTreeMap<String, EventSound>,
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            volume: DEFAULT_SOUND_VOLUME,
+            events: BTreeMap::new(),
+        }
+    }
+}
+
+/// The user's own choice for one event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventSound {
+    /// This file, an absolute path.
+    File(PathBuf),
+    /// No sound.
+    Off,
+}
+
+impl EventSound {
+    /// The choice `value` -- `sounds.events.<name>` in the file -- spells:
+    /// `off`, or an absolute path. `None` for anything else, a relative path
+    /// above all: relative to what would be a guess.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value == "off" {
+            return Some(Self::Off);
+        }
+        let path = pathcodec::decode_path(value);
+        path.is_absolute().then_some(Self::File(path))
+    }
+
+    /// How the file spells it.
+    #[must_use]
+    pub fn yaml_value(&self) -> String {
+        match self {
+            Self::Off => "off".to_string(),
+            Self::File(path) => pathcodec::encode_path(path),
+        }
+    }
+}
+
+// ============================================================================
 // Font settings
 // ============================================================================
 
@@ -1532,6 +1601,17 @@ pub struct AppearanceSettings {
     /// [`cursor_size`](Self::cursor_size) and
     /// [`cursor_scheme`](Self::cursor_scheme).
     pub cursor_theme: cursors::CursorTheme,
+    /// The theme an event's sound comes from -- a message arriving, an
+    /// error, the recycle bin emptied: the built-in one, the sounds
+    /// `gui/sound` synthesizes, unless the user chose another. `theme.sounds`
+    /// in the file, by the folder name of the theme, which may be another
+    /// desktop's sound theme (freedesktop's, Yaru) as well as a SlateOS one.
+    /// Nothing is read until a sound is asked for; see
+    /// [`sounds::SoundTheme`] and [`sound_for`](Self::sound_for).
+    pub sound_theme: sounds::SoundTheme,
+    /// Whether events make sounds, how loud, and the user's own sound for an
+    /// event -- the `sounds` section.
+    pub sounds: SoundSettings,
     /// The theme the shapes of the controls come from -- a button's corners,
     /// a field's focus mark, a scrollbar's width: the built-in one unless the
     /// user chose another. `theme.widget_style` in the file, by the theme's
@@ -1844,6 +1924,8 @@ impl Default for AppearanceSettings {
             color_theme: themes::ColorTheme::built_in(),
             icon_theme: icons::IconTheme::built_in(),
             cursor_theme: cursors::CursorTheme::built_in(),
+            sound_theme: sounds::SoundTheme::built_in(),
+            sounds: SoundSettings::default(),
             widget_theme: themes::WidgetTheme::built_in(),
             animation_theme: themes::AnimationTheme::built_in(),
             decoration_theme: themes::DecorationTheme::built_in(),
@@ -2164,8 +2246,43 @@ impl AppearanceSettings {
         self.panel_theme.style()
     }
 
+    /// What to play for the event `name` -- a sound naming specification
+    /// name (`message-new-instant`, `dialog-error`, `trash-empty`): nothing
+    /// with sounds off; else the user's own choice for it, or for its name
+    /// cut at a hyphen, so a sound chosen for `dialog-error` is heard for
+    /// `dialog-error-serious` too; else the sound theme's
+    /// ([`sounds::SoundTheme::sound`]), which ends at the built-in sound.
+    /// Play it at [`SoundSettings::volume`].
+    #[must_use]
+    pub fn sound_for(&self, name: &str) -> sounds::SoundChoice {
+        let name = name.trim();
+        if !self.sounds.enabled || !sounds::is_valid_name(name) {
+            return sounds::SoundChoice::Silent;
+        }
+        for candidate in sounds::cuts(name) {
+            match self.sounds.events.get(candidate) {
+                Some(EventSound::File(path)) => return sounds::SoundChoice::File(path.clone()),
+                Some(EventSound::Off) => return sounds::SoundChoice::Silent,
+                None => {}
+            }
+        }
+        self.sound_theme.sound(name)
+    }
+
     /// Validate and clamp settings to sane ranges.
     pub fn validate(&mut self) {
+        // A volume is a fraction; a NaN set in code is the default rather
+        // than a panic or a silence nobody chose.
+        self.sounds.volume = if self.sounds.volume.is_nan() {
+            DEFAULT_SOUND_VOLUME
+        } else {
+            self.sounds.volume.clamp(0.0, 1.0)
+        };
+        // A name that is no event's would be looked up as nothing anyway;
+        // dropped, so a save does not keep writing it back.
+        self.sounds
+            .events
+            .retain(|name, _| sounds::is_valid_name(name));
         // Clamp font sizes. `get_f64` never yields a NaN or an infinity, so
         // `clamp` cannot be handed one from a config file; a NaN written by a
         // future code path would panic here rather than propagate silently.
@@ -2618,6 +2735,36 @@ impl AppearanceSettings {
             s.cursor_theme =
                 cursors::CursorTheme::load(&pathcodec::decode_path(&name).into_os_string());
         }
+        // The sound theme, spelled as the cursor theme is, and for its
+        // reason read no further: a sound is looked up when it is played.
+        if let Some(name) = doc
+            .get_str(&["theme", "sounds"])
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            s.sound_theme =
+                sounds::SoundTheme::load(&pathcodec::decode_path(&name).into_os_string());
+        }
+        if let Some(on) = doc.get_bool(&["sounds", "enabled"]) {
+            s.sounds.enabled = on;
+        }
+        if let Some(volume) = doc.get_f64(&["sounds", "volume"]) {
+            // Clamped by `validate`; the narrowing is of a fraction.
+            #[allow(clippy::cast_possible_truncation, reason = "a volume, 0 to 1")]
+            let volume = volume as f32;
+            s.sounds.volume = volume;
+        }
+        // The user's own sounds: an event's name and `off` or a path. One
+        // that is neither, or is no event's, is passed over rather than
+        // costing the rest.
+        for name in doc.keys(&["sounds", "events"]) {
+            let choice = doc
+                .get_str(&["sounds", "events", &name])
+                .and_then(|value| EventSound::parse(&value));
+            if let Some(choice) = choice.filter(|_| sounds::is_valid_name(&name)) {
+                s.sounds.events.insert(name, choice);
+            }
+        }
         // The widget style, spelled and loaded as the colour theme is -- file
         // and all, since the palette carries it and a palette is resolved per
         // frame.
@@ -2954,6 +3101,22 @@ impl AppearanceSettings {
             &["theme", "cursors"],
             &pathcodec::encode_path(std::path::Path::new(self.cursor_theme.id())),
         );
+        doc.set_str(
+            &["theme", "sounds"],
+            &pathcodec::encode_path(std::path::Path::new(self.sound_theme.id())),
+        );
+        doc.set_bool(&["sounds", "enabled"], self.sounds.enabled);
+        doc.set_f64(&["sounds", "volume"], f64::from(self.sounds.volume));
+        // An event no longer given a sound of its own is taken out, so the
+        // theme's is heard again; the rest are written as they are.
+        for stale in doc.keys(&["sounds", "events"]) {
+            if !self.sounds.events.contains_key(&stale) {
+                let _removed = doc.remove(&["sounds", "events", &stale]);
+            }
+        }
+        for (name, choice) in &self.sounds.events {
+            doc.set_str(&["sounds", "events", name], &choice.yaml_value());
+        }
         doc.set_str(
             &["theme", "widget_style"],
             &pathcodec::encode_path(std::path::Path::new(self.widget_theme.id())),
@@ -3814,6 +3977,25 @@ mod tests {
             // Another again, and another desktop's: a cursor theme need not
             // be a SlateOS theme at all.
             cursor_theme: cursors::CursorTheme::load(std::ffi::OsStr::new("Adwaita")),
+            // Another desktop's sound theme, and none of the others': the
+            // sound axis is its own.
+            sound_theme: sounds::SoundTheme::load(std::ffi::OsStr::new("Yaru")),
+            // Off, an uncommon volume, and an event of each kind: a file
+            // whose name holds a space, a non-ASCII letter and a `%`, and a
+            // silence.
+            sounds: SoundSettings {
+                enabled: false,
+                volume: 0.35,
+                events: BTreeMap::from([
+                    ("dialog-error".to_string(), EventSound::Off),
+                    (
+                        "message-new-instant".to_string(),
+                        EventSound::File(PathBuf::from(host_absolute(
+                            "home/u/Sounds/d\u{ed}ng 100%.oga",
+                        ))),
+                    ),
+                ]),
+            },
             // A third, read back from the file the round trip installs.
             widget_theme: themes::WidgetTheme::from_style(
                 ROUND_TRIP_WIDGETS,
@@ -4127,6 +4309,162 @@ mod tests {
             let back = AppearanceSettings::read_from(&written);
             assert_eq!(back.cursor_theme.id(), odd.as_os_str());
         });
+    }
+
+    /// `tail` made absolute on the host the tests run on. A SlateOS path is
+    /// absolute from `/`, but `Path::is_absolute` on a Windows host also
+    /// wants a drive -- and with one, the path is still spelled with `/`
+    /// alone, so it reads the same in a file as anywhere else.
+    fn host_absolute(tail: &str) -> String {
+        if cfg!(windows) {
+            format!("C:/{tail}")
+        } else {
+            format!("/{tail}")
+        }
+    }
+
+    /// Settings whose sound theme is `id` under a scratch directory's roots,
+    /// with one file there: `t/stereo/bell.oga`.
+    fn with_sound_theme(scratch: &scratchdir::ScratchDir) -> (AppearanceSettings, PathBuf) {
+        let share = scratch.dir().join("share");
+        let bell = share.join("t").join("stereo").join("bell.oga");
+        std::fs::create_dir_all(bell.parent().unwrap()).unwrap();
+        std::fs::write(&bell, b"a sound").unwrap();
+        let mut s = AppearanceSettings::default();
+        s.sound_theme = sounds::SoundTheme::named(
+            std::ffi::OsStr::new("t"),
+            themes::ThemeDirs {
+                user: None,
+                system: scratch.dir().join("system"),
+            },
+            vec![share],
+        );
+        (s, bell)
+    }
+
+    /// **An event's sound is the user's own, then the theme's, then the
+    /// built-in one** -- the user's for an event's shorter name too, so a
+    /// sound chosen for `dialog-error` is heard for `dialog-error-serious`.
+    #[test]
+    fn an_events_sound_is_the_users_then_the_themes_then_the_built_in() {
+        let scratch = scratchdir::ScratchDir::new("appearance-sound-for");
+        let (mut s, bell) = with_sound_theme(&scratch);
+        assert_eq!(s.sound_for("bell"), sounds::SoundChoice::File(bell.clone()));
+        assert_eq!(
+            s.sound_for("trash-empty"),
+            sounds::SoundChoice::BuiltIn("trash-empty".to_string())
+        );
+        let mine = PathBuf::from("/home/u/my bell.wav");
+        s.sounds
+            .events
+            .insert("bell".to_string(), EventSound::File(mine.clone()));
+        s.sounds
+            .events
+            .insert("dialog-error".to_string(), EventSound::Off);
+        assert_eq!(s.sound_for("bell"), sounds::SoundChoice::File(mine));
+        assert_eq!(
+            s.sound_for("dialog-error-serious"),
+            sounds::SoundChoice::Silent
+        );
+        assert_eq!(s.sound_for(" bell "), s.sound_for("bell"), "trimmed");
+        assert_eq!(s.sound_for("Not An Event"), sounds::SoundChoice::Silent);
+    }
+
+    /// **With sounds off, no event makes one** -- not the user's own, not the
+    /// theme's, not the built-in.
+    #[test]
+    fn with_sounds_off_nothing_sounds() {
+        let scratch = scratchdir::ScratchDir::new("appearance-sounds-off");
+        let (mut s, _) = with_sound_theme(&scratch);
+        s.sounds.enabled = false;
+        s.sounds.events.insert(
+            "complete".to_string(),
+            EventSound::File(PathBuf::from("/x.oga")),
+        );
+        for event in ["bell", "complete", "trash-empty"] {
+            assert_eq!(s.sound_for(event), sounds::SoundChoice::Silent, "{event}");
+        }
+    }
+
+    /// **The file spells a choice `off` or an absolute path**; a relative
+    /// path, a blank and a name that is no event's are passed over, and the
+    /// rest are kept.
+    #[test]
+    fn the_file_spells_a_choice_off_or_an_absolute_path() {
+        let done = host_absolute("home/u/done.oga");
+        let doc = Document::parse(&format!(
+            "theme:\n  sounds: Yaru\nsounds:\n  enabled: false\n  volume: 0.25\n  events:\n    bell: relative/x.oga\n    Bad: \"off\"\n    trash-empty: \"off\"\n    complete: {done}\n    message: \" \"\n",
+        ));
+        let s = AppearanceSettings::read_from(&doc);
+        assert_eq!(s.sound_theme.id(), "Yaru");
+        assert!(!s.sounds.enabled);
+        assert!((s.sounds.volume - 0.25).abs() < 1e-6);
+        assert_eq!(
+            s.sounds.events,
+            BTreeMap::from([
+                ("trash-empty".to_string(), EventSound::Off),
+                (
+                    "complete".to_string(),
+                    EventSound::File(PathBuf::from(&done))
+                ),
+            ])
+        );
+        assert_eq!(EventSound::parse("off"), Some(EventSound::Off));
+        assert_eq!(EventSound::parse(" off "), Some(EventSound::Off));
+        assert_eq!(EventSound::parse("relative.oga"), None);
+        assert_eq!(EventSound::parse(""), None);
+        // Spelled as the file spells any path: a `%` is `%25`.
+        assert_eq!(
+            EventSound::parse(&host_absolute("100%25.oga")),
+            Some(EventSound::File(PathBuf::from(host_absolute("100%.oga"))))
+        );
+    }
+
+    /// **An event given back to the theme leaves the file**, and the
+    /// defaults -- sounds on, the built-in theme -- are written as such.
+    #[test]
+    fn an_event_given_back_to_the_theme_leaves_the_file() {
+        let mut s = AppearanceSettings::default();
+        let mut doc = Document::parse("");
+        s.write_into(&mut doc);
+        assert_eq!(doc.get_bool(&["sounds", "enabled"]), Some(true));
+        assert_eq!(
+            doc.get_str(&["theme", "sounds"]).as_deref(),
+            Some(themes::BUILT_IN)
+        );
+        s.sounds.events.insert("bell".to_string(), EventSound::Off);
+        s.sounds.events.insert(
+            "complete".to_string(),
+            EventSound::File(PathBuf::from(host_absolute("a.oga"))),
+        );
+        s.write_into(&mut doc);
+        assert_eq!(doc.keys(&["sounds", "events"]), ["bell", "complete"]);
+        s.sounds.events.remove("bell");
+        s.write_into(&mut doc);
+        assert_eq!(doc.keys(&["sounds", "events"]), ["complete"]);
+        assert_eq!(AppearanceSettings::read_from(&doc).sounds, s.sounds);
+    }
+
+    /// **A volume is held to 0 to 1, a NaN is the default, and a name that is
+    /// no event's is dropped.**
+    #[test]
+    fn the_sound_settings_are_validated() {
+        let mut s = AppearanceSettings::default();
+        s.sounds.volume = 3.0;
+        s.validate();
+        assert_eq!(s.sounds.volume, 1.0);
+        s.sounds.volume = -1.0;
+        s.validate();
+        assert_eq!(s.sounds.volume, 0.0);
+        s.sounds.volume = f32::NAN;
+        s.validate();
+        assert_eq!(s.sounds.volume, DEFAULT_SOUND_VOLUME);
+        s.sounds
+            .events
+            .insert("../escape".to_string(), EventSound::Off);
+        s.sounds.events.insert("bell".to_string(), EventSound::Off);
+        s.validate();
+        assert_eq!(s.sounds.events.keys().collect::<Vec<_>>(), ["bell"]);
     }
 
     /// A blank name is the built-in theme, as a blanked wallpaper is none.

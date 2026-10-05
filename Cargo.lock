@@ -58,6 +58,7 @@ dependencies = [
  "pathcodec",
  "scratchdir",
  "settingsfile",
+ "sound",
  "yamldoc",
 ]
 

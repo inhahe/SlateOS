@@ -234,6 +234,11 @@ rule_actions! {
     /// a rule has to name the layout as well as the cell. Anything from
     /// `SnapSlot::COUNT` up names no slot and is dropped.
     snap_zone: u32,
+    /// Keep the window in the system tray while it is minimised, rather than
+    /// on the taskbar: its button goes, and a tray icon stands for it until
+    /// it is restored. With `initial_state` minimised, it starts there --
+    /// `design.txt`'s "always start in system tray".
+    to_tray: bool,
 }
 
 impl Default for RuleActions {
@@ -812,6 +817,9 @@ impl RuleActions {
         }
         if self.snap_zone.is_some() {
             parts.push("snap");
+        }
+        if self.to_tray == Some(true) {
+            parts.push("tray");
         }
         parts.join(", ")
     }

@@ -35,6 +35,11 @@ need to link the desktop shell.
   announcement (`SettingsChanged` for `window-rules`), so a page that stores
   needs to tell nobody. Rules apply to windows as they arrive, so a change
   shows on the next window a rule matches, not on ones already open.
+- **`tray`, added after this was filed** (2026-10-05): minimised, the window
+  goes to the system tray rather than the taskbar, and with `state:
+  minimized` it starts there. It is how `design.txt` lets a user make a
+  program "always start in system tray"; `tray: false` keeps one in the
+  taskbar, and `taskbar: false` with `tray: false` gives it neither.
 - **What a rule can say that the desktop cannot yet do:** `monitor` (waits
   on multi-monitor) and `decorations` (a window's frame is its own program's).
   `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` keeps the

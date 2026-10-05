@@ -135,6 +135,7 @@ pub struct Loaded {
 /// | `min-size`, `max-size` | `W H` | limits on its size |
 /// | `can-close`, `can-move`, `can-resize` | `true`/`false` | what the user may do to it |
 /// | `snap` | a snap slot's number | the zone it snaps into |
+/// | `tray` | `true`/`false` | minimised, it goes to the system tray, not the taskbar; with `state: minimized`, it starts there |
 #[must_use]
 pub fn read(doc: &Document) -> Option<Loaded> {
     if !doc.contains(&[RULES]) {
@@ -230,6 +231,7 @@ fn read_rule(doc: &Document, name: &str, index: usize) -> Result<WindowRule, Str
                         .map_err(|_| format!("`snap` is not a slot number: {text:?}"))?,
                 );
             }
+            "tray" => a.to_tray = Some(flag(key, text)?),
             other => return Err(format!("`{other}` is not something a rule can say")),
         }
     }
@@ -534,6 +536,9 @@ fn write_actions(a: &RuleActions, put: &mut dyn FnMut(&str, Value)) {
     }
     if let Some(slot) = a.snap_zone {
         put("snap", Value::Whole(i64::from(slot)));
+    }
+    if let Some(tray) = a.to_tray {
+        put("tray", Value::Flag(tray));
     }
 }
 

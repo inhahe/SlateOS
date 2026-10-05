@@ -153,6 +153,8 @@ mod pointer_tests;
 #[cfg(test)]
 mod service_menu_tests;
 #[cfg(test)]
+mod tray_window_tests;
+#[cfg(test)]
 mod wallpaper_move_tests;
 
 use appearance::config;
@@ -445,6 +447,16 @@ const TASKBAR_TILE_HIGHLIGHT_LIT: u8 = 179;
 const TASKBAR_TILE_GLOW: u8 = 128;
 /// How far a lit tile's glow reaches: the reference's 11.
 const TASKBAR_TILE_GLOW_BLUR: f32 = 11.0;
+/// The owner the shell's own tray entries -- one for each window minimised to
+/// the tray -- go by.
+///
+/// No program's icon is owned by 0: the compositor names an icon's owner by
+/// the connection it came over, numbers its connections from 1 and keeps 0
+/// for "no client" (its server's `next_client_id`). So a key owned by 0 can
+/// only be the shell's, and a click on it is the shell's to answer rather
+/// than a program's to hear.
+pub const SHELL_TRAY_OWNER: u64 = 0;
+
 /// Narrowest the system tray gets, however little is in it.
 ///
 /// The tray's real width is *measured* — see
@@ -543,6 +555,11 @@ const TASKBAR_ICON: f32 = 20.0;
 /// The side of the tray's chevron, in logical pixels: smaller than the icons
 /// it stands beside, as it is a way to them rather than one of them.
 const TRAY_CHEVRON_ICON: f32 = 16.0;
+
+/// The side of a window's picture in the tray, in logical pixels: the tray's
+/// small size rather than the taskbar button's, as a window minimised there
+/// is one of the small things beside the clock and not a button on the bar.
+const TRAY_WINDOW_ICON: f32 = 16.0;
 
 /// A press on a tray icon, in flight.
 struct TrayDrag {
@@ -1240,6 +1257,11 @@ pub struct ManagedWindow {
     /// window docked to the edge might want no button but must still be
     /// reachable by keyboard, and a background helper the reverse.
     pub skip_alt_tab: bool,
+    /// Whether a window rule asked for this window to go to the system tray
+    /// when it is minimised, rather than keep its taskbar button
+    /// ([`in_tray`](Self::in_tray)). Carried across lists for the reason
+    /// [`skip_taskbar`](Self::skip_taskbar) is.
+    pub to_tray: bool,
     pub state: WindowState,
     pub desktop: u32,
     /// Whether this window has focus.
@@ -1292,6 +1314,16 @@ impl ManagedWindow {
     #[must_use]
     pub fn on_glass(&self) -> bool {
         self.mapped && self.state != WindowState::Minimized
+    }
+
+    /// Whether the window is put away **in the system tray**: minimised, and
+    /// a rule says it goes there ([`to_tray`](Self::to_tray)). Such a window
+    /// has a tray entry in place of its taskbar button, and is out of the
+    /// Alt+Tab switcher -- it is reached from the tray, as a program that
+    /// minimises to the tray is on every desktop.
+    #[must_use]
+    pub fn in_tray(&self) -> bool {
+        self.to_tray && self.mapped && self.state == WindowState::Minimized
     }
 }
 
@@ -1998,7 +2030,18 @@ pub struct DesktopShell {
     /// the keyboard and one chosen in a panel cannot disagree, and the choice
     /// survives a restart the way a user expects.
     pub input_methods: input_method::InputMethodManager,
-    /// The icons other programs have put in the tray.
+    /// Every icon in the tray: [`program_tray_icons`](Self::program_tray_icons),
+    /// then an entry of the shell's own for each window minimised to the tray
+    /// ([`ManagedWindow::in_tray`]) -- owned by [`SHELL_TRAY_OWNER`], which
+    /// no program is.
+    ///
+    /// One list, so that the tray's arrangement, its overflow, its dragging
+    /// and its tooltips treat a window's entry as they treat any icon, with
+    /// nothing to keep in step; only a click on one, and its picture, differ
+    /// ([`click_tray_icon`](Self::click_tray_icon)).
+    tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The icons other programs have put in the tray, as the compositor
+    /// last reported them.
     ///
     /// Held rather than derived: they come from the compositor over `TRAY`
     /// frames, which is the only place they exist. The shell does not own them
@@ -2009,7 +2052,13 @@ pub struct DesktopShell {
     /// Order is the compositor's (registration order) and is kept as given: a
     /// tray whose icons move when an unrelated program registers one is a tray
     /// where the user's muscle memory is wrong.
-    tray_icons: Vec<guiremote::tray::TrayIcon>,
+    program_tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The id each window's tray entry goes by, from the first time it went
+    /// to the tray until it closes -- so its entry is the same icon to the
+    /// tray's arrangement each time.
+    window_tray_ids: BTreeMap<WindowId, u32>,
+    /// The id the next window to go to the tray is given.
+    next_window_tray_id: u32,
     /// What on the taskbar the pointer is resting on -- a tray icon or a tile
     /// -- and the tooltip naming it.
     ///
@@ -2803,6 +2852,9 @@ impl DesktopShell {
             // `load_input_settings`; this is only the list.
             input_methods: input_method::InputMethodManager::with_builtins(),
             tray_icons: Vec::new(),
+            program_tray_icons: Vec::new(),
+            window_tray_ids: BTreeMap::new(),
+            next_window_tray_id: 1,
             tray_arrangement: tray_dnd::TrayIconArrangement::new(),
             tray_drag: None,
             tray_overflow_menu: None,
@@ -5162,7 +5214,7 @@ impl DesktopShell {
                     self.drag_tray_icon_to(event.x, event.y);
                     return ShellAction::Consumed;
                 }
-                MouseEventKind::Release(_) => return self.finish_tray_press(),
+                MouseEventKind::Release(_) => return self.finish_tray_press(event.x, event.y),
                 _ => return ShellAction::Consumed,
             }
         }
@@ -6385,14 +6437,15 @@ impl DesktopShell {
             let carried = self
                 .windows
                 .get(&id)
-                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));
-            let (icon_id, mut skip_taskbar, mut skip_alt_tab) =
-                carried.unwrap_or((0, false, false));
+                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab, w.to_tray));
+            let (icon_id, mut skip_taskbar, mut skip_alt_tab, mut to_tray) =
+                carried.unwrap_or((0, false, false, false));
 
             if carried.is_none() {
                 let actions = self.rules.evaluate(&info.title, &info.app_id);
                 skip_taskbar = actions.skip_taskbar.unwrap_or(false);
                 skip_alt_tab = actions.skip_alt_tab.unwrap_or(false);
+                to_tray = actions.to_tray.unwrap_or(false);
                 requests.extend(Self::rule_requests(
                     id,
                     info,
@@ -6429,6 +6482,7 @@ impl DesktopShell {
                     app_id: info.app_id.clone(),
                     skip_taskbar,
                     skip_alt_tab,
+                    to_tray,
                     state: if info.minimized {
                         WindowState::Minimized
                     } else if info.maximized {
@@ -6468,6 +6522,9 @@ impl DesktopShell {
         }
 
         self.windows = kept;
+        // A window minimised to the tray has an entry there, and one restored
+        // or gone has none: from this list, as the taskbar's buttons are.
+        self.sync_window_tray();
         // Every window gone, of an ending waiting for them: it is to be
         // carried out, by the session (`take_ending_action`).
         if self.ending.is_some() && self.windows.is_empty() {
@@ -6537,12 +6594,12 @@ impl DesktopShell {
 
     /// Turn the actions a rule matched into asks the compositor understands.
     ///
-    /// Fifteen of [`RuleActions`](window_rules::RuleActions)'s seventeen
-    /// fields have somewhere to go. Two of those — `skip_taskbar` and
-    /// `skip_alt_tab` — are the shell's own business and are handled by the
-    /// caller; the thirteen here need the compositor, each through a request
-    /// only a shell may send about another program's window (`ShellMove`,
-    /// `ShellSetOpacity`, `ShellSetWindowPolicy` and the rest).
+    /// Sixteen of [`RuleActions`](window_rules::RuleActions)'s eighteen
+    /// fields have somewhere to go. Three of those — `skip_taskbar`,
+    /// `skip_alt_tab` and `to_tray` — are the shell's own business and are
+    /// handled by the caller; the thirteen here need the compositor, each
+    /// through a request only a shell may send about another program's window
+    /// (`ShellMove`, `ShellSetOpacity`, `ShellSetWindowPolicy` and the rest).
     ///
     /// The two that are missing are missing on purpose, not by oversight.
     /// `target_monitor` waits on the compositor modelling more than one
@@ -6712,7 +6769,8 @@ impl DesktopShell {
     /// [`ManagedWindow::on_glass`].
     #[must_use]
     pub fn taskbar_windows(&self) -> Vec<&ManagedWindow> {
-        self.listed_windows(|w| !w.skip_taskbar)
+        // A window in the tray has its entry there instead.
+        self.listed_windows(|w| !w.skip_taskbar && !w.in_tray())
     }
 
     /// The windows Alt+Tab cycles through, most recently used first: the
@@ -6738,7 +6796,7 @@ impl DesktopShell {
     /// on to the window used before last.
     #[must_use]
     pub fn switcher_windows(&self) -> Vec<&ManagedWindow> {
-        let mut windows = self.listed_windows(|w| !w.skip_alt_tab);
+        let mut windows = self.listed_windows(|w| !w.skip_alt_tab && !w.in_tray());
         windows.reverse();
         windows
     }
@@ -8662,6 +8720,20 @@ impl DesktopShell {
             } else {
                 self.theme.taskbar_fg
             };
+            // A window minimised to the tray shows its program's picture, as
+            // its taskbar button did: the glyph is only the title's first
+            // letter, which tells two windows apart less well than the
+            // picture tells two programs apart.
+            if icon.owner == SHELL_TRAY_OWNER
+                && let Some(window) = self.window_of_tray_entry(icon.id)
+            {
+                let px = self.icon_px(TRAY_WINDOW_ICON);
+                #[allow(clippy::cast_precision_loss)]
+                let side = px as f32;
+                let program = self.program_for_app_id(&window.app_id);
+                image_centred(&mut tree, *rect, side, self.picture_of(program, px, color));
+                continue;
+            }
             tree.text(
                 rect.x,
                 tray_text_y,
@@ -10416,8 +10488,10 @@ impl DesktopShell {
         (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH)) + self.show_desktop_rect().w
     }
 
-    /// The icons other programs have put in the tray, as the compositor
-    /// reported them.
+    /// Every icon in the tray: those other programs have put there, as the
+    /// compositor reported them, then the shell's own entry for each window
+    /// minimised to the tray -- owned by [`SHELL_TRAY_OWNER`], titled with
+    /// the window's title, its glyph the title's first letter.
     ///
     /// **This is not the order they are drawn in** -- see
     /// [`ordered_tray_icons`](Self::ordered_tray_icons). This is the raw
@@ -10472,16 +10546,81 @@ impl DesktopShell {
     /// because a shell that repainted on every frame it received would repaint
     /// on reconnection for a list identical to the one it already had.
     pub fn apply_tray_icons(&mut self, icons: Vec<guiremote::tray::TrayIcon>) -> bool {
-        if self.tray_icons == icons {
+        if self.program_tray_icons == icons {
             return false;
         }
-        // Fold before storing, so the arrangement sees both lists and can tell
-        // a program that relabelled its icon from one that just registered.
-        // The answer is discarded: reaching here already means the membership
-        // or a glyph changed, so the tray repaints either way.
-        self.tray_arrangement.sync(&icons);
-        self.tray_icons = icons;
+        self.program_tray_icons = icons;
+        self.rebuild_tray();
         true
+    }
+
+    /// Give each window minimised to the tray an entry there, and take the
+    /// entries of those restored or gone away -- from the window list just
+    /// adopted, which repaints the bar whatever this changes.
+    fn sync_window_tray(&mut self) {
+        // A window keeps its entry's id until it closes.
+        let windows = &self.windows;
+        self.window_tray_ids
+            .retain(|id, _| windows.contains_key(id));
+        let joining: Vec<WindowId> = self
+            .windows
+            .values()
+            .filter(|w| w.in_tray() && !self.window_tray_ids.contains_key(&w.id))
+            .map(|w| w.id)
+            .collect();
+        for id in joining {
+            // The next id no window holds, and never 0. Some id is free: there
+            // are fewer windows than ids.
+            let mut entry = self.next_window_tray_id;
+            while entry == 0 || self.window_tray_ids.values().any(|&held| held == entry) {
+                entry = entry.wrapping_add(1);
+            }
+            self.next_window_tray_id = entry.wrapping_add(1);
+            self.window_tray_ids.insert(id, entry);
+        }
+        self.rebuild_tray();
+    }
+
+    /// Store the tray's whole list -- the programs' icons, then the windows'
+    /// entries -- folding it into the arrangement first, so the arrangement
+    /// sees both lists and can tell a program that relabelled its icon from
+    /// one that just registered.
+    ///
+    /// The list's order is only where a new icon joins the arrangement: an
+    /// entry already in it keeps its place there, so an entry that went to
+    /// the tray later joins after the ones before it.
+    fn rebuild_tray(&mut self) {
+        let entries = self
+            .windows
+            .values()
+            .filter(|w| w.in_tray())
+            .filter_map(|w| Some((*self.window_tray_ids.get(&w.id)?, w)));
+        let mut icons = self.program_tray_icons.clone();
+        icons.extend(entries.map(|(entry, w)| {
+            // The glyph is what a row in the overflow list shows when it has
+            // no title, and what stands in where the program's picture is not
+            // known: the title's first letter.
+            let glyph = w
+                .title
+                .chars()
+                .find(|c| c.is_alphanumeric())
+                .map_or_else(|| "\u{25A3}".to_string(), |c| c.to_uppercase().collect());
+            guiremote::tray::TrayIcon::new(SHELL_TRAY_OWNER, entry, glyph, w.title.clone())
+        }));
+        if icons == self.tray_icons {
+            return;
+        }
+        // Whether the arrangement changed is not asked: the callers repaint
+        // on any change to the list, which this is.
+        let _rearranged = self.tray_arrangement.sync(&icons);
+        self.tray_icons = icons;
+    }
+
+    /// The window whose tray entry has `entry` for its id, if it is still
+    /// in the tray.
+    fn window_of_tray_entry(&self, entry: u32) -> Option<&ManagedWindow> {
+        let (&id, _) = self.window_tray_ids.iter().find(|&(_, &e)| e == entry)?;
+        self.windows.get(&id).filter(|w| w.in_tray())
     }
 
     /// Open the list of icons the bar had no room for.
@@ -10506,6 +10645,17 @@ impl DesktopShell {
         let mut items = Vec::with_capacity(hidden.len());
         for (index, icon) in hidden.iter().enumerate() {
             keys.push(tray_dnd::TrayIconKey::of(icon));
+            // A window minimised to the tray is shown by its program's
+            // picture, as it is on the bar; a program's icon by its glyph.
+            let picture = if icon.owner == SHELL_TRAY_OWNER {
+                self.window_of_tray_entry(icon.id).map(|window| {
+                    self.program_for_app_id(&window.app_id)
+                        .and_then(|program| program.icon.clone())
+                        .unwrap_or_else(|| launcher::GENERIC_PROGRAM_ICON.to_owned())
+                })
+            } else {
+                None
+            };
             items.push(guitk::menu::MenuItem::Action {
                 // The row's position, resolved against `keys` rather than
                 // against the live tray -- see the field's documentation.
@@ -10518,7 +10668,7 @@ impl DesktopShell {
                     icon.tooltip.clone()
                 },
                 shortcut: None,
-                icon: Some(icon.glyph.clone()),
+                icon: Some(picture.unwrap_or_else(|| icon.glyph.clone())),
                 enabled: true,
                 checked: None,
             });
@@ -11350,6 +11500,12 @@ impl DesktopShell {
         {
             return None;
         }
+        // A window minimised to the tray comes back, as a click on its icon
+        // would bring it.
+        if key.owner == SHELL_TRAY_OWNER {
+            let window = self.window_of_tray_entry(key.id)?.id;
+            return Some(ShellRequest::window(window, ShellControlAction::Activate));
+        }
         Some(ShellRequest::ClickTrayIcon {
             owner: key.owner,
             id: key.id,
@@ -11737,9 +11893,9 @@ impl DesktopShell {
             .unwrap_or(count)
     }
 
-    /// Release a pressed tray icon: either a reorder just ended, or the
-    /// program that owns the icon is about to hear about a click.
-    fn finish_tray_press(&mut self) -> ShellAction {
+    /// Release a pressed tray icon at `(x, y)`: either a reorder just ended,
+    /// or the icon was clicked -- see [`click_tray_icon`](Self::click_tray_icon).
+    fn finish_tray_press(&mut self, x: f32, y: f32) -> ShellAction {
         let Some(mut drag) = self.tray_drag.take() else {
             return ShellAction::Consumed;
         };
@@ -11753,6 +11909,24 @@ impl DesktopShell {
         let Some(key) = key else {
             return ShellAction::Consumed;
         };
+        self.click_tray_icon(key, drag.button, x, y)
+    }
+
+    /// A click with `button` on the tray icon `key`, the pointer at `(x, y)`.
+    ///
+    /// A program's icon is that program's: it hears of the click, and what
+    /// it means is its own to decide. One of the shell's -- a window minimised
+    /// to the tray ([`SHELL_TRAY_OWNER`]) -- is answered here, the way the
+    /// window's taskbar button would be: the primary button brings the window
+    /// back, the secondary opens the window's menu at the pointer, and the
+    /// others do nothing, as they do on the button.
+    fn click_tray_icon(
+        &mut self,
+        key: tray_dnd::TrayIconKey,
+        button: MouseButton,
+        x: f32,
+        y: f32,
+    ) -> ShellAction {
         // Named by key rather than by slot, because the slot may have changed
         // under the pointer -- another program registering an icon reorders
         // nothing, but a program *departing* does, and a click that resolved a
@@ -11764,11 +11938,28 @@ impl DesktopShell {
         {
             return ShellAction::Consumed;
         }
-        ShellAction::Control(ShellRequest::ClickTrayIcon {
-            owner: key.owner,
-            id: key.id,
-            button: drag.button,
-        })
+        if key.owner != SHELL_TRAY_OWNER {
+            return ShellAction::Control(ShellRequest::ClickTrayIcon {
+                owner: key.owner,
+                id: key.id,
+                button,
+            });
+        }
+        let Some(window) = self.window_of_tray_entry(key.id).map(|w| w.id) else {
+            return ShellAction::Consumed;
+        };
+        match button {
+            // `Activate`, not `Restore`, for the reason the taskbar button
+            // gives: a window minimised while maximised comes back maximised.
+            MouseButton::Left => {
+                ShellAction::Control(ShellRequest::window(window, ShellControlAction::Activate))
+            }
+            MouseButton::Right => {
+                self.open_pin_menu(PinTarget::Window(window), x, y);
+                ShellAction::Consumed
+            }
+            _ => ShellAction::Consumed,
+        }
     }
 
     /// Which gap between icons the pointer is nearest, `0..=len`.

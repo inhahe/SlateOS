@@ -437,6 +437,13 @@ fn test_action_summary() {
     let s = a.summary();
     assert!(s.contains("on-top"));
     assert!(s.contains("opacity"));
+    assert!(!s.contains("tray"));
+    // A rule keeping a program out of the tray says nothing to list; one
+    // sending it there does.
+    a.to_tray = Some(false);
+    assert!(!a.summary().contains("tray"));
+    a.to_tray = Some(true);
+    assert!(a.summary().ends_with(", tray"), "{}", a.summary());
 }
 
 #[test]
@@ -788,9 +795,12 @@ fn every_action_field_takes_part_in_merge_and_in_the_count() {
     all.prevent_move = Some(true);
     all.prevent_resize = Some(true);
     all.snap_zone = Some(1);
+    all.to_tray = Some(true);
 
     let declared = all.active_count();
-    assert!(declared >= 17, "every declared field should be set here");
+    // Equal, not at least: a field added to the struct and not set here
+    // would leave the merge of it unchecked.
+    assert_eq!(declared, 18, "every declared field should be set here");
 
     let mut empty = RuleActions::new();
     assert_eq!(empty.active_count(), 0);

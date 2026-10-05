@@ -14,6 +14,13 @@ drop a frame from a live window. The count above was found wrong while
 correcting two doc comments that still said "five of seventeen"
 (`gui/desktop/src/lib.rs` `rule_requests`, `gui/desktop/src/window_rules.rs`).
 
+**Update 2026-10-05: sixteen of eighteen.** An eighteenth action,
+`to_tray` (`tray:` in `window-rules.yaml`), sends a window to the system tray
+when it is minimised -- and, with `state: minimized`, starts it there. It is
+carried out in the shell, like `skip_taskbar`, so it was working the day it
+was added. The two that do nothing are still `target_monitor` and
+`no_decorations`.
+
 The title is left as it was written. It is wrong now and that is the point:
 renaming it would lose the thing worth remembering, which is that a settings
 page can accept, save and *display* twelve settings that do nothing, and that
@@ -70,6 +77,7 @@ rest.
 |---|---|
 | `skip_taskbar` | shell-local: `ManagedWindow::skip_taskbar`, filtered out of `taskbar_windows` |
 | `skip_alt_tab` | shell-local: filtered out of `switcher_windows` |
+| `to_tray` | shell-local, added 2026-10-05: minimised, the window leaves `taskbar_windows` and `switcher_windows` for an entry of the shell's own in the tray (`ManagedWindow::in_tray`) |
 | `initial_state` | `ShellControlAction::Minimize` / `Maximize` / `Fullscreen` (all three, since 2026-09-07) |
 | `snap_zone` | `ShellControlAction::SnapToZone(SnapSlot)` |
 | `desktop` | `ShellRequest::MoveWindowToDesktop` |

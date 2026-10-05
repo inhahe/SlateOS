@@ -48,6 +48,7 @@ fn every_kind() -> Vec<WindowRule> {
     a.prevent_move = Some(false);
     a.prevent_resize = Some(true);
     a.snap_zone = Some(7);
+    a.to_tray = Some(true);
     all.one_shot = true;
 
     let mut centred = WindowRule::new(0, "centred", MatchCriteria::TitleExact("Notes".into()));
@@ -103,6 +104,7 @@ fn what_is_written_reads_back_as_itself() {
         "    monitor: 3",
         "    taskbar: false",
         "    can-close: false",
+        "    tray: true",
         "    once: true",
         "    position: centre 2",
         "    enabled: false",

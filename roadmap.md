@@ -2058,6 +2058,16 @@ live.
   the page in Settings (`requests/c-e-a-window-rules-page-in-settings.md`),
   after which the shell's undrawn panel is deleted.
 
+- `[C]` **A user can send any program to the system tray** -- done
+  2026-10-05 (`design-decisions.md` §1467). A window rule's `tray` sends a
+  program's windows to the tray when they are minimised, and with `state:
+  minimized` starts them there -- `design.txt`'s "always start in system
+  tray, always in taskbar, or neither". In the tray a window is an icon of the
+  shell's own: its program's picture and title; a click brings it back, a
+  right click opens its menu. **Lane F:** a flag by which a program can ask
+  for the same itself (`requests/c-f-let-a-window-say-it-goes-to-the-tray.md`),
+  which lane C then honours under the user's rules.
+
 - `[C]` **A settings service that tells open windows when a setting
   changes** -- **done 2026-09-28** (C-Q26, §1418, §1434). Beside
   `gui/settingsfile`, never in front of it: saving stays a program writing its

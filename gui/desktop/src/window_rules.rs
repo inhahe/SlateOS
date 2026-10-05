@@ -17,6 +17,7 @@
 //! - Start minimized / maximized / fullscreen
 //! - Opacity / transparency
 //! - Skip taskbar / skip alt-tab
+//! - Minimise to the system tray (and, with start minimized, start there)
 //! - Force-assign to specific monitor
 //! - Custom title bar visibility
 //!
@@ -25,9 +26,9 @@
 //!
 //! # What the shell can actually carry out today
 //!
-//! Fifteen of [`RuleActions`]'s seventeen fields: `skip_taskbar` and
-//! `skip_alt_tab` in the shell itself, and the rest through requests only a
-//! shell may send about another program's window -- see
+//! Sixteen of [`RuleActions`]'s eighteen fields: `skip_taskbar`,
+//! `skip_alt_tab` and `to_tray` in the shell itself, and the rest through
+//! requests only a shell may send about another program's window -- see
 //! `DesktopShell::rule_requests`. The two that do nothing yet are
 //! `target_monitor`, which waits on the compositor modelling more than one
 //! display, and `no_decorations`, which waits on a request to take a frame

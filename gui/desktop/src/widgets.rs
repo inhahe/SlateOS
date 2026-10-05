@@ -652,10 +652,12 @@ pub struct LiveReadings {
     /// processor is idle" is a different claim from "nothing measured the
     /// processor". The widget says which.
     ///
-    /// Nothing supplies these yet -- `gui/desktop` has no `procinfo` -- so the
-    /// widget reports that it is not measuring. The day the shell reads
-    /// `/proc/stat` and `/proc/meminfo`, filling these in is the whole of the
-    /// change, and it is a typed seam rather than a plausible number.
+    /// Processor and memory are measured: the shell reads `/proc/stat` and
+    /// `/proc/meminfo` once a second (`DesktopShell::sample_system`, through
+    /// `procinfo`), and the first second reports `None` -- a fraction is a
+    /// ratio over an interval, and there is no interval yet. Disk has no
+    /// source anywhere in the tree (`DesktopShell::live_readings` says why),
+    /// so it stays `None` and the meter says it is not measuring.
     pub cpu_fraction: Option<f32>,
     /// Memory in use, 0.0 to 1.0. `None` when nothing has measured it.
     pub memory_fraction: Option<f32>,

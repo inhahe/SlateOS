@@ -37,7 +37,7 @@
     reason = "filtered values are clamped to 0..=255 before they become pixels; plane positions convert between isize and usize only once checked to be inside the plane"
 )]
 
-use crate::frame::{Frame, Plane};
+use crate::frame::{Frame, Plane, Target};
 use crate::modes::{Edges, ModeInfo, Mv, SPLITMV};
 use crate::tables::{BILINEAR_FILTERS, SUB_PEL_FILTERS};
 
@@ -288,7 +288,7 @@ fn predict<const W: usize>(
 fn predict_block(
     ctx: &InterContext,
     refp: &Frame,
-    dst: &mut Frame,
+    dst: &mut Target<'_>,
     p: usize,
     x: usize,
     y: usize,
@@ -306,9 +306,8 @@ fn predict_block(
         (Filter::Bilinear, _) => (0, 1),
     };
     let src_at = window(src_plane, sx, sy, w, h, before, after);
-    let dst_plane = &mut dst.planes[p];
-    let dst_at = dst_plane.at(x, y);
-    let stride = dst_plane.stride;
+    let dst_at = dst.at(p, x, y);
+    let stride = dst.strides[p];
     let run = match w {
         16 => predict::<16>,
         8 => predict::<8>,
@@ -322,7 +321,7 @@ fn predict_block(
         xfrac,
         yfrac,
         h,
-        &mut dst_plane.data,
+        &mut *dst.planes[p],
         dst_at,
         stride,
     );
@@ -415,7 +414,7 @@ pub(crate) fn predict_mb(
     ctx: &InterContext,
     mi: &ModeInfo,
     refp: &Frame,
-    dst: &mut Frame,
+    dst: &mut Target<'_>,
     stale: Option<&Frame>,
     mb_x: usize,
     mb_y: usize,
@@ -442,10 +441,10 @@ pub(crate) fn predict_mb(
         // libvpx returns here and leaves the chroma blocks as they were.
         if let Some(stale) = stale {
             for p in 1..3 {
-                let (src, out) = (&stale.planes[p], &mut dst.planes[p]);
+                let src = &stale.planes[p];
                 for r in 0..8 {
-                    let at = out.at(cx, cy + r);
-                    out.data[at..at + 8].copy_from_slice(&src.data[at..at + 8]);
+                    let (from, to) = (src.at(cx, cy + r), dst.at(p, cx, cy + r));
+                    dst.planes[p][to..to + 8].copy_from_slice(&src.data[from..from + 8]);
                 }
             }
         }
@@ -462,7 +461,7 @@ fn predict_split(
     ctx: &InterContext,
     mi: &ModeInfo,
     refp: &Frame,
-    dst: &mut Frame,
+    dst: &mut Target<'_>,
     mb_x: usize,
     mb_y: usize,
 ) {

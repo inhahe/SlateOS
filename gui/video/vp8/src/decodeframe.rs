@@ -39,7 +39,7 @@
 
 use crate::Error;
 use crate::boolread::BoolDecoder;
-use crate::frame::Frame;
+use crate::frame::{Frame, Target};
 use crate::header::{START_CODE, Tag, VersionSetup};
 use crate::idct;
 use crate::inter::{self, Filter, InterContext};
@@ -605,7 +605,7 @@ fn decode_mb_rows(
                 bc,
                 &mut left,
                 &mut residual,
-                new,
+                &mut new.target(),
                 stale,
                 refs,
             );
@@ -674,7 +674,7 @@ fn decode_macroblock(
     bc: &mut BoolDecoder<'_>,
     left: &mut Context,
     r: &mut Residual,
-    new: &mut Frame,
+    new: &mut Target<'_>,
     stale: Option<&Frame>,
     refs: &Refs<'_>,
 ) {
@@ -714,49 +714,40 @@ fn decode_macroblock(
     let mode = mi.mode;
     if mi.ref_frame == INTRA_FRAME {
         for p in 1..3 {
-            let plane = &mut new.planes[p];
-            let (pos, stride) = (plane.at(mb_x / 2, mb_y / 2), plane.stride);
+            let (pos, stride) = (new.at(p, mb_x / 2, mb_y / 2), new.strides[p]);
             intra::predict_mb(
                 mi.uv_mode,
                 8,
                 at.left_available,
                 at.up_available,
-                &mut plane.data,
+                new.planes[p],
                 pos,
                 stride,
             );
         }
-        let y = &mut new.planes[0];
-        let (pos, stride) = (y.at(mb_x, mb_y), y.stride);
+        let (pos, stride) = (new.at(0, mb_x, mb_y), new.strides[0]);
+        let y = &mut *new.planes[0];
         if mode == B_PRED {
             if mi.mb_skip_coeff {
                 r.eobs = [0; 25];
             }
-            intra::down_copy_above_right(&mut y.data, pos, stride);
+            intra::down_copy_above_right(y, pos, stride);
             for i in 0..16 {
                 let b = pos + (i >> 2) * 4 * stride + (i & 3) * 4;
-                intra::predict_4x4(mi.bmodes[i], &mut y.data, b, stride);
+                intra::predict_4x4(mi.bmodes[i], y, b, stride);
                 match r.eobs[i] {
                     0 => {}
                     1 => {
                         let dc = (i32::from(r.qcoeff[i][0]) * i32::from(d.y1[0])) as i16;
-                        idct::dc_only_idct_add(dc, &mut y.data, b, stride);
+                        idct::dc_only_idct_add(dc, y, b, stride);
                         r.qcoeff[i][0] = 0;
                         r.qcoeff[i][1] = 0;
                     }
-                    _ => idct::dequant_idct_add(&mut r.qcoeff[i], &d.y1, &mut y.data, b, stride),
+                    _ => idct::dequant_idct_add(&mut r.qcoeff[i], &d.y1, y, b, stride),
                 }
             }
         } else {
-            intra::predict_mb(
-                mode,
-                16,
-                at.left_available,
-                at.up_available,
-                &mut y.data,
-                pos,
-                stride,
-            );
+            intra::predict_mb(mode, 16, at.left_available, at.up_available, y, pos, stride);
         }
     } else {
         let refp = match mi.ref_frame {
@@ -798,26 +789,24 @@ fn decode_macroblock(
             }
             dq_y = &d.y1_dc;
         }
-        let y = &mut new.planes[0];
-        let (pos, stride) = (y.at(mb_x, mb_y), y.stride);
+        let (pos, stride) = (new.at(0, mb_x, mb_y), new.strides[0]);
         idct::add_y_blocks(
             &mut r.qcoeff[..16],
             dq_y,
             &r.eobs[..16],
-            &mut y.data,
+            new.planes[0],
             pos,
             stride,
         );
     }
     for (p, blocks) in [(1, 16..20), (2, 20..24)] {
-        let plane = &mut new.planes[p];
-        let (pos, stride) = (plane.at(mb_x / 2, mb_y / 2), plane.stride);
+        let (pos, stride) = (new.at(p, mb_x / 2, mb_y / 2), new.strides[p]);
         let eobs = &r.eobs[blocks.clone()];
         idct::add_uv_blocks(
             &mut r.qcoeff[blocks],
             &d.uv,
             eobs,
-            &mut plane.data,
+            new.planes[p],
             pos,
             stride,
         );

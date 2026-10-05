@@ -19,6 +19,7 @@ use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 use crate::text::TextCursor;
+use crate::text::scaled;
 
 // --- Catppuccin Mocha palette ---
 
@@ -231,7 +232,7 @@ impl DialogButton {
         // The toolkit button's own measure, in the style it is drawn in, so
         // the rectangle laid out is the one the label was measured for when
         // it is drawn.
-        crate::button::width(style, &self.label).max(BUTTON_MIN_WIDTH)
+        crate::button::width(style, &self.label).max(scaled(BUTTON_MIN_WIDTH))
     }
 }
 
@@ -974,7 +975,7 @@ impl AlertDialog {
             x: layout.x,
             y: layout.y,
             width: layout.width,
-            height: TITLE_BAR_HEIGHT,
+            height: scaled(TITLE_BAR_HEIGHT),
             color: palette.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_CORNER_RADIUS,
@@ -986,48 +987,48 @@ impl AlertDialog {
 
         // Title text.
         tree.push(RenderCommand::Text {
-            x: layout.x + CONTENT_PADDING,
-            y: layout.y + (TITLE_BAR_HEIGHT - FONT_SIZE_TITLE) / 2.0,
+            x: layout.x + scaled(CONTENT_PADDING),
+            y: layout.y + (scaled(TITLE_BAR_HEIGHT) - scaled(FONT_SIZE_TITLE)) / 2.0,
             text: self.title.clone(),
             color: palette.text,
-            font_size: FONT_SIZE_TITLE,
+            font_size: scaled(FONT_SIZE_TITLE),
             font_weight: FontWeightHint::Bold,
-            max_width: Some(layout.width - CONTENT_PADDING * 2.0),
+            max_width: Some(layout.width - scaled(CONTENT_PADDING) * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Content area.
-        let content_y = layout.y + TITLE_BAR_HEIGHT + CONTENT_PADDING;
-        let mut text_x = layout.x + CONTENT_PADDING;
+        let content_y = layout.y + scaled(TITLE_BAR_HEIGHT) + scaled(CONTENT_PADDING);
+        let mut text_x = layout.x + scaled(CONTENT_PADDING);
 
         // Icon (if any).
         if let Some(glyph) = self.icon.glyph() {
-            let icon_x = layout.x + CONTENT_PADDING;
+            let icon_x = layout.x + scaled(CONTENT_PADDING);
             let icon_y = content_y;
 
             // Icon background circle.
             tree.push(RenderCommand::FillRect {
                 x: icon_x,
                 y: icon_y,
-                width: ICON_SIZE,
-                height: ICON_SIZE,
+                width: scaled(ICON_SIZE),
+                height: scaled(ICON_SIZE),
                 color: self.icon.bg_color(),
-                corner_radii: CornerRadii::all(ICON_SIZE / 2.0),
+                corner_radii: CornerRadii::all(scaled(ICON_SIZE) / 2.0),
             });
 
             // Icon glyph.
             tree.push(RenderCommand::Text {
-                x: icon_x + (ICON_SIZE - FONT_SIZE_TITLE) / 2.0,
-                y: icon_y + (ICON_SIZE - FONT_SIZE_TITLE) / 2.0,
+                x: icon_x + (scaled(ICON_SIZE) - scaled(FONT_SIZE_TITLE)) / 2.0,
+                y: icon_y + (scaled(ICON_SIZE) - scaled(FONT_SIZE_TITLE)) / 2.0,
                 text: glyph.to_string(),
                 color: palette.ink(self.icon.color(palette)),
-                font_size: FONT_SIZE_TITLE,
+                font_size: scaled(FONT_SIZE_TITLE),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
 
-            text_x = icon_x + ICON_SIZE + ICON_PADDING;
+            text_x = icon_x + scaled(ICON_SIZE) + scaled(ICON_PADDING);
         }
 
         // Message, then the detail under whatever the message actually
@@ -1039,14 +1040,14 @@ impl AlertDialog {
         // two, then top-aligned once it is taller — so a one-line message
         // still sits level with its icon.
         let block_height = self.text_block_height();
-        let first_line_y = content_y + (ICON_SIZE - block_height).max(0.0) / 2.0;
+        let first_line_y = content_y + (scaled(ICON_SIZE) - block_height).max(0.0) / 2.0;
         let message_height = self
             .message_para(palette.subtext1, text_x, first_line_y)
             .draw(tree);
         self.detail_para(
             palette.ink(palette.yellow),
             text_x,
-            first_line_y + message_height + DETAIL_GAP,
+            first_line_y + message_height + scaled(DETAIL_GAP),
         )
         .draw(tree);
 
@@ -1110,10 +1111,10 @@ impl AlertDialog {
     /// are right-aligned inside the box, so overflow goes off the *near* side
     /// where it is least expected.
     fn dialog_width(&self) -> f32 {
-        let requested = self.width.unwrap_or(DIALOG_MIN_WIDTH);
+        let requested = self.width.unwrap_or(scaled(DIALOG_MIN_WIDTH));
         requested
-            .max(self.buttons_row_width() + CONTENT_PADDING * 2.0)
-            .clamp(DIALOG_MIN_WIDTH, DIALOG_MAX_WIDTH)
+            .max(self.buttons_row_width() + scaled(CONTENT_PADDING) * 2.0)
+            .clamp(scaled(DIALOG_MIN_WIDTH), scaled(DIALOG_MAX_WIDTH))
     }
 
     /// Total width of the button row, buttons and the gaps between them.
@@ -1123,17 +1124,17 @@ impl AlertDialog {
             .iter()
             .map(|button| button.width(&self.button_style))
             .sum::<f32>()
-            + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING
+            + (self.buttons.len().saturating_sub(1) as f32) * scaled(BUTTON_SPACING)
     }
 
     /// Horizontal room the message has, after the padding and any icon.
     fn message_max_width(&self) -> f32 {
         let text_offset = if self.icon.glyph().is_some() {
-            CONTENT_PADDING + ICON_SIZE + ICON_PADDING
+            scaled(CONTENT_PADDING) + scaled(ICON_SIZE) + scaled(ICON_PADDING)
         } else {
-            CONTENT_PADDING
+            scaled(CONTENT_PADDING)
         };
-        self.dialog_width() - text_offset - CONTENT_PADDING
+        self.dialog_width() - text_offset - scaled(CONTENT_PADDING)
     }
 
     /// The message as it will be drawn: wrapped to the column, capped to the
@@ -1147,8 +1148,8 @@ impl AlertDialog {
     fn message_para(&self, ink: Color, x: f32, y: f32) -> crate::text::Paragraph<'_> {
         crate::text::Paragraph::new(&self.message, ink)
             .at(x, y, self.message_max_width())
-            .font(FONT_SIZE, FontWeightHint::Regular)
-            .line_height(MESSAGE_LINE_HEIGHT)
+            .font(scaled(FONT_SIZE), FontWeightHint::Regular)
+            .line_height(scaled(MESSAGE_LINE_HEIGHT))
             .max_lines(self.line_budget().0)
     }
 
@@ -1159,8 +1160,8 @@ impl AlertDialog {
     fn detail_para(&self, ink: Color, x: f32, y: f32) -> crate::text::Paragraph<'_> {
         crate::text::Paragraph::new(self.detail.as_deref().unwrap_or(""), ink)
             .at(x, y, self.message_max_width())
-            .font(FONT_SIZE_SMALL, FontWeightHint::Regular)
-            .line_height(DETAIL_LINE_HEIGHT)
+            .font(scaled(FONT_SIZE_SMALL), FontWeightHint::Regular)
+            .line_height(scaled(DETAIL_LINE_HEIGHT))
             .max_lines(self.line_budget().1)
     }
 
@@ -1184,25 +1185,29 @@ impl AlertDialog {
     /// read as a sentence that ended.
     fn line_budget(&self) -> (usize, usize) {
         let width = self.message_max_width();
-        let message = Self::natural_lines(&self.message, width, FONT_SIZE);
-        let detail =
-            Self::natural_lines(self.detail.as_deref().unwrap_or(""), width, FONT_SIZE_SMALL);
+        let message = Self::natural_lines(&self.message, width, scaled(FONT_SIZE));
+        let detail = Self::natural_lines(
+            self.detail.as_deref().unwrap_or(""),
+            width,
+            scaled(FONT_SIZE_SMALL),
+        );
 
-        let gap = if detail == 0 { 0.0 } else { DETAIL_GAP };
-        let natural =
-            message as f32 * MESSAGE_LINE_HEIGHT + detail as f32 * DETAIL_LINE_HEIGHT + gap;
-        if natural <= TEXT_BLOCK_MAX_HEIGHT {
+        let gap = if detail == 0 { 0.0 } else { scaled(DETAIL_GAP) };
+        let natural = message as f32 * scaled(MESSAGE_LINE_HEIGHT)
+            + detail as f32 * scaled(DETAIL_LINE_HEIGHT)
+            + gap;
+        if natural <= scaled(TEXT_BLOCK_MAX_HEIGHT) {
             return (message, detail);
         }
 
-        let room = (TEXT_BLOCK_MAX_HEIGHT - gap).max(0.0);
-        let detail_cap = ((room / 2.0) / DETAIL_LINE_HEIGHT).floor().max(0.0) as usize;
+        let room = (scaled(TEXT_BLOCK_MAX_HEIGHT) - gap).max(0.0);
+        let detail_cap = ((room / 2.0) / scaled(DETAIL_LINE_HEIGHT)).floor().max(0.0) as usize;
         let detail_kept = detail.min(detail_cap);
-        let left = (room - detail_kept as f32 * DETAIL_LINE_HEIGHT).max(0.0);
+        let left = (room - detail_kept as f32 * scaled(DETAIL_LINE_HEIGHT)).max(0.0);
         // At least one line of message: a confirmation that shows only its
         // consequence, with the question missing, is not a question.
         let message_kept =
-            message.min(((left / MESSAGE_LINE_HEIGHT).floor().max(0.0) as usize).max(1));
+            message.min(((left / scaled(MESSAGE_LINE_HEIGHT)).floor().max(0.0) as usize).max(1));
         (message_kept, detail_kept)
     }
 
@@ -1226,7 +1231,7 @@ impl AlertDialog {
         // own label needs, so the row has to be walked rather than indexed:
         // button `i` starts where button `i - 1` ended, which is only a
         // multiplication while every button is the same width.
-        let buttons_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
+        let buttons_y = y + height - scaled(BUTTON_HEIGHT) - scaled(CONTENT_PADDING);
         let widths: Vec<f32> = self
             .buttons
             .buttons
@@ -1234,14 +1239,14 @@ impl AlertDialog {
             .map(|button| button.width(&self.button_style))
             .collect();
         let total_btn_width: f32 = widths.iter().sum::<f32>()
-            + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
-        let start_x = x + width - CONTENT_PADDING - total_btn_width;
+            + (self.buttons.len().saturating_sub(1) as f32) * scaled(BUTTON_SPACING);
+        let start_x = x + width - scaled(CONTENT_PADDING) - total_btn_width;
 
         let mut cursor_x = start_x;
         let mut button_rects: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(widths.len());
         for w in widths {
-            button_rects.push((cursor_x, buttons_y, w, BUTTON_HEIGHT));
-            cursor_x += w + BUTTON_SPACING;
+            button_rects.push((cursor_x, buttons_y, w, scaled(BUTTON_HEIGHT)));
+            cursor_x += w + scaled(BUTTON_SPACING);
         }
 
         DialogLayout {
@@ -1261,7 +1266,7 @@ impl AlertDialog {
         let message = self.message_para(Color::TRANSPARENT, 0.0, 0.0).height();
         let detail = self.detail_para(Color::TRANSPARENT, 0.0, 0.0).height();
         if detail > 0.0 {
-            message + DETAIL_GAP + detail
+            message + scaled(DETAIL_GAP) + detail
         } else {
             message
         }
@@ -1274,14 +1279,14 @@ impl AlertDialog {
         // The message area is as tall as the message's own wrapped lines. It
         // used to be a flat three-line guess, which left a band of empty space
         // under a one-line message and clipped anything longer than three.
-        let content_height = ICON_SIZE.max(self.text_block_height());
-        (TITLE_BAR_HEIGHT
-            + CONTENT_PADDING
+        let content_height = scaled(ICON_SIZE).max(self.text_block_height());
+        (scaled(TITLE_BAR_HEIGHT)
+            + scaled(CONTENT_PADDING)
             + content_height
-            + CONTENT_PADDING
-            + BUTTON_HEIGHT
-            + CONTENT_PADDING)
-            .clamp(DIALOG_MIN_HEIGHT, DIALOG_MAX_HEIGHT)
+            + scaled(CONTENT_PADDING)
+            + scaled(BUTTON_HEIGHT)
+            + scaled(CONTENT_PADDING))
+        .clamp(scaled(DIALOG_MIN_HEIGHT), scaled(DIALOG_MAX_HEIGHT))
     }
 
     fn new(title: &str, message: &str, icon: DialogIcon, buttons: ButtonSet) -> Self {
@@ -1742,7 +1747,7 @@ impl InputDialog {
             &display,
             drawn_cursor,
             width,
-            FONT_SIZE,
+            scaled(FONT_SIZE),
             FontWeightHint::Regular,
             dx,
         );
@@ -1793,14 +1798,14 @@ impl InputDialog {
             crate::text::caret_right(
                 &self.input_text,
                 self.cursor,
-                FONT_SIZE,
+                scaled(FONT_SIZE),
                 FontWeightHint::Regular,
             )
         } else {
             crate::text::caret_left(
                 &self.input_text,
                 self.cursor,
-                FONT_SIZE,
+                scaled(FONT_SIZE),
                 FontWeightHint::Regular,
             )
         };
@@ -1911,8 +1916,8 @@ impl InputDialog {
     fn message_lines(&self) -> Vec<String> {
         crate::text::wrap(
             &self.message,
-            INPUT_DIALOG_WIDTH - CONTENT_PADDING * 2.0,
-            FONT_SIZE,
+            scaled(INPUT_DIALOG_WIDTH) - scaled(CONTENT_PADDING) * 2.0,
+            scaled(FONT_SIZE),
             FontWeightHint::Regular,
         )
     }
@@ -1934,26 +1939,26 @@ impl InputDialog {
 
         self.overlay.render(parent_width, parent_height, tree);
 
-        let width = INPUT_DIALOG_WIDTH;
+        let width = scaled(INPUT_DIALOG_WIDTH);
         let has_error = self.validation_error.is_some();
         // The prompt is wrapped rather than clipped, so the room reserved for
         // it is the height of its own lines. A flat one-line allowance used to
         // push the input field up over the second line of any longer prompt.
         let message_lines = self.message_lines();
-        let message_height = message_lines.len() as f32 * MESSAGE_LINE_HEIGHT;
-        let height = TITLE_BAR_HEIGHT
-            + CONTENT_PADDING
+        let message_height = message_lines.len() as f32 * scaled(MESSAGE_LINE_HEIGHT);
+        let height = scaled(TITLE_BAR_HEIGHT)
+            + scaled(CONTENT_PADDING)
             + message_height
-            + 12.0
-            + INPUT_HEIGHT
+            + scaled(12.0)
+            + scaled(INPUT_HEIGHT)
             + (if has_error {
-                FONT_SIZE_SMALL + 8.0
+                scaled(FONT_SIZE_SMALL) + scaled(8.0)
             } else {
                 0.0
             })
-            + CONTENT_PADDING
-            + BUTTON_HEIGHT
-            + CONTENT_PADDING;
+            + scaled(CONTENT_PADDING)
+            + scaled(BUTTON_HEIGHT)
+            + scaled(CONTENT_PADDING);
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
         self.overlay.set_content_rect(x, y, width, height);
@@ -1987,7 +1992,7 @@ impl InputDialog {
             x,
             y,
             width,
-            height: TITLE_BAR_HEIGHT,
+            height: scaled(TITLE_BAR_HEIGHT),
             color: palette.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_CORNER_RADIUS,
@@ -1999,35 +2004,40 @@ impl InputDialog {
 
         // Title text.
         tree.push(RenderCommand::Text {
-            x: x + CONTENT_PADDING,
-            y: y + (TITLE_BAR_HEIGHT - FONT_SIZE_TITLE) / 2.0,
+            x: x + scaled(CONTENT_PADDING),
+            y: y + (scaled(TITLE_BAR_HEIGHT) - scaled(FONT_SIZE_TITLE)) / 2.0,
             text: self.title.clone(),
             color: palette.text,
-            font_size: FONT_SIZE_TITLE,
+            font_size: scaled(FONT_SIZE_TITLE),
             font_weight: FontWeightHint::Bold,
-            max_width: Some(width - CONTENT_PADDING * 2.0),
+            max_width: Some(width - scaled(CONTENT_PADDING) * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Message, one command per wrapped line.
-        let mut content_y = y + TITLE_BAR_HEIGHT + CONTENT_PADDING;
+        let mut content_y = y + scaled(TITLE_BAR_HEIGHT) + scaled(CONTENT_PADDING);
         for (n, line) in message_lines.iter().enumerate() {
             tree.push(RenderCommand::Text {
-                x: x + CONTENT_PADDING,
-                y: content_y + n as f32 * MESSAGE_LINE_HEIGHT,
+                x: x + scaled(CONTENT_PADDING),
+                y: content_y + n as f32 * scaled(MESSAGE_LINE_HEIGHT),
                 text: line.clone(),
                 color: palette.subtext1,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(width - CONTENT_PADDING * 2.0),
+                max_width: Some(width - scaled(CONTENT_PADDING) * 2.0),
                 overflow: TextOverflow::Ellipsis,
             });
         }
-        content_y += message_height + 12.0;
+        content_y += message_height + scaled(12.0);
 
         // Input field.
-        let input_width = width - CONTENT_PADDING * 2.0;
-        let field_rect = (x + CONTENT_PADDING, content_y, input_width, INPUT_HEIGHT);
+        let input_width = width - scaled(CONTENT_PADDING) * 2.0;
+        let field_rect = (
+            x + scaled(CONTENT_PADDING),
+            content_y,
+            input_width,
+            scaled(INPUT_HEIGHT),
+        );
         // The box every field is drawn in (`crate::field`). It used to be a
         // box of its own whose edge turned *blue* -- not the accent -- when
         // focused, and whose red "this is wrong" edge was hidden whenever the
@@ -2049,9 +2059,9 @@ impl InputDialog {
         //
         // Geometry shared by both paths, so the caret in an empty field sits
         // exactly where the first character will be drawn.
-        let text_x = x + CONTENT_PADDING + 10.0;
-        let text_y = content_y + (INPUT_HEIGHT - FONT_SIZE) / 2.0;
-        let text_avail = input_width - 20.0;
+        let text_x = x + scaled(CONTENT_PADDING) + scaled(10.0);
+        let text_y = content_y + (scaled(INPUT_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
+        let text_avail = input_width - scaled(20.0);
         let field_focused = self.focused_element == InputFocus::TextField;
 
         let display_text = self.display_text();
@@ -2066,7 +2076,7 @@ impl InputDialog {
                 y: text_y,
                 text: display_text,
                 color: palette.subtext0,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_avail),
                 overflow: TextOverflow::Ellipsis,
@@ -2076,7 +2086,7 @@ impl InputDialog {
                     tree,
                     text_x,
                     text_y,
-                    FONT_SIZE,
+                    scaled(FONT_SIZE),
                     palette.text,
                     crate::textedit::CARET_WIDTH,
                 );
@@ -2096,8 +2106,8 @@ impl InputDialog {
                     x: text_x,
                     y: text_y,
                     width: text_avail,
-                    line_height: FONT_SIZE,
-                    font_size: FONT_SIZE,
+                    line_height: scaled(FONT_SIZE),
+                    font_size: scaled(FONT_SIZE),
                     weight: FontWeightHint::Regular,
                     color: palette.text,
                     // The accent, which is what a selection is for. Its ink
@@ -2110,17 +2120,17 @@ impl InputDialog {
             );
         }
 
-        content_y += INPUT_HEIGHT;
+        content_y += scaled(INPUT_HEIGHT);
 
         // Validation error.
         if let Some(ref error) = self.validation_error {
             content_y += 4.0;
             tree.push(RenderCommand::Text {
-                x: x + CONTENT_PADDING,
+                x: x + scaled(CONTENT_PADDING),
                 y: content_y,
                 text: error.clone(),
                 color: palette.ink(palette.red),
-                font_size: FONT_SIZE_SMALL,
+                font_size: scaled(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_width),
                 overflow: TextOverflow::Ellipsis,
@@ -2128,13 +2138,16 @@ impl InputDialog {
         }
 
         // Buttons.
-        let buttons_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
-        let btn_start_x = x + width - CONTENT_PADDING - BUTTON_MIN_WIDTH * 2.0 - BUTTON_SPACING;
+        let buttons_y = y + height - scaled(BUTTON_HEIGHT) - scaled(CONTENT_PADDING);
+        let btn_start_x = x + width
+            - scaled(CONTENT_PADDING)
+            - scaled(BUTTON_MIN_WIDTH) * 2.0
+            - scaled(BUTTON_SPACING);
 
         // OK and Cancel, as the toolkit draws a button: OK the dialog's own
         // action. Their labels used to be placed by a guessed width -- 18 for
         // "OK", 42 for "Cancel" -- and are centred on their measured one now.
-        let cancel_x = btn_start_x + BUTTON_MIN_WIDTH + BUTTON_SPACING;
+        let cancel_x = btn_start_x + scaled(BUTTON_MIN_WIDTH) + scaled(BUTTON_SPACING);
         for (x, label, kind, focused) in [
             (
                 btn_start_x,
@@ -2152,7 +2165,12 @@ impl InputDialog {
             crate::button::draw(
                 tree,
                 palette,
-                (x, buttons_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT),
+                (
+                    x,
+                    buttons_y,
+                    scaled(BUTTON_MIN_WIDTH),
+                    scaled(BUTTON_HEIGHT),
+                ),
                 label,
                 kind,
                 crate::button::State {
@@ -2171,8 +2189,18 @@ impl InputDialog {
             field: field_rect,
             text_x,
             text_width: text_avail,
-            ok: (btn_start_x, buttons_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT),
-            cancel: (cancel_x, buttons_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT),
+            ok: (
+                btn_start_x,
+                buttons_y,
+                scaled(BUTTON_MIN_WIDTH),
+                scaled(BUTTON_HEIGHT),
+            ),
+            cancel: (
+                cancel_x,
+                buttons_y,
+                scaled(BUTTON_MIN_WIDTH),
+                scaled(BUTTON_HEIGHT),
+            ),
         });
     }
 }
@@ -2400,23 +2428,23 @@ impl ProgressDialog {
 
         self.overlay.render(parent_width, parent_height, tree);
 
-        let width = DIALOG_MIN_WIDTH + 40.0;
+        let width = scaled(DIALOG_MIN_WIDTH) + scaled(40.0);
         let detail_height = if self.show_detail && self.detail_text.is_some() {
-            FONT_SIZE_SMALL + 8.0
+            scaled(FONT_SIZE_SMALL) + scaled(8.0)
         } else {
             0.0
         };
         let cancel_height = if self.cancelable {
-            BUTTON_HEIGHT + CONTENT_PADDING
+            scaled(BUTTON_HEIGHT) + scaled(CONTENT_PADDING)
         } else {
             0.0
         };
-        let height = TITLE_BAR_HEIGHT + CONTENT_PADDING
-            + FONT_SIZE + 12.0 // status text
-            + PROGRESS_BAR_HEIGHT + 12.0 // progress bar
+        let height = scaled(TITLE_BAR_HEIGHT) + scaled(CONTENT_PADDING)
+            + scaled(FONT_SIZE) + scaled(12.0) // status text
+            + scaled(PROGRESS_BAR_HEIGHT) + scaled(12.0) // progress bar
             + detail_height
             + cancel_height
-            + CONTENT_PADDING;
+            + scaled(CONTENT_PADDING);
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
         self.overlay.set_content_rect(x, y, width, height);
@@ -2450,7 +2478,7 @@ impl ProgressDialog {
             x,
             y,
             width,
-            height: TITLE_BAR_HEIGHT,
+            height: scaled(TITLE_BAR_HEIGHT),
             color: palette.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_CORNER_RADIUS,
@@ -2462,40 +2490,40 @@ impl ProgressDialog {
 
         // Title.
         tree.push(RenderCommand::Text {
-            x: x + CONTENT_PADDING,
-            y: y + (TITLE_BAR_HEIGHT - FONT_SIZE_TITLE) / 2.0,
+            x: x + scaled(CONTENT_PADDING),
+            y: y + (scaled(TITLE_BAR_HEIGHT) - scaled(FONT_SIZE_TITLE)) / 2.0,
             text: self.title.clone(),
             color: palette.text,
-            font_size: FONT_SIZE_TITLE,
+            font_size: scaled(FONT_SIZE_TITLE),
             font_weight: FontWeightHint::Bold,
-            max_width: Some(width - CONTENT_PADDING * 2.0),
+            max_width: Some(width - scaled(CONTENT_PADDING) * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Status text.
-        let mut content_y = y + TITLE_BAR_HEIGHT + CONTENT_PADDING;
+        let mut content_y = y + scaled(TITLE_BAR_HEIGHT) + scaled(CONTENT_PADDING);
         tree.push(RenderCommand::Text {
-            x: x + CONTENT_PADDING,
+            x: x + scaled(CONTENT_PADDING),
             y: content_y,
             text: self.status_text.clone(),
             color: palette.subtext1,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
-            max_width: Some(width - CONTENT_PADDING * 2.0),
+            max_width: Some(width - scaled(CONTENT_PADDING) * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
-        content_y += FONT_SIZE + 12.0;
+        content_y += scaled(FONT_SIZE) + scaled(12.0);
 
         // Progress bar.
-        let bar_width = width - CONTENT_PADDING * 2.0;
-        let bar_x = x + CONTENT_PADDING;
+        let bar_width = width - scaled(CONTENT_PADDING) * 2.0;
+        let bar_x = x + scaled(CONTENT_PADDING);
 
         // Bar background.
         tree.push(RenderCommand::FillRect {
             x: bar_x,
             y: content_y,
             width: bar_width,
-            height: PROGRESS_BAR_HEIGHT,
+            height: scaled(PROGRESS_BAR_HEIGHT),
             color: palette.surface0,
             corner_radii: CornerRadii::all(PROGRESS_BAR_RADIUS),
         });
@@ -2509,7 +2537,7 @@ impl ProgressDialog {
                         x: bar_x,
                         y: content_y,
                         width: fill_width,
-                        height: PROGRESS_BAR_HEIGHT,
+                        height: scaled(PROGRESS_BAR_HEIGHT),
                         color: palette.blue,
                         corner_radii: CornerRadii::all(PROGRESS_BAR_RADIUS),
                     });
@@ -2524,24 +2552,24 @@ impl ProgressDialog {
                     x: segment_x,
                     y: content_y,
                     width: segment_width,
-                    height: PROGRESS_BAR_HEIGHT,
+                    height: scaled(PROGRESS_BAR_HEIGHT),
                     color: palette.blue,
                     corner_radii: CornerRadii::all(PROGRESS_BAR_RADIUS),
                 });
             }
         }
 
-        content_y += PROGRESS_BAR_HEIGHT + 12.0;
+        content_y += scaled(PROGRESS_BAR_HEIGHT) + scaled(12.0);
 
         // Percentage text (for determinate mode).
         if let ProgressMode::Determinate(value) = self.progress {
             let pct = (value * 100.0) as u32;
             tree.push(RenderCommand::Text {
-                x: x + width - CONTENT_PADDING - 40.0,
-                y: content_y - PROGRESS_BAR_HEIGHT - 10.0 - FONT_SIZE_SMALL,
+                x: x + width - scaled(CONTENT_PADDING) - scaled(40.0),
+                y: content_y - scaled(PROGRESS_BAR_HEIGHT) - scaled(10.0) - scaled(FONT_SIZE_SMALL),
                 text: format!("{pct}%"),
                 color: palette.subtext0,
-                font_size: FONT_SIZE_SMALL,
+                font_size: scaled(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2553,11 +2581,11 @@ impl ProgressDialog {
             && let Some(ref detail) = self.detail_text
         {
             tree.push(RenderCommand::Text {
-                x: x + CONTENT_PADDING,
+                x: x + scaled(CONTENT_PADDING),
                 y: content_y,
                 text: detail.clone(),
                 color: palette.subtext0,
-                font_size: FONT_SIZE_SMALL,
+                font_size: scaled(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_width),
                 overflow: TextOverflow::Ellipsis,
@@ -2574,13 +2602,23 @@ impl ProgressDialog {
         // about which setters exist, which the next setter would silently break.
         self.cancel_rect = None;
         if self.cancelable {
-            let btn_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
-            let btn_x = x + width - CONTENT_PADDING - BUTTON_MIN_WIDTH;
-            self.cancel_rect = Some((btn_x, btn_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT));
+            let btn_y = y + height - scaled(BUTTON_HEIGHT) - scaled(CONTENT_PADDING);
+            let btn_x = x + width - scaled(CONTENT_PADDING) - scaled(BUTTON_MIN_WIDTH);
+            self.cancel_rect = Some((
+                btn_x,
+                btn_y,
+                scaled(BUTTON_MIN_WIDTH),
+                scaled(BUTTON_HEIGHT),
+            ));
             crate::button::draw(
                 tree,
                 palette,
-                (btn_x, btn_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT),
+                (
+                    btn_x,
+                    btn_y,
+                    scaled(BUTTON_MIN_WIDTH),
+                    scaled(BUTTON_HEIGHT),
+                ),
                 "Cancel",
                 crate::button::Kind::Plain,
                 crate::button::State::default(),
@@ -2752,15 +2790,16 @@ impl NonModalDialog {
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 // Check close button hit.
-                let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
-                let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
+                let close_x =
+                    self.x + self.width - scaled(CONTENT_PADDING) - scaled(CLOSE_BUTTON_SIZE);
+                let close_y = self.y + (scaled(TITLE_BAR_HEIGHT) - scaled(CLOSE_BUTTON_SIZE)) / 2.0;
                 if point_in_rect(
                     event.x,
                     event.y,
                     close_x,
                     close_y,
-                    CLOSE_BUTTON_SIZE,
-                    CLOSE_BUTTON_SIZE,
+                    scaled(CLOSE_BUTTON_SIZE),
+                    scaled(CLOSE_BUTTON_SIZE),
                 ) {
                     self.hide();
                     return EventResult::Consumed;
@@ -2773,7 +2812,7 @@ impl NonModalDialog {
                     self.x,
                     self.y,
                     self.width,
-                    TITLE_BAR_HEIGHT,
+                    scaled(TITLE_BAR_HEIGHT),
                 ) {
                     self.dragging = true;
                     self.drag_offset = (event.x - self.x, event.y - self.y);
@@ -2821,15 +2860,16 @@ impl NonModalDialog {
                 }
 
                 // Update close button hover state.
-                let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
-                let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
+                let close_x =
+                    self.x + self.width - scaled(CONTENT_PADDING) - scaled(CLOSE_BUTTON_SIZE);
+                let close_y = self.y + (scaled(TITLE_BAR_HEIGHT) - scaled(CLOSE_BUTTON_SIZE)) / 2.0;
                 self.close_hovered = point_in_rect(
                     event.x,
                     event.y,
                     close_x,
                     close_y,
-                    CLOSE_BUTTON_SIZE,
-                    CLOSE_BUTTON_SIZE,
+                    scaled(CLOSE_BUTTON_SIZE),
+                    scaled(CLOSE_BUTTON_SIZE),
                 );
 
                 if point_in_rect(event.x, event.y, self.x, self.y, self.width, self.height) {
@@ -2885,7 +2925,7 @@ impl NonModalDialog {
             x: self.x,
             y: self.y,
             width: self.width,
-            height: TITLE_BAR_HEIGHT,
+            height: scaled(TITLE_BAR_HEIGHT),
             color: palette.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_CORNER_RADIUS,
@@ -2897,19 +2937,24 @@ impl NonModalDialog {
 
         // Title text.
         tree.push(RenderCommand::Text {
-            x: self.x + CONTENT_PADDING,
-            y: self.y + (TITLE_BAR_HEIGHT - FONT_SIZE_TITLE) / 2.0,
+            x: self.x + scaled(CONTENT_PADDING),
+            y: self.y + (scaled(TITLE_BAR_HEIGHT) - scaled(FONT_SIZE_TITLE)) / 2.0,
             text: self.title.clone(),
             color: palette.text,
-            font_size: FONT_SIZE_TITLE,
+            font_size: scaled(FONT_SIZE_TITLE),
             font_weight: FontWeightHint::Bold,
-            max_width: Some(self.width - CONTENT_PADDING * 2.0 - CLOSE_BUTTON_SIZE - 8.0),
+            max_width: Some(
+                self.width
+                    - scaled(CONTENT_PADDING) * 2.0
+                    - scaled(CLOSE_BUTTON_SIZE)
+                    - scaled(8.0),
+            ),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Close button (X).
-        let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
-        let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
+        let close_x = self.x + self.width - scaled(CONTENT_PADDING) - scaled(CLOSE_BUTTON_SIZE);
+        let close_y = self.y + (scaled(TITLE_BAR_HEIGHT) - scaled(CLOSE_BUTTON_SIZE)) / 2.0;
         let close_bg = if self.close_hovered {
             palette.surface2
         } else {
@@ -2918,29 +2963,29 @@ impl NonModalDialog {
         tree.push(RenderCommand::FillRect {
             x: close_x,
             y: close_y,
-            width: CLOSE_BUTTON_SIZE,
-            height: CLOSE_BUTTON_SIZE,
+            width: scaled(CLOSE_BUTTON_SIZE),
+            height: scaled(CLOSE_BUTTON_SIZE),
             color: close_bg,
-            corner_radii: CornerRadii::all(CLOSE_BUTTON_SIZE / 2.0),
+            corner_radii: CornerRadii::all(scaled(CLOSE_BUTTON_SIZE) / 2.0),
         });
         tree.push(RenderCommand::Text {
-            x: close_x + (CLOSE_BUTTON_SIZE - 8.0) / 2.0,
-            y: close_y + (CLOSE_BUTTON_SIZE - FONT_SIZE) / 2.0,
+            x: close_x + (scaled(CLOSE_BUTTON_SIZE) - scaled(8.0)) / 2.0,
+            y: close_y + (scaled(CLOSE_BUTTON_SIZE) - scaled(FONT_SIZE)) / 2.0,
             text: String::from("X"),
             color: if self.close_hovered {
                 palette.ink(palette.red)
             } else {
                 palette.subtext0
             },
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
         // Content area with clipping.
-        let content_y = self.y + TITLE_BAR_HEIGHT;
-        let content_height = self.height - TITLE_BAR_HEIGHT;
+        let content_y = self.y + scaled(TITLE_BAR_HEIGHT);
+        let content_height = self.height - scaled(TITLE_BAR_HEIGHT);
         tree.push(RenderCommand::PushClip {
             x: self.x,
             y: content_y,
@@ -3655,6 +3700,32 @@ mod tests {
             !dialog.is_animating(),
             "a settled dialog still wants a clock"
         );
+    }
+
+    /// **An alert follows the user's text size** (on this test's thread): at
+    /// twice the size its title and its message are twice as large, and its
+    /// button's label with them -- the dialog laid out round the larger text.
+    #[test]
+    fn an_alert_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let mut dialog = AlertDialog::info("Title", "Message");
+        dialog.show();
+        for _ in 0..300 {
+            dialog.tick(1);
+        }
+        let mut tree = RenderTree::new();
+        dialog.render(&Palette::for_mode(false), 1920.0, 1080.0, &mut tree);
+        let sizes: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        for wanted in [FONT_SIZE_TITLE, FONT_SIZE, crate::button::FONT_SIZE] {
+            assert!(sizes.contains(&(wanted * 2.0)), "{wanted}: {sizes:?}");
+        }
     }
 
     #[test]

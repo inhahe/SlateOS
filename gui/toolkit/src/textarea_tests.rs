@@ -869,15 +869,15 @@ fn the_right_click_menu_does_what_the_keys_do() {
     let m = wide(4);
     crate::clipboard::set_text("");
     let mut area = TextArea::new();
-    assert_eq!(lit(&area.edit_menu()), Vec::<String>::new());
+    assert_eq!(lit(area.edit_menu().items()), Vec::<String>::new());
     type_text(&mut area, "one two", &m);
-    assert_eq!(lit(&area.edit_menu()), ["Undo", "Select all"]);
+    assert_eq!(lit(area.edit_menu().items()), ["Undo", "Select all"]);
     assert_eq!(
         area.edit_command(EditCommand::SelectAll.id(), &m),
         KeyEdit::Handled
     );
     assert_eq!(
-        lit(&area.edit_menu()),
+        lit(area.edit_menu().items()),
         ["Undo", "Cut", "Copy", "Delete", "Select all"]
     );
     assert_eq!(
@@ -893,7 +893,7 @@ fn the_right_click_menu_does_what_the_keys_do() {
     assert_eq!(area.text(), "one two");
     area.edit_command(EditCommand::Undo.id(), &m);
     assert_eq!(area.text(), "", "Undo from the menu took nothing back");
-    assert!(lit(&area.edit_menu()).contains(&"Redo".to_owned()));
+    assert!(lit(area.edit_menu().items()).contains(&"Redo".to_owned()));
     area.edit_command(EditCommand::Redo.id(), &m);
     assert_eq!(area.text(), "one two");
     area.edit_command(EditCommand::SelectAll.id(), &m);

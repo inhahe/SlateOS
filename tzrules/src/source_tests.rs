@@ -1,7 +1,6 @@
 //! `tz_plan`, case by case against glibc 2.39 -- where a comment gives what
 //! `date` printed for a case, it was measured under WSL's glibc at
-//! 1990-03-20 12:00 UTC -- and the superseded `tz_source`, kept until nothing
-//! calls it.
+//! 1990-03-20 12:00 UTC.
 
 use super::*;
 
@@ -135,62 +134,4 @@ fn a_nul_ends_no_rule_early() {
     assert_eq!(p.file(), None);
     assert_eq!(p.fallback(), Tz::utc());
     assert_eq!(tz_plan(Some(b"JST-9")).fallback(), rule(b"JST-9"));
-}
-
-// ---------------------------------------------------------------------------
-// The superseded `tz_source`, unchanged until `posix/src/tz.rs` moves off it.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn tz_source_unset_is_the_machines_zone_and_empty_is_utc() {
-    assert_eq!(tz_source(None), TzSource::System);
-    assert_eq!(tz_source(Some(b"")), TzSource::Utc);
-}
-
-#[test]
-fn tz_source_takes_a_rule_as_it_is() {
-    let text = b"CET-1CEST,M3.5.0,M10.5.0/3";
-    assert_eq!(tz_source(Some(text)), TzSource::Rule(rule(text)));
-}
-
-/// The order `tz_plan` replaces: the rule before the file, unless a `:` says
-/// file.
-#[test]
-fn tz_source_tries_a_rule_before_a_file_unless_a_colon_says_file() {
-    assert!(matches!(tz_source(Some(b"EST5EDT")), TzSource::Rule(_)));
-    assert_eq!(tz_source(Some(b":EST5EDT")), TzSource::Named(b"EST5EDT"));
-}
-
-#[test]
-fn tz_source_reads_a_name_under_the_zoneinfo_directory_and_a_path_as_a_path() {
-    assert_eq!(
-        tz_source(Some(b"America/New_York")),
-        TzSource::Named(b"America/New_York")
-    );
-    assert_eq!(
-        tz_source(Some(b":/etc/zones/home")),
-        TzSource::Path(b"/etc/zones/home")
-    );
-    assert_eq!(
-        tz_source(Some(b"/etc/zones/home")),
-        TzSource::Path(b"/etc/zones/home")
-    );
-}
-
-#[test]
-fn tz_source_refuses_a_name_that_escapes_or_is_cut_short() {
-    for bad in [
-        &b"../../../etc/shadow"[..],
-        b":../x",
-        b"/usr/share/zoneinfo/../../etc/shadow",
-        b"Europe/..",
-        b"a\0b",
-        b":",
-    ] {
-        assert_eq!(tz_source(Some(bad)), TzSource::Refused, "{bad:?}");
-    }
-    assert_eq!(
-        tz_source(Some(b"Europe/Bu..dapest")),
-        TzSource::Named(b"Europe/Bu..dapest")
-    );
 }

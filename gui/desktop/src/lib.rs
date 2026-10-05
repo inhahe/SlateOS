@@ -3044,13 +3044,16 @@ impl DesktopShell {
         // the default face and had it drawn in the user's: a wider face ran
         // the taskbar's labels past their tiles, a narrower one was cut where
         // it fitted, and centred text sat off centre. Every application
-        // applies them the same way (`oswindow`'s `hand_over`).
+        // applies them the same way (`oswindow`'s `hand_over`). Through
+        // `fonts_in_use`, the one answer every process is to draw from, so
+        // that a chosen font theme reaches the shell the moment it reaches
+        // the compositor (design-decisions §1472).
         //
         // The outcome is not acted on: a family this machine does not have
         // leaves the working face in place -- in the compositor too, which
         // looks in the same font directories -- and the Settings font page is
         // where that is said.
-        let _ = appearance.fonts.apply();
+        let _ = appearance.fonts_in_use().apply();
         self.theme = DesktopTheme::from_settings(&appearance);
         // How things move, to every animator the shell owns: the animation
         // theme at the user's speed (design-decisions §1446). Pushed from here
@@ -5118,6 +5121,10 @@ impl DesktopShell {
                 MouseEventKind::Move => {
                     if let Some((menu, _)) = self.field_menu.as_mut() {
                         menu.handle_mouse_move(event.x, event.y);
+                        // Come to rest on a greyed row: its reason waits
+                        // out the tooltip delay, a deadline the session
+                        // must be told of to wake for.
+                        self.hover_changed |= menu.due_in(self.osd_clock_ms).is_some();
                     }
                     return ShellAction::Consumed;
                 }
@@ -5751,15 +5758,26 @@ impl DesktopShell {
     }
 
     /// How long until the tooltip the pointer is resting on appears, in
-    /// milliseconds of the overlay clock -- `None` when none is waiting to.
+    /// milliseconds of the overlay clock -- a tile's name, or why the row
+    /// of a text field's menu it rests on is greyed -- `None` when none is
+    /// waiting to.
     ///
     /// For the session, which sleeps while nothing moves: the delay is a
     /// deadline nothing else wakes the loop for.
     #[must_use]
     pub fn tooltip_due_in(&self) -> Option<u64> {
-        self.tooltip
+        let tile = self
+            .tooltip
             .as_ref()
-            .and_then(|(_, tip)| tip.due_in(self.osd_clock_ms))
+            .and_then(|(_, tip)| tip.due_in(self.osd_clock_ms));
+        let reason = self
+            .field_menu
+            .as_ref()
+            .and_then(|(menu, _)| menu.due_in(self.osd_clock_ms));
+        match (tile, reason) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Whether what the pointer rests on has changed since this was last
@@ -11488,26 +11506,24 @@ impl DesktopShell {
     /// Nothing opens over a field with nothing to offer: a note or a rename
     /// that went before the press arrived.
     fn open_field_menu(&mut self, field: MenuField, x: f32, y: f32) {
-        let mut items = match field {
-            MenuField::RunBox => self.run_dialog.edit_menu(),
-            MenuField::StartSearch => self.start_query.edit_menu(),
+        let menu = match field {
+            MenuField::RunBox => Some(self.run_dialog.edit_menu()),
+            MenuField::StartSearch => Some(self.start_query.edit_menu()),
             MenuField::Note(_) => self.widgets.note_edit_menu(),
             MenuField::Rename => self.icons.rename_edit_menu(),
         };
-        if items.is_empty() {
+        let Some(mut menu) = menu else {
             return;
-        }
+        };
         if matches!(field, MenuField::Note(_)) {
-            items.push(MenuItem::Separator);
             // A note is never a photo frame.
-            items.extend(Self::widget_menu_items(false));
+            menu.extend(std::iter::once(MenuItem::Separator).chain(Self::widget_menu_items(false)));
         }
         self.desktop_menu.hide();
         self.tray_overflow_menu = None;
         self.pin_menu = None;
         self.taskbar_menu = None;
         self.close_notification_menu();
-        let mut menu = ContextMenu::new(items);
         menu.show(x, y, self.viewport());
         self.field_menu = Some((menu, field));
     }
@@ -14559,6 +14575,13 @@ impl DesktopShell {
             let was = tip.is_visible();
             tip.tick(self.osd_clock_ms);
             self.hover_changed |= tip.is_visible() != was;
+        }
+        // And why a greyed row of a text field's menu is greyed, which waits
+        // out the same delay (`ContextMenu::tick`): the first tick after the
+        // pointer came to rest starts the wait -- the frame step re-arms its
+        // wake-up for the deadline that gives -- and a later one shows it.
+        if let Some((menu, _)) = self.field_menu.as_mut() {
+            self.hover_changed |= menu.tick(self.osd_clock_ms);
         }
     }
 

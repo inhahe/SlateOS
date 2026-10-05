@@ -10,6 +10,7 @@ use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::surface::{Edge, Surface};
+use crate::text::scaled;
 
 /// A single tab definition.
 #[derive(Clone, Debug)]
@@ -59,7 +60,10 @@ pub enum TabEvent {
     Reordered { tab_id: u64, new_index: usize },
 }
 
-/// How tab widths are calculated.
+/// How tab widths are calculated: in pixels at the default text size, as
+/// every size in the toolkit is written -- a tab is drawn that much wider
+/// at a larger text size ([`crate::text::scaled`]), so its label keeps its
+/// room.
 #[derive(Clone, Copy, Debug)]
 pub enum TabWidth {
     /// All tabs have the same fixed width.
@@ -91,6 +95,14 @@ impl Default for TabWidth {
 /// Public because a caller that lays out around a bar -- the dock does, one
 /// bar per tab group -- has to know how much of its area the bar takes.
 pub const TAB_BAR_HEIGHT: f32 = 36.0;
+
+/// The tab bar's height at the user's text size ([`TAB_BAR_HEIGHT`] at the
+/// default): what the bar is drawn at, and what a caller laying out round
+/// one -- the dock -- has to leave it.
+#[must_use]
+pub fn bar_height() -> f32 {
+    scaled(TAB_BAR_HEIGHT)
+}
 /// Padding inside each tab.
 const TAB_PADDING_H: f32 = 12.0;
 /// Size of the close button hit area.
@@ -237,13 +249,13 @@ impl TabView {
             .iter()
             .map(|tab| {
                 let tw = self.compute_tab_width(tab);
-                let rect = Rect::new(current_x, bar_y, tw, TAB_BAR_HEIGHT);
+                let rect = Rect::new(current_x, bar_y, tw, scaled(TAB_BAR_HEIGHT));
                 let close = tab.closeable.then(|| {
                     Rect::new(
-                        current_x + tw - TAB_PADDING_H - CLOSE_BUTTON_SIZE,
-                        bar_y + (TAB_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0,
-                        CLOSE_BUTTON_SIZE,
-                        CLOSE_BUTTON_SIZE,
+                        current_x + tw - scaled(TAB_PADDING_H) - scaled(CLOSE_BUTTON_SIZE),
+                        bar_y + (scaled(TAB_BAR_HEIGHT) - scaled(CLOSE_BUTTON_SIZE)) / 2.0,
+                        scaled(CLOSE_BUTTON_SIZE),
+                        scaled(CLOSE_BUTTON_SIZE),
                     )
                 });
                 current_x += tw;
@@ -259,7 +271,7 @@ impl TabView {
     /// Handle a mouse click at position (x, y) relative to the tab bar origin.
     pub fn handle_click(&mut self, x: f32, y: f32) -> Option<TabEvent> {
         // Outside the bar vertically is outside every tab.
-        if !(0.0..TAB_BAR_HEIGHT).contains(&y) {
+        if !(0.0..scaled(TAB_BAR_HEIGHT)).contains(&y) {
             return None;
         }
         let hit = self
@@ -311,7 +323,7 @@ impl TabView {
         width: f32,
         total_height: f32,
     ) -> (Vec<RenderCommand>, f32, f32) {
-        let bar_height = TAB_BAR_HEIGHT;
+        let bar_height = scaled(TAB_BAR_HEIGHT);
         let (bar_y, content_y, content_height) = match self.position {
             TabPosition::Top => (y, y + bar_height, total_height - bar_height),
             TabPosition::Bottom => (y + total_height - bar_height, y, total_height - bar_height),
@@ -403,17 +415,17 @@ impl TabView {
             }
 
             // Dirty indicator (dot before label)
-            let mut label_x = current_x + TAB_PADDING_H;
+            let mut label_x = current_x + scaled(TAB_PADDING_H);
             if tab.dirty {
                 commands.push(RenderCommand::FillRect {
                     x: label_x,
-                    y: bar_y + (bar_height - 6.0) / 2.0,
-                    width: 6.0,
-                    height: 6.0,
+                    y: bar_y + (bar_height - scaled(6.0)) / 2.0,
+                    width: scaled(6.0),
+                    height: scaled(6.0),
                     color: palette.peach,
-                    corner_radii: CornerRadii::all(3.0),
+                    corner_radii: CornerRadii::all(scaled(3.0)),
                 });
-                label_x += 10.0;
+                label_x += scaled(10.0);
             }
 
             // Tab label
@@ -423,20 +435,20 @@ impl TabView {
                 palette.subtext0
             };
             let max_label_width = tw
-                - TAB_PADDING_H * 2.0
+                - scaled(TAB_PADDING_H) * 2.0
                 - if tab.closeable {
-                    CLOSE_BUTTON_SIZE + 4.0
+                    scaled(CLOSE_BUTTON_SIZE) + scaled(4.0)
                 } else {
                     0.0
                 }
-                - if tab.dirty { 10.0 } else { 0.0 };
+                - if tab.dirty { scaled(10.0) } else { 0.0 };
 
             commands.push(RenderCommand::Text {
                 x: label_x,
-                y: bar_y + (bar_height - LABEL_FONT_SIZE) / 2.0,
+                y: bar_y + (bar_height - scaled(LABEL_FONT_SIZE)) / 2.0,
                 text: tab.label.clone(),
                 color: text_color,
-                font_size: LABEL_FONT_SIZE,
+                font_size: scaled(LABEL_FONT_SIZE),
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -456,11 +468,11 @@ impl TabView {
                 };
                 // Render X as text
                 commands.push(RenderCommand::Text {
-                    x: close_x + 3.0,
-                    y: close_y + 1.0,
+                    x: close_x + scaled(3.0),
+                    y: close_y + scaled(1.0),
                     text: "\u{00D7}".to_string(), // multiplication sign as close icon
                     color: close_color,
-                    font_size: 14.0,
+                    font_size: scaled(14.0),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -476,11 +488,11 @@ impl TabView {
             // Left arrow indicator
             if self.scroll_offset > 0.0 {
                 commands.push(RenderCommand::Text {
-                    x: x + 2.0,
-                    y: bar_y + (bar_height - 12.0) / 2.0,
+                    x: x + scaled(2.0),
+                    y: bar_y + (bar_height - scaled(12.0)) / 2.0,
                     text: "\u{25C0}".to_string(),
                     color: palette.subtext0,
-                    font_size: 12.0,
+                    font_size: scaled(12.0),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -489,11 +501,11 @@ impl TabView {
             // Right arrow indicator
             if self.scroll_offset + width < total_tab_width {
                 commands.push(RenderCommand::Text {
-                    x: x + width - 14.0,
-                    y: bar_y + (bar_height - 12.0) / 2.0,
+                    x: x + width - scaled(14.0),
+                    y: bar_y + (bar_height - scaled(12.0)) / 2.0,
                     text: "\u{25B6}".to_string(),
                     color: palette.subtext0,
-                    font_size: 12.0,
+                    font_size: scaled(12.0),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -543,19 +555,19 @@ impl TabView {
 
     fn compute_tab_width(&self, tab: &Tab) -> f32 {
         match self.tab_width {
-            TabWidth::Fixed(w) => w,
+            TabWidth::Fixed(w) => scaled(w),
             TabWidth::Flexible { min, max } => {
                 // Measured in the same size the label is drawn in, so a tab is
                 // never too narrow for its own text.
-                let estimated = TAB_PADDING_H * 2.0
-                    + crate::text::width(&tab.label, LABEL_FONT_SIZE)
+                let estimated = scaled(TAB_PADDING_H) * 2.0
+                    + crate::text::width(&tab.label, scaled(LABEL_FONT_SIZE))
                     + if tab.closeable {
-                        CLOSE_BUTTON_SIZE + 4.0
+                        scaled(CLOSE_BUTTON_SIZE) + scaled(4.0)
                     } else {
                         0.0
                     }
-                    + if tab.dirty { 10.0 } else { 0.0 };
-                estimated.clamp(min, max)
+                    + if tab.dirty { scaled(10.0) } else { 0.0 };
+                estimated.clamp(scaled(min), scaled(max))
             }
         }
     }
@@ -772,6 +784,27 @@ mod tests {
 
     use super::*;
     use crate::event::Modifiers;
+
+    /// **A tab bar follows the user's text size** (on this test's thread): at
+    /// twice the size the bar is twice as tall, the content starts below it
+    /// there, and the labels are twice as large.
+    #[test]
+    fn a_tab_bar_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        assert_eq!(bar_height(), TAB_BAR_HEIGHT * 2.0);
+        let mut tv = TabView::new(TabPosition::Top);
+        tv.add_tab(Tab::new(1, "Documents"));
+        let (commands, content_y, _) = tv.render(&Palette::for_mode(false), 0.0, 0.0, 800.0, 600.0);
+        assert_eq!(content_y, TAB_BAR_HEIGHT * 2.0);
+        let sizes: Vec<f32> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert!(sizes.contains(&(LABEL_FONT_SIZE * 2.0)), "{sizes:?}");
+    }
 
     #[test]
     fn test_new_tab_view_is_empty() {

@@ -59,18 +59,36 @@ use crate::palette::{Palette, legible_on};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
+use crate::text::scaled;
 
 pub use crate::widget::CheckState;
 
-/// The box's side.
+/// The box's side, at the default text size: the box grows with the label,
+/// at the user's ([`crate::text::scaled`]), as the other sizes here do.
 pub const SIZE: f32 = 14.0;
-/// The label's size: the reference's 12 pixels.
+/// The label's size: the reference's 12 pixels, at the default text size --
+/// [`font_size`] is at the user's.
 pub const FONT_SIZE: f32 = 12.0;
-/// From the box to its label: the reference's `gap: 6px`.
+/// From the box to its label: the reference's `gap: 6px`, at the default
+/// text size.
 pub const LABEL_GAP: f32 = 6.0;
 /// A checkbox's height where the caller has no layout of its own: tall
-/// enough for the label's line.
+/// enough for the label's line, at the default text size -- [`height`] is
+/// at the user's.
 pub const HEIGHT: f32 = 20.0;
+
+/// A checkbox's height at the user's text size ([`HEIGHT`] at the default):
+/// what a list of them with no layout of its own lays out from.
+#[must_use]
+pub fn height() -> f32 {
+    scaled(HEIGHT)
+}
+
+/// The label's size at the user's text size ([`FONT_SIZE`] at the default).
+#[must_use]
+pub fn font_size() -> f32 {
+    scaled(FONT_SIZE)
+}
 /// How far the edge is tinted towards the accent under the pointer.
 const HOVER_TINT: f32 = 0.5;
 /// The mark's stroke.
@@ -125,16 +143,18 @@ pub struct State {
 #[must_use]
 pub fn width(label: &str) -> f32 {
     if label.is_empty() {
-        return SIZE;
+        return scaled(SIZE);
     }
-    SIZE + LABEL_GAP + crate::text::measure(label, FONT_SIZE, FontWeightHint::Regular)
+    scaled(SIZE)
+        + scaled(LABEL_GAP)
+        + crate::text::measure(label, scaled(FONT_SIZE), FontWeightHint::Regular)
 }
 
 /// Where the box is for a checkbox whose row starts at `(x, y)` and is `h`
 /// tall: at the left, centred down the row.
 #[must_use]
 pub fn box_rect(x: f32, y: f32, h: f32) -> Rect {
-    Rect::new(x, y + (h - SIZE) / 2.0, SIZE, SIZE)
+    Rect::new(x, y + (h - scaled(SIZE)) / 2.0, scaled(SIZE), scaled(SIZE))
 }
 
 /// The region a press takes hold of the checkbox in: the box, grown as
@@ -164,7 +184,7 @@ fn hit_to(x: f32, y: f32, h: f32, label: &str, room: Option<f32>) -> Rect {
 
 /// How much of a row `room` wide is the label's, after the box and the gap.
 pub(crate) fn label_room(room: f32) -> f32 {
-    (room - SIZE - LABEL_GAP).max(0.0)
+    (room - scaled(SIZE) - scaled(LABEL_GAP)).max(0.0)
 }
 
 /// Whether `key` flips a checkbox that has the keyboard: Space, pressed, with
@@ -282,7 +302,10 @@ fn draw_to(
     draw_box(sink, p, b, check, state, focus_ring, colours.mark);
     if !label.is_empty() {
         sink.emit(label_text(
-            (b.right() + LABEL_GAP, y + (h - FONT_SIZE) / 2.0),
+            (
+                b.right() + scaled(LABEL_GAP),
+                y + (h - scaled(FONT_SIZE)) / 2.0,
+            ),
             label,
             fade(colours.label, state),
             room,
@@ -303,7 +326,7 @@ pub(crate) fn label_text(
         y,
         text: label.to_string(),
         color,
-        font_size: FONT_SIZE,
+        font_size: scaled(FONT_SIZE),
         font_weight: FontWeightHint::Regular,
         max_width: room.map(label_room),
         overflow: if room.is_some() {
@@ -381,16 +404,16 @@ pub fn draw_box(
                     x2: xb,
                     y2: yb,
                     color: fade(mark, state),
-                    width: MARK_WIDTH,
+                    width: scaled(MARK_WIDTH),
                 });
             }
         }
         CheckState::Indeterminate => {
             sink.emit(RenderCommand::FillRect {
-                x: b.x + (b.w - PARTLY) / 2.0,
-                y: b.y + (b.h - PARTLY) / 2.0,
-                width: PARTLY,
-                height: PARTLY,
+                x: b.x + (b.w - scaled(PARTLY)) / 2.0,
+                y: b.y + (b.h - scaled(PARTLY)) / 2.0,
+                width: scaled(PARTLY),
+                height: scaled(PARTLY),
                 color: fade(mark, state),
                 corner_radii: CornerRadii::all(1.0),
             });
@@ -446,6 +469,40 @@ mod tests {
             2.0,
         );
         cmds
+    }
+
+    /// **A check box follows the user's text size** (on this test's thread):
+    /// at twice the size its box, its label and the gap between them are
+    /// twice as large, and so is the height it offers.
+    #[test]
+    fn a_check_box_follows_the_text_size() {
+        let label = "Show hidden files";
+        let wide = width(label);
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        assert_eq!(height(), HEIGHT * 2.0);
+        assert_eq!(box_rect(0.0, 0.0, height()).w, SIZE * 2.0);
+        let ratio = width(label) / wide;
+        assert!((1.9..=2.1).contains(&ratio), "{ratio}");
+
+        let p = Palette::for_mode(false);
+        let mut cmds = Vec::new();
+        draw(
+            &mut cmds,
+            &p,
+            (10.0, 20.0, height()),
+            label,
+            CheckState::Checked,
+            State::default(),
+            2.0,
+        );
+        let sizes: Vec<f32> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, [FONT_SIZE * 2.0]);
     }
 
     /// A two-state box is set or cleared by a click, and a box that was

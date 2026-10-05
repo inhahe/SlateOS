@@ -265,6 +265,25 @@ impl FontDb {
         Self::spellings(self.faces.iter().filter(|f| f.monospaced))
     }
 
+    /// Whether a face answers to `family`, whatever its capitals -- whether
+    /// [`find`](Self::find) has a file to give. What a choice among families
+    /// asks before choosing: a theme's recommendations, tried in order.
+    #[must_use]
+    pub fn has_family(&self, family: &str) -> bool {
+        self.faces.iter().any(|face| face.matches(family))
+    }
+
+    /// Whether `family` has a fixed-pitch face, as
+    /// [`monospaced_families`](Self::monospaced_families) counts one: whether
+    /// a terminal drawn in it keeps its grid. `false` for a family that is
+    /// not installed.
+    #[must_use]
+    pub fn is_fixed_pitch(&self, family: &str) -> bool {
+        self.faces
+            .iter()
+            .any(|face| face.monospaced && face.matches(family))
+    }
+
     /// The best file for `family` at `want`, or `None` if the family is not
     /// installed.
     ///
@@ -603,6 +622,31 @@ mod tests {
         // does not remove a family from the system.
         assert_eq!(db(entries).families(), vec!["consolas"]);
         assert_eq!(db_mono(entries).families(), vec!["consolas"]);
+    }
+
+    /// **A family is installed when a face answers to it**, whatever its
+    /// capitals, **and fixed-pitch when one of its faces is** -- the same
+    /// entries twice, differing in the flag alone, so it is the flag being
+    /// read and not the name.
+    #[test]
+    fn a_family_is_installed_and_fixed_pitch_as_its_faces_say() {
+        let entries: &[(&str, &[&str], u16, bool, u8)] = &[("c.ttf", &["Consolas"], 400, false, 5)];
+        let proportional = db(entries);
+        assert!(proportional.has_family("Consolas"));
+        assert!(
+            proportional.has_family("cONSOLAS"),
+            "names match in any case"
+        );
+        assert!(!proportional.has_family("Inter"));
+        assert!(!proportional.is_fixed_pitch("Consolas"));
+
+        let fixed = db_mono(entries);
+        assert!(fixed.is_fixed_pitch("consolas"));
+        assert!(
+            !fixed.is_fixed_pitch("Inter"),
+            "a family not installed is not fixed-pitch"
+        );
+        assert!(!FontDb::new().has_family("Consolas"));
     }
 
     // ---- the fallback faces (`crate::text::DEFAULT_FALLBACK_FAMILIES`) ----

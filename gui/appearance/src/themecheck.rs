@@ -80,7 +80,7 @@ pub const MAX_DEPTH: usize = 8;
 
 /// Every axis a theme can cover, by the name `meta.supports` gives it: the
 /// sections that carry one and the folders that do.
-pub const AXES: [&str; 10] = [
+pub const AXES: [&str; 11] = [
     themes::DARK_SECTION,
     themes::TERMINAL_DARK_SECTION,
     themes::SYNTAX_DARK_SECTION,
@@ -89,17 +89,18 @@ pub const AXES: [&str; 10] = [
     themes::DECORATIONS_SECTION,
     themes::PANEL_SECTION,
     themes::WALLPAPERS_SECTION,
+    themes::FONTS_SECTION,
     icons::ICONS_DIR,
     cursors::CURSORS_DIR,
 ];
 
 /// Axes the theme format names that this desktop does not have yet --
-/// `roadmap-detailed.md`'s sounds and fonts. A theme listing one is ahead of
-/// the desktop, not wrong.
-const PLANNED_AXES: [&str; 2] = ["sounds", "fonts"];
+/// `roadmap-detailed.md`'s sounds. A theme listing one is ahead of the
+/// desktop, not wrong.
+const PLANNED_AXES: [&str; 1] = ["sounds"];
 
 /// The sections the theme file is read for.
-const SECTIONS: [&str; 12] = [
+const SECTIONS: [&str; 13] = [
     themes::META_SECTION,
     themes::DARK_SECTION,
     themes::LIGHT_SECTION,
@@ -112,6 +113,7 @@ const SECTIONS: [&str; 12] = [
     themes::DECORATIONS_SECTION,
     themes::PANEL_SECTION,
     themes::WALLPAPERS_SECTION,
+    themes::FONTS_SECTION,
 ];
 
 /// The largest wallpaper read to see that it is a picture. Not a limit the
@@ -314,6 +316,24 @@ struct Entry {
     kind: Kind,
 }
 
+/// What the checker asks of this machine's fonts: whether a family is
+/// installed, and whether it is fixed-pitch. The system's index
+/// ([`FontQuestions::SYSTEM`]), or a test's answers -- what a machine has
+/// installed is no fixture.
+#[derive(Clone, Copy)]
+struct FontQuestions {
+    installed: fn(&str) -> bool,
+    fixed_pitch: fn(&str) -> bool,
+}
+
+impl FontQuestions {
+    /// This machine's fonts, as the desktop finds them.
+    const SYSTEM: Self = Self {
+        installed: guitk::text::family_installed,
+        fixed_pitch: guitk::text::family_fixed_pitch,
+    };
+}
+
 struct Checker {
     root: PathBuf,
     /// The folder as the system resolves it, every link on the way followed:
@@ -335,6 +355,9 @@ struct Checker {
     /// test, which can then reach the bound without making ten thousand
     /// files.
     max_entries: usize,
+    /// What the machine's fonts are asked: [`FontQuestions::SYSTEM`], or a
+    /// test's answers.
+    fonts: FontQuestions,
 }
 
 impl Checker {
@@ -350,6 +373,7 @@ impl Checker {
             files: 0,
             bytes: 0,
             max_entries: MAX_ENTRIES,
+            fonts: FontQuestions::SYSTEM,
         }
     }
 
@@ -416,6 +440,7 @@ impl Checker {
             self.check_cursors();
         }
         self.check_wallpapers(file.as_ref().and_then(|file| file.wallpapers.as_ref()));
+        self.check_fonts(file.as_ref().and_then(|file| file.fonts.as_ref()));
         if let Some(file) = &file {
             self.check_screenshots(&file.meta);
             self.check_contrast(&file.colors);
@@ -805,6 +830,7 @@ impl Checker {
             (themes::DECORATIONS_SECTION, file.decorations.is_some()),
             (themes::PANEL_SECTION, file.panel.is_some()),
             (themes::WALLPAPERS_SECTION, file.wallpapers.is_some()),
+            (themes::FONTS_SECTION, file.fonts.is_some()),
         ];
         for (section, sets) in sections {
             if doc.contains(&[section]) && !sets {
@@ -893,6 +919,42 @@ impl Checker {
                 ),
             );
         }
+    }
+
+    /// The fonts a theme recommends, against this machine's: a family it
+    /// lacks is a note and not a fault -- a theme is checked where it is
+    /// written and used where its fonts may be installed, and a list is
+    /// tried in order -- and a fixed-pitch recommendation that is installed
+    /// and is not fixed-pitch is a warning, since code and terminals drawn in
+    /// it lose their columns. A section naming any family covers the axis.
+    fn check_fonts(&mut self, recommended: Option<&themes::FontNames>) {
+        let Some(names) = recommended else {
+            return;
+        };
+        let at = themes::FILE_NAME;
+        for (role, families) in [("ui", &names.ui), ("mono", &names.mono)] {
+            for family in families {
+                let shown = themes::quoted(family);
+                if !(self.fonts.installed)(family) {
+                    self.note(
+                        at,
+                        format!(
+                            "font `{shown}` (`{}.{role}`) is not installed here: where it is not, the next family listed is drawn, or the user's own",
+                            themes::FONTS_SECTION
+                        ),
+                    );
+                } else if role == "mono" && !(self.fonts.fixed_pitch)(family) {
+                    self.warning(
+                        at,
+                        format!(
+                            "font `{shown}` (`{}.mono`) is not fixed-pitch: code and terminals drawn in it lose their columns",
+                            themes::FONTS_SECTION
+                        ),
+                    );
+                }
+            }
+        }
+        self.covers.insert(themes::FONTS_SECTION);
     }
 
     /// `meta.supports` against what the theme covers.

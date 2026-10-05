@@ -31,6 +31,15 @@
 #       light: wallpapers/day.jpg
 # -- chosen as `theme.wallpaper: <name>`. This one brings none.
 #
+# And it may name the fonts it was designed with -- named, not shipped, since
+# a font's licence seldom lets a theme carry it -- each a list tried in order,
+# the first one installed drawn:
+#     fonts:
+#       ui: [Inter, Noto Sans]
+#       mono: Fira Code
+# -- chosen as `theme.fonts: <name>`. This one names none: its fonts are the
+# ones you choose in Settings.
+#
 # Colours are opaque, written "#rrggbb" -- in quotes, because an unquoted `#`
 # after a space begins a comment. The accent is not here: it is the user's own
 # choice, made in Settings. And the four text colours (text, subtext0,

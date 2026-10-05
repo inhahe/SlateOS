@@ -1838,7 +1838,8 @@ live.
   (lane B's report). `tzrules::tz_plan` is glibc's order and the clock reads
   through it; the libc's move (lane D) and `localtime`'s (lane B) are in
   `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`,
-  after which `tz_source` is deleted.
+  after which `tz_source` is deleted. **Deleted 2026-10-05**: the libc reads
+  `TZ` through glibc's own code, ported (lane D), and nothing else called it.
 
 - `[C]` **"System (Auto)" switches between light and dark by the clock** --
   done 2026-09-25 (`design-decisions.md` §876). It had always meant dark. It is
@@ -2200,6 +2201,43 @@ live.
   still come first. The theme checker decodes them. **Lane E:** the
   Background page that chooses it
   (`requests/c-e-a-themes-wallpapers-on-the-background-page.md`).
+
+- `[-]` `[C]` **A theme recommends its fonts** (`design-decisions.md` §1472;
+  `roadmap-detailed.md` *Tier 2 -- Font Preferences*) -- lane C's half done
+  2026-10-05. A theme names the families it was designed with in a `fonts`
+  section -- for the desktop's text and for code, each a list tried in order
+  -- without shipping them, as a font's licence seldom allows; chosen as
+  `theme.fonts: <name>`, the first of each list the machine has takes the
+  place of the user's own font, and the user's own stays where none is
+  installed. Read, listed (`ThemeInfo::fonts`), checked by `themecheck` and
+  resolved (`AppearanceSettings::fonts_with_theme`). **Not drawn yet**:
+  `fonts_in_use()`, which the shell applies, answers with the user's own
+  until the compositor and the applications' event loop apply through it
+  too, so that no two processes measure and draw in different faces.
+  **Lane F:** those two lines (`requests/c-f-apply-the-fonts-in-use.md`);
+  lane C then turns the theme on in one place. **Lane E:** the Fonts page
+  that chooses it and offers to install what is missing
+  (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`).
+
+- `[x]` `[C]` **A disabled control says why** (`design-decisions.md` §1473;
+  `roadmap-detailed.md` §3.5 *Enable/disable controls API*) -- done
+  2026-10-05. Rest the pointer on a greyed button or menu row and, after the
+  tooltip delay, its reason appears: `ContextMenu::explain` for a menu's
+  rows, `guitk::disabled::WhyDisabled` for a window's controls. The text
+  fields' menus explain theirs ("Select some text first", "Nothing has
+  been copied"), the desktop's included. **Lane E:** the programs' own
+  (`requests/c-e-say-why-a-control-is-disabled.md`).
+
+- `[x]` `[C]` **The toolkit's controls follow the user's text size**
+  (`design-decisions.md` §1474; `roadmap-detailed.md` *Tier 2 -- Font
+  Preferences*) -- done 2026-10-05. The size chosen in Settings reached
+  the desktop's own text and the window titles and stopped there: every
+  menu, tooltip, dialog, tab and menu bar, button, check box, drop-down and
+  switch drew at 13 pixels. Each now draws its text at the user's size and
+  is laid out round it, the Run box with them. **Lane E:** programs laying
+  out from the toolkit's sizes (`requests/c-e-lay-out-from-the-text-size.md`).
+  **Operator:** where the display's scale is applied (C-Q34) -- programs
+  apply none today.
 
 - `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
   -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's

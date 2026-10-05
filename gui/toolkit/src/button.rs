@@ -44,20 +44,23 @@ use crate::palette::{Palette, TEXT_CONTRAST_FLOOR, legible_on};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
+use crate::text::scaled;
 use crate::theme::{contrast_ratio, relative_luminance};
 use crate::widget_style::ButtonStyle;
 
 /// A button's height where the caller has no layout of its own to fit: the
-/// reference's 28.
+/// reference's 28, at the default text size -- [`height`] is at the user's.
 pub const HEIGHT: f32 = 28.0;
-/// The label's size.
+/// The label's size at the default text size -- [`font_size`] is at the
+/// user's.
 pub const FONT_SIZE: f32 = 13.0;
 /// Room either side of the label in the built-in theme: the reference's
 /// `padding: 0 14px`. A theme's own is its widget style's
 /// (`ButtonStyle::padding`), which [`width`] and [`draw`] read.
 pub const PADDING_H: f32 = 14.0;
 /// The narrowest a button is, so a row of short labels -- OK, Cancel -- is a
-/// row of equal buttons, as every desktop draws them.
+/// row of equal buttons, as every desktop draws them. At the default text
+/// size: [`width`] keeps it at the user's.
 pub const MIN_WIDTH: f32 = 80.0;
 /// The corners in the built-in theme: the reference's 4. A theme's own are
 /// its widget style's (`ButtonStyle::radius`), which [`draw`] reads.
@@ -134,25 +137,42 @@ pub struct Paint {
 }
 
 /// The width a button needs for `label` in `style`: the label in bold at
-/// [`FONT_SIZE`], with the style's padding either side, and never narrower
-/// than [`MIN_WIDTH`].
+/// [`font_size`], with the style's padding either side, and never narrower
+/// than [`MIN_WIDTH`] -- all at the user's text size.
 ///
 /// A row that lays its buttons out from this must draw them with the same
 /// style, and test a click against the rectangles it drew -- the padding moves
 /// every button after the first.
 #[must_use]
 pub fn width(style: &ButtonStyle, label: &str) -> f32 {
-    (crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold) + padding(style) * 2.0)
-        .max(MIN_WIDTH)
+    (crate::text::measure(label, font_size(), FontWeightHint::Bold) + padding(style) * 2.0)
+        .max(scaled(MIN_WIDTH))
 }
 
-/// The room either side of a label in `style`, held to the style's bounds.
+/// The room either side of a label in `style`, held to the style's bounds,
+/// at the user's text size: a larger label is a larger button, not a label
+/// pressed against its edges.
 fn padding(style: &ButtonStyle) -> f32 {
-    f32::from(
+    scaled(f32::from(
         style
             .padding
             .clamp(ButtonStyle::MIN_PADDING, ButtonStyle::MAX_PADDING),
-    )
+    ))
+}
+
+/// A button's height at the user's text size ([`HEIGHT`] at the default):
+/// what a row of buttons with no layout of its own to fit lays out from,
+/// so a larger label has the room it needs.
+#[must_use]
+pub fn height() -> f32 {
+    scaled(HEIGHT)
+}
+
+/// The label's size at the user's text size ([`FONT_SIZE`] at the
+/// default): what [`width`] measures and [`draw`] draws.
+#[must_use]
+pub fn font_size() -> f32 {
+    scaled(FONT_SIZE)
 }
 
 /// The colours a button of `kind` in `state` is drawn in, on `ground` -- the
@@ -337,15 +357,16 @@ pub fn draw(
             corner_radii: CornerRadii::all(r + focus_ring),
         });
     }
-    let text_w = crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold);
+    let font_size = font_size();
+    let text_w = crate::text::measure(label, font_size, FontWeightHint::Bold);
     let pad = padding(style);
     let room = (w - pad).max(0.0);
     sink.emit(RenderCommand::Text {
         x: x + ((w - text_w) / 2.0).max(pad / 2.0),
-        y: y + (h - FONT_SIZE) / 2.0,
+        y: y + (h - font_size) / 2.0,
         text: label.to_string(),
         color: colours.ink,
-        font_size: FONT_SIZE,
+        font_size,
         font_weight: FontWeightHint::Bold,
         max_width: Some(room),
         overflow: TextOverflow::Ellipsis,
@@ -393,6 +414,46 @@ mod tests {
         },
     ];
     const KINDS: [Kind; 3] = [Kind::Plain, Kind::Primary, Kind::Destructive];
+
+    /// **A button follows the user's text size** (`crate::text::set_base_size`,
+    /// on this test's thread): at twice the size its label, the height it
+    /// offers and its least width are twice as large, and a label's width
+    /// grows with the label -- a larger label is a larger button, not one
+    /// spilling out of the old.
+    #[test]
+    fn a_button_follows_the_text_size() {
+        let style = WidgetStyle::AERO.button;
+        let label = "Install updates";
+        let wide = width(&style, label);
+        assert_eq!((height(), font_size()), (HEIGHT, FONT_SIZE));
+
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        assert_eq!((height(), font_size()), (HEIGHT * 2.0, FONT_SIZE * 2.0));
+        assert_eq!(width(&style, "OK"), MIN_WIDTH * 2.0, "the least width");
+        let ratio = width(&style, label) / wide;
+        assert!((1.9..=2.1).contains(&ratio), "{ratio}");
+
+        let p = Palette::for_mode(false);
+        let mut drawn: Vec<RenderCommand> = Vec::new();
+        draw(
+            &mut drawn,
+            &p,
+            (0.0, 0.0, 400.0, height()),
+            label,
+            Kind::Plain,
+            State::default(),
+            p.base,
+            2.0,
+        );
+        let sizes: Vec<f32> = drawn
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, [FONT_SIZE * 2.0]);
+    }
 
     /// **Every label can be read**, on both halves of its face, for every
     /// kind and state, in both modes, on the grounds a button is drawn on.

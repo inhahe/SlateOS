@@ -314,7 +314,7 @@ fn button_row<B: Copy>(width: f32, y: f32, p: &Palette, buttons: &[(B, &str)]) -
         .iter()
         .zip(widths)
         .map(|((which, _), w)| {
-            let rect = Rect::new(x, y, w, button::HEIGHT);
+            let rect = Rect::new(x, y, w, button::height());
             x += w + BUTTON_GAP;
             (*which, rect)
         })
@@ -478,7 +478,7 @@ impl AskApp {
         lines.gap(GAP * 1.5);
         let buttons_y = lines.y;
         AskLayout {
-            height: buttons_y + button::HEIGHT + MARGIN,
+            height: buttons_y + button::height() + MARGIN,
             lines: lines.lines,
             field,
             buttons_y,
@@ -846,7 +846,7 @@ impl ChooseApp {
         lines.gap(list_height + GAP * 1.5);
         let buttons_y = lines.y;
         ChooseLayout {
-            height: buttons_y + button::HEIGHT + MARGIN,
+            height: buttons_y + button::height() + MARGIN,
             lines: lines.lines,
             list,
             buttons_y,

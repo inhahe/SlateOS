@@ -6,7 +6,8 @@
 //! # Components
 //!
 //! - [`DisabledState`] — per-widget enabled/disabled state with optional reason
-//! - [`DisabledOverlay`] — rendering helper for disabled appearance
+//! - [`WhyDisabled`] — says why a disabled control is disabled, while the
+//!   pointer rests on it
 //! - [`DisabledGroup`] — enable/disable multiple controls at once
 //! - [`ConditionalEnable`] — declarative rules for automatic enable/disable
 //! - [`FormValidator`] — form validation with per-field rules
@@ -20,9 +21,9 @@
 //! ```
 
 use crate::color::Color;
+use crate::menu::Tooltip;
 use crate::palette::Palette;
-use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
-use crate::style::CornerRadii;
+use crate::render::RenderCommand;
 use crate::widget::WidgetId;
 
 // ---------------------------------------------------------------------------
@@ -89,7 +90,7 @@ impl DisabledState {
 }
 
 // ---------------------------------------------------------------------------
-// DisabledOverlay
+// How a disabled control looks
 // ---------------------------------------------------------------------------
 
 /// Default opacity multiplier for disabled controls.
@@ -102,80 +103,150 @@ impl DisabledState {
 /// warning that says exactly this.
 pub const DISABLED_OPACITY: f32 = 0.5;
 
-/// Tooltip delay before showing reason (milliseconds).
-const TOOLTIP_DELAY_MS: u64 = 500;
+// ---------------------------------------------------------------------------
+// Saying why
+// ---------------------------------------------------------------------------
 
-// The tooltip's three colours come from the user's palette now (838). They
-// were written as decimal `rgb(49, 50, 68)` rather than hex, which is the
-// only reason they outlasted the other hundred-odd: every survey of this
-// toolkit looked for `from_hex`, and a colour spelled a different way is a
-// colour a sweep cannot see. Their own comments named the roles correctly --
-// surface0, text, overlay0 -- which is how they were found in the end.
+/// One disabled control as a window drew it: its box, `(x, y, width,
+/// height)`, and why it is disabled -- what [`WhyDisabled`] is handed.
+pub type Disabled<'a> = ((f32, f32, f32, f32), &'a str);
 
-/// Tooltip padding in pixels.
-const TOOLTIP_PADDING: f32 = 6.0;
-/// Tooltip font size.
-const TOOLTIP_FONT_SIZE: f32 = 12.0;
-/// Tooltip corner radius.
-const TOOLTIP_RADIUS: f32 = 4.0;
-/// Tooltip vertical offset from control.
-const TOOLTIP_OFFSET_Y: f32 = 4.0;
-
-/// Rendering helper for disabled widget appearance.
+/// Says why a disabled control is disabled, while the pointer rests on it --
+/// what `design.txt` asks of every program: "a hover tooltip for any menu
+/// option or button that's currently disabled, explaining why it's
+/// disabled/how to enable it".
 ///
-/// When a control is disabled, the overlay:
-/// - Reduces opacity to ~50%
-/// - Changes cursor to "not-allowed"
-/// - Prevents all mouse/keyboard interaction
-/// - Shows tooltip with reason on hover (after standard delay)
-pub struct DisabledOverlay {
-    /// Whether the mouse is currently hovering over the disabled widget.
-    hover: bool,
-    /// Accumulated hover time in milliseconds.
-    hover_time_ms: u64,
-    /// The disabled state to render for.
-    state: DisabledState,
+/// One per window. The toolkit's controls are drawn by their owner every
+/// frame, so the owner is what knows which are disabled and why: it hands
+/// those over with each pointer move ([`pointer_at`](Self::pointer_at)) --
+/// each one's box, as drawn, and its reason -- lets time pass
+/// ([`tick`](Self::tick), waking for [`due_in`](Self::due_in)), and draws
+/// what [`render`](Self::render) gives over everything else. The reason
+/// appears after the toolkit's tooltip delay, beside the pointer and on the
+/// screen, as any [`Tooltip`] does; a menu's greyed rows say theirs the same
+/// way ([`ContextMenu::explain`](crate::menu::ContextMenu::explain)).
+#[derive(Default)]
+pub struct WhyDisabled {
+    /// The disabled control the pointer rests on.
+    resting: Option<Explaining>,
 }
 
-impl DisabledOverlay {
-    /// Create a new overlay for the given disabled state.
-    pub fn new(state: DisabledState) -> Self {
-        Self {
-            hover: false,
-            hover_time_ms: 0,
-            state,
-        }
+/// The disabled control the pointer rests on: its box as drawn, its
+/// reason, and the tooltip saying the reason.
+struct Explaining {
+    bounds: (f32, f32, f32, f32),
+    why: String,
+    tooltip: Tooltip,
+}
+
+impl WhyDisabled {
+    /// Nothing to say yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Update hover state. Returns `true` if tooltip should now be visible.
-    pub fn update_hover(&mut self, hovering: bool, elapsed_ms: u64) -> bool {
-        if hovering {
-            if !self.hover {
-                self.hover = true;
-                self.hover_time_ms = 0;
+    /// The pointer is at `(x, y)` at `now_ms`, on a screen `viewport` big,
+    /// over a window whose disabled controls are `disabled`. The first whose
+    /// box holds the pointer and whose reason is not empty is explained: its
+    /// reason after the delay, the wait going on while the pointer stays on
+    /// it. Over none, any reason shown or waiting goes.
+    ///
+    /// Returns whether what [`render`](Self::render) draws changed -- a
+    /// reason that was showing went, or gave way to another's wait -- the
+    /// moment to repaint.
+    pub fn pointer_at(
+        &mut self,
+        (x, y): (f32, f32),
+        now_ms: u64,
+        viewport: (f32, f32),
+        disabled: &[Disabled<'_>],
+    ) -> bool {
+        let over = disabled.iter().find(|((left, top, width, height), why)| {
+            !why.is_empty() && x >= *left && x < left + width && y >= *top && y < top + height
+        });
+        let was = self.is_showing();
+        match over {
+            Some((bounds, why)) => {
+                let same = self.resting.as_ref().is_some_and(|resting| {
+                    same_box(resting.bounds, *bounds) && resting.why == *why
+                });
+                if same {
+                    return false;
+                }
+                let mut tooltip = Tooltip::new(why);
+                tooltip.start_hover(x, y, now_ms, viewport);
+                self.resting = Some(Explaining {
+                    bounds: *bounds,
+                    why: (*why).to_owned(),
+                    tooltip,
+                });
             }
-            self.hover_time_ms = self.hover_time_ms.saturating_add(elapsed_ms);
-        } else {
-            self.hover = false;
-            self.hover_time_ms = 0;
+            None => self.resting = None,
         }
-        self.should_show_tooltip()
+        was
     }
 
-    /// Whether the tooltip should be displayed.
-    pub fn should_show_tooltip(&self) -> bool {
-        self.hover && self.hover_time_ms >= TOOLTIP_DELAY_MS && self.state.reason().is_some()
+    /// The pointer left the window: any reason shown or waiting goes.
+    /// Returns whether one that was showing went.
+    pub fn pointer_left(&mut self) -> bool {
+        let was = self.is_showing();
+        self.resting = None;
+        was
     }
 
-    /// Get the tooltip delay constant.
-    pub fn tooltip_delay_ms() -> u64 {
-        TOOLTIP_DELAY_MS
+    /// Let time pass, at `now_ms`. Returns whether a reason appeared now --
+    /// the moment to repaint.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
+        let Some(Explaining { tooltip, .. }) = self.resting.as_mut() else {
+            return false;
+        };
+        let was = tooltip.is_visible();
+        tooltip.tick(now_ms);
+        !was && tooltip.is_visible()
     }
 
-    /// Get the disabled state.
-    pub fn state(&self) -> &DisabledState {
-        &self.state
+    /// How long until a reason appears, in milliseconds from `now_ms`;
+    /// `None` when none is waiting to. For an owner that sleeps while nothing
+    /// moves: a deadline with no wake-up behind it never comes.
+    #[must_use]
+    pub fn due_in(&self, now_ms: u64) -> Option<u64> {
+        self.resting
+            .as_ref()
+            .and_then(|resting| resting.tooltip.due_in(now_ms))
     }
+
+    /// The reason showing now, if one is.
+    #[must_use]
+    pub fn showing(&self) -> Option<&str> {
+        self.resting
+            .as_ref()
+            .filter(|resting| resting.tooltip.is_visible())
+            .map(|resting| resting.why.as_str())
+    }
+
+    /// What to draw over the window: the reason showing, if one is.
+    #[must_use]
+    pub fn render(&self, palette: &Palette) -> Vec<RenderCommand> {
+        self.resting
+            .as_ref()
+            .map(|resting| resting.tooltip.render(palette))
+            .unwrap_or_default()
+    }
+
+    fn is_showing(&self) -> bool {
+        self.showing().is_some()
+    }
+}
+
+/// Whether two boxes are the one drawn twice: the same four numbers, bit for
+/// bit -- the owner passes the box it drew, unchanged between frames, so
+/// identity is what is asked, not nearness.
+fn same_box(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+    a.0.to_bits() == b.0.to_bits()
+        && a.1.to_bits() == b.1.to_bits()
+        && a.2.to_bits() == b.2.to_bits()
+        && a.3.to_bits() == b.3.to_bits()
 }
 
 // ---------------------------------------------------------------------------
@@ -297,78 +368,6 @@ fn apply_opacity(cmd: &RenderCommand, opacity: f32) -> RenderCommand {
 fn reduce_alpha(color: Color, factor: f32) -> Color {
     let new_alpha = ((color.a as f32) * factor) as u8;
     Color::rgba(color.r, color.g, color.b, new_alpha)
-}
-
-/// Render a reason tooltip at the specified position.
-///
-/// The tooltip is positioned above the control by default. If `above` is false,
-/// it is positioned below.
-pub fn render_reason_tooltip(
-    palette: &Palette,
-    reason: &str,
-    x: f32,
-    y: f32,
-    above: bool,
-) -> Vec<RenderCommand> {
-    // Measured rather than estimated: the tooltip's background is sized from
-    // this, so a wrong answer here is a visible box that does not fit its text.
-    let text_width = crate::text::width(reason, TOOLTIP_FONT_SIZE);
-    let box_width = text_width + TOOLTIP_PADDING * 2.0;
-    let box_height = TOOLTIP_FONT_SIZE + TOOLTIP_PADDING * 2.0;
-
-    let box_y = if above {
-        y - box_height - TOOLTIP_OFFSET_Y
-    } else {
-        y + TOOLTIP_OFFSET_Y
-    };
-
-    let radii = CornerRadii::all(TOOLTIP_RADIUS);
-
-    vec![
-        // Shadow
-        RenderCommand::BoxShadow {
-            x,
-            y: box_y,
-            width: box_width,
-            height: box_height,
-            offset_x: 0.0,
-            offset_y: 2.0,
-            blur: 4.0,
-            spread: 0.0,
-            color: Color::rgba(0, 0, 0, 80),
-            corner_radii: radii,
-        },
-        // Background
-        RenderCommand::FillRect {
-            x,
-            y: box_y,
-            width: box_width,
-            height: box_height,
-            color: palette.surface0,
-            corner_radii: radii,
-        },
-        // Border
-        RenderCommand::StrokeRect {
-            x,
-            y: box_y,
-            width: box_width,
-            height: box_height,
-            color: palette.overlay0,
-            line_width: 1.0,
-            corner_radii: radii,
-        },
-        // Text
-        RenderCommand::Text {
-            x: x + TOOLTIP_PADDING,
-            y: box_y + TOOLTIP_PADDING,
-            text: reason.to_string(),
-            color: palette.text,
-            font_size: TOOLTIP_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(text_width),
-            overflow: TextOverflow::Ellipsis,
-        },
-    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,6 +1061,8 @@ mod tests {
     )]
 
     use super::*;
+    use crate::render::{FontWeightHint, TextOverflow};
+    use crate::style::CornerRadii;
 
     // -- DisabledState tests --
 
@@ -1416,44 +1417,6 @@ mod tests {
         }
     }
 
-    // -- Tooltip rendering --
-
-    #[test]
-    fn tooltip_renders_four_commands() {
-        let palette = Palette::for_mode(false);
-        let commands = render_reason_tooltip(&palette, "Not available yet", 50.0, 100.0, true);
-        // Shadow, fill, stroke, text = 4 commands.
-        assert_eq!(commands.len(), 4);
-        assert!(matches!(commands[0], RenderCommand::BoxShadow { .. }));
-        assert!(matches!(commands[1], RenderCommand::FillRect { .. }));
-        assert!(matches!(commands[2], RenderCommand::StrokeRect { .. }));
-        assert!(matches!(commands[3], RenderCommand::Text { .. }));
-    }
-
-    #[test]
-    fn tooltip_above_positions_correctly() {
-        let palette = Palette::for_mode(false);
-        let y = 100.0;
-        let commands = render_reason_tooltip(&palette, "Reason", 0.0, y, true);
-        if let RenderCommand::FillRect { y: box_y, .. } = &commands[1] {
-            assert!(*box_y < y, "Tooltip above should have y < control y");
-        } else {
-            panic!("Expected FillRect");
-        }
-    }
-
-    #[test]
-    fn tooltip_below_positions_correctly() {
-        let palette = Palette::for_mode(false);
-        let y = 100.0;
-        let commands = render_reason_tooltip(&palette, "Reason", 0.0, y, false);
-        if let RenderCommand::FillRect { y: box_y, .. } = &commands[1] {
-            assert!(*box_y > y, "Tooltip below should have y > control y");
-        } else {
-            panic!("Expected FillRect");
-        }
-    }
-
     // -- FormValidator tests --
 
     #[test]
@@ -1706,49 +1669,96 @@ mod tests {
         }
     }
 
-    // -- DisabledOverlay tests --
+    // -- WhyDisabled --
 
-    #[test]
-    fn overlay_tooltip_not_shown_initially() {
-        let overlay = DisabledOverlay::new(DisabledState::Disabled {
-            reason: Some("Offline".into()),
-        });
-        assert!(!overlay.should_show_tooltip());
+    const SCREEN: (f32, f32) = (1280.0, 800.0);
+    const DELAY: u64 = 500;
+    const SAVE: (f32, f32, f32, f32) = (10.0, 10.0, 80.0, 24.0);
+    const PRINT: (f32, f32, f32, f32) = (100.0, 10.0, 80.0, 24.0);
+
+    fn controls() -> Vec<Disabled<'static>> {
+        vec![
+            (SAVE, "The file is read-only"),
+            (PRINT, "No printer is set up"),
+            ((200.0, 10.0, 80.0, 24.0), ""),
+        ]
     }
 
-    #[test]
-    fn overlay_tooltip_shown_after_delay() {
-        let mut overlay = DisabledOverlay::new(DisabledState::Disabled {
-            reason: Some("Offline".into()),
-        });
-
-        // Hover but not long enough.
-        overlay.update_hover(true, 200);
-        assert!(!overlay.should_show_tooltip());
-
-        // Accumulate past threshold.
-        overlay.update_hover(true, 400);
-        assert!(overlay.should_show_tooltip());
+    fn texts(commands: &[RenderCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
+    /// **The reason a disabled control gives appears once the pointer has
+    /// rested on it for the tooltip delay**, and is drawn; moving within the
+    /// control does not start the wait again.
     #[test]
-    fn overlay_tooltip_hidden_on_leave() {
-        let mut overlay = DisabledOverlay::new(DisabledState::Disabled {
-            reason: Some("Offline".into()),
-        });
+    fn a_disabled_control_says_why_once_the_pointer_rests_on_it() {
+        let mut why = WhyDisabled::new();
+        assert!(!why.pointer_at((20.0, 20.0), 1000, SCREEN, &controls()));
+        assert_eq!(why.due_in(1000), Some(DELAY));
+        assert!(!why.pointer_at((30.0, 20.0), 1200, SCREEN, &controls()));
+        assert_eq!(why.due_in(1200), Some(DELAY - 200), "the wait went on");
+        assert!(!why.tick(1400));
+        assert_eq!(why.showing(), None);
 
-        overlay.update_hover(true, 600);
-        assert!(overlay.should_show_tooltip());
-
-        overlay.update_hover(false, 0);
-        assert!(!overlay.should_show_tooltip());
+        assert!(why.tick(1000 + DELAY), "it appeared");
+        assert!(!why.tick(1000 + DELAY + 10), "it appears once");
+        assert_eq!(why.showing(), Some("The file is read-only"));
+        assert_eq!(why.due_in(1000 + DELAY), None);
+        let palette = Palette::for_mode(false);
+        assert!(texts(&why.render(&palette)).contains(&"The file is read-only".to_owned()));
     }
 
+    /// **Another control's reason takes its own wait, and leaving every
+    /// control, or the window, puts the reason away** -- each said, so the
+    /// owner repaints.
     #[test]
-    fn overlay_no_tooltip_without_reason() {
-        let mut overlay = DisabledOverlay::new(DisabledState::Disabled { reason: None });
-        overlay.update_hover(true, 1000);
-        // No reason -> no tooltip even after delay.
-        assert!(!overlay.should_show_tooltip());
+    fn the_reason_goes_with_the_pointer() {
+        let mut why = WhyDisabled::new();
+        why.pointer_at((20.0, 20.0), 0, SCREEN, &controls());
+        why.tick(DELAY);
+        assert!(
+            why.pointer_at((110.0, 20.0), DELAY, SCREEN, &controls()),
+            "the shown reason went"
+        );
+        assert_eq!(why.showing(), None);
+        assert_eq!(why.due_in(DELAY), Some(DELAY));
+        assert!(why.tick(2 * DELAY));
+        assert_eq!(why.showing(), Some("No printer is set up"));
+
+        assert!(why.pointer_at((500.0, 500.0), 2 * DELAY, SCREEN, &controls()));
+        assert_eq!(why.showing(), None);
+        assert_eq!(why.due_in(2 * DELAY), None);
+        assert!(texts(&why.render(&Palette::for_mode(false))).is_empty());
+
+        why.pointer_at((110.0, 20.0), 0, SCREEN, &controls());
+        why.tick(DELAY);
+        assert!(why.pointer_left());
+        assert!(!why.pointer_left(), "nothing left to put away");
+        assert_eq!(why.due_in(0), None);
+    }
+
+    /// **A control with no reason says nothing**, and an edge of a box is
+    /// in it on its left and top and out of it on its right and bottom, as
+    /// every box here is.
+    #[test]
+    fn only_a_reason_is_said_and_only_inside_the_box() {
+        let mut why = WhyDisabled::new();
+        why.pointer_at((210.0, 20.0), 0, SCREEN, &controls());
+        assert_eq!(why.due_in(0), None, "no reason given");
+        assert!(!why.tick(10 * DELAY));
+
+        why.pointer_at((SAVE.0, SAVE.1), 0, SCREEN, &controls());
+        assert!(why.due_in(0).is_some(), "the top-left corner is inside");
+        why.pointer_at((SAVE.0 + SAVE.2, SAVE.1), 0, SCREEN, &controls());
+        assert_eq!(why.due_in(0), None, "the right edge is outside");
+        why.pointer_at((SAVE.0, SAVE.1 + SAVE.3), 0, SCREEN, &controls());
+        assert_eq!(why.due_in(0), None, "the bottom edge is outside");
     }
 }

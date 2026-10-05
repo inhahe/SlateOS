@@ -1212,7 +1212,8 @@ impl FontSettings {
         }
     }
 
-    /// Draw in these families from now on, in *this* process.
+    /// Draw in these families from now on, in *this* process -- and at
+    /// `ui_size`, which the toolkit's controls follow, on this thread.
     ///
     /// `guitk`'s font selection is per-process global state, and its own
     /// documentation is explicit about the consequence: "callers must apply
@@ -1241,6 +1242,13 @@ impl FontSettings {
         // compositor's was hinted. The colour-emoji palette is the theme's,
         // which this section does not know, so the one in force is kept.
         guitk::text::set_rendering(self.rendering(guitk::text::rendering().palette));
+        // And the size: the toolkit's controls draw their text at it, and lay
+        // their rows and boxes out round it (`guitk::text::scaled`). Until
+        // this they drew at 13 pixels whatever the user chose, so a larger
+        // size reached the desktop's own text and the window titles and left
+        // every menu, tooltip, button and field behind. On this thread: the
+        // one that lays the program's windows out.
+        let _changed = guitk::text::set_base_size(self.ui_size);
         // Asking first, because installing is not free: `set_font_family`
         // reloads the faces and drops every rasterized glyph, so calling it
         // for the family already in use would throw the cache away to arrive
@@ -1563,6 +1571,13 @@ pub struct AppearanceSettings {
     /// fixed picture, which it stands in for. See [`themes::WallpaperTheme`]
     /// and `design-decisions.md` §1471.
     pub wallpaper_theme: themes::WallpaperTheme,
+    /// The theme whose recommended fonts are drawn -- for each role the
+    /// first of its families this machine has, in place of the user's own
+    /// [`fonts`](Self::fonts) -- or the built-in one, which recommends none.
+    /// `theme.fonts` in the file, by the theme's folder name. What every
+    /// process draws in is [`fonts_in_use`](Self::fonts_in_use). See
+    /// [`themes::FontTheme`] and `design-decisions.md` §1472.
+    pub font_theme: themes::FontTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1834,6 +1849,7 @@ impl Default for AppearanceSettings {
             decoration_theme: themes::DecorationTheme::built_in(),
             panel_theme: themes::PanelTheme::built_in(),
             wallpaper_theme: themes::WallpaperTheme::built_in(),
+            font_theme: themes::FontTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -1971,6 +1987,37 @@ impl AppearanceSettings {
     #[must_use]
     pub fn theme_wallpaper(&self) -> Option<&std::path::Path> {
         self.wallpaper_theme.picture(self.is_light())
+    }
+
+    /// The fonts every process draws in: the user's own
+    /// [`fonts`](Self::fonts) -- families, sizes and rasterizing -- and, once
+    /// every process applies through this, a chosen font theme's
+    /// recommendations in place of the families where this machine has them
+    /// ([`fonts_with_theme`](Self::fonts_with_theme)).
+    ///
+    /// **The theme's are not applied yet.** A label is measured by the
+    /// program that lays it out and drawn by the compositor, so the two must
+    /// agree on the face or every centred label sits off centre. The shell
+    /// applies through this; the applications' event loop and the
+    /// compositor read [`fonts`](Self::fonts) still
+    /// (`requests/c-f-apply-the-fonts-in-use.md`), and until both apply
+    /// through this it answers as they read: the user's own. Turning the
+    /// theme on is then this function's body alone --
+    /// `self.fonts_with_theme(guitk::text::family_installed)` -- which every
+    /// process takes up together (`design-decisions.md` §1472).
+    #[must_use]
+    pub fn fonts_in_use(&self) -> FontSettings {
+        self.fonts.clone()
+    }
+
+    /// The user's [`fonts`](Self::fonts) with the chosen font theme's
+    /// recommendations in place of the families, where `installed` says this
+    /// machine has one ([`themes::FontTheme::families_in_use`]): what
+    /// [`fonts_in_use`](Self::fonts_in_use) will answer, and what a font page
+    /// can show meanwhile.
+    #[must_use]
+    pub fn fonts_with_theme(&self, installed: impl Fn(&str) -> bool) -> FontSettings {
+        self.font_theme.families_in_use(&self.fonts, installed)
     }
 
     /// How long until the automatic mode next turns light or dark, reading
@@ -2594,6 +2641,12 @@ impl AppearanceSettings {
         if let Some(name) = wallpaper_theme_name(doc) {
             s.wallpaper_theme = themes::WallpaperTheme::load(&name);
         }
+        // And the fonts a theme recommends, as it names them. Which of them
+        // this machine has is asked where they are drawn (`fonts_in_use`):
+        // a fact about the machine, not about the file.
+        if let Some(name) = font_theme_name(doc) {
+            s.font_theme = themes::FontTheme::load(&name);
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2922,6 +2975,10 @@ impl AppearanceSettings {
             &pathcodec::encode_path(std::path::Path::new(self.wallpaper_theme.id())),
         );
         doc.set_str(
+            &["theme", "fonts"],
+            &pathcodec::encode_path(std::path::Path::new(self.font_theme.id())),
+        );
+        doc.set_str(
             &["theme", "surface_style"],
             surface_style_yaml_name(self.surface_style),
         );
@@ -3187,6 +3244,13 @@ pub(crate) fn panel_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
 /// [`color_theme_name`] is.
 pub(crate) fn wallpaper_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
     theme_name_at(doc, "wallpaper")
+}
+
+/// The font theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn font_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "fonts")
 }
 
 /// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
@@ -3621,6 +3685,22 @@ mod tests {
         assert_eq!(r.subpixel, guitk::text::Subpixel::Rgb);
     }
 
+    /// **Applying the fonts sets the toolkit's text size**, on the thread
+    /// that applies them -- the one that lays the program's windows out -- so
+    /// the toolkit's controls follow the user's size. The families stay the
+    /// defaults here, as every caller of `apply` in this binary leaves them.
+    #[test]
+    fn applying_the_fonts_sets_the_toolkits_text_size() {
+        let fonts = FontSettings {
+            ui_size: 20.0,
+            ..FontSettings::default()
+        };
+        let _ = fonts.apply();
+        assert!((guitk::text::base_size() - 20.0).abs() < f32::EPSILON);
+        let _ = FontSettings::default().apply();
+        assert!((guitk::text::base_size() - guitk::text::DEFAULT_SIZE).abs() < f32::EPSILON);
+    }
+
     /// One mapping from the settings to a rasterizer's terms, field by field.
     #[test]
     fn the_rendering_is_the_settings_field_for_field() {
@@ -3702,6 +3782,10 @@ mod tests {
     /// for dark mode, which the round trip puts in its folder.
     const ROUND_TRIP_WALLPAPERS: &str = "fonds ï";
     const ROUND_TRIP_WALLPAPERS_FILE: &str = "wallpapers:\n  dark: wallpapers/night.png\n";
+    /// The round trip's font theme: an eighth, recommending two families for
+    /// the interface's text and one for code.
+    const ROUND_TRIP_FONTS: &str = "polices ë";
+    const ROUND_TRIP_FONTS_FILE: &str = "fonts:\n  ui: [Inter, Cantarell]\n  mono: Fira Code\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3765,6 +3849,12 @@ mod tests {
                 ROUND_TRIP_WALLPAPERS,
                 None,
                 None,
+            ),
+            // An eighth, for the fonts: read back as its file names them.
+            font_theme: themes::FontTheme::from_families(
+                ROUND_TRIP_FONTS,
+                vec!["Inter".to_string(), "Cantarell".to_string()],
+                vec!["Fira Code".to_string()],
             ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
@@ -3869,6 +3959,7 @@ mod tests {
             install_theme(root, ROUND_TRIP_DECORATIONS, ROUND_TRIP_DECORATIONS_FILE);
             install_theme(root, ROUND_TRIP_PANEL, ROUND_TRIP_PANEL_FILE);
             install_theme(root, ROUND_TRIP_WALLPAPERS, ROUND_TRIP_WALLPAPERS_FILE);
+            install_theme(root, ROUND_TRIP_FONTS, ROUND_TRIP_FONTS_FILE);
             let folder = config::testing::scratch_data_dir(root)
                 .join("slateos")
                 .join("themes")
@@ -4611,6 +4702,49 @@ mod tests {
                 with_picture,
                 "the pictures count when the file was counted for the colours"
             );
+        });
+    }
+
+    /// A font theme is chosen by name, as the other axes are, written back
+    /// by name, and its file is a dependency. What it gives is its first
+    /// installed family for each role, the user's own where it has none
+    /// installed ([`AppearanceSettings::fonts_with_theme`]) -- and until every
+    /// process applies through [`AppearanceSettings::fonts_in_use`], that
+    /// answers with the user's own, so no two processes draw in different
+    /// faces.
+    #[test]
+    fn a_font_theme_is_chosen_and_its_families_resolved() {
+        config::testing::with_scratch_config("font-axis", |root| {
+            install_theme(
+                root,
+                "nord",
+                "fonts:\n  ui: [Inter, Noto Sans]\n  mono: Fira Code\n",
+            );
+            let doc = Document::parse("theme:\n  fonts: nord\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.font_theme.id(), "nord");
+            assert_eq!(s.font_theme.problem(), None);
+
+            let fonts = s.fonts_with_theme(|family| family == "Noto Sans");
+            assert_eq!(fonts.ui_font, "Noto Sans", "the first of its installed");
+            assert_eq!(
+                fonts.mono_font, s.fonts.mono_font,
+                "none of its installed: the user's own"
+            );
+            assert_eq!(
+                s.fonts_in_use(),
+                s.fonts,
+                "not drawn until every process applies through fonts_in_use"
+            );
+
+            let mut out = Document::new();
+            s.write_into(&mut out);
+            assert_eq!(out.get_str(&["theme", "fonts"]).as_deref(), Some("nord"));
+
+            let before = themes::fingerprint(&doc);
+            assert!(!before.is_empty(), "the font theme's file is a dependency");
+            install_theme(root, "nord", "fonts:\n  ui: Cantarell\n");
+            assert_ne!(themes::fingerprint(&doc), before);
         });
     }
 

@@ -26,6 +26,7 @@ use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::Surface;
 use crate::text::TextCursor;
+use crate::text::scaled;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -430,9 +431,9 @@ impl PathBar {
         if self.mode != Mode::Edit || !self.dropdown_visible || self.completions.is_empty() {
             return None;
         }
-        let rows = self.completion_rows(height + DROPDOWN_GAP);
-        let bottom = rows.bottom() + DROPDOWN_PADDING;
-        let top = height + DROPDOWN_GAP;
+        let rows = self.completion_rows(height + scaled(DROPDOWN_GAP));
+        let bottom = rows.bottom() + scaled(DROPDOWN_PADDING);
+        let top = height + scaled(DROPDOWN_GAP);
         Some((0.0, top, width, bottom - top))
     }
 
@@ -444,8 +445,8 @@ impl PathBar {
     fn completion_rows(&self, top: f32) -> RowStrip {
         let shown = self.completions.len().min(DROPDOWN_MAX_VISIBLE);
         RowStrip::new(
-            top + DROPDOWN_PADDING,
-            core::iter::repeat_n(DROPDOWN_ITEM_HEIGHT, shown),
+            top + scaled(DROPDOWN_PADDING),
+            core::iter::repeat_n(scaled(DROPDOWN_ITEM_HEIGHT), shown),
         )
     }
 
@@ -679,7 +680,7 @@ impl PathBar {
         if let Some(prev) = crate::text::caret_left(
             &self.edit_text,
             self.cursor,
-            FONT_SIZE,
+            scaled(FONT_SIZE),
             FontWeightHint::Regular,
         ) {
             self.cursor = prev;
@@ -701,7 +702,7 @@ impl PathBar {
         if let Some(next) = crate::text::caret_right(
             &self.edit_text,
             self.cursor,
-            FONT_SIZE,
+            scaled(FONT_SIZE),
             FontWeightHint::Regular,
         ) {
             self.cursor = next;
@@ -987,7 +988,7 @@ impl PathBar {
                     }
                     return EventResult::Consumed;
                 }
-                let text_x = EDIT_TEXT_X;
+                let text_x = scaled(EDIT_TEXT_X);
                 // Hit-tested against the drawn glyphs rather than a nominal
                 // cell, so a click lands on the character under the pointer
                 // instead of one several letters away. The affinity the click
@@ -998,7 +999,7 @@ impl PathBar {
                 self.cursor = crate::text::cursor_at(
                     &self.edit_text,
                     x - text_x,
-                    FONT_SIZE,
+                    scaled(FONT_SIZE),
                     FontWeightHint::Regular,
                 );
                 self.selection_anchor = None;
@@ -1025,10 +1026,10 @@ impl PathBar {
 
         // The whole trail: every crumb, with a chevron between each
         // neighbouring pair, inside the field's padding.
-        let mut total_width = FIELD_PADDING_LEFT + FIELD_PADDING_RIGHT;
+        let mut total_width = scaled(FIELD_PADDING_LEFT) + scaled(FIELD_PADDING_RIGHT);
         for (i, seg) in self.segments.iter().enumerate() {
             if i > 0 {
-                total_width += SEPARATOR_WIDTH;
+                total_width += scaled(SEPARATOR_WIDTH);
             }
             total_width += crumb_width(&seg.label, crumb_weight(i == current));
         }
@@ -1043,14 +1044,14 @@ impl PathBar {
         let overflow = total_width > width;
         let first_visible = if overflow {
             let available = width
-                - FIELD_PADDING_LEFT
-                - FIELD_PADDING_RIGHT
+                - scaled(FIELD_PADDING_LEFT)
+                - scaled(FIELD_PADDING_RIGHT)
                 - crumb_width(ELLIPSIS, FontWeightHint::Regular);
             let mut accum = 0.0f32;
             let mut first = self.segments.len();
             for (i, seg) in self.segments.iter().enumerate().rev() {
                 let seg_total =
-                    SEPARATOR_WIDTH + crumb_width(&seg.label, crumb_weight(i == current));
+                    scaled(SEPARATOR_WIDTH) + crumb_width(&seg.label, crumb_weight(i == current));
                 if accum + seg_total > available {
                     break;
                 }
@@ -1066,7 +1067,7 @@ impl PathBar {
         // that has one in front of it rather than after a crumb that has one
         // behind it -- which is the same set of chevrons without having to ask
         // whether an index is the last.
-        let mut x = FIELD_PADDING_LEFT;
+        let mut x = scaled(FIELD_PADDING_LEFT);
         let mut preceded = false;
 
         // Never a trail with no folder in it: when not even the current
@@ -1093,9 +1094,9 @@ impl PathBar {
         for (i, seg) in self.segments.iter().enumerate().skip(first_drawn) {
             if preceded {
                 push_chevron(palette, cmds, x, y_center);
-                x += SEPARATOR_WIDTH;
+                x += scaled(SEPARATOR_WIDTH);
             }
-            let room = (width - FIELD_PADDING_RIGHT - x).max(0.0);
+            let room = (width - scaled(FIELD_PADDING_RIGHT) - x).max(0.0);
             let rect = push_crumb(
                 cmds,
                 x,
@@ -1124,10 +1125,10 @@ impl PathBar {
         height: f32,
     ) {
         let y_center = height / 2.0;
-        let text_y = y_center - FONT_SIZE / 2.0;
+        let text_y = y_center - scaled(FONT_SIZE) / 2.0;
         // The field `render` drew is already the input's well; the text goes
         // where the first crumb's name was.
-        let text_x = EDIT_TEXT_X;
+        let text_x = scaled(EDIT_TEXT_X);
 
         // Selection highlight.
         if let Some(anchor) = self.selection_anchor {
@@ -1143,14 +1144,14 @@ impl PathBar {
                 &self.edit_text,
                 sel_start,
                 sel_end,
-                FONT_SIZE,
+                scaled(FONT_SIZE),
                 FontWeightHint::Regular,
             ) {
                 cmds.push(RenderCommand::FillRect {
                     x: text_x + sel_x,
-                    y: text_y - 2.0,
+                    y: text_y - scaled(2.0),
                     width: sel_w,
-                    height: FONT_SIZE + 4.0,
+                    height: scaled(FONT_SIZE) + scaled(4.0),
                     color: Color::rgba(
                         palette.lavender.r,
                         palette.lavender.g,
@@ -1168,9 +1169,9 @@ impl PathBar {
             y: text_y,
             text: self.edit_text.clone(),
             color: palette.text,
-            font_size: FONT_SIZE,
+            font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
-            max_width: Some((width - EDIT_TEXT_X - FIELD_PADDING_RIGHT).max(0.0)),
+            max_width: Some((width - scaled(EDIT_TEXT_X) - scaled(FIELD_PADDING_RIGHT)).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -1182,7 +1183,7 @@ impl PathBar {
             + crate::text::caret_x(
                 &self.edit_text,
                 self.cursor,
-                FONT_SIZE,
+                scaled(FONT_SIZE),
                 FontWeightHint::Regular,
             );
         // Through the shared helper rather than a rectangle of its own: one
@@ -1193,8 +1194,8 @@ impl PathBar {
         crate::textedit::push_caret(
             &mut caret,
             cursor_x,
-            text_y - 2.0,
-            FONT_SIZE + 4.0,
+            text_y - scaled(2.0),
+            scaled(FONT_SIZE) + scaled(4.0),
             palette.lavender,
             crate::textedit::CARET_WIDTH,
         );
@@ -1264,10 +1265,10 @@ impl PathBar {
             if selected_row == Some(vi) {
                 palette.push_surface(
                     cmds,
-                    DROPDOWN_PADDING,
+                    scaled(DROPDOWN_PADDING),
                     item_y,
-                    dropdown_w - DROPDOWN_PADDING * 2.0,
-                    DROPDOWN_ITEM_HEIGHT,
+                    dropdown_w - scaled(DROPDOWN_PADDING) * 2.0,
+                    scaled(DROPDOWN_ITEM_HEIGHT),
                     3.0,
                     Surface::Selected,
                 );
@@ -1281,11 +1282,11 @@ impl PathBar {
             };
             let icon_text = if item.is_directory { "/" } else { " " };
             cmds.push(RenderCommand::Text {
-                x: DROPDOWN_PADDING + 4.0,
-                y: item_y + (DROPDOWN_ITEM_HEIGHT - FONT_SIZE) / 2.0,
+                x: scaled(DROPDOWN_PADDING) + scaled(4.0),
+                y: item_y + (scaled(DROPDOWN_ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0,
                 text: icon_text.to_string(),
                 color: icon_color,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1293,13 +1294,13 @@ impl PathBar {
 
             // Item name.
             cmds.push(RenderCommand::Text {
-                x: DROPDOWN_PADDING + 16.0,
-                y: item_y + (DROPDOWN_ITEM_HEIGHT - FONT_SIZE) / 2.0,
+                x: scaled(DROPDOWN_PADDING) + scaled(16.0),
+                y: item_y + (scaled(DROPDOWN_ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0,
                 text: item.name.clone(),
                 color: palette.text,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(dropdown_w - DROPDOWN_PADDING * 2.0 - 20.0),
+                max_width: Some(dropdown_w - scaled(DROPDOWN_PADDING) * 2.0 - scaled(20.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -1330,7 +1331,7 @@ fn crumb_weight(is_current: bool) -> FontWeightHint {
 
 /// How wide a crumb is: its name in `weight`, with its padding either side.
 fn crumb_width(label: &str, weight: FontWeightHint) -> f32 {
-    crate::text::padded_width(label, CRUMB_PADDING_H, FONT_SIZE, weight)
+    crate::text::padded_width(label, scaled(CRUMB_PADDING_H), scaled(FONT_SIZE), weight)
 }
 
 /// Draw one crumb -- `label` in `weight`, centred on the bar's height, cut
@@ -1353,15 +1354,15 @@ fn push_crumb(
     let (width, max_width, overflow) = if full <= room {
         (full, None, TextOverflow::Clip)
     } else {
-        let text_room = (room - CRUMB_PADDING_H * 2.0).max(0.0);
+        let text_room = (room - scaled(CRUMB_PADDING_H) * 2.0).max(0.0);
         (room, Some(text_room), TextOverflow::Ellipsis)
     };
     cmds.push(RenderCommand::Text {
-        x: x + CRUMB_PADDING_H,
-        y: height / 2.0 - FONT_SIZE / 2.0,
+        x: x + scaled(CRUMB_PADDING_H),
+        y: height / 2.0 - scaled(FONT_SIZE) / 2.0,
         text: label.to_string(),
         color,
-        font_size: FONT_SIZE,
+        font_size: scaled(FONT_SIZE),
         font_weight: weight,
         max_width,
         overflow,
@@ -1378,10 +1379,13 @@ fn push_crumb(
 /// installed. In `overlay0`, the palette's role for separators -- the faintest
 /// mark that is still seen, as the reference's is a pale blue beside its ink.
 fn push_chevron(palette: &Palette, cmds: &mut Vec<RenderCommand>, x: f32, y_center: f32) {
-    let centre = x + SEPARATOR_WIDTH / 2.0;
-    let open = centre - CHEVRON_REACH / 2.0;
-    let tip = centre + CHEVRON_REACH / 2.0;
-    for end in [y_center - CHEVRON_REACH, y_center + CHEVRON_REACH] {
+    let centre = x + scaled(SEPARATOR_WIDTH) / 2.0;
+    let open = centre - scaled(CHEVRON_REACH) / 2.0;
+    let tip = centre + scaled(CHEVRON_REACH) / 2.0;
+    for end in [
+        y_center - scaled(CHEVRON_REACH),
+        y_center + scaled(CHEVRON_REACH),
+    ] {
         cmds.push(RenderCommand::Line {
             x1: open,
             y1: end,
@@ -1564,6 +1568,26 @@ mod tests {
 
     use super::*;
     use crate::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    /// **The path bar follows the user's text size** (on this test's
+    /// thread): at twice the size its crumbs are twice as large.
+    #[test]
+    fn the_path_bar_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let sizes: Vec<f32> = PathBar::new("/home/user/Documents")
+            .draw(&Palette::for_mode(false), 1200.0, 56.0)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert!(!sizes.is_empty());
+        assert!(
+            sizes.iter().all(|size| *size == FONT_SIZE * 2.0),
+            "{sizes:?}"
+        );
+    }
 
     /// How many chevrons a breadcrumb render drew: each is two strokes, and
     /// nothing else in breadcrumb mode is a line.

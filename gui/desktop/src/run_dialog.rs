@@ -44,6 +44,7 @@ use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEve
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::scaled;
 // The field's state, and no longer a copy of it. This type lived here, private,
 // until 2026-09-17; twenty-two files in the tree hand-roll typing because they
 // could not reach it, and the bidirectional caret it carries is the reason a
@@ -108,6 +109,12 @@ const INPUT_Y: f32 = 69.0;
 const BUTTON_HEIGHT: f32 = 28.0;
 const BUTTON_WIDTH: f32 = 75.0;
 const BUTTON_SPACING: f32 = 8.0;
+/// The column the "Open:" label takes before the field.
+const OPEN_LABEL_WIDTH: f32 = 40.0;
+/// The size of the line saying a command does not exist, under the field.
+const ERROR_FONT_SIZE: f32 = 11.0;
+/// From the field's bottom to the error line, or to the suggestions under it.
+const UNDER_FIELD_GAP: f32 = 2.0;
 const BODY_FONT_SIZE: f32 = 12.0;
 const INPUT_FONT_SIZE: f32 = 13.0;
 const AUTOCOMPLETE_ROW_HEIGHT: f32 = 26.0;
@@ -372,7 +379,9 @@ impl RunDialog {
     /// Where the box and its parts are: the frame around the content, with
     /// its top-left corner at the dialog's position.
     fn layout(&self) -> FrameLayout {
-        let (width, height) = self.frame.outer_size(CONTENT_WIDTH, CONTENT_HEIGHT);
+        let (width, height) = self
+            .frame
+            .outer_size(scaled(CONTENT_WIDTH), scaled(CONTENT_HEIGHT));
         self.frame.layout(guitk::frame::Rect::new(
             self.dialog_x,
             self.dialog_y,
@@ -392,12 +401,12 @@ impl RunDialog {
         };
         guitk::frame::Rect::new(
             content.x + content.w
-                - PADDING
-                - BUTTON_WIDTH * from_right
-                - BUTTON_SPACING * (from_right - 1.0),
-            content.y + content.h - PADDING - BUTTON_HEIGHT,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
+                - scaled(PADDING)
+                - scaled(BUTTON_WIDTH) * from_right
+                - scaled(BUTTON_SPACING) * (from_right - 1.0),
+            content.y + content.h - scaled(PADDING) - scaled(BUTTON_HEIGHT),
+            scaled(BUTTON_WIDTH),
+            scaled(BUTTON_HEIGHT),
         )
     }
 
@@ -522,7 +531,9 @@ impl RunDialog {
     /// left edge off-screen — where the title bar cannot be reached and the
     /// buttons are the half that gets cut.
     pub fn centre_on(&mut self, screen_width: f32, screen_height: f32) {
-        let (width, height) = self.frame.outer_size(CONTENT_WIDTH, CONTENT_HEIGHT);
+        let (width, height) = self
+            .frame
+            .outer_size(scaled(CONTENT_WIDTH), scaled(CONTENT_HEIGHT));
         self.dialog_x = ((screen_width - width) / 2.0).max(0.0);
         self.dialog_y = ((screen_height - height) / 2.0).max(0.0);
     }
@@ -701,13 +712,19 @@ impl RunDialog {
 
             // Cursor movement
             Key::Left => {
-                self.input
-                    .move_cursor_left(shift, INPUT_FONT_SIZE, FontWeightHint::Regular);
+                self.input.move_cursor_left(
+                    shift,
+                    scaled(INPUT_FONT_SIZE),
+                    FontWeightHint::Regular,
+                );
             }
 
             Key::Right => {
-                self.input
-                    .move_cursor_right(shift, INPUT_FONT_SIZE, FontWeightHint::Regular);
+                self.input.move_cursor_right(
+                    shift,
+                    scaled(INPUT_FONT_SIZE),
+                    FontWeightHint::Regular,
+                );
             }
 
             // The page keys are the list's: the suggestions while they show,
@@ -775,17 +792,26 @@ impl RunDialog {
     pub fn field_rect(&self) -> guitk::frame::Rect {
         let content = self.layout().content;
         guitk::frame::Rect::new(
-            content.x + PADDING + 40.0,
-            content.y + INPUT_Y,
-            CONTENT_WIDTH - PADDING * 2.0 - 40.0,
-            INPUT_HEIGHT,
+            content.x + scaled(PADDING) + scaled(OPEN_LABEL_WIDTH),
+            content.y + scaled(INPUT_Y),
+            scaled(CONTENT_WIDTH) - scaled(PADDING) * 2.0 - scaled(OPEN_LABEL_WIDTH),
+            scaled(INPUT_HEIGHT),
         )
     }
 
-    /// The rows of the command field's right-click menu: Cut, Copy, Paste,
-    /// Delete and Select all, each dimmed when it would do nothing.
+    /// Where what hangs under the field starts -- the error line, the
+    /// suggestions: the one answer the drawing and a click both read, so a
+    /// click on a suggestion lands on the row drawn at any text size.
+    fn under_field_y(&self) -> f32 {
+        let field = self.field_rect();
+        field.y + field.h + scaled(UNDER_FIELD_GAP)
+    }
+
+    /// The command field's right-click menu: Cut, Copy, Paste, Delete and
+    /// Select all, each dimmed when it would do nothing and saying why while
+    /// the pointer rests on it.
     #[must_use]
-    pub fn edit_menu(&self) -> Vec<guitk::menu::MenuItem> {
+    pub fn edit_menu(&self) -> guitk::menu::ContextMenu {
         self.input.edit_menu()
     }
 
@@ -855,10 +881,10 @@ impl RunDialog {
                         // Check autocomplete dropdown clicks.
                         if self.show_autocomplete {
                             let field = self.field_rect();
-                            let dropdown_y = field.y + field.h + 2.0;
+                            let dropdown_y = self.under_field_y();
                             let rel_y = y - dropdown_y;
                             if rel_y >= 0.0 && x >= field.x {
-                                let idx = (rel_y / AUTOCOMPLETE_ROW_HEIGHT) as usize;
+                                let idx = (rel_y / scaled(AUTOCOMPLETE_ROW_HEIGHT)) as usize;
                                 if idx < self.suggestions.len() {
                                     self.suggestion_index = Some(idx);
                                     self.accept_suggestion();
@@ -894,25 +920,25 @@ impl RunDialog {
 
         // Instruction text.
         cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: y + INSTRUCTION_Y,
+            x: x + scaled(PADDING),
+            y: y + scaled(INSTRUCTION_Y),
             text: "Type the name of a program, folder, or document, and the \
                    OS will open it for you."
                 .to_string(),
             color: p.subtext0,
-            font_size: BODY_FONT_SIZE,
+            font_size: scaled(BODY_FONT_SIZE),
             font_weight: FontWeightHint::Regular,
-            max_width: Some(CONTENT_WIDTH - PADDING * 2.0),
+            max_width: Some(scaled(CONTENT_WIDTH) - scaled(PADDING) * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
 
         // "Open:" label.
         cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: y + INPUT_Y + 6.0,
+            x: x + scaled(PADDING),
+            y: y + scaled(INPUT_Y) + scaled(6.0),
             text: "Open:".to_string(),
             color: p.text,
-            font_size: BODY_FONT_SIZE,
+            font_size: scaled(BODY_FONT_SIZE),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -947,13 +973,13 @@ impl RunDialog {
             // that one of them isn't, so it tolerates a bad offset the same
             // way `selected_text` already does rather than panicking mid-frame.
             let text_before_start = self.input.text().get(..start).unwrap_or("");
-            let start_px = text::width(text_before_start, INPUT_FONT_SIZE);
-            let sel_width = text::width(self.input.selected_text(), INPUT_FONT_SIZE);
+            let start_px = text::width(text_before_start, scaled(INPUT_FONT_SIZE));
+            let sel_width = text::width(self.input.selected_text(), scaled(INPUT_FONT_SIZE));
             cmds.push(RenderCommand::FillRect {
-                x: input_x + 4.0 + start_px,
-                y: y + INPUT_Y + 3.0,
+                x: input_x + scaled(4.0) + start_px,
+                y: y + scaled(INPUT_Y) + scaled(3.0),
                 width: sel_width,
-                height: INPUT_HEIGHT - 6.0,
+                height: scaled(INPUT_HEIGHT) - scaled(6.0),
                 color: p.accent,
                 corner_radii: CornerRadii::all(2.0),
             });
@@ -961,13 +987,13 @@ impl RunDialog {
 
         // Input text.
         cmds.push(RenderCommand::Text {
-            x: input_x + 4.0,
-            y: y + INPUT_Y + 7.0,
+            x: input_x + scaled(4.0),
+            y: y + scaled(INPUT_Y) + scaled(7.0),
             text: self.input.text().to_string(),
             color: p.text,
-            font_size: INPUT_FONT_SIZE,
+            font_size: scaled(INPUT_FONT_SIZE),
             font_weight: FontWeightHint::Regular,
-            max_width: Some(input_w - 8.0),
+            max_width: Some(input_w - scaled(8.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -985,16 +1011,16 @@ impl RunDialog {
         let cursor_px = text::caret_x(
             self.input.text(),
             self.input.cursor(),
-            INPUT_FONT_SIZE,
+            scaled(INPUT_FONT_SIZE),
             FontWeightHint::Regular,
         );
-        let caret_top = y + INPUT_Y + 4.0;
+        let caret_top = y + scaled(INPUT_Y) + scaled(4.0);
         let mut caret = guitk::render::RenderTree::new();
         guitk::textedit::push_caret(
             &mut caret,
-            input_x + 4.0 + cursor_px,
+            input_x + scaled(4.0) + cursor_px,
             caret_top,
-            INPUT_HEIGHT - 8.0,
+            scaled(INPUT_HEIGHT) - scaled(8.0),
             p.text,
             self.caret_width,
         );
@@ -1004,10 +1030,10 @@ impl RunDialog {
         if let Some(ref err) = self.error_message {
             cmds.push(RenderCommand::Text {
                 x: input_x,
-                y: y + INPUT_Y + INPUT_HEIGHT + 2.0,
+                y: self.under_field_y(),
                 text: err.clone(),
                 color: p.ink(p.red),
-                font_size: 11.0,
+                font_size: scaled(ERROR_FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_w),
                 overflow: TextOverflow::Ellipsis,
@@ -1017,8 +1043,8 @@ impl RunDialog {
         // Autocomplete dropdown.
         if self.show_autocomplete && !self.suggestions.is_empty() {
             let dropdown_x = input_x;
-            let dropdown_y = y + INPUT_Y + INPUT_HEIGHT + 2.0;
-            let dropdown_h = self.suggestions.len() as f32 * AUTOCOMPLETE_ROW_HEIGHT;
+            let dropdown_y = self.under_field_y();
+            let dropdown_h = self.suggestions.len() as f32 * scaled(AUTOCOMPLETE_ROW_HEIGHT);
 
             let mut paint = p.surface_paint(Surface::Panel);
             paint.border = Some(paint.border.unwrap_or(p.surface1));
@@ -1033,7 +1059,7 @@ impl RunDialog {
             );
 
             for (i, suggestion) in self.suggestions.iter().enumerate() {
-                let row_y = dropdown_y + i as f32 * AUTOCOMPLETE_ROW_HEIGHT;
+                let row_y = dropdown_y + i as f32 * scaled(AUTOCOMPLETE_ROW_HEIGHT);
                 let is_selected = self.suggestion_index == Some(i);
 
                 if is_selected {
@@ -1042,20 +1068,20 @@ impl RunDialog {
                         dropdown_x + 1.0,
                         row_y,
                         input_w - 2.0,
-                        AUTOCOMPLETE_ROW_HEIGHT,
+                        scaled(AUTOCOMPLETE_ROW_HEIGHT),
                         0.0,
                         Surface::Selected,
                     );
                 }
 
                 cmds.push(RenderCommand::Text {
-                    x: dropdown_x + 8.0,
-                    y: row_y + 6.0,
+                    x: dropdown_x + scaled(8.0),
+                    y: row_y + scaled(6.0),
                     text: suggestion.text.clone(),
                     color: if is_selected { p.ink(p.accent) } else { p.text },
-                    font_size: INPUT_FONT_SIZE,
+                    font_size: scaled(INPUT_FONT_SIZE),
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(input_w - 16.0),
+                    max_width: Some(input_w - scaled(16.0)),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
@@ -1567,6 +1593,40 @@ mod tests {
         input.delete();
         assert_eq!(input.text(), "a😀b");
         assert!(input.text().is_char_boundary(input.cursor().byte()));
+    }
+
+    /// **The Run box follows the user's text size** (on this test's thread,
+    /// as the desktop's `set_appearance` sets it on its own): at twice the
+    /// size its instruction, its field and its buttons are twice as large --
+    /// the box laid out round the larger text, not the text spilling out of
+    /// the old box.
+    #[test]
+    fn the_run_box_follows_the_text_size() {
+        let p = Palette::for_mode(false);
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        let field = dialog.field_rect();
+
+        guitk::text::set_base_size(guitk::text::DEFAULT_SIZE * 2.0);
+        let mut big = RunDialog::new();
+        big.show();
+        let big_field = big.field_rect();
+        assert!((big_field.h - field.h * 2.0).abs() < 0.01, "{big_field:?}");
+        assert!((big_field.w - field.w * 2.0).abs() < 0.01, "{big_field:?}");
+        let sizes: Vec<f32> = big
+            .render(&p)
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        for wanted in [BODY_FONT_SIZE, guitk::button::FONT_SIZE] {
+            assert!(
+                sizes.iter().any(|size| (size - wanted * 2.0).abs() < 0.01),
+                "{wanted}: {sizes:?}"
+            );
+        }
     }
 
     /// Where the dialog *draws* its caret, in the order it drew it.

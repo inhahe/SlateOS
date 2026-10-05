@@ -15,6 +15,7 @@ use crate::scrollbar;
 use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::Surface;
+use crate::text::scaled;
 
 // ─── Catppuccin Mocha palette ───────────────────────────────────────────────
 
@@ -44,6 +45,20 @@ const SEPARATOR_HEIGHT: f32 = 9.0;
 const ICON_COLUMN_WIDTH: f32 = 28.0;
 /// A row's picture, square, centred in [`ICON_COLUMN_WIDTH`].
 const ICON_SIZE: u32 = 16;
+
+/// A row's picture at the user's text size ([`scaled`]), in whole pixels:
+/// what a menu asks its owner for, and draws.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "sixteen at a scale the text size bounds to a few times either way: a \
+              positive side of a few dozen pixels, rounded before it is narrowed"
+)]
+fn icon_side() -> u32 {
+    scaled(ICON_SIZE as f32).round().max(1.0) as u32
+}
+
 const SHORTCUT_PADDING: f32 = 40.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
 const VERTICAL_PADDING: f32 = 4.0;
@@ -185,6 +200,21 @@ pub struct ContextMenu {
     /// about where the bottom of the screen is. Set only by
     /// [`show`](Self::show), which is the only thing that positions a menu.
     viewport: (f32, f32),
+    /// Why a greyed row is greyed, by the row's id, as the menu's owner says
+    /// ([`explain`](Self::explain)). Handed down to a submenu when it opens,
+    /// so a row is explained wherever in the menu it sits.
+    reasons: Vec<(MenuItemId, String)>,
+    /// The greyed row the pointer rests on, when it has a reason to show.
+    resting: Option<Resting>,
+}
+
+/// The pointer resting on a greyed row that has a reason: which row, where
+/// the pointer came to rest, and -- once [`ContextMenu::tick`] has seen it,
+/// which is when the wait starts -- the tooltip saying the reason.
+struct Resting {
+    index: usize,
+    at: (f32, f32),
+    tooltip: Option<Tooltip>,
 }
 
 impl ContextMenu {
@@ -201,7 +231,120 @@ impl ContextMenu {
             width,
             scroll: 0.0,
             viewport: FALLBACK_VIEWPORT,
+            reasons: Vec::new(),
+            resting: None,
         }
+    }
+
+    /// Add `items` below the rows the menu has -- a window's own rows below
+    /// a field's, say. Before [`show`](Self::show): the width is measured
+    /// again, and a menu already up is laid out as it was shown.
+    pub fn extend(&mut self, items: impl IntoIterator<Item = MenuItem>) {
+        self.items.extend(items);
+        self.width = Self::calculate_width(&self.items);
+    }
+
+    /// Say why the row `id` is greyed, to be shown while the pointer rests on
+    /// it -- what `design.txt` asks of every disabled control: "explaining why
+    /// it's disabled/how to enable it". Shown only while the row *is* greyed,
+    /// so a reason can be given whatever the row's state, and saying it again
+    /// replaces what was said. A row in a submenu is explained here too.
+    ///
+    /// Shown by a menu whose owner lets time pass ([`tick`](Self::tick)); one
+    /// that never does shows no reasons and behaves as it always did.
+    pub fn explain(&mut self, id: MenuItemId, why: impl Into<String>) {
+        let why = why.into();
+        match self.reasons.iter_mut().find(|(said, _)| *said == id) {
+            Some((_, reason)) => *reason = why,
+            None => self.reasons.push((id, why)),
+        }
+    }
+
+    /// What [`explain`](Self::explain) was told for the row `id`.
+    #[must_use]
+    pub fn reason(&self, id: MenuItemId) -> Option<&str> {
+        self.reasons
+            .iter()
+            .find(|(said, _)| *said == id)
+            .map(|(_, why)| why.as_str())
+    }
+
+    /// Let time pass, at `now_ms`: the reason a greyed row gives appears once
+    /// the pointer has rested on the row for the toolkit's tooltip delay,
+    /// counted from the first `tick` after it came to rest. Returns whether a
+    /// reason appeared now -- the moment to repaint.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let mut appeared = false;
+        if let Some((_, ref mut submenu)) = self.open_submenu {
+            appeared |= submenu.tick(now_ms);
+        }
+        let viewport = self.viewport;
+        let why = self
+            .resting
+            .as_ref()
+            .and_then(|resting| self.reason_at(resting.index))
+            .map(str::to_owned);
+        if let (Some(resting), Some(why)) = (self.resting.as_mut(), why) {
+            let at = resting.at;
+            let tooltip = resting.tooltip.get_or_insert_with(|| {
+                let mut tooltip = Tooltip::new(&why);
+                tooltip.start_hover(at.0, at.1, now_ms, viewport);
+                tooltip
+            });
+            let was = tooltip.is_visible();
+            tooltip.tick(now_ms);
+            appeared |= !was && tooltip.is_visible();
+        }
+        appeared
+    }
+
+    /// How long until a reason appears, in milliseconds from `now_ms` --
+    /// `Some(0)` when the pointer has come to rest on a greyed row and no
+    /// [`tick`](Self::tick) has started the wait yet -- or `None` when none is
+    /// waiting. For an owner that sleeps while nothing moves: a deadline with
+    /// no wake-up behind it never comes.
+    #[must_use]
+    pub fn due_in(&self, now_ms: u64) -> Option<u64> {
+        if !self.visible {
+            return None;
+        }
+        let own = self
+            .resting
+            .as_ref()
+            .and_then(|resting| match &resting.tooltip {
+                Some(tooltip) => tooltip.due_in(now_ms),
+                None => Some(0),
+            });
+        let submenu = self
+            .open_submenu
+            .as_ref()
+            .and_then(|(_, submenu)| submenu.due_in(now_ms));
+        match (own, submenu) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// The reason showing now, if one is: the greyed row's the pointer rests
+    /// on, in this menu or the submenu open from it.
+    #[must_use]
+    pub fn showing_reason(&self) -> Option<&str> {
+        if !self.visible {
+            return None;
+        }
+        let own = self
+            .resting
+            .as_ref()
+            .filter(|resting| resting.tooltip.as_ref().is_some_and(Tooltip::is_visible))
+            .and_then(|resting| self.reason_at(resting.index));
+        own.or_else(|| {
+            self.open_submenu
+                .as_ref()
+                .and_then(|(_, submenu)| submenu.showing_reason())
+        })
     }
 
     /// Show the menu at the given position, adjusting for viewport edges.
@@ -240,6 +383,7 @@ impl ContextMenu {
         self.visible = true;
         self.hover_index = None;
         self.open_submenu = None;
+        self.resting = None;
     }
 
     /// Scroll the rows by `dy` wheel notches, if `(mx, my)` is over this menu
@@ -271,7 +415,11 @@ impl ContextMenu {
 
         // Consumed even when there is nothing to scroll: the wheel must not
         // fall through a popup to whatever it is covering.
-        self.set_scroll(self.scroll + crate::wheel::pixels(dy, ITEM_HEIGHT));
+        self.set_scroll(self.scroll + crate::wheel::pixels(dy, scaled(ITEM_HEIGHT)));
+        // The rows moved under a pointer that did not: a reason waiting, or
+        // showing, would now be about some other row. The next move finds
+        // the row it is over.
+        self.resting = None;
         true
     }
 
@@ -280,6 +428,7 @@ impl ContextMenu {
         self.visible = false;
         self.hover_index = None;
         self.open_submenu = None;
+        self.resting = None;
     }
 
     /// The rows the menu was built with, in order -- for a caller that
@@ -400,10 +549,7 @@ impl ContextMenu {
                 ..
             }) => {
                 // Clicking a submenu item opens it (same as hover).
-                let mut sub = ContextMenu::new(children.clone());
-                let sub_x = self.x + self.width;
-                let sub_y = self.y + self.y_offset_for_index(idx);
-                sub.show(sub_x, sub_y, self.viewport);
+                let sub = self.submenu(idx, children);
                 self.open_submenu = Some((idx, Box::new(sub)));
                 None
             }
@@ -417,15 +563,18 @@ impl ContextMenu {
             return;
         }
 
-        // Delegate to submenu if mouse is within it.
+        // Delegate to submenu if mouse is within it. The pointer has left
+        // this menu's rows, so whatever reason it was resting on goes.
         if let Some((_, ref mut submenu)) = self.open_submenu
             && submenu.point_in_bounds(mx, my)
         {
             submenu.handle_mouse_move(mx, my);
+            self.resting = None;
             return;
         }
 
         if !self.point_in_bounds(mx, my) {
+            self.resting = None;
             // Don't clear hover if mouse moved to a submenu.
             if self
                 .open_submenu
@@ -440,6 +589,7 @@ impl ContextMenu {
 
         let new_index = self.index_at_y(my);
         self.hover_index = new_index;
+        self.rest_on(new_index, mx, my);
 
         // Open submenu if hovering over a submenu item.
         if let Some(idx) = new_index {
@@ -452,10 +602,7 @@ impl ContextMenu {
                     // Only open if not already open for this index.
                     let already_open = self.open_submenu.as_ref().is_some_and(|(i, _)| *i == idx);
                     if !already_open {
-                        let mut sub = ContextMenu::new(children.clone());
-                        let sub_x = self.x + self.width;
-                        let sub_y = self.y + self.y_offset_for_index(idx);
-                        sub.show(sub_x, sub_y, self.viewport);
+                        let sub = self.submenu(idx, children);
                         self.open_submenu = Some((idx, Box::new(sub)));
                     }
                 }
@@ -518,10 +665,7 @@ impl ContextMenu {
                             children,
                             ..
                         }) => {
-                            let mut sub = ContextMenu::new(children.clone());
-                            let sub_x = self.x + self.width;
-                            let sub_y = self.y + self.y_offset_for_index(idx);
-                            sub.show(sub_x, sub_y, self.viewport);
+                            let sub = self.submenu(idx, children);
                             self.open_submenu = Some((idx, Box::new(sub)));
                             Some(MenuAction::None)
                         }
@@ -540,10 +684,7 @@ impl ContextMenu {
                         ..
                     }) = self.items.get(idx)
                 {
-                    let mut sub = ContextMenu::new(children.clone());
-                    let sub_x = self.x + self.width;
-                    let sub_y = self.y + self.y_offset_for_index(idx);
-                    sub.show(sub_x, sub_y, self.viewport);
+                    let sub = self.submenu(idx, children);
                     self.open_submenu = Some((idx, Box::new(sub)));
                 }
                 Some(MenuAction::None)
@@ -654,11 +795,11 @@ impl ContextMenu {
             }
             match item {
                 MenuItem::Separator => {
-                    let line_y = current_y + SEPARATOR_HEIGHT / 2.0;
+                    let line_y = current_y + scaled(SEPARATOR_HEIGHT) / 2.0;
                     cmds.push(RenderCommand::Line {
-                        x1: self.x + HORIZONTAL_PADDING,
+                        x1: self.x + scaled(HORIZONTAL_PADDING),
                         y1: line_y,
-                        x2: self.x + self.width - HORIZONTAL_PADDING,
+                        x2: self.x + self.width - scaled(HORIZONTAL_PADDING),
                         y2: line_y,
                         color: palette.surface1,
                         width: 1.0,
@@ -683,7 +824,7 @@ impl ContextMenu {
                             self.x + 4.0,
                             current_y,
                             self.width - 8.0,
-                            ITEM_HEIGHT,
+                            scaled(ITEM_HEIGHT),
                             4.0,
                             Surface::Selected,
                         );
@@ -694,16 +835,16 @@ impl ContextMenu {
                     } else {
                         palette.overlay0
                     };
-                    let text_y = current_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
+                    let text_y = current_y + (scaled(ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
 
                     // Check mark, or else the row's picture.
                     if let Some(true) = checked {
                         cmds.push(RenderCommand::Text {
-                            x: self.x + HORIZONTAL_PADDING + 4.0,
+                            x: self.x + scaled(HORIZONTAL_PADDING) + scaled(4.0),
                             y: text_y,
                             text: "\u{2713}".to_string(), // checkmark
                             color: palette.ink(palette.blue),
-                            font_size: FONT_SIZE,
+                            font_size: scaled(FONT_SIZE),
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
                             overflow: TextOverflow::Clip,
@@ -714,11 +855,11 @@ impl ContextMenu {
 
                     // Label.
                     cmds.push(RenderCommand::Text {
-                        x: self.x + HORIZONTAL_PADDING + ICON_COLUMN_WIDTH,
+                        x: self.x + scaled(HORIZONTAL_PADDING) + scaled(ICON_COLUMN_WIDTH),
                         y: text_y,
                         text: label.clone(),
                         color: text_color,
-                        font_size: FONT_SIZE,
+                        font_size: scaled(FONT_SIZE),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -728,12 +869,12 @@ impl ContextMenu {
                     if let Some(shortcut_text) = shortcut {
                         cmds.push(RenderCommand::Text {
                             x: self.x + self.width
-                                - HORIZONTAL_PADDING
-                                - Self::estimate_text_width(shortcut_text, FONT_SIZE),
+                                - scaled(HORIZONTAL_PADDING)
+                                - Self::estimate_text_width(shortcut_text, scaled(FONT_SIZE)),
                             y: text_y,
                             text: shortcut_text.clone(),
                             color: palette.subtext0,
-                            font_size: FONT_SIZE,
+                            font_size: scaled(FONT_SIZE),
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
                             overflow: TextOverflow::Clip,
@@ -757,7 +898,7 @@ impl ContextMenu {
                             self.x + 4.0,
                             current_y,
                             self.width - 8.0,
-                            ITEM_HEIGHT,
+                            scaled(ITEM_HEIGHT),
                             4.0,
                             Surface::Selected,
                         );
@@ -768,16 +909,16 @@ impl ContextMenu {
                     } else {
                         palette.overlay0
                     };
-                    let text_y = current_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
+                    let text_y = current_y + (scaled(ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
                     self.push_icon(&mut cmds, icon.as_deref(), current_y, icons);
 
                     // Label.
                     cmds.push(RenderCommand::Text {
-                        x: self.x + HORIZONTAL_PADDING + ICON_COLUMN_WIDTH,
+                        x: self.x + scaled(HORIZONTAL_PADDING) + scaled(ICON_COLUMN_WIDTH),
                         y: text_y,
                         text: label.clone(),
                         color: text_color,
-                        font_size: FONT_SIZE,
+                        font_size: scaled(FONT_SIZE),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -785,11 +926,13 @@ impl ContextMenu {
 
                     // Submenu arrow indicator.
                     cmds.push(RenderCommand::Text {
-                        x: self.x + self.width - HORIZONTAL_PADDING - SUBMENU_ARROW_WIDTH,
+                        x: self.x + self.width
+                            - scaled(HORIZONTAL_PADDING)
+                            - scaled(SUBMENU_ARROW_WIDTH),
                         y: text_y,
                         text: "\u{25B8}".to_string(), // right-pointing triangle
                         color: text_color,
-                        font_size: FONT_SIZE,
+                        font_size: scaled(FONT_SIZE),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -851,10 +994,71 @@ impl ContextMenu {
             cmds.extend(submenu.render_with_icons(palette, icons));
         }
 
+        // Over everything, why the greyed row the pointer rests on is greyed.
+        if let Some(Resting {
+            tooltip: Some(tooltip),
+            ..
+        }) = &self.resting
+        {
+            cmds.extend(tooltip.render(palette));
+        }
+
         cmds
     }
 
     // ─── Private helpers ────────────────────────────────────────────────────
+
+    /// The submenu of row `idx`, built from `children` and shown beside the
+    /// row -- with this menu's reasons handed down, so a greyed row in it
+    /// is explained as one here is. The one place a submenu is made: there
+    /// were four copies of these lines, a click's, a hover's and two keys'.
+    fn submenu(&self, idx: usize, children: &[MenuItem]) -> ContextMenu {
+        let mut sub = ContextMenu::new(children.to_vec());
+        sub.reasons.clone_from(&self.reasons);
+        sub.show(
+            self.x + self.width,
+            self.y + self.y_offset_for_index(idx),
+            self.viewport,
+        );
+        sub
+    }
+
+    /// The reason the row at `index` gives: a greyed row's, if the owner
+    /// explained it.
+    fn reason_at(&self, index: usize) -> Option<&str> {
+        let id = match self.items.get(index)? {
+            MenuItem::Action {
+                id, enabled: false, ..
+            }
+            | MenuItem::Submenu {
+                id, enabled: false, ..
+            } => *id,
+            _ => return None,
+        };
+        self.reason(id)
+    }
+
+    /// The pointer is at `(x, y)` over row `index`, or over none: resting on
+    /// a greyed row with a reason begins the wait for it -- unless it was
+    /// resting on that row already, when the wait goes on -- and anywhere
+    /// else ends it, the reason hidden with it.
+    fn rest_on(&mut self, index: Option<usize>, x: f32, y: f32) {
+        match index.filter(|&i| self.reason_at(i).is_some()) {
+            Some(i)
+                if self
+                    .resting
+                    .as_ref()
+                    .is_some_and(|resting| resting.index == i) => {}
+            Some(i) => {
+                self.resting = Some(Resting {
+                    index: i,
+                    at: (x, y),
+                    tooltip: None,
+                });
+            }
+            None => self.resting = None,
+        }
+    }
 
     /// Draw the picture `icon` names, if `icons` can, in the row at `row_y`'s
     /// picture column.
@@ -865,17 +1069,18 @@ impl ContextMenu {
         row_y: f32,
         icons: &dyn Fn(&str, u32) -> Option<u64>,
     ) {
-        let Some(image_id) = icon.and_then(|name| icons(name, ICON_SIZE)) else {
+        let px = icon_side();
+        let Some(image_id) = icon.and_then(|name| icons(name, px)) else {
             return;
         };
         #[allow(
             clippy::cast_precision_loss,
-            reason = "a sixteen-pixel side is exact in an f32"
+            reason = "a side of a few dozen pixels is exact in an f32"
         )]
-        let side = ICON_SIZE as f32;
+        let side = px as f32;
         cmds.push(RenderCommand::Image {
-            x: self.x + HORIZONTAL_PADDING + (ICON_COLUMN_WIDTH - side) / 2.0,
-            y: row_y + (ITEM_HEIGHT - side) / 2.0,
+            x: self.x + scaled(HORIZONTAL_PADDING) + (scaled(ICON_COLUMN_WIDTH) - side) / 2.0,
+            y: row_y + (scaled(ITEM_HEIGHT) - side) / 2.0,
             width: side,
             height: side,
             image_id,
@@ -891,35 +1096,35 @@ impl ContextMenu {
                 MenuItem::Action {
                     label, shortcut, ..
                 } => {
-                    let label_w = Self::estimate_text_width(label, FONT_SIZE);
+                    let label_w = Self::estimate_text_width(label, scaled(FONT_SIZE));
                     max_label_w = max_label_w.max(label_w);
                     if let Some(sc) = shortcut {
-                        let sc_w = Self::estimate_text_width(sc, FONT_SIZE);
+                        let sc_w = Self::estimate_text_width(sc, scaled(FONT_SIZE));
                         max_shortcut_w = max_shortcut_w.max(sc_w);
                     }
                 }
                 MenuItem::Submenu { label, .. } => {
-                    let label_w = Self::estimate_text_width(label, FONT_SIZE);
+                    let label_w = Self::estimate_text_width(label, scaled(FONT_SIZE));
                     max_label_w = max_label_w.max(label_w);
                     // Account for arrow indicator.
-                    max_shortcut_w = max_shortcut_w.max(SUBMENU_ARROW_WIDTH);
+                    max_shortcut_w = max_shortcut_w.max(scaled(SUBMENU_ARROW_WIDTH));
                 }
                 MenuItem::Separator => {}
             }
         }
 
         let shortcut_space = if max_shortcut_w > 0.0 {
-            SHORTCUT_PADDING + max_shortcut_w
+            scaled(SHORTCUT_PADDING) + max_shortcut_w
         } else {
             0.0
         };
 
-        let width = HORIZONTAL_PADDING * 2.0
-            + ICON_COLUMN_WIDTH
+        let width = scaled(HORIZONTAL_PADDING) * 2.0
+            + scaled(ICON_COLUMN_WIDTH)
             + max_label_w
             + shortcut_space
-            + HORIZONTAL_PADDING;
-        width.max(MIN_MENU_WIDTH)
+            + scaled(HORIZONTAL_PADDING);
+        width.max(scaled(MIN_MENU_WIDTH))
     }
 
     /// Width of `text`, as the compositor will actually draw it.
@@ -941,10 +1146,10 @@ impl ContextMenu {
     /// [`Self::y_offset_for_index`] to hang a submenu. Four walks of one list
     /// is four chances for three of them to be right; when they disagree the
     /// user clicks one row and gets the one above it.
-    const fn item_height(item: &MenuItem) -> f32 {
+    fn item_height(item: &MenuItem) -> f32 {
         match item {
-            MenuItem::Separator => SEPARATOR_HEIGHT,
-            _ => ITEM_HEIGHT,
+            MenuItem::Separator => scaled(SEPARATOR_HEIGHT),
+            _ => scaled(ITEM_HEIGHT),
         }
     }
 
@@ -957,7 +1162,7 @@ impl ContextMenu {
     /// would be a second description of where the rows are.
     fn strip(&self) -> RowStrip {
         RowStrip::new(
-            self.y + VERTICAL_PADDING - self.scroll,
+            self.y + scaled(VERTICAL_PADDING) - self.scroll,
             self.items.iter().map(Self::item_height),
         )
     }
@@ -965,7 +1170,7 @@ impl ContextMenu {
     /// How tall the menu would be if the screen were unbounded — every row plus
     /// the padding above and below them.
     fn content_height(&self) -> f32 {
-        self.strip().total_height() + VERTICAL_PADDING * 2.0
+        self.strip().total_height() + scaled(VERTICAL_PADDING) * 2.0
     }
 
     /// How tall the menu actually is on screen. Equal to
@@ -977,7 +1182,7 @@ impl ContextMenu {
 
     /// Top of the region the rows are drawn in and hit-tested against.
     fn viewport_top(&self) -> f32 {
-        self.y + VERTICAL_PADDING
+        self.y + scaled(VERTICAL_PADDING)
     }
 
     /// One past the bottom of that region. Never above
@@ -985,7 +1190,7 @@ impl ContextMenu {
     /// own padding gets a zero-height row region rather than a negative-height
     /// one, because a negative-height clip is not a small clip.
     fn viewport_bottom(&self) -> f32 {
-        (self.y + self.panel_height() - VERTICAL_PADDING).max(self.viewport_top())
+        (self.y + self.panel_height() - scaled(VERTICAL_PADDING)).max(self.viewport_top())
     }
 
     /// Height of the row region — what the renderer clips to.
@@ -1178,7 +1383,7 @@ impl Tooltip {
             visible: false,
             delay_ms: DEFAULT_TOOLTIP_DELAY_MS,
             hover_start: None,
-            max_width: DEFAULT_TOOLTIP_MAX_WIDTH,
+            max_width: scaled(DEFAULT_TOOLTIP_MAX_WIDTH),
             viewport: FALLBACK_VIEWPORT,
         }
     }
@@ -1205,14 +1410,14 @@ impl Tooltip {
             let tip_width = self.compute_width();
             let tip_height = self.compute_height();
 
-            let mut tip_x = x + TOOLTIP_OFFSET_X;
-            let mut tip_y = y + TOOLTIP_OFFSET_Y;
+            let mut tip_x = x + scaled(TOOLTIP_OFFSET_X);
+            let mut tip_y = y + scaled(TOOLTIP_OFFSET_Y);
 
             if tip_x + tip_width > self.viewport.0 {
-                tip_x = (x - tip_width - TOOLTIP_OFFSET_X).max(0.0);
+                tip_x = (x - tip_width - scaled(TOOLTIP_OFFSET_X)).max(0.0);
             }
             if tip_y + tip_height > self.viewport.1 {
-                tip_y = (y - tip_height - TOOLTIP_OFFSET_Y).max(0.0);
+                tip_y = (y - tip_height - scaled(TOOLTIP_OFFSET_Y)).max(0.0);
             }
 
             self.x = tip_x;
@@ -1306,19 +1511,19 @@ impl Tooltip {
 
         // Text (each wrapped line).
         let lines = self.wrap_text();
-        let mut text_y = self.y + TOOLTIP_PADDING;
+        let mut text_y = self.y + scaled(TOOLTIP_PADDING);
         for line in &lines {
             cmds.push(RenderCommand::Text {
-                x: self.x + TOOLTIP_PADDING,
+                x: self.x + scaled(TOOLTIP_PADDING),
                 y: text_y,
                 text: line.clone(),
                 color: palette.text,
-                font_size: TOOLTIP_FONT_SIZE,
+                font_size: scaled(TOOLTIP_FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.max_width),
                 overflow: TextOverflow::Ellipsis,
             });
-            text_y += TOOLTIP_LINE_HEIGHT;
+            text_y += scaled(TOOLTIP_LINE_HEIGHT);
         }
 
         cmds
@@ -1330,15 +1535,16 @@ impl Tooltip {
         let lines = self.wrap_text();
         let max_line_width: f32 = lines
             .iter()
-            .map(|l| crate::text::width(l, TOOLTIP_FONT_SIZE))
+            .map(|l| crate::text::width(l, scaled(TOOLTIP_FONT_SIZE)))
             .fold(0.0_f32, f32::max);
-        (max_line_width + TOOLTIP_PADDING * 2.0).min(self.max_width + TOOLTIP_PADDING * 2.0)
+        (max_line_width + scaled(TOOLTIP_PADDING) * 2.0)
+            .min(self.max_width + scaled(TOOLTIP_PADDING) * 2.0)
     }
 
     fn compute_height(&self) -> f32 {
         let lines = self.wrap_text();
         let line_count = lines.len().max(1);
-        line_count as f32 * TOOLTIP_LINE_HEIGHT + TOOLTIP_PADDING * 2.0
+        line_count as f32 * scaled(TOOLTIP_LINE_HEIGHT) + scaled(TOOLTIP_PADDING) * 2.0
     }
 
     /// Word-wrap at `max_width` pixels.
@@ -1351,7 +1557,7 @@ impl Tooltip {
         crate::text::wrap(
             &self.text,
             self.max_width,
-            TOOLTIP_FONT_SIZE,
+            scaled(TOOLTIP_FONT_SIZE),
             FontWeightHint::Regular,
         )
     }
@@ -2531,6 +2737,201 @@ mod tests {
 
         tooltip.end_hover();
         assert_eq!(tooltip.due_in(1300), None);
+    }
+
+    // ─── Why a greyed row is greyed ─────────────────────────────────────────
+
+    /// `sample_items` shown at the screen's corner, with Paste (row 3, id 3)
+    /// greyed and explained; and the middle of row `index`.
+    fn explained_menu() -> ContextMenu {
+        let mut menu = ContextMenu::new(sample_items());
+        menu.explain(3, "Nothing has been copied");
+        menu.show(10.0, 10.0, SCREEN);
+        menu
+    }
+
+    fn middle(menu: &ContextMenu, index: usize) -> (f32, f32) {
+        let rect = menu.item_rect(index).expect("the row is on screen");
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+    }
+
+    fn texts(commands: &[RenderCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A greyed row says why, once the pointer has rested on it** for the
+    /// tooltip delay -- counted from the first tick after it came to rest,
+    /// which `due_in` asks for at once -- and the reason is drawn over the
+    /// menu.
+    #[test]
+    fn a_greyed_row_says_why_once_the_pointer_rests_on_it() {
+        let mut menu = explained_menu();
+        assert_eq!(menu.reason(3), Some("Nothing has been copied"));
+        assert_eq!(menu.due_in(0), None, "nothing rests on a row");
+
+        let (x, y) = middle(&menu, 3);
+        menu.handle_mouse_move(x, y);
+        assert_eq!(
+            menu.due_in(1000),
+            Some(0),
+            "the wait starts at the next tick"
+        );
+        assert!(!menu.tick(1000));
+        assert_eq!(menu.due_in(1000), Some(u64::from(DEFAULT_TOOLTIP_DELAY_MS)));
+        assert_eq!(menu.showing_reason(), None);
+
+        let due = 1000 + u64::from(DEFAULT_TOOLTIP_DELAY_MS);
+        assert!(menu.tick(due), "the reason appeared");
+        assert_eq!(menu.showing_reason(), Some("Nothing has been copied"));
+        assert_eq!(menu.due_in(due), None, "showing is not waiting");
+        assert!(!menu.tick(due + 100), "it appears once");
+        let palette = Palette::for_mode(false);
+        assert!(texts(&menu.render(&palette)).contains(&"Nothing has been copied".to_owned()));
+
+        // Moving within the row keeps it; leaving the row hides it.
+        menu.handle_mouse_move(x + 5.0, y);
+        assert_eq!(menu.showing_reason(), Some("Nothing has been copied"));
+        let (x0, y0) = middle(&menu, 0);
+        menu.handle_mouse_move(x0, y0);
+        assert_eq!(menu.showing_reason(), None);
+        assert_eq!(menu.due_in(due), None);
+        assert!(!texts(&menu.render(&palette)).contains(&"Nothing has been copied".to_owned()));
+    }
+
+    /// **Only a greyed row with a reason says anything**: a row that can be
+    /// chosen is not explained, whatever it was told, and a greyed row no
+    /// one explained shows nothing; nor does a menu whose owner never ticks.
+    #[test]
+    fn only_a_greyed_row_with_a_reason_says_anything() {
+        let mut menu = ContextMenu::new(sample_items());
+        menu.explain(1, "Cut is on");
+        menu.show(10.0, 10.0, SCREEN);
+        for row in [0, 3] {
+            let (x, y) = middle(&menu, row);
+            menu.handle_mouse_move(x, y);
+            assert_eq!(menu.due_in(0), None, "row {row}");
+            assert!(!menu.tick(10_000));
+            assert_eq!(menu.showing_reason(), None);
+        }
+    }
+
+    /// **Saying why again replaces what was said**, and the pointer leaving
+    /// the menu, the menu hiding, or its rows scrolling under the pointer
+    /// ends the wait.
+    #[test]
+    fn the_wait_ends_when_the_row_is_no_longer_under_the_pointer() {
+        let mut menu = explained_menu();
+        menu.explain(3, "The clipboard is empty");
+        assert_eq!(menu.reason(3), Some("The clipboard is empty"));
+
+        let (x, y) = middle(&menu, 3);
+        menu.handle_mouse_move(x, y);
+        menu.handle_mouse_move(SCREEN.0 - 1.0, SCREEN.1 - 1.0);
+        assert_eq!(menu.due_in(0), None, "the pointer left the menu");
+
+        menu.handle_mouse_move(x, y);
+        assert!(menu.handle_scroll(x, y, 1.0));
+        assert_eq!(menu.due_in(0), None, "the rows moved under the pointer");
+
+        menu.handle_mouse_move(x, y);
+        menu.hide();
+        assert_eq!(menu.due_in(0), None);
+        assert!(!menu.tick(10_000));
+    }
+
+    /// **A greyed row in a submenu is explained too**: the reasons go down
+    /// with the submenu, and its wait is the menu's to report.
+    #[test]
+    fn a_greyed_row_in_a_submenu_says_why() {
+        let mut menu = ContextMenu::new(vec![
+            action(1, true),
+            MenuItem::Submenu {
+                id: 2,
+                label: "More".to_string(),
+                icon: None,
+                enabled: true,
+                children: vec![action(21, true), action(22, false)],
+            },
+        ]);
+        menu.explain(22, "Not on this machine");
+        menu.show(10.0, 10.0, SCREEN);
+        let (x, y) = middle(&menu, 1);
+        menu.handle_mouse_move(x, y);
+        let (sx, sy) = {
+            let (_, submenu) = menu.open_submenu.as_ref().expect("hover opened it");
+            middle(submenu, 1)
+        };
+        menu.handle_mouse_move(sx, sy);
+        assert_eq!(menu.due_in(0), Some(0));
+        menu.tick(0);
+        assert!(menu.tick(u64::from(DEFAULT_TOOLTIP_DELAY_MS)));
+        assert_eq!(menu.showing_reason(), Some("Not on this machine"));
+    }
+
+    /// **Rows added below the menu's own are drawn, and widen it** -- a
+    /// window's rows below a field's.
+    #[test]
+    fn rows_added_below_widen_the_menu() {
+        let mut menu = ContextMenu::new(vec![action(1, true)]);
+        let narrow = menu.width();
+        menu.extend([MenuItem::Action {
+            id: 2,
+            label: "A row much longer than the menu it was added to".to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        }]);
+        assert_eq!(menu.items().len(), 2);
+        assert!(menu.width() > narrow);
+    }
+
+    /// **A menu, and a tooltip, follow the user's text size**: at twice the
+    /// size the rows are twice as tall and every label twice as large, and
+    /// the menu is wider -- the text does not spill out of rows laid out for
+    /// the old size. On this test's thread alone.
+    #[test]
+    fn a_menu_and_a_tooltip_follow_the_text_size() {
+        let measure = || {
+            let mut menu = ContextMenu::new(sample_items());
+            menu.show(10.0, 10.0, SCREEN);
+            let sizes: Vec<f32> = texts_sized(&menu.render(&Palette::for_mode(false)));
+            (menu.item_rect(0).unwrap().h, menu.width(), sizes)
+        };
+        let (row, width, sizes) = measure();
+        assert!(sizes.iter().all(|size| *size == FONT_SIZE), "{sizes:?}");
+
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let (big_row, big_width, big_sizes) = measure();
+        assert_eq!(big_row, row * 2.0);
+        assert!(big_width > width * 1.5, "{big_width} against {width}");
+        assert!(
+            big_sizes.iter().all(|size| *size == FONT_SIZE * 2.0),
+            "{big_sizes:?}"
+        );
+
+        let mut tooltip = Tooltip::new("Tip");
+        tooltip.start_hover(50.0, 50.0, 0, SCREEN);
+        tooltip.tick(10_000);
+        let tip = texts_sized(&tooltip.render(&Palette::for_mode(false)));
+        assert_eq!(tip, [TOOLTIP_FONT_SIZE * 2.0]);
+    }
+
+    /// The size of every piece of text in `commands`.
+    fn texts_sized(commands: &[RenderCommand]) -> Vec<f32> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

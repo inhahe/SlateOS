@@ -704,15 +704,15 @@ impl Widget {
             WidgetKind::Label { text } => padded(self.measure(text), line),
             WidgetKind::Button { text, .. } => padded(
                 crate::button::width(&p.widget_style.button, text),
-                crate::button::HEIGHT,
+                crate::button::height(),
             ),
             WidgetKind::TextInput { .. } => least(120.0, 28.0),
             WidgetKind::TextArea { .. } => least(200.0, 80.0),
             WidgetKind::Checkbox { label, .. } => {
-                padded(crate::checkbox::width(label), crate::checkbox::HEIGHT)
+                padded(crate::checkbox::width(label), crate::checkbox::height())
             }
             WidgetKind::RadioButton { label, .. } => {
-                padded(crate::radio::width(label), crate::checkbox::HEIGHT)
+                padded(crate::radio::width(label), crate::checkbox::height())
             }
             WidgetKind::ProgressBar { .. } => least(200.0, PROGRESS_HEIGHT),
             WidgetKind::Slider { .. } => Size::new(

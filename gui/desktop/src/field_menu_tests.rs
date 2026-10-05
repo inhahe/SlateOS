@@ -631,3 +631,43 @@ fn a_rename_offers_its_menu_and_keeps_going() {
         "My Editor"
     );
 }
+
+// ---- why a row is greyed ----
+
+/// **A greyed row says why once the pointer rests on it** -- Paste, with
+/// nothing copied -- after the tooltip delay on the shell's overlay clock,
+/// which the session is told to wake for; a lit row says nothing.
+#[test]
+fn a_greyed_row_says_why_once_the_pointer_rests_on_it() {
+    guitk::clipboard::set_text("");
+    let mut shell = run_box_with("terminal");
+    let (x, y) = run_line_middle(&shell);
+    let _ = right_click(&mut shell, x, y);
+    let _ = shell.take_hover_changed();
+
+    let (px, py) = row_middle(&shell, "Paste");
+    let _ = shell.handle_mouse(&at(px, py, MouseEventKind::Move));
+    assert!(shell.take_hover_changed(), "the session is told to wake");
+    assert_eq!(
+        shell.tooltip_due_in(),
+        Some(0),
+        "the wait starts at the next frame"
+    );
+    shell.advance_osd(16);
+    let due = shell.tooltip_due_in().expect("a deadline to wake for");
+    assert!(due > 0, "the delay is waited out, not skipped");
+    assert!(!shell.take_hover_changed(), "nothing to draw yet");
+
+    shell.advance_osd(due);
+    assert!(shell.take_hover_changed(), "the reason appeared: repaint");
+    let (menu, _) = shell.field_menu.as_ref().expect("still open");
+    assert_eq!(menu.showing_reason(), Some("Nothing has been copied"));
+    let drawn = format!("{:?}", shell.render_field_menu().expect("drawn"));
+    assert!(drawn.contains("Nothing has been copied"), "{drawn}");
+
+    let (sx, sy) = row_middle(&shell, "Select all");
+    let _ = shell.handle_mouse(&at(sx, sy, MouseEventKind::Move));
+    assert_eq!(shell.tooltip_due_in(), None, "a lit row has no reason");
+    let (menu, _) = shell.field_menu.as_ref().expect("still open");
+    assert_eq!(menu.showing_reason(), None);
+}

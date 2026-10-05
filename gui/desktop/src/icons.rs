@@ -850,15 +850,15 @@ impl DesktopIconLayer {
         }
     }
 
-    /// The rows of the rename field's right-click menu (`guitk::editmenu`):
-    /// Cut, Copy, Paste, Delete and Select all, each dimmed when it would do
-    /// nothing. Empty with no rename under way.
+    /// The rename field's right-click menu (`guitk::editmenu`): Cut, Copy,
+    /// Paste, Delete and Select all, each dimmed when it would do nothing and
+    /// saying why while the pointer rests on it. `None` with no rename under
+    /// way.
     #[must_use]
-    pub fn rename_edit_menu(&self) -> Vec<guitk::menu::MenuItem> {
+    pub fn rename_edit_menu(&self) -> Option<guitk::menu::ContextMenu> {
         self.renaming
             .as_ref()
             .map(|rename| rename.input.edit_menu())
-            .unwrap_or_default()
     }
 
     /// Do what a row of [`rename_edit_menu`](Self::rename_edit_menu) says to

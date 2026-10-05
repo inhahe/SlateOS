@@ -84,7 +84,7 @@
 mod source;
 mod tzif;
 
-pub use source::{LOCALTIME, TzPlan, TzSource, ZONEINFO_DIR, ZoneFile, tz_plan, tz_source};
+pub use source::{LOCALTIME, TzPlan, ZONEINFO_DIR, ZoneFile, tz_plan};
 pub use tzif::{LocalTimeType, TzFile};
 
 /// Longest zone abbreviation stored, in bytes.

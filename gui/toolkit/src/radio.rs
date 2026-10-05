@@ -40,6 +40,7 @@ use crate::render::RenderCommand;
 use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
+use crate::text::scaled;
 
 /// The dot's diameter in a chosen option.
 const DOT: f32 = 6.0;
@@ -322,12 +323,12 @@ fn draw_to(
     });
     if chosen {
         sink.emit(RenderCommand::FillRect {
-            x: c.x + (c.w - DOT) / 2.0,
-            y: c.y + (c.h - DOT) / 2.0,
-            width: DOT,
-            height: DOT,
+            x: c.x + (c.w - scaled(DOT)) / 2.0,
+            y: c.y + (c.h - scaled(DOT)) / 2.0,
+            width: scaled(DOT),
+            height: scaled(DOT),
             color: fade(legible_on(p.accent, p.crust)),
-            corner_radii: CornerRadii::all(DOT / 2.0),
+            corner_radii: CornerRadii::all(scaled(DOT) / 2.0),
         });
     }
     if state.focused && !state.disabled && focus_ring > 0.0 && focus_ring.is_finite() {

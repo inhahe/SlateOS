@@ -1,4 +1,12 @@
-### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — FIXED (defect 2 fixed 2026-08-13 `315a7e0ca`; defect 1 fixed 2026-08-13 `975114f54`, corroborated by a 20/20 clean soak) 2026-08-13
+### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — OPEN: reopened 2026-10-05 (lane C), as this entry asks, after the 2026-08-13 change (`975114f54`, `315a7e0ca`)
+
+**Status:** OPEN -- reopened 2026-10-05 by lane C: the faulting variant
+recurred in lane C's boot of `8954a8168` (a kernel byte-identical to main
+`98877e477`; debug, TCG, a slow boot under another lane's builds, BOOT_OK at
+814 s). The first worker (task 333 of process 358) took a user `#PF` with
+`rip == addr == 0x6000066370`; the process was terminated and exited -8.
+Serial log: `os-lane-c/build/serial-failures/20261005T194714Z-8954a8168-rc1.txt`
+(lane A told by notice). The analysis below, from 2026-08-13, is as it was.
 
 **Symptom.** A deliberate 40-boot soak (`scripts/wedge-soak.sh`, run
 `soak-20260813-093459`) was launched to hunt an unrelated wedge. It did not

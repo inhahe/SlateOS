@@ -4352,7 +4352,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 ### 1.4 IPC and syscalls
 
 ### 1.5 Capability / security model
-- [x] "Request capability from user" dialog mechanism
+- [-] "Request capability from user" dialog mechanism -- *2026-10-05: the kernel's half is done; the user is never asked until the desktop's dialog is (the sub-item below), so the mechanism as a whole is not.*
   - [x] Capability request broker (kernel-side queue, approve/deny/cancel/timeout)
   - [x] Auto-deny fail-safe when no policy handler registered
   - [x] Per-process request limit (4 pending max)
@@ -4362,7 +4362,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Kshell `capreq`/`cr` command (list/approve/deny/handler/test)
   - [x] Self-test (7 tests: auto-deny, pending, approve, deny, cancel, limits, unregister)
   - [x] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL)
-  - [-] GUI security dialog integration (security_dialog.rs: UAC-style modal prompt, risk-level assessment, remember decisions, queue system, keyboard nav, 26 tests) -- *corrected 2026-09-30 (lane C): the dialog is written and tested and constructed by nothing, and cannot be yet: no syscall lets a userspace process answer requests, so every one is auto-denied, and approving one -- in the kernel shell, the only place it can be done -- grants nothing. Asked of lanes A, B and F in `requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`; `known-issues.md` `TD-C-A-PROGRAM-ASKING-FOR-A-CAPABILITY-REACHES-NO-ONE`.*
+  - [-] `[C]` GUI security dialog integration (security_dialog.rs: UAC-style modal prompt, risk-level assessment, remember decisions, queue system, keyboard nav, 26 tests) -- *corrected 2026-09-30 (lane C): the dialog is written and tested and constructed by nothing, and cannot be yet: no syscall lets a userspace process answer requests, so every one is auto-denied, and approving one -- in the kernel shell, the only place it can be done -- grants nothing. Asked of lanes A, B and F in `requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`; `known-issues.md` `TD-C-A-PROGRAM-ASKING-FOR-A-CAPABILITY-REACHES-NO-ONE`.*
 - [~] `[A]` Enable LLVM CFI as default for C/C++ compilation — **blocked by an
   operator decision, not by remaining work.** `design-decisions.md` §201 defers
   it ("not yet", 2026-08-15); it waits in `deferred-questions.md` → **DQ2**,

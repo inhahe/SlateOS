@@ -43,7 +43,25 @@ that parses the file stays in checked Rust; it is the standard way Rust
 programs use newer instructions without leaving older machines behind. B is
 worth weighing for the whole system someday, but not for video's sake.
 
-**Where it bites:** `gui/video/vp9/src/inter.rs` and `loopfilter.rs` (the
-crate's `#![forbid(unsafe_code)]` would become a single module allowed it);
+**Also VP8** (added 2026-10-05). The same answer would cover
+`gui/video/vp8`, which has the same gap: on one core it decodes at about
+60% of libvpx's SIMD speed
+(`known-issues/F-vp8-on-one-thread-is-about-60-percent-of-libvpx-simd.md`).
+Its largest single cost is turning the pixels across a vertical edge into
+lanes before the loop filter and back after -- about 12% of a frame's
+instructions, which libvpx's SSE2 does in some forty register shuffles. The
+compiler does not find those shuffles in safe Rust: written as byte
+shuffles of 16-byte arrays it emitted 484 scalar instructions for one 16x8
+block, and as shifts and masks on eight-byte words 525 executed against
+the plain byte copy's 428. And option A is the only way to them even for
+the oldest instructions: in Rust 1.95 a function may name a vector
+instruction safely only if it is itself marked as needing that
+instruction set, and calling such a function takes `unsafe` once --
+including for SSE2, which every x86-64 processor has, so no run-time check
+would even be needed for it.
+
+**Where it bites:** `gui/video/vp9/src/inter.rs` and `loopfilter.rs`, and
+`gui/video/vp8/src/loopfilter.rs` (each crate's `#![forbid(unsafe_code)]`
+would become a single module allowed it);
 design-decisions §1339, which set the crate's no-`unsafe` rule and said
 this would come here rather than change quietly.

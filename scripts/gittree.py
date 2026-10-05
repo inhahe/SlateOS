@@ -114,19 +114,31 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # to a pipe that is already open and never consults it.
 import gitenv  # noqa: E402
 
-# `mod name;` and `pub mod name;`, and nothing cleverer.
+# `mod name;` and `pub mod name;` -- and the one attribute that names a
+# module's file outright, `#[path = "..."]` -- and nothing cleverer.
 #
 # Deliberately not a general model of rustc's module resolution. The
-# alternative is approximating `#[path = "..."]`, `cfg`-gated arms and `mod`
-# nested inside an inline `mod`, and an approximation that is *wrong* seeds a
-# stub that shadows a real sibling and silently drops it from whatever check
-# the caller was running. A form this does not recognise instead leaves rustfmt
-# unable to resolve it, which is loud: the tool fails and the caller reports it.
-# Failing visibly on an unhandled shape beats guessing at it.
+# alternative is approximating `cfg`-gated arms and `mod` nested inside an
+# inline `mod`, and an approximation that is *wrong* seeds a stub that shadows
+# a real sibling and silently drops it from whatever check the caller was
+# running. A form this does not recognise instead leaves rustfmt unable to
+# resolve it, which is loud: the tool fails and the caller reports it. Failing
+# visibly on an unhandled shape beats guessing at it.
+#
+# `#[path]` is not a guess, which is why it is followed: the attribute *is* the
+# file's name, relative to the directory of the file declaring the module (the
+# rule for a module declared at a file's top level). Before it was followed, a
+# push touching a file whose tests sit beside it under `#[path =
+# "x_tests.rs"]` -- every SVG module in `gui/toolkit` -- was refused unless the
+# untouched test file rode along, and the stub went to `name.rs`, a file
+# nothing names.
 _MOD_DECL = re.compile(
     rb"^[ \t]*(?:pub[^ ]*[ \t]+)?mod[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;",
     re.MULTILINE,
 )
+
+# One attribute line, `#[path = "file.rs"]`, alone on its line.
+_PATH_ATTR = re.compile(rb'#\[[ \t]*path[ \t]*=[ \t]*"([^"\\]+)"[ \t]*\]')
 
 # rustfmt reports a diff on a zero-byte file — it wants the trailing newline —
 # so a stub that is genuinely empty would make every stub this creates look
@@ -1043,6 +1055,9 @@ def _seed_rust_mod_stubs(root: str, written: Iterable[str]) -> None:
 
     Run after every real blob is on disk, never interleaved with them, so a
     stub can never be mistaken for a sibling that had not been written yet.
+
+    A module declared under `#[path = "..."]` gets its stub where the
+    attribute says, and none at `name.rs` (see `_PATH_ATTR`).
     """
     for rel in written:
         abs_path = _under(root, rel)
@@ -1053,6 +1068,10 @@ def _seed_rust_mod_stubs(root: str, written: Iterable[str]) -> None:
         except OSError:
             continue
         for match in _MOD_DECL.finditer(body):
+            named = _path_attribute(body, match.start())
+            if named is not None:
+                _stub_named(root, parent, named)
+                continue
             name = match.group(1).decode("ascii")
             # Never overwrite: a sibling already here is a real pushed file and
             # must keep its own bytes and its own verdict.
@@ -1068,6 +1087,56 @@ def _seed_rust_mod_stubs(root: str, written: Iterable[str]) -> None:
                 # resolve the mod, which the caller reports. Silence here would
                 # only be wrong if it could turn a finding green, and it cannot.
                 pass
+
+
+def _path_attribute(body: bytes, line_start: int) -> Optional[bytes]:
+    """The file a `#[path = "..."]` names, among the attribute lines directly
+    above the `mod` declaration whose line starts at `line_start` -- `None`
+    when none of them is one.
+
+    Only attributes alone on their lines, contiguous with the declaration, as
+    rustfmt writes them; a blank or comment line between ends the search. A
+    shape this misses is the loud kind: rustfmt cannot resolve the module.
+    """
+    pos = line_start
+    while pos > 0:
+        prev_end = pos - 1  # the newline that ends the line above
+        prev_start = body.rfind(b"\n", 0, prev_end) + 1
+        line = body[prev_start:prev_end].strip()
+        if not line.startswith(b"#["):
+            return None
+        found = _PATH_ATTR.fullmatch(line)
+        if found is not None:
+            return found.group(1)
+        pos = prev_start
+    return None
+
+
+def _stub_named(root: str, parent: str, named: bytes) -> None:
+    """A stub at `named`, relative to `parent`, unless something is there --
+    and never outside `root`: the attribute is the pushed file's text, and a
+    `..` in it must not let materialising a mirror write anywhere else.
+    """
+    try:
+        rel = named.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    target = os.path.normpath(os.path.join(parent, rel))
+    base = os.path.normpath(root)
+    try:
+        inside = os.path.commonpath([base, target]) == base
+    except ValueError:
+        # Another drive, or one absolute and one not: not inside.
+        inside = False
+    if not inside or os.path.exists(target):
+        return
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as handle:
+            handle.write(_STUB)
+    except OSError:
+        # As for any stub: rustfmt then fails to resolve the module, loudly.
+        pass
 
 
 def materialise(

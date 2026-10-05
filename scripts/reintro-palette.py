@@ -16413,7 +16413,7 @@ DEFECTS = [
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a switch knob reaches the very edge of its pill when on",
         SWITCH,
         [
-            ('        x + width - knob - INSET\n',
+            ('        x + width - knob - scaled(INSET)\n',
              '        x + width - knob\n'),
         ],
         ["guitk", "desktop"],
@@ -17037,14 +17037,14 @@ DEFECTS = [
              '            crate::text::caret_right(\n'
              '                &self.input_text,\n'
              '                self.cursor,\n'
-             '                FONT_SIZE,\n'
+             '                scaled(FONT_SIZE),\n'
              '                FontWeightHint::Regular,\n'
              '            )\n'
              '        } else {\n'
              '            crate::text::caret_left(\n'
              '                &self.input_text,\n'
              '                self.cursor,\n'
-             '                FONT_SIZE,\n'
+             '                scaled(FONT_SIZE),\n'
              '                FontWeightHint::Regular,\n'
              '            )\n'
              '        };\n',
@@ -17093,14 +17093,14 @@ DEFECTS = [
             ('        if let Some(prev) = crate::text::caret_left(\n'
              '            &self.edit_text,\n'
              '            self.cursor,\n'
-             '            FONT_SIZE,\n'
+             '            scaled(FONT_SIZE),\n'
              '            FontWeightHint::Regular,\n'
              '        ) {\n',
              '        if let Some(prev) = self.cursor.prev_in(&self.edit_text) {\n'),
             ('        if let Some(next) = crate::text::caret_right(\n'
              '            &self.edit_text,\n'
              '            self.cursor,\n'
-             '            FONT_SIZE,\n'
+             '            scaled(FONT_SIZE),\n'
              '            FontWeightHint::Regular,\n'
              '        ) {\n',
              '        if let Some(next) = self.cursor.next_in(&self.edit_text) {\n'),
@@ -17139,8 +17139,8 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Run dialog goes back to slicing its text at the caret's raw byte offset",
         RUN,
         [
-            ('        let cursor_px = text::caret_x(\n            self.input.text(),\n            self.input.cursor(),\n            INPUT_FONT_SIZE,\n            FontWeightHint::Regular,\n        );\n',
-             '        let cursor_px = text::measure(\n            &self.input.text()[..self.input.cursor().byte()],\n            INPUT_FONT_SIZE,\n            FontWeightHint::Regular,\n        );\n'),
+            ('        let cursor_px = text::caret_x(\n            self.input.text(),\n            self.input.cursor(),\n            scaled(INPUT_FONT_SIZE),\n            FontWeightHint::Regular,\n        );\n',
+             '        let cursor_px = text::measure(\n            &self.input.text()[..self.input.cursor().byte()],\n            scaled(INPUT_FONT_SIZE),\n            FontWeightHint::Regular,\n        );\n'),
         ],
         ["desktop"],
         [

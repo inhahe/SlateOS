@@ -182,9 +182,11 @@ pub struct Demuxer<R> {
     segment_end: u64,
     /// Where the first Cluster begins, if there is one.
     first_cluster: Option<u64>,
-    /// Where the Cues are, if the file says -- before its first Cluster or
-    /// through its SeekHead, where FFmpeg looks -- and them once read.
-    cues_at: Option<u64>,
+    /// Where the Cues are, as FFmpeg finds them: every Cues element read
+    /// before the first Cluster (or where a SeekHead entry naming something
+    /// else points), all of them one index; else the one the SeekHead names,
+    /// unless following it failed. And the index once read.
+    cues_at: Vec<u64>,
     cues: Option<Vec<Cue>>,
     state: State,
     /// The frames of the last block not yet given out.
@@ -318,7 +320,7 @@ impl<R: Read + Seek> Demuxer<R> {
             segment_data: segment.data,
             segment_end,
             first_cluster: None,
-            cues_at: None,
+            cues_at: Vec::new(),
             cues: None,
             state: State::Done,
             queue: VecDeque::new(),
@@ -504,7 +506,7 @@ impl<R: Read + Seek> Demuxer<R> {
         let mut lists = Lists::default();
         let mut level1 = Level1::default();
         // Cues read where they stand, which FFmpeg reads at once.
-        let mut cues_read: Option<u64> = None;
+        let mut cues_read: Vec<u64> = Vec::new();
         self.r.seek_to(self.segment_data)?;
         while self.r.pos() < self.segment_end {
             let Some(h) = self.r.header()? else { break };
@@ -521,9 +523,7 @@ impl<R: Read + Seek> Demuxer<R> {
                 match h.id {
                     ids::INFO => self.read_info(&h)?,
                     ids::TRACKS => self.read_tracks(&h)?,
-                    ids::CUES => {
-                        cues_read.get_or_insert(h.start);
-                    }
+                    ids::CUES => cues_read.push(h.start),
                     _ => {
                         let read = if segment_ends.is_some_and(|e| end > e) {
                             Err(Error::Invalid("an element running past its Segment"))
@@ -592,10 +592,12 @@ impl<R: Read + Seek> Demuxer<R> {
                 entry.parsed = true;
             }
         }
-        self.cues_at = match cues_read {
-            Some(at) => Some(at),
-            None if !cues_broken => level1.cues_unread(),
-            None => None,
+        self.cues_at = if !cues_read.is_empty() {
+            cues_read
+        } else if cues_broken {
+            Vec::new()
+        } else {
+            level1.cues_unread().into_iter().collect()
         };
         if self.info.timestamp_scale == 0 {
             self.info.timestamp_scale = 1_000_000;
@@ -616,7 +618,7 @@ impl<R: Read + Seek> Demuxer<R> {
         pos: u64,
         level1: &mut Level1,
         lists: &mut Lists,
-        cues_read: &mut Option<u64>,
+        cues_read: &mut Vec<u64>,
     ) -> Result<(), Error> {
         self.r.seek_to(pos)?;
         let id = nest::read_id(&mut self.r)?;
@@ -645,7 +647,7 @@ impl<R: Read + Seek> Demuxer<R> {
             ids::TRACKS => self.read_tracks(&h),
             ids::CUES => {
                 // Read at once by FFmpeg: these are its index then.
-                cues_read.get_or_insert(pos);
+                cues_read.push(pos);
                 Ok(())
             }
             _ => self.read_listed(&h, FROM_SEEK_HEAD, lists),
@@ -1246,30 +1248,36 @@ impl<R: Read + Seek> Demuxer<R> {
     fn cues(&mut self) -> Result<&[Cue], Error> {
         if self.cues.is_none() {
             let reading = self.r.pos();
-            let cues = match self.cues_at {
-                // Damaged Cues are no Cues, as FFmpeg's seek then falls
-                // back to reading.
-                Some(at) => self.read_cues(at).unwrap_or_default(),
-                None => Vec::new(),
-            };
-            self.cues = Some(cues);
+            let mut points = Vec::new();
+            for at in self.cues_at.clone() {
+                // Damage keeps the points read before it, as FFmpeg keeps
+                // them: what the error leaves in `points` is the index, so
+                // the error itself is passed over.
+                let _ = self.read_cue_points(at, &mut points);
+            }
+            let index = cues::index(points, self.segment_data, self.info.timestamp_scale);
+            self.cues = Some(index);
             self.r.seek_to(reading)?;
         }
         Ok(self.cues.as_deref().unwrap_or_default())
     }
 
-    fn read_cues(&mut self, at: u64) -> Result<Vec<Cue>, Error> {
+    /// The cue points of the Cues element at `at`, into `points`: none if
+    /// another element stands there, as FFmpeg reads none from it.
+    fn read_cue_points(&mut self, at: u64, points: &mut Vec<cues::Point>) -> Result<(), Error> {
         self.r.seek_to(at)?;
-        let h = self.r.header()?.ok_or(Error::Truncated)?;
-        if h.id != ids::CUES {
-            return Ok(Vec::new());
+        let id = nest::read_id(&mut self.r)?;
+        if id != ids::CUES {
+            return Ok(());
         }
-        cues::read(
-            &mut self.r,
-            &h,
-            self.segment_data,
-            self.info.timestamp_scale,
-        )
+        let size = nest::read_size(&mut self.r)?;
+        let h = Header {
+            id,
+            size,
+            start: at,
+            data: self.r.pos(),
+        };
+        cues::read_points(&mut self.r, &h, FROM_SEEK_HEAD, points)
     }
 
     fn place(&self) -> Place {

@@ -19,13 +19,19 @@ of them.
 | WavPack, ProRes, RealMedia audio and WebVTT packets, which FFmpeg rebuilds from Matroska's form | given as stored | FFmpeg's `matroska_parse_wavpack`, `_prores`, `_rm_audio` and `_webvtt`, if those codecs are ever decoded here |
 | Several `ContentEncoding`s on one track | passed through as stored, as FFmpeg does | nothing: FFmpeg's own behaviour |
 | A source that cannot seek (a pipe, a live stream) | `Demuxer::open` measures the source, so it needs `Seek` | a streaming mode: the reader already knows where every element ends, but `open`'s SeekHead and the seek's index read ahead |
-| Several Cues elements before the first Cluster | the first is the index | FFmpeg reads each into one list of cue points and seeks by them all (its `matroska_index`, by its code: ffprobe cannot show it, as its probing indexes every key frame of a file small enough for a fixture); read each into `cues.rs`'s list and merge them as `av_add_index_entry` does (by time, a later entry at the same time replacing the earlier) |
 | A top-level element of unknown size other than a Cluster (the specification allows it of none) | refused before the first Cluster; ends following the SeekHead there | FFmpeg reads one until an element that cannot be inside it begins, as it reads a Cluster of unknown size |
 | A chapter without an end, in a file whose Info gives no duration | the last such chapter ends where it starts (`Demuxer::chapter_ends`) | FFmpeg estimates a duration from the streams' bit rates when probing; that needs the bit rates, which the demuxer does not know |
 | Damage in an Info or Tracks before the first Cluster | the file is refused | FFmpeg reads the Segment again from its start, which repeats every track before the damage (design-decisions §1358 for why that is not copied for chapters, tags and attachments); reading on after the damaged element, as there, would serve |
 
 **Where.** `gui/video/matroska/src/` (`demux.rs`, `track.rs`, `nest.rs`,
 `metadata.rs`); the crate's module documentation says what it reads.
+
+**Was here, fixed 2026-10-05:** with several Cues elements before the first
+Cluster, the first alone was the index, where FFmpeg seeks by all of them
+(`two_cues.mkv`); and damaged Cues were no index at all, where FFmpeg seeks
+by the points before the damage (`damaged_cues.mkv`). Both now as FFmpeg,
+held to ffprobe probing as little as it can -- its probing of a small file
+indexes every key frame, and hides what the Cues say.
 
 **Was here, fixed 2026-10-05:** chapters, tags and attachments were skipped.
 They are read now, and the metadata FFmpeg makes of them and of the Info

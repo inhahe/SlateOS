@@ -1,0 +1,11 @@
+# damaged_cues.mkv: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 5000
+packet 0 0 K__
+packet 0 40 ___
+packet 0 10000 K__
+packet 0 10040 ___
+packet 0 20000 K__
+packet 0 20040 ___
+seek 25000
+packet 0 30000 K__
+packet 0 30040 ___

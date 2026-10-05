@@ -78,6 +78,8 @@ CUES_MET = "cues_met_while_reading_are_passed_over"
 # Cues the SeekHead names twice, and Cues left unused after a failure.
 SEEKS_CUES_LAST_ENTRY = "seeks_in_cues_last_entry"
 SEEKS_CUES_BROKEN = "seeks_in_cues_broken"
+SEEKS_TWO_CUES = "seeks_in_two_cues"
+SEEKS_DAMAGED_CUES = "seeks_in_damaged_cues"
 # The metadata: as ffprobe shows it (`tests/metadata.rs`), and the packets
 # of the same files (`tests/fixtures.rs`).
 META_FFMPEG = "metadata_of_ffmpeg_s_file"
@@ -364,9 +366,24 @@ DEMUX = [
     ),
     (
         "Cues the SeekHead points to are not noted",
-        "None if !cues_broken => level1.cues_unread(),",
-        "None if !cues_broken => None,",
+        "            level1.cues_unread().into_iter().collect()\n",
+        "            Vec::new()\n",
         [SPARSE],
+    ),
+    (
+        "only the first Cues element before the Clusters is the index",
+        "                    ids::CUES => cues_read.push(h.start),",
+        "                    ids::CUES if cues_read.is_empty() => cues_read.push(h.start),\n"
+        "                    ids::CUES => {}",
+        [SEEKS_TWO_CUES],
+    ),
+    (
+        "damaged Cues are no index",
+        "                let _ = self.read_cue_points(at, &mut points);",
+        "                if self.read_cue_points(at, &mut points).is_err() {\n"
+        "                    points.clear();\n"
+        "                }",
+        [SEEKS_DAMAGED_CUES],
     ),
     (
         "the first SeekHead entry naming the Cues is the one followed",
@@ -585,7 +602,7 @@ DEMUX = [
         "                // Anything else is passed over -- Cues too: FFmpeg reads Cues\n"
         "                // only before the first Cluster or where the SeekHead points.\n",
         "                if h.id == ids::CUES {\n"
-        "                    self.cues_at.get_or_insert(h.start);\n"
+        "                    self.cues_at.push(h.start);\n"
         "                }\n",
         [CUES_MET],
     ),

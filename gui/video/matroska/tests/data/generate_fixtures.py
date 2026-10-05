@@ -1065,10 +1065,50 @@ def e_cue_layouts():
             tail += made[k]
         return E_HEADER + e_el("18538067", head(entries) + E_INFO + tracks + b"".join(clusters) + tail)
 
-    return {
+    out = {
         "cues_last_entry.mkv": build(["bad", "good"]),
         "cues_broken.mkv": build(["bad", "broken"]),
     }
+
+    # Four Clusters ten seconds apart, for Cues FFmpeg's probing does not
+    # hide (`SEEK_PROBING`).
+    far = [
+        e_cluster(s * 10_000, e_simple(v, 0, True, f"key{s}".encode()),
+                  e_simple(v, 40, False, f"inter{s}".encode()))
+        for s in range(4)
+    ]
+
+    def starts_after(at):
+        out = []
+        for c in far:
+            out.append(at)
+            at += len(c)
+        return out
+
+    # Two Cues elements before the first Cluster: FFmpeg's index is both --
+    # the second's point at 20 s is where a seek to 25 s lands.
+    first = lambda s: cues([(0, s[0]), (30_000, s[3])])  # noqa: E731
+    second = lambda s: cues([(20_000, s[2])])  # noqa: E731
+    stub = [0, 0, 0, 0]
+    s = starts_after(len(E_INFO) + len(tracks) + len(first(stub)) + len(second(stub)))
+    out["two_cues.mkv"] = E_HEADER + e_el("18538067", E_INFO + tracks + first(s) + second(s) + b"".join(far))
+
+    # Cues after the Clusters, through the SeekHead, whose third point is
+    # damaged (its CueTime runs past it): FFmpeg keeps the two before -- and
+    # the second sends 20 s to the last Cluster, so a seek to 25 s lands at
+    # 30 s, where a walk would land at 20.
+    def damaged(s):
+        # The two good points (the Cues element's own 12-byte header cut
+        # off), then a CuePoint whose CueTime claims 8 bytes of its 1.
+        points = cues([(0, s[0]), (20_000, s[3])])[12:]
+        return e_el("1C53BB6B", points + e_el("BB", b"\xb3\x88\x00"))
+
+    at = len(head([("1C53BB6B", 0)])) + len(E_INFO) + len(tracks)
+    s = starts_after(at)
+    tail_at = s[3] + len(far[3])
+    out["damaged_cues.mkv"] = E_HEADER + e_el(
+        "18538067", head([("1C53BB6B", tail_at)]) + E_INFO + tracks + b"".join(far) + damaged(s))
+    return out
 
 
 def m_trailing():
@@ -1263,6 +1303,17 @@ SEEKABLE = {
     "unlisted_cues.mkv": THREE_SECONDS,
     "cues_last_entry.mkv": THREE_SECONDS,
     "cues_broken.mkv": THREE_SECONDS,
+    "two_cues.mkv": [5.0, 25.0, 35.0],
+    "damaged_cues.mkv": [5.0, 25.0],
+}
+# Files whose seeks ffprobe makes having probed as little as it can: FFmpeg
+# indexes every key frame it reads, and its probing of a file this small
+# reads them all, which hides what the Cues say. Probing 32 bytes, it reads
+# the first two Clusters' key frames (0 and 10 s), so these files' Cues are
+# about later ones, and their seeks avoid the times those two would answer.
+SEEK_PROBING = {
+    "two_cues.mkv": ["-probesize", "32", "-analyzeduration", "1"],
+    "damaged_cues.mkv": ["-probesize", "32", "-analyzeduration", "1"],
 }
 
 
@@ -1270,7 +1321,7 @@ def seek_answer(name):
     lines = [f"# {name}: ffprobe's first {SEEK_PACKETS} packets after each seek (generate_fixtures.py)."]
     for s in SEEKABLE[name]:
         out = subprocess.run(
-            [FFPROBE, "-v", "error", "-fflags", "+noparse+nofillin",
+            [FFPROBE, "-v", "error", "-fflags", "+noparse+nofillin", *SEEK_PROBING.get(name, []),
              "-read_intervals", f"{s}%+#{SEEK_PACKETS}",
              "-show_entries", "packet=stream_index,pts,flags", "-of", "compact=p=0", name],
             check=True, capture_output=True, text=True, encoding="utf-8",

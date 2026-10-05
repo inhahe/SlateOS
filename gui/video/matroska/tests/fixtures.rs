@@ -342,6 +342,19 @@ fn packets_of_cues_broken() {
     demuxes_as_ffmpeg_does("cues_broken.mkv");
 }
 
+// Two Cues elements before the first Cluster, one index; and damaged Cues,
+// whose points before the damage are the index.
+
+#[test]
+fn packets_of_two_cues() {
+    demuxes_as_ffmpeg_does("two_cues.mkv");
+}
+
+#[test]
+fn packets_of_damaged_cues() {
+    demuxes_as_ffmpeg_does("damaged_cues.mkv");
+}
+
 /// Every byte of a file with Cues, a laced one, one of unknown sizes and a
 /// compressed one changed in turn -- its low bit, its high bit, and all of it
 /// -- then each cut short at every length: each opens and reads to its end,
@@ -552,4 +565,14 @@ fn seeks_in_cues_last_entry() {
 #[test]
 fn seeks_in_cues_broken() {
     seeks_as_ffmpeg_does("cues_broken.mkv");
+}
+
+#[test]
+fn seeks_in_two_cues() {
+    seeks_as_ffmpeg_does("two_cues.mkv");
+}
+
+#[test]
+fn seeks_in_damaged_cues() {
+    seeks_as_ffmpeg_does("damaged_cues.mkv");
 }

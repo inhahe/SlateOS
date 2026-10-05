@@ -153,7 +153,7 @@ fn size_of(h: &Header) -> u64 {
 }
 
 /// Where an element ends; the elements here are all of known size.
-fn end_of(h: &Header) -> Result<u64, Error> {
+pub(crate) fn end_of(h: &Header) -> Result<u64, Error> {
     h.end()
         .ok_or(Error::Invalid("a master element of unknown size"))
 }
@@ -162,7 +162,7 @@ fn end_of(h: &Header) -> Result<u64, Error> {
 /// if empty; refused, `out` untouched, if longer than 8 bytes; and if the
 /// file ends inside it, what was read, the missing bytes zeros -- kept, and
 /// an error.
-fn uint<R: Read + Seek>(
+pub(crate) fn uint<R: Read + Seek>(
     r: &mut Reader<R>,
     h: &Header,
     default: u64,
@@ -250,7 +250,7 @@ fn binary_place<R: Read + Seek>(
 /// Pass over an element FFmpeg does not read here: refused if it runs past
 /// the end of the file, or is larger than C's `int` holds (FFmpeg's
 /// `ffio_limit` takes one).
-fn skip<R: Read + Seek>(r: &mut Reader<R>, h: &Header) -> Result<(), Error> {
+pub(crate) fn skip<R: Read + Seek>(r: &mut Reader<R>, h: &Header) -> Result<(), Error> {
     let n = size_of(h);
     if n > r.remaining() || n > u64::from(i32::MAX.unsigned_abs()) {
         return Err(Error::Truncated);

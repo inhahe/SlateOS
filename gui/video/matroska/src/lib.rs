@@ -50,7 +50,7 @@
 //!
 //! # Held to FFmpeg
 //!
-//! Every packet of 45 files, and the packets after 92 seeks, are ffprobe's
+//! Every packet of 47 files, and the packets after 97 seeks, are ffprobe's
 //! (`tests/fixtures.rs`, `tests/data/generate_fixtures.py`), and so is the
 //! display matrix -- or the refusal -- of 22 files' video projections
 //! ([`Video::display_matrix`], `tests/projection.rs`), and the metadata,

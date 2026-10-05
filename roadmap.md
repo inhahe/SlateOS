@@ -3810,7 +3810,7 @@ lane C's `guitk`.
   opens a file's pictures.
   - `[x]` Matroska and WebM, demultiplexed (`gui/video/matroska`,
     design-decisions §1345): written from RFC 9559 with FFmpeg's behaviour
-    where the RFC leaves a choice -- every packet of 45 fixtures and 92
+    where the RFC leaves a choice -- every packet of 47 fixtures and 97
     seeks held to `ffprobe`'s, and every frame of VP9, VP9 with alpha and
     AV1 played through it held to ffmpeg's decoders. The tree's one
     Matroska demuxer: `apps/mediaprobe`'s cases moved into its suite

@@ -67,9 +67,40 @@ export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 # same reason: its test runs a program too, and the guess "no" compiles
 # lib/sh/mktime.c, which nothing in bash calls today, and which the first
 # call would reach instead of ours.
+#
+# The rest, 2026-10-05: each is what its configure test answers -- or would,
+# run on SlateOS -- measured from our libc and kernel rather than guessed
+# (known-issues-resolved/D-SPIKES-BASH-CROSS-CONFIGURE-GUESSED-WHAT-IT-COULD-NOT-RUN.md):
+#
+#   bash_cv_wexitstatus_offset=8  our wait status is Linux's, exit code in bits
+#       8-15 (posix/src/process.rs: exit 1 is 256). The guess, 0, made the
+#       status `lastpipe` synthesises for a pipeline's last command (jobs.c,
+#       append_process) read as a death by signal: `shopt -s lastpipe;
+#       true | false; echo $?` said 129, and `true | (exit 3)` 131 -- measured
+#       with this build's own bash under WSL, whose wait status is Linux's
+#       too, where Ubuntu's bash says 1 and 3.
+#   bash_cv_printf_a_format=yes   our printf's %A, %a and the long-double %LA
+#       bash's builtin uses are glibc 2.39's byte for byte (posix/src/printf.rs,
+#       its conversion oracle); the guess turned the builtin's %a off.
+#   bash_cv_unusable_rtsigs=no    the test asks only that SIGRTMIN be under
+#       2*NSIG, and ours is 32; the guess dropped RTMIN..RTMAX from kill and trap.
+#   bash_cv_sys_named_pipes=present  the test answers from mkfifo existing,
+#       which ours does. It answers ENOSYS for now (the filesystem holds no
+#       FIFO), so process substitution fails saying so -- and starts working,
+#       with no rebuild, the day FIFOs do.
+#   bash_cv_dev_fd=absent, bash_cv_dev_stdin=absent  configure reads these
+#       from the *build* machine's /dev, and SlateOS has no /dev/fd, its
+#       /dev/stdin, /dev/stdout and /dev/stderr are the console rather than the
+#       process's descriptors (kernel/src/fs/devfs.rs), and /proc/self/fd/N
+#       names nothing for a native process. Absent, bash opens those names
+#       itself in its redirections (redir.c), as their descriptors: `echo x >
+#       /dev/stderr` reaches fd 2 and not the console.
 ./configure --host=x86_64-linux-musl --build=x86_64-pc-linux-gnu \
     --without-bash-malloc --disable-nls --disable-readline --without-curses \
     bash_cv_getcwd_malloc=yes ac_cv_func_working_mktime=yes \
+    bash_cv_wexitstatus_offset=8 bash_cv_printf_a_format=yes \
+    bash_cv_unusable_rtsigs=no bash_cv_sys_named_pipes=present \
+    bash_cv_dev_fd=absent bash_cv_dev_stdin=absent \
     >cross-configure.log 2>&1
 echo "CROSS_CONFIGURE_EXIT=$?"
 tail -15 cross-configure.log

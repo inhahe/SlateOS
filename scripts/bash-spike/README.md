@@ -126,8 +126,12 @@ the truth about `getcwd` and `mktime`, which `cross2.sh` now does: bash's
 `getcwd` walks `..` matching inode numbers, and names the wrong directory
 under procfs, which reports 0 for every one. Until that day zig's cc driver
 had moved `-lsh` behind our `libc.a`, so ours were taken and bash's never
-were, by accident. Other guesses configure made are in known-issues
-D-SPIKES-BASH-CROSS-CONFIGURE-GUESSED-WHAT-IT-COULD-NOT-RUN.
+were, by accident. The other six guesses are answered too, since
+2026-10-05, each from a measured fact (`cross2.sh`'s comment; known-issues
+D-SPIKES-BASH-CROSS-CONFIGURE-GUESSED-WHAT-IT-COULD-NOT-RUN, resolved). One
+was a live bug: with `shopt -s lastpipe`, `true | false; echo $?` said 129,
+bash reading the status it made for the pipeline's last command as a death
+by signal.
 
 ## If this is ever taken further
 

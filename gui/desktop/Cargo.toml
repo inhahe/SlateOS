@@ -56,6 +56,9 @@ associations = { path = "../associations" }
 # rather than a typed crate like `appearance`. See src/idle_lock.rs.
 settingsfile = { path = "../settingsfile" }
 guitk = { path = "../toolkit" }
+# The shell's sounds -- a notification's chime, a screenshot's shutter --
+# decoded, converted and played (`event_sounds`).
+sound = { path = "../sound" }
 # `/proc` is read through the one parser, not a second copy. The same
 # crate serves apps/sysinfo, apps/procexplorer and apps/sysmonitor; two
 # /proc parsers in one repository is the arrangement where a kernel

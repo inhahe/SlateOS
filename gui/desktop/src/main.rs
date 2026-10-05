@@ -178,6 +178,9 @@ fn main() -> ExitCode {
         }
     };
 
+    // This is the desktop: its sounds are heard, from the first -- the
+    // session's start says so aloud. Nothing else that builds a shell is.
+    desktop::event_sounds::allow_playback();
     // `start_for_user`, not `start`: the user's appearance, widgets and clock
     // are read here or not at all -- `start` leaves them to its caller.
     let mut session = match ShellSession::start_for_user(EventLoop::new(link)) {

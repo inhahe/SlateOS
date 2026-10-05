@@ -96,6 +96,7 @@ pub mod dialog_frame;
 /// render output, and a release build has nothing to check.
 #[cfg(test)]
 pub mod draw_check;
+pub mod event_sounds;
 pub mod file_drop;
 pub mod focus_assist;
 pub mod hotkeys;
@@ -124,7 +125,6 @@ pub mod session;
 pub mod session_mgr;
 pub mod shortcut_editor;
 pub mod snap;
-pub mod sound_settings;
 pub mod startup_settings;
 pub mod storage_settings;
 pub mod taskbar;
@@ -2519,6 +2519,10 @@ pub struct DesktopShell {
     /// Timed off `osd_clock_ms` rather than off the wall
     /// clock; see that field for why the difference does not matter here.
     pub osd: osd::OsdManager,
+    /// The shell's sounds: what plays for a notification, a volume change, a
+    /// screenshot -- and the events asked for, for the tests to read. See
+    /// [`event_sounds`].
+    pub event_sounds: event_sounds::EventSounds,
     /// Milliseconds of animation time the shell has been told about, and the
     /// only clock [`show_osd`](Self::show_osd) consults.
     ///
@@ -2966,6 +2970,7 @@ impl DesktopShell {
             // itself on the whole display rather than on the work area, because
             // it is a heads-up overlay and may sit over the taskbar.
             osd: osd::OsdManager::new(screen_width as f32, screen_height as f32),
+            event_sounds: event_sounds::EventSounds::new(),
             osd_clock_ms: 0,
             // Not positioned here. `set_position` needs a screen size, and this
             // one would go stale the moment the display changed; the dialog is
@@ -12596,6 +12601,18 @@ impl DesktopShell {
         // under, so opening one marks the other read.
         let pop_up =
             (!notif.silent && !self.notifications.pane_state().is_visible()).then(|| notif.clone());
+        // Heard as it arrives -- unless focus assist silenced it, or its
+        // program's rule in the Notifications settings turns its sound off.
+        // Not tied to the toast: the rule's sound and banner are separate
+        // switches, and a sound with no banner (hear it now, read it later)
+        // is a choice a user can make. Nor to the pane being shut: a card
+        // added to a list the user is reading is easily missed.
+        if !notif.silent
+            && self.notif.settings.rule_for(&notif.app_name).sound
+            && let Some(name) = event_sounds::for_notification(notif.priority)
+        {
+            self.event_sounds.sound(&self.appearance, name);
+        }
         let id = self.notifications.push_notification(notif);
         if let Some(mut shown) = pop_up {
             shown.id = id;
@@ -14556,6 +14573,11 @@ impl DesktopShell {
     /// forty of its callers.
     pub fn show_osd(&mut self, kind: osd::OsdKind) {
         self.sync_osd_screen();
+        // Heard as it is shown: a volume's new level, a screenshot's shutter
+        // -- the events `event_sounds::for_osd` gives a sound.
+        if let Some(name) = event_sounds::for_osd(&kind) {
+            self.event_sounds.sound(&self.appearance, name);
+        }
         self.osd.show(kind, self.osd_clock_ms);
     }
 

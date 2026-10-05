@@ -674,6 +674,14 @@ impl<T: Transport> ShellSession<T> {
         let mut session = Self::start(events)?;
         session.load_appearance();
         session.repaint()?;
+        // In already -- nobody to sign in as, or signed in by itself: say so
+        // aloud, in the user's sound -- after their appearance is read, so it
+        // is their theme's chime at their volume, and after the first frame,
+        // so it is not heard over a black screen. A login screen up instead
+        // is nobody in yet; a password accepted says it then (`answer_login`).
+        if !session.is_locked() {
+            session.sound_event("desktop-login");
+        }
         Ok(session)
     }
 
@@ -1200,6 +1208,10 @@ impl<T: Transport> ShellSession<T> {
                     .to_string();
                 screen.auth_success();
                 self.admit(&shown, lockable);
+                // Not in `admit`, which a start also calls -- before the
+                // user's appearance is read, and before the first frame.
+                // `start_for_user` says it for a start.
+                self.sound_event("desktop-login");
             }
             // Deliberately the same words for a wrong password and an unknown
             // user. Distinguishing them tells someone standing at the machine
@@ -4002,8 +4014,19 @@ impl<T: Transport> ShellSession<T> {
         if self.login.is_some() {
             // Nobody is using the desktop until somebody signs in again.
             self.shell.set_user_name("");
+            // In the settings of the one leaving, the only ones there are.
+            self.sound_event("desktop-logout");
         }
         self.dirty = true;
+    }
+
+    /// Sound the shell's event `name` as the user's appearance settings say
+    /// ([`crate::event_sounds`]).
+    fn sound_event(&mut self, name: &str) {
+        let shell = &mut self.shell;
+        // What was chosen is kept in `event_sounds`' record; nothing here acts
+        // on it.
+        let _chosen = shell.event_sounds.sound(&shell.appearance, name);
     }
 
     /// A login screen `width` by `height` pixels for the accounts in

@@ -897,6 +897,7 @@ dependencies = [
  "servicemenus",
  "settingsfile",
  "settingswatch",
+ "sound",
  "tzrules",
  "windowrules",
  "yamldoc",

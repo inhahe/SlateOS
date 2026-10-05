@@ -7189,6 +7189,30 @@ fn a_session_started_for_a_user_starts_in_their_settings() {
     });
 }
 
+/// **A session started for a user says so aloud**: `desktop-login`, the last
+/// thing it does, once their settings are read -- so in their sound theme, at
+/// their volume, or not at all when they have turned sounds off, as here.
+#[test]
+fn a_session_started_for_a_user_sounds_its_start() {
+    settingsfile::testing::with_scratch_config("session-login-sound", |_root| {
+        let mut look = appearance::AppearanceFile::load();
+        look.settings.sounds.enabled = false;
+        look.save().expect("save");
+
+        let _turn = settingsfile::testing::config_turn();
+        let (events, _desktop) = wired();
+        let session = ShellSession::start_for_user(events).expect("the harness refused a surface");
+        assert_eq!(
+            session.shell().event_sounds.recent().last(),
+            Some(&crate::event_sounds::Asked {
+                event: "desktop-login".to_string(),
+                choice: appearance::sounds::SoundChoice::Silent,
+            }),
+            "asked for in the user's settings, which turn sounds off"
+        );
+    });
+}
+
 /// And `start` itself still reads nothing of the kind -- the contract every
 /// test that builds a session relies on, so that none of them depends on what
 /// is in the configuration directory of the machine running it.
@@ -7205,6 +7229,14 @@ fn a_bare_session_does_not_read_the_users_appearance_or_clock() {
         let (session, _desktop, _turn) = session();
         assert_ne!(session.shell().appearance.accent_color, AccentColor::Teal);
         assert_eq!(session.shell().datetime.zone, None);
+        assert!(
+            session
+                .shell()
+                .event_sounds
+                .recent()
+                .all(|asked| asked.event != "desktop-login"),
+            "nobody signed in to a bare session"
+        );
     });
 }
 
@@ -7469,6 +7501,50 @@ fn logging_out_after_signing_in_by_itself_stays_at_the_login_screen() {
         "the account signed itself straight back in"
     );
     assert_eq!(session.shell().user_name(), "");
+}
+
+/// The events `session`'s shell has asked to sound, oldest first.
+fn heard(session: &Session) -> Vec<String> {
+    session
+        .shell()
+        .event_sounds
+        .recent()
+        .map(|asked| asked.event.clone())
+        .collect()
+}
+
+/// **Signing in and out are heard**: `desktop-login` when a password lets
+/// someone in, `desktop-logout` when they leave -- and nothing while the
+/// login screen waits, nor for a password it refuses.
+#[test]
+fn signing_in_and_out_are_heard() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    assert!(heard(&session).is_empty(), "nobody has signed in");
+    type_password(&desktop, &mut session, "not the password");
+    assert!(session.is_locked());
+    assert!(
+        heard(&session).is_empty(),
+        "a refused password let nobody in"
+    );
+    // A key first, which a refused screen takes to mean "again"
+    // (`LoginScreen::retry`) rather than typing it.
+    type_password(&desktop, &mut session, "");
+    type_password(&desktop, &mut session, "password");
+    assert!(!session.is_locked());
+    assert_eq!(heard(&session), ["desktop-login"]);
+    session.act(crate::ShellAction::LogOut).expect("log out");
+    assert_eq!(heard(&session), ["desktop-login", "desktop-logout"]);
+}
+
+/// **A sign-in by itself at a bare start is not heard** -- `start` reads no
+/// appearance settings to sound it in; `start_for_user` sounds it once it has
+/// (`a_session_started_for_a_user_sounds_its_start`).
+#[test]
+fn a_bare_start_signing_in_by_itself_is_not_heard() {
+    let (session, _desktop, _dir, _turn) =
+        session_signing_in_by_itself(crate::autologin::StartConditions::default(), true, "");
+    assert!(!session.is_locked());
+    assert!(heard(&session).is_empty());
 }
 
 // ---- the power menu --------------------------------------------------------

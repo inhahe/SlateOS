@@ -1,4 +1,6 @@
-## TD-C-A-PROGRAMS-OWN-ICON-FILE-IS-NOT-READ
+## TD-C-A-PROGRAMS-OWN-ICON-FILE-IS-NOT-READ -- FIXED 2026-09-26
+
+**Status:** FIXED 2026-09-26 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **Date:** 2026-09-26. **Lane:** C. **FIXED 2026-09-26**, the same day:
 `IconTheme::render` draws an icon file named by its path (SVG, or PNG scaled

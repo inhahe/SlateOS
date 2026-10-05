@@ -1,6 +1,8 @@
-## `TD-C-A-PASSWORD-POLICY-NOBODY-CAN-STATE` (lane C, 2026-09-18)
+## `TD-C-A-PASSWORD-POLICY-NOBODY-CAN-STATE` (lane C, 2026-09-18) -- FIXED 2026-09-27
 
-> **Status: FIXED 2026-09-27 (lane E), with C-Q26 answered (option A,
+**Status:** FIXED 2026-09-27 (lane E). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
+
+> **Earlier status: FIXED 2026-09-27 (lane E), with C-Q26 answered (option A,
 > §1418).** The rules are drawn and changed on a Rules tab (`4`; Up/Down
 > choose, Left/Right change, Space flips) and kept in `passwordgen.yaml`
 > under `rules:` -- shortest and longest length, each kind of character,

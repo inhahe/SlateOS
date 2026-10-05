@@ -1,6 +1,8 @@
-### C-CREDMANAGER-HAS-NO-VAULT-ON-DISK — 2026-08-26 — LANE C, OPEN
+## C-CREDMANAGER-HAS-NO-VAULT-ON-DISK -- FIXED 2026-09-27
 
-**Status: FIXED 2026-09-27 (lane E, which owns `apps/` since the split).** The
+**Status:** FIXED 2026-09-27 (lane E, which owns apps/ since the split). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
+
+**Earlier status: FIXED 2026-09-27 (lane E, which owns `apps/` since the split).** The
 cipher this waited on is vendored -- RustCrypto's XChaCha20-Poly1305 and
 Argon2id under `rustcrypto/`, used through `rustcrypto/seal`
 (`design-decisions.md` §539, §1218) -- and the vault is one file,

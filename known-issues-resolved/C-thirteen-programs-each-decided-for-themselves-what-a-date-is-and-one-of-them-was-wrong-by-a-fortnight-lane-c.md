@@ -1,4 +1,6 @@
-## Thirteen programs each decided for themselves what a date is, and one of them was wrong by a fortnight (lane C)
+## Thirteen programs each decided for themselves what a date is, and one of them was wrong by a fortnight (lane C) -- FIXED 2026-08-21
+
+**Status:** FIXED 2026-08-21 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **Found:** 2026-08-21 · **Status:** FIXED · **Lane:** C
 **Commits:** `60eec1ba2`, `12cc4ce18`, and the migration commits that follow

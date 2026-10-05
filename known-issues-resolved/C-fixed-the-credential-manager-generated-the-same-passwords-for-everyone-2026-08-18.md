@@ -1,4 +1,6 @@
-## [C] FIXED — the credential manager generated the same passwords for everyone (2026-08-18)
+## [C] FIXED — the credential manager generated the same passwords for everyone (2026-08-18) -- FIXED 2026-08-18
+
+**Status:** FIXED 2026-08-18 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **In short:** `apps/credmanager` — the app whose whole job is to make and keep
 strong passwords — built every password from a fixed starting number, `12345`,

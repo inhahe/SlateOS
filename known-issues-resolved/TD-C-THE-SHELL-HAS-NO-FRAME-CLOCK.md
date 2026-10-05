@@ -1,5 +1,7 @@
 ## TD-C-THE-SHELL-HAS-NO-FRAME-CLOCK (lane C, 2026-08-22) — RESOLVED 2026-08-22
 
+**Status:** FIXED 2026-08-22 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
+
 **In short:** Nothing on the desktop can move by itself. A menu cannot slide
 open, a window cannot fade, a progress spinner cannot spin — not because the
 code for those is missing, but because there is no heartbeat to step it with.

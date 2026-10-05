@@ -1,4 +1,6 @@
-## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- LANE C DONE 2026-09-16
+## TD-C-SETTINGS-THAT-ONLY-CONFIRM-THEMSELVES -- FIXED 2026-09-16
+
+**Status:** FIXED 2026-09-16 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **Re-read 2026-09-16: all three rows this entry left "real, open" are closed,
 two of them by work done after it was written.** Checked one at a time rather

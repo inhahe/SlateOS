@@ -1,4 +1,6 @@
-## TD-C-THE-PANE-CLOSE-ANIMATION-TEST-IS-FLAKY-UNDER-LOAD
+## TD-C-THE-PANE-CLOSE-ANIMATION-TEST-IS-FLAKY-UNDER-LOAD -- FIXED 2026-09-26
+
+**Status:** FIXED 2026-09-26 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **Date:** 2026-09-14. **Lane:** C. **FIXED 2026-09-26** -- a real-time tick
 inside the same pump, which the "ruled out" list below wrongly excluded; see

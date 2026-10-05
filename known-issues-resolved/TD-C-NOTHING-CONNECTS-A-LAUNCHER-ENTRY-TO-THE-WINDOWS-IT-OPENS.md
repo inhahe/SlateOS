@@ -1,4 +1,6 @@
-## TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS
+## TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS -- FIXED 2026-09-26
+
+**Status:** FIXED 2026-09-26 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **Date:** 2026-09-14. **Lane:** C. **FIXED 2026-09-26**, by the first of the
 three options below rather than the recommended third: the installed programs'

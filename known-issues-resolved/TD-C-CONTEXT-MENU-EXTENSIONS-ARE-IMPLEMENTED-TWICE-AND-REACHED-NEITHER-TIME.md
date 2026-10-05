@@ -1,4 +1,6 @@
-## TD-C-CONTEXT-MENU-EXTENSIONS-ARE-IMPLEMENTED-TWICE-AND-REACHED-NEITHER-TIME
+## TD-C-CONTEXT-MENU-EXTENSIONS-ARE-IMPLEMENTED-TWICE-AND-REACHED-NEITHER-TIME -- FIXED 2026-09-29
+
+**Status:** FIXED 2026-09-29 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **Date:** 2026-09-14. **Lane:** C. **FIXED 2026-09-29, by neither copy:**
 the feature was built a third way, as declarations rather than a run-time

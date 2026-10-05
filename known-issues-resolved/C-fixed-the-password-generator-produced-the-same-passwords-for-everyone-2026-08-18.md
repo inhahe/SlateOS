@@ -1,4 +1,6 @@
-## [C] FIXED — the password generator produced the same passwords for everyone (2026-08-18)
+## [C] FIXED — the password generator produced the same passwords for everyone (2026-08-18) -- FIXED 2026-08-18
+
+**Status:** FIXED 2026-08-18 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **In short:** `apps/passwordgen` generated passwords, PINs and passphrases
 from a *pseudo*-random generator seeded with the literal number 42. A seed is

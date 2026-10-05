@@ -1,4 +1,6 @@
-## `TD-C-AUTHORING-APPS-THAT-CANNOT-AUTHOR` -- **ALL THREE FIXED 2026-09-18** (lane C)
+## `TD-C-AUTHORING-APPS-THAT-CANNOT-AUTHOR` -- FIXED 2026-09-18
+
+**Status:** FIXED 2026-09-18 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **In short:** Three of our content-creation programs cannot create content.
 You can add slides, notes and diagram nodes; you cannot put a word in any of

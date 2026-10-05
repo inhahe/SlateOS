@@ -1,4 +1,6 @@
-## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
+## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- FIXED 2026-09-19
+
+**Status:** FIXED 2026-09-19 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
 and the same command on the same tree passed on the next run. Something in the

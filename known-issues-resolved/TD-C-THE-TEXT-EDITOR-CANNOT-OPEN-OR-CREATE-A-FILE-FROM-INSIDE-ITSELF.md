@@ -1,6 +1,8 @@
 ## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF -- FIXED 2026-09-14
 
-**Status: FIXED.** Ctrl+N, Ctrl+O and Ctrl+Shift+S, with File gaining New,
+**Status:** FIXED 2026-09-14 (lane C). Filed among the resolved on 2026-10-05; what follows is the entry as it stood.
+
+**Earlier status: FIXED.** Ctrl+N, Ctrl+O and Ctrl+Shift+S, with File gaining New,
 Open... and Save As.... Ctrl+S on a document with no path now asks where to put
 it instead of refusing. Four tests drive the dialog through `handle_event`, and
 the reintroduction proof fails as it should.

@@ -3333,13 +3333,11 @@ mod tests {
         for (what, s) in screens(&p) {
             let drawn = every_color(&s.render(&p));
             for (name, hex) in deleted {
-                // `CRUST` is exempt: `#11111B` is also what `readable_on`
-                // answers for a pale fill, so the Sign In label legitimately
-                // draws it whenever the accent is light. That hole is named
-                // rather than papered over — see `palette_check`'s module docs.
-                if name == "CRUST" {
-                    continue;
-                }
+                // `CRUST` included: it was exempt until 2026-10-05, when
+                // `#11111B` was also what `readable_on` answered for a pale
+                // fill, so the Sign In label drew it whenever the accent was
+                // light. `readable_on` answers `#10101A` now (design-decisions
+                // §1470), and a leftover crust is caught like the rest.
                 let rgb = (
                     ((hex >> 16) & 0xFF) as u8,
                     ((hex >> 8) & 0xFF) as u8,

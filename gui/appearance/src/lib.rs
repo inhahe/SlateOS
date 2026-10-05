@@ -5174,13 +5174,17 @@ mod tests {
         // Not pure black and white: an accented title bar with `#000` text
         // beside a taskbar with `#11111B` text is two different blacks a few
         // pixels apart, which reads as a rendering fault rather than a style.
+        // The answers are the palettes' own extremes one step further out --
+        // Mocha's crust and Latte's base, each channel moved by one -- the
+        // same colours to the eye, and values no role has, so a palette
+        // check can tell them from a leftover page colour.
         assert_eq!(
             readable_on(Color::from_hex(0xF9E2AF)),
-            Color::from_hex(0x11111B)
+            Color::from_hex(0x10101A)
         );
         assert_eq!(
             readable_on(Color::from_hex(0x1E1E2E)),
-            Color::from_hex(0xEFF1F5)
+            Color::from_hex(0xF0F2F6)
         );
         // A saturated blue is dark to the eye however bright its one channel
         // is: near-white on `#0000FF` is 7.60:1 and near-black only 2.18:1.
@@ -5188,8 +5192,16 @@ mod tests {
         // unweighted, would call this one light and put black text on it.
         assert_eq!(
             readable_on(Color::from_hex(0x0000FF)),
-            Color::from_hex(0xEFF1F5)
+            Color::from_hex(0xF0F2F6)
         );
+        // No role of either built-in palette is either answer.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (name, role) in p.roles() {
+                assert_ne!(role, DARK_EXTREME, "{name} (light {light})");
+                assert_ne!(role, LIGHT_EXTREME, "{name} (light {light})");
+            }
+        }
     }
 
     /// [`contrast_ratio`] is the WCAG ratio and not merely something shaped

@@ -369,9 +369,14 @@ fn packets_of_mov_text() {
         (text.kind, text.codec, &text.codec_tag),
         (TrackKind::Subtitle, mp4::Codec::MovText, b"tx3g")
     );
-    // Display flags, justification, background, text box, default style.
-    assert!(text.config.len() >= 30);
+    // Display flags, justification, background, text box, default style,
+    // then the font table: FFmpeg's extradata, as `ffprobe -show_entries
+    // stream=extradata_size,extradata_hash -show_data_hash MD5` gives it.
     assert_eq!(&text.config[30 + 4..30 + 8], b"ftab");
+    assert_eq!(
+        (text.config.len(), md5::md5_hex(&text.config).to_string()),
+        (68, "17972bfddf33ec44918b35c84a268606".to_owned())
+    );
 }
 
 #[test]
@@ -798,7 +803,7 @@ fn seeks_in_edit_at_shown_key() {
 }
 
 /// Every packet of a demuxer, to the end.
-fn every_packet(d: &mut Demuxer<File>) -> Vec<mp4::Packet> {
+fn every_packet<R: std::io::Read + std::io::Seek>(d: &mut Demuxer<R>) -> Vec<mp4::Packet> {
     let mut all = Vec::new();
     while let Some(p) = d.next_packet().unwrap() {
         all.push(p);
@@ -808,7 +813,9 @@ fn every_packet(d: &mut Demuxer<File>) -> Vec<mp4::Packet> {
 
 /// A track read alone (`Demuxer::select_tracks`) gives exactly the packets it
 /// gives among the others, in every fixture the demuxer opens: the others'
-/// samples, passed over unread, still take their turns.
+/// samples, passed over unread, still take their turns. Read ahead little
+/// -- as a reader of one track reads (`videocodec`'s sound and subtitles) --
+/// or a few bytes at a time, a file reads the same.
 #[test]
 fn a_track_selected_alone_gives_the_packets_it_gives_among_the_others() {
     let mut differ = Vec::new();
@@ -822,9 +829,15 @@ fn a_track_selected_alone_gives_the_packets_it_gives_among_the_others() {
             continue;
         };
         let all = every_packet(&mut d);
+        let mut ahead = Demuxer::open(File::open(data(&name)).unwrap()).unwrap();
+        ahead.set_read_ahead(7).unwrap();
+        if every_packet(&mut ahead) != all {
+            differ.push(format!("{name}: read 7 bytes ahead at a time"));
+        }
         for track in 0..d.tracks().len() {
             let mut alone = Demuxer::open(File::open(data(&name)).unwrap()).unwrap();
             alone.select_tracks(Some(&[track]));
+            alone.set_read_ahead(1024).unwrap();
             let got = every_packet(&mut alone);
             let want: Vec<_> = all.iter().filter(|p| p.track == track).cloned().collect();
             if got != want {
@@ -865,6 +878,61 @@ impl std::io::Seek for Counted {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.inner.seek(pos)
     }
+}
+
+/// A track read alone reads its own samples and nothing more: it gives its
+/// own packets alone, and, read a byte ahead at a time, the bytes it reads
+/// once open are the bytes of those packets -- the others' samples are not
+/// read and let go.
+#[test]
+fn a_track_selected_alone_reads_its_own_samples_alone() {
+    let mut differ = Vec::new();
+    let mut checked = 0;
+    for entry in std::fs::read_dir(data("")).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if !(name.ends_with(".mp4") || name.ends_with(".mov")) {
+            continue;
+        }
+        let Ok(d) = Demuxer::open(File::open(data(&name)).unwrap()) else {
+            continue;
+        };
+        if d.tracks().len() < 2 {
+            continue;
+        }
+        for track in 0..d.tracks().len() {
+            let read = std::rc::Rc::new(std::cell::Cell::new((0, 0)));
+            let source = Counted {
+                inner: File::open(data(&name)).unwrap(),
+                read: read.clone(),
+            };
+            let mut alone = Demuxer::open(source).unwrap();
+            alone.select_tracks(Some(&[track]));
+            alone.set_read_ahead(1).unwrap();
+            read.set((0, 0));
+            let got = every_packet(&mut alone);
+            if let Some(p) = got.iter().find(|p| p.track != track) {
+                differ.push(format!(
+                    "{name} track {track}: gave track {}'s packet",
+                    p.track
+                ));
+            }
+            let own: usize = got.iter().map(|p| p.data.len()).sum();
+            let (bytes, _) = read.get();
+            if bytes != own as u64 {
+                differ.push(format!(
+                    "{name} track {track}: {bytes} bytes read for {own}"
+                ));
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "{} of {checked} differ:\n{}",
+        differ.len(),
+        differ.join("\n")
+    );
+    assert!(checked >= 16, "only {checked} tracks checked");
 }
 
 /// How much of a real film each track read alone reads, at each read-ahead:

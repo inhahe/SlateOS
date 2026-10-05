@@ -275,4 +275,16 @@ mod tests {
         assert_eq!(video_codec(*b"raw "), Some(Codec::Other));
         assert_eq!(audio_codec(*b"zzzz"), None);
     }
+
+    #[test]
+    fn a_code_is_subtitles_by_ffmpegs_table() {
+        // 3GPP timed text, as MP4 and QuickTime name it.
+        assert_eq!(subtitle_codec(*b"tx3g"), Some(Codec::MovText));
+        assert_eq!(subtitle_codec(*b"text"), Some(Codec::MovText));
+        // Subtitles, but none read here.
+        assert_eq!(subtitle_codec(*b"c608"), Some(Codec::Other));
+        // Not in FFmpeg's table: a data track with these stays one.
+        assert_eq!(subtitle_codec(*b"wvtt"), None);
+        assert_eq!(subtitle_codec(*b"avc1"), None);
+    }
 }

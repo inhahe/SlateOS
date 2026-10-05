@@ -97,6 +97,7 @@ mod modes;
 // Generated from libvpx by `tools/gen_tables.py`, which formats what it
 // writes, so regenerating and diffing compares like with like.
 mod tables;
+mod threading;
 mod tokens;
 
 pub use decoder::{DEFAULT_MAX_PIXELS, Decoder, Picture, PlaneView};

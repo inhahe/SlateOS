@@ -42,12 +42,14 @@ const PROBE: u64 = 1 << 20;
 const EBML: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 
 /// How far ahead a reader of one small track -- sound, subtitles -- reads a
-/// Matroska file, where it passes over most of the bytes: each block passed
-/// over costs a read of this much past it. Measured on a minute of 1080p
-/// film at 5 Mbit/s (`gui/video/matroska/tests/beyond_ffprobe.rs`,
-/// `film_read_track_by_track`): its sound or its subtitles alone read 82% of
-/// the file 64 KiB ahead, 7.7% 2 KiB ahead and 4.3% 1 KiB ahead, at about a
-/// read a video frame; 512 bytes ahead read no less, in twice the reads.
+/// Matroska or MP4 file, where it passes over most of the bytes: each run of
+/// the others' passed over costs a read of this much past it. Measured on a
+/// minute of 1080p film at 5 Mbit/s (`film_read_track_by_track` in
+/// `gui/video/matroska/tests/beyond_ffprobe.rs` and
+/// `gui/video/mp4/tests/fixtures.rs`): its sound or its subtitles alone read
+/// 82% of the file 64 KiB ahead, 15% 4 KiB ahead and 4% 1 KiB ahead, at
+/// about a read a video frame; 512 bytes ahead read no less, in twice the
+/// reads.
 pub(crate) const PASSING_READ_AHEAD: usize = 1024;
 
 /// A file being read.
@@ -133,8 +135,9 @@ pub(crate) struct Sample {
     /// MP4's edit list leaves out.
     pub discard: bool,
     pub data: Vec<u8>,
-    /// WebM's alpha channel for the frame: its `BlockAdditional` 1.
-    pub alpha: Option<Vec<u8>>,
+    /// Matroska's `BlockAdditional` 1: for a WebM video frame, its alpha
+    /// channel; for an `S_TEXT/WEBVTT` cue, its settings and identifier.
+    pub addition: Option<Vec<u8>>,
     /// The codec setup this packet and those after it decode with, where it
     /// changes (an MP4 track of several sample entries).
     pub new_config: Option<Vec<u8>>,
@@ -369,11 +372,13 @@ impl<R: Read + Seek> Container<R> {
     }
 
     /// From here on, give out only the packets of the track `key` names, and
-    /// read ahead `read_ahead` bytes at a time if given. Matroska's other
-    /// blocks are passed over unread once their header names their track, as
-    /// FFmpeg passes over a discarded stream's (`matroska::Demuxer::
-    /// select_tracks`); MP4's and Ogg's other packets are read as before, for
-    /// the caller to drop.
+    /// read ahead `read_ahead` bytes at a time if given. The other tracks'
+    /// packets are passed over unread, as FFmpeg passes over a discarded
+    /// stream's: Matroska's once a block's header names its track
+    /// (`matroska::Demuxer::select_tracks`), MP4's samples without a read
+    /// (`mp4::Demuxer::select_tracks`). An Ogg file's pages carry its
+    /// streams together, and are read as before, for the caller to drop
+    /// the other streams' packets.
     ///
     /// # Errors
     ///
@@ -384,18 +389,29 @@ impl<R: Read + Seek> Container<R> {
         key: u64,
         read_ahead: Option<usize>,
     ) -> Result<(), ContainerError> {
-        if let Self::Matroska(d) = self {
-            d.select_tracks(Some(&[key]));
-            if let Some(bytes) = read_ahead {
-                d.set_read_ahead(bytes)?;
+        match self {
+            Self::Matroska(d) => {
+                d.select_tracks(Some(&[key]));
+                if let Some(bytes) = read_ahead {
+                    d.set_read_ahead(bytes)?;
+                }
             }
+            Self::Mp4(d) => {
+                if let Ok(index) = usize::try_from(key) {
+                    d.select_tracks(Some(&[index]));
+                }
+                if let Some(bytes) = read_ahead {
+                    d.set_read_ahead(bytes)?;
+                }
+            }
+            Self::Ogg(_) | Self::Flac(_) | Self::Mp3(_) => {}
         }
         Ok(())
     }
 
     /// The file's subtitle tracks, in the file's order: Matroska's, its
-    /// encrypted ones aside. MP4's text tracks are not read yet; Ogg's
-    /// (Kate) are not read, and the other files have none.
+    /// encrypted ones aside, and MP4's. Ogg's (Kate) are not read, and the
+    /// other files have none.
     pub(crate) fn subtitles(&self) -> Vec<SubtitleTrack> {
         match self {
             Self::Matroska(d) => d
@@ -416,7 +432,30 @@ impl<R: Read + Seek> Container<R> {
                     })
                 })
                 .collect(),
-            Self::Mp4(_) | Self::Ogg(_) | Self::Flac(_) | Self::Mp3(_) => Vec::new(),
+            Self::Mp4(d) => d
+                .tracks()
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.kind == mp4::TrackKind::Subtitle)
+                .filter_map(|(i, t)| {
+                    Some(SubtitleTrack {
+                        number: u64::from(t.id),
+                        key: u64::try_from(i).ok()?,
+                        format: if t.codec == mp4::Codec::MovText {
+                            SubtitleFormat::MovText
+                        } else {
+                            SubtitleFormat::Other
+                        },
+                        codec_id: t.codec_tag.to_vec(),
+                        config: t.config.clone(),
+                        enabled: true,
+                        default: t.default,
+                        forced: false,
+                        time_base: (1, u64::from(t.timescale.max(1))),
+                    })
+                })
+                .collect(),
+            Self::Ogg(_) | Self::Flac(_) | Self::Mp3(_) => Vec::new(),
         }
     }
 
@@ -466,7 +505,7 @@ impl<R: Read + Seek> Container<R> {
     pub(crate) fn next_packet(&mut self) -> Result<Option<Sample>, ContainerError> {
         match self {
             Self::Matroska(d) => Ok(d.next_packet()?.map(|p| {
-                let alpha = p
+                let addition = p
                     .additions
                     .into_iter()
                     .find(|(id, _)| *id == 1)
@@ -478,7 +517,7 @@ impl<R: Read + Seek> Container<R> {
                     keyframe: p.keyframe,
                     discard: false,
                     data: p.data,
-                    alpha,
+                    addition,
                     new_config: None,
                     discard_padding: p.discard_padding,
                     discard_samples: 0,
@@ -497,7 +536,7 @@ impl<R: Read + Seek> Container<R> {
                     keyframe: p.keyframe,
                     discard: p.discard,
                     data: p.data,
-                    alpha: None,
+                    addition: None,
                     new_config: p.new_config,
                     discard_padding: 0,
                     discard_samples: 0,
@@ -527,7 +566,7 @@ impl<R: Read + Seek> Container<R> {
                     keyframe: true,
                     discard: false,
                     data: frame.to_vec(),
-                    alpha: None,
+                    addition: None,
                     new_config: None,
                     discard_padding: 0,
                     discard_samples: p.discard_padding,
@@ -640,7 +679,7 @@ impl<R: Read + Seek> OggFile<R> {
             keyframe: true,
             discard: false,
             data: p.data,
-            alpha: None,
+            addition: None,
             new_config,
             discard_padding: 0,
             discard_samples: u64::from(p.discard_padding),

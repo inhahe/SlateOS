@@ -321,7 +321,7 @@ impl<R: Read + Seek> Video<R> {
             self.decoder.configure(config);
         }
         let alpha = if self.info.alpha {
-            sample.alpha.as_deref()
+            sample.addition.as_deref()
         } else {
             None
         };

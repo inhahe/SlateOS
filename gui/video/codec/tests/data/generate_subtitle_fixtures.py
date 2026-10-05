@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate videocodec's subtitle fixtures and their answers.
 
-Each fixture NAME.mkv (or NAME.webm) carries one text subtitle track;
+Each fixture NAME.mkv (or NAME.webm, NAME.mp4) carries one text subtitle track;
 NAME.ffmpeg.srt is what ffmpeg makes of that track with `-c:s srt`: every
 cue's start and end, and its text as SRT markup. Each cue's text is one
 question about the conversion, so a disagreement names the rule broken.
@@ -26,6 +26,12 @@ S_TEXT/SSA or Matroska's S_TEXT/WEBVTT (the text alone in the block), so
 S_TEXT/SSA as it reads S_TEXT/ASS; S_TEXT/WEBVTT this ffmpeg does not know,
 so `webvtt_mkv`'s answer is ffmpeg's for the same cues in WebM.
 
+MP4's 3GPP timed text (`tx3g`): `movtext.mp4` is ffmpeg's mov_text encoder's
+from SubRip; the others are written here, box by box (`tx3g_mp4`), for what
+that encoder never writes -- a styled default, justification, colours,
+fonts, style runs out of order. ffmpeg's SRT of each is the answer, as for
+the rest.
+
 Run from this directory, on Windows, with gyan.dev's ffmpeg (2026-03-09, git
 9b7439c31b) and MKVToolNix's mkvmerge 99.0 on PATH (or in the MKVMERGE
 environment variable): `python generate_subtitle_fixtures.py`.
@@ -33,6 +39,7 @@ environment variable): `python generate_subtitle_fixtures.py`.
 
 import os
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -293,6 +300,161 @@ WEBVTT = [
     "<b><i>x</b>y</i>z",
 ]
 
+# Cues placed by their settings, which ffmpeg ignores: (settings, text).
+WEBVTT_PLACED = [
+    ("line:0", "top by line number"),
+    ("line:-1", "bottom by line number"),
+    ("line:7", "seven lines down: the middle"),
+    ("line:50%", "middle by percentage"),
+    ("align:start position:0%", "left, as YouTube writes it"),
+    ("align:end", "right aligned"),
+    ("line:10% align:left", "top left"),
+    ("line:0 position:90% align:end", "top right"),
+    ("align:center position:20%", "centred a fifth across: left"),
+    ("vertical:rl line:0", "vertical, put where a cue without settings goes"),
+    ("line:0,bottom", "a setting the specification passes over"),
+]
+
+# --- 3GPP timed text in MP4 ---
+# Through ffmpeg's own mov_text encoder, from SubRip: the styles it writes.
+MOVTEXT = [
+    "Plain text",
+    "<i>Italic</i> and <b>bold</b> and <u>under</u>",
+    '<font size="30">big</font> text',
+    "Two\nlines",
+    "été <b>日本</b> end",
+    "<b><i>both</i></b> nested",
+]
+
+
+# Written here, sample by sample, for what ffmpeg's encoder never writes: a
+# box per cue of a tx3g sample (a StyleRecord, `styl`, `hlit`...).
+def tx3g_box(kind, *parts):
+    body = b"".join(parts)
+    return struct.pack(">I4s", 8 + len(body), kind) + body
+
+
+def tx3g_style(start, end, font=1, flags=0, size=16, rgba=0xFFFFFFFF):
+    """A StyleRecord: characters [start, end), a font ID, face flags (1 bold,
+    2 italic, 4 underline), a size and a colour."""
+    return struct.pack(">HHHBBI", start, end, font, flags, size, rgba)
+
+
+def tx3g_setup(fonts=((1, "Arial"),), across=1, down=-1, default=None):
+    """A TextSampleEntry's fields after the sample entry's header: display
+    flags, justification across (0 left, 1 centre, -1 right) and down (0
+    top, 1 middle, -1 bottom), background, text box, default style, fonts."""
+    default = default if default is not None else tx3g_style(0, 0)
+    ftab = tx3g_box(b"ftab", struct.pack(">H", len(fonts)),
+                    *[struct.pack(">HB", fid, len(name.encode())) + name.encode() for fid, name in fonts])
+    return (struct.pack(">Ibb", 0, across, down) + struct.pack(">I", 0x000000FF)
+            + struct.pack(">hhhh", 0, 0, 0, 0) + default + ftab)
+
+
+def tx3g_sample(text, *modifiers):
+    raw = text.encode()
+    return struct.pack(">H", len(raw)) + raw + b"".join(modifiers)
+
+
+def styl(*records):
+    return tx3g_box(b"styl", struct.pack(">H", len(records)), *records)
+
+
+MOVTEXT_STYLES = [
+    tx3g_sample("plain"),
+    tx3g_sample("bold italic under", styl(tx3g_style(0, 4, flags=1), tx3g_style(5, 11, flags=2),
+                                          tx3g_style(12, 17, flags=4))),
+    tx3g_sample("overlapping ranges", styl(tx3g_style(0, 6, flags=1), tx3g_style(3, 9, flags=2))),
+    tx3g_sample("red text", styl(tx3g_style(0, 3, rgba=0xFF0000FF))),
+    tx3g_sample("big text", styl(tx3g_style(0, 3, size=32))),
+    tx3g_sample("mono text", styl(tx3g_style(0, 4, font=2))),
+    tx3g_sample("aaaa  bbbb", styl(tx3g_style(6, 10, flags=1), tx3g_style(0, 4, flags=2))),
+    tx3g_sample("short", styl(tx3g_style(0, 100, flags=1))),
+    tx3g_sample("backwards", styl(tx3g_style(5, 2, flags=1))),
+    tx3g_sample("été 日本 x", styl(tx3g_style(4, 6, flags=1))),
+    tx3g_sample("highlight this", tx3g_box(b"hlit", struct.pack(">HH", 0, 4)),
+                tx3g_box(b"hclr", struct.pack(">I", 0xFFFF00FF))),
+    tx3g_sample("wrapped", tx3g_box(b"twrp", b"\x01")),
+    tx3g_sample("one\ntwo"),
+    tx3g_sample("three\r\nfour"),
+    tx3g_sample("<i>not italic</i> {\\an8} braces & amp"),
+    tx3g_sample("all flags", styl(tx3g_style(0, 3, flags=7))),
+    tx3g_sample("as default", styl(tx3g_style(0, 2))),
+    tx3g_sample("half red", styl(tx3g_style(0, 4, rgba=0xFF000080))),
+    tx3g_sample("  leading spaces"),
+    tx3g_sample("trailing spaces  "),
+    tx3g_sample("all four differ", styl(tx3g_style(0, 3, font=2, flags=1, size=30, rgba=0xFF0000FF))),
+    tx3g_sample("adjacent runs here", styl(tx3g_style(0, 8, flags=1), tx3g_style(8, 13, flags=2))),
+    tx3g_sample("mid text run here", styl(tx3g_style(4, 8, flags=1))),
+    tx3g_sample("unknown font", styl(tx3g_style(0, 7, font=9))),
+    tx3g_sample("back\\Nslash and \\h hard"),
+    struct.pack(">H", 40) + b"too long",
+    tx3g_sample("zero length run", styl(tx3g_style(2, 2, flags=1), tx3g_style(3, 6, flags=2))),
+    tx3g_sample("styl too short") + struct.pack(">I4sH", 12, b"styl", 3),
+    tx3g_sample("colour then size", styl(tx3g_style(0, 6, rgba=0x00FF00FF, size=20))),
+    tx3g_sample("  styled at the start", styl(tx3g_style(0, 4, flags=1))),
+]
+
+# A track whose default is Georgia 24, yellow, bold and italic, top left.
+MOVTEXT_DEFAULT = [
+    tx3g_sample("styled by default"),
+    tx3g_sample("plain part then styled", styl(tx3g_style(0, 10, flags=0, size=24, rgba=0xFFFFFFFF))),
+    tx3g_sample("small", styl(tx3g_style(0, 5, flags=3, size=12, rgba=0xFFFF00FF))),
+]
+
+
+def tx3g_mp4(path, entry_setup, samples):
+    """An MP4 of one 3GPP timed text track: each sample a second and a half
+    after the one before, a second long, an empty sample in each gap as
+    ffmpeg's muxer writes them."""
+    data, durations, at = [], [], 0
+    for i, s in enumerate(samples):
+        start, end = 1000 + 1500 * i, 2000 + 1500 * i
+        if start > at:
+            data.append(struct.pack(">H", 0))
+            durations.append(start - at)
+        data.append(s)
+        durations.append(end - start)
+        at = end
+    total = sum(durations)
+    identity = struct.pack(">9i", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+
+    def full(kind, version, flags, *parts):
+        return tx3g_box(kind, struct.pack(">I", (version << 24) | flags), *parts)
+
+    ftyp = tx3g_box(b"ftyp", b"isom", struct.pack(">I", 0x200), b"isom", b"iso2", b"mp41")
+    mdat = tx3g_box(b"mdat", b"".join(data))
+    entry = tx3g_box(b"tx3g", b"\0" * 6, struct.pack(">H", 1), entry_setup)
+    runs = []
+    for d in durations:
+        if runs and runs[-1][1] == d:
+            runs[-1][0] += 1
+        else:
+            runs.append([1, d])
+    stbl = tx3g_box(
+        b"stbl",
+        full(b"stsd", 0, 0, struct.pack(">I", 1), entry),
+        full(b"stts", 0, 0, struct.pack(">I", len(runs)), *[struct.pack(">II", n, d) for n, d in runs]),
+        full(b"stsc", 0, 0, struct.pack(">I", 1), struct.pack(">III", 1, len(data), 1)),
+        full(b"stsz", 0, 0, struct.pack(">II", 0, len(data)), *[struct.pack(">I", len(s)) for s in data]),
+        full(b"stco", 0, 0, struct.pack(">I", 1), struct.pack(">I", len(ftyp) + 8)),
+    )
+    dinf = tx3g_box(b"dinf", full(b"dref", 0, 0, struct.pack(">I", 1), full(b"url ", 0, 1)))
+    mdia = tx3g_box(
+        b"mdia",
+        full(b"mdhd", 0, 0, struct.pack(">IIIIHH", 0, 0, 1000, total, 0x55C4, 0)),
+        full(b"hdlr", 0, 0, struct.pack(">I4s", 0, b"sbtl"), b"\0" * 12, b"SubtitleHandler\0"),
+        tx3g_box(b"minf", full(b"nmhd", 0, 0), dinf, stbl),
+    )
+    tkhd = full(b"tkhd", 0, 3, struct.pack(">IIIII", 0, 0, 1, 0, total), b"\0" * 8,
+                struct.pack(">hhhH", 0, 0, 0, 0), identity, struct.pack(">II", 0, 0))
+    mvhd = full(b"mvhd", 0, 0, struct.pack(">IIII", 0, 0, 1000, total), struct.pack(">IH", 0x10000, 0x100),
+                b"\0" * 10, identity, b"\0" * 24, struct.pack(">I", 2))
+    moov = tx3g_box(b"moov", mvhd, tx3g_box(b"trak", tkhd, mdia))
+    with open(path, "wb") as f:
+        f.write(ftyp + mdat + moov)
+
+
 # --- Cues that overlap, for seeking: (start ms, end ms, text) ---
 OVERLAP = [
     (1000, 10000, "long, under the next two"),
@@ -403,11 +565,33 @@ DEPARTURES = {
         16: "it's A 'q'",
         # `</b>` with `<i>` innermost is passed over.
         17: '<b><i>xy</i>z</b>',
+        # Placed by their settings, as the specification lays them out, in
+        # the third of the picture each way their text's anchor falls in.
+        18: '{\\an8}top by line number',
+        20: '{\\an5}seven lines down: the middle',
+        21: '{\\an5}middle by percentage',
+        22: '{\\an1}left, as YouTube writes it',
+        23: '{\\an3}right aligned',
+        24: '{\\an7}top left',
+        25: '{\\an9}top right',
+        26: '{\\an1}centred a fifth across: left',
     },
 }
 # Matroska's WebVTT is WebM's cues, so its answers too; and mkvmerge stores
 # a cue's text without the spaces around it.
 DEPARTURES["webvtt_mkv"] = {**DEPARTURES["webvtt"], 7: 'spaced'}
+DEPARTURES["movtext_styles"] = {
+    # Timed text is plain text: `<i>` and `{\an8}` in it are characters,
+    # kept from reading as SRT markup.
+    15: '<⁠i>not italic<⁠/i> {⁠\\an8} braces & amp',
+    # And `\N` is not a line break, nor `\h` a hard space.
+    25: 'back\\⁠Nslash and \\⁠h hard',
+}
+DEPARTURES["movtext_default"] = {
+    # The run's reset to the default style does not write the place again.
+    2: '<font face="Georgia" size="24" color="#ffff00"><b><i>{\\an7}</i></b><font color="#ffffff">plain part</font>'
+       '</font><font face="Georgia" size="24" color="#ffff00"><b><i> then styled</i></b></font>',
+}
 
 
 def ms(t):
@@ -462,18 +646,24 @@ def cues_of(srt):
     return cues
 
 
-def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None):
-    """Mux `source` into NAME.container -- with ffmpeg, or with mkvmerge --
-    then write ffmpeg's SRT of it (NAME.ffmpeg.srt) and the answer (NAME.srt):
-    ffmpeg's, its DEPARTURES made. A track this ffmpeg cannot read takes its
-    SRT from fixture `answer_from`, made already, which holds the same cues."""
+def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, codec="copy"):
+    """Mux `source` into NAME.container -- with ffmpeg (`codec` its subtitle
+    codec), with mkvmerge, or, for muxer "written", by `source` itself, a
+    function writing the file -- then write ffmpeg's SRT of it
+    (NAME.ffmpeg.srt) and the answer (NAME.srt): ffmpeg's, its DEPARTURES
+    made. A track this ffmpeg cannot read takes its SRT from fixture
+    `answer_from`, made already, which holds the same cues."""
     src = os.path.join(HERE, f"{name}.source.{source_ext}")
-    write(src, source)
     out = os.path.join(HERE, f"{name}.{container}")
-    if muxer == "mkvmerge":
-        mkvmerge(out, src)
+    if muxer == "written":
+        source(out)
     else:
-        ffmpeg("-i", src, "-c:s", "copy", "-fflags", "+bitexact", "-flags", "+bitexact", out)
+        write(src, source)
+        if muxer == "mkvmerge":
+            mkvmerge(out, src)
+        else:
+            ffmpeg("-i", src, "-c:s", codec, "-fflags", "+bitexact", "-flags", "+bitexact", out)
+        os.remove(src)
     raw = os.path.join(HERE, f"{name}.ffmpeg.srt")
     if answer_from:
         shutil.copyfile(os.path.join(HERE, f"{answer_from}.ffmpeg.srt"), raw)
@@ -487,7 +677,6 @@ def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None):
         cues[number - 1][2] = text
     answer = os.path.join(HERE, f"{name}.srt")
     write(answer, "".join(f"{n}\n{times}\n{text}\n\n" for n, times, text in cues))
-    os.remove(src)
     print("wrote", out, raw, answer)
 
 
@@ -513,14 +702,26 @@ def main():
                      for i, (style, text) in enumerate(SSA))
     make("ssa", "ssa", SSA_HEADER + events, "mkv", muxer="mkvmerge")
 
-    vtt = "WEBVTT\n\n" + "".join(f"{vtt_time(1000 + 1500 * i)} --> {vtt_time(2000 + 1500 * i)}\n{text}\n\n"
-                                  for i, text in enumerate(WEBVTT))
+    cues = [("", text) for text in WEBVTT] + WEBVTT_PLACED
+    vtt = "WEBVTT\n\n" + "".join(f"{vtt_time(1000 + 1500 * i)} --> {vtt_time(2000 + 1500 * i)}"
+                                  f"{' ' + settings if settings else ''}\n{text}\n\n"
+                                  for i, (settings, text) in enumerate(cues))
     make("webvtt", "vtt", vtt, "webm")
     make("webvtt_mkv", "vtt", vtt, "mkv", muxer="mkvmerge", answer_from="webvtt")
 
     overlap = "".join(f"{i + 1}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n\n"
                       for i, (start, end, text) in enumerate(OVERLAP))
     make("overlap", "srt", overlap, "mkv")
+
+    make("movtext", "srt", srt_of(MOVTEXT), "mp4", codec="mov_text")
+    two_fonts = tx3g_setup(fonts=((1, "Arial"), (2, "Courier")))
+    make("movtext_styles", "", lambda out: tx3g_mp4(out, two_fonts, MOVTEXT_STYLES), "mp4", muxer="written")
+    georgia = tx3g_setup(fonts=((1, "Georgia"),), across=0, down=0,
+                         default=tx3g_style(0, 0, font=1, flags=3, size=24, rgba=0xFFFF00FF))
+    make("movtext_default", "", lambda out: tx3g_mp4(out, georgia, MOVTEXT_DEFAULT), "mp4", muxer="written")
+    right_middle = tx3g_setup(across=-1, down=1)
+    make("movtext_justified", "", lambda out: tx3g_mp4(out, right_middle, [tx3g_sample("right and middle")]),
+         "mp4", muxer="written")
 
 
 if __name__ == "__main__":

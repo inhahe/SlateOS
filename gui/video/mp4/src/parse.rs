@@ -10,7 +10,9 @@ use crate::Error;
 use crate::index::{DISCARD, Edit, Entry, KEYFRAME, Stream, Stsc, Tts};
 use crate::rational::{self, Q};
 use crate::reader::Reader;
-use crate::track::{Audio, Codec, Colour, Kind, Video, audio_codec, read_esds, video_codec};
+use crate::track::{
+    Audio, Codec, Colour, Kind, Video, audio_codec, read_esds, subtitle_codec, video_codec,
+};
 
 /// A box being read: its type and the size of its body (FFmpeg's
 /// `MOVAtom`).
@@ -976,6 +978,16 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
             if let Some(c) = video_codec(format) {
                 sc.kind = Kind::Video;
                 codec = c;
+            } else if sc.kind == Kind::Data
+                || (sc.kind == Kind::Subtitle && d.codec == Codec::Other)
+            {
+                // A data track -- QuickTime's `text` handler, Apple's `sbtl`
+                // -- or a subtitle one without its codec yet: its sample
+                // entry says whether it is subtitles.
+                if let Some(c) = subtitle_codec(format) {
+                    sc.kind = Kind::Subtitle;
+                    codec = c;
+                }
             }
         }
         d.codec = codec;
@@ -984,7 +996,8 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
         match kind {
             Kind::Video => self.stsd_video(start)?,
             Kind::Audio => self.stsd_audio(isom)?,
-            _ => {}
+            Kind::Subtitle => self.stsd_subtitle(format, start, size)?,
+            Kind::Data => {}
         }
         // The boxes after the entry's fields: av1C, esds, colr...
         let left = size - i64::try_from(self.r.pos() - start).unwrap_or(0);
@@ -1019,6 +1032,31 @@ impl<'a, R: Read + Seek> Parser<'a, R> {
                 d.sample_rate = sc.time_scale.cast_unsigned();
             }
             sc.stsd_count = sc.stsd_count.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// A subtitle sample entry's fields (`mov_parse_stsd_subtitle`): the
+    /// rest of the entry is the codec's setup, read whole -- for 3GPP timed
+    /// text, its display flags, justification, background colour, text box,
+    /// default style and font table. MPEG-4's `mp4s` keeps an `esds` box
+    /// instead, and ISMV's `dfxp` has none.
+    fn stsd_subtitle(&mut self, format: [u8; 4], start: u64, size: i64) -> Result<(), Error> {
+        if format == *b"mp4s" || format == *b"dfxp" {
+            return Ok(());
+        }
+        let read = self.r.pos().saturating_sub(start);
+        let left = size.saturating_sub(i64::try_from(read).unwrap_or(0));
+        let Ok(n) = u64::try_from(left) else {
+            return Ok(());
+        };
+        // FFmpeg's `mov_read_glbl` takes up to 1 GiB.
+        if n > 1 << 30 {
+            return Err(Error::Invalid("a subtitle setup over 1 GiB"));
+        }
+        let setup = self.r.bytes(n)?;
+        if let Some((_, d)) = self.last() {
+            d.config = setup;
         }
         Ok(())
     }

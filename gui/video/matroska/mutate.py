@@ -75,6 +75,10 @@ SEGMENT = "the_segment_says_its_tick_and_its_length"
 STORED = "a_track_stored_as_this_cannot_undo_is_passed_over"
 NO_KEYS = "a_seek_in_a_track_without_key_frames_fails_and_reading_goes_on"
 CUES_MET = "cues_met_while_reading_are_passed_over"
+# One track read alone (`Demuxer::select_tracks`), and the read-ahead.
+ALONE = "a_track_selected_alone_gives_the_packets_it_gives_among_the_others"
+ALONE_READS_LITTLE = "a_track_selected_alone_reads_little_of_the_others"
+ALONE_DAMAGE = "a_block_naming_no_track_is_damage_to_a_track_read_alone_too"
 # Cues the SeekHead names twice, and Cues left unused after a failure.
 SEEKS_CUES_LAST_ENTRY = "seeks_in_cues_last_entry"
 SEEKS_CUES_BROKEN = "seeks_in_cues_broken"
@@ -209,6 +213,24 @@ EBML = [
         # The allocation fails, which aborts the test binary: the harness
         # scores that a crash, not a named failure.
         ["a_size_past_the_end_is_refused_without_allocating"],
+    ),
+    (
+        "a new read-ahead reads on from where the old one had read to",
+        "        if let Err(e) = old.seek(SeekFrom::Start(self.pos)) {",
+        "        if let Err(e) = old.stream_position() {",
+        ["a_new_read_ahead_reads_on_from_where_reading_is", ALONE],
+    ),
+    (
+        "a new read-ahead keeps the old one's size",
+        "        self.inner = Some(BufReader::with_capacity(bytes, old.into_inner()));",
+        "        self.inner = Some(BufReader::with_capacity(READ_AHEAD, old.into_inner()));",
+        ["a_small_read_ahead_reads_little_past_what_is_read", ALONE_READS_LITTLE],
+    ),
+    (
+        "a read-ahead that cannot be changed loses the source",
+        "            self.inner = Some(old);\n            return Err(e.into());",
+        "            return Err(e.into());",
+        ["a_read_ahead_that_cannot_be_changed_leaves_reading_as_it_was"],
     ),
 ]
 
@@ -457,8 +479,8 @@ DEMUX = [
     ),
     (
         "a SimpleBlock of no bytes is read",
-        "let data = self.r.binary(h.size, MAX_BINARY)?;\n                        if !data.is_empty() {",
-        "let data = self.r.binary(h.size, MAX_BINARY)?;\n                        if true {",
+        "let data = self.r.binary(h.size, MAX_BINARY)?;\n                            if !data.is_empty() {",
+        "let data = self.r.binary(h.size, MAX_BINARY)?;\n                            if true {",
         [EMPTY_FRAMES],
     ),
     (
@@ -679,6 +701,42 @@ DEMUX = [
         "        self.go_to(reading)?;\n        result",
         "        result",
         [NO_KEYS],
+    ),
+    (
+        "a track not selected is read and given",
+        "    Ok(declared.iter().any(|(n, _)| *n == number) && !selected.contains(&number))",
+        "    Ok(false)",
+        [ALONE, ALONE_READS_LITTLE],
+    ),
+    (
+        "the track selected is the one passed over",
+        "&& !selected.contains(&number))",
+        "&& selected.contains(&number))",
+        [ALONE, ALONE_READS_LITTLE],
+    ),
+    (
+        "a block naming no declared track is passed over",
+        "    Ok(declared.iter().any(|(n, _)| *n == number) && !selected.contains(&number))",
+        "    Ok(!selected.contains(&number))",
+        [ALONE_DAMAGE],
+    ),
+    (
+        "a block's first bytes, read for its track, are taken for its data",
+        "    r.read_into(head)?;\n    r.seek_to(h.data)?;\n",
+        "    r.read_into(head)?;\n",
+        [ALONE, ALONE_READS_LITTLE],
+    ),
+    (
+        "a BlockGroup of a track not selected is read and given",
+        "                    passing = passed_over(r, c, declared, selected)?;",
+        "                    passing = false && passed_over(r, c, declared, selected)?;",
+        [ALONE_READS_LITTLE],
+    ),
+    (
+        "a BlockGroup passed over has its additions read",
+        "                ids::BLOCK_ADDITIONS if passing => {}\n",
+        "",
+        [ALONE_READS_LITTLE],
     ),
 ]
 

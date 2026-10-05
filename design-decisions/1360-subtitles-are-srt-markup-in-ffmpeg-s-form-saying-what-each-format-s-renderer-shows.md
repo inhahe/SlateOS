@@ -30,7 +30,7 @@ for WebVTT and the WebVTT specification.
    question (F-Q7); its behaviour was read off its output, one probe a cue.
 3. **Where ffmpeg's conversion contradicts the format's own renderer, the
    renderer wins**, and the fixture's answer is ffmpeg's with that cue
-   changed (`generate_subtitle_fixtures.py`, `DEPARTURES`: 53 of 325 cues,
+   changed (`generate_subtitle_fixtures.py`, `DEPARTURES`: 72 of 387 cues,
    each with its reason and checked by hand). The renderers:
    - **ASS and SSA: libass** (ISC licence; `ass_parse.c`, `ass_render.c` and
      `ass.c` read for the semantics, which follow VSFilter's). Every `{…}`
@@ -57,7 +57,19 @@ for WebVTT and the WebVTT specification.
    - **WebVTT: its specification.** `&nbsp;` is U+00A0 (ffmpeg writes ASS's
      `\h`); `&quot;`, `&apos;` and numeric references are their characters
      (YouTube writes every apostrophe `&#39;`); an end tag that is not the
-     innermost element's is ignored; ruby goes in parentheses after its base.
+     innermost element's is ignored; ruby goes in parentheses after its base;
+     a cue's settings (`line`, `position`, `size`, `align`), which ffmpeg
+     ignores, place it: `{\anN}` for the third of the picture each way its
+     text's anchor falls in, the anchor where the specification lays the
+     cue out.
+   - **3GPP timed text (MP4's `tx3g`): ffmpeg's `mov_text` reading**, held
+     to it over files written box by box: the default style and the
+     justification as the cue's style and place, style runs as what differs
+     from the default, a run's end a return to it. Departures: its text is
+     plain text, so `<i>`, `{\an8}` and `\N` in it are characters (ffmpeg
+     passes them on as markup); UTF-16 text, which 3GPP allows, is read
+     (ffmpeg drops the cue); an empty sample with a style box is no cue
+     (ffmpeg makes an empty one).
 4. **Text that SRT would read as markup is kept from it** by a U+2060 WORD
    JOINER, which shows nothing: after a `{` before a backslash, a backslash
    before `N`, `n` or `h`, and in WebVTT every `<` (which can only have been
@@ -88,6 +100,5 @@ for WebVTT and the WebVTT specification.
 `DEPARTURES` says, and `NAME.ffmpeg.srt` beside each `NAME.srt` keeps
 ffmpeg's own for comparison. Lane E's renderer reads `{\anN}` anywhere in a
 cue (it is written at the start), sizes in 1/288 of the picture with 16
-normal, and U+2060 as nothing. WebVTT's cue settings (placement) and MP4's
-text tracks are not read yet
-(`known-issues/F-subtitles-leave-out-webvtt-placement-and-mp4s-text.md`).
+normal, and U+2060 as nothing. What is not read yet:
+`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`.

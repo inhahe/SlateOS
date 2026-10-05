@@ -425,7 +425,9 @@ mod tests {
     )]
 
     use super::*;
+    use std::cell::Cell;
     use std::io::Cursor;
+    use std::rc::Rc;
 
     fn reader(bytes: &[u8]) -> Reader<Cursor<Vec<u8>>> {
         Reader::new(Cursor::new(bytes.to_vec())).unwrap()
@@ -552,5 +554,96 @@ mod tests {
         assert_eq!(svint_in(&[0xbf]), Some((1, 0)));
         assert_eq!(svint_in(&[0x80]), Some((1, -63)));
         assert_eq!(svint_in(&[0x5f, 0xff]), Some((2, 0)));
+    }
+
+    // --- Changing the read-ahead (`Reader::set_read_ahead`) ----------------
+
+    /// A source that counts the bytes read from it, and whose seeks fail
+    /// while it is told to fail them.
+    struct Source {
+        inner: Cursor<Vec<u8>>,
+        read: Rc<Cell<u64>>,
+        seeks_fail: Rc<Cell<bool>>,
+    }
+
+    impl Read for Source {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read
+                .set(self.read.get().saturating_add(u64::try_from(n).unwrap()));
+            Ok(n)
+        }
+    }
+
+    impl Seek for Source {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            if self.seeks_fail.get() {
+                return Err(io::ErrorKind::Other.into());
+            }
+            self.inner.seek(pos)
+        }
+    }
+
+    /// 256 KiB counting 0 to 255 over and over: a byte read from the wrong
+    /// place is a different byte.
+    fn counting() -> Vec<u8> {
+        (0..=255u8).cycle().take(256 * 1024).collect()
+    }
+
+    /// A reader of [`counting`], the count of what it reads, and the switch
+    /// that fails its seeks.
+    fn counted() -> (Reader<Source>, Rc<Cell<u64>>, Rc<Cell<bool>>) {
+        let (read, seeks_fail) = (Rc::default(), Rc::default());
+        let source = Source {
+            inner: Cursor::new(counting()),
+            read: Rc::clone(&read),
+            seeks_fail: Rc::clone(&seeks_fail),
+        };
+        (Reader::new(source).unwrap(), read, seeks_fail)
+    }
+
+    /// `n` bytes read from `r`.
+    fn take(r: &mut Reader<Source>, n: usize) -> Vec<u8> {
+        let mut v = vec![0; n];
+        r.read_into(&mut v).unwrap();
+        v
+    }
+
+    #[test]
+    fn a_new_read_ahead_reads_on_from_where_reading_is() {
+        let (mut r, _, _) = counted();
+        // The first byte read reads 64 KiB ahead of it.
+        assert_eq!(take(&mut r, 1), [0]);
+        r.set_read_ahead(7).unwrap();
+        assert_eq!(r.pos(), 1);
+        assert_eq!(take(&mut r, 20), counting()[1..21]);
+        r.seek_to(100_000).unwrap();
+        assert_eq!(take(&mut r, 4), counting()[100_000..100_004]);
+        // Back to reading far ahead, from where reading is.
+        r.set_read_ahead(READ_AHEAD).unwrap();
+        assert_eq!(take(&mut r, 300), counting()[100_004..100_304]);
+    }
+
+    #[test]
+    fn a_small_read_ahead_reads_little_past_what_is_read() {
+        let (mut r, read, _) = counted();
+        r.set_read_ahead(16).unwrap();
+        for at in (0..256 * 1024).step_by(4096) {
+            r.seek_to(at).unwrap();
+            assert_eq!(take(&mut r, 4), [0, 1, 2, 3]);
+        }
+        // 64 reads of four bytes, each reading 16 at most.
+        assert!(read.get() <= 64 * 16, "{} bytes read", read.get());
+    }
+
+    #[test]
+    fn a_read_ahead_that_cannot_be_changed_leaves_reading_as_it_was() {
+        let (mut r, _, seeks_fail) = counted();
+        assert_eq!(take(&mut r, 1), [0]);
+        seeks_fail.set(true);
+        assert_eq!(r.set_read_ahead(7), Err(Error::Io(io::ErrorKind::Other)));
+        seeks_fail.set(false);
+        assert_eq!(r.pos(), 1);
+        assert_eq!(take(&mut r, 20), counting()[1..21]);
     }
 }

@@ -1,114 +1,122 @@
 1
 00:00:01,000 --> 00:00:02,000
-Plain cue
+plain
 
 2
 00:00:02,500 --> 00:00:03,500
-<i>Italic</i> <b>bold</b> <u>under</u>
+<b>bold</b> <i>italic</i> <u>under</u>
 
 3
 00:00:04,000 --> 00:00:05,000
-class Voice lang
+overlapping ranges
 
 4
 00:00:05,500 --> 00:00:06,500
-& < > x\hy ‎l ‏r &quot;q&quot;
+<font color="#ff0000">red</font> text
 
 5
 00:00:07,000 --> 00:00:08,000
-漢kan timed
+<font size="32">big</font> text
 
 6
 00:00:08,500 --> 00:00:09,500
-Two
-lines
+<font face="Courier">mono</font> text
 
 7
 00:00:10,000 --> 00:00:11,000
-spaced   
+aaaa  bbbb
 
 8
 00:00:11,500 --> 00:00:12,500
-<b><i>nested</i></b> <i>unclosed</i>
+<b>short</b>
 
 9
 00:00:13,000 --> 00:00:14,000
-voice with class
+backwards
 
 10
 00:00:14,500 --> 00:00:15,500
-two classes
+été <b>日本</b> x
 
 11
 00:00:16,000 --> 00:00:17,000
-été 日本語
+highlight this
 
 12
 00:00:17,500 --> 00:00:18,500
-<b>bold
-across lines</b>
+wrapped
 
 13
 00:00:19,000 --> 00:00:20,000
-brace \{{}\⁠an8} and backslash \⁠N here
+one
+two
 
 14
 00:00:20,500 --> 00:00:21,500
-<i>classed italic</i>
+three
+four
 
 15
 00:00:22,000 --> 00:00:23,000
-a  d
+<⁠i>not italic<⁠/i> {⁠\an8} braces & amp
 
 16
 00:00:23,500 --> 00:00:24,500
-it&#39;s &#x41; &apos;q&apos;
+<b><i><u>all</u></i></b> flags
 
 17
 00:00:25,000 --> 00:00:26,000
-<b><i>x</i></b>yz
+as default
 
 18
 00:00:26,500 --> 00:00:27,500
-top by line number
+<font color="#ff0000">half</font> red
 
 19
 00:00:28,000 --> 00:00:29,000
-bottom by line number
+leading spaces
 
 20
 00:00:29,500 --> 00:00:30,500
-seven lines down: the middle
+trailing spaces  
 
 21
 00:00:31,000 --> 00:00:32,000
-middle by percentage
+<b><font size="30"><font face="Courier"><font color="#ff0000">all</font></font></font></b> four differ
 
 22
 00:00:32,500 --> 00:00:33,500
-left, as YouTube writes it
+<b>adjacent</b><i> runs</i> here
 
 23
 00:00:34,000 --> 00:00:35,000
-right aligned
+mid <b>text</b> run here
 
 24
 00:00:35,500 --> 00:00:36,500
-top left
+unknown font
 
 25
 00:00:37,000 --> 00:00:38,000
-top right
+back\⁠Nslash and \⁠h hard
 
 26
 00:00:38,500 --> 00:00:39,500
-centred a fifth across: left
+too long
 
 27
 00:00:40,000 --> 00:00:41,000
-vertical, put where a cue without settings goes
+zer<i>o l</i>ength run
 
 28
 00:00:41,500 --> 00:00:42,500
-a setting the specification passes over
+styl too short
+
+29
+00:00:43,000 --> 00:00:44,000
+<font size="20"><font color="#00ff00">colour</font></font> then size
+
+30
+00:00:44,500 --> 00:00:45,500
+<b>  st</b>yled at the start
 

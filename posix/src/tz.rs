@@ -110,7 +110,7 @@ impl Drop for Locked {
 /// Bytes of [`ARENA`]: every distinct zone name a process meets, kept for the
 /// life of the process as glibc keeps them. tzdata has under 300 distinct
 /// designations, and suffixes are shared, so this is many times enough.
-pub const ARENA_CAP: usize = 8 * 1024;
+const ARENA_CAP: usize = 8 * 1024;
 
 /// The names, each NUL-terminated, one after another.
 static mut ARENA: [u8; ARENA_CAP] = [0; ARENA_CAP];
@@ -240,7 +240,7 @@ const RULE_ZERO: Rule = Rule {
 
 /// Bytes of a `TZ` value [`tzset_internal`] remembers to compare the next one
 /// with. A longer one is read again at every `tzset` (see the module docs).
-pub const OLD_TZ_CAP: usize = 1024;
+const OLD_TZ_CAP: usize = 1024;
 
 /// `tzname`, `timezone` and `daylight` as glibc's code leaves them; written
 /// out to the C-visible variables in [`crate::time`] when a call returns.

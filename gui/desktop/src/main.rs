@@ -48,7 +48,8 @@ fn usage() {
     println!("Connects to the compositor named by --display, or by SLATE_DISPLAY,");
     println!("or to the default local display.");
     println!();
-    println!("  --display ADDR   the compositor to connect to");
+    println!("  --display ADDR   the compositor to connect to: HOST:PORT, or");
+    println!("                   service:NAME for a SlateOS service");
     println!("  -h, --help       this message");
     println!("  -V, --version    version");
 }
@@ -102,6 +103,31 @@ fn decide(args: &[String]) -> Wanted {
     Wanted::Run
 }
 
+/// Where the desktop looked for its compositor, in words a person can act
+/// on: the display it was given; else the one `SLATE_DISPLAY` names
+/// (`variable`, read only when the variable is set); else the default --
+/// which on SlateOS is the display service, tried before the TCP address.
+fn where_looked(
+    given: Option<&str>,
+    variable: Option<std::io::Result<String>>,
+    on_slateos: bool,
+) -> String {
+    use guiremote::socket::DEFAULT_DISPLAY;
+    if let Some(given) = given {
+        return given.to_owned();
+    }
+    match variable {
+        Some(Ok(named)) => named,
+        // Set, and unreadable: the error that follows says why.
+        Some(Err(_)) => format!("the display {} names", oswindow::DISPLAY_VAR),
+        None if on_slateos => format!(
+            "the default display (the service {}, then {DEFAULT_DISPLAY})",
+            guiremote::channel::DISPLAY_SERVICE
+        ),
+        None => DEFAULT_DISPLAY.to_owned(),
+    }
+}
+
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     match decide(&raw) {
@@ -128,23 +154,26 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // `connect_to_display`, which takes what SLATE_DISPLAY takes -- an address,
+    // or `service:NAME` for a SlateOS service -- so `--display` and the
+    // variable cannot come to mean different things.
     let link = match args.display.as_deref() {
-        Some(addr) => oswindow::connect_to(addr),
+        Some(display) => oswindow::connect_to_display(display),
         None => oswindow::connect(),
     };
     let link = match link {
         Ok(link) => link,
         Err(e) => {
-            // The *resolved* address, named rather than described.
-            // "Connection refused" without it is the one diagnostic a user
-            // cannot act on, because the address may have come from
-            // SLATE_DISPLAY -- which is exactly the thing they cannot see.
-            let where_ = match args.display.clone() {
-                Some(addr) => addr,
-                None => guiremote::socket::display_addr()
-                    .unwrap_or_else(|_| String::from("the default display")),
-            };
-            eprintln!("desktop: cannot reach the compositor at {where_}: {e}");
+            // Where it looked, named rather than described: "connection
+            // refused" without it is the one diagnostic a user cannot act on,
+            // because the display may have come from SLATE_DISPLAY -- which is
+            // exactly the thing they cannot see.
+            let looked = where_looked(
+                args.display.as_deref(),
+                std::env::var_os(oswindow::DISPLAY_VAR).map(|_| guiremote::socket::display_addr()),
+                cfg!(all(target_os = "linux", target_vendor = "slateos")),
+            );
+            eprintln!("desktop: cannot reach the compositor at {looked}: {e}");
             return ExitCode::from(1);
         }
     };
@@ -242,7 +271,34 @@ fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Wanted, decide};
+    use super::{Wanted, decide, where_looked};
+
+    /// **A compositor that cannot be reached is named where it was looked
+    /// for**: the display given, the one `SLATE_DISPLAY` names, or the
+    /// default -- on SlateOS, the service before the address
+    /// (`requests/f-c-the-desktops-display-argument-should-take-a-service-too.md`).
+    #[test]
+    fn where_it_looked_is_said() {
+        let named = || Some(Ok(String::from("service:org.example.Second")));
+        assert_eq!(
+            where_looked(Some("10.0.0.2:7373"), named(), true),
+            "10.0.0.2:7373"
+        );
+        assert_eq!(
+            where_looked(None, named(), true),
+            "service:org.example.Second"
+        );
+        let unreadable = Some(Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)));
+        assert_eq!(
+            where_looked(None, unreadable, false),
+            "the display SLATE_DISPLAY names"
+        );
+        assert_eq!(
+            where_looked(None, None, true),
+            "the default display (the service org.slateos.Display, then 127.0.0.1:7373)"
+        );
+        assert_eq!(where_looked(None, None, false), "127.0.0.1:7373");
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()

@@ -1,6 +1,6 @@
 ## TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT
 
-**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as unfixed. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
 
 **What.** `ScaledFont::shape` returns glyphs in logical order for every
 script. For Arabic and Hebrew the caller therefore gets the glyphs in the

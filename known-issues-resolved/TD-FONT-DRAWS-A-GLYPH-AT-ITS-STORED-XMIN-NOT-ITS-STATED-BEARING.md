@@ -1,5 +1,7 @@
 ## TD-FONT-DRAWS-A-GLYPH-AT-ITS-STORED-XMIN-NOT-ITS-STATED-BEARING
 
+**Status:** FIXED 2026-08-14 (lane C) -- see **Fixed** below. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
+
 *Filed and fixed 2026-08-14 (lane C).*
 
 `Face::outline` returned a `glyf` glyph's points exactly as stored, and

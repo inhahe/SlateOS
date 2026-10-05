@@ -1,5 +1,7 @@
 ## TD-FONT-A-ZEROED-MARK-IS-NOT-PARKED-ON-ITS-BASE -- 2026-09-17
 
+**Status:** FIXED 2026-09-17 (lane C) -- every Tibetan case and the supplementary corpus agree with HarfBuzz; the one default-corpus case left, Segoe UI Variable's CGJ, is the deliberate divergence described at the end. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
+
 **In short:** on a font that cannot draw a script at all, HarfBuzz tucks that
 script's combining marks back onto the letter they belong to and we leave them
 where the pen was. Every glyph involved is a missing-glyph box, so nothing

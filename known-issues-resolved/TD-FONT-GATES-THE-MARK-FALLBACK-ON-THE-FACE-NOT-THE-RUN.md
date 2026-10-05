@@ -1,5 +1,7 @@
 ## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-FACE-NOT-THE-RUN
 
+**Status:** FIXED 2026-08-14 (lane C); the residual it left, legacy kerning for a run `GPOS` is refused, was closed the same day by `TD-FONT-DECIDES-LEGACY-KERNING-PER-FACE-NOT-PER-RUN`. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
+
 **What.** `ScaledFont::shape` decides whether marks have to be placed by
 measurement with one boolean for the whole call:
 

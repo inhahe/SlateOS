@@ -1,6 +1,6 @@
 ## TD-FONT-FALLBACK-CLASSES-SCRIPTS-IT-NEVER-PLACES
 
-**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as unfixed. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
 
 **What.** `fallback::attach_class` carries position classes for scripts
 `fallback::positions_marks` always refuses, so those arms can never run.

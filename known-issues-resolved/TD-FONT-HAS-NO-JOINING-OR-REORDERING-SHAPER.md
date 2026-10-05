@@ -1,5 +1,7 @@
 ## TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER
 
+**Status:** RESOLVED -- the joining and Indic shapers on 2026-08-14, and Khmer, Myanmar, Thai and Lao and the Universal Shaping Engine since (`TD-FONT-HAS-NO-UNIVERSAL-SHAPING-ENGINE`, resolved). Each residual below is answered further down. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
+
 **What.** Features are chosen by tag from a fixed list — `ccmp`, `locl`,
 `liga`, `rlig`, `clig`, `calt`. The features every complex script actually
 needs are not chosen that way: Arabic's `init`/`medi`/`fina`/`isol` are decided

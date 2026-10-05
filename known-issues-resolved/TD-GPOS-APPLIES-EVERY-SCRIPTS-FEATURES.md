@@ -1,6 +1,6 @@
 ## TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES
 
-**Status:** FIXED 2026-08-16 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+**Status:** FIXED 2026-08-16 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as unfixed. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
 
 **What.** The `GSUB` half of the table walk now selects features by the run's
 script. The `GPOS` half does not: `otl::feature_subtables` takes the union over

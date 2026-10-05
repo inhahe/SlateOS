@@ -1,6 +1,6 @@
 ## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
 
-**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as unfixed. The positions it left unresolved, at 249, on the pointed-Hebrew and meteg strings agree with HarfBuzz on every host face since `GPOS` types 7 and 8 (`TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING`). Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
 
 **What.** Unicode gives Hebrew points the canonical combining classes 10–26
 and Arabic vowel signs 27–36. Those numbers are an *ordering*, not a place on

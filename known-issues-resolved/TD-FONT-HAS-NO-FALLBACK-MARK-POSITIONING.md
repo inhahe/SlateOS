@@ -1,6 +1,6 @@
 ## TD-FONT-HAS-NO-FALLBACK-MARK-POSITIONING
 
-**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as unfixed. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
 
 **What.** A combining mark is placed on its base by the `GPOS` `mark` feature
 (lookup types 4 and 6), which `mark.rs` implements. A face that has no such

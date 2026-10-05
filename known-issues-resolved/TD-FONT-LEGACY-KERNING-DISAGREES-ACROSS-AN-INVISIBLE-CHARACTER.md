@@ -1,5 +1,7 @@
 ## TD-FONT-LEGACY-KERNING-DISAGREES-ACROSS-AN-INVISIBLE-CHARACTER -- 2026-09-17
 
+**Status:** RESOLVED 2026-09-17 (lane C) -- the cause was how a legacy kern is split between the pair, not the invisible character; see the resolution below. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
+
 **In short:** when an invisible character sits between two letters that would
 otherwise kern — a soft hyphen, a zero-width space, a joiner — we put the
 following letter in a slightly different place than HarfBuzz does. Nobody can

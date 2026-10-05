@@ -1,5 +1,7 @@
 ## TD-FONT-DECIDES-MARK-NESS-FROM-THE-COMBINING-CLASS
 
+**Status:** FIXED 2026-08-14 (lane C) -- see **Fixed** below. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
+
 **What.** On a face with no `GPOS`, `scaled.rs` settles whether a glyph is a
 combining mark with `synthesize && glyph.klass != 0`, and `klass` is
 `fallback::attach_class(ch)` — a *combining class*, and only stored at all

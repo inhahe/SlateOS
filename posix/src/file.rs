@@ -7070,7 +7070,7 @@ pub extern "C" fn __getcwd_chk(buf: *mut u8, size: SizeT, buflen: SizeT) -> *mut
     } else {
         size.min(buflen)
     };
-    crate::unistd::getcwd(buf, size)
+    crate::unistd::copy_cwd(buf, size)
 }
 
 /// `__realpath_chk` — fortified `realpath`.

@@ -732,36 +732,12 @@ pub(crate) fn set_cwd_for_test(path: &[u8]) {
 // Functions
 // ---------------------------------------------------------------------------
 
-/// Get the current working directory.
-///
-/// Copies the absolute pathname of the CWD into `buf` (null-terminated).
-/// Returns `buf` on success, null on error with errno set.
-///
-/// # A null `buf` allocates
-///
-/// `getcwd(NULL, size)` is the GNU "allocate for me" form, which glibc, musl
-/// and the BSDs all support, and which bash depends on: `builtins/common.c`
-/// asks for `getcwd (0, PATH_MAX)` and falls back to `getcwd (0, 0)`.  The
-/// result is a fresh `malloc` block that the caller must `free` — `size` bytes
-/// when `size > 0`, otherwise exactly the path's length plus its terminator.
-///
-/// This used to be refused with `EINVAL`, and bash said so on every boot
-/// (`shell-init: error retrieving current directory: getcwd: cannot access
-/// parent directories: Invalid argument`) while the rung that ran it stayed
-/// green, because it asserted bash's output and never its stderr
-/// (`requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`).
-/// The one-branch cause was that a null `buf` and a zero `size` were rejected
-/// together, when only the pair "non-null `buf`, zero `size`" is an error.
-///
-/// # Errors
-///
-/// - `EINVAL` — `buf` is non-null and `size` is 0 (POSIX).
-/// - `ERANGE` — `size` is non-zero and too small for the CWD path plus its
-///   null terminator, in either form.  With a null `buf` this is checked
-///   before allocating, so a refused call allocates nothing.
-/// - `ENOMEM` — `buf` is null and the allocation failed.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
+/// `getcwd`'s work, which is what this library itself calls --
+/// `get_current_dir_name`, `getwd`, `__getcwd_chk` -- rather than `getcwd`,
+/// as glibc's own callers use an internal name: a program may define
+/// `getcwd` itself, and that changes what the program's calls reach and
+/// nothing else. See `getcwd` for what it does.
+pub(crate) fn copy_cwd(buf: *mut u8, size: SizeT) -> *mut u8 {
     // SAFETY: Single-threaded per-process access to CWD state; the invariant on
     // `cwd_buf_ptr` is that its first `*cwd_len_ptr()` bytes are the path.
     let cwd = unsafe {
@@ -812,6 +788,48 @@ pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
 
     dst
 }
+
+/// Own archive member -- bash and gnulib's getcwd module define `getcwd`
+/// themselves where they judge ours wanting, and bash, cross-compiled
+/// with no answer to give its configure, did until 2026-10-01. See
+/// string.rs's module header.
+mod gnu_getcwd {
+    use super::*;
+
+    /// Get the current working directory.
+    ///
+    /// Copies the absolute pathname of the CWD into `buf` (null-terminated).
+    /// Returns `buf` on success, null on error with errno set.
+    ///
+    /// # A null `buf` allocates
+    ///
+    /// `getcwd(NULL, size)` is the GNU "allocate for me" form, which glibc, musl
+    /// and the BSDs all support, and which bash depends on: `builtins/common.c`
+    /// asks for `getcwd (0, PATH_MAX)` and falls back to `getcwd (0, 0)`.  The
+    /// result is a fresh `malloc` block that the caller must `free` — `size` bytes
+    /// when `size > 0`, otherwise exactly the path's length plus its terminator.
+    ///
+    /// This used to be refused with `EINVAL`, and bash said so on every boot
+    /// (`shell-init: error retrieving current directory: getcwd: cannot access
+    /// parent directories: Invalid argument`) while the rung that ran it stayed
+    /// green, because it asserted bash's output and never its stderr
+    /// (`requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`).
+    /// The one-branch cause was that a null `buf` and a zero `size` were rejected
+    /// together, when only the pair "non-null `buf`, zero `size`" is an error.
+    ///
+    /// # Errors
+    ///
+    /// - `EINVAL` — `buf` is non-null and `size` is 0 (POSIX).
+    /// - `ERANGE` — `size` is non-zero and too small for the CWD path plus its
+    ///   null terminator, in either form.  With a null `buf` this is checked
+    ///   before allocating, so a refused call allocates nothing.
+    /// - `ENOMEM` — `buf` is null and the allocation failed.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
+        copy_cwd(buf, size)
+    }
+}
+pub use gnu_getcwd::getcwd;
 
 /// Change the current working directory.
 ///
@@ -4796,7 +4814,7 @@ pub unsafe extern "C" fn tmpnam_r(s: *mut u8) -> *mut u8 {
 /// every stale `$PWD` would match.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn get_current_dir_name() -> *mut u8 {
-    getcwd(core::ptr::null_mut(), 0)
+    copy_cwd(core::ptr::null_mut(), 0)
 }
 
 // ---------------------------------------------------------------------------

@@ -246,7 +246,7 @@ pub(crate) unsafe fn path_search(
     let mut d = dir;
     if try_tmpdir {
         // SAFETY: a C string.
-        let env = unsafe { crate::environ::secure_getenv(c"TMPDIR".as_ptr().cast()) };
+        let env = unsafe { crate::environ::secure_lookup(c"TMPDIR".as_ptr().cast()) };
         if !env.is_null() && dir_exists(env) {
             d = env;
         } else if dir.is_null() || !dir_exists(dir) {

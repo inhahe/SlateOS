@@ -250,6 +250,19 @@ STRICT_FAMILIES: dict[str, frozenset[str]] = {
             "obstack_exit_failure",
         }
     ),
+    # The environment, getcwd and mktime, each alone (lane D, 2026-10-01):
+    # bash replaces getenv, putenv, setenv and unsetenv as one family, but
+    # gnulib's modules replace them one at a time, so a member holding two
+    # would be one a program with gnulib's setenv cannot decline when it
+    # calls this library's unsetenv. See REPLACEABLE's note on them.
+    "getenv": frozenset({"getenv"}),
+    "setenv": frozenset({"setenv"}),
+    "unsetenv": frozenset({"unsetenv"}),
+    "putenv": frozenset({"putenv"}),
+    "clearenv": frozenset({"clearenv"}),
+    "secure_getenv": frozenset({"secure_getenv"}),
+    "getcwd": frozenset({"getcwd"}),
+    "mktime": frozenset({"mktime"}),
 }
 
 # CHECK 2 (broad, generalising): no single member may define both a name that
@@ -364,6 +377,16 @@ REPLACEABLE = frozenset(
         "argp_err_exit_status",
         "getsubopt", "timegm", "strptime",
         "qsort_r", "timespec_get",
+        # the environment, getcwd and mktime (lane D, 2026-10-01): bash's
+        # lib/sh defines getenv, putenv, setenv and unsetenv -- always, as on
+        # Linux -- and getcwd and mktime where its cross configure guessed
+        # ours broken, and links them ahead of the C library; gnulib's
+        # setenv, unsetenv, putenv, secure_getenv, getcwd and mktime modules
+        # define theirs where they judge the C library's wanting. Each is a
+        # STRICT_FAMILIES entry, posix::environ's, posix::unistd's or
+        # posix::time's own gnu_* member.
+        "getenv", "setenv", "unsetenv", "putenv", "clearenv", "secure_getenv",
+        "getcwd", "mktime",
     }
 )
 
@@ -382,7 +405,9 @@ UNAVOIDABLE = frozenset(
         "printf", "fprintf", "snprintf", "vfprintf", "puts", "putchar",
         "fopen", "fclose", "fread", "fwrite", "fflush",
         "read", "write", "open", "close",
-        "getenv", "setenv", "environ",
+        # getenv and setenv were here until 2026-10-01, when bash showed a
+        # program may replace them (REPLACEABLE, above); environ stays.
+        "environ",
         "exit", "abort",
     }
 )

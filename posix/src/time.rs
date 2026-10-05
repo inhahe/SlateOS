@@ -1043,29 +1043,48 @@ fn secs_to_local_tm(secs: TimeT, tm: &mut Tm) -> bool {
     crate::tz::localtime(secs, tm, false)
 }
 
-/// Convert broken-down **local** time to time_t, honouring `TZ`.
-///
-/// glibc's `mktime` ([`crate::tz::mktime`]): `tzset`, then a search from the
-/// offset the previous call found. Every field may be out of range -- a 32nd
-/// of January, a -1st hour -- and the fields are rewritten to describe the
-/// instant found, `tm_wday` and `tm_yday` included. `tm_isdst` negative lets
-/// the zone decide; zero or positive asks for standard or daylight time and
-/// gets the nearest offset of that kind; a time a spring-forward skipped is
-/// the instant the gap's size away.
-///
-/// When no instant can be found -- the year does not fit `tm_year` -- the
-/// result is -1 with `errno` `EOVERFLOW` and `*tm` is left as it was.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
+/// `mktime` on the caller's pointer -- the null check and `EOVERFLOW`
+/// around [`mktime_tm`] -- for `mktime` and `timelocal`, so that neither
+/// calls the other by its exported name: a program may define `mktime`
+/// itself, and that changes what the program's calls reach and nothing
+/// else.
+fn mktime_ptr(tm: *mut Tm) -> TimeT {
     if tm.is_null() {
         return -1;
     }
+    // SAFETY: non-null, and the caller's `struct tm`, which this call may
+    // rewrite.
     let t = unsafe { &mut *tm };
     mktime_tm(t).unwrap_or_else(|| {
         crate::errno::set_errno(crate::errno::EOVERFLOW);
         -1
     })
 }
+
+/// Own archive member -- bash and gnulib's mktime module define `mktime`
+/// themselves where they judge ours wanting, as bash's cross configure did
+/// until 2026-10-01. See string.rs's module header.
+mod gnu_mktime {
+    use super::*;
+
+    /// Convert broken-down **local** time to time_t, honouring `TZ`.
+    ///
+    /// glibc's `mktime` ([`crate::tz::mktime`]): `tzset`, then a search from the
+    /// offset the previous call found. Every field may be out of range -- a 32nd
+    /// of January, a -1st hour -- and the fields are rewritten to describe the
+    /// instant found, `tm_wday` and `tm_yday` included. `tm_isdst` negative lets
+    /// the zone decide; zero or positive asks for standard or daylight time and
+    /// gets the nearest offset of that kind; a time a spring-forward skipped is
+    /// the instant the gap's size away.
+    ///
+    /// When no instant can be found -- the year does not fit `tm_year` -- the
+    /// result is -1 with `errno` `EOVERFLOW` and `*tm` is left as it was.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
+        mktime_ptr(tm)
+    }
+}
+pub use gnu_mktime::mktime;
 
 /// `mktime`'s work, for `mktime` and `getdate`.
 fn mktime_tm(t: &mut Tm) -> Option<TimeT> {
@@ -1087,6 +1106,8 @@ mod gnu_timegm {
         if tm.is_null() {
             return -1;
         }
+        // SAFETY: non-null, and the caller's `struct tm`, which this call may
+        // rewrite.
         let t = unsafe { &mut *tm };
         let Some(secs) = tm_to_secs(t) else {
             crate::errno::set_errno(crate::errno::EOVERFLOW);
@@ -1114,7 +1135,7 @@ fn set_utc_zone(tm: &mut Tm) {
 /// BSD/GNU extension; a synonym for `mktime`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timelocal(tm: *mut Tm) -> TimeT {
-    mktime(tm)
+    mktime_ptr(tm)
 }
 
 /// Convert broken-down time to string.
@@ -2719,8 +2740,8 @@ pub unsafe extern "C" fn getdate_r(string: *const u8, tp: *mut Tm) -> i32 {
         return 7;
     }
     // SAFETY: the name is a NUL-terminated literal.
-    let path = unsafe { crate::environ::getenv(c"DATEMSK".as_ptr().cast()) };
-    // SAFETY: `getenv` returns NULL or a NUL-terminated value.
+    let path = unsafe { crate::environ::lookup(c"DATEMSK".as_ptr().cast()) };
+    // SAFETY: `lookup` returns NULL or a NUL-terminated value.
     if path.is_null() || unsafe { *path } == 0 {
         return 1;
     }

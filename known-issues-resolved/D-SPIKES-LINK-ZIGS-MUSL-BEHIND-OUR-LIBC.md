@@ -1,6 +1,6 @@
 ## D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC — every port's final link has zig's musl `libc.a` on it, after ours, so a function our libc lacks would be supplied by musl instead of failing the link (lane D, 2026-10-01)
 
-**Status:** OPEN — latent: no port binary uses musl's code, measured; the fix is a direct ld.lld link for every port, as the LLVM port's.
+**Status:** FIXED 2026-10-05
 
 **In short:** the programs ported to SlateOS -- bash, make, pkgconf, CMake,
 CPython, espeak-ng -- are linked against SlateOS's own C library. Measured
@@ -57,3 +57,21 @@ counts read again. The order is part of the fix: the CMake port's link
 named zig's runtime ahead of our `libc.a`, and `compiler_rt` carries weak
 copies of `memcpy`, the 128-bit division helpers and some sixty libm
 functions, so where ours had not already been pulled in, CMake got zig's.
+
+**Fixed (2026-10-05):** every port's final link goes through
+`slate_make_link_wrappers` now -- make, pkgconf, bash, eSpeak NG (both its
+scripts), CPython, CMake and coreutils -- so each links exactly the inputs
+it names, with zig's C++ runtime ahead of our `libc.a` and zig's
+`compiler_rt` behind it, in zig's own order. Relinked so, make, pkgconf,
+eSpeak NG, CPython and CMake have nothing undefined and nothing duplicated,
+as they had with musl behind them. CMake's link, run again with
+`--why-extract`, takes nothing at all from `compiler_rt`: the 128-bit
+division helpers our own members call (`__udivti3`, `__divti3`,
+`__umodti3`) come from our `libc.a`. bash, linked in its own order for the
+first time, needed our library to let it bring its own `getenv` family
+(D-POSIX-GETENV-AND-GETCWD-COULD-NOT-BE-REPLACED), and links with nothing
+undefined or duplicated. coreutils 9.5, built again from source, links all
+107 of its programs the same way, with nothing undefined or duplicated.
+Its `LINKS_THAT_PULLED_ZIG_MUSL` is gone: the wrapper links no musl, and
+every binary is checked for the SlateOS note instead
+(`BINARIES_WITHOUT_SLATEOS_NOTE`, 0 of 107).

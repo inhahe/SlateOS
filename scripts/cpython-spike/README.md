@@ -160,6 +160,14 @@ agree exactly:
 | **`MISSING_AT_LINK`** (ld.lld's own report) | **0** | **0** |
 | `SLATE_LINK_EXIT` | 0 | 0 |
 
+Both columns' links were made with `zig cc -nostdlib`, which, it turned out on
+2026-10-01, puts zig's own musl `libc.a` behind ours on every link, so a
+function ours lacked would have come from musl rather than counting as missing
+(known-issues `D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC`). The first measure
+never involved the linker, and the link is now zig's `ld.lld` with exactly its
+inputs (`slate_make_link_wrappers` in `scripts/lib/worktree.sh`); relinked
+that way, the interpreter still has nothing undefined.
+
 The jump from 363 to 478 is the 52 extra C extension modules arriving, not a
 regression: those 115 symbols were always going to be needed by an interpreter
 that can `import struct`. Stage 1's 363 was an honest measurement of the wrong

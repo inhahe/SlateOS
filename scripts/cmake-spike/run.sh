@@ -143,17 +143,21 @@ tail -25 conf.log
 echo "BUILD_EXIT=$?"
 grep -iE "^.*error" build.log | head -20
 
-# The decisive step. -nostdlib so we get SlateOS's libc, not zig's bundled musl.
-# libc.a twice: it is Rust-built and its intra-archive references are not
-# topologically ordered, so a second pass is cheaper than --start-group.
-# libstubs.a is deliberately not linked — it and libc.a each carry a panic
+# The decisive step: a link against SlateOS's libc and nothing else, through
+# scripts/lib/worktree.sh's link wrapper -- zig's ld.lld itself, given this
+# build's own inputs and then our libc.a, with zig's C++ runtime ahead of it
+# and zig's compiler runtime behind it, which is zig's own order (the
+# wrapper's comment says why the order matters). Not zig's c++ driver with
+# -nostdlib, as until 2026-10-01: that puts zig's own musl libc.a behind
+# every link, where it would supply whatever ours lacks instead of a missing
+# symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
+# libstubs.a is deliberately not linked -- it and libc.a each carry a panic
 # handler and collide on __rustc::rust_begin_unwind.
 mkdir -p "$SPIKE_LIBS"
 cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
-
-CXXRT="$(slate_zig_cxx_runtime)" || exit 1
-echo "CXX_RUNTIME_ARCHIVES:"
-printf '%s\n' "$CXXRT"
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
+echo "LINK_WRAPPER=$SLATE_LINK_CXX:"
+grep '^libs=' "$SLATE_LINK_CXX"
 
 # Take the object list from cmake's own build rather than globbing: the tree
 # ships Tests/ and Utilities/ subtrees whose objects the real link does not use.
@@ -171,16 +175,19 @@ if [ -z "$OBJS" ]; then
 fi
 
 # Every static archive the build produced, which is where CMakeLib and the
-# bundled third-party libraries live. Ordered by the linker's needs is not
-# something we can know here, so the whole set is passed twice for the same
-# reason libc.a is.
+# bundled third-party libraries live, in no particular order: ld.lld takes a
+# symbol from any archive on the line, wherever the reference is, so the
+# order the linker needs is not something this has to know. (They were
+# passed twice until 2026-10-01, for GNU ld's sake; the binary is
+# byte-identical either way.)
 LIBS="$(find bld -name '*.a' | sort | tr '\n' ' ')"
 echo "ARCHIVE_COUNT=$(echo "$LIBS" | wc -w)"
 
+# Removed first: ld.lld leaves an existing output alone when a link fails,
+# and the check below would then stage the last run's binary as this one's.
+rm -f cmake-slateos
 # shellcheck disable=SC2086  # word splitting is what builds the object list
-"$SLATE_CXX" -static -nostdlib -o cmake-slateos $OBJS $LIBS $LIBS $CXXRT \
-    "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libunwind.a" \
-    2>slate-link.log
+"$SLATE_LINK_CXX" -o cmake-slateos $OBJS $LIBS 2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 
 MISSING="/tmp/cmake_missing-$SLATE_LANE.txt"
@@ -269,4 +276,5 @@ if [ -x cmake-slateos ]; then
     echo "SLATE_CMAKE_BUILT"
 else
     echo "NO_SLATE_BINARY"
+    exit 1
 fi

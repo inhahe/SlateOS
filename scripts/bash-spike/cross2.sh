@@ -54,8 +54,22 @@ cd "$BUILD" || exit 1
 export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 # --disable-readline drops termcap (9 of the 23 unresolved symbols); a spike only
 # needs `bash -c` and script execution to prove the port is real.
+#
+# bash_cv_getcwd_malloc=yes is the answer configure would find if it could run
+# its test, which a cross build cannot: getcwd(NULL, 0) allocates, in our libc
+# as in musl. Without it configure guesses "no" and compiles lib/sh/getcwd.c,
+# a getcwd that walks `..` matching inode numbers -- which procfs, sysfs and
+# devfs report as 0 for every entry, so in them it names the wrong directory --
+# in place of ours, which reads the kernel's record of the directory. Ours
+# lost to it once the link kept bash's own order, lib/sh/libsh.a ahead of the
+# C library, on 2026-10-01; before that, zig's driver had moved -lsh behind
+# our libc.a and ours won by accident. ac_cv_func_working_mktime=yes for the
+# same reason: its test runs a program too, and the guess "no" compiles
+# lib/sh/mktime.c, which nothing in bash calls today, and which the first
+# call would reach instead of ours.
 ./configure --host=x86_64-linux-musl --build=x86_64-pc-linux-gnu \
     --without-bash-malloc --disable-nls --disable-readline --without-curses \
+    bash_cv_getcwd_malloc=yes ac_cv_func_working_mktime=yes \
     >cross-configure.log 2>&1
 echo "CROSS_CONFIGURE_EXIT=$?"
 tail -15 cross-configure.log

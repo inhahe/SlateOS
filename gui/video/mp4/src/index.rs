@@ -6,6 +6,19 @@
 
 use crate::track::Kind;
 
+/// The most entries FFmpeg's index can hold. Its `AVIndexEntry` is 24 bytes
+/// and `av_malloc` refuses more than `INT_MAX` bytes (its default
+/// `max_alloc_size`), so an index of more cannot be allocated: a track's
+/// tables claiming more give it no index, and a fragment claiming more is an
+/// error. (FFmpeg's own checks against `UINT_MAX / 24` lie beyond this, and
+/// so never decide anything.)
+pub(crate) const INDEX_ALLOC: u32 = 0x7FFF_FFFF / 24;
+/// A table of the samples' times (`MOVTimeToSample`, 12 bytes): FFmpeg
+/// refuses `UINT_MAX / 12` samples or more outright...
+pub(crate) const TTS_LIMIT: u32 = u32::MAX / 12;
+/// ... and cannot allocate more than this.
+const TTS_ALLOC: u32 = 0x7FFF_FFFF / 12;
+
 /// A sample may start decoding.
 pub(crate) const KEYFRAME: u8 = 1;
 /// A sample outside the edit list, kept only so that others decode: FFmpeg
@@ -154,7 +167,33 @@ pub(crate) fn rescale(a: i64, b: i64, c: i64) -> i64 {
 impl Stream {
     /// The index from the sample tables: FFmpeg's `mov_build_index`, then
     /// its `mov_fix_index` when the edit lists are applied.
-    pub(crate) fn build_index(&mut self, advanced: bool, movie_scale: i32, codec: crate::Codec) {
+    ///
+    /// `room` is how many more entries the file has room for: one a byte,
+    /// as every sample of a real file is at least a byte of it. A track whose
+    /// tables claim more samples than that -- which FFmpeg would index, up to
+    /// what it can allocate, then stop reading at the first past the file's
+    /// end -- is held to it, and what its index takes is taken from `room`.
+    pub(crate) fn build_index(
+        &mut self,
+        advanced: bool,
+        movie_scale: i32,
+        codec: crate::Codec,
+        room: &mut u64,
+    ) {
+        let limit = u32::try_from(*room).unwrap_or(u32::MAX);
+        self.build_index_within(advanced, movie_scale, codec, limit);
+        let taken = u64::try_from(self.index.len()).unwrap_or(u64::MAX);
+        *room = room.saturating_sub(taken);
+    }
+
+    /// [`Self::build_index`], the index held to `limit` entries.
+    fn build_index_within(
+        &mut self,
+        advanced: bool,
+        movie_scale: i32,
+        codec: crate::Codec,
+        limit: u32,
+    ) {
         let mut current_dts: i64 = 0;
         if !self.edits.is_empty() {
             let (mut edit_start, mut multiple, mut empty_duration, mut start_time) =
@@ -193,60 +232,83 @@ impl Stream {
             && self.stts.len() == 1
             && self.stts.first().is_some_and(|&(_, d)| d == 1);
         if chunked {
-            if !self.build_chunked(current_dts) {
+            if !self.build_chunked(current_dts, limit) {
                 return;
             }
-        } else if !self.build_samples(current_dts) {
+        } else if !self.build_samples(current_dts, limit) {
             return;
         }
         if advanced {
-            self.fix_index(movie_scale, codec);
+            self.fix_index(movie_scale, codec, limit);
         }
     }
 
     /// FFmpeg's `mov_merge_tts_data`: `stts` and `ctts` spread out to one
-    /// entry a sample, as far as there are samples. `false` where FFmpeg
-    /// gives up.
-    fn merge_tts(&mut self, merge_ctts: bool, merge_stts: bool) -> bool {
+    /// entry a sample, as far as there are samples -- and, here, no further
+    /// than `limit`. `false` where FFmpeg gives up: at its ceilings, or when
+    /// it cannot allocate the table. The table is allocated only for what is
+    /// merged, as FFmpeg's is, and only as long as what it fills.
+    fn merge_tts(&mut self, merge_ctts: bool, merge_stts: bool, limit: u32) -> bool {
         if self.ctts.is_empty() && self.stts.is_empty() {
             return true;
         }
-        let samples = usize::try_from(self.sample_count).unwrap_or(0);
-        if samples == 0 {
+        if self.sample_count == 0 || self.sample_count >= TTS_LIMIT {
             return false;
         }
-        let mut tts = vec![Tts::default(); samples];
-        let mut filled = 0usize;
-        if merge_ctts && !self.ctts.is_empty() {
+        let ctts = merge_ctts && !self.ctts.is_empty();
+        let stts = merge_stts && !self.stts.is_empty();
+        if (ctts || stts) && self.sample_count > TTS_ALLOC {
+            return false;
+        }
+        let samples = usize::try_from(self.sample_count.min(limit)).unwrap_or(0);
+        let spread = |counts: &mut dyn Iterator<Item = u32>| {
+            counts
+                .fold(0usize, |n, c| {
+                    n.saturating_add(usize::try_from(c).unwrap_or(usize::MAX))
+                })
+                .min(samples)
+        };
+        let len = if ctts {
+            spread(&mut self.ctts.iter().map(|&(c, _)| c))
+        } else {
+            0
+        }
+        .max(if stts {
+            spread(&mut self.stts.iter().map(|&(c, _)| c))
+        } else {
+            0
+        });
+        // Each table fills as many entries as it counts samples, in order;
+        // the table is as long as the longer fill.
+        let mut tts = vec![Tts::default(); len];
+        if ctts {
+            let mut slots = tts.iter_mut();
             for &(count, offset) in &self.ctts {
-                for _ in 0..count {
-                    let Some(t) = tts.get_mut(filled) else {
-                        break;
-                    };
+                for t in slots
+                    .by_ref()
+                    .take(usize::try_from(count).unwrap_or(usize::MAX))
+                {
                     t.offset = offset;
                     t.count = 1;
-                    filled = filled.saturating_add(1);
                 }
             }
         } else {
             self.has_ctts = false;
         }
-        let mut stts_filled = 0usize;
-        if merge_stts && !self.stts.is_empty() {
+        if stts {
+            let mut slots = tts.iter_mut();
             for &(count, duration) in &self.stts {
-                for _ in 0..count {
-                    let Some(t) = tts.get_mut(stts_filled) else {
-                        break;
-                    };
+                for t in slots
+                    .by_ref()
+                    .take(usize::try_from(count).unwrap_or(usize::MAX))
+                {
                     t.duration = duration;
                     t.count = 1;
-                    stts_filled = stts_filled.saturating_add(1);
                 }
             }
         } else {
             self.has_stts = false;
         }
-        tts.truncate(filled.max(stts_filled));
         self.tts = tts;
         true
     }
@@ -257,12 +319,18 @@ impl Stream {
         clippy::arithmetic_side_effects,
         reason = "counters bounded by the tables' lengths; offsets checked against overflow, times wrapping as C's"
     )]
-    fn build_samples(&mut self, start_dts: i64) -> bool {
+    fn build_samples(&mut self, start_dts: i64, limit: u32) -> bool {
         let mut current_dts = start_dts.wrapping_sub(i64::from(self.dts_shift));
         if self.sample_count == 0 || !self.index.is_empty() || !self.tts.is_empty() {
             return false;
         }
-        if !self.merge_tts(true, true) {
+        if self.sample_count > INDEX_ALLOC {
+            // FFmpeg cannot allocate the index: the track has none.
+            return false;
+        }
+        // Past `limit`, a sample is one the file has no bytes for.
+        let samples = self.sample_count.min(limit);
+        if !self.merge_tts(true, true, limit) {
             return false;
         }
         let key_off = u32::from(
@@ -307,6 +375,11 @@ impl Stream {
                 if current_sample >= self.sample_count {
                     // "wrong sample count": FFmpeg stops here.
                     finished = false;
+                    break 'chunks;
+                }
+                if current_sample >= samples {
+                    // The rest the file has no bytes for: the index ends
+                    // here, and is edited as FFmpeg's whole one would be.
                     break 'chunks;
                 }
                 let mut keyframe = false;
@@ -396,17 +469,19 @@ impl Stream {
 
     /// Uncompressed sound in chunks, a packet of up to 1024 samples (FFmpeg's
     /// second loop in `mov_build_index`). `false` where FFmpeg returns early.
+    /// Its count of packets, and the sums that make it, wrap as FFmpeg's
+    /// unsigned ints do.
     #[allow(
         clippy::arithmetic_side_effects,
         reason = "counts bounded by the tables; sizes checked against FFmpeg's limit"
     )]
-    fn build_chunked(&mut self, start_dts: i64) -> bool {
+    fn build_chunked(&mut self, start_dts: i64, limit: u32) -> bool {
         let mut current_dts = start_dts;
         if self.chunk_offsets.is_empty() || !self.tts.is_empty() {
             return false;
         }
         let spf = self.samples_per_frame;
-        let mut total: u64 = 0;
+        let mut total: u32 = 0;
         for (i, run) in self.stsc.iter().enumerate() {
             let chunk_samples = run.count;
             if i + 1 != self.stsc.len() && spf != 0 && chunk_samples % spf != 0 {
@@ -416,18 +491,25 @@ impl Stream {
                 chunk_samples / spf
             } else if spf > 1 {
                 let samples = (1024 / spf) * spf;
-                chunk_samples.div_ceil(samples.max(1))
+                chunk_samples.wrapping_add(samples - 1) / samples
             } else {
-                chunk_samples.div_ceil(1024)
+                chunk_samples.wrapping_add(1023) / 1024
             };
             let chunk_count = match self.stsc.get(i + 1) {
-                Some(next) => u64::from(next.first.wrapping_sub(run.first)),
-                None => u64::try_from(self.chunk_offsets.len())
-                    .unwrap_or(0)
-                    .wrapping_sub(u64::from(run.first).wrapping_sub(1)),
+                Some(next) => next.first.wrapping_sub(run.first),
+                None => u32::try_from(self.chunk_offsets.len())
+                    .unwrap_or(u32::MAX)
+                    .wrapping_sub(run.first.wrapping_sub(1)),
             };
-            total = total.wrapping_add(chunk_count.wrapping_mul(u64::from(count)));
+            total = total.wrapping_add(chunk_count.wrapping_mul(count));
         }
+        if total > INDEX_ALLOC {
+            // FFmpeg cannot allocate the index: the track has none.
+            return false;
+        }
+        // Past `limit`, a packet is one the file has no bytes for.
+        let packets = usize::try_from(total.min(limit)).unwrap_or(usize::MAX);
+        let total = usize::try_from(total).unwrap_or(usize::MAX);
         let mut stsc_index = 0usize;
         let chunks = core::mem::take(&mut self.chunk_offsets);
         let mut finished = true;
@@ -456,10 +538,14 @@ impl Stream {
                     let samples = chunk_samples.min(1024);
                     (samples.wrapping_mul(self.sample_size), samples)
                 };
-                if u64::try_from(self.index.len()).unwrap_or(u64::MAX) >= total
-                    || size > 0x3FFF_FFFF
-                {
+                if self.index.len() >= total || size > 0x3FFF_FFFF {
+                    // "wrong chunk count", or a packet too large.
                     finished = false;
+                    break 'chunks;
+                }
+                if self.index.len() >= packets {
+                    // The rest the file has no bytes for: the index ends
+                    // here, and is edited as FFmpeg's whole one would be.
                     break 'chunks;
                 }
                 self.index.push(Entry {
@@ -471,7 +557,9 @@ impl Stream {
                 });
                 current_offset = current_offset.wrapping_add(i64::from(size));
                 current_dts = current_dts.wrapping_add(i64::from(samples));
-                chunk_samples = chunk_samples.saturating_sub(samples);
+                // Unsigned, as FFmpeg's: a last run of fewer samples than a
+                // frame wraps, and packets go on to the count's end.
+                chunk_samples = chunk_samples.wrapping_sub(samples);
             }
         }
         self.chunk_offsets = chunks;
@@ -480,7 +568,7 @@ impl Stream {
         }
         // Only the composition offsets merge here: a packet's duration is the
         // time to the next one's.
-        self.merge_tts(true, false)
+        self.merge_tts(true, false, limit)
     }
 }
 
@@ -604,15 +692,23 @@ impl Stream {
     /// presentation's clock; samples outside the edits kept but marked
     /// [`DISCARD`]; sound's samples cut at an edit's start counted as samples
     /// to skip.
+    ///
+    /// Edits may give the same samples again, so the new index may outgrow
+    /// the old: an entry past `limit` (or past what FFmpeg can allocate) is
+    /// one that cannot be added, and ends its edit as FFmpeg's failed
+    /// `add_index_entry` does. FFmpeg's allocation doubles as it grows, so
+    /// its own can fail from about half that ceiling; any file shorter than
+    /// the ceiling's count of bytes meets `limit` first.
     #[allow(
         clippy::arithmetic_side_effects,
         clippy::too_many_lines,
         reason = "FFmpeg's 64-bit time arithmetic on the track's own times; one function, as FFmpeg's, to be read beside it"
     )]
-    pub(crate) fn fix_index(&mut self, movie_scale: i32, codec: crate::Codec) {
+    pub(crate) fn fix_index(&mut self, movie_scale: i32, codec: crate::Codec, limit: u32) {
         if self.edits.is_empty() || self.index.is_empty() {
             return;
         }
+        let room = usize::try_from(limit.min(INDEX_ALLOC)).unwrap_or(usize::MAX);
         let audio = self.kind == Kind::Audio;
         let vorbis = false; // No Vorbis in MP4 that FFmpeg's tables name.
         let _ = codec;
@@ -788,6 +884,10 @@ impl Stream {
                         }
                     }
                 }
+                if self.index.len() >= room {
+                    // "Cannot add index entry": this edit ends here.
+                    break;
+                }
                 self.index.push(Entry {
                     pos: current.pos,
                     timestamp: edit_list_dts_counter,
@@ -872,6 +972,144 @@ mod tests {
             min_distance: 0,
             flags,
         }
+    }
+
+    /// A track claiming `samples` samples, every one `size` bytes and
+    /// `duration` ticks, in chunks of `per_chunk` -- one chunk's offset
+    /// given, as many claimed as there are chunks to hold them.
+    fn claiming(kind: Kind, samples: u32, size: u32, duration: u32, per_chunk: u32) -> Stream {
+        Stream {
+            kind,
+            time_scale: 10240,
+            chunk_offsets: vec![0],
+            stsc: vec![Stsc {
+                first: 1,
+                count: per_chunk,
+                id: 1,
+            }],
+            stsz_sample_size: size,
+            sample_size: size,
+            sample_count: samples,
+            stts: vec![(samples, duration)],
+            has_stts: true,
+            ..Stream::new()
+        }
+    }
+
+    fn indexed(mut s: Stream, room: u64) -> (Stream, u64) {
+        let mut left = room;
+        s.build_index(true, 1000, crate::Codec::Other, &mut left);
+        (s, left)
+    }
+
+    #[test]
+    fn sound_in_chunks_keeps_no_table_of_times_it_does_not_merge() {
+        // A minute of sound at 48 kHz, a sample a tick: FFmpeg spreads none
+        // of its times out, and allocates nothing for them. This did, and
+        // kept it -- for an hour of sound, 173 million entries, 2 GB.
+        let (s, _) = indexed(claiming(Kind::Audio, 2_880_000, 4, 1, 4096), u64::MAX);
+        assert_eq!(s.index.len(), 4, "a chunk of 4096 samples: four packets");
+        assert_eq!(s.tts.capacity(), 0);
+    }
+
+    #[test]
+    fn an_index_held_to_the_room_is_edited_as_a_whole_one_would_be() {
+        // A million samples claimed, room for 50, an edit of half a second
+        // from the third: the index is cut at 50, then edited -- the five
+        // samples of the edit, from 0.
+        let mut s = claiming(Kind::Video, 1_000_000, 10, 1024, 1_000_000);
+        s.edits = vec![Edit {
+            duration: 500,
+            time: 2048,
+        }];
+        let (s, _) = indexed(s, 50);
+        let kept: Vec<(i64, i64)> = s.index.iter().map(|e| (e.pos, e.timestamp)).collect();
+        assert_eq!(
+            kept,
+            [(20, 0), (30, 1024), (40, 2048), (50, 3072), (60, 4096)]
+        );
+        // Sound in chunks the same: cut to ten packets of 1024 samples, then
+        // edited -- the two the edit takes, and the two before it kept for
+        // the decoder and dropped.
+        let mut s = claiming(Kind::Audio, 1 << 28, 2, 1, 1 << 28);
+        s.time_scale = 48000;
+        s.edits = vec![Edit {
+            duration: 40,
+            time: 2048,
+        }];
+        let (s, _) = indexed(s, 10);
+        let kept: Vec<(i64, bool)> = s
+            .index
+            .iter()
+            .map(|e| (e.timestamp, e.flags & DISCARD != 0))
+            .collect();
+        assert_eq!(
+            kept,
+            [(-2048, true), (-1024, true), (0, false), (1024, false)]
+        );
+    }
+
+    #[test]
+    fn packets_ffmpeg_cannot_index_in_chunks_are_none() {
+        // A hundred chunks of 894,785 packets (of 1024 samples each): 15
+        // more than FFmpeg can allocate.
+        let mut s = claiming(Kind::Audio, 1 << 30, 2, 1, 894_785 * 1024);
+        s.chunk_offsets = vec![0; 100];
+        let (s, left) = indexed(s, 1000);
+        assert!(s.index.is_empty());
+        assert_eq!(left, 1000);
+        // A packet fewer a chunk, and FFmpeg has them all: held to the room.
+        let mut s = claiming(Kind::Audio, 1 << 30, 2, 1, 894_784 * 1024);
+        s.chunk_offsets = vec![0; 100];
+        let (s, _) = indexed(s, 1000);
+        assert_eq!(s.index.len(), 1000);
+    }
+
+    #[test]
+    fn a_track_takes_no_more_entries_than_the_room_left() {
+        // Room for 100: a track of 40 takes 40, one claiming a million the
+        // other 60, and one after them none.
+        let (a, left) = indexed(claiming(Kind::Video, 40, 10, 1024, 40), 100);
+        assert_eq!((a.index.len(), left), (40, 60));
+        let (b, left) = indexed(claiming(Kind::Video, 1_000_000, 10, 1024, 1_000_000), left);
+        assert_eq!((b.index.len(), b.tts.len(), left), (60, 60, 0));
+        let (c, left) = indexed(claiming(Kind::Video, 5, 10, 1024, 5), left);
+        assert_eq!((c.index.len(), c.tts.len(), left), (0, 0, 0));
+        // Packets of sound in chunks the same.
+        let (d, left) = indexed(claiming(Kind::Audio, 1 << 30, 2, 1, 1 << 30), 7);
+        assert_eq!((d.index.len(), left), (7, 0));
+    }
+
+    #[test]
+    fn an_index_ffmpeg_cannot_allocate_is_none() {
+        let (s, left) = indexed(
+            claiming(Kind::Video, INDEX_ALLOC + 1, 10, 1024, INDEX_ALLOC + 1),
+            u64::MAX,
+        );
+        assert!(s.index.is_empty() && s.tts.is_empty());
+        assert_eq!(left, u64::MAX, "nothing taken");
+        let (s, _) = indexed(claiming(Kind::Video, INDEX_ALLOC, 10, 1024, INDEX_ALLOC), 5);
+        assert_eq!(s.index.len(), 5, "its whole index, held to the room");
+    }
+
+    #[test]
+    fn edits_giving_samples_again_take_no_more_than_the_room() {
+        // Twelve pictures, an edit list giving them twenty times over: 240
+        // entries with room for them, and the room's worth without.
+        let edited = |room: u64| {
+            let mut s = claiming(Kind::Video, 12, 10, 1024, 12);
+            s.edits = vec![
+                Edit {
+                    duration: 1200,
+                    time: 0,
+                };
+                20
+            ];
+            let (s, left) = indexed(s, room);
+            (s.index.len(), left)
+        };
+        assert_eq!(edited(1000), (240, 760));
+        assert_eq!(edited(100), (100, 0));
     }
 
     #[test]

@@ -1020,6 +1020,14 @@ pub enum RequestBody {
     /// connection. A client that could name an owner could put an icon in the
     /// tray on another program's behalf, and clicking it would deliver to a
     /// process that never asked.
+    ///
+    /// Text past [`MAX_GLYPH_BYTES`](crate::tray::MAX_GLYPH_BYTES) and
+    /// [`MAX_TOOLTIP_BYTES`](crate::tray::MAX_TOOLTIP_BYTES) is cut, on a
+    /// character boundary. A new id is refused with [`ResponseBody::Error`]
+    /// once this client has
+    /// [`MAX_TRAY_ICONS_PER_CLIENT`](crate::tray::MAX_TRAY_ICONS_PER_CLIENT)
+    /// icons, or the tray [`MAX_TRAY_ICONS`](crate::tray::MAX_TRAY_ICONS);
+    /// replacing an icon the client has is never refused.
     SetTrayIcon {
         id: u32,
         glyph: String,

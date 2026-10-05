@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mutation_harness import check_the_table, failed_tests  # noqa: E402  (path set above)
+from mutation_harness import cargo_test_command, check_the_table, failed_tests  # noqa: E402  (path set above)
 
 # `cargo test`'s report when a unit test in a submodule and an integration
 # test both fail -- two binaries, each with its own `failures:` summary. The
@@ -155,6 +155,21 @@ def main() -> int:
     print(f"  {'ok  ' if ok else 'FAIL'}  failures are read from unit and integration "
           f"binaries alike, whatever the test's module is called (got {sorted(got)})")
     results.append(ok)
+    # A sweep's cargo: every test target by default, as before targets could
+    # be named; the named ones alone when they are, before what comes last.
+    host = ["cargo", "test", "-p", "videocodec", "--target", "x86_64-pc-windows-gnu"]
+    for label, got, want in [
+        ("a sweep builds every test target by default",
+         cargo_test_command("videocodec", (), "--no-run"), host + ["--no-run"]),
+        ("...and runs every one",
+         cargo_test_command("videocodec", (), "--no-fail-fast"), host + ["--no-fail-fast"]),
+        ("a sweep given targets builds and runs those alone",
+         cargo_test_command("videocodec", ("--lib", "--test", "subtitles"), "--no-run"),
+         host + ["--lib", "--test", "subtitles", "--no-run"]),
+    ]:
+        ok = got == want
+        print(f"  {'ok  ' if ok else 'FAIL'}  {label} (got {got})")
+        results.append(ok)
     passed = sum(results)
     print(f"all {passed} mutation_harness tests passed" if all(results)
           else f"{len(results) - passed} of {len(results)} mutation_harness tests FAILED")

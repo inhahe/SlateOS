@@ -1,0 +1,2 @@
+# found_tx3g_claims_billions.mp4: what ffprobe makes of it (generate_fixtures.py).
+stream 0 tx3g 1/1000 - 5000 -

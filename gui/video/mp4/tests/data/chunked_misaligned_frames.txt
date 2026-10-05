@@ -1,0 +1,5 @@
+# chunked_misaligned_frames.mp4: what ffprobe makes of it (generate_fixtures.py).
+stream 0 afx0 1/8000 8000Hz/1 750 -
+packet 0 0 0 160 33 596 K__ dbfb6a31db7d758bd1a68b1f2af87abf 0
+packet 0 160 160 160 33 629 K__ 1b13254111e6ab877de9a6ccb8a92653 0
+packet 0 320 320 430 33 662 K__ 7ace2113fe17fcc06bdf63a52da3efac 0

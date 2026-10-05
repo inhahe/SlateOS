@@ -53,6 +53,11 @@ fn a_damaged_file_is_read_or_refused_but_never_panics() {
         "colr_nclc_after_vpcc.mp4",
         "clap_offset.mp4",
         "both_rotations.mp4",
+        // Tables claiming more samples than the file has bytes for: the
+        // fuzzer's find, and a track's and a fragment's own.
+        "found_tx3g_claims_billions.mp4",
+        "claims_a_million.mp4",
+        "trun_claims_a_million.mp4",
     ] {
         let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
         let bytes = std::fs::read(&path).unwrap();

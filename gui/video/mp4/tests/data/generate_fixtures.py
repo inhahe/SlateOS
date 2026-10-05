@@ -32,10 +32,16 @@ Three kinds of fixture:
   no decoder reads, so that what ffprobe prints is the demuxer's word, not a
   decoder's -- and two FFmpeg refuses.
 
+And a fourth, **claiming** more samples than the file has bytes for, or
+than FFmpeg can index, each answered by what FFmpeg reads of it; and files
+the fuzzer **found** (`FOUND`), kept as found and only answered here.
+
 The answers were made with the ffmpeg and ffprobe of gyan.dev's full build
 of 2026-03-09 (git 9b7439c31b). Run from this directory:
 
-    python generate_fixtures.py [path-to-ffmpeg-directory]
+    python generate_fixtures.py [path-to-ffmpeg-directory] [--only NAME...]
+
+`--only` makes the fixtures named and no others.
 """
 
 import hashlib
@@ -45,7 +51,10 @@ import struct
 import subprocess
 import sys
 
-FFDIR = sys.argv[1] if len(sys.argv) > 1 else "D:/utils"
+ARGS = sys.argv[1:]
+ONLY = set(ARGS[ARGS.index("--only") + 1:]) if "--only" in ARGS else set()
+ARGS = ARGS[:ARGS.index("--only")] if "--only" in ARGS else ARGS
+FFDIR = ARGS[0] if ARGS else "D:/utils"
 FFMPEG = os.path.join(FFDIR, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
 FFPROBE = os.path.join(FFDIR, "ffprobe.exe" if os.name == "nt" else "ffprobe")
 
@@ -194,6 +203,18 @@ def stsz(sizes):
     return full(b"stsz", 0, 0, u32(0), u32(len(sizes)), *[u32(s) for s in sizes])
 
 
+def stsz_constant(size, count):
+    """Every sample one size: the count alone, with no table to bound it."""
+    return full(b"stsz", 0, 0, u32(size), u32(count))
+
+
+def sound_entry_v1(fourcc, samples_per_packet, bytes_per_frame, channels=1, rate=8000, bits=16):
+    """QuickTime's version-1 sound description: four more words, of which
+    FFmpeg keeps the samples a packet and the bytes a frame."""
+    return box(fourcc, bytes(6), u16(1), u16(1), bytes(6), u16(channels), u16(bits), u16(0), u16(0),
+               u32(rate << 16), u32(samples_per_packet), u32(bytes_per_frame), u32(bytes_per_frame), u32(2))
+
+
 def stz2(sizes, field):
     bits = "".join(format(s, f"0{field}b") for s in sizes)
     bits += "0" * (-len(bits) % 8)
@@ -256,13 +277,14 @@ class Trak:
     def __init__(self, handler, entry, timescale, samples, chunks, *, edits=None, stss_keys="auto",
                  ctts_version=None, extra_stbl=b"", stsc_override=None, stsd_entries=None,
                  sizes="stsz", offsets="stco", stts_override=None, ctts_override=None, width=64, height=48,
-                 display=MATRIX):
+                 display=MATRIX, stsz_override=None):
         self.handler, self.entry, self.timescale = handler, entry, timescale
         self.samples, self.chunks = samples, chunks
         self.edits, self.stss_keys, self.ctts_version = edits, stss_keys, ctts_version
         self.extra_stbl, self.stsc_override = extra_stbl, stsc_override
         self.stsd_entries = stsd_entries
         self.sizes, self.offsets = sizes, offsets
+        self.stsz_override = stsz_override
         self.stts_override, self.ctts_override = stts_override, ctts_override
         self.width, self.height = width, height
         self.display = display
@@ -303,7 +325,10 @@ class Trak:
                     prev = n
             stbl.append(stsc(entries))
         sizes = [len(s[0]) for s in self.samples]
-        stbl.append(stsz(sizes) if self.sizes == "stsz" else stz2(sizes, self.sizes))
+        if self.stsz_override is not None:
+            stbl.append(self.stsz_override)
+        else:
+            stbl.append(stsz(sizes) if self.sizes == "stsz" else stz2(sizes, self.sizes))
         stbl.append(stco(offsets) if self.offsets == "stco" else co64(offsets))
         stbl.append(self.extra_stbl)
         movie_duration = media * movie_scale // self.timescale
@@ -527,8 +552,128 @@ def refused():
         # A vpcC too short to hold its version and flags.
         "vpcc_short.mp4": vpcc(body=bytes(4)),
     }
-    return {name: mp4([Trak(b"vide", visual_entry(b"vfx0", 64, 48, child), 10240, v8, [8])])
-            for name, child in children.items()}
+    out = {name: mp4([Trak(b"vide", visual_entry(b"vfx0", 64, 48, child), 10240, v8, [8])])
+           for name, child in children.items()}
+    # A fragment's run of one sample more than FFmpeg can index.
+    out["trun_past_ffmpeg_index.mp4"] = fragmented(fragment(1, INDEX_ALLOC + 1, 12, tfdt=0))
+    # A run whose 1001st sample would take time past 2^63, its first nearly
+    # there: FFmpeg refuses that sample, though the file holds only twelve.
+    near = (1 << 63) - 1 - 1000 * 0xFFFFFFFF
+    out["trun_time_overflows.mp4"] = fragmented(fragment(1, 1_000_000, 12, tfdt=near), duration=0xFFFFFFFF)
+    # A run claiming a million samples, then a fragment whose samples are of
+    # no bytes: FFmpeg refuses the first of those.
+    out["trun_run_of_no_size.mp4"] = fragmented(fragment(1, 1_000_000, 12, tfdt=0),
+                                                fragment(2, 5, 5, default_size=0))
+    return out
+
+
+# FFmpeg's ceilings (index.rs): av_malloc refuses more than INT_MAX bytes, so
+# its index (24 bytes an entry) and its table of the samples' times (12) can
+# hold no more than these; and it refuses the table outright from UINT_MAX /
+# 12 samples.
+INDEX_ALLOC = 0x7FFFFFFF // 24
+TTS_ALLOC = 0x7FFFFFFF // 12
+TTS_LIMIT = 0xFFFFFFFF // 12
+
+
+def fragment(seq, entries, samples, *, tfdt=None, default_size=None, own_sizes=False, size=10):
+    """A fragment of track 1: a moof whose one run claims `entries` samples,
+    then an mdat holding `samples` of them (of `size` bytes). The run's
+    samples are the track's defaults -- with no field of their own to bound
+    their count -- unless `default_size` is the fragment's own (`tfhd`) or
+    `own_sizes` gives each its size in the run."""
+    tfhd = full(b"tfhd", 0, 0x020000 | (0x10 if default_size is not None else 0), u32(1),
+                b"" if default_size is None else u32(default_size))
+    fields = b"".join(u32(size) for _ in range(entries)) if own_sizes else b""
+
+    def moof(data_offset):
+        # The base is the moof (tfhd's flag 0x020000), and the run's data
+        # offset counts from there to the mdat's first byte.
+        trun = full(b"trun", 0, 0x000001 | (0x200 if own_sizes else 0), u32(entries), i32(data_offset), fields)
+        start = [] if tfdt is None else [full(b"tfdt", 1, 0, u64(tfdt))]
+        return box(b"moof", full(b"mfhd", 0, 0, u32(seq)), box(b"traf", tfhd, *start, trun))
+
+    first = len(moof(0)) + 8
+    return moof(first) + box(b"mdat", b"".join(sample(i, size) for i in range(samples)))
+
+
+def fragmented(*fragments, size=10, duration=1024):
+    """A fragmented file of one picture track -- its moov empty but for the
+    track's defaults (`trex`): samples of `size` bytes and `duration` ticks,
+    each a key frame -- then `fragments`."""
+    stbl = box(b"stbl", stsd(visual_entry(b"vfx0")), stts([]), stsc([]), stsz([]), stco([]))
+    minf = box(b"minf", box(b"vmhd", bytes(12)),
+               box(b"dinf", full(b"dref", 0, 0, u32(1), full(b"url ", 0, 1))), stbl)
+    trak = box(b"trak", tkhd(1, 0, 64, 48), box(b"mdia", mdhd(10240, 0), hdlr(b"vide"), minf))
+    mvex = box(b"mvex", full(b"trex", 0, 0, u32(1), u32(1), u32(duration), u32(size), u32(0)))
+    head = (box(b"ftyp", b"isom", u32(0x200), b"isom", b"iso2", b"mp41")
+            + box(b"moov", mvhd(1000, 0), trak, mvex))
+    return head + b"".join(fragments)
+
+
+def claiming():
+    """Hand-written files whose tables claim more samples than the file has
+    bytes for, or than FFmpeg can index: name -> bytes. FFmpeg reads the
+    samples the file holds, then meets its end -- or reads none, where it
+    cannot allocate the index. The crate holds the index to what the file's
+    length allows (index.rs), which these show changes nothing read."""
+    out = {}
+    vfx0 = visual_entry(b"vfx0")
+    v12 = video_samples(12, keys=(0,))
+
+    def claims(count):
+        # Twelve samples in the file, many more claimed: one chunk holding
+        # them all, each 10 bytes and 0.1 s.
+        return Trak(b"vide", vfx0, 10240, v12, [12], stss_keys=None, stsz_override=stsz_constant(10, count),
+                    stts_override=[(count, 1024)], stsc_override=[(1, count, 1)])
+
+    out["claims_a_million.mp4"] = mp4([claims(1_000_000)])
+    # FFmpeg's whole index, and a sample more than it can allocate.
+    out["claims_ffmpeg_whole_index.mp4"] = mp4([claims(INDEX_ALLOC)])
+    out["claims_past_ffmpeg_index.mp4"] = mp4([claims(INDEX_ALLOC + 1)])
+    # The same from a fragment's run, whose samples take none of its bytes;
+    # and two runs, the second giving each sample's size.
+    out["trun_claims_a_million.mp4"] = fragmented(fragment(1, 1_000_000, 12, tfdt=0))
+    out["trun_ffmpeg_whole_index.mp4"] = fragmented(fragment(1, INDEX_ALLOC, 12, tfdt=0))
+    out["trun_runs_claim_millions.mp4"] = fragmented(fragment(1, 1_000_000, 12, tfdt=0),
+                                                     fragment(2, 5, 5, own_sizes=True))
+    # Sound read in chunks (a sample a tick), its edit list applied -- unless
+    # FFmpeg gives up spreading the composition offsets out to one a sample:
+    # at UINT_MAX / 12 samples outright, and, with offsets to spread, when it
+    # cannot allocate them.
+    pcm = [(sample(i, 2), 1, True, 0) for i in range(3072)]
+
+    def chunked(count, ctts_runs=None):
+        return Trak(b"soun", sound_entry(b"afx0"), 48000, pcm, [1024, 1024, 1024],
+                    stsz_override=stsz_constant(2, count), stts_override=[(count, 1)],
+                    stsc_override=[(1, 1024, 1)], ctts_override=ctts_runs, edits=[(40, 512)])
+
+    out["chunked_below_ffmpeg_tts_limit.mp4"] = mp4([chunked(TTS_LIMIT - 1)])
+    out["chunked_at_ffmpeg_tts_limit.mp4"] = mp4([chunked(TTS_LIMIT)])
+    out["chunked_ffmpeg_whole_tts.mp4"] = mp4([chunked(TTS_ALLOC, [(3072, 0)])])
+    out["chunked_past_ffmpeg_tts.mp4"] = mp4([chunked(TTS_ALLOC + 1, [(3072, 0)])])
+    # A chunk claiming 2^32 - 1023 samples: a negative count to FFmpeg,
+    # whose ints hold stsc's numbers, and repaired to one sample.
+    out["stsc_count_negative.mp4"] = mp4([Trak(b"soun", sound_entry(b"afx0"), 48000, pcm[:1024], [1024],
+                                               stsz_override=stsz_constant(2, 1024), stts_override=[(1024, 1)],
+                                               stsc_override=[(1, 0xFFFFFC01, 1)])])
+    # Chunks claiming 2^32 + 3 packets between them, which FFmpeg's count,
+    # an unsigned int, wraps to 3: those, then "wrong chunk count".
+    tiny = [(sample(i, 2), 1, True, 0) for i in range(4096)]
+    out["chunked_total_wraps.mp4"] = mp4([Trak(b"soun", sound_entry(b"afx0"), 48000, tiny, [1] * 4096,
+                                               stsz_override=stsz_constant(2, 4096), stts_override=[(4096, 1)],
+                                               stsc_override=[(1, 1 << 30, 1), (4096, (1 << 30) + 3072, 1)])])
+    # Frames of 160 samples in chunks of 250: the last run need not hold
+    # whole frames, and FFmpeg's count of what is left wraps below zero, so
+    # its packets go on through the first chunk's bytes to the count's end.
+    frames = [(sample(i, 99), 250, True, 0) for i in range(3)]
+    out["chunked_misaligned_frames.mp4"] = mp4([Trak(b"soun", sound_entry_v1(b"afx0", 160, 33), 8000, frames,
+                                                     [1, 1, 1], stsz_override=stsz_constant(1, 750),
+                                                     stts_override=[(750, 1)], stsc_override=[(1, 250, 1)])])
+    # An edit list giving the same twelve pictures twenty times over.
+    out["edits_repeat.mp4"] = mp4([Trak(b"vide", vfx0, 10240, video_samples(12, keys=(0, 4, 8)), [12],
+                                        edits=[(1200, 0)] * 20)])
+    return out
 
 
 # --- the answers ---------------------------------------------------------------
@@ -651,11 +796,35 @@ def refusal(name):
     return f"# {name}: ffprobe refuses it ({why}) (generate_fixtures.py).\nrefused\n"
 
 
+# Files found by the fuzzer (gui/video/fuzz), kept as they were found: only
+# their answers are made here.
+FOUND = {
+    # The subtitles target, 2026-10-05: a timed-text track whose stsz gives
+    # every sample one size and claims 3.9 billion of them. The crate tried
+    # to allocate 46 GB for their times and was killed; FFmpeg indexes
+    # none, as it cannot allocate the index.
+    "found_tx3g_claims_billions.mp4",
+}
+
+
+def found():
+    out = {}
+    for name in sorted(FOUND):
+        with open(name, "rb") as f:
+            out[name] = f.read()
+    return out
+
+
 def main():
-    files = {**made_by_ffmpeg(), **synthetic()}
+    hand = {**synthetic(), **claiming(), **found()}
     looks = described()
     refusals = refused()
+    # Only the ffmpeg-written fixtures take long to make: they are made
+    # unless every fixture asked for (--only) is written by hand.
+    files = hand if ONLY and not ONLY - {*hand, *looks, *refusals} else {**made_by_ffmpeg(), **hand}
     for name, data in sorted({**files, **looks, **refusals}.items()):
+        if ONLY and name not in ONLY:
+            continue
         with open(name, "wb") as f:
             f.write(data)
         text = refusal(name) if name in refusals else answer(name, described=name in looks)

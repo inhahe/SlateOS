@@ -924,6 +924,95 @@ fn a_folder_too_deep_or_too_full_is_said_so() {
     assert_eq!(Checker::new(&full.dir).max_entries, MAX_ENTRIES);
 }
 
+// ─── Wallpapers ─────────────────────────────────────────────────────────────
+
+/// **A theme's wallpapers are pictures the desktop can show**: those its
+/// folder bundles are read -- one that is no picture is an error -- and a
+/// recommended one, in the folder or elsewhere in the theme, covers the
+/// axis.
+#[test]
+fn wallpapers_are_pictures_the_desktop_can_show() {
+    let theme = Theme::tidy();
+    theme
+        .write(
+            "theme.yaml",
+            TIDY.replace(
+                "supports: [colors, icons]",
+                "supports: [colors, icons, wallpapers]",
+            ) + "wallpapers:\n  dark: wallpapers/night.png\n  light: day.png\n",
+        )
+        .write("wallpapers/night.png", png())
+        .write("wallpapers/spare.png", png())
+        .write("wallpapers/broken.png", "not a picture")
+        .write("day.png", png());
+    let report = theme.check();
+    assert!(
+        report.covers.contains(&"wallpapers"),
+        "{}",
+        listing(&report)
+    );
+    assert_said(
+        &report,
+        Severity::Error,
+        "wallpapers/broken.png",
+        "is not a picture",
+    );
+    for quiet in ["wallpapers/night.png", "wallpapers/spare.png", "day.png"] {
+        assert!(
+            !report.findings.iter().any(|f| f.place == quiet),
+            "{quiet}: {}",
+            listing(&report)
+        );
+    }
+}
+
+/// **A recommendation the theme cannot show is said**: outside its folder an
+/// error, missing a warning -- and with neither shown, the axis is not
+/// covered.
+#[test]
+fn a_wallpaper_the_theme_cannot_show_is_said() {
+    let theme = Theme::tidy();
+    theme.write(
+        "theme.yaml",
+        format!("{TIDY}wallpapers:\n  dark: ../outside.png\n  light: gone.png\n"),
+    );
+    let report = theme.check();
+    assert_said(
+        &report,
+        Severity::Error,
+        "theme.yaml",
+        "dark wallpaper `../outside.png` is outside",
+    );
+    assert_said(
+        &report,
+        Severity::Warning,
+        "theme.yaml",
+        "light wallpaper `gone.png` is not in",
+    );
+    assert!(
+        !report.covers.contains(&"wallpapers"),
+        "{}",
+        listing(&report)
+    );
+
+    // A recommendation that is no picture covers nothing either.
+    let theme = Theme::tidy();
+    theme
+        .write(
+            "theme.yaml",
+            format!("{TIDY}wallpapers:\n  dark: wallpapers/x.png\n"),
+        )
+        .write("wallpapers/x.png", "words");
+    let report = theme.check();
+    assert_said(
+        &report,
+        Severity::Error,
+        "wallpapers/x.png",
+        "is not a picture",
+    );
+    assert!(!report.covers.contains(&"wallpapers"));
+}
+
 /// **A theme named for the built-in one is told what that means.**
 #[test]
 fn a_theme_named_for_the_built_in_one_is_told_so() {

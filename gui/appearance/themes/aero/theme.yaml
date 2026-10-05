@@ -24,6 +24,13 @@
 # `taskbar-panel`, at the end, is the taskbar's finish and spacing --
 # `theme.taskbar_panel: <name>`.
 #
+# A theme may also bring desktop pictures: put them in a `wallpapers` folder
+# beside this file, and name one for each mode in a section of their own --
+#     wallpapers:
+#       dark: wallpapers/night.jpg
+#       light: wallpapers/day.jpg
+# -- chosen as `theme.wallpaper: <name>`. This one brings none.
+#
 # Colours are opaque, written "#rrggbb" -- in quotes, because an unquoted `#`
 # after a space begins a comment. The accent is not here: it is the user's own
 # choice, made in Settings. And the four text colours (text, subtext0,

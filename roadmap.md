@@ -2190,6 +2190,17 @@ live.
   darken to read, files nothing reads; `--strict` fails on warnings, as a
   repository would. **Next:** the repository and its CI, which do not exist.
 
+- `[x]` `[C]` **A theme brings its own wallpapers** (`design-decisions.md`
+  §1471; `roadmap-detailed.md` *Tier 3 -- Wallpaper Integration*) -- done
+  2026-10-05. A theme bundles pictures in a `wallpapers` folder and names one
+  for dark mode and one for light in a `wallpapers` section; chosen as the
+  other parts of a theme are, `theme.wallpaper: <name>`, the desktop shows
+  the picture for the mode it is drawn in, so a day and a night picture
+  follow the automatic mode. A time-of-day schedule and a rotating folder
+  still come first. The theme checker decodes them. **Lane E:** the
+  Background page that chooses it
+  (`requests/c-e-a-themes-wallpapers-on-the-background-page.md`).
+
 - `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
   -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
   pictures -- the folder the start menu's Pictures place opens -- in name

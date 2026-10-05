@@ -3081,7 +3081,17 @@ impl<T: Transport> ShellSession<T> {
             self.dirty = true;
         }
 
-        let wanted = scheduled.or_else(|| self.shell.appearance.wallpaper.clone());
+        // Below those, a theme's recommended picture for the mode the desktop
+        // is drawn in -- which stands in for the fixed picture, being chosen
+        // in its place -- and then the fixed picture.
+        let wanted = scheduled
+            .or_else(|| {
+                self.shell
+                    .appearance
+                    .theme_wallpaper()
+                    .map(Path::to_path_buf)
+            })
+            .or_else(|| self.shell.appearance.wallpaper.clone());
         match wanted.as_deref() {
             Some(path) => {
                 // Only a new picture is a new image: the placement was applied

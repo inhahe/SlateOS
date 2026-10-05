@@ -1554,6 +1554,15 @@ pub struct AppearanceSettings {
     /// see-through stays [`taskbar_style`](Self::taskbar_style). See
     /// [`themes::PanelTheme`] and `design-decisions.md` §1460.
     pub panel_theme: themes::PanelTheme,
+    /// The theme whose recommended wallpaper the desktop shows -- its picture
+    /// for the mode the desktop is drawn in -- or the built-in one, which
+    /// recommends none, so that the user's own
+    /// [`wallpaper`](Self::wallpaper) is shown. `theme.wallpaper` in the
+    /// file, by the theme's folder name. Below a time-of-day schedule and a
+    /// rotation folder, each of which *is* the wallpaper when set; above the
+    /// fixed picture, which it stands in for. See [`themes::WallpaperTheme`]
+    /// and `design-decisions.md` §1471.
+    pub wallpaper_theme: themes::WallpaperTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1824,6 +1833,7 @@ impl Default for AppearanceSettings {
             animation_theme: themes::AnimationTheme::built_in(),
             decoration_theme: themes::DecorationTheme::built_in(),
             panel_theme: themes::PanelTheme::built_in(),
+            wallpaper_theme: themes::WallpaperTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -1952,6 +1962,15 @@ impl AppearanceSettings {
         self.color_theme
             .colors()
             .map_or(asked, |theme| theme.variant(asked).0)
+    }
+
+    /// The picture the chosen wallpaper theme recommends for the mode the
+    /// desktop is drawn in ([`is_light`](Self::is_light)) -- so a theme's day
+    /// and night pictures follow the automatic mode as its colours do --
+    /// or `None` when it recommends none, the built-in theme among them.
+    #[must_use]
+    pub fn theme_wallpaper(&self) -> Option<&std::path::Path> {
+        self.wallpaper_theme.picture(self.is_light())
     }
 
     /// How long until the automatic mode next turns light or dark, reading
@@ -2570,6 +2589,11 @@ impl AppearanceSettings {
         if let Some(name) = panel_theme_name(doc) {
             s.panel_theme = themes::PanelTheme::load(&name);
         }
+        // And the wallpaper a theme recommends, the same way: the pictures
+        // are found when the settings are read, never when one is drawn.
+        if let Some(name) = wallpaper_theme_name(doc) {
+            s.wallpaper_theme = themes::WallpaperTheme::load(&name);
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2894,6 +2918,10 @@ impl AppearanceSettings {
             &pathcodec::encode_path(std::path::Path::new(self.panel_theme.id())),
         );
         doc.set_str(
+            &["theme", "wallpaper"],
+            &pathcodec::encode_path(std::path::Path::new(self.wallpaper_theme.id())),
+        );
+        doc.set_str(
             &["theme", "surface_style"],
             surface_style_yaml_name(self.surface_style),
         );
@@ -3152,6 +3180,13 @@ pub(crate) fn decoration_theme_name(doc: &Document) -> Option<std::ffi::OsString
 /// [`color_theme_name`] is.
 pub(crate) fn panel_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
     theme_name_at(doc, "taskbar_panel")
+}
+
+/// The wallpaper theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn wallpaper_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "wallpaper")
 }
 
 /// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
@@ -3663,6 +3698,10 @@ mod tests {
     /// The round trip's taskbar-panel theme: a sixth.
     const ROUND_TRIP_PANEL: &str = "barre ö";
     const ROUND_TRIP_PANEL_FILE: &str = "taskbar-panel:\n  gloss: 0.25\n  spacing:\n    tiles: 4\n";
+    /// The round trip's wallpaper theme: a seventh, recommending one picture
+    /// for dark mode, which the round trip puts in its folder.
+    const ROUND_TRIP_WALLPAPERS: &str = "fonds ï";
+    const ROUND_TRIP_WALLPAPERS_FILE: &str = "wallpapers:\n  dark: wallpapers/night.png\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3718,6 +3757,14 @@ mod tests {
                 themes::parse(ROUND_TRIP_PANEL_FILE)
                     .panel
                     .expect("the fixture sets a taskbar panel"),
+            ),
+            // A seventh, for the wallpaper: only its name is written; what it
+            // reads back as is a path in the scratch folder, which the round
+            // trip compares inside it.
+            wallpaper_theme: themes::WallpaperTheme::from_pictures(
+                ROUND_TRIP_WALLPAPERS,
+                None,
+                None,
             ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
@@ -3815,14 +3862,29 @@ mod tests {
         settings.write_into(&mut doc);
         // The colour theme is read from its own file, so that file has to be
         // where the reader looks: a scratch user's data directory.
-        let reread = config::testing::with_scratch_config("round-trip", |root| {
+        let (reread, wallpapers) = config::testing::with_scratch_config("round-trip", |root| {
             install_theme(root, ROUND_TRIP_THEME, ROUND_TRIP_THEME_FILE);
             install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
             install_theme(root, ROUND_TRIP_ANIMATION, ROUND_TRIP_ANIMATION_FILE);
             install_theme(root, ROUND_TRIP_DECORATIONS, ROUND_TRIP_DECORATIONS_FILE);
             install_theme(root, ROUND_TRIP_PANEL, ROUND_TRIP_PANEL_FILE);
-            AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
+            install_theme(root, ROUND_TRIP_WALLPAPERS, ROUND_TRIP_WALLPAPERS_FILE);
+            let folder = config::testing::scratch_data_dir(root)
+                .join("slateos")
+                .join("themes")
+                .join(ROUND_TRIP_WALLPAPERS);
+            let night = folder.join(themes::WALLPAPERS_DIR).join("night.png");
+            std::fs::create_dir_all(night.parent().unwrap()).unwrap();
+            std::fs::write(&night, b"a picture").unwrap();
+            let wallpapers =
+                themes::WallpaperTheme::from_pictures(ROUND_TRIP_WALLPAPERS, Some(night), None);
+            (
+                AppearanceSettings::read_from(&Document::parse(&doc.to_text())),
+                wallpapers,
+            )
         });
+        let mut settings = settings;
+        settings.wallpaper_theme = wallpapers;
         assert_eq!(reread, settings);
     }
 
@@ -4501,6 +4563,54 @@ mod tests {
             assert_ne!(themes::fingerprint(&other), themes::fingerprint(&colours));
             let alone = Document::parse("theme:\n  animation: calm\n");
             assert!(!themes::fingerprint(&alone).is_empty());
+        });
+    }
+
+    /// The wallpaper theme is a dependency as the other axes' are, and so are
+    /// the pictures it recommends: `watcher()` sees one arrive after the
+    /// theme's file -- a theme being copied in -- and the desktop is told the
+    /// picture it can now show. They count even when the theme's file was
+    /// counted for another axis.
+    #[test]
+    fn a_wallpaper_theme_and_its_pictures_are_a_dependency() {
+        config::testing::with_scratch_config("wallpaper-axis", |root| {
+            let text = "colors:\n  base: \"#2e3440\"\nwallpapers:\n  dark: night.png\n";
+            install_theme(root, "aurora", text);
+            let dir = config::testing::scratch_data_dir(root)
+                .join("slateos")
+                .join("themes")
+                .join("aurora");
+            let mut file = AppearanceFile::load();
+            file.settings.wallpaper_theme =
+                themes::WallpaperTheme::load(std::ffi::OsStr::new("aurora"));
+            assert!(file.settings.theme_wallpaper().is_none(), "no picture yet");
+            file.save().unwrap();
+
+            let mut w = watcher();
+            assert!(w.poll().is_some(), "the first look");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            std::fs::write(dir.join("night.png"), b"a picture").unwrap();
+            let doc = w
+                .poll()
+                .expect("the picture arrived, so the wallpaper changed");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.theme_wallpaper(), Some(dir.join("night.png").as_path()));
+            assert!(w.poll().is_none(), "reported once");
+
+            // An edit that leaves the same pictures found: the file itself
+            // is a dependency, not only what it recommends.
+            install_theme(root, "aurora", &text.replace("#2e3440", "#3b4252"));
+            assert!(w.poll().is_some(), "the theme's file edited");
+
+            let both = Document::parse("theme:\n  colors: aurora\n  wallpaper: aurora\n");
+            let with_picture = themes::fingerprint(&both);
+            std::fs::remove_file(dir.join("night.png")).unwrap();
+            assert_ne!(
+                themes::fingerprint(&both),
+                with_picture,
+                "the pictures count when the file was counted for the colours"
+            );
         });
     }
 

@@ -18576,12 +18576,7 @@ mod overview_wiring_tests {
     }
 
     fn tray_icon(id: u32, glyph: &str, tooltip: &str) -> guiremote::tray::TrayIcon {
-        guiremote::tray::TrayIcon {
-            owner: 99,
-            id,
-            glyph: glyph.to_string(),
-            tooltip: tooltip.to_string(),
-        }
+        guiremote::tray::TrayIcon::new(99, id, glyph, tooltip)
     }
 
     /// An icon a program registered is drawn in the taskbar.
@@ -18637,12 +18632,7 @@ mod overview_wiring_tests {
 
     /// A tray icon for `owner`, so two programs can be told apart.
     fn owned_tray_icon(owner: u64, id: u32, glyph: &str) -> guiremote::tray::TrayIcon {
-        guiremote::tray::TrayIcon {
-            owner,
-            id,
-            glyph: glyph.to_string(),
-            tooltip: format!("program {owner} icon {id}"),
-        }
+        guiremote::tray::TrayIcon::new(owner, id, glyph, format!("program {owner} icon {id}"))
     }
 
     /// A flood of tray icons cannot take the taskbar away from the user.
@@ -24202,12 +24192,7 @@ mod taskbar_pin_tests {
     fn the_chevron_and_the_clock_name_themselves() {
         let mut s = DesktopShell::new(1024, 768);
         let flood: Vec<_> = (1..=80)
-            .map(|id| guiremote::tray::TrayIcon {
-                owner: 99,
-                id,
-                glyph: "X".to_string(),
-                tooltip: "x".to_string(),
-            })
+            .map(|id| guiremote::tray::TrayIcon::new(99, id, "X", "x"))
             .collect();
         s.apply_tray_icons(flood);
         let chevron = s.tray_overflow_rect().expect("overflowing");
@@ -24244,12 +24229,7 @@ mod taskbar_pin_tests {
         use guitk::render::RenderCommand;
         let mut s = DesktopShell::new(1024, 768);
         let flood: Vec<_> = (1..=80)
-            .map(|id| guiremote::tray::TrayIcon {
-                owner: 99,
-                id,
-                glyph: "X".to_string(),
-                tooltip: "x".to_string(),
-            })
+            .map(|id| guiremote::tray::TrayIcon::new(99, id, "X", "x"))
             .collect();
         s.apply_tray_icons(flood);
         let lights = |s: &DesktopShell| -> Vec<(super::Rect, u8)> {

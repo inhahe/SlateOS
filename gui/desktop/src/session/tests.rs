@@ -932,12 +932,7 @@ fn the_trays_overflow_list_is_put_on_the_screen() {
     let (mut session, desktop, _turn) = session();
     let popups = session.popups().window();
     let icons: Vec<guiremote::tray::TrayIcon> = (1..=200)
-        .map(|id| guiremote::tray::TrayIcon {
-            owner: 99,
-            id,
-            glyph: "T".to_string(),
-            tooltip: format!("Program {id}"),
-        })
+        .map(|id| guiremote::tray::TrayIcon::new(99, id, "T", format!("Program {id}")))
         .collect();
     session.shell_mut().apply_tray_icons(icons);
     session.pump().expect("pump");
@@ -4487,12 +4482,12 @@ fn an_idle_desktop_is_woken_to_show_a_tooltip_and_repainted_to_hide_it() {
     let osd = session.osd().window();
     session
         .shell_mut()
-        .apply_tray_icons(vec![guiremote::tray::TrayIcon {
-            owner: 99,
-            id: 1,
-            glyph: "B".to_string(),
-            tooltip: "Battery: 84%".to_string(),
-        }]);
+        .apply_tray_icons(vec![guiremote::tray::TrayIcon::new(
+            99,
+            1,
+            "B",
+            "Battery: 84%",
+        )]);
     let icon = session.shell().tray_icon_rects()[0];
     let pointer_at = |x: f32, y: f32| {
         InputEvent::new(

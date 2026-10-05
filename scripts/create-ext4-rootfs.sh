@@ -1513,6 +1513,14 @@ if [ -e "$PY_SLATE" ] && [ -e "$PY_ZIP" ]; then
             echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
             PY_STALE=1
         fi
+        # A warning and not a stale stdlib: python3 runs without it, and a zip
+        # packed before 2026-10-05 lacks it in every worktree that has one.
+        if ! unzip -l "$PY_ZIP" '_sysconfigdata_*.py' >/dev/null 2>&1; then
+            echo "[rootfs] WARNING: python312.zip has no _sysconfigdata_*.py, so on the image"
+            echo "[rootfs]          sysconfig.get_config_var() and get_path() raise"
+            echo "[rootfs]          ModuleNotFoundError. Python still runs; repack it:"
+            echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cpython-spike/stdlib.sh"
+        fi
     else
         echo "[rootfs] NOTE: no unzip — skipping the python312.zip shape checks"
     fi

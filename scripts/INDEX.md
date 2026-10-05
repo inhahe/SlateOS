@@ -450,6 +450,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-lane-claims.py` | Tests for `scripts/lane-claims.py` through its command line. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
+| `scripts/test-link-wrappers.sh` | Self-test for slate_make_link_wrappers in scripts/lib/worktree.sh: the |
 | `scripts/test-msysbash.py` | Tests for `msysbash.py`, the one place that decides which bash runs our scripts. |
 | `scripts/test-mutation_harness.py` | Tests for mutation_harness.check_the_table: where a table's tests are found. |
 | `scripts/test-open-requests.py` | Regression tests for `scripts/open-requests.py`. |
@@ -509,4 +510,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_499 scripts._
+_500 scripts._

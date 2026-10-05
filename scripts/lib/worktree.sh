@@ -636,8 +636,9 @@ slate_zig_cxx_runtime() {
 }
 
 # Write DIR/cc and DIR/c++, and set SLATE_LINK_CC and SLATE_LINK_CXX to them:
-# zig's cc and c++ for a compile, and zig's ld.lld ITSELF for a link, which is
-# made against SlateOS's libc.a, with zig's C++ and compiler runtimes around it.
+# zig's cc and c++ for a compile, with posix/include in front of musl's headers
+# (since 2026-10-05), and zig's ld.lld ITSELF for a link, which is made against
+# SlateOS's libc.a, with zig's C++ and compiler runtimes around it.
 #
 #   slate_make_link_wrappers "$WORK/bin"                 # the sysroot's libc.a
 #   slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS"   # a copy of it
@@ -688,14 +689,19 @@ slate_zig_cxx_runtime() {
 # dropping either would build something other than what was asked for.
 #
 # What goes to zig's driver unchanged: a compile (-c, -S, -E), a relocatable
-# link (-r), a question about the compiler (its version, its search paths),
-# and a call that compiles a source and links it in one step. That last is a
-# link, and the one these do not reach: zig's musl is behind ours on it.
-# CMake makes one only to identify the compiler -- its try_compile checks
-# compile, then link, so they reach ld.lld -- but autoconf makes one for every
-# link test (AC_LINK_IFELSE, AC_CHECK_FUNC), so a configure run through these
-# would still answer for musl where ours is silent. No port configures
-# through them but LLVM, whose configure is cmake.
+# link (-r), and a question about the compiler (its version, its search paths).
+#
+# A call that compiles a source and links it in one step is split: each source
+# is compiled by zig's driver, with the call's compiler flags, into a scratch
+# object, and the objects are linked here like any others. autoconf makes such
+# a call for every link test (AC_LINK_IFELSE, AC_CHECK_FUNC -- `cc -o conftest
+# conftest.c -lfoo`), so this is what lets a configure run through these ask
+# our libc.a what it has. Until 2026-10-05 the whole call went to zig's driver,
+# which linked it against its musl: CPython, configured through these that
+# day, still found none of close_range, sem_clockwait, getwd and tmpnam_r,
+# which ours has and musl has not (known-issues-resolved/
+# D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md). CMake's
+# try_compile compiles, then links, so LLVM's configure never met the gap.
 #
 # The paths are written with printf %q, so the worktree's spaces stay inside
 # them.
@@ -745,6 +751,13 @@ _slate_write_link_wrapper() {
         printf '# Written by scripts/lib/worktree.sh (slate_make_link_wrappers): %s to\n' "$compiler"
         printf '# compile, ld.lld to link against SlateOS'"'"'s libc. Its comment says why.\n'
         printf 'cc=%q\n' "$compiler"
+        # posix/include: the headers that declare what our libc.a has beyond
+        # musl's (each stands in front of musl's, design-decisions §1141).
+        # A program built for our libc compiles against them, or what it
+        # links but cannot declare -- close_range, sem_clockwait -- is an
+        # implicit declaration, an error since C99. -I, not -isystem: zig's
+        # driver searches its own libc headers before an -isystem directory.
+        printf 'overlay=%q\n' "$SLATE_ROOT/posix/include"
         printf 'ld=(%q ld.lld)\n' "$SLATE_ZIG"
         printf 'libs=('
         for lib in "$@"; do
@@ -755,11 +768,38 @@ _slate_write_link_wrapper() {
 for a in "$@"; do
     case "$a" in
         -c|-S|-E|-r|-x*|-|-###|--version|-dumpversion|-dumpfullversion|-dumpmachine|-dumpspecs|-print-*)
-            exec "$cc" "$@" ;;
-        *.c|*.cc|*.cpp|*.cxx|*.c++|*.C|*.i|*.ii|*.s|*.S) exec "$cc" "$@" ;;
+            exec "$cc" -I"$overlay" "$@" ;;
     esac
 done
 me="${0##*/}"
+# A source on a link line is compiled here, with the line's compiler flags --
+# everything but the output, the inputs and what only a link reads -- and its
+# object linked like any other (worktree.sh's comment says why).
+srcs=() cflags=() skip=0
+for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+        *.c|*.cc|*.cpp|*.cxx|*.c++|*.C|*.i|*.ii|*.s|*.S) srcs+=("$a") ;;
+        -o|-L|-l|-e|-u|-z|-Xlinker) skip=1 ;;
+        -o?*|-L?*|-l?*|-Wl,*|-static|-static-pie|-pie|-no-pie|-rdynamic|-shared|-s) ;;
+        -nostdlib|-nostartfiles|-nodefaultlibs|-nostdlib++) ;;
+        *.o|*.a|*.so|*.so.*|@?*) ;;
+        *) cflags+=("$a") ;;
+    esac
+done
+objs=() tmp=""
+if [ ${#srcs[@]} -gt 0 ]; then
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/slate-link.XXXXXX")" || exit 1
+    n=0
+    for s in "${srcs[@]}"; do
+        n=$((n + 1))
+        if ! "$cc" -I"$overlay" "${cflags[@]}" -c "$s" -o "$tmp/$n.o"; then
+            rm -rf "$tmp"
+            exit 1
+        fi
+        objs+=("$tmp/$n.o")
+    done
+fi
 args=()
 while [ $# -gt 0 ]; do
     a="$1"
@@ -790,7 +830,13 @@ while [ $# -gt 0 ]; do
         *) ;;
     esac
 done
-exec "${ld[@]}" -static --eh-frame-hdr "${args[@]}" "${libs[@]}"
+if [ -z "$tmp" ]; then
+    exec "${ld[@]}" -static --eh-frame-hdr "${args[@]}" "${libs[@]}"
+fi
+"${ld[@]}" -static --eh-frame-hdr "${objs[@]}" "${args[@]}" "${libs[@]}"
+rc=$?
+rm -rf "$tmp"
+exit "$rc"
 BODY
     } >"$file" || return 1
     chmod +x "$file"

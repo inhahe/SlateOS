@@ -1,6 +1,6 @@
 ## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS
 
-**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as open.
+**Status:** FIXED 2026-08-14 -- the resolution note in the entry below gives the change; on `main` since. Stamped 2026-09-28 by lane F, `gui/font`'s owner since the six-lane split, so that the heading no longer reads as unfixed. Its remaining Syriac half -- HarfBuzz's Arabic arm calls Syriac's shaper off for `DFLT` alone, where the Indic and USE arms also do for `latn` -- FIXED 2026-10-05 (lane F), once Syriac had joining forms to lose: `fallback::shaped_as_default`, and a run whose shaper is called off takes no joining forms (`scaled.rs`). Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
 
 **What.** `fallback::positions_marks` decides whether a run may have its marks
 placed by measurement from the OpenType tag the run's *characters* map to. In

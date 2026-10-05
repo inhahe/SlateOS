@@ -1,5 +1,7 @@
 ## TD-FONT-ZEROES-A-MARKS-ADVANCE-ONLY-WHEN-THE-FALLBACK-RUNS
 
+**Status:** FIXED 2026-08-14 (lane C). The last residual -- default ignorables classed marks where HarfBuzz's synthesized classes leave them bases -- was found on 2026-10-05 (lane F) to change nothing on the screen: whatever reads the class, the ignorable's own erasure takes its advance and offset away (before the attachments are resolved, as of that day), and kerning steps over it as never drawn. The sweep's strings with a variation selector between two letters, and before an accent, agree with HarfBuzz on every host face. Closed. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
+
 Filed 2026-08-14, lane C. Fixed the same day.
 
 A combining mark takes no room on the line. We zeroed its advance from

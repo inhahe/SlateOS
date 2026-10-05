@@ -2570,11 +2570,17 @@ impl Face {
     /// [`gpos_kerns`](Self::gpos_kerns) needs. Distinct from
     /// [`kern_across`](Self::kern_across), which prefers `GPOS` face-wide and
     /// so would answer 0 for exactly the faces this exists for.
+    ///
+    /// The two glyphs may stand apart, with marks between them: HarfBuzz reads
+    /// this table with `IgnoreMarks` (`hb_kern_machine_t`). Which glyphs those
+    /// are is the caller's to settle: the face's `GDEF` classes where it has
+    /// them, and the characters' categories where it has not, as HarfBuzz's
+    /// synthesized classes are.
     #[must_use]
-    pub(crate) fn legacy_kern_across(&self, left: u16, right: u16, between: &[u16]) -> i16 {
+    pub(crate) fn legacy_kern(&self, left: u16, right: u16) -> i16 {
         self.kerning
             .as_ref()
-            .map_or(0, |k| k.legacy_pair(&self.data, left, right, between))
+            .map_or(0, |k| k.legacy_adjacent(&self.data, left, right))
     }
 
     /// Whether this face can tell a combining mark from a letter — because it
@@ -4740,6 +4746,18 @@ pub(crate) mod tests {
     /// The table is a bare version-0 header with nothing in it: presence is
     /// all face fallback asks about.
     pub(crate) fn build_test_font_at(first: u16, colour: bool) -> Vec<u8> {
+        let extra = if colour {
+            alloc::vec![(*b"COLR", alloc::vec![0; 14])]
+        } else {
+            Vec::new()
+        };
+        build_test_font_at_with(first, extra)
+    }
+
+    /// The fixture with its three glyphs at `first`, `first + 1` and
+    /// `first + 2`, as [`build_test_font_at`] maps them, and `extra` tables
+    /// besides: a `GSUB` that acts on letters of another script, say.
+    pub(crate) fn build_test_font_at_with(first: u16, extra: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
         let mut tables = build_test_tables(TRUE_LSB_3);
         let last = first + 2;
         let mut sub4 = Vec::new();
@@ -4761,9 +4779,8 @@ pub(crate) mod tests {
                 *data = cmap.clone();
             }
         }
-        if colour {
-            tables.insert(0, (*b"COLR", alloc::vec![0; 14]));
-        }
+        tables.extend(extra);
+        tables.sort_unstable_by_key(|&(tag, _)| tag);
         assemble(&tables)
     }
 

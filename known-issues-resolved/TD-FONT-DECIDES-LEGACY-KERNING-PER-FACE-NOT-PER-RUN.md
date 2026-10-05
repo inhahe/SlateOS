@@ -1,5 +1,7 @@
 ## TD-FONT-DECIDES-LEGACY-KERNING-PER-FACE-NOT-PER-RUN
 
+**Status:** FIXED 2026-08-14 (lane C). The residual its closing paragraph left -- the legacy table read without `IgnoreMarks` -- FIXED 2026-10-05 (lane F): the table is read across marks, and inside the positioning pass where `GPOS` attaches them, so an attached accent stays on its letter (`kern.rs` `legacy_pair`, `gpos.rs` `kern_legacy`). About ninety host faces that disagreed with HarfBuzz on a kerning pair with an accent between now agree. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
+
 Filed 2026-08-14, lane C. Fixed the same day. Closes the residual left open
 by `TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-FACE-NOT-THE-RUN`
 ("legacy-`kern` fallback when `GPOS` is disabled per run").

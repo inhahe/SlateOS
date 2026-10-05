@@ -1,4 +1,6 @@
-### TD-FONT-NOT-ACTUALLY-NO-STD. `osfont` documents itself as `no_std` but links `std` — 2026-08-14 — OPEN
+### TD-FONT-NOT-ACTUALLY-NO-STD. `osfont` documents itself as `no_std` but links `std` — 2026-08-14 — CLOSED
+
+**Status:** CLOSED 2026-10-05 (lane F) -- not needed. The question it asked to be settled first is settled: SlateOS userspace has `std` (`x86_64-slateos` builds it with `-Zbuild-std`), and the compositor, this crate's main user, uses `std::thread` itself, so `#![no_std]` here would buy nothing. The crate keeps writing `alloc::` paths, which costs nothing and keeps the way clear, and its docs now say so. Moved to `known-issues-resolved/` on 2026-10-05 (lane F).
 
 **What.** `gui/font` is written entirely in `alloc` terms (`alloc::vec::Vec`,
 `alloc::string::String`, no `std::` paths, `extern crate alloc;` at the top),

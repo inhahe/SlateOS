@@ -355,62 +355,97 @@ MUTATIONS = [
 
     # ── The pointer ───────────────────────────────────────────────────────
     (
-        "a right press does what a left one does",
-        "        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {",
-        "        if !matches!(ev.kind, MouseEventKind::Press(_)) {",
-        ["only_a_left_press_does_anything"],
+        'a right press does what a left one does',
+        '            MouseEventKind::Press(MouseButton::Left) => {}\n',
+        '            MouseEventKind::Press(_) => {}\n',
+        ['only_a_left_press_does_anything'],
     ),
     (
-        "a release does what a press does",
-        "        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {",
-        "        if matches!(ev.kind, MouseEventKind::Move) {",
-        ["only_a_left_press_does_anything"],
+        'a release does what a press does',
+        '            _ => return EventResult::Ignored,\n        }\n        let f = self.frame(',
+        '            _ => {}\n        }\n        let f = self.frame(',
+        ['only_a_left_press_does_anything'],
     ),
     (
-        "a click on nothing is consumed anyway",
-        "        let Some((target, rect)) = hit_with_rect(&f, ev.x, ev.y) else {\n            return EventResult::Ignored;\n        };",
-        "        let Some((target, rect)) = hit_with_rect(&f, ev.x, ev.y) else {\n            return EventResult::Consumed;\n        };",
-        ["a_click_on_nothing_is_left_alone"],
+        'a click on nothing is consumed anyway',
+        '        let Some(target) = f.hit_test(ev.x, ev.y) else {\n            return EventResult::Ignored;\n        };',
+        '        let Some(target) = f.hit_test(ev.x, ev.y) else {\n            return EventResult::Consumed;\n        };',
+        ['a_click_on_nothing_is_left_alone'],
+    ),
+    # No row for the first box at a point winning over the last: since
+    # 2026-10-04 a press is read by `Frame::hit_test`, the toolkit's, with
+    # its own tests; the_pixels_a_control_is_drawn_on_are_the_pixels_that_reach_it
+    # still holds the mixer's boxes to their order.
+    # The faders are the toolkit's slider since 2026-10-04
+    # (c-e-the-toolkit-has-a-slider-now.md): no rows for loud at the top,
+    # a click read against the window, or a volume past the ends -- that
+    # arithmetic is `guitk::slider`'s, swept with it. The rows below are
+    # the mixer's use of it.
+    (
+        "a fader's volume is upside down",
+        '        let volume = event.value() as f32;\n',
+        '        let volume = 1.0 - event.value() as f32;\n',
+        ['a_click_on_a_fader_sets_the_volume_to_the_height_it_landed_at', 'a_fader_follows_a_drag_and_stays_where_it_is_let_go'],
     ),
     (
-        # `hit_test` takes the *last* box at a point.  Taking the first makes the
-        # whole-column box win over the fader and the mute button drawn after
-        # it, and makes the picker's backdrop win over its own rows.
-        "the first box recorded at a point wins instead of the last",
-        "    f.hits()\n        .iter()\n        .rev()\n        .find(|(_, r)| r.contains(x, y))",
-        "    f.hits()\n        .iter()\n        .find(|(_, r)| r.contains(x, y))",
-        ["the_pixels_a_control_is_drawn_on_are_the_pixels_that_reach_it"],
+        'a fader moves the master whichever column it is',
+        '        self.apply(Action::SetVolume(sel, volume));\n',
+        '        self.apply(Action::SetVolume(Selection::Master, volume));\n',
+        ['a_click_on_a_fader_sets_the_volume_to_the_height_it_landed_at'],
     ),
     (
-        "a fader is loud at the bottom and quiet at the top",
-        "    (1.0 - (y - r.y) / r.h).clamp(0.0, 1.0)",
-        "    ((y - r.y) / r.h).clamp(0.0, 1.0)",
-        ["a_click_on_a_fader_sets_the_volume_to_the_height_it_landed_at"],
+        'a drag stops at the press',
+        '        if let Some(sel) = self.dragging {\n            return self.drag_fader(sel, ev);\n        }\n',
+        '',
+        ['a_fader_follows_a_drag_and_stays_where_it_is_let_go'],
     ),
     (
-        "a fader reads the click against the window rather than its own track",
-        "    (1.0 - (y - r.y) / r.h).clamp(0.0, 1.0)",
-        "    (1.0 - y / r.h).clamp(0.0, 1.0)",
-        ["a_click_on_a_fader_sets_the_volume_to_the_height_it_landed_at"],
+        'a press starts no drag',
+        '        if dragging {\n            self.dragging = Some(sel);\n        }\n',
+        '',
+        ['a_fader_follows_a_drag_and_stays_where_it_is_let_go'],
     ),
     (
-        # SURVIVED the first sweep, because through the pointer the clamp is
-        # unreachable: a click is measured in the very box it was tested
-        # against, so the fraction is already in range before the clamp sees
-        # it.  But `value_at` is public, and a caller handing it a `y` off the
-        # track is a thing that can happen -- so unlike the two guards deleted
-        # elsewhere in this file, this one is worth keeping, and therefore
-        # worth a test that reaches it.
-        "a fader click sets a volume outside the range",
-        "    (1.0 - (y - r.y) / r.h).clamp(0.0, 1.0)",
-        "    1.0 - (y - r.y) / r.h",
-        ["a_click_past_either_end_of_a_track_is_full_volume_or_none"],
+        'a drag keeps the pointer after the release',
+        '        let response = fader.handle_mouse(&placement, ev);\n        if !fader.is_dragging() {\n            self.dragging = None;\n        }\n',
+        '        let response = fader.handle_mouse(&placement, ev);\n',
+        ['a_fader_follows_a_drag_and_stays_where_it_is_let_go'],
     ),
     (
-        "clicking a fader moves it but does not point the keyboard at it",
-        "            Target::StreamFader(i) => {\n                self.apply(Action::Select(Selection::Stream(i)));",
-        "            Target::StreamFader(i) => {",
-        ["a_click_on_a_fader_sets_the_volume_to_the_height_it_landed_at"],
+        'a key during a drag moves the fader the pointer has',
+        '        if let Some(sel) = self.dragging {\n            return self.drag_key(sel, ev);\n        }\n',
+        '',
+        ['escape_takes_a_fader_drag_back'],
+    ),
+    (
+        'Escape leaves a drag where it was',
+        '        let response = fader.handle_key(ev);\n',
+        '        let response = guitk::slider::Response::Taken;\n',
+        ['escape_takes_a_fader_drag_back'],
+    ),
+    (
+        'a fader keeps its own idea of the volume',
+        '        if !fader.is_dragging() {\n            fader.set_value(f64::from(volume));\n        }\n        Some(fader)\n',
+        '        let _ = volume;\n        Some(fader)\n',
+        ['a_press_on_a_faders_thumb_holds_it_where_it_is'],
+    ),
+    (
+        'the pointer lights no thumb',
+        '                answered |= fader.handle_mouse(&placement, ev).is_taken();\n',
+        '                let _ = (placement, ev);\n',
+        ['the_pointer_over_a_faders_thumb_lights_it'],
+    ),
+    (
+        "a fader under the picker's sheet lights",
+        '    fn hover_faders(&mut self, ev: &MouseEvent) -> EventResult {\n        if self.picker != Picker::None {\n            return EventResult::Ignored;\n        }\n',
+        '    fn hover_faders(&mut self, ev: &MouseEvent) -> EventResult {\n',
+        ['the_pointer_over_a_faders_thumb_lights_it'],
+    ),
+    (
+        'clicking a fader moves it but does not point the keyboard at it',
+        '    fn press_fader(&mut self, sel: Selection, ev: &MouseEvent) {\n        self.apply(Action::Select(sel));\n',
+        '    fn press_fader(&mut self, sel: Selection, ev: &MouseEvent) {\n',
+        ['a_click_on_a_fader_sets_the_volume_to_the_height_it_landed_at'],
     ),
     (
         "clicking a mute button mutes the next column along",
@@ -443,10 +478,10 @@ MUTATIONS = [
         ["the_device_bars_open_the_picker_they_name"],
     ),
     (
-        "no hit box is recorded for a fader",
-        "        f.hit(\n            match sel {\n                Selection::Master => Target::MasterFader,\n                Selection::Stream(i) => Target::StreamFader(i),\n            },\n            track,\n        );",
-        "",
-        ["every_column_can_be_muted_and_faded_with_the_pointer"],
+        'no hit box is recorded for a fader',
+        '                    Selection::Master => Target::MasterFader,\n                    Selection::Stream(i) => Target::StreamFader(i),\n                },\n                hit,\n            );\n',
+        '                    Selection::Master => Target::MasterColumn,\n                    Selection::Stream(i) => Target::StreamColumn(i),\n                },\n                hit,\n            );\n',
+        ['every_column_can_be_muted_and_faded_with_the_pointer'],
     ),
     (
         "no hit box is recorded for a mute button",
@@ -470,16 +505,34 @@ MUTATIONS = [
         ["every_column_can_be_muted_and_faded_with_the_pointer"],
     ),
     (
-        # SURVIVED the first sweep, and it is the sharpest of the thirteen.
-        # The grid walk compares the frame's hit boxes with each other, so a
-        # box of the wrong *shape* is invisible to it -- shrink every fader to
-        # its top half and the walk still agrees with itself, because both
-        # sides of the comparison shrank together.  Only a test that ties the
-        # box back to the geometry the fader was *drawn* from can see it.
-        "a fader's hit box is not the track it is drawn on",
-        "        f.hit(\n            match sel {\n                Selection::Master => Target::MasterFader,\n                Selection::Stream(i) => Target::StreamFader(i),\n            },\n            track,\n        );",
-        "        f.hit(\n            match sel {\n                Selection::Master => Target::MasterFader,\n                Selection::Stream(i) => Target::StreamFader(i),\n            },\n            Rect::new(track.x, track.y, track.w, track.h * 0.5),\n        );",
-        ["a_faders_hit_box_is_the_track_it_is_drawn_on"],
+        "a fader's hit box is not the slider's round its track",
+        '                },\n                hit,\n            );\n',
+        '                },\n                Rect::new(hit.x, hit.y, hit.w, hit.h * 0.5),\n            );\n',
+        ['a_faders_hit_box_is_the_sliders_round_the_track_it_is_drawn_on'],
+    ),
+    (
+        "a fader's hit box reaches out of its column",
+        '        self.fader_placement(col)?.hit().intersect(col)\n',
+        '        Some(self.fader_placement(col)?.hit())\n',
+        ['every_hit_box_is_inside_the_window'],
+    ),
+    (
+        "a thumb's light and ring reach out of the window",
+        '        let room = (centre - col.x).min(col.right() - centre) - THUMB_REACH;\n',
+        '        let room = (centre - col.x).min(col.right() - centre);\n',
+        ['nothing_is_drawn_outside_the_window'],
+    ),
+    (
+        'a column with no room still draws a fader',
+        '        if !(thumb > 0.0 && track_h > 0.0) {\n            return None;\n        }\n',
+        '',
+        ['nothing_is_drawn_outside_the_window'],
+    ),
+    (
+        "a press past the end of a track is the column's",
+        '        if let Some(hit) = l.fader_hit(col) {\n',
+        '        if let Some(hit) = l.fader_placement(col).map(|p| p.track) {\n',
+        ['a_press_past_either_end_of_a_track_is_full_volume_or_none'],
     ),
 
     # ── The clock ─────────────────────────────────────────────────────────

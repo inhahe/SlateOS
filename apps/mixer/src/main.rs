@@ -4,6 +4,15 @@
 //! application, each with a draggable vertical fader, a peak meter, a mute
 //! button and a live percentage, plus an output and an input device picker.
 //!
+//! The faders are the toolkit's slider (`guitk::slider`, lane C's
+//! `c-e-the-toolkit-has-a-slider-now.md`, 2026-10-04): a press on a track
+//! moves the fader there and a drag carries it, a press on the thumb takes
+//! hold without moving it, Escape takes a drag back, and the thumb lights
+//! while the pointer is where a press would take hold. Until then a fader
+//! only answered a click -- it could not be dragged, whatever this line said.
+//! The volumes stay in the model; Up and Down still nudge the selected
+//! column by [`VOLUME_STEP`].
+//!
 //! # What wiring this up found
 //!
 //! `main` built a widget tree, dropped it, ticked the peak meters ten times,
@@ -70,6 +79,7 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
+use guitk::slider::{Look, Placement, Slider, SliderEvent};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
@@ -100,6 +110,21 @@ const FALLBACK_SEED: u64 = 0x4D49_5845_5221_2121;
 
 /// How much one press of Up or Down moves a fader.
 const VOLUME_STEP: f32 = 0.05;
+
+/// The grid a dragged fader keeps to: a whole percent, the readout's unit.
+const FADER_GRID: f64 = 0.01;
+
+/// The widest a fader's thumb is drawn; narrower where the column is.
+const FADER_THUMB: f32 = 18.0;
+
+/// The width of the ring round a fader's thumb while its column has the
+/// keyboard.
+const FOCUS_RING: f32 = 2.0;
+
+/// How far past a fader's thumb the toolkit draws: the light round it while
+/// the pointer is on it (`guitk::slider::HALO`), and the focus ring with the
+/// gap inside it -- whichever reaches further.
+const THUMB_REACH: f32 = 4.0;
 
 /// The meters advance one step per this many milliseconds of real time, no
 /// matter how often the window happens to draw.
@@ -421,6 +446,13 @@ pub struct MixerApp {
     /// The last size the window was drawn at. A click is read against this.
     size: (f32, f32),
     rng: SeededRng,
+    /// Each column's fader, by its place in the row (master first): the
+    /// toolkit's slider, holding the state of a drag and of the pointer over
+    /// its thumb. The volumes stay in the model; a fader is set from its
+    /// column's volume before each input and each drawing.
+    faders: Vec<Slider>,
+    /// The column whose fader a drag is moving, while one is.
+    dragging: Option<Selection>,
 }
 
 impl Default for MixerApp {
@@ -478,6 +510,8 @@ impl MixerApp {
             steps: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             rng: SeededRng::new(seed),
+            faders: Vec::new(),
+            dragging: None,
         }
     }
 
@@ -963,6 +997,11 @@ impl MixerApp {
         if !ev.pressed {
             return EventResult::Ignored;
         }
+        // During a drag the fader has the keyboard: Escape takes the drag
+        // back, and the rest wait for the button to come up.
+        if let Some(sel) = self.dragging {
+            return self.drag_key(sel, ev);
+        }
         // Shift is not a modifier that refuses a key: it is half of Shift-Tab,
         // which is the one keystroke every toolkit agrees means "backwards".
         if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {
@@ -987,30 +1026,27 @@ impl MixerApp {
     /// decided by where the thing it hit was actually drawn — there is no second
     /// copy of the layout for the pointer to disagree with.
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
-        if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
-            return EventResult::Ignored;
+        // A drag has the pointer wherever it goes, until the button comes up.
+        if let Some(sel) = self.dragging {
+            return self.drag_fader(sel, ev);
+        }
+        match ev.kind {
+            MouseEventKind::Press(MouseButton::Left) => {}
+            MouseEventKind::Move => return self.hover_faders(ev),
+            _ => return EventResult::Ignored,
         }
         let f = self.frame(self.size.0, self.size.1);
-        let Some((target, rect)) = hit_with_rect(&f, ev.x, ev.y) else {
+        let Some(target) = f.hit_test(ev.x, ev.y) else {
             return EventResult::Ignored;
         };
         match target {
-            Target::MasterFader => {
-                self.apply(Action::Select(Selection::Master));
-                self.apply(Action::SetVolume(Selection::Master, value_at(rect, ev.y)));
-            }
+            Target::MasterFader => self.press_fader(Selection::Master, ev),
             Target::MasterMute => {
                 self.apply(Action::Select(Selection::Master));
                 self.apply(Action::ToggleMute(Selection::Master));
             }
             Target::MasterColumn => self.apply(Action::Select(Selection::Master)),
-            Target::StreamFader(i) => {
-                self.apply(Action::Select(Selection::Stream(i)));
-                self.apply(Action::SetVolume(
-                    Selection::Stream(i),
-                    value_at(rect, ev.y),
-                ));
-            }
+            Target::StreamFader(i) => self.press_fader(Selection::Stream(i), ev),
             Target::StreamMute(i) => {
                 self.apply(Action::Select(Selection::Stream(i)));
                 self.apply(Action::ToggleMute(Selection::Stream(i)));
@@ -1026,32 +1062,144 @@ impl MixerApp {
         }
         EventResult::Consumed
     }
-}
 
-/// The value a fader is set to by a click at `y` on the track `r`.
-///
-/// Up is loud, which is the only way round a fader is ever drawn.
-#[must_use]
-pub fn value_at(r: Rect, y: f32) -> f32 {
-    if r.h <= 0.0 {
-        return 0.0;
+    // ── The faders ─────────────────────────────────────────────────────────
+
+    /// Column `sel`'s fader as it stands -- its stored state, or one at rest
+    /// for a column the pointer has not touched -- for drawing.
+    fn fader_for(&self, sel: Selection) -> Slider {
+        self.faders
+            .get(sel.index())
+            .cloned()
+            .unwrap_or_else(new_fader)
     }
-    (1.0 - (y - r.y) / r.h).clamp(0.0, 1.0)
+
+    /// Column `sel`'s stored fader, made where there is none yet and set to
+    /// the column's volume -- the model's word -- unless a drag is moving
+    /// it. `None` for a column that is not there.
+    fn fader_mut(&mut self, sel: Selection) -> Option<&mut Slider> {
+        let volume = self.volume_of(sel)?;
+        let index = sel.index();
+        if self.faders.len() <= index {
+            self.faders.resize_with(index.saturating_add(1), new_fader);
+        }
+        let fader = self.faders.get_mut(index)?;
+        if !fader.is_dragging() {
+            fader.set_value(f64::from(volume));
+        }
+        Some(fader)
+    }
+
+    /// Where column `sel`'s fader is drawn at the window's size.
+    fn fader_placement_of(&self, sel: Selection) -> Option<Placement> {
+        let l = self.layout_at(self.size.0, self.size.1);
+        l.column_of(sel).and_then(|col| l.fader_placement(col))
+    }
+
+    /// A press on column `sel`'s fader: the column selected, and the fader
+    /// taken hold of -- moved to the press, or held where it was pressed if
+    /// the press was on its thumb.
+    fn press_fader(&mut self, sel: Selection, ev: &MouseEvent) {
+        self.apply(Action::Select(sel));
+        let Some(placement) = self.fader_placement_of(sel) else {
+            return;
+        };
+        let Some(fader) = self.fader_mut(sel) else {
+            return;
+        };
+        let response = fader.handle_mouse(&placement, ev);
+        let dragging = fader.is_dragging();
+        if let Some(event) = response.event() {
+            self.fader_moved(sel, event);
+        }
+        if dragging {
+            self.dragging = Some(sel);
+        }
+    }
+
+    /// The pointer during a drag of column `sel`'s fader.
+    fn drag_fader(&mut self, sel: Selection, ev: &MouseEvent) -> EventResult {
+        let placement = self.fader_placement_of(sel);
+        let (Some(placement), Some(fader)) = (placement, self.fader_mut(sel)) else {
+            // The column went while it was dragged.
+            self.dragging = None;
+            return EventResult::Ignored;
+        };
+        let response = fader.handle_mouse(&placement, ev);
+        if !fader.is_dragging() {
+            self.dragging = None;
+        }
+        if let Some(event) = response.event() {
+            self.fader_moved(sel, event);
+        }
+        if response.is_taken() {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// The pointer moving with no drag: each fader lights its thumb, or puts
+    /// the light out, as the pointer comes over it or leaves. Nothing under
+    /// an open picker's sheet answers.
+    fn hover_faders(&mut self, ev: &MouseEvent) -> EventResult {
+        if self.picker != Picker::None {
+            return EventResult::Ignored;
+        }
+        let mut answered = false;
+        for index in 0..=self.streams.len() {
+            let sel = Selection::at(index);
+            let Some(placement) = self.fader_placement_of(sel) else {
+                continue;
+            };
+            if let Some(fader) = self.fader_mut(sel) {
+                answered |= fader.handle_mouse(&placement, ev).is_taken();
+            }
+        }
+        if answered {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// What a fader's movement does to its column: the volume the event
+    /// carries -- shown while a drag moves it, kept when it is let go, and
+    /// put back where it began when Escape takes the drag back.
+    fn fader_moved(&mut self, sel: Selection, event: SliderEvent) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a fader's value is in 0..=1, which f32 holds to the grid's whole percent"
+        )]
+        let volume = event.value() as f32;
+        self.apply(Action::SetVolume(sel, volume));
+    }
+
+    /// A key during a drag: Escape takes the drag back; every other key is
+    /// swallowed, the pointer having the volume.
+    fn drag_key(&mut self, sel: Selection, ev: &KeyEvent) -> EventResult {
+        let Some(fader) = self.fader_mut(sel) else {
+            self.dragging = None;
+            return EventResult::Ignored;
+        };
+        let response = fader.handle_key(ev);
+        if !fader.is_dragging() {
+            self.dragging = None;
+        }
+        if let Some(event) = response.event() {
+            self.fader_moved(sel, event);
+        }
+        if response.is_taken() {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
 }
 
-/// The last box recorded at a point, and the box itself.
-///
-/// `Frame::hit_test` answers *which* target, and a fader also needs to know how
-/// far up its own track the click landed — so the box has to come back with it.
-/// Reading the value from the recorded box rather than from a freshly-computed
-/// one is what keeps the pointer and the drawing on the same rectangle.
-#[must_use]
-pub fn hit_with_rect(f: &Frame, x: f32, y: f32) -> Option<(Target, Rect)> {
-    f.hits()
-        .iter()
-        .rev()
-        .find(|(_, r)| r.contains(x, y))
-        .map(|(t, r)| (*t, *r))
+/// A fader at rest: from silence to full, on the grid of whole percents.
+fn new_fader() -> Slider {
+    Slider::new(0.0, 1.0, 0.0).with_step(FADER_GRID)
 }
 
 // ── Volume arithmetic ──────────────────────────────────────────────────────
@@ -1303,6 +1451,39 @@ impl Layout {
         let (fw, mw, inner) = self.middle_widths(mid);
         let x0 = mid.x + (mid.w - (fw + mw + inner)) / 2.0;
         Rect::new(x0, mid.y, fw, mid.h)
+    }
+
+    /// The fader of a column as the toolkit's slider draws and reads it: a
+    /// thin track down the middle of [`fader_of`](Self::fader_of)'s area,
+    /// loud at the top. The track stops short of the area's ends, and the
+    /// thumb is no wider than the column leaves room for, by as much as the
+    /// thumb and the light and ring drawn round it ([`THUMB_REACH`]) need --
+    /// so that a thumb at full volume or at none, lit or ringed, is drawn
+    /// inside its column, and its column inside the window. `None` for a
+    /// column with no room for a fader, which then has none.
+    #[must_use]
+    pub fn fader_placement(&self, col: Rect) -> Option<Placement> {
+        let area = self.fader_of(col);
+        let centre = area.x + area.w / 2.0;
+        let room = (centre - col.x).min(col.right() - centre) - THUMB_REACH;
+        let thumb = FADER_THUMB.min(area.w).min(2.0 * room);
+        let inset = thumb / 2.0 + THUMB_REACH;
+        let track_h = area.h - 2.0 * inset;
+        if !(thumb > 0.0 && track_h > 0.0) {
+            return None;
+        }
+        let track_w = (thumb * 0.35).max(2.0).min(area.w);
+        let track = Rect::new(centre - track_w / 2.0, area.y + inset, track_w, track_h);
+        Some(Placement::vertical(track, thumb))
+    }
+
+    /// Where a press takes hold of a column's fader: the slider's target --
+    /// never thinner than a finger, past the thumb at both ends -- cut to the
+    /// column, so that it cannot take a press meant for its neighbour, or
+    /// lie outside the window.
+    #[must_use]
+    pub fn fader_hit(&self, col: Rect) -> Option<Rect> {
+        self.fader_placement(col)?.hit().intersect(col)
     }
 
     /// The peak meter of a column, beside its fader.
@@ -1719,28 +1900,29 @@ impl MixerApp {
             FontWeightHint::Bold,
         );
 
-        // The fader.
-        let track = l.fader_of(col);
-        fill(f, track, self.palette.crust, 3.0);
-        let filled = Rect::new(
-            track.x,
-            track.y + track.h * (1.0 - volume),
-            track.w,
-            track.h * volume,
-        );
-        fill(
-            f,
-            filled,
-            if muted { self.palette.surface1 } else { accent },
-            3.0,
-        );
-        f.hit(
-            match sel {
-                Selection::Master => Target::MasterFader,
-                Selection::Stream(i) => Target::StreamFader(i),
-            },
-            track,
-        );
+        // The fader: the toolkit's slider, set to the column's volume, its
+        // fill the column's colour (grey while muted, the level kept).
+        if let Some(placement) = l.fader_placement(col) {
+            let mut fader = self.fader_for(sel);
+            fader.set_value(f64::from(volume));
+            let look = Look {
+                track: self.palette.crust,
+                fill: if muted { self.palette.surface1 } else { accent },
+                alpha: u8::MAX,
+            };
+            f.draw_with(|cmds| {
+                fader.draw(cmds, &self.palette, &placement, look, selected, FOCUS_RING);
+            });
+        }
+        if let Some(hit) = l.fader_hit(col) {
+            f.hit(
+                match sel {
+                    Selection::Master => Target::MasterFader,
+                    Selection::Stream(i) => Target::StreamFader(i),
+                },
+                hit,
+            );
+        }
 
         // The meter, if this column has one. The master column does not: the
         // master is not a stream and has no level of its own to show.
@@ -2165,6 +2347,11 @@ mod tests {
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         )
+    }
+
+    /// Any pointer event at a point, through the real event path.
+    fn mouse(a: &mut MixerApp, x: f32, y: f32, kind: MouseEventKind) -> EventResult {
+        handle_event(a, &Event::Mouse(MouseEvent { x, y, kind }))
     }
 
     fn tick(a: &mut MixerApp, ms: u64) -> EventResult {
@@ -3084,19 +3271,24 @@ mod tests {
 
     #[test]
     fn a_click_on_a_fader_sets_the_volume_to_the_height_it_landed_at() {
-        // The value comes from the box the drawing pass recorded, so this also
+        // The value comes from the track the fader is drawn on, so this also
         // says the fader's pixels and its arithmetic are the same rectangle.
-        let f = app().frame(WINDOW_WIDTH, WINDOW_HEIGHT);
         for (target, sel) in [
             (Target::MasterFader, Selection::Master),
             (Target::StreamFader(1), Selection::Stream(1)),
             (Target::StreamFader(4), Selection::Stream(4)),
         ] {
-            let track = box_of(&f, target).expect("a fader to click");
             for (frac, want) in [(0.0_f32, 1.0_f32), (0.25, 0.75), (0.5, 0.5), (1.0, 0.0)] {
                 let mut a = app();
-                // A hair inside the bottom edge, which is exclusive.
-                let y = (track.y + track.h * frac).min(track.bottom() - 0.01);
+                // The thumb well away from where the press lands: a press on
+                // the thumb takes hold of it where it is, and moves nothing.
+                a.apply(Action::SetVolume(sel, if want > 0.5 { 0.0 } else { 1.0 }));
+                let l = a.layout();
+                let track = l
+                    .fader_placement(l.column_of(sel).expect("a column"))
+                    .expect("room for a fader")
+                    .track;
+                let y = track.y + track.h * frac;
                 assert_eq!(click(&mut a, track.centre().0, y), EventResult::Consumed);
                 let got = a.volume_of(sel).expect("the column to have a volume");
                 assert!(
@@ -3106,6 +3298,171 @@ mod tests {
                 assert_eq!(a.selection(), sel, "clicking a fader did not select it too");
             }
         }
+    }
+
+    /// **A fader drags**: a press takes hold of it, the volume follows the
+    /// pointer while the button is down, and stays where it is let go.
+    #[test]
+    fn a_fader_follows_a_drag_and_stays_where_it_is_let_go() {
+        let mut a = app();
+        let l = a.layout();
+        let track = l
+            .fader_placement(l.column_of(Selection::Stream(0)).expect("a column"))
+            .expect("room for a fader")
+            .track;
+        let x = track.centre().0;
+        a.apply(Action::SetVolume(Selection::Stream(0), 0.0));
+        mouse(
+            &mut a,
+            x,
+            track.bottom(),
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        for frac in [0.75_f32, 0.5, 0.2] {
+            mouse(&mut a, x, track.y + track.h * frac, MouseEventKind::Move);
+            let got = a.volume_of(Selection::Stream(0)).unwrap();
+            assert!(
+                (got - (1.0 - frac)).abs() < 0.02,
+                "dragged to {frac} of the way down: {got}"
+            );
+        }
+        mouse(
+            &mut a,
+            x,
+            track.y + track.h * 0.2,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        // Moves after the release are only the pointer passing.
+        mouse(&mut a, x, track.bottom(), MouseEventKind::Move);
+        let got = a.volume_of(Selection::Stream(0)).unwrap();
+        assert!(
+            (got - 0.8).abs() < 0.02,
+            "the volume moved after the release: {got}"
+        );
+        // And the pointer is free again: a press elsewhere is that control's.
+        let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (mx, my) = where_is(&f, Target::StreamMute(1)).expect("a mute button");
+        assert_eq!(click(&mut a, mx, my), EventResult::Consumed);
+        assert_eq!(
+            a.muted_of(Selection::Stream(1)),
+            Some(true),
+            "the drag kept the pointer"
+        );
+    }
+
+    /// **The pointer over a fader's thumb lights it** -- the sign that a
+    /// press there takes hold of it -- and the light goes when it leaves;
+    /// nothing under an open picker lights.
+    #[test]
+    fn the_pointer_over_a_faders_thumb_lights_it() {
+        let mut a = app();
+        a.apply(Action::SetVolume(Selection::Master, 0.5));
+        let l = a.layout();
+        let placement = l
+            .fader_placement(l.column_of(Selection::Master).expect("a column"))
+            .expect("room for a fader");
+        let (x, y) = placement.thumb_rect(0.5).centre();
+        assert_eq!(
+            mouse(&mut a, x, y, MouseEventKind::Move),
+            EventResult::Consumed
+        );
+        assert!(
+            a.fader_for(Selection::Master).is_hovered(),
+            "the thumb is not lit"
+        );
+        let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (nx, ny) = where_is(&f, Target::MasterMute).expect("a mute button");
+        assert_eq!(
+            mouse(&mut a, nx, ny, MouseEventKind::Move),
+            EventResult::Consumed
+        );
+        assert!(
+            !a.fader_for(Selection::Master).is_hovered(),
+            "the light stayed on"
+        );
+        a.apply(Action::OpenOutput);
+        assert_eq!(
+            mouse(&mut a, x, y, MouseEventKind::Move),
+            EventResult::Ignored,
+            "a fader under the sheet answered the pointer"
+        );
+        assert!(!a.fader_for(Selection::Master).is_hovered());
+    }
+
+    /// **Escape takes a drag back** to where the fader was when it was
+    /// pressed, and the other keys wait for the button.
+    #[test]
+    fn escape_takes_a_fader_drag_back() {
+        let mut a = app();
+        let before = a.volume_of(Selection::Stream(3)).unwrap();
+        let l = a.layout();
+        let track = l
+            .fader_placement(l.column_of(Selection::Stream(3)).expect("a column"))
+            .expect("room for a fader")
+            .track;
+        let x = track.centre().0;
+        mouse(&mut a, x, track.y, MouseEventKind::Press(MouseButton::Left));
+        mouse(&mut a, x, track.y + 1.0, MouseEventKind::Move);
+        assert!(
+            a.volume_of(Selection::Stream(3)).unwrap() > 0.9,
+            "the drag did not move it"
+        );
+        assert_eq!(
+            press(&mut a, Key::Down),
+            EventResult::Consumed,
+            "a key mid-drag"
+        );
+        assert!(
+            a.volume_of(Selection::Stream(3)).unwrap() > 0.9,
+            "Down moved a fader the pointer had"
+        );
+        assert_eq!(press(&mut a, Key::Escape), EventResult::Consumed);
+        assert_eq!(
+            a.volume_of(Selection::Stream(3)),
+            Some(before),
+            "Escape did not take it back"
+        );
+        // The drag is over: the button coming up changes nothing.
+        mouse(
+            &mut a,
+            x,
+            track.y,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(a.volume_of(Selection::Stream(3)), Some(before));
+    }
+
+    /// **A press on the thumb takes hold without moving it**: a fader nudged
+    /// by a pixel-perfect click would never sit still under a careful hand.
+    #[test]
+    fn a_press_on_a_faders_thumb_holds_it_where_it_is() {
+        let mut a = app();
+        a.apply(Action::SetVolume(Selection::Master, 0.5));
+        let l = a.layout();
+        let placement = l
+            .fader_placement(l.column_of(Selection::Master).expect("a column"))
+            .expect("room for a fader");
+        let thumb = placement.thumb_rect(0.5);
+        let (x, y) = thumb.centre();
+        // Pressed a little off the thumb's centre, still on it.
+        mouse(
+            &mut a,
+            x,
+            y + thumb.h / 4.0,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert_eq!(
+            a.volume_of(Selection::Master),
+            Some(0.5),
+            "the thumb jumped to the press"
+        );
+        mouse(
+            &mut a,
+            x,
+            y + thumb.h / 4.0,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(a.volume_of(Selection::Master), Some(0.5));
     }
 
     #[test]
@@ -3196,7 +3553,7 @@ mod tests {
                         .rev()
                         .find(|(_, r)| r.contains(x, y))
                         .map(|p| p.0);
-                    let got = hit_with_rect(&f, x, y).map(|p| p.0);
+                    let got = f.hit_test(x, y);
                     assert_eq!(got, want, "at {w}x{h} the point ({x}, {y}) disagreed");
                     y += vstep;
                 }
@@ -3925,7 +4282,7 @@ mod tests {
         let (x, y) = (l.window.x + 2.0, l.sheet.y / 2.0);
         assert!(!l.sheet.contains(x, y), "the point picked is on the sheet");
         assert_eq!(
-            hit_with_rect(&f, x, y).map(|p| p.0),
+            f.hit_test(x, y),
             Some(Target::ClosePicker),
             "the backdrop does not answer off the sheet"
         );
@@ -3940,46 +4297,60 @@ mod tests {
     }
 
     #[test]
-    fn a_click_past_either_end_of_a_track_is_full_volume_or_none() {
-        // `value_at` is public, and the clamp in it is the only thing keeping
-        // a caller that hands it a `y` off the track from getting a volume
-        // that is not a volume. Through the pointer the two always agree --
-        // the box a click was tested against is the box it is measured in --
-        // so the clamp is only reachable, and only checkable, from here.
-        let r = Rect::new(10.0, 20.0, 8.0, 100.0);
-        assert!(
-            close(value_at(r, r.y), 1.0),
-            "the top of a track is not full"
+    fn a_press_past_either_end_of_a_track_is_full_volume_or_none() {
+        // The fader's hit box reaches past both ends of its track, so a press
+        // there is the fader's -- and the volume it gives is held to the
+        // range, full above the track and silence below it.
+        let mut a = app();
+        let l = a.layout();
+        let col = l.column_of(Selection::Stream(1)).expect("a column");
+        let placement = l.fader_placement(col).expect("room for a fader");
+        let hit = placement.hit();
+        let x = placement.track.x + placement.track.w / 2.0;
+        mouse(
+            &mut a,
+            x,
+            hit.y + 0.5,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        mouse(
+            &mut a,
+            x,
+            hit.y + 0.5,
+            MouseEventKind::Release(MouseButton::Left),
         );
         assert!(
-            close(value_at(r, r.bottom()), 0.0),
-            "the foot of a track is not silence"
+            close(a.volume_of(Selection::Stream(1)).unwrap(), 1.0),
+            "a press above the track is not full volume"
         );
-        for y in [r.y - 1.0, r.y - 1e6, f32::NEG_INFINITY] {
-            assert!(
-                close(value_at(r, y), 1.0),
-                "a click above the track gave {}",
-                value_at(r, y)
-            );
-        }
-        for y in [r.bottom() + 1.0, r.bottom() + 1e6, f32::INFINITY] {
-            assert!(
-                close(value_at(r, y), 0.0),
-                "a click below the track gave {}",
-                value_at(r, y)
-            );
-        }
-        // A track with no height has no fraction to read, and dividing by it
-        // would answer with an infinity rather than a level.
-        assert!(close(value_at(Rect::new(0.0, 0.0, 4.0, 0.0), 3.0), 0.0));
+        mouse(
+            &mut a,
+            x,
+            hit.bottom() - 0.5,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        // Dragged far past the foot of the track: no lower than silence.
+        mouse(&mut a, x, hit.bottom() + 1e6, MouseEventKind::Move);
+        mouse(
+            &mut a,
+            x,
+            hit.bottom() + 1e6,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert!(
+            close(a.volume_of(Selection::Stream(1)).unwrap(), 0.0),
+            "a press below the track is not silence"
+        );
     }
 
     #[test]
-    fn a_faders_hit_box_is_the_track_it_is_drawn_on() {
+    fn a_faders_hit_box_is_the_sliders_round_the_track_it_is_drawn_on() {
         // The grid walk compares the frame's hit boxes against each other, so
         // it is blind to a box that is the wrong *shape*: shrink every fader to
         // its top half and the walk still agrees with itself. This ties the box
-        // back to the geometry the fader was drawn from.
+        // back to the geometry the fader was drawn from -- the toolkit slider's
+        // target round its track, which reaches past the thumb at both ends
+        // and is never thinner than a finger.
         for (w, h) in SIZES {
             let a = app();
             let f = a.frame(w, h);
@@ -3991,20 +4362,30 @@ mod tests {
                 let Some(col) = l.column_of(sel) else {
                     continue;
                 };
-                let want = l.fader_of(col);
-                let Some(got) = box_of(&f, target) else {
+                let Some(want) = l.fader_hit(col) else {
                     assert!(
-                        want.is_empty(),
-                        "at {w}x{h} {target:?} was drawn but not recorded"
+                        box_of(&f, target).is_none(),
+                        "at {w}x{h} {target:?} has no room but answers"
                     );
                     continue;
+                };
+                let Some(got) = box_of(&f, target) else {
+                    panic!("at {w}x{h} {target:?} was drawn but not recorded");
                 };
                 assert!(
                     close(got.x, want.x)
                         && close(got.y, want.y)
                         && close(got.w, want.w)
                         && close(got.h, want.h),
-                    "at {w}x{h} {target:?} is drawn on {want:?} but answers for {got:?}"
+                    "at {w}x{h} {target:?} is the slider {want:?} but answers for {got:?}"
+                );
+                let track = l.fader_placement(col).expect("room for a fader").track;
+                assert!(
+                    got.x <= track.x
+                        && got.right() >= track.right()
+                        && got.y <= track.y
+                        && got.bottom() >= track.bottom(),
+                    "at {w}x{h} {target:?}'s box {got:?} does not cover its track {track:?}"
                 );
             }
         }

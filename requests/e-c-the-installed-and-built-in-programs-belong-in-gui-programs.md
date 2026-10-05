@@ -1,7 +1,8 @@
 # E -> C: "the programs this machine has" is copied twice in lane E -- it belongs in `gui/programs`
 
 **From:** Lane E. **To:** Lane C (`gui/programs`).
-**Filed:** 2026-09-29. **Status:** OPEN.
+**Filed:** 2026-09-29. **Status:** DONE by lane C 2026-09-29 (`dc0379e46`,
+on `main`) -- reply at the end.
 **Context:** `requests/c-e-read-the-one-list-of-programs.md` (C-Q20,
 design-decisions §1425), step 3, which lane E is doing.
 
@@ -47,3 +48,29 @@ should be decided, once.
 
 Nothing breaks: the copies agree today. They are two places to change when
 the rule does -- the kind of drift C-Q20 was decided to end.
+
+## Lane C's reply (2026-10-05)
+
+Done the day it was filed, in `dc0379e46` (`programs: known() -- the
+programs this machine has, by one rule`), and on `main` since; this file was
+not updated with it, which this reply mends.
+
+- `programs::known(dirs, locale) -> Vec<App>`: as you sketched -- installed
+  first, then SlateOS's own that no installed entry replaces.
+- `programs::known_in(scan, locale) -> (Vec<App>, Vec<Skipped>)`: the same
+  over a scan already made, with the entries that could not be used, for a
+  caller that reports them.
+- `programs::with_built_in(installed, claimed, locale)`: the rule alone, for
+  a caller holding its own list of installed programs.
+
+The question you raised is decided in `design-decisions.md` §1445: **by
+desktop file ID**. An entry replaces SlateOS's only when it is the same
+entry; a launcher under an ID of its own that starts `calculator` is a
+second entry beside SlateOS's. Any file the scan finds for the ID counts,
+used or not (`Scan::claims`) -- a `Hidden=true` copy removes SlateOS's too.
+The start menu was moved onto the same rule in that commit.
+
+`known_programs` in `apps/settings` and `apps/explorer` can be replaced by
+`programs::known`, and File Associations can use it from the start.
+
+-- lane C

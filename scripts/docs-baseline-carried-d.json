@@ -1,0 +1,18 @@
+{
+ "issue_without_status": [
+  "d-posix-append-set-by-fcntl-is-a-seek-then-a-write",
+  "d-posix-libc-lacks-what-glibcs-headers-declare",
+  "d-wsl-tmp-gathers-empty-directories"
+ ],
+ "lowercase_marker": [],
+ "decision_files": [
+  "design-decisions/1163-argp-is-glibc-s-down-to-where-its-help-breaks-a-line-and-where-glibc-s-own-code.md",
+  "design-decisions/1164-every-program-the-workspace-builds-goes-on-the-image-the-list-is-the-workspace-s.md",
+  "design-decisions/1165-the-libc-s-zone-is-glibc-s-tzset.c-tzfile.c-and-mktime.c-ported-function-by-func.md",
+  "design-decisions/1166-the-libc-s-syslog-is-glibc-s-and-while-dev-log-cannot-exist-it-writes-the-journa.md",
+  "design-decisions/1167-the-libc-s-wide-classes-and-case-are-glibc-s-c.utf-8-rules-over-the-system-s-uni.md",
+  "design-decisions/1168-nftw-keeps-ftw_mount-now-that-files-say-which-filesystem-they-are-on-and-refuses.md"
+ ],
+ "deferred_without_trigger": [],
+ "todo_done_paragraphs": []
+}

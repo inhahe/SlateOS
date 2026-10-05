@@ -1,7 +1,7 @@
 # C -> D: put the third-party notices in the image
 
 **From:** Lane C. **To:** Lane D (the rootfs recipe). **Filed:** 2026-09-28.
-**Status:** OPEN.
+**Status:** ✅ DONE 2026-10-01 by lane D -- reply at the end.
 **Decision behind it:** `design-decisions.md` §1433.
 
 **In short:** A SlateOS image may only be handed to anyone if it carries the
@@ -63,3 +63,28 @@ Nothing breaks. The screen that will show the notices
 rather than showing an empty list. Only a published image lacks the notices
 its licences require, so this matters before the first image is published
 anywhere.
+
+## Lane D — done, 2026-10-01
+
+`scripts/create-ext4-rootfs.sh` runs `scripts/gather-notices.py --out
+"$STAGE/usr/share/licenses"` after the themes. The image build fails if it
+exits non-zero, or if there is no Python to run it with. A run today stages
+the notices of 96 components in 163 files: 29 from manifests, 25 vendored
+crates, 42 from crates.io. Three things beyond the call:
+
+- **The registry is Windows cargo's.** The recipe runs under WSL, and the
+  workspace is built by Windows cargo. Against WSL's own `~/.cargo` the
+  gather failed for want of packages; against the Windows one it passed. So
+  under WSL the recipe asks `cmd.exe` for `%CARGO_HOME%`, else
+  `%USERPROFILE%\.cargo`, and converts the answer with `wslpath`.
+  `SLATEOS_CARGO_HOME` overrides the search; without WSL's interop it is
+  cargo's own home. Reading the tree and the cache through WSL takes about
+  12 s, where your figure for Windows is 2 s.
+- **Modes are set, as for the themes**: files 0644, directories 0755.
+- **Nothing is removed first.** The staging tree is a fresh `mktemp -d`, so
+  `--out` is always new. If a step above ever put something in
+  `/usr/share/licenses`, the gather would refuse rather than lose it.
+
+`scripts/test-rootfs-staging.sh` cases 28 to 31 cover it with a stand-in
+gatherer: the call, the registry both ways, the modes, the count, and both
+failures. It reaches `main` with lane D's next publish.

@@ -147,11 +147,15 @@ int main(void)
     if (tcgetpgrp(-1) != -1)            return 17;
     if (errno != EBADF)                 return 18;
 
-    /* Likewise a bad pgrp: EINVAL beats ENOTTY, so a caller that passes 0
-     * learns its argument is wrong rather than being told it has no
-     * terminal (which would be true but useless). */
+    /* Likewise a bad pgrp: EINVAL beats ENOTTY, so a caller that passes a
+     * negative group learns its argument is wrong rather than being told it
+     * has no terminal (which would be true but useless). Group 0 is not
+     * malformed, only absent, and goes through the terminal's checks as in
+     * Linux's tiocspgrp -- ENOTTY here, ESRCH with a terminal -- since lane
+     * A's f4f5778ba; it was EINVAL up front before, which is what these
+     * checks asserted until 2026-10-05. */
     errno = 0;
-    if (tcsetpgrp(0, 0) != -1)          return 19;
+    if (tcsetpgrp(0, -1) != -1)         return 19;
     if (errno != EINVAL)                return 20;
 
     /* ---------------------------------------------------------------- *

@@ -27,7 +27,9 @@ What each part says today:
 | `setlocale(LC_ALL, "")` -- "use the user's settings" | "C", whatever was asked for |
 | `MB_CUR_MAX` | 4: UTF-8's |
 | `mbrtowc`, `wcrtomb` and the other conversions | UTF-8, in every locale |
-| `mbrtoc16`, `mbrtoc32`, `c16rtomb`, `c32rtomb` | ASCII only -- a bug either way, being made UTF-8 like `mbrtowc` now |
+| `mbrtoc16`, `mbrtoc32`, `c16rtomb`, `c32rtomb` | UTF-8, as `mbrtowc` (ASCII only until 2026-09-29: a bug under every option) |
+| `iswalpha` and the other class and case functions | Unicode's, in every locale: glibc's `C.UTF-8` rules since 2026-10-01 (design-decisions §1167); ASCII's before, which was wrong under every option for a program that asks for the user's settings |
+| `fnmatch`'s and `regex`'s bracket classes (`[[:alpha:]]`) | bytes, ASCII's classes |
 | the `locale` command (lane B) | the C locale's character set is ASCII |
 
 | Option | *What changes:* |
@@ -62,7 +64,8 @@ every byte a character, so nothing in it is ever an encoding error -- and
 written against, and what POSIX asks for, while keeping SlateOS UTF-8
 wherever a user's text is shown. In the meantime lane D fixes only what is
 wrong either way (`<uchar.h>`'s conversions, which must agree with
-`mbrtowc`'s), and leaves the ASCII answers alone.
+`mbrtowc`'s, and the class functions, which must know the letters the
+user's text is written in), and leaves the ASCII answers alone.
 
 **Where it bites:** `posix/src/langinfo.rs` (`CODESET`), `posix/src/locale.rs`
 (`setlocale`), `posix/src/wchar.rs` and `posix/src/uchar.rs` (the

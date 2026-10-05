@@ -763,6 +763,67 @@ pub(crate) fn abi_asserts() -> String {
         contents
     );
 
+    // --- argp: a program's tables, and the state its parser is given --------
+    abi!(
+        out,
+        hdrs,
+        crate::argp::ArgpOption,
+        "struct argp_option",
+        "argp.h",
+        name,
+        key,
+        arg,
+        flags,
+        doc,
+        group
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::argp::Argp,
+        "struct argp",
+        "argp.h",
+        options,
+        parser,
+        args_doc,
+        doc,
+        children,
+        help_filter,
+        argp_domain
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::argp::ArgpChild,
+        "struct argp_child",
+        "argp.h",
+        argp,
+        flags,
+        header,
+        group
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::argp::ArgpState,
+        "struct argp_state",
+        "argp.h",
+        root_argp,
+        argc,
+        argv,
+        next,
+        flags,
+        arg_num,
+        quoted,
+        input,
+        child_inputs,
+        hook,
+        name,
+        err_stream,
+        out_stream,
+        pstate
+    );
+
     // --- small odds and ends -------------------------------------------------
     abi!(
         out,

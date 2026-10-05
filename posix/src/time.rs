@@ -857,10 +857,10 @@ pub extern "C" fn difftime(time1: TimeT, time0: TimeT) -> f64 {
 
 /// Sync wrapper for `*const u8` in static arrays.
 ///
-/// The pointers are into [`crate::tz`]'s process-lifetime name storage — safe
-/// to share, and stable until the next `tzset` rewrites the bytes in place.
+/// The pointers are into [`crate::tz`]'s names, which live for the process
+/// as glibc's `__tzstring`s do, or are literals.
 #[repr(transparent)]
-pub struct TzPtr(*const u8);
+pub struct TzPtr(pub(crate) *const u8);
 
 // SAFETY: Points into `tz`'s static name buffers, which have program lifetime
 // and are never reallocated.
@@ -870,13 +870,12 @@ unsafe impl Sync for TzPtr {}
 ///
 /// POSIX requires `tzname` to be a `char *[2]`, refreshed by `tzset`.
 /// `repr(transparent)` on `TzPtr` ensures the layout matches
-/// `[*const u8; 2]` for C interop.
-///
-/// This is `static mut` because `tzset` must be able to repoint it when `TZ`
-/// changes — a zone that never updates its own name is exactly the bug this
-/// module used to have.
+/// `[*const u8; 2]` for C interop. `"GMT"` until a zone is read, as in
+/// glibc -- and then wherever glibc's code puts it, which is not only
+/// `tzset`: a `localtime` in a zoneinfo zone moves it to the names in force
+/// around the instant converted ([`crate::tz`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut tzname: [TzPtr; 2] = [TzPtr(core::ptr::null()), TzPtr(core::ptr::null())];
+pub static mut tzname: [TzPtr; 2] = [TzPtr(c"GMT".as_ptr().cast()), TzPtr(c"GMT".as_ptr().cast())];
 
 /// Seconds **west** of UTC for standard time.
 ///
@@ -897,30 +896,26 @@ pub static mut daylight: i32 = 0;
 
 /// Initialize timezone information from the `TZ` environment variable.
 ///
-/// Re-reads `TZ`, installs the resulting zone as the process's current one,
-/// and refreshes `tzname`, `timezone` and `daylight` from it.  POSIX specifies
-/// this as not thread-safe, and it is not: it writes those three globals.
+/// glibc's `tzset` ([`crate::tz::tzset`]): reads `TZ` again when it has
+/// changed, and sets `tzname`, `timezone` and `daylight`. POSIX specifies this
+/// as not thread-safe, and it is not: it writes those three globals.
 ///
-/// The conversion functions call this implicitly on first use, so a program
-/// that never calls `tzset` still gets its zone — matching every real libc.
+/// The conversion functions read the zone on first use, so a program that
+/// never calls `tzset` still gets its zone, as in every real libc.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tzset() {
-    crate::tz::set_from_env();
-    publish_tz_globals();
+    crate::tz::tzset();
 }
 
-/// Refresh the three POSIX zone globals from [`crate::tz`]'s current zone.
-fn publish_tz_globals() {
-    let tz = crate::tz::current();
+/// Set the three POSIX zone globals: what [`crate::tz`]'s code leaves them as.
+pub(crate) fn set_tz_globals(std: *const u8, dst: *const u8, west: i64, ever_dst: i32) {
     // SAFETY: these are the C-visible zone globals, which POSIX specifies as
     // unsynchronised and modifiable by `tzset`.  Each write is a single
     // pointer- or word-sized store to a process-lifetime static.
     unsafe {
-        (*core::ptr::addr_of_mut!(tzname)) =
-            [TzPtr(crate::tz::name_ptr(0)), TzPtr(crate::tz::name_ptr(1))];
-        // POSIX's sign is west-positive; ours is east-positive.
-        (*core::ptr::addr_of_mut!(timezone)) = i64::from(tz.standard().gmtoff).saturating_neg();
-        (*core::ptr::addr_of_mut!(daylight)) = i32::from(tz.has_dst());
+        (*core::ptr::addr_of_mut!(tzname)) = [TzPtr(std), TzPtr(dst)];
+        (*core::ptr::addr_of_mut!(timezone)) = west;
+        (*core::ptr::addr_of_mut!(daylight)) = ever_dst;
     }
 }
 
@@ -1002,6 +997,7 @@ pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
         return core::ptr::null_mut();
     }
     let secs = unsafe { *timep };
+    crate::tz::gmtime_touch(secs);
     // SAFETY: `perthread::current()` is non-null and valid for this thread,
     // and no other thread holds a pointer into this block.
     let tm = unsafe { &raw mut (*crate::perthread::current()).tm };
@@ -1016,9 +1012,10 @@ pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
 
 /// Convert time_t to broken-down **local** time, honouring `TZ`.
 ///
-/// Behaves as if `tzset` had been called, per POSIX.  Returns a pointer to
-/// per-thread storage that this thread's next `gmtime`/`localtime`/`ctime`
-/// overwrites; `localtime_r` is the reentrant form.
+/// Reads `TZ` again when it has changed, as glibc's `localtime` does and its
+/// `localtime_r` does not. Returns a pointer to per-thread storage that this
+/// thread's next `gmtime`/`localtime`/`ctime` overwrites; `localtime_r` is
+/// the reentrant form.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
     if timep.is_null() {
@@ -1029,7 +1026,7 @@ pub extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
     // and no other thread holds a pointer into this block.
     let tm = unsafe { &raw mut (*crate::perthread::current()).tm };
     // SAFETY: as above — `tm` points at this thread's own `Tm`.
-    if secs_to_local_tm(secs, unsafe { &mut *tm }) {
+    if crate::tz::localtime(secs, unsafe { &mut *tm }, true) {
         tm
     } else {
         crate::errno::set_errno(crate::errno::EOVERFLOW);
@@ -1037,37 +1034,27 @@ pub extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
     }
 }
 
-/// Fill `tm` with the broken-down local time for UTC instant `secs`; `false`,
-/// with `tm` untouched, when its year does not fit `tm_year`.
+/// `localtime_r`'s work: `tm` filled with the broken-down local time for UTC
+/// instant `secs`; `false` when its year does not fit `tm_year`.
 ///
-/// Shared by `localtime`, `localtime_r` and `mktime` so they cannot drift
-/// apart.
+/// Shared by `localtime_r`, `strptime`'s `%s` and `getdate`, which glibc
+/// builds on `localtime_r` too, so that none of them can drift apart.
 fn secs_to_local_tm(secs: TimeT, tm: &mut Tm) -> bool {
-    publish_tz_globals();
-    let info = crate::tz::current().lookup(secs);
-    // Rendering local time is rendering the instant at the zone's offset; the
-    // offset is then recorded so `%z`/`%Z` and `mktime` can recover the zone.
-    let Some(b) = Broken::of(secs, i64::from(info.gmtoff)) else {
-        return false;
-    };
-    b.store(tm);
-    tm.tm_isdst = i32::from(info.is_dst);
-    tm.tm_gmtoff = i64::from(info.gmtoff);
-    tm.tm_zone = crate::tz::name_ptr(usize::from(info.is_dst));
-    true
+    crate::tz::localtime(secs, tm, false)
 }
 
 /// Convert broken-down **local** time to time_t, honouring `TZ`.
 ///
-/// Every field may be out of range -- a 32nd of January, a -1st hour -- and
-/// is carried into the next, as C requires; the fields are then rewritten to
-/// describe the resulting instant, `tm_wday` and `tm_yday` included. The
-/// zone's offset is chosen as glibc 2.39 chooses it ([`resolve_local`]):
-/// `tm_isdst` negative lets the zone decide, zero or positive asks for
-/// standard or daylight time and gets the nearest offset of that kind.
+/// glibc's `mktime` ([`crate::tz::mktime`]): `tzset`, then a search from the
+/// offset the previous call found. Every field may be out of range -- a 32nd
+/// of January, a -1st hour -- and the fields are rewritten to describe the
+/// instant found, `tm_wday` and `tm_yday` included. `tm_isdst` negative lets
+/// the zone decide; zero or positive asks for standard or daylight time and
+/// gets the nearest offset of that kind; a time a spring-forward skipped is
+/// the instant the gap's size away.
 ///
-/// When the answer's year does not fit `tm_year`, the result is -1 with
-/// `errno` `EOVERFLOW` and `*tm` is left as it was.
+/// When no instant can be found -- the year does not fit `tm_year` -- the
+/// result is -1 with `errno` `EOVERFLOW` and `*tm` is left as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
     if tm.is_null() {
@@ -1080,63 +1067,9 @@ pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
     })
 }
 
-/// `mktime`'s work: `t` normalised as local time, and the instant it names;
-/// `None`, with `t` untouched, when the year does not fit `tm_year`.
+/// `mktime`'s work, for `mktime` and `getdate`.
 fn mktime_tm(t: &mut Tm) -> Option<TimeT> {
-    publish_tz_globals();
-    let utc = resolve_local(&crate::tz::current(), wall_secs(t), t.tm_isdst);
-    secs_to_local_tm(utc, t).then_some(utc)
-}
-
-/// The UTC instant for wall time `local` (seconds since the epoch as if the
-/// wall clock were UTC) in `zone`, with `mktime`'s `tm_isdst` hint `isdst`,
-/// chosen as glibc 2.39's `mktime` chooses it:
-///
-/// - negative: the reading the zone makes consistent -- in the repeated
-///   autumn hour the earlier, in the vanished spring hour the standard-time
-///   reading, which lands just past the jump (`Zone::local_to_utc`);
-/// - in the vanished hour, zero or positive: the reading whose own state is
-///   the *other* kind, as glibc settles its oscillation there -- daylight
-///   time asked for gives the instant just before the jump, standard time
-///   the one just after;
-/// - otherwise, when the zone's state there is not the kind asked for: the
-///   offset of the nearest time that is, probing a week at a time out to
-///   about seven years either way; and with none, an hour's difference
-///   (`tm_isdst` 1 in a zone with no daylight time reads an hour earlier).
-#[allow(clippy::arithmetic_side_effects)]
-fn resolve_local(zone: &crate::tz::Zone, local: i64, isdst: i32) -> i64 {
-    // glibc's probe stride and bound: the shortest DST period in the tz
-    // database, and half its longest run of either kind plus a stride.
-    const STRIDE: i64 = 601_200;
-    const BOUND: i64 = 457_243_200 / 2 + STRIDE;
-    let (t, _) = zone.local_to_utc(local, -1);
-    if isdst < 0 {
-        return t;
-    }
-    let want_dst = isdst > 0;
-    let here = zone.lookup(t);
-    // `t`'s wall clock is not `local` only in the vanished hour.
-    if t + i64::from(here.gmtoff) != local {
-        let other = local - i64::from(here.gmtoff);
-        return if here.is_dst != want_dst { t } else { other };
-    }
-    if here.is_dst == want_dst {
-        return t;
-    }
-    let mut delta = STRIDE;
-    while delta < BOUND {
-        for probe in [t - delta, t + delta] {
-            let there = zone.lookup(probe);
-            if there.is_dst == want_dst {
-                return local - i64::from(there.gmtoff);
-            }
-        }
-        delta += STRIDE;
-    }
-    // No time of the kind asked for: +1 if standard time was wanted and the
-    // zone is on daylight time here, -1 the other way round.
-    let dst_difference = i64::from(!want_dst) - i64::from(!here.is_dst);
-    t + 3600 * dst_difference
+    crate::tz::mktime(t)
 }
 
 /// Own archive member — gnulib replaces `timegm`. See string.rs's module header.
@@ -1248,6 +1181,7 @@ pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut 
         return core::ptr::null_mut();
     }
     let secs = unsafe { *timep };
+    crate::tz::gmtime_touch(secs);
     let tm = unsafe { &mut *result };
     if secs_to_tm(secs, tm) {
         result
@@ -1748,8 +1682,8 @@ fn iso_week_date(tm: &Tm) -> (i32, i32) {
 }
 
 /// A broken-down time with every field in range, computed before anything
-/// is stored: what `gmtime` and `localtime` write.
-struct Broken {
+/// is stored: what `gmtime` and `localtime` write -- glibc's `__offtime`.
+pub(crate) struct Broken {
     sec: i32,
     min: i32,
     hour: i32,
@@ -1767,7 +1701,7 @@ impl Broken {
     /// `tzrules`' calendar, so an instant 292 billion years out costs what
     /// one in 1970 does.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn of(secs: i64, gmtoff: i64) -> Option<Self> {
+    pub(crate) fn of(secs: i64, gmtoff: i64) -> Option<Self> {
         // `|gmtoff|` is under a day, so the sum cannot overflow.
         let rem = secs.rem_euclid(86_400) + gmtoff;
         let days = secs.div_euclid(86_400) + rem.div_euclid(86_400);
@@ -1790,7 +1724,7 @@ impl Broken {
     }
 
     /// Store the eight calendar fields; the zone fields are the caller's.
-    fn store(&self, tm: &mut Tm) {
+    pub(crate) fn store(&self, tm: &mut Tm) {
         tm.tm_sec = self.sec;
         tm.tm_min = self.min;
         tm.tm_hour = self.hour;
@@ -4996,6 +4930,11 @@ mod tests {
 
     #[test]
     fn test_strftime_epoch_seconds() {
+        // `%s` is `mktime` of the broken-down time, which reads the zone:
+        // without the guard, a neighbour's `TzGuard::set` moved the answer
+        // by its offset, and the order gate refused pushes over it
+        // (requests/b-d-strftime-epoch-seconds-test-races-the-time-zone.md).
+        let _tz = TzGuard::utc();
         // %s = seconds since epoch (GNU extension).
         let mut tm = zero_tm();
         tm.tm_year = 70;
@@ -5782,12 +5721,21 @@ mod tests {
     #[test]
     fn test_tzset_installs_the_zone_named_by_tz() {
         let _tz = TzGuard::set(b"EST5EDT,M3.2.0,M11.1.0");
-        let zone = crate::tz::current();
-        assert_eq!(zone.standard().name.as_bytes(), b"EST");
-        assert_eq!(zone.standard().gmtoff, -5 * 3600);
-        let dst = zone.daylight().expect("EST5EDT has a daylight zone");
-        assert_eq!(dst.name.as_bytes(), b"EDT");
-        assert_eq!(dst.gmtoff, -4 * 3600);
+        // 2021-01-15 12:00 UTC is winter, 2021-07-15 12:00 UTC summer.
+        let winter = local_tm(1_610_712_000);
+        assert_eq!(
+            (winter.tm_hour, winter.tm_isdst, winter.tm_gmtoff),
+            (7, 0, -5 * 3600)
+        );
+        // SAFETY: `tm_zone` points at a process-lifetime name.
+        assert_eq!(unsafe { cstr(winter.tm_zone) }, b"EST");
+        let summer = local_tm(1_626_350_400);
+        assert_eq!(
+            (summer.tm_hour, summer.tm_isdst, summer.tm_gmtoff),
+            (8, 1, -4 * 3600)
+        );
+        // SAFETY: as above.
+        assert_eq!(unsafe { cstr(summer.tm_zone) }, b"EDT");
     }
 
     #[test]

@@ -39,6 +39,16 @@ aio_init	aio.h	gnu	void (const struct aioinit *)
 arc4random	stdlib.h	default,gnu,gnu23,bsd	unsigned int (void)
 arc4random_buf	stdlib.h	default,gnu,gnu23,bsd	void (void *, unsigned long)
 arc4random_uniform	stdlib.h	default,gnu,gnu23,bsd	unsigned int (unsigned int)
+argp_err_exit_status	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int
+argp_error	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void (const struct argp_state *, const char *, ...)
+argp_failure	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void (const struct argp_state *, int, int, const char *, ...)
+argp_help	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void (const struct argp *, struct _IO_FILE *, unsigned int, char *)
+argp_parse	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (const struct argp *, int, char **, unsigned int, int *, void *)
+argp_program_bug_address	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	const char *
+argp_program_version	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	const char *
+argp_program_version_hook	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void (*)(struct _IO_FILE *, struct argp_state *)
+argp_state_help	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void (const struct argp_state *, struct _IO_FILE *, unsigned int)
+argp_usage	argp.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	void (const struct argp_state *)
 argz_add	argz.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (char **, unsigned long *, const char *)
 argz_add_sep	argz.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (char **, unsigned long *, const char *, int)
 argz_append	argz.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (char **, unsigned long *, const char *, unsigned long)

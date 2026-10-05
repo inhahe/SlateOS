@@ -1000,18 +1000,29 @@ elif [ -e "$LIBC_A" ]; then
     # covers whatever `ctest-fixtures.py` covers without a second person
     # remembering to edit both. sed, not a TOML parser: this branch runs only
     # when there is no python at all.
-    _dep_roots=""
-    for _dep in $(sed -n 's/.*path *= *"\([^"]*\)".*/\1/p' "$ROOT_DIR/posix/Cargo.toml" 2>/dev/null); do
+    #
+    # Each is resolved against posix/, as cargo resolves it and as
+    # `_posix_path_deps` does: a sibling (`../tzrules`) and one inside posix/
+    # (`vendor/libm`) alike; one outside the repo is not ours to check, there
+    # or here. An array, not a word list: $ROOT_DIR has a space in it on every
+    # real run ("visual studio projects"). Until 2026-10-01 this was a string
+    # expanded unquoted, which split each root into pieces that did not exist,
+    # and `vendor/libm` was skipped as "left to the python path" -- in the
+    # branch that runs when there is none -- so neither dependency was ever
+    # checked here.
+    _dep_roots=()
+    while IFS= read -r _dep; do
         case "$_dep" in
-            ../*) _dep_roots="$_dep_roots $ROOT_DIR/${_dep#../}" ;;
-            *) ;;    # not a sibling crate; leave the resolution to the python path
+            /* | ../../*) ;;
+            ../*) _dep_roots+=("$ROOT_DIR/${_dep#../}") ;;
+            ?*) _dep_roots+=("$ROOT_DIR/posix/$_dep") ;;
         esac
-    done
+    done < <(sed -n 's/.*path *= *"\([^"]*\)".*/\1/p' "$ROOT_DIR/posix/Cargo.toml" 2>/dev/null)
     for sysroot_src in "$ROOT_DIR/posix/src" \
                        "$ROOT_DIR/posix/Cargo.toml" \
                        "$ROOT_DIR/toolchain/stubs" \
                        "$ROOT_DIR/toolchain/build-sysroot.ps1" \
-                       $_dep_roots; do
+                       ${_dep_roots[@]+"${_dep_roots[@]}"}; do
         [ -e "$sysroot_src" ] || continue
         newer="$(find "$sysroot_src" -type f -newer "$LIBC_A" -print -quit 2>/dev/null || true)"
         [ -n "$newer" ] || continue
@@ -1170,6 +1181,7 @@ fi
 #     A skip reports nothing and says so; a stale binary reports OK and is
 #     wrong.  ALLOW_STALE_FIXTURES=1 downgrades this too, since a host that
 #     cannot rebuild the fixtures certainly cannot relink bash.
+# PROGRAM: /bin/bash -- GNU bash 5.2, the shell. (scripts/bash-spike/)
 BASH_SLATE="$ROOT_DIR/build/spike/bash-slateos.elf"
 BASH_STALE=0
 if [ -e "$BASH_SLATE" ]; then
@@ -1214,6 +1226,7 @@ fi
 # Staleness: identical rule to bash — absent is honest (best-effort, warn),
 # present-but-older-than-libc.a is a lie (fatal), because a stale binary links a
 # libc that is no longer in the build.  See the long comment above bash.
+# PROGRAM: /bin/pkgconf, /bin/pkg-config -- pkgconf 2.3.0: the compiler and linker flags an installed library needs. (scripts/pkgconf-spike/)
 PKGCONF_SLATE="$ROOT_DIR/build/spike/pkgconf-slateos.elf"
 PKGCONF_STALE=0
 if [ -e "$PKGCONF_SLATE" ]; then
@@ -1252,6 +1265,7 @@ fi
 #
 # Staleness: identical rule to bash and pkgconf — absent is honest (warn),
 # present-but-older-than-libc.a is a lie (fatal).
+# PROGRAM: /bin/make -- GNU make 4.4.1, the build tool. (scripts/make-spike/)
 MAKE_SLATE="$ROOT_DIR/build/spike/make-slateos.elf"
 MAKE_STALE=0
 if [ -e "$MAKE_SLATE" ]; then
@@ -1301,6 +1315,7 @@ fi
 # added back when it is implemented, per §1006 — the same ruling that deleted
 # our own fabricating `cmake/ctest/cpack` reimplementation, which is why
 # /bin/cmake is free for the real one.
+# PROGRAM: /bin/cmake -- CMake 4.4.3, the build-system generator. (scripts/cmake-spike/)
 CMAKE_SLATE="$ROOT_DIR/build/spike/cmake-slateos.elf"
 CMAKE_DATA="$ROOT_DIR/build/spike/cmake-data"
 CMAKE_STALE=0
@@ -1354,6 +1369,7 @@ fi
 # Staleness: identical rule to bash, pkgconf, make and cmake -- absent is
 # honest (NOTE), older than libc.a is a lie (fatal).  The relink above is
 # normally what keeps it fresh.
+# PROGRAM: /bin/espeak-ng -- eSpeak NG 1.52.0, the speech synthesizer. (scripts/espeak-spike/)
 ESPEAK_SLATE="$ROOT_DIR/build/spike/espeak-ng-slateos.elf"
 ESPEAK_DATA="$ROOT_DIR/build/spike/espeak-ng-data"
 ESPEAK_STALE=0
@@ -1447,6 +1463,7 @@ fi
 #     produces "No module named 'zlib'" from inside <frozen zipimport>.  That is
 #     measured, not assumed (see scripts/cpython-spike/stdlib.sh), and a build
 #     host whose zipfile defaults changed would reintroduce it invisibly.
+# PROGRAM: /bin/python3 -- CPython 3.12.3, the Python interpreter. (scripts/cpython-spike/)
 PY_SLATE="$ROOT_DIR/build/spike/python-slateos.elf"
 PY_ZIP="$ROOT_DIR/build/spike/python312.zip"
 PY_STALE=0
@@ -2125,53 +2142,30 @@ fi
 # A-THE-AUDIO-DRIVERS-HAD-NEVER-RUN-ON-ANY-BOOT-TEST in known-issues.md.
 # Compiling is not running.
 #
-# Build them with three commands, in this order:
-#   cd userspace/coreutils
-#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release -p coreutils
-#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly clean --release \
-#     --target ../../toolchain/x86_64-slateos.json -p kill -p logger -p powerctl
-#   CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \
-#     -p ar -p kill -p logger -p logrotate -p powerctl
-# (`slate_build_commands` below prints them, wherever this block says to run
-# them.)
+# Build them -- every program the workspace builds, which is what this stages
+# since 2026-10-01 (the second loop, below the manifest's) -- with one command,
+# run on Windows in this worktree:
 #
-# The `-p` list is NOT decoration. The manifest's names come from six
-# crates, not one: coreutils produces 70 of them, and `ar`, `kill`, `logger`,
-# `logrotate` and `powerctl` their own. A plain `cargo build` in
-# `userspace/coreutils` builds only that crate, so following the old form of
-# this instruction left four binaries -- and the `ranlib`, `strip` and
-# `killall` aliases that need two of them -- off the image, reported as a
-# NOTE nobody reads. Measured with `scripts/check-manifest-producers.py`,
-# not guessed, and the command above was run before being printed here.
+#   python scripts/build-userland.py
 #
-# Nor is the split into two builds. `kill` and `logger` are built TWICE:
-# coreutils has a `src/bin/kill.rs` and a `src/bin/logger.rs` of its own
-# beside the `userspace/kill` and `userspace/logger` crates -- the last two of
-# the pairs in known-issues.md B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-
-# PACKAGES, which design-decisions.md §1005 has merged into coreutils, lane
-# B's to do. The two of a pair write one file, `release/kill`, and cargo
-# asked for both in one invocation warns "output filename collision" and
-# keeps whichever it linked last: scheduling, not a decision. The command
-# here was one invocation until 2026-09-28, and the image's /bin/kill was
-# coreutils', which has no `killall` -- so the `killall = kill` alias below
-# made a /bin/killall that was plain `kill`. Cargo links a requested
-# package's outputs into `release/` whether it rebuilt them or found them
-# fresh, so the last command's copies are the ones left there: the standalone
-# crates', which are the copies this manifest means, `killall` being theirs.
-# The staging loop below checks it, since a wrong copy is otherwise silent.
-#
-# And the `clean` is for those three crates' other defect. Unlike coreutils,
-# `ar` and `logrotate`, they have no build script naming `libc.a` as an input
-# (`userspace/sysroot-dep` says why one is needed), so after a libc rebuild
-# cargo reports `Finished` and relinks nothing, and the staleness check below
-# refuses them -- rightly: they carry the old library. Cleaning them makes the
-# build link them again, against the current one. (`--target` because
-# `cargo clean`, unlike `cargo build`, does not take the target from
-# userspace/.cargo/config.toml: without it, it cleans the host's directory
-# and reports 0 files -- measured.) The build scripts, and
-# the two pairs, are asked of lane B in requests/d-b-kill-and-logger-are-
-# built-twice-and-three-image-crates-miss-sysroot-dep.md; when both are done,
-# the clean goes.
+# (`slate_build_commands` below prints it, wherever this block says to run it.)
+# It was three cargo commands until then, in an order that mattered, and each
+# of the three things that made it matter is now that script's, and explained
+# there:
+#   - the packages are the workspace's, from `cargo metadata`, not a `-p` list
+#     kept by hand -- one such list once left four binaries, and the `ranlib`,
+#     `strip` and `killall` aliases that need two of them, off the image;
+#   - a name two packages build -- `kill`, coreutils' and its own crate's
+#     (known-issues.md B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES) --
+#     ships as its own crate's. cargo keeps whichever copy it linked last, so
+#     the script builds that crate last. The staging loops below check it,
+#     since a wrong copy is otherwise silent: on 2026-09-28 /bin/kill was
+#     coreutils', which has no `killall`, and the `killall = kill` alias made a
+#     /bin/killall that was plain `kill`;
+#   - a binary older than libc.a is relinked. cargo cannot see the archive as
+#     an input, so after a libc rebuild it relinks nothing; a crate whose build
+#     script names it (userspace/sysroot-dep) is relinked by cargo, and the
+#     script cleans and rebuilds the rest.
 #
 # ABSENCE IS AN ERROR AS OF 2026-09-16, which is what the paragraph that used
 # to sit here asked for:
@@ -2208,18 +2202,14 @@ SLATE_ALIASES=0
 SLATE_ALIAS_LINES=""
 SLATE_ALIAS_ORPHANS=""
 SLATE_WRONG_COPY=""
+# The names the manifest lists, which the second loop leaves to the first.
+declare -A SLATE_LISTED=()
 
-# The commands that build what the manifest names, in the order that matters
-# ("Nor is the split into two builds", above), printed wherever this block
-# tells somebody to run them -- one copy, so they cannot drift apart. $1 is
-# the indent after "[rootfs]".
+# The command that builds every program this stages, printed wherever this
+# block tells somebody to run it -- one copy, so it cannot drift. $1 is the
+# indent after "[rootfs]".
 slate_build_commands() {
-    echo "[rootfs]$1cd userspace/coreutils"
-    echo "[rootfs]$1CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release -p coreutils"
-    echo "[rootfs]$1CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly clean --release \\"
-    echo "[rootfs]$1  --target ../../toolchain/x86_64-slateos.json -p kill -p logger -p powerctl"
-    echo "[rootfs]$1CARGO_UNSTABLE_JSON_TARGET_SPEC=true cargo +nightly build --release \\"
-    echo "[rootfs]$1  -p ar -p kill -p logger -p logrotate -p powerctl"
+    echo "[rootfs]$1python scripts/build-userland.py    # on Windows, in this worktree"
 }
 
 # Whether the name $1 is built by two packages: a coreutils bin, and a crate
@@ -2279,6 +2269,7 @@ while IFS= read -r name; do
             continue
             ;;
     esac
+    SLATE_LISTED[$name]=1
     f="$SLATE_BIN_DIR/$name"
     if [ ! -f "$f" ]; then
         SLATE_MISSING=$((SLATE_MISSING + 1))
@@ -2323,8 +2314,8 @@ done < "$SLATE_MANIFEST"
 if [ -n "$SLATE_WRONG_COPY" ]; then
     echo "[rootfs] ERROR: two packages build each of these, and what $SLATE_BIN_DIR"
     echo "[rootfs]        holds is not the userspace/<name> crate's build:$SLATE_WRONG_COPY"
-    echo "[rootfs]        cargo keeps whichever copy it linked last. Build with these"
-    echo "[rootfs]        commands, in this order, which link the standalone crates last:"
+    echo "[rootfs]        cargo keeps whichever copy it linked last. This builds the"
+    echo "[rootfs]        standalone crates last, so theirs are the copies left:"
     slate_build_commands "          "
     exit 1
 fi
@@ -2360,7 +2351,7 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     if [ "$SLATE_STALE" -gt 0 ]; then
         echo "[rootfs] $SLATE_STALE of $SLATE_COUNT staged binaries are OLDER than the sysroot libc.a."
         echo "[rootfs] They link a stale libc and prove nothing about the current one."
-        echo "[rootfs] Rebuild them, with these commands in this order:"
+        echo "[rootfs] Rebuild them with:"
         slate_build_commands "  "
         if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
             echo "[rootfs] NOTE: ALLOW_STALE_FIXTURES=1 — packing them anyway."
@@ -2412,7 +2403,7 @@ else
     echo "[rootfs] ERROR: none of the binaries named in $SLATE_MANIFEST have been"
     echo "[rootfs]        built, so /bin would get none of this project's own utilities."
     echo "[rootfs]        They build for the HOST by default; the slateos target is separate,"
-    echo "[rootfs]        with these commands, in this order:"
+    echo "[rootfs]        with:"
     slate_build_commands "          "
     echo "[rootfs]        then re-run this script."
     echo "[rootfs]"
@@ -2433,6 +2424,173 @@ else
     echo "[rootfs]        Set ALLOW_EMPTY_SLATE_BIN=1 for a deliberately minimal image."
     exit 1
 fi
+# --- every other program the workspace builds ---------------------------------
+#
+# requests/b-d-stage-every-program-that-builds.md. design-decisions §1053 is
+# the operator's answer to B-Q21 -- "make the image big enough, and stage
+# everything that builds" -- and §1164 is how. The manifest's names, above,
+# are the programs the image must carry, which the boot tests run. This stages
+# every other program the workspace builds, except what
+# scripts/rootfs-bin-kept-off.txt keeps off, each there with its reason. The
+# image sizes itself from what is staged ("the image's size", below), so the
+# old objection, that they did not fit 384 MiB, has gone.
+#
+# The list is the workspace's -- `build-userland.py --list`, from `cargo
+# metadata` -- and never a scan of target/: what a developer last built must
+# not decide what the image holds (the manifest's header says how that went).
+# The same script builds them, and build/pipeline.sh runs it. A program on the
+# list with no binary is an error, as a manifest name's is, and the error says
+# what to run; ALLOW_PARTIAL_USERLAND=1 stages what there is, knowingly (as
+# does ALLOW_EMPTY_SLATE_BIN, which asks for less). A binary older than libc.a
+# is refused as the manifest's are, and ALLOW_STALE_FIXTURES=1 downgrades it
+# the same way.
+SLATE_KEPT_OFF_FILE="$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
+declare -A SLATE_KEPT_OFF=()
+SLATE_KEPT_UNREASONED=""
+if [ ! -f "$SLATE_KEPT_OFF_FILE" ]; then
+    echo "[rootfs] ERROR: $SLATE_KEPT_OFF_FILE does not exist. It is tracked in git,"
+    echo "[rootfs]        so this checkout is broken -- and without it, programs whose"
+    echo "[rootfs]        names a block above owns (fastpy's cat, dash's sh) collide."
+    exit 1
+fi
+while IFS= read -r line; do
+    line="$(printf '%s' "$line" | tr -d '\r')"
+    name="$(printf '%s' "${line%%#*}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$name" ] || continue
+    # Kept off with no reason is the defect this file exists to stop: what is
+    # left off the image, and why, is the whole of what it records.
+    reason="${line#*#}"
+    if [ "$reason" = "$line" ] || [ -z "$(printf '%s' "$reason" | tr -d '[:space:]')" ]; then
+        SLATE_KEPT_UNREASONED="$SLATE_KEPT_UNREASONED $name"
+        continue
+    fi
+    SLATE_KEPT_OFF[$name]=1
+done < "$SLATE_KEPT_OFF_FILE"
+if [ -n "$SLATE_KEPT_UNREASONED" ]; then
+    echo "[rootfs] ERROR: scripts/rootfs-bin-kept-off.txt keeps these off the image with"
+    echo "[rootfs]        no reason:$SLATE_KEPT_UNREASONED"
+    echo "[rootfs]        Each line is a name and a # reason, and the reason is the point."
+    exit 1
+fi
+if [ -z "$SYSROOT_PY" ]; then
+    echo "[rootfs] ERROR: no python3/python, so scripts/build-userland.py cannot say"
+    echo "[rootfs]        which programs the workspace builds."
+    exit 1
+fi
+# `tr` for a Windows Python's CRLF; pipefail keeps the script's own status.
+if ! SLATE_PROGRAMS="$("$SYSROOT_PY" "$ROOT_DIR/scripts/build-userland.py" --list | tr -d '\r')"; then
+    echo "[rootfs] ERROR: scripts/build-userland.py --list failed (above), so which"
+    echo "[rootfs]        programs the workspace builds is unknown."
+    exit 1
+fi
+# A name two packages build is listed once for each.
+declare -A SLATE_PROGRAM=()
+declare -A SLATE_SHARED=()
+while IFS=$'\t' read -r name _pkg; do
+    [ -n "$name" ] || continue
+    [ -z "${SLATE_PROGRAM[$name]:-}" ] || SLATE_SHARED[$name]=1
+    SLATE_PROGRAM[$name]=1
+done <<< "$SLATE_PROGRAMS"
+SLATE_REST_COUNT=0
+SLATE_REST_BYTES=0
+SLATE_REST_STALE=0
+SLATE_REST_KEPT=0
+SLATE_REST_MISSING=0
+SLATE_REST_MISSING_NAMES=""
+SLATE_REST_TAKEN=""
+SLATE_REST_WRONG=""
+declare -A SLATE_REST_DONE=()
+while IFS=$'\t' read -r name _pkg; do
+    [ -n "$name" ] || continue
+    # The manifest's own, staged or reported by the loop above.
+    [ -z "${SLATE_LISTED[$name]:-}" ] || continue
+    [ -z "${SLATE_REST_DONE[$name]:-}" ] || continue
+    SLATE_REST_DONE[$name]=1
+    if [ -n "${SLATE_KEPT_OFF[$name]:-}" ]; then
+        SLATE_REST_KEPT=$((SLATE_REST_KEPT + 1))
+        continue
+    fi
+    f="$SLATE_BIN_DIR/$name"
+    if [ ! -f "$f" ]; then
+        SLATE_REST_MISSING=$((SLATE_REST_MISSING + 1))
+        SLATE_REST_MISSING_NAMES="$SLATE_REST_MISSING_NAMES $name"
+        continue
+    fi
+    if [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' ')" != "7f454c46" ]; then
+        echo "[rootfs] NOTE: $f is a program the workspace builds but not an ELF binary;"
+        echo "[rootfs]       not staging it."
+        continue
+    fi
+    # Taken by a block above, and not kept off here: a collision the kept-off
+    # list does not know of yet. The earlier block's copy stays, as for the
+    # manifest's names, and the list should gain the name, with its reason.
+    if [ -e "$STAGE/bin/$name" ]; then
+        SLATE_REST_TAKEN="$SLATE_REST_TAKEN $name"
+        continue
+    fi
+    if [ -n "${SLATE_SHARED[$name]:-}" ] && ! slate_standalone_build "$name" "$f"; then
+        SLATE_REST_WRONG="$SLATE_REST_WRONG $name"
+        continue
+    fi
+    cp -L "$f" "$STAGE/bin/$name"
+    SLATE_REST_COUNT=$((SLATE_REST_COUNT + 1))
+    SLATE_REST_BYTES=$((SLATE_REST_BYTES + $(wc -c < "$f")))
+    if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$f" ]; then
+        SLATE_REST_STALE=$((SLATE_REST_STALE + 1))
+    fi
+done <<< "$SLATE_PROGRAMS"
+# A kept-off name the workspace does not build keeps nothing off: a stale entry.
+SLATE_KEPT_STALE=""
+for name in "${!SLATE_KEPT_OFF[@]}"; do
+    [ -n "${SLATE_PROGRAM[$name]:-}" ] || SLATE_KEPT_STALE="$SLATE_KEPT_STALE $name"
+done
+if [ -n "$SLATE_REST_WRONG" ]; then
+    echo "[rootfs] ERROR: two packages build each of these, and what $SLATE_BIN_DIR"
+    echo "[rootfs]        holds is not the one named after it:$SLATE_REST_WRONG"
+    echo "[rootfs]        cargo keeps whichever copy it linked last. Build with:"
+    slate_build_commands "          "
+    exit 1
+fi
+if [ "$SLATE_REST_MISSING" -gt 0 ]; then
+    if [ "${ALLOW_PARTIAL_USERLAND:-0}" = "1" ] || [ -n "${ALLOW_EMPTY_SLATE_BIN:-}" ]; then
+        echo "[rootfs] NOTE: $SLATE_REST_MISSING program(s) the workspace builds have no binary, and"
+        echo "[rootfs]       this image goes without them, as asked:$SLATE_REST_MISSING_NAMES"
+    else
+        echo "[rootfs] ERROR: $SLATE_REST_MISSING program(s) the workspace builds have no binary:"
+        echo "[rootfs]       $SLATE_REST_MISSING_NAMES"
+        echo "[rootfs]"
+        echo "[rootfs]        Every program that builds goes on the image (design-decisions"
+        echo "[rootfs]        §1053, §1164). Build them all with:"
+        slate_build_commands "          "
+        echo "[rootfs]        or set ALLOW_PARTIAL_USERLAND=1 for an image without them."
+        exit 1
+    fi
+fi
+SLATE_REST_MIB=$((SLATE_REST_BYTES / 1048576))
+echo "[rootfs] staged $SLATE_REST_COUNT more programs the workspace builds into /bin ($SLATE_REST_MIB MiB);"
+echo "[rootfs]          $SLATE_REST_KEPT kept off by scripts/rootfs-bin-kept-off.txt"
+if [ -n "$SLATE_REST_TAKEN" ]; then
+    echo "[rootfs] NOTE: a block above had already staged these names, so its copy is the"
+    echo "[rootfs]       one on the image:$SLATE_REST_TAKEN"
+    echo "[rootfs]       Add each to scripts/rootfs-bin-kept-off.txt, with the reason."
+fi
+if [ -n "$SLATE_KEPT_STALE" ]; then
+    echo "[rootfs] NOTE: scripts/rootfs-bin-kept-off.txt keeps off names the workspace does"
+    echo "[rootfs]       not build:$SLATE_KEPT_STALE -- remove each, or correct it."
+fi
+if [ "$SLATE_REST_STALE" -gt 0 ]; then
+    echo "[rootfs] $SLATE_REST_STALE of them are OLDER than the sysroot libc.a: they link a stale libc."
+    echo "[rootfs] Rebuild them with:"
+    slate_build_commands "  "
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] NOTE: ALLOW_STALE_FIXTURES=1 — packing them anyway."
+    else
+        echo "[rootfs] ERROR: refusing to build an image from stale binaries."
+        echo "[rootfs]        Set ALLOW_STALE_FIXTURES=1 to pack them regardless."
+        exit 1
+    fi
+fi
+
 # --- multi-call aliases ------------------------------------------------------
 #
 # A multi-call program reads argv[0] and behaves as a different tool: our `ar`
@@ -2639,6 +2797,79 @@ find "$THEMES_DST" -type f -exec chmod 0644 {} +
 THEMES_STAGED="$(find "$THEMES_DST" -name theme.yaml | wc -l)"
 THEMES_FILES="$(find "$THEMES_DST" -type f | wc -l)"
 echo "[rootfs] staged $THEMES_STAGED colour theme(s) under /usr/share/slateos/themes ($THEMES_FILES files)"
+
+# --- notices: the licences of the code other people wrote ---------------------
+#
+# requests/c-d-put-the-third-party-notices-in-the-image.md (lane C;
+# design-decisions §1433). An image may be handed to anyone only if it carries
+# the licence notices of the third-party code in it: the crates.io libraries,
+# the vendored crates, the ported decoders. scripts/gather-notices.py gathers
+# every notice the tree holds -- from the source tree, Cargo.lock and cargo's
+# registry cache -- into /usr/share/licenses: `index.yaml`, which gui/notices
+# reads; a directory of texts per component; and NOTICES.txt, all of them in
+# one file.
+#
+# A failure is fatal, as the request asks: a notice that could not be gathered
+# is the failure this exists to prevent, and an image without one may not be
+# published. So is having no Python to run it with, for the same reason.
+#
+# The bundle is written whole into a directory that does not exist yet, and
+# $STAGE is a fresh `mktemp -d`; nothing is removed first, so a step above that
+# had put something in /usr/share/licenses would be refused here, not lost.
+#
+# The registry cache is the one the workspace was built with. This script runs
+# under WSL, and the workspace is built by Windows cargo, whose cache is under
+# %CARGO_HOME% or %USERPROFILE%\.cargo on the Windows side. WSL's own ~/.cargo,
+# if there is one, holds only what WSL's builds fetched. Measured 2026-10-01:
+# gather-notices.py failed against WSL's, and gathered 96 notices in 12 s
+# against Windows'. SLATEOS_CARGO_HOME overrides the search; off WSL, or
+# without interop, it is cargo's own: $CARGO_HOME, else ~/.cargo.
+#
+# Prints the directory, or nothing for cargo's own; always succeeds, since
+# under `set -e` a failing `$(...)` in an assignment would end the script
+# without a word.
+notices_cargo_home() {
+    if [ -n "${SLATEOS_CARGO_HOME:-}" ]; then
+        printf '%s\n' "$SLATEOS_CARGO_HOME"
+        return 0
+    fi
+    command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1 || return 0
+    local win
+    win="$(cmd.exe /d /c 'if defined CARGO_HOME (echo %CARGO_HOME%) else (echo %USERPROFILE%\.cargo)' 2>/dev/null | tr -d '\r')" || true
+    case "$win" in
+        [A-Za-z]:\\*) wslpath -u "$win" 2>/dev/null || true ;;
+    esac
+    return 0
+}
+NOTICES_DST="$STAGE/usr/share/licenses"
+if [ -z "$SYSROOT_PY" ]; then
+    echo "[rootfs] ERROR: no python3/python, so scripts/gather-notices.py cannot gather"
+    echo "[rootfs]        the third-party notices the image must carry."
+    exit 1
+fi
+NOTICES_CARGO_HOME="$(notices_cargo_home)"
+NOTICES_RC=0
+if [ -n "$NOTICES_CARGO_HOME" ]; then
+    echo "[rootfs] gathering the third-party notices (cargo's registry: $NOTICES_CARGO_HOME)"
+    CARGO_HOME="$NOTICES_CARGO_HOME" "$SYSROOT_PY" "$ROOT_DIR/scripts/gather-notices.py" \
+        --out "$NOTICES_DST" || NOTICES_RC=$?
+else
+    echo "[rootfs] gathering the third-party notices (cargo's registry: ${CARGO_HOME:-~/.cargo})"
+    "$SYSROOT_PY" "$ROOT_DIR/scripts/gather-notices.py" --out "$NOTICES_DST" || NOTICES_RC=$?
+fi
+if [ "$NOTICES_RC" -ne 0 ]; then
+    echo "[rootfs] ERROR: scripts/gather-notices.py failed (exit $NOTICES_RC, above): the"
+    echo "[rootfs]        image would lack a licence notice it must carry. A package"
+    echo "[rootfs]        missing from the registry is fetched by building the"
+    echo "[rootfs]        workspace; a cache elsewhere is named by SLATEOS_CARGO_HOME."
+    exit 1
+fi
+# Data, like the themes: fixed modes rather than whatever the umask gave.
+find "$NOTICES_DST" -type d -exec chmod 0755 {} +
+find "$NOTICES_DST" -type f -exec chmod 0644 {} +
+NOTICES_COMPONENTS="$(find "$NOTICES_DST" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+NOTICES_FILES="$(find "$NOTICES_DST" -type f | wc -l)"
+echo "[rootfs] staged the notices of $NOTICES_COMPONENTS component(s) under /usr/share/licenses ($NOTICES_FILES files)"
 
 # --- Completeness: the check that replaces the retired content stamps ---------
 #

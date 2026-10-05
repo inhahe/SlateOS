@@ -300,6 +300,9 @@ pub struct Outcome {
     pub answer: Answer,
     /// Why.
     pub why: Why,
+    /// Who asked, as the kernel named it -- a program refused for holding no
+    /// key included; `None` when the kernel named nobody. For the log.
+    pub program: Option<Program>,
 }
 
 impl Outcome {
@@ -307,6 +310,15 @@ impl Outcome {
         Self {
             answer: Answer::Refused,
             why,
+            program: None,
+        }
+    }
+
+    const fn given(answer: Answer, why: Why) -> Self {
+        Self {
+            answer,
+            why,
+            program: None,
         }
     }
 }
@@ -359,10 +371,21 @@ impl<V: Vault, P: Prompt> Service<V, P> {
     /// Answer `query`, asked by `peer`.
     pub fn answer(&mut self, peer: &impl Peer, query: &Query) -> Outcome {
         self.expire();
-        let program = match identify(peer) {
-            Ok(program) => program,
-            Err(why) => return Outcome::refused(why),
-        };
+        match identify(peer) {
+            Ok(program) => {
+                let mut outcome = self.answer_program(&program, query);
+                outcome.program = Some(program);
+                outcome
+            }
+            Err((why, program)) => Outcome {
+                program,
+                ..Outcome::refused(why)
+            },
+        }
+    }
+
+    /// Answer `query`, asked by `program`, which may ask.
+    fn answer_program(&mut self, program: &Program, query: &Query) -> Outcome {
         let now = (self.clock)();
         if self.vault.is_locked() {
             // Whatever the user allowed went with the vault's last lock.
@@ -379,10 +402,7 @@ impl<V: Vault, P: Prompt> Service<V, P> {
             if let (Some(login), None) = (earlier.next(), earlier.next()) {
                 let answer = login.answer();
                 self.last_used = Some(now);
-                return Outcome {
-                    answer,
-                    why: Why::AllowedEarlier,
-                };
+                return Outcome::given(answer, Why::AllowedEarlier);
             }
         }
         if self
@@ -392,7 +412,7 @@ impl<V: Vault, P: Prompt> Service<V, P> {
         {
             return Outcome::refused(Why::Quiet);
         }
-        self.ask(&program, query)
+        self.ask(program, query)
     }
 
     /// Ask the user about `program`'s `query`.
@@ -468,10 +488,7 @@ impl<V: Vault, P: Prompt> Service<V, P> {
                     .or_default()
                     .insert(login.id);
             }
-            return Outcome {
-                answer,
-                why: Why::Allowed,
-            };
+            return Outcome::given(answer, Why::Allowed);
         }
         self.refused_by_user(program, Why::WrongPassword)
     }
@@ -503,6 +520,15 @@ impl<V: Vault, P: Prompt> Service<V, P> {
             .and_then(|last| last.checked_add(self.vault.stays_open()))
     }
 
+    /// How long from now [`expire`](Self::expire) will lock the vault, by
+    /// this service's clock -- what a loop waits for at most: `None` as for
+    /// [`next_expiry`](Self::next_expiry), and nothing once it is due.
+    #[must_use]
+    pub fn until_expiry(&self) -> Option<Duration> {
+        self.next_expiry()
+            .map(|at| at.saturating_duration_since((self.clock)()))
+    }
+
     /// Lock the vault now -- the session locking, the user logging out --
     /// and forget what the user allowed until it locked.
     pub fn lock(&mut self) {
@@ -512,18 +538,19 @@ impl<V: Vault, P: Prompt> Service<V, P> {
     }
 }
 
-/// The program at the other end of `peer`, if it may ask at all.
-fn identify(peer: &impl Peer) -> Result<Program, Why> {
+/// The program at the other end of `peer`, if it may ask at all; else why
+/// not, and who it was when the kernel named it.
+fn identify(peer: &impl Peer) -> Result<Program, (Why, Option<Program>)> {
     let program = match peer.program() {
         Ok(Some(program)) => program,
-        Ok(None) => return Err(Why::Unknown),
-        Err(e) => return Err(Why::Failed(e.kind())),
+        Ok(None) => return Err((Why::Unknown, None)),
+        Err(e) => return Err((Why::Failed(e.kind()), None)),
     };
     // After the name: see the module doc's step 2.
     match peer.holds_key() {
         Ok(true) => Ok(program),
-        Ok(false) => Err(Why::NoKey),
-        Err(e) => Err(Why::Failed(e.kind())),
+        Ok(false) => Err((Why::NoKey, Some(program))),
+        Err(e) => Err((Why::Failed(e.kind()), Some(program))),
     }
 }
 
@@ -553,6 +580,18 @@ fn candidates<'v>(logins: &'v [SavedLogin], query: &Query) -> Vec<&'v SavedLogin
     found
 }
 
+/// What one connection came to, for the service's log: never the password,
+/// nor which user's login was given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Served {
+    /// How the ask ended.
+    pub why: Why,
+    /// Who asked, when the kernel named them.
+    pub program: Option<Program>,
+    /// What for, as asked.
+    pub target: String,
+}
+
 /// Answer one program: read its query from `conn`, freshly accepted, and
 /// write what `service` answers.
 ///
@@ -562,7 +601,7 @@ fn candidates<'v>(logins: &'v [SavedLogin], query: &Query) -> Vec<&'v SavedLogin
 /// if the program hung up first; `InvalidData` if what it sent is not a
 /// query, or is more than one; and the transport's own errors -- for a
 /// program that hung up while the user was asked, `BrokenPipe`.
-pub fn serve<T, V, P>(service: &mut Service<V, P>, mut conn: T) -> io::Result<Why>
+pub fn serve<T, V, P>(service: &mut Service<V, P>, mut conn: T) -> io::Result<Served>
 where
     T: Transport<Error = io::Error> + Peer,
     V: Vault,
@@ -576,7 +615,11 @@ where
         // Nothing here gives up waiting, so this is never read.
         return Err(io::ErrorKind::Interrupted.into());
     };
-    let Outcome { answer, mut why } = service.answer(&conn, &query);
+    let Outcome {
+        answer,
+        mut why,
+        program,
+    } = service.answer(&conn, &query);
     let frame = match protocol::encode_answer(&answer) {
         Ok(frame) => frame,
         Err(_) => {
@@ -588,7 +631,11 @@ where
     // The frame holds the password: overwritten once sent.
     let frame = Secret::new(frame);
     conn.write(frame.as_bytes())?;
-    Ok(why)
+    Ok(Served {
+        why,
+        program,
+        target: query.target,
+    })
 }
 
 #[cfg(test)]

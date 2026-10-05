@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use guiremote::client::Transport;
 
 use super::{
-    Asking, Choice, Outcome, Peer, Picked, Program, Prompt, QUIET, Said, SavedLogin, Scope,
+    Asking, Choice, Outcome, Peer, Picked, Program, Prompt, QUIET, Said, SavedLogin, Scope, Served,
     Service, TRIES, Vault, Why, serve,
 };
 use crate::protocol::{self, Answer, Decoded, MAX_USERNAME, Query, Secret};
@@ -577,8 +577,10 @@ fn the_vault_stays_open_only_so_long_unused() {
     r.service.answer(&mail, &query);
     let opened = *r.clock.0.lock().unwrap();
     assert_eq!(r.service.next_expiry(), Some(opened + STAYS_OPEN));
+    assert_eq!(r.service.until_expiry(), Some(STAYS_OPEN));
     // Used again just before it would lock: it stays open as long again.
     r.clock.pass(STAYS_OPEN - Duration::from_secs(1));
+    assert_eq!(r.service.until_expiry(), Some(Duration::from_secs(1)));
     r.service.expire();
     assert!(r.vault.is_open());
     assert_eq!(r.service.answer(&mail, &query).why, Why::AllowedEarlier);
@@ -586,9 +588,12 @@ fn the_vault_stays_open_only_so_long_unused() {
     r.service.expire();
     assert!(r.vault.is_open());
     r.clock.pass(Duration::from_secs(1));
+    // Due: nothing left to wait.
+    assert_eq!(r.service.until_expiry(), Some(Duration::ZERO));
     r.service.expire();
     assert!(!r.vault.is_open());
     assert_eq!(r.service.next_expiry(), None);
+    assert_eq!(r.service.until_expiry(), None);
     // A vault to stay open longer than a clock counts never locks.
     r.vault.0.borrow_mut().stays_open = Duration::MAX;
     r.user.will([allow(Scope::Once, MASTER)]);
@@ -761,14 +766,23 @@ fn answer_in(written: &RefCell<Vec<u8>>) -> Answer {
     }
 }
 
-/// **One connection is one query read and one answer written.**
+/// **One connection is one query read and one answer written** -- and what
+/// it came to said for the log: who asked, for what, and how it ended, even
+/// for a program refused for holding no key.
 #[test]
 fn a_connection_is_answered() {
     let mut r = rig(bank());
     let query = protocol::encode_query(&ask_for("bank.example")).unwrap();
     let (conn, written) = Conn::sending(&query, Asker::holding("/bin/mail"));
     r.user.will([allow(Scope::Once, MASTER)]);
-    assert_eq!(serve(&mut r.service, conn).unwrap(), Why::Allowed);
+    assert_eq!(
+        serve(&mut r.service, conn).unwrap(),
+        Served {
+            why: Why::Allowed,
+            program: Some(program("/bin/mail")),
+            target: "bank.example".into(),
+        }
+    );
     assert_eq!(
         answer_in(&written),
         Answer::Login {
@@ -777,8 +791,20 @@ fn a_connection_is_answered() {
         }
     );
     let (conn, written) = Conn::sending(&query, Asker::without_key("/bin/mail"));
-    assert_eq!(serve(&mut r.service, conn).unwrap(), Why::NoKey);
+    let served = serve(&mut r.service, conn).unwrap();
+    assert_eq!(
+        (served.why, served.program),
+        (Why::NoKey, Some(program("/bin/mail")))
+    );
     assert_eq!(answer_in(&written), Answer::Refused);
+    // A program the kernel named nobody for is logged as nobody.
+    let nobody = Asker {
+        program: Ok(None),
+        key: Ok(true),
+    };
+    let (conn, _) = Conn::sending(&query, nobody);
+    let served = serve(&mut r.service, conn).unwrap();
+    assert_eq!((served.why, served.program), (Why::Unknown, None));
 }
 
 /// **A login the protocol cannot carry is refused, not cut**, and the
@@ -790,7 +816,7 @@ fn a_login_too_long_to_send_is_refused() {
     let query = protocol::encode_query(&ask_for("bank.example")).unwrap();
     let (conn, written) = Conn::sending(&query, Asker::holding("/bin/mail"));
     r.user.will([allow(Scope::Once, MASTER)]);
-    assert_eq!(serve(&mut r.service, conn).unwrap(), Why::TooLong);
+    assert_eq!(serve(&mut r.service, conn).unwrap().why, Why::TooLong);
     assert_eq!(answer_in(&written), Answer::Refused);
 }
 

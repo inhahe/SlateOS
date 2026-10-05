@@ -732,7 +732,9 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "credentials",
+ "guiremote",
  "guitk",
+ "journalrec",
  "oswindow",
  "pathcodec",
  "secret",

@@ -22,6 +22,12 @@ appearance = { path = "../appearance" }
 oswindow = { path = "../window" }
 # How a program's path is shown when it is not text.
 pathcodec = { path = "../pathcodec" }
+# The service registry's listener and the wait on it, on SlateOS; the
+# transport a program's connection is, everywhere.
+guiremote = { path = "../remote" }
+# One spelling of a journal record -- JSON lines, as `journalctl` reads them
+# -- for the service's log of who was given what.
+journalrec = { path = "../../userspace/journalrec" }
 
 [lints]
 workspace = true

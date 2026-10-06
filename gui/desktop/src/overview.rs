@@ -176,7 +176,7 @@ pub struct ThumbnailLayout {
 
 impl ThumbnailLayout {
     /// The card as it is drawn and takes a press: its place, grown by
-    /// [`HOVER_GROWTH`] on every side while it is `hovered`.
+    /// `HOVER_GROWTH` on every side while it is `hovered`.
     ///
     /// The one statement of it. The renderer grew the hovered card and the
     /// hit test did not, so the four pixels round a lit card were drawn as
@@ -194,7 +194,7 @@ impl ThumbnailLayout {
 }
 
 /// The close button of a card drawn at `card`: on its top-right corner,
-/// standing [`CLOSE_RISE`] above its top edge.
+/// standing `CLOSE_RISE` above its top edge.
 #[must_use]
 pub fn close_rect(card: Rect) -> Rect {
     Rect::new(

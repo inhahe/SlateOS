@@ -1358,17 +1358,32 @@ impl DesktopIconLayer {
     /// Find the icon at a given pixel position, if any.
     pub fn icon_at(&self, x: f32, y: f32) -> Option<IconId> {
         // Iterate in reverse so topmost (last-added) icon wins on overlap.
-        for icon in self.icons.iter().rev() {
-            let ix = icon.x as f32;
-            let iy = icon.y as f32;
-            let iw = self.grid.cell_width() as f32;
-            let ih = self.grid.cell_height() as f32;
+        self.icons
+            .iter()
+            .rev()
+            .find(|icon| self.place_of(icon).contains(x, y))
+            .map(|icon| icon.id)
+    }
 
-            if x >= ix && x < ix + iw && y >= iy && y < iy + ih {
-                return Some(icon.id);
-            }
-        }
-        None
+    /// Where the icon `id` is, the cell it takes: what a click on it lands
+    /// in ([`icon_at`](Self::icon_at)) and what a tool is told of it.
+    #[must_use]
+    pub fn icon_rect(&self, id: IconId) -> Option<guitk::frame::Rect> {
+        self.get_icon(id).map(|icon| self.place_of(icon))
+    }
+
+    /// The cell `icon` takes, at its place.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a place and a cell on a screen, far below where f32 loses whole numbers"
+    )]
+    fn place_of(&self, icon: &DesktopIcon) -> guitk::frame::Rect {
+        guitk::frame::Rect::new(
+            icon.x as f32,
+            icon.y as f32,
+            self.grid.cell_width() as f32,
+            self.grid.cell_height() as f32,
+        )
     }
 
     // ======================================================================

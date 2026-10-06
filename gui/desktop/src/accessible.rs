@@ -1,5 +1,10 @@
 //! The desktop shell as tools see it -- a screen reader, a script
-//! ([`Accessible`]): the taskbar and what is open over it.
+//! ([`Accessible`]): the desktop's icons, the taskbar and what is open over
+//! it.
+//!
+//! The icons are a list, each named by its label and said to be what it is
+//! -- a folder, a program, the recycle bin -- the chosen ones marked; one
+//! chosen is clicked, one pressed is double-clicked, so it opens.
 //!
 //! The taskbar holds the start button, a tile for each pinned program and
 //! each window -- named by the program and by the window's title, the window
@@ -28,7 +33,7 @@ use guitk::widget::automation::{Accessible, Action, Node, Refusal, Role, Value};
 
 use crate::{
     DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, Rect, ShellAction, StartRow,
-    StartShortcut, TaskbarSlot, click, power, volume_flyout,
+    StartShortcut, TaskbarSlot, click, icons, power, volume_flyout,
 };
 
 /// A part of the shell, as tools name it.
@@ -36,6 +41,11 @@ use crate::{
 pub enum ShellPart {
     /// The whole screen the shell draws on.
     Desktop,
+    /// The icons on the desktop.
+    Icons,
+    /// A desktop icon: chosen as a click chooses it, opened as a double
+    /// click opens it.
+    Icon(icons::IconId),
     /// The taskbar.
     Taskbar,
     /// The start menu, while it is open.
@@ -164,6 +174,81 @@ impl DesktopShell {
         // A control answers the press or the release: a tile acts when the
         // button comes up, so a drag of it is not a click.
         Ok(answered(released).or_else(|| answered(pressed)))
+    }
+
+    /// The desktop's icons, each named by its label and said to be what it
+    /// is, the chosen ones marked.
+    fn icons_node(&self) -> Node<ShellPart> {
+        let (width, height) = self.viewport();
+        let mut list = Node::new(
+            ShellPart::Icons,
+            Role::List,
+            "Desktop icons",
+            Rect::new(0.0, 0.0, width, height),
+        );
+        for id in self.icons.icon_ids() {
+            let (Some(icon), Some(bounds)) = (self.icons.get_icon(id), self.icons.icon_rect(id))
+            else {
+                continue;
+            };
+            let mut node = Node::new(
+                ShellPart::Icon(id),
+                Role::ListItem,
+                icon.label.clone(),
+                bounds,
+            );
+            node.description = Some(
+                match icon.icon_type {
+                    icons::IconType::Folder => "folder",
+                    icons::IconType::File => "file",
+                    icons::IconType::Shortcut => "shortcut",
+                    icons::IconType::Drive => "drive",
+                    icons::IconType::RecycleBin => "recycle bin",
+                    icons::IconType::Computer => "computer",
+                    icons::IconType::Document => "document",
+                    icons::IconType::Image => "picture",
+                    icons::IconType::Executable => "program",
+                }
+                .to_owned(),
+            );
+            node.value = Some(Value::Chosen(icon.selected));
+            node.focused = icon.selected;
+            node.focusable = true;
+            list.children.push(node);
+        }
+        list
+    }
+
+    /// Click the desktop icon `id` -- and, where `open`, click it again as a
+    /// double click: the shell's own presses, releases and double click at
+    /// the middle of its cell. Refused where something is drawn over it.
+    fn click_icon(
+        &mut self,
+        id: icons::IconId,
+        open: bool,
+    ) -> Result<Option<ShellAction>, Refusal> {
+        let rect = self.icons.icon_rect(id).ok_or(Refusal::NoSuchWidget)?;
+        let (x, y) = rect.centre();
+        if self.hit_test(x, y) != Hit::Desktop || self.icons.icon_at(x, y) != Some(id) {
+            return Err(Refusal::Hidden);
+        }
+        let release = MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        };
+        let mut said = answered(self.handle_mouse(&click(x, y)));
+        said = answered(self.handle_mouse(&release)).or(said);
+        if open {
+            said = answered(self.handle_mouse(&MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::DoubleClick(MouseButton::Left),
+            }))
+            .or(said);
+            said = answered(self.handle_mouse(&release)).or(said);
+        }
+        Ok(said)
     }
 
     /// The taskbar's parts, left to right.
@@ -394,6 +479,7 @@ impl Accessible for DesktopShell {
             "Desktop",
             Rect::new(0.0, 0.0, width, height),
         );
+        root.children.push(self.icons_node());
         root.children.push(self.taskbar_node());
         if self.start_menu_open {
             root.children.push(self.start_menu_node());
@@ -420,6 +506,10 @@ impl Accessible for DesktopShell {
             action: asked,
         };
         match (*part, action) {
+            (ShellPart::Icon(id), Action::Choose | Action::Focus) => self.click_icon(id, false),
+            (ShellPart::Icon(id), Action::Press) => self.click_icon(id, true),
+            (ShellPart::Icon(_), _) => Err(not_for(Role::ListItem)),
+            (ShellPart::Icons, _) => Err(not_for(Role::List)),
             (
                 ShellPart::Control(hit @ Hit::StartMenuEntry(index)),
                 Action::Press | Action::Choose,

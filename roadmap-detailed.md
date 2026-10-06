@@ -2695,13 +2695,15 @@ authors never wrote a single automation handler.
   dialog (`guitk::dialog::DialogTarget`): Back, Forward and Up, the
   address, the places, the headings that sort, the files -- each with
   what it is -- the name of a Save dialog, its button and Cancel. And the
-  shell (`desktop::accessible::ShellPart`): the taskbar -- Start, each
+  shell (`desktop::accessible::ShellPart`): the desktop's icons -- each
+  named and said to be what it is, chosen as a click chooses it and opened
+  as a double click opens it -- the taskbar -- Start, each
   pinned program and window, the tray's icons, the speaker, the bell, the
   clock, Show desktop -- and, while open, the start menu (its search, every
   row of its list, its places, the power button and caret), the power
   choices and the volume flyout; a part pressed is the shell's own click
   on it. Not yet: the font picker, and the shell's other surfaces -- the
-  notification pane, the calendar, Alt+Tab, the desktop's icons.*
+  notification pane, the calendar, Alt+Tab.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

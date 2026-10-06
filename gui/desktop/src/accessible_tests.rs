@@ -44,7 +44,8 @@ fn the_taskbar_shows_tools_its_parts() {
     let shell = shell();
     let root = tree(&shell);
     assert_eq!((root.role, root.name.as_str()), (Role::Group, "Desktop"));
-    let bar = &root.children[0];
+    assert_eq!(root.children[0].id, ShellPart::Icons);
+    let bar = &root.children[1];
     assert_eq!(bar.id, ShellPart::Taskbar);
     let names: Vec<&str> = bar.children.iter().map(|n| n.name.as_str()).collect();
     assert_eq!(names.first(), Some(&"Start"));
@@ -62,8 +63,53 @@ fn the_taskbar_shows_tools_its_parts() {
     }
     assert_eq!(
         root.children.len(),
-        1,
+        2,
         "nothing open over the taskbar: nothing else shown"
+    );
+}
+
+/// **The desktop's icons are a list**, each named by its label and said to
+/// be what it is; one chosen is chosen as a click chooses it, one pressed
+/// is opened as a double click opens it.
+#[test]
+fn the_desktops_icons_are_a_list() {
+    let mut shell = shell();
+    // The defaults alone: This PC and the bin whoever runs the test, and no
+    // layout read from anyone's settings.
+    shell.icons.populate_defaults();
+    let icons = node(&shell, ShellPart::Icons);
+    let bin = icons
+        .children
+        .iter()
+        .find(|icon| icon.name == "Recycle Bin")
+        .expect("the recycle bin")
+        .clone();
+    assert_eq!(bin.description.as_deref(), Some("recycle bin"));
+    assert_eq!(bin.value, Some(Value::Chosen(false)));
+    let (x, y) = bin.bounds.centre();
+    assert_eq!(shell.hit_test(x, y), Hit::Desktop);
+    assert_eq!(shell.invoke(&bin.id, Action::Choose, 0.0, 0.0), Ok(None));
+    assert_eq!(node(&shell, bin.id).value, Some(Value::Chosen(true)));
+    let opened = shell.invoke(&bin.id, Action::Press, 0.0, 0.0);
+    assert!(
+        matches!(opened, Ok(Some(ShellAction::Launch(_)))),
+        "{opened:?}"
+    );
+    assert_eq!(
+        shell.invoke(&bin.id, Action::SetText("x".to_owned()), 0.0, 0.0),
+        Err(Refusal::NotApplicable {
+            role: Role::ListItem,
+            action: "set the text of"
+        })
+    );
+    assert_eq!(
+        shell.invoke(
+            &ShellPart::Icon(crate::icons::IconId(u64::MAX)),
+            Action::Press,
+            0.0,
+            0.0
+        ),
+        Err(Refusal::NoSuchWidget)
     );
 }
 

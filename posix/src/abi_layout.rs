@@ -951,6 +951,17 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::legacy::Prof,
+        "struct prof",
+        "sys/profil.h",
+        pr_base,
+        pr_size,
+        pr_off,
+        pr_scale
+    );
+    abi!(
+        out,
+        hdrs,
         crate::sys_mount::MountAttr,
         "struct mount_attr",
         "sys/mount.h",

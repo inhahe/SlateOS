@@ -13,6 +13,8 @@
 //! | `revoke`, `setlogin`, `gtty`, `stty` | refused, `ENOSYS`, as glibc's on Linux |
 //! | `ttyslot` | 0: there is no `/etc/ttys` |
 //! | `profil` | stopping answers 0; starting is `ENOSYS`, there being no profiling timer (`setitimer`'s `ITIMER_PROF`) to drive it |
+//! | `sprofil` | glibc's `profil` for several regions: tells the period, answers 0 for nothing to profile, and cannot start, `ENOSYS` |
+//! | `monstartup` | the start of `-pg`'s profiling, which cannot start: it does nothing, as glibc's says nothing of a `profil` that fails |
 //! | `getpw` | a `passwd` line of a user, into the caller's buffer |
 //! | `isctype` | a character's classes as glibc's `<ctype.h>` masks (`_ISupper` ...) |
 //! | `isfdtype` | whether a descriptor's file is of a type |
@@ -215,6 +217,80 @@ pub extern "C" fn profil(buf: *mut u16, _bufsiz: usize, _offset: usize, scale: u
     }
     fail(ENOSYS)
 }
+
+/// glibc's `struct prof` (`<sys/profil.h>`): one region of [`sprofil`]'s --
+/// its counters, their size in bytes, the program counter they start at,
+/// and the fixed-point scale from addresses to counters. 32 bytes, glibc's.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Prof {
+    pub pr_base: *mut core::ffi::c_void,
+    pub pr_size: usize,
+    pub pr_off: usize,
+    pub pr_scale: u64,
+}
+
+/// `sprofil`: 16-bit counters, the default.
+pub const PROF_USHORT: u32 = 0;
+/// `sprofil`: 32-bit counters.
+pub const PROF_UINT: u32 = 1 << 0;
+/// `sprofil`: profile faster than usual -- which glibc's ignores too.
+pub const PROF_FAST: u32 = 1 << 1;
+
+/// `sprofil(profp, profcnt, tvp, flags)` (glibc's, after Irix's): [`profil`]
+/// for several regions at once, and like `profil` here unable to start:
+/// there is no profiling timer to drive it (design-decisions §1004). As
+/// glibc's does first, it tells `tvp` the profiling period -- one clock
+/// tick, `1 / sysconf(_SC_CLK_TCK)` seconds, 10 ms -- and, as glibc's, a
+/// call with nothing to profile (no region whose scale is at least 2) is 0.
+/// Otherwise -1, `ENOSYS`, with `SIGPROF`'s handling left as it was, where
+/// glibc's installs its handler before starting its timer. `EFAULT` for a
+/// NULL `profp` with regions to read, where glibc's would fault.
+///
+/// # Safety
+///
+/// `profp` must point to `profcnt` regions, and `tvp` be NULL or writable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn sprofil(
+    profp: *mut Prof,
+    profcnt: i32,
+    tvp: *mut crate::time::Timeval,
+    _flags: u32,
+) -> i32 {
+    if !tvp.is_null() {
+        let hz = crate::unistd::sysconf(crate::unistd::_SC_CLK_TCK).max(1);
+        let period = 1_000_000_i64.checked_div(hz).unwrap_or(0);
+        // SAFETY: the caller's contract: `tvp` is writable.
+        unsafe {
+            tvp.write(crate::time::Timeval {
+                tv_sec: period / 1_000_000,
+                tv_usec: period % 1_000_000,
+            });
+        }
+    }
+    let count = usize::try_from(profcnt).unwrap_or(0);
+    if count == 0 {
+        return 0;
+    }
+    if profp.is_null() {
+        return fail(EFAULT);
+    }
+    // SAFETY: the caller's contract: `profcnt` regions at `profp`.
+    let regions = unsafe { core::slice::from_raw_parts(profp, count) };
+    if regions.iter().all(|r| r.pr_scale < 2) {
+        return 0;
+    }
+    fail(ENOSYS)
+}
+
+/// `monstartup(lowpc, highpc)` (`<sys/gmon.h>`): start the profiling a
+/// program built with `-pg` keeps for `gprof` -- which cannot start here:
+/// it counts through [`profil`], which has no timer to drive it. glibc's
+/// says nothing of a `profil` that fails either -- it returns nothing and
+/// ignores the answer -- so this does nothing, and no `gmon.out` is
+/// written.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn monstartup(_lowpc: u64, _highpc: u64) {}
 
 /// `gtty` (Version 7): refused, `ENOSYS`, as glibc's is; `tcgetattr` is the
 /// call that works.
@@ -924,5 +1000,68 @@ mod tests {
             -1
         );
         assert_eq!(crate::errno::get_errno(), EFAULT);
+    }
+
+    /// `sprofil` tells the period -- a clock tick, 10 ms -- answers 0 for
+    /// nothing to profile, as glibc's does (both measured), and cannot start:
+    /// `ENOSYS`, as `profil` here.
+    #[test]
+    fn sprofil_tells_the_period_and_cannot_start() {
+        let mut tv = crate::time::Timeval {
+            tv_sec: -1,
+            tv_usec: -1,
+        };
+        // SAFETY: no regions, and a writable `tvp`.
+        assert_eq!(
+            unsafe { sprofil(core::ptr::null_mut(), 0, &raw mut tv, PROF_USHORT) },
+            0
+        );
+        assert_eq!((tv.tv_sec, tv.tv_usec), (0, 10_000));
+        let mut counters = [0u16; 16];
+        let mut regions = [Prof {
+            pr_base: counters.as_mut_ptr().cast(),
+            pr_size: 32,
+            pr_off: 0x1000,
+            pr_scale: 1,
+        }];
+        // A scale under 2 profiles nothing.
+        // SAFETY: one region.
+        assert_eq!(
+            unsafe { sprofil(regions.as_mut_ptr(), 1, core::ptr::null_mut(), 0) },
+            0
+        );
+        regions[0].pr_scale = 0x1_0000;
+        crate::errno::set_errno(0);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { sprofil(regions.as_mut_ptr(), 1, core::ptr::null_mut(), PROF_UINT) },
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), ENOSYS);
+        crate::errno::set_errno(0);
+        // SAFETY: a NULL `profp` is this function's to refuse.
+        assert_eq!(
+            unsafe { sprofil(core::ptr::null_mut(), 1, core::ptr::null_mut(), 0) },
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), EFAULT);
+    }
+
+    /// glibc's `struct prof`, as measured: 32 bytes.
+    #[test]
+    fn prof_is_glibcs() {
+        assert_eq!(core::mem::size_of::<Prof>(), 32);
+        assert_eq!(core::mem::offset_of!(Prof, pr_size), 8);
+        assert_eq!(core::mem::offset_of!(Prof, pr_off), 16);
+        assert_eq!(core::mem::offset_of!(Prof, pr_scale), 24);
+    }
+
+    /// `monstartup` does nothing, and says nothing, as glibc's says nothing
+    /// of a `profil` that cannot start.
+    #[test]
+    fn monstartup_does_nothing() {
+        crate::errno::set_errno(0);
+        monstartup(0x1000, 0x2000);
+        assert_eq!(crate::errno::get_errno(), 0);
     }
 }

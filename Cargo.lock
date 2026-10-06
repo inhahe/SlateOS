@@ -200,6 +200,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "backdrop"
+version = "0.1.0"
+
+[[package]]
 name = "backup"
 version = "0.1.0"
 dependencies = [
@@ -891,6 +895,7 @@ dependencies = [
  "appearance",
  "associations",
  "authlib",
+ "backdrop",
  "charpicker",
  "datetimesettings",
  "daywindow",
@@ -4710,6 +4715,14 @@ dependencies = [
  "authlib",
  "quoting",
  "userdb",
+]
+
+[[package]]
+name = "wallvideo"
+version = "0.1.0"
+dependencies = [
+ "backdrop",
+ "videocodec",
 ]
 
 [[package]]

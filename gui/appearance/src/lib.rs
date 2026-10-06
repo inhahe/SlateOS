@@ -1762,6 +1762,20 @@ pub struct AppearanceSettings {
     /// thing the user can see in the settings file and never on the screen.
     pub wallpaper_folder: Option<PathBuf>,
 
+    /// A program that draws the background, instead of a picture: started by
+    /// the desktop, each picture it writes shown as the wallpaper, and told
+    /// what happens on the desktop (`gui/backdrop`, `design-decisions.md`
+    /// §1489). `design.txt`'s "not just a video, but a program constantly
+    /// changing it".
+    ///
+    /// Takes precedence over every other wallpaper setting, for the reason
+    /// the folder takes precedence over the picture: a program drawing the
+    /// background *is* the wallpaper. Written as `wallpaper.program`, the
+    /// path encoded as the other wallpaper paths are. (A *video* needs no key
+    /// of its own: chosen as the [`wallpaper`](Self::wallpaper), it is
+    /// played.)
+    pub wallpaper_program: Option<PathBuf>,
+
     /// How long each picture stays up, in seconds.
     ///
     /// Clamped to at least one second on the way into `set_slideshow`: zero
@@ -1912,6 +1926,7 @@ impl Default for AppearanceSettings {
             wallpaper_fit: ImageFit::Fill,
             wallpaper_position: (0.5, 0.5),
             wallpaper_folder: None,
+            wallpaper_program: None,
             // Ten minutes. Long enough that a picture is a background rather
             // than a distraction, short enough that a user who turns rotation
             // on sees it work without waiting for the next day.
@@ -2749,6 +2764,19 @@ impl AppearanceSettings {
                 Some(PathBuf::from(trimmed))
             };
         }
+        if let Some(program) = doc.get_str(&["wallpaper", "program"]) {
+            let trimmed = program.trim();
+            let encoded = doc
+                .get_str(&["wallpaper", "image_encoding"])
+                .is_some_and(|v| v.trim() == WALLPAPER_ENCODING);
+            s.wallpaper_program = if trimmed.is_empty() {
+                None
+            } else if encoded {
+                Some(pathcodec::decode_path(trimmed))
+            } else {
+                Some(PathBuf::from(trimmed))
+            };
+        }
         if let Some(secs) = doc.get_i64(&["wallpaper", "interval_secs"]) {
             // Clamped on read as well as on write: this file is meant to be
             // hand-editable, and `interval_secs: 0` typed into it should give
@@ -3095,6 +3123,14 @@ impl AppearanceSettings {
             &["wallpaper", "folder"],
             &self
                 .wallpaper_folder
+                .as_deref()
+                .map(pathcodec::encode_path)
+                .unwrap_or_default(),
+        );
+        doc.set_str(
+            &["wallpaper", "program"],
+            &self
+                .wallpaper_program
                 .as_deref()
                 .map(pathcodec::encode_path)
                 .unwrap_or_default(),
@@ -4157,6 +4193,9 @@ mod tests {
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
+            // A name with a space and a non-ASCII letter, so a round trip that
+            // lost the path codec shows.
+            wallpaper_program: Some(PathBuf::from("/home/u/bin/st\u{e4}rfield bg")),
             // Non-default, like every other field here: the default is empty.
             wallpaper_exclusions: vec!["*.gif".to_string(), "draft-*".to_string()],
             // Two pictures, one with a space, a non-ASCII letter and a `%` in

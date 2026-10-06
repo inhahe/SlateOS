@@ -4278,6 +4278,238 @@ fn a_wallpaper_file_is_uploaded_under_the_id_the_render_tree_names() {
     assert!(background_names(&session, id), "no frame names the picture");
 }
 
+// ---- a program drawing the background ---------------------------------------
+
+/// What a test's background starter was asked to start: the program and its
+/// arguments.
+type Started = Rc<RefCell<Vec<(std::path::PathBuf, Vec<std::ffi::OsString>)>>>;
+
+/// Start background programs in `session` as `script`, recording what was
+/// asked to start.
+fn script_backgrounds(
+    session: &mut Session,
+) -> (crate::background_program::tests::Scripted, Started) {
+    let script = crate::background_program::tests::Scripted::default();
+    let started: Started = Rc::default();
+    let (given, asked) = (script.clone(), Rc::clone(&started));
+    session.set_background_starter(Box::new(move |program, args, _waker| {
+        asked
+            .borrow_mut()
+            .push((program.to_path_buf(), args.to_vec()));
+        Ok(Box::new(given.clone()) as Box<dyn crate::background_program::Source>)
+    }));
+    (script, started)
+}
+
+/// **A video chosen as the wallpaper is played by `wallvideo`**, told the
+/// background's size and the desktop's look, and each picture it writes goes
+/// up under the id the wallpaper draws -- the first naming it in the
+/// background's frame, the next replacing its pixels.
+#[test]
+fn a_video_wallpaper_is_played_and_its_pictures_put_up() {
+    use crate::background_program::{Event as Told, tests::frame};
+    let (mut session, desktop, _turn) = session();
+    let (script, started) = script_backgrounds(&mut session);
+    let background = session.background().window();
+    let clip = std::path::PathBuf::from("/home/u/Videos/waves.webm");
+    session.shell_mut().appearance.wallpaper = Some(clip.clone());
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+
+    let asked = started.borrow().clone();
+    assert_eq!(asked.len(), 1, "started once");
+    assert_eq!(
+        asked[0].0.file_stem().and_then(|s| s.to_str()),
+        Some(crate::background_program::WALLVIDEO)
+    );
+    assert_eq!(asked[0].1, [clip.into_os_string()], "the file, to play");
+    let told = script.told.borrow().clone();
+    assert_eq!(
+        told.first(),
+        Some(&Told::Size {
+            width: session.shell().screen_width,
+            height: session.shell().screen_height,
+        }),
+        "the size first"
+    );
+    assert!(
+        told.iter().any(|t| matches!(t, Told::Theme { .. })),
+        "{told:?}"
+    );
+
+    let id = session.wallpaper_mut().current_image_id();
+    script
+        .frames
+        .borrow_mut()
+        .push_back(frame(4, 2, 0xFF11_2233));
+    session.pump().expect("pump");
+    assert_eq!(uploads(&desktop), vec![(background, id, 4, 2, 16, 32)]);
+    assert!(background_names(&session, id), "the frame draws it");
+    script
+        .frames
+        .borrow_mut()
+        .push_back(frame(4, 2, 0xFF44_5566));
+    session.pump().expect("pump");
+    assert_eq!(uploads(&desktop).len(), 2, "the next picture replaces it");
+    session.paint_background().expect("paint");
+    assert_eq!(started.borrow().len(), 1, "not started again at a paint");
+}
+
+/// **A background program that stops says why, and is not started again
+/// at every paint**, as a picture that will not open is not read again.
+#[test]
+fn a_background_that_stops_says_why() {
+    // The reason is posted as a notice, which the notifications keep: in a
+    // scratch directory, never the developer's own.
+    settingsfile::testing::with_scratch_config("background-stops", |_root| {
+        let (mut session, _desktop, _turn) = session();
+        let (script, started) = script_backgrounds(&mut session);
+        session.shell_mut().appearance.wallpaper =
+            Some(std::path::PathBuf::from("/home/u/Videos/gone.mkv"));
+        session.sync_wallpaper();
+        session.paint_background().expect("paint");
+        *script.ended.borrow_mut() = Some("the background program ended: no such file".to_owned());
+        session.pump().expect("pump");
+        assert_eq!(
+            session.wallpaper_error(),
+            Some("the background program ended: no such file")
+        );
+        session.paint_background().expect("paint");
+        assert_eq!(started.borrow().len(), 1);
+    });
+}
+
+/// **The program chosen to draw the background is the wallpaper**, over a
+/// picture, started as it is, with nothing to play.
+#[test]
+fn the_program_chosen_draws_the_background() {
+    let (mut session, _desktop, _turn) = session();
+    let (_script, started) = script_backgrounds(&mut session);
+    let stars = std::path::PathBuf::from("/home/u/bin/stars");
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.wallpaper_program = Some(stars.clone());
+    session.sync_wallpaper();
+    assert_eq!(
+        session.wallpaper_mut().current_image_path(),
+        Some(stars.as_path())
+    );
+    session.paint_background().expect("paint");
+    assert_eq!(started.borrow().clone(), [(stars, Vec::new())]);
+}
+
+/// **A background program is told the desktop shown and where its windows
+/// are -- topmost first, nothing minimised or elsewhere -- and the
+/// background's new size**; and nothing more of them.
+#[test]
+fn a_background_program_is_told_the_desktop() {
+    use crate::background_program::{Event as Told, Rect as Place};
+    let (mut session, desktop, _turn) = session();
+    let (script, _started) = script_backgrounds(&mut session);
+    session.shell_mut().appearance.wallpaper_program =
+        Some(std::path::PathBuf::from("/home/u/bin/stars"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    let mut hidden = WindowInfo::new(3, 3, "hidden").at(0, 0, 50, 50);
+    hidden.minimized = true;
+    let mut elsewhere = WindowInfo::new(4, 4, "elsewhere").at(0, 0, 60, 60);
+    elsewhere.workspace = 1;
+    desktop.borrow_mut().send_window_list(&[
+        WindowInfo::new(1, 1, "below").at(10, 20, 300, 200),
+        WindowInfo::new(2, 2, "above").at(-5, 0, 100, 100),
+        hidden,
+        elsewhere,
+    ]);
+    session.pump().expect("pump");
+    let told = script.told.borrow().clone();
+    assert!(told.contains(&Told::Desktop(0)), "{told:?}");
+    assert!(
+        told.contains(&Told::Windows(vec![
+            Place {
+                x: -5,
+                y: 0,
+                width: 100,
+                height: 100
+            },
+            Place {
+                x: 10,
+                y: 20,
+                width: 300,
+                height: 200
+            },
+        ])),
+        "{told:?}"
+    );
+    // The pointer over the background itself, in screen places.
+    let background = session.background().window();
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        background,
+        guitk::event::Event::Mouse(guitk::event::MouseEvent {
+            x: 40.0,
+            y: 30.0,
+            kind: MouseEventKind::Move,
+        }),
+    )]);
+    session.pump().expect("pump");
+    assert!(
+        script
+            .told
+            .borrow()
+            .contains(&Told::Pointer { x: 40, y: 30 }),
+        "{:?}",
+        script.told.borrow()
+    );
+    session.resize_display(1280, 720).expect("resize");
+    assert_eq!(
+        script.told.borrow().last(),
+        Some(&Told::Size {
+            width: 1280,
+            height: 720
+        })
+    );
+}
+
+/// **Nobody sees the background while the login screen covers it**: the
+/// program is told to pause, and to go on once somebody has signed in.
+#[test]
+fn a_background_program_pauses_behind_the_login_screen() {
+    use crate::background_program::Event as Told;
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    let (script, _started) = script_backgrounds(&mut session);
+    session.shell_mut().appearance.wallpaper_program =
+        Some(std::path::PathBuf::from("/home/u/bin/stars"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    session.pump().expect("pump");
+    assert!(script.told.borrow().contains(&Told::Pause));
+    type_password(&desktop, &mut session, "password");
+    session.pump().expect("pump");
+    assert_eq!(script.told.borrow().last(), Some(&Told::Resume));
+}
+
+/// **With motion turned off, the first picture is the background**: the
+/// program is told nobody needs another.
+#[test]
+fn with_motion_off_the_first_picture_is_the_background() {
+    use crate::background_program::{Event as Told, tests::frame};
+    let (mut session, _desktop, _turn) = session();
+    let (script, _started) = script_backgrounds(&mut session);
+    session.shell_mut().appearance.animation_speed = AnimationSpeed::Off;
+    session.shell_mut().appearance.wallpaper =
+        Some(std::path::PathBuf::from("/home/u/Videos/waves.webm"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    assert!(
+        !script.told.borrow().contains(&Told::Pause),
+        "not before it"
+    );
+    script
+        .frames
+        .borrow_mut()
+        .push_back(frame(2, 2, 0xFF00_0000));
+    session.pump().expect("pump");
+    assert!(script.told.borrow().contains(&Told::Pause));
+}
+
 /// Whether the background frame last sent draws the picture uploaded as `id`.
 fn background_names(session: &Session, id: u64) -> bool {
     session.background_drawn.as_ref().is_some_and(|tree| {

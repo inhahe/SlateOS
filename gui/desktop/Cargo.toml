@@ -78,6 +78,9 @@ procinfo = { path = "../../procinfo" }
 #
 # It costs nothing extra to pull in: `guiremote`'s only dependency is `guitk`,
 # which this crate already has.
+# What a program drawing the background writes and is told
+# (`background_program`, design-decisions.md 1489).
+backdrop = { path = "../backdrop" }
 guiremote = { path = "../remote" }
 
 # The client side of that protocol — a connection, windows, an event loop.

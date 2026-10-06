@@ -1,0 +1,23 @@
+[package]
+name = "wallvideo"
+version = "0.1.0"
+edition = "2024"
+description = "A video as the desktop's background: a background program (gui/backdrop) that plays a file, looping, at the background's size."
+
+[[bin]]
+name = "wallvideo"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# What a background program writes and is told.
+backdrop = { path = "../backdrop" }
+# The file's pictures, decoded -- in this process, and not the desktop's: a
+# video is a file from anywhere, and its decoders are large, so they run
+# where a fault costs the background and not the desktop.
+videocodec = { path = "../video/codec" }
+
+[lints]
+workspace = true

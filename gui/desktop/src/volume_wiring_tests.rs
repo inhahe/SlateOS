@@ -19,9 +19,9 @@ use guitk::render::RenderCommand;
 use sound::Errno;
 
 use crate::backlight::Backlight;
-use crate::backlight::tests::Recording;
+use crate::backlight::backlight_tests::Recording;
 use crate::volume::Output;
-use crate::volume::tests::{Shared, card};
+use crate::volume::volume_tests::{Shared, card};
 use crate::{DesktopShell, Key, KeyEvent, Modifiers, click};
 
 fn shell() -> DesktopShell {

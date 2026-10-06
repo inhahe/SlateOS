@@ -209,6 +209,9 @@ pub const fn why(e: MixerError) -> &'static str {
     }
 }
 
+// Named for its file, not `tests`: other modules' tests use its helpers,
+// and a path naming the file is one `scripts/scan-orphan-modules.py`
+// can follow.
 #[cfg(test)]
 #[path = "volume_tests.rs"]
-pub(crate) mod tests;
+pub(crate) mod volume_tests;

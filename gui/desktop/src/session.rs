@@ -81,7 +81,9 @@
 //! are all in one space.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::task::Waker;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appearance::Palette;
@@ -94,6 +96,7 @@ use oswindow::{
 
 use crate::animations::{AnimationManager, WindowAnimation};
 use crate::autologin::StartConditions;
+use crate::background_program::{self, Source};
 use crate::login_screen::{LoginAction, LoginScreen, LoginUser};
 use crate::notif_pane;
 use crate::pictures::{Decoded, Job, PictureWorker, Slot};
@@ -190,6 +193,23 @@ type AppStamp = (PathBuf, u64, Option<std::time::SystemTime>);
 /// what changes when a picture is saved over under the same name, which its
 /// path alone does not show.
 type FileStamp = (u64, Option<std::time::SystemTime>);
+
+/// How a background program is started: its path, its arguments and the
+/// loop's waker in, the program (or a test's stand-in) out.
+type BackgroundStarter =
+    Box<dyn FnMut(&Path, &[OsString], Option<Waker>) -> std::io::Result<Box<dyn Source>>>;
+
+/// Start a background program as a process
+/// ([`background_program::Program`]).
+fn start_background_process(
+    program: &Path,
+    args: &[OsString],
+    waker: Option<Waker>,
+) -> std::io::Result<Box<dyn Source>> {
+    Ok(Box::new(background_program::Program::start(
+        program, args, waker,
+    )?))
+}
 
 /// `path`'s [`FileStamp`], or `None` for a file that cannot be looked at --
 /// itself a state a later look can differ from, as when a missing picture
@@ -492,6 +512,23 @@ pub struct ShellSession<T: Transport> {
     /// The picture the background surface does hold: the id it was uploaded
     /// under, released before the next is uploaded.
     wallpaper_uploaded: Option<u64>,
+    /// The program drawing the background -- `wallvideo` playing a video
+    /// chosen as the wallpaper, or the program chosen to draw it -- with the
+    /// image id its pictures go up under (`background_program`,
+    /// `design-decisions.md` §1489). Dropping it stops the program.
+    background_program: Option<(u64, Box<dyn Source>)>,
+    /// The size of the last picture it put up: the wallpaper places a
+    /// picture by its size, so a new size is told to it.
+    background_size: Option<(u32, u32)>,
+    /// Whether it was last told nobody can see the background.
+    background_paused: bool,
+    /// The desktop's mode and accent as it was last told them.
+    background_theme_told: Option<background_program::Event>,
+    /// The loop's waker, which a background program's pictures wake.
+    waker: Option<Waker>,
+    /// How a background program is started: a process, or in a test, a
+    /// script.
+    start_background: BackgroundStarter,
     /// What the fixed, scheduled or theme picture's file was when
     /// `sync_wallpaper` last set it: how one saved over under the same name
     /// is told from the one up. `None` while the wallpaper is none of those
@@ -948,6 +985,8 @@ impl<T: Transport> ShellSession<T> {
         // pass, the next event or frame, so the error is dropped rather than
         // failing the desktop over its wallpaper.
         let picture_waker = events.waker().ok().flatten();
+        // The same waker, for a background program's pictures.
+        let background_waker = picture_waker.clone();
         let mut session = Self {
             events,
             global_held,
@@ -994,6 +1033,12 @@ impl<T: Transport> ShellSession<T> {
             rotation_loaded: None,
             wallpaper_image: None,
             wallpaper_uploaded: None,
+            background_program: None,
+            background_size: None,
+            background_paused: false,
+            background_theme_told: None,
+            waker: background_waker,
+            start_background: Box::new(start_background_process),
             wallpaper_stamp: None,
             frame_requests: BTreeMap::new(),
             frame_uploaded: std::collections::BTreeSet::new(),
@@ -1704,6 +1749,7 @@ impl<T: Transport> ShellSession<T> {
         // command at all, so anything still uploaded is unreachable and costs
         // the link's image budget for nothing.
         let Some(path) = want.filter(|_| id != 0) else {
+            self.stop_background_program();
             self.release_wallpaper_image()?;
             // Nothing asked for, so an answer still on its way is dropped
             // when it lands, and the manager stops drawing the picture that
@@ -1722,12 +1768,180 @@ impl<T: Transport> ShellSession<T> {
             return Ok(());
         }
 
+        self.wallpaper_image = Some((id, path.clone()));
+        // A new wallpaper: whatever program drew the last one stops.
+        self.stop_background_program();
+        // A video, or the program chosen to draw the background: started
+        // rather than decoded, its pictures put up under this id as they come
+        // (`collect_background`).
+        let program = self.shell.appearance.wallpaper_program.as_deref() == Some(path.as_path());
+        if program || background_program::is_video(&path) {
+            self.start_background_program(id, &path, program);
+            return Ok(());
+        }
         // Asked for, not decoded here: the decoding thread answers, and
         // `adopt_picture` uploads it. Until then the picture before it stays
         // up -- the manager draws the one that is up, not the one wanted.
-        self.wallpaper_image = Some((id, path.clone()));
         self.pictures.request(Slot::Wallpaper, id, path);
         Ok(())
+    }
+
+    /// Start what draws the background for the wallpaper `path` -- the
+    /// program itself where `program`, else `wallvideo` playing it -- its
+    /// pictures to go up under `id`, telling it the background's size and
+    /// the desktop's look; or say why it could not start, as a picture that
+    /// will not open is said.
+    fn start_background_program(&mut self, id: u64, path: &Path, program: bool) {
+        let waker = self.waker.clone();
+        let started = if program {
+            (self.start_background)(path, &[], waker)
+        } else {
+            match background_program::wallvideo_path() {
+                Some(player) => {
+                    (self.start_background)(&player, &[path.as_os_str().to_owned()], waker)
+                }
+                None => Err(std::io::Error::other(
+                    "the video player is not installed beside the desktop",
+                )),
+            }
+        };
+        match started {
+            Ok(mut source) => {
+                source.tell(&background_program::Event::Size {
+                    width: self.shell.screen_width,
+                    height: self.shell.screen_height,
+                });
+                let theme = self.background_theme();
+                source.tell(&theme);
+                self.background_theme_told = Some(theme);
+                self.background_program = Some((id, source));
+                self.background_size = None;
+                self.background_paused = false;
+                self.set_wallpaper_error(None);
+                self.sync_background();
+            }
+            Err(e) => {
+                self.set_wallpaper_error(Some(format!("The background could not be started: {e}")));
+            }
+        }
+    }
+
+    /// Start background programs with `starter` instead of as processes: a
+    /// test's script, which records what it was asked to start.
+    #[cfg(test)]
+    pub(crate) fn set_background_starter(&mut self, starter: BackgroundStarter) {
+        self.start_background = starter;
+    }
+
+    /// Stop the program drawing the background, if one is. Its last picture
+    /// stays up until the wallpaper after it replaces it.
+    fn stop_background_program(&mut self) {
+        // Dropping it closes its input and kills it -- its own process, and
+        // no other.
+        self.background_program = None;
+        self.background_size = None;
+        self.background_theme_told = None;
+    }
+
+    /// The desktop's mode and accent, as a background program is told them.
+    fn background_theme(&self) -> background_program::Event {
+        let accent = Palette::from_settings(&self.shell.appearance).accent;
+        background_program::Event::Theme {
+            dark: !self.shell.appearance.is_light(),
+            accent: (u32::from(accent.r) << 16) | (u32::from(accent.g) << 8) | u32::from(accent.b),
+        }
+    }
+
+    /// Put up the newest picture the background program wrote, if one came
+    /// -- under the wallpaper's id, so the user's fit places it as it places
+    /// a picture file -- or, if its pictures stopped, stop it and say why.
+    /// Answers whether anything happened.
+    ///
+    /// # Errors
+    ///
+    /// A connection that failed: a refused picture costs the background, not
+    /// the desktop, and is said.
+    fn collect_background(&mut self) -> Result<bool, Error<T>> {
+        let (id, ended, frame) = match self.background_program.as_mut() {
+            None => return Ok(false),
+            Some((id, source)) => (*id, source.ended(), source.take_frame()),
+        };
+        let Some(frame) = frame else {
+            if let Some(why) = ended {
+                self.stop_background_program();
+                self.set_wallpaper_error(Some(why));
+                self.dirty = true;
+                return Ok(true);
+            }
+            return Ok(false);
+        };
+        let (width, height) = (frame.width, frame.height);
+        let bytes = guitk::canvas::WireBytes::from_le_argb(&frame.pixels);
+        let Some(mut handle) = self.events.window_mut(self.background.window) else {
+            return Ok(false);
+        };
+        match handle.upload_image(
+            id,
+            width,
+            height,
+            width.saturating_mul(4),
+            PixelFormat::Argb8888,
+            bytes,
+        ) {
+            Ok(()) => {}
+            Err(ConnectionError::Refused(why)) => {
+                self.stop_background_program();
+                self.set_wallpaper_error(Some(format!(
+                    "The background's picture was refused: {why}"
+                )));
+                self.dirty = true;
+                return Ok(true);
+            }
+            Err(other) => return Err(other),
+        }
+        if self.background_size != Some((width, height)) {
+            // The first picture, or one of a new size: the wallpaper places
+            // it by its size, and draws it from now on. The pictures after it
+            // replace its pixels under the same id, which the compositor
+            // redraws by itself.
+            self.background_size = Some((width, height));
+            self.wallpaper_uploaded = Some(id);
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "a picture's side, at most the compositor's largest buffer's"
+            )]
+            self.wallpaper
+                .picture_ready(id, width as f32, height as f32);
+            self.refresh_background()?;
+            // With motion turned off, the first picture is the background.
+            self.sync_background();
+        }
+        Ok(true)
+    }
+
+    /// Tell the background program what it should know now: whether anyone
+    /// can see the background -- not while the login screen covers it, nor,
+    /// with motion turned off, after its first picture -- and the desktop's
+    /// look, where it changed.
+    fn sync_background(&mut self) {
+        let theme = self.background_theme();
+        let pause = self.login.is_some()
+            || (!self.shell.appearance.animations_enabled() && self.background_size.is_some());
+        let Some((_, source)) = self.background_program.as_mut() else {
+            return;
+        };
+        if pause != self.background_paused {
+            source.tell(if pause {
+                &background_program::Event::Pause
+            } else {
+                &background_program::Event::Resume
+            });
+            self.background_paused = pause;
+        }
+        if self.background_theme_told.as_ref() != Some(&theme) {
+            source.tell(&theme);
+            self.background_theme_told = Some(theme);
+        }
     }
 
     /// Read the installed programs' desktop entries into the shell's list, if
@@ -2645,6 +2859,8 @@ impl<T: Transport> ShellSession<T> {
         // Pictures the decoding thread finished while the loop was parked --
         // it woke the loop to say so -- or while it was busy.
         let mut worked = self.collect_pictures()?;
+        // And a background program's newest picture, which woke it too.
+        worked |= self.collect_background()?;
         worked |= self.announce_settings()?;
         while let Some((window, event)) = self.events.poll()? {
             worked = true;
@@ -2704,6 +2920,35 @@ impl<T: Transport> ShellSession<T> {
             // about windows that arrived in this list: a rule can only be
             // carried out by asking the compositor, and the shell is the only
             // thing here holding a connection.
+            // What a background program is told of it: which desktop shows,
+            // and where its windows are -- topmost first, no title, no
+            // program (`backdrop`'s documentation).
+            let told = self.events.desktop().map(|list| {
+                let rects = list
+                    .windows
+                    .iter()
+                    .rev()
+                    .filter(|w| {
+                        w.visible
+                            && !w.minimized
+                            && w.workspace == list.current_workspace
+                            && w.layer == guiremote::control::Layer::Normal
+                    })
+                    .map(|w| background_program::Rect {
+                        x: w.x,
+                        y: w.y,
+                        width: w.width,
+                        height: w.height,
+                    })
+                    .collect::<Vec<_>>();
+                (list.current_workspace, rects)
+            });
+            if let (Some((desktop, rects)), Some((_, source))) =
+                (told, self.background_program.as_mut())
+            {
+                source.tell(&background_program::Event::Desktop(desktop));
+                source.tell(&background_program::Event::Windows(rects));
+            }
             let requests = if let Some(list) = self.events.desktop() {
                 self.shell.apply_window_list(list)
             } else {
@@ -2723,6 +2968,10 @@ impl<T: Transport> ShellSession<T> {
 
         // The displays, woken from the sleep the user put them in.
         worked |= self.notice_display_wake()?;
+
+        // A background program told whether anyone can see the background,
+        // and the desktop's look where it changed.
+        self.sync_background();
 
         // The tray, on its own revision. Separate from the window list
         // deliberately: the two arrive in different frames and change for
@@ -3273,15 +3522,21 @@ impl<T: Transport> ShellSession<T> {
             self.dirty = true;
         }
 
-        // A time-of-day schedule wins over a folder and a picture, and a
-        // rotation folder over a fixed picture: each *is* the wallpaper, and
-        // honouring two would leave one visible in the settings file and never
-        // on the screen.
-        let scheduled = self
-            .shell
-            .scheduled_wallpaper(unix_now())
-            .map(Path::to_path_buf);
-        if scheduled.is_none()
+        // A program drawing the background wins over every other source, a
+        // time-of-day schedule over a folder and a picture, and a rotation
+        // folder over a fixed picture: each *is* the wallpaper, and honouring
+        // two would leave one visible in the settings file and never on the
+        // screen.
+        let program = self.shell.appearance.wallpaper_program.clone();
+        let scheduled = if program.is_some() {
+            None
+        } else {
+            self.shell
+                .scheduled_wallpaper(unix_now())
+                .map(Path::to_path_buf)
+        };
+        if program.is_none()
+            && scheduled.is_none()
             && let Some(folder) = self.shell.appearance.wallpaper_folder.clone()
         {
             self.wallpaper_stamp = None;
@@ -3300,7 +3555,8 @@ impl<T: Transport> ShellSession<T> {
         // Below those, a theme's recommended picture for the mode the desktop
         // is drawn in -- which stands in for the fixed picture, being chosen
         // in its place -- and then the fixed picture.
-        let wanted = scheduled
+        let wanted = program
+            .or(scheduled)
             .or_else(|| {
                 self.shell
                     .appearance
@@ -3539,7 +3795,26 @@ impl<T: Transport> ShellSession<T> {
                 let action = self.shell.handle_toast_mouse(&surface.to_screen(&mouse));
                 self.act(action)?;
             }
-            Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,
+            Event::Mouse(mouse) => {
+                let on_screen = surface.to_screen(&mouse);
+                // The pointer over the background itself -- its own surface,
+                // nothing of the shell's over it -- is a background program's
+                // to know, and nothing else of the pointer is.
+                if surface.window == self.background.window
+                    && matches!(on_screen.kind, guitk::event::MouseEventKind::Move)
+                    && let Some((_, source)) = self.background_program.as_mut()
+                {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "a place on a screen, within i32 by far"
+                    )]
+                    source.tell(&background_program::Event::Pointer {
+                        x: on_screen.x.round() as i32,
+                        y: on_screen.y.round() as i32,
+                    });
+                }
+                self.pointer(&on_screen)?;
+            }
             Event::Key(key) => {
                 let outcome = self.shell.handle_hotkey(&key);
                 let claimed = outcome.consumed;
@@ -4434,6 +4709,9 @@ impl<T: Transport> ShellSession<T> {
     /// Follow the display to a new size.
     fn resize_display(&mut self, width: u32, height: u32) -> Result<(), Error<T>> {
         self.shell.set_screen_size(width, height);
+        if let Some((_, source)) = self.background_program.as_mut() {
+            source.tell(&background_program::Event::Size { width, height });
+        }
 
         let bar = self.shell.taskbar_rect();
         if let Some(mut handle) = self.events.window_mut(self.panel.window) {

@@ -1,0 +1,12 @@
+[package]
+name = "backdrop"
+version = "0.1.0"
+edition = "2024"
+description = "A program that draws the desktop's background, and the desktop: the pictures the program writes, and the events the desktop tells it."
+
+# Nothing: the desktop and every background program link this, and a program
+# that only draws should not compile a widget library to say so.
+[dependencies]
+
+[lints]
+workspace = true

@@ -84,6 +84,7 @@
 pub mod about;
 pub mod animations;
 pub mod autologin;
+pub mod background_program;
 pub mod backlight;
 pub mod bluetooth;
 pub mod calendar;

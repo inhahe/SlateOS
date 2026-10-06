@@ -1605,6 +1605,10 @@ live.
   **Still open: the other ~56 crates.** 987 `const NAME: Color` declarations
   over 68 crates was the original count; the twelve were the visible end of it.
   Thirteen more crates already have a `Palette` in scope and are nearly free.
+  *(2026-10-05: those crates are all under `apps/`, lane E's since the
+  six-lane split, so what is left of this item is lane E's to do; lane C's
+  part -- `appearance::palette_check::assert_drawn_from`, the check each
+  crate adopts as its fix and its guard -- is done and on `main`.)*
 
   **The ~43 games are C-Q16 and are not part of this.** Their chrome follows
   the theme either way; whether the *board* should is a question about taste
@@ -1776,7 +1780,12 @@ live.
   would (a whole-line path opened, otherwise the words split POSIX-style),
   which is the "and running" half. Super chords, and keys the field does not
   use, still reach their shortcuts with the menu up. The field sits where the
-  "Applications" title was.
+  "Applications" title was. **And what a program can do** (2026-09-29,
+  `design-decisions.md` §1451): a search finds a program's actions -- the
+  rows of its jump list -- by name, ranked with the programs, so "display"
+  lists Settings' "Display settings" first and a click or Enter opens the
+  page; the row names its program after the action, dimmer, and is not
+  carried anywhere by a drag.
 
 - `[C]` **A file name that is not text is drawn so it can be told apart** --
   done 2026-09-25 (`design-decisions.md` §873, proposed by lane E). The file
@@ -1823,6 +1832,14 @@ live.
   (`TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE`). Waiting on others:
   the Settings page (lane E), the relay that makes a change reach a running
   shell (lane F), and the libc and `osh` adopting `tz_source` (lanes D, B).
+  **Corrected 2026-10-01** (`design-decisions.md` §1458): `tz_source`'s order
+  was not glibc's -- it took a rule before a zoneinfo file of the same name, so
+  `TZ=EST5EDT` read an hour off from Linux for years under the old US rules
+  (lane B's report). `tzrules::tz_plan` is glibc's order and the clock reads
+  through it; the libc's move (lane D) and `localtime`'s (lane B) are in
+  `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`,
+  after which `tz_source` is deleted. **Deleted 2026-10-05**: the libc reads
+  `TZ` through glibc's own code, ported (lane D), and nothing else called it.
 
 - `[C]` **"System (Auto)" switches between light and dark by the clock** --
   done 2026-09-25 (`design-decisions.md` §876). It had always meant dark. It is
@@ -1870,8 +1887,12 @@ live.
   the left with the search field at their foot, and a places column on the
   right -- who is signed in (the account's display name, from the login),
   Home, Documents, Pictures, Music, Downloads, Settings, a terminal, and the
-  power button at the foot. Next: the pinned programs as tiles, jump lists,
-  and a Shut down button with the rest behind a caret.
+  power button at the foot. The rest done 2026-09-26 and -27: jump lists (a
+  program's right-click menu starts with its desktop entry's actions),
+  "Shut down" in one click with the rest behind a caret (§1405), and the
+  pinned programs -- as rows, not tiles: the reference's stylesheet has a
+  tile grid its markup never uses, and draws its pins as rows like the rest
+  (`roadmap-detailed.md` → Start menu).
 
 - `[C]` **Icon themes, and the start menu drawn with them** -- done
   2026-09-26 (`design-decisions.md` §880). `appearance::icons` finds an icon
@@ -2010,15 +2031,43 @@ live.
   the git common directory beside the halts. The `CLAUDE.md` paragraph that
   would make it a rule is put to the operator as C-Q31.
 
-- `[C]` **A program may ask the password manager for a password -- with a key
-  for it, and the user's consent** -- open, **waiting on lane A for the
-  capability's shape** (C-Q25, §1417;
-  `requests/c-a-a-capability-to-ask-the-credential-service-for-a-password.md`).
-  In the credential service (`gui/credentials`): the request over the service's
-  IPC (`SYS_SERVICE_CONNECT`), refused without the capability, and a prompt
-  naming the asking program (`SYS_CHANNEL_PEER_CRED`) to allow or refuse. The
-  service today is an in-process model with no transport, and its vault waits on
-  the ported cipher and password hash (lane E's question to lane A).
+- `[-] [C]` **A program may ask the password manager for a password -- with a
+  key for it, and the user's consent** (C-Q25, §1417, §1464). Lane A built the
+  key (§1518: the kernel answers whether a connection's peer holds the
+  service's key). **Built** in `gui/credentials`' library: the protocol, a
+  program's `ask`, and the service's judgement -- key, then the user asked
+  (once / until the vault locks / refuse, the master password typed into the
+  same prompt), quiet after a refusal, the best login -- tested against
+  stand-ins for the kernel, the vault and the prompt. The prompt's windows
+  are built too (`gui/credentialsd`): the program and what it asks for,
+  shown whole with nothing invisible left unspelled, a password field that
+  keeps the master password as a `Secret` (`guitk::secretinput`), and no
+  key or click taken for the first 600 ms. **Left:** the vault, **waiting
+  on lane E** to share the password manager's
+  (`requests/c-e-share-the-password-vault-with-the-credential-service.md`);
+  then the daemon that registers the service, and deleting the old store's
+  own vault and cipher (`gui/credentials/src/main.rs`).
+
+- `[C]` **Window rules are kept, in a file the desktop reads** -- done
+  2026-10-05 (`design-decisions.md` §1465). The rules that place a program's
+  windows as they open lived only while the desktop ran. They are kept in
+  `window-rules.yaml` now -- each rule under its name, the one nearest the
+  top winning -- read when the desktop starts and again whenever the file
+  changes; a rule that cannot be read is left out whole and said in a
+  notification. The model, the engine and the file moved to their own crate,
+  `gui/windowrules`, so Settings can use them without the shell. **Lane E:**
+  the page in Settings (`requests/c-e-a-window-rules-page-in-settings.md`),
+  after which the shell's undrawn panel is deleted.
+
+- `[C]` **A user can send any program to the system tray** -- done
+  2026-10-05 (`design-decisions.md` §1467). A window rule's `tray` sends a
+  program's windows to the tray when they are minimised, and with `state:
+  minimized` starts them there -- `design.txt`'s "always start in system
+  tray, always in taskbar, or neither". In the tray a window is an icon of the
+  shell's own: its program's picture and title; a click brings it back, a
+  right click opens its menu. **Lane F:** a flag by which a program can ask
+  for the same itself (`requests/c-f-let-a-window-say-it-goes-to-the-tray.md`),
+  which lane C then honours under the user's rules.
 
 - `[C]` **A settings service that tells open windows when a setting
   changes** -- **done 2026-09-28** (C-Q26, §1418, §1434). Beside
@@ -2075,6 +2124,256 @@ live.
   (`guitk::scrollbar::draw`, in a column every theme shares), and the shell's
   own text fields; button padding through the alert dialog's layout.
 
+- `[C]` **A file opens in its kind's default, and "Open with" offers every
+  program that opens it** (`design-decisions.md` §1449) -- done 2026-09-29.
+  A file nobody chose a program for opens in the one SlateOS names for its
+  kind (`programs::default_for`, a kind of text falling back to plain
+  text's) instead of saying nothing is set; a file's right-click menu on the
+  desktop has **Open with**: every program whose desktop entry lists the
+  kind, the one Open would start first, each with its picture, started as
+  its own command line says. **Lane E:** the file manager's own Open With
+  list was asked for in `requests/c-e-read-the-one-list-of-programs.md`.
+
+- `[-]` `[C]` **Programs add to a file's right-click menu**
+  (`design-decisions.md` §1448; `roadmap-detailed.md` → *Context menu
+  extension API*) -- the shell's half done 2026-09-29: KDE's service-menu
+  files, read from where KDE reads them (`gui/servicemenus`), each item's
+  command run as KDE runs it -- a port of KDE's own expansion and splitting,
+  so `sh -c "cd %d && make"`, `%f` in quotes and a pipe all do what they do
+  there, a file's name never read as shell -- one program per file where
+  the command takes one at a time, in the file's folder. A right-click on a
+  desktop icon offers them after Open, laid out as KDE lays them out
+  (submenus, `Important` and `TopLevel`, an "Actions" submenu past four
+  rows). Installed menus are on until turned off, the user's own off until
+  turned on (`context-menus.yaml`); a menu that cannot be used is reported
+  with why. **Lane E:** the file manager's menus and the Settings page that
+  lists and switches them
+  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). Menu rows
+  draw their pictures since the same day -- an item's, a submenu's, a jump
+  list action's (`ContextMenu::render_with_icons`).
+
+- `[-]` `[C]` **Notifications pop up** (`design-decisions.md` §1447,
+  open question C-Q32) -- the shell's half done 2026-09-29: every
+  notification the desktop files pops up at the bottom-right corner above
+  the taskbar for a few seconds (low 4, normal 6, high 10; urgent until
+  closed), the pointer holding them, at most three stacked with the newest
+  nearest the bell; a press opens it (read, its program started), its close
+  button leaves it unread in the pane; nothing while Do Not Disturb silences
+  it, while the pane is open, or at the login screen. They slide along the
+  desktop's motion and wake the desktop once when their time is up, not
+  every frame. On a surface of their own the size of the stack, so a press
+  beside a toast reaches the window under it. **Next:** programs cannot send
+  a notification yet -- the channel is lane F's or lane D's to build, asked
+  for once C-Q32 settles which of the two notification systems stays (the
+  separate `gui/notifications` program is started by nothing).
+
+- `[x]` `[C]` **Notifications outlive the desktop** (`design-decisions.md`
+  §1468) -- done 2026-10-05. What the notification pane holds is written to
+  the user's data directory whenever it changes -- one arriving, read,
+  dismissed, cleared -- and put back when the desktop next starts, read or
+  unread as it was left, without popping up again. A notification older
+  than a week is forgotten; how long is `history.days` in
+  `notifications.yaml` (0 to 365, 0 keeping nothing), honoured on disk the
+  moment it is saved. **Next:** a control for it on the Settings
+  application's Notifications page, asked of lane E
+  (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+
+- `[x]` `[C]` **A theme is checked before it is installed or shared**
+  (`design-decisions.md` §1469; `roadmap-detailed.md` §4.6, *Automated
+  Validation*) -- done 2026-10-05. `themecheck FOLDER...` (and
+  `appearance::themecheck::check` for an installer) says what in a theme the
+  desktop would refuse, ignore or adjust, judged by the desktop's own readers:
+  errors for a program or script, an SVG with a script or an outside
+  reference, a link out of the folder, a file past a reader's limit, an icon
+  or cursor it cannot read, a screenshot that is no picture; warnings for
+  what the theme file's reader ignores, sections and keys nothing reads,
+  `meta.supports` against what the theme covers, text the palette must
+  darken to read, files nothing reads; `--strict` fails on warnings, as a
+  repository would. **Next:** the repository and its CI, which do not exist.
+
+- `[x]` `[C]` **A theme brings its own wallpapers** (`design-decisions.md`
+  §1471; `roadmap-detailed.md` *Tier 3 -- Wallpaper Integration*) -- done
+  2026-10-05. A theme bundles pictures in a `wallpapers` folder and names one
+  for dark mode and one for light in a `wallpapers` section; chosen as the
+  other parts of a theme are, `theme.wallpaper: <name>`, the desktop shows
+  the picture for the mode it is drawn in, so a day and a night picture
+  follow the automatic mode. A time-of-day schedule and a rotating folder
+  still come first. The theme checker decodes them. **Lane E:** the
+  Background page that chooses it
+  (`requests/c-e-a-themes-wallpapers-on-the-background-page.md`).
+
+- `[-]` `[C]` **A theme recommends its fonts** (`design-decisions.md` §1472;
+  `roadmap-detailed.md` *Tier 2 -- Font Preferences*) -- lane C's half done
+  2026-10-05. A theme names the families it was designed with in a `fonts`
+  section -- for the desktop's text and for code, each a list tried in order
+  -- without shipping them, as a font's licence seldom allows; chosen as
+  `theme.fonts: <name>`, the first of each list the machine has takes the
+  place of the user's own font, and the user's own stays where none is
+  installed. Read, listed (`ThemeInfo::fonts`), checked by `themecheck` and
+  resolved (`AppearanceSettings::fonts_with_theme`). **Not drawn yet**:
+  `fonts_in_use()`, which the shell applies, answers with the user's own
+  until the compositor and the applications' event loop apply through it
+  too, so that no two processes measure and draw in different faces.
+  **Lane F:** those two lines (`requests/c-f-apply-the-fonts-in-use.md`);
+  lane C then turns the theme on in one place. **Lane E:** the Fonts page
+  that chooses it and offers to install what is missing
+  (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`).
+
+- `[x]` `[C]` **A disabled control says why** (`design-decisions.md` §1473;
+  `roadmap-detailed.md` §3.5 *Enable/disable controls API*) -- done
+  2026-10-05. Rest the pointer on a greyed button or menu row and, after the
+  tooltip delay, its reason appears: `ContextMenu::explain` for a menu's
+  rows, `guitk::disabled::WhyDisabled` for a window's controls. The text
+  fields' menus explain theirs ("Select some text first", "Nothing has
+  been copied"), the desktop's included. **Lane E:** the programs' own
+  (`requests/c-e-say-why-a-control-is-disabled.md`).
+
+- `[x]` `[C]` **The toolkit's controls follow the user's text size**
+  (`design-decisions.md` §1474; `roadmap-detailed.md` *Tier 2 -- Font
+  Preferences*) -- done 2026-10-05. The size chosen in Settings reached
+  the desktop's own text and the window titles and stopped there: every
+  menu, tooltip, dialog, tab and menu bar, button, check box, drop-down and
+  switch drew at 13 pixels. Each now draws its text at the user's size and
+  is laid out round it, the Run box with them. **Lane E:** programs laying
+  out from the toolkit's sizes (`requests/c-e-lay-out-from-the-text-size.md`).
+  **Operator:** where the display's scale is applied (C-Q34) -- programs
+  apply none today.
+
+- `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
+  -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
+  pictures -- the folder the start menu's Pictures place opens -- in name
+  order, one every thirty seconds and round again, each decoded to the
+  frame's size on the decoding thread and fitted in it; an empty folder says
+  so. The old picture is released only after the frame that stops naming it
+  is sent. "Choose folder…" on the frame's menu picks another folder in
+  the shell's chooser, saved with the layout -- and its test found and
+  fixed that opening a folder in the toolkit's folder picker chose it, a
+  fix the seven lane E applications already using the picker share.
+
+- `[C]` **The toolkit's widget tree draws in the user's theme** -- done
+  2026-10-01 (`known-issues.md`
+  `TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING`).
+  `guitk::widget`'s declarative tree, which lays out as Flexbox and Grid do
+  (§1455), now draws every control through the toolkit's own module for it
+  in the palette its program gives it, and its five silent kinds work: a
+  multi-line text field, radio buttons in groups, a scroll view, a slider
+  and a picture. Buttons and boxes light under the pointer. A program can
+  build a form from it rather than drawing one by hand.
+
+- `[C]` **Icons' gradients are drawn** (`roadmap-detailed.md` → *SVG
+  rendering support*; `design-decisions.md` §1462) -- done 2026-10-01. The toolkit's SVG renderer paints a
+  fill or stroke of `url(#id)` with that linear or radial gradient, wherever
+  the document defines it: both units, `gradientTransform`, pad, reflect and
+  repeat, a focal point, one gradient inheriting another's stops through
+  `href`, and the fallback colour after a missing one; stops mix as SVG 2
+  says, unpremultiplied. `fill-opacity` and `stroke-opacity` are inherited
+  from groups, which they were not. Found on the way and fixed: `rotate()`
+  turned the drawing the wrong way and `matrix()` read its numbers
+  transposed. Then `<use>` and `<symbol>` -- an element drawn again where a
+  `<use>` names it, a symbol in the viewport the `<use>` sizes -- with each
+  element built once and a document that names itself, loops or multiplies
+  itself bounded; drawings fitted to the pixels as `preserveAspectRatio`
+  says instead of stretched; inner `<svg>`s placed in their own viewports;
+  and a document nested past 128 levels refused, where one 100 000 deep
+  overflowed the stack of whatever drew it. And clip paths -- what an
+  element draws cut to the shapes of the `<clipPath>` it names, in either
+  units, by its `clip-rule`, clips within clips multiplying. And `<style>`
+  sheets, so a drawing coloured by CSS classes, as Illustrator writes them,
+  is no longer drawn in black; and masks, the shine glossy icons fade
+  through a gradient; and (2026-10-05) patterns, a tile repeated to paint a
+  shape -- the checkerboard behind an image editor's picture -- and XML
+  namespaces, so a document written `<svg:rect>` is drawn. And (2026-10-05,
+  §1466) filters -- every Filter Effects 1 primitive, from the soft shadow
+  under an icon to lighting and turbulence, and CSS's `blur()`,
+  `drop-shadow()`, `grayscale()` and the rest -- with a faded group now
+  faded as a whole, its overlapping parts no darker where they overlap.
+  And markers -- arrowheads and vertex dots, turned along the path -- and
+  embedded pictures, an `<image>` of a `data:` PNG, JPEG, GIF, WebP, BMP,
+  ICO or TIFF. Still not drawn: text, waiting on lane F
+  (`requests/c-f-an-outline-for-each-shaped-glyph.md`)
+  (`TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES`).
+
+- `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
+  §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's
+  frame from the window-decorations axis -- its title bar, title, close button,
+  border and shadow, in the frame's colours, with the windows' geometry
+  (`DecorationStyle::title_bar`) -- and the run box lays its content out
+  inside it; its close button cancels. The security prompt and the print
+  dialog take it when they are wired up (`TD-C-THE-SHELLS-OTHER-DIALOGS-DRAW-FRAMES-OF-THEIR-OWN`).
+
+- `[C]` **The taskbar's glass and spacing are a theme axis**
+  (`roadmap-detailed.md` → *Tier 2 — Taskbar/Panel Styling*;
+  `design-decisions.md` §1460) -- done 2026-10-01. A theme's `taskbar-panel`
+  section sets how much of the Aero glass the taskbar wears -- 0 is a flat bar
+  in the theme's colour, its tiles their edges -- and the gaps between its
+  tiles; `theme.taskbar_panel` chooses it, and the desktop draws and lays out
+  the taskbar from it. Whether the bar is see-through stays the user's.
+  **Lane E:** a chooser in Settings (`requests/c-e-choose-the-taskbar-panel-in-settings.md`).
+
+- `[C]` **Cursor themes** (`roadmap-detailed.md` → *Tier 1 — Cursor
+  Theme*; `design-decisions.md` §1459) -- lane C's half done 2026-10-01.
+  `theme.cursors` chooses a cursor theme in the format every Linux desktop
+  uses -- XCursor files by name, with `index.theme` inheritance -- so
+  Adwaita, Breeze or Bibata install as they are; `appearance::cursors` reads
+  any pointer shape at the nearest size, every frame of an animated one, each
+  file checked before it is believed. **Waiting on others:** the compositor
+  drawing the pictures (lane F, `requests/c-f-draw-the-pointer-from-the-cursor-theme.md`)
+  and a chooser in Settings (lane E, `requests/c-e-choose-the-cursor-theme-in-settings.md`).
+
+- `[C]` **Window frames are a theme axis** (`design-decisions.md` §1456) --
+  lane C's half done 2026-10-01: a theme's `window-decorations` section sets
+  the title bar (height, alignment, weight, how a long title is cut), its
+  buttons (side, order, shape, size, gap), the border and the shadow, with
+  the geometry drawing and clicking share (`DecorationStyle::title_bar`).
+  The taskbar cuts window labels as titles are cut. **Waiting on others:** the
+  compositor drawing from it (lane F, `requests/c-f-draw-window-frames-from-the-theme.md`)
+  and its chooser (lane E, `requests/c-e-choose-the-window-frames-in-settings.md`).
+
+- `[C]` **The toolkit lays out as CSS Flexbox and Grid do**
+  (`design-decisions.md` §1455) -- done 2026-10-01. `guitk::layout`: flex
+  lines, wrapping, growing and shrinking with min/max freezing, margins,
+  baselines and `align-content`; `layout::grid` with sparse auto-placement and
+  `Px`/`Auto`/`Fr`/`MinMax` tracks; `fit_image` for contain, cover, stretch
+  and natural size. The widget tree lays out and routes clicks through it.
+
+- `[C]` **A right-click on a text field offers what its keys do**
+  (`design-decisions.md` §1454) -- done 2026-10-01: Cut, Copy, Paste, Delete
+  and Select All in every toolkit text field and the code editor, and in the
+  desktop's own fields (the run box, start-menu search, a note, a rename).
+  **And the wallpaper moves** (§1457): a picture that overflows the screen
+  is dragged into place from the desktop's menu, and the login screen shows
+  the same part.
+
+- `[C]` **A ribbon in the toolkit** (`roadmap-detailed.md` → *Ribbon
+  Widget*; `design-decisions.md` §1453) -- done 2026-09-30. `guitk::ribbon`:
+  tabs of named groups of controls -- large, medium and small buttons,
+  toggles, split buttons, dropdowns, galleries -- with contextual tabs
+  shown while the application's context is active, groups folding into one
+  button each (lowest priority first) when the window is narrow and what
+  fits nowhere behind `»`, and minimizing to the tabs alone (a double click
+  on a tab, or Ctrl+F1). Key tips from F10 (digits on the tabs and letters
+  on the commands, one layer), and tooltips that say why a disabled command
+  cannot be used. Deliberately not Office's where Microsoft licenses the
+  arrangement: no staged shrinking, no gallery preview, no set header above
+  contextual tabs, no layered key tips. A Quick Access Toolbar over or under
+  the ribbon, and the user's changes -- commands onto the toolbar, into and
+  out of groups, tabs hidden and moved -- from a right-click or the
+  "Customize the ribbon…" dialog, kept as one line of text the application
+  saves. The strip is the title bar's colour, accented title bars included,
+  from the one answer the window manager's bar is drawn from
+  (`Palette::title_bar`). **Lane E:** its applications onto it
+  (`requests/c-e-the-toolkit-has-a-ribbon.md`).
+
+- `[x]` `[C]` **A notification's right-click menu turns its program off**
+  (`design.txt`: "option for any notification to not show notifications from
+  that application again"; `design-decisions.md` §1450) -- done 2026-09-29.
+  A right-click on a card in the pane, or on a pop-up, offers "Turn off
+  notifications from *program*" (the program's rule becomes `Silent`, as the
+  Settings switch makes it; its pop-ups go, its cards stay) -- "Turn on ..."
+  for a program already off -- and "Notification settings" (`settings --page
+  notifications`). Over the pane, which stays open; beside the pop-ups, which
+  it holds while it is up.
+
 - `[-]` `[C]` **A theme sets how the desktop moves, and every moving thing
   follows it** (`roadmap-detailed.md` → *Tier 3 — Animation Tuning*,
   `design-decisions.md` §1446) -- the axis done 2026-09-29: a theme's
@@ -2089,8 +2388,9 @@ live.
   under every curve; the taskbar no longer jumps to hidden when the pointer
   comes back mid-slide. **Lane F:** window
   animations, when the compositor has them, take their curve from the
-  palette. **Lane C next:** the toast daemon's colours
-  (`TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`).
+  palette. The toast daemon's colours followed the same day
+  (`TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`, fixed); whether the
+  daemon runs at all is C-Q32.
 
 - `[C]` **A code editor in the toolkit** (`roadmap-detailed.md` →
   *Code-Aware TextEdit Widget*) -- done 2026-09-28: `guitk::textbuffer` (a
@@ -2116,8 +2416,8 @@ live.
   shell script), C, C++, CSS, diffs (a change's lines in kinds of their
   own), Dockerfiles, DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
   systemd units), Java, JavaScript (JSX included), JSON, linker scripts
-  (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), PowerShell, Python,
-  Rust, SQL (PostgreSQL's, MySQL's and SQLite's in one grammar), TOML, TypeScript and TSX (§1441: their query after JavaScript's)
+  (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), Nushell (the default shell's scripts),
+  PowerShell, Python, Rust, SQL (PostgreSQL's, MySQL's and SQLite's in one grammar), TOML, tree-sitter queries (the language every grammar's highlight query is written in: `.scm`), TypeScript and TSX (§1441: their query after JavaScript's)
   XML (SVG, XSLT, plists, project files) and YAML (every settings file),
   each passing its authors' test corpus (XML's save one example, which has
   valid XML be an error: `grammars/xml.rs`). **Injections** (a language inside another): a Markdown code fence
@@ -4199,6 +4499,17 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 ### 1.4 IPC and syscalls
 
 ### 1.5 Capability / security model
+- [-] "Request capability from user" dialog mechanism -- *2026-10-05: the kernel's half is done; the user is never asked until the desktop's dialog is (the sub-item below), so the mechanism as a whole is not.*
+  - [x] Capability request broker (kernel-side queue, approve/deny/cancel/timeout)
+  - [x] Auto-deny fail-safe when no policy handler registered
+  - [x] Per-process request limit (4 pending max)
+  - [x] System-wide request limit (32 pending max)
+  - [x] Audit trail for all requests (pending/approved/denied/timed-out/cancelled)
+  - [x] Handler register/unregister with auto-deny on unregister
+  - [x] Kshell `capreq`/`cr` command (list/approve/deny/handler/test)
+  - [x] Self-test (7 tests: auto-deny, pending, approve, deny, cancel, limits, unregister)
+  - [x] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL)
+  - [-] `[C]` GUI security dialog integration (security_dialog.rs: UAC-style modal prompt, risk-level assessment, remember decisions, queue system, keyboard nav, 26 tests) -- *corrected 2026-09-30 (lane C): the dialog is written and tested and constructed by nothing, and cannot be yet: no syscall lets a userspace process answer requests, so every one is auto-denied, and approving one -- in the kernel shell, the only place it can be done -- grants nothing. Asked of lanes A, B and F in `requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`; `known-issues.md` `TD-C-A-PROGRAM-ASKING-FOR-A-CAPABILITY-REACHES-NO-ONE`.*
 - [~] `[A]` Enable LLVM CFI as default for C/C++ compilation — **blocked by an
   operator decision, not by remaining work.** `design-decisions.md` §201 defers
   it ("not yet", 2026-08-15); it waits in `deferred-questions.md` → **DQ2**,
@@ -5965,16 +6276,10 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [-] `[F]` Video-encoded capture fallback (VP9 for games/video, §1332: libvpx, threaded; hardware where found) -- *(Lane F 2026-10-04: the compositor's stream codes buffer windows as VP9, §1343; the service that reads it is not built.)*
 
 ### 3.4 Window manager / desktop shell
-- [x] Desktop with draggable icons (snap-to-grid or free placement)
-  - [x] Grid snapping (cells sized by the icon-size setting), free placement + auto-arrange modes, chosen from the desktop menu's View submenu and saved in `deskicons.yaml` — **really done 2026-09-25**: this line was ticked from the start while the only modes were a snap and an always-sorted arrange, with no way to choose; see lane C's entry above and `design-decisions.md` §869
-  - [-] Rubber-band selection (done), Ctrl+A select all (done), Ctrl+Click toggle (**not reachable yet**: the icon layer implements it, but the desktop is never told that Ctrl is held -- `known-issues.md` → `TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION`. Corrected 2026-09-25)
-  - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
-  - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
-  - [x] Double-click activate, right-click context menu, F2 rename, Delete -- **really done 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Rename, Pin to taskbar, Remove from desktop), Delete and F2 rename in place are all real now.
 - [ ] Theme color API for applications — **was marked `[x]` on the strength of a `ThemeColors` helper no application ever held**, deleted 2026-09-03 with the rest (§810). Unchecked 2026-09-03: applications do *not* get their colours from an API, they each write out their own copy of the dark palette — 2,258 `const NAME: Color` across 135 files, tracked as `TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO`, which is what actually has to be done for this item to be true. The API it should be built on is `appearance::Palette`, not a toolkit type.
 
 ### 3.5 GUI toolkit / widget API
-- [x] Advanced features:
+- [-] `[C]` Advanced features:
   - [x] Clipboard (multi-format: text, HTML, image, structured data, history)
     - [x] System clipboard service with 7 formats (PlainText/RichText/Html/ImagePng/ImageBmp/FilePaths/Custom)
     - [x] History (50 entries), pinning, search, format conversion (HTML→text, RTF→text)
@@ -5984,7 +6289,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
     - [x] DragDropManager state machine (Idle→Dragging→OverTarget)
     - [x] Drop target registration, hit testing, format compatibility, effect negotiation
     - [x] Drag threshold, cancel support, DragEvent lifecycle events
-  - [-] File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. Decided 2026-09-27 (`design-decisions.md` §1415): the explorer will show the window for every program and hand back only the file chosen.*
+  - [-] `[C]` File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. Decided 2026-09-27 (`design-decisions.md` §1415): the explorer will show the window for every program and hand back only the file chosen.* **Lane C's half done 2026-10-05** (§1463): `gui/filechooser` -- a program asks the service `org.slateos.FileChooser` through `filechooser::Picker` (the toolkit picker's calls), the explorer answers through `filechooser::service`, and where nothing serves the name the toolkit's dialog is drawn as before. **Remaining, other lanes':** the explorer serving it and the applications asking through it (lane E, `requests/c-e-serve-every-programs-open-and-save-window.md`), the chooser kept above the asking window (lane F, `requests/c-f-the-file-choosers-window-belongs-to-the-program-that-asked.md`), the file handed open rather than named (lanes A and D, `requests/c-ad-hand-a-program-the-file-it-chose-not-its-name.md`).
     - [x] Open/Save/SelectFolder modes with builder API
     - [x] Directory navigation (back/forward/up), quick-access sidebar
     - [x] Sortable file list, extension filters, auto-extension append

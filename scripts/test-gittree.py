@@ -118,6 +118,30 @@ def build_repo(tmp: str) -> str:
         ),
         "mods/present.rs": b"pub fn p() {}\n",
         "mods/dirmod/mod.rs": b"pub fn d() {}\n",
+        # Modules declared under `#[path = "..."]`, as gui/toolkit's SVG
+        # modules declare their tests: the attribute is the file's name,
+        # relative to the declaring file's directory. A blank line stops the
+        # search for an attribute, so `plain` is the ordinary rule's again --
+        # and `escape` tries to name a file above the mirror.
+        "paths/svg.rs": (
+            b"pub mod clip;\n"
+            b"#[cfg(test)]\n"
+            b'#[path = "svg/mask_tests.rs"]\n'
+            b"mod mask_tests;\n"
+        ),
+        "paths/svg/clip.rs": (
+            b"pub fn c() {}\r\n"
+            b"#[cfg(test)]\r\n"
+            b'#[path = "clip_tests.rs"]\r\n'
+            b"mod tests;\r\n"
+            b'#[path = "far/away.rs"]\r\n'
+            b"\r\n"
+            b"mod plain;\r\n"
+            b'#[path = "../../../outside.rs"]\r\n'
+            b"mod escape;\r\n"
+        ),
+        "paths/svg/clip_tests.rs": b"#[test]\nfn t() {}\n",
+        "paths/svg/mask_tests.rs": b"#[test]\nfn m() {}\n",
     }
     for rel, body in files.items():
         path = os.path.join(work, *rel.split("/"))
@@ -195,7 +219,7 @@ def case_list_paths(work: str) -> None:
     with gittree.GitTree(work) as tree:
         every = tree.list_paths("HEAD")
         narrowed = tree.list_paths("HEAD", "mods")
-    check("list_paths finds every committed file", len(every), 9)
+    check("list_paths finds every committed file", len(every), 13)
     check("list_paths honours a pathspec", sorted(narrowed),
           ["mods/dirmod/mod.rs", "mods/lib.rs", "mods/present.rs"])
 
@@ -216,7 +240,7 @@ def case_list_entries_carries_the_object_id(work: str) -> None:
         entries = tree.list_entries("HEAD")
         paths = tree.list_paths("HEAD")
 
-    check("list_entries finds every committed file", len(entries), 9)
+    check("list_entries finds every committed file", len(entries), 13)
     check("...the same ones list_paths does",
           sorted(p for p, _t, _o in entries), sorted(paths))
     check("...all of them blobs", sorted({t for _p, t, _o in entries}),
@@ -390,6 +414,53 @@ def case_stub_rules(work: str) -> None:
           os.path.exists(os.path.join(both, "dirmod.rs")), False)
     with open(os.path.join(both, "dirmod", "mod.rs"), "rb") as fh:
         check("and keeps its own bytes", fh.read(), b"pub fn d() {}\n")
+
+
+def case_a_path_attribute_is_followed(work: str) -> None:
+    """A module declared under `#[path = "..."]` is stubbed where the
+    attribute says -- relative to the declaring file's directory, through any
+    attributes between -- and not at `name.rs`; a file in the list keeps its
+    bytes; and a `..` that climbs out of the mirror writes nothing there.
+
+    The push this was found on touched `gui/toolkit/src/svg/clip.rs` and not
+    its `#[path = "clip_tests.rs"]` tests, and gate 7 refused it: the stub
+    went to `svg/tests.rs`, and rustfmt could not find `svg/clip_tests.rs`.
+    """
+    outer = tempfile.mkdtemp()
+    dest = os.path.join(outer, "mirror")
+    os.makedirs(dest)
+    gittree.materialise(
+        "HEAD", dest, ["paths/svg.rs", "paths/svg/clip.rs"],
+        stub_rust_mods=True, repo=work,
+    )
+
+    def body(rel: str) -> bytes | None:
+        try:
+            with open(os.path.join(dest, *rel.split("/")), "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    check("a path attribute's file gets the stub", body("paths/svg/clip_tests.rs"), b"\n")
+    check("and no stub goes to `name.rs`", body("paths/svg/tests.rs"), None)
+    check("a path into a subdirectory is followed from the declaring file's",
+          body("paths/svg/mask_tests.rs"), b"\n")
+    check("a plain `mod` keeps the ordinary rule", body("paths/svg/clip/plain.rs"), None)
+    check("... which stubs it beside the file, as it always has",
+          body("paths/svg/plain.rs"), b"\n")
+    check("an attribute cut off by a blank line names nothing",
+          body("paths/svg/far/away.rs"), None)
+    check("a `..` out of the mirror writes nothing outside it",
+          os.path.exists(os.path.join(outer, "outside.rs")), False)
+
+    kept = tempfile.mkdtemp()
+    gittree.materialise(
+        "HEAD", kept, ["paths/svg/clip.rs", "paths/svg/clip_tests.rs"],
+        stub_rust_mods=True, repo=work,
+    )
+    with open(os.path.join(kept, "paths", "svg", "clip_tests.rs"), "rb") as fh:
+        check("a path attribute's file in the list keeps its own bytes",
+              fh.read(), b"#[test]\nfn t() {}\n")
 
 
 def case_cli_emits_lf(work: str) -> None:
@@ -1353,8 +1424,8 @@ def main() -> int:
                      case_the_id_is_what_actually_gets_read,
                      case_a_tab_in_a_filename_does_not_truncate_it,
                      case_materialise_layout, case_materialise_skips_absent,
-                     case_stub_rules, case_cli_emits_lf,
-                     case_cli_reports_crlf_input):
+                     case_stub_rules, case_a_path_attribute_is_followed,
+                     case_cli_emits_lf, case_cli_reports_crlf_input):
             case(work)
         for i, tcase in enumerate((case_tree_agrees, case_prune_is_by_component,
                                    case_missing_is_an_answer,

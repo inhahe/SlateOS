@@ -17,6 +17,7 @@ use crate::scrollbar;
 use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::Surface;
+use crate::text::scaled;
 
 // ─── Re-export the shared item-id type from the context-menu module ────────
 
@@ -50,6 +51,14 @@ const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 160);
 /// number has to repeat it -- at which point the bar's height is recorded in
 /// two places and a change to one of them is a silent overlap or a silent gap.
 pub const BAR_HEIGHT: f32 = 28.0;
+
+/// The bar's height at the user's text size ([`BAR_HEIGHT`] at the
+/// default): what it is drawn at, and the room a window leaves above its
+/// own content.
+#[must_use]
+pub fn bar_height() -> f32 {
+    scaled(BAR_HEIGHT)
+}
 /// Horizontal padding inside each top-level label.
 const LABEL_HPAD: f32 = 12.0;
 /// Height of a single dropdown item row.
@@ -303,7 +312,7 @@ impl DropdownPanel {
         scroll: f32,
         viewport: (f32, f32),
     ) -> Self {
-        let content_height = dropdown_content_height(entries) + DROPDOWN_VPAD * 2.0;
+        let content_height = dropdown_content_height(entries) + scaled(DROPDOWN_VPAD) * 2.0;
         let available = (viewport.1 - min_y).max(0.0);
         let panel_height = content_height.min(available);
         // `min_y <= viewport.1 - panel_height` holds because
@@ -364,14 +373,14 @@ impl DropdownPanel {
 
     /// Top of the region the rows are drawn in and hit-tested against.
     fn viewport_top(&self) -> f32 {
-        self.y + DROPDOWN_VPAD
+        self.y + scaled(DROPDOWN_VPAD)
     }
 
     /// One past its bottom. Never above [`Self::viewport_top`]: a zero-height
     /// row region is a panel with no room, and a negative-height clip is not a
     /// small clip.
     fn viewport_bottom(&self) -> f32 {
-        (self.bottom() - DROPDOWN_VPAD).max(self.viewport_top())
+        (self.bottom() - scaled(DROPDOWN_VPAD)).max(self.viewport_top())
     }
 
     fn viewport_height(&self) -> f32 {
@@ -488,7 +497,13 @@ fn submenu_panel(
     viewport: (f32, f32),
 ) -> DropdownPanel {
     DropdownPanel::place(
-        sub.x, sub.y, BAR_HEIGHT, sub.width, entries, sub.scroll, viewport,
+        sub.x,
+        sub.y,
+        scaled(BAR_HEIGHT),
+        sub.width,
+        entries,
+        sub.scroll,
+        viewport,
     )
 }
 
@@ -676,13 +691,13 @@ impl MenuBar {
         // Consumed even with nothing to scroll: an open menu must not let the
         // wheel through to the document behind it.
         self.dropdown_scroll =
-            panel.clamped_scroll(panel.scroll + crate::wheel::pixels(dy, ITEM_HEIGHT));
+            panel.clamped_scroll(panel.scroll + crate::wheel::pixels(dy, scaled(ITEM_HEIGHT)));
         EventResult::Consumed
     }
 
     fn on_mouse_press(&mut self, mx: f32, my: f32) -> EventResult {
         // --- Click on a top-level label? ---
-        if (0.0..BAR_HEIGHT).contains(&my)
+        if (0.0..scaled(BAR_HEIGHT)).contains(&my)
             && let Some(idx) = self.label_index_at_x(mx)
         {
             if self.open_index == Some(idx) {
@@ -761,7 +776,7 @@ impl MenuBar {
 
     fn on_mouse_move(&mut self, mx: f32, my: f32) -> EventResult {
         // --- Hot-tracking across top-level labels. ---
-        if (0.0..BAR_HEIGHT).contains(&my) {
+        if (0.0..scaled(BAR_HEIGHT)).contains(&my) {
             if self.is_open()
                 && let Some(idx) = self.label_index_at_x(mx)
             {
@@ -978,7 +993,7 @@ impl MenuBar {
             x: 0.0,
             y: 0.0,
             width: bar_w,
-            height: BAR_HEIGHT,
+            height: scaled(BAR_HEIGHT),
             color: palette.base,
             corner_radii: CornerRadii::ZERO,
         });
@@ -986,9 +1001,9 @@ impl MenuBar {
         // --- Bottom border of bar ---
         cmds.push(RenderCommand::Line {
             x1: 0.0,
-            y1: BAR_HEIGHT,
+            y1: scaled(BAR_HEIGHT),
             x2: bar_w,
-            y2: BAR_HEIGHT,
+            y2: scaled(BAR_HEIGHT),
             color: palette.surface1,
             width: 1.0,
         });
@@ -1003,21 +1018,21 @@ impl MenuBar {
                     *x_off,
                     0.0,
                     *w,
-                    BAR_HEIGHT,
+                    scaled(BAR_HEIGHT),
                     0.0,
                     Surface::Selected,
                 );
             }
 
-            let text_y = (BAR_HEIGHT - FONT_SIZE) / 2.0;
-            let text_x = *x_off + LABEL_HPAD;
+            let text_y = (scaled(BAR_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
+            let text_x = *x_off + scaled(LABEL_HPAD);
 
             cmds.push(RenderCommand::Text {
                 x: text_x,
                 y: text_y,
                 text: parsed.text.clone(),
                 color: palette.text,
-                font_size: FONT_SIZE,
+                font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1030,16 +1045,16 @@ impl MenuBar {
                     .char_indices()
                     .nth(mi)
                     .map_or(parsed.text.len(), |(pos, _)| pos)];
-                let prefix_w = estimate_text_width(prefix, FONT_SIZE);
+                let prefix_w = estimate_text_width(prefix, scaled(FONT_SIZE));
                 let char_w = estimate_text_width(
                     &parsed
                         .text
                         .chars()
                         .nth(mi)
                         .map_or(String::new(), |c| c.to_string()),
-                    FONT_SIZE,
+                    scaled(FONT_SIZE),
                 );
-                let ul_y = text_y + FONT_SIZE + MNEMONIC_UNDERLINE_OFFSET;
+                let ul_y = text_y + scaled(FONT_SIZE) + scaled(MNEMONIC_UNDERLINE_OFFSET);
                 cmds.push(RenderCommand::Line {
                     x1: text_x + prefix_w,
                     y1: ul_y,
@@ -1081,8 +1096,8 @@ impl MenuBar {
         let mut x = 0.0_f32;
         for item in items {
             let parsed = parse_mnemonic(&item.label);
-            let text_w = estimate_text_width(&parsed.text, FONT_SIZE);
-            let slot_w = text_w + LABEL_HPAD * 2.0;
+            let text_w = estimate_text_width(&parsed.text, scaled(FONT_SIZE));
+            let slot_w = text_w + scaled(LABEL_HPAD) * 2.0;
             metrics.push((x, slot_w, parsed));
             x += slot_w;
         }
@@ -1108,11 +1123,11 @@ impl MenuBar {
             .dropdown_widths
             .get(idx)
             .copied()
-            .unwrap_or(MIN_DROPDOWN_WIDTH);
+            .unwrap_or(scaled(MIN_DROPDOWN_WIDTH));
         DropdownPanel::place(
             x,
-            BAR_HEIGHT,
-            BAR_HEIGHT,
+            scaled(BAR_HEIGHT),
+            scaled(BAR_HEIGHT),
             width,
             children,
             self.dropdown_scroll,
@@ -1429,7 +1444,7 @@ fn scroll_in_submenu_chain(
     }
     // Consumed even with nothing to scroll: the wheel must not fall through a
     // popup to whatever it is covering.
-    sub.scroll = panel.clamped_scroll(panel.scroll + crate::wheel::pixels(dy, ITEM_HEIGHT));
+    sub.scroll = panel.clamped_scroll(panel.scroll + crate::wheel::pixels(dy, scaled(ITEM_HEIGHT)));
     true
 }
 
@@ -1547,10 +1562,10 @@ fn deepest_submenu_mut(sub: &mut OpenSubmenu) -> &mut OpenSubmenu {
 /// once adding them up again to position a submenu. Four walks of one list is
 /// four chances for three of them to be right; when they disagree the user
 /// clicks one row and gets the one above.
-const fn entry_height(entry: &MenuBarEntry) -> f32 {
+fn entry_height(entry: &MenuBarEntry) -> f32 {
     match entry {
-        MenuBarEntry::Separator => SEPARATOR_HEIGHT,
-        _ => ITEM_HEIGHT,
+        MenuBarEntry::Separator => scaled(SEPARATOR_HEIGHT),
+        _ => scaled(ITEM_HEIGHT),
     }
 }
 
@@ -1578,30 +1593,34 @@ fn calculate_dropdown_width(entries: &[MenuBarEntry]) -> f32 {
             MenuBarEntry::Action {
                 label, shortcut, ..
             } => {
-                max_label = max_label.max(estimate_text_width(label, FONT_SIZE));
+                max_label = max_label.max(estimate_text_width(label, scaled(FONT_SIZE)));
                 if let Some(sc) = shortcut {
-                    max_shortcut = max_shortcut.max(estimate_text_width(sc, FONT_SIZE));
+                    max_shortcut = max_shortcut.max(estimate_text_width(sc, scaled(FONT_SIZE)));
                 }
             }
             MenuBarEntry::Check { label, .. } => {
-                max_label = max_label.max(estimate_text_width(label, FONT_SIZE));
+                max_label = max_label.max(estimate_text_width(label, scaled(FONT_SIZE)));
             }
             MenuBarEntry::SubMenu { label, .. } => {
-                max_label = max_label.max(estimate_text_width(label, FONT_SIZE));
-                max_shortcut = max_shortcut.max(SUBMENU_ARROW_WIDTH);
+                max_label = max_label.max(estimate_text_width(label, scaled(FONT_SIZE)));
+                max_shortcut = max_shortcut.max(scaled(SUBMENU_ARROW_WIDTH));
             }
             MenuBarEntry::Separator => {}
         }
     }
 
     let shortcut_space = if max_shortcut > 0.0 {
-        SHORTCUT_GAP + max_shortcut
+        scaled(SHORTCUT_GAP) + max_shortcut
     } else {
         0.0
     };
 
-    (DROPDOWN_HPAD * 2.0 + ICON_COL_WIDTH + max_label + shortcut_space + DROPDOWN_HPAD)
-        .max(MIN_DROPDOWN_WIDTH)
+    (scaled(DROPDOWN_HPAD) * 2.0
+        + scaled(ICON_COL_WIDTH)
+        + max_label
+        + shortcut_space
+        + scaled(DROPDOWN_HPAD))
+    .max(scaled(MIN_DROPDOWN_WIDTH))
 }
 
 /// Whether an entry can take the hover highlight.
@@ -1737,11 +1756,11 @@ fn render_entries(
         }
         match entry {
             MenuBarEntry::Separator => {
-                let line_y = cur_y + SEPARATOR_HEIGHT / 2.0;
+                let line_y = cur_y + scaled(SEPARATOR_HEIGHT) / 2.0;
                 cmds.push(RenderCommand::Line {
-                    x1: panel_x + DROPDOWN_HPAD,
+                    x1: panel_x + scaled(DROPDOWN_HPAD),
                     y1: line_y,
-                    x2: panel_x + panel_w - DROPDOWN_HPAD,
+                    x2: panel_x + panel_w - scaled(DROPDOWN_HPAD),
                     y2: line_y,
                     color: palette.surface1,
                     width: 1.0,
@@ -1760,7 +1779,7 @@ fn render_entries(
                         panel_x + 4.0,
                         cur_y,
                         panel_w - 8.0,
-                        ITEM_HEIGHT,
+                        scaled(ITEM_HEIGHT),
                         ITEM_HOVER_RADIUS,
                         Surface::Selected,
                     );
@@ -1771,14 +1790,14 @@ fn render_entries(
                 } else {
                     palette.overlay0
                 };
-                let text_y = cur_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
+                let text_y = cur_y + (scaled(ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
 
                 cmds.push(RenderCommand::Text {
-                    x: panel_x + DROPDOWN_HPAD + ICON_COL_WIDTH,
+                    x: panel_x + scaled(DROPDOWN_HPAD) + scaled(ICON_COL_WIDTH),
                     y: text_y,
                     text: label.clone(),
                     color: tc,
-                    font_size: FONT_SIZE,
+                    font_size: scaled(FONT_SIZE),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1786,11 +1805,13 @@ fn render_entries(
 
                 if let Some(sc) = shortcut {
                     cmds.push(RenderCommand::Text {
-                        x: panel_x + panel_w - DROPDOWN_HPAD - estimate_text_width(sc, FONT_SIZE),
+                        x: panel_x + panel_w
+                            - scaled(DROPDOWN_HPAD)
+                            - estimate_text_width(sc, scaled(FONT_SIZE)),
                         y: text_y,
                         text: sc.clone(),
                         color: palette.subtext0,
-                        font_size: FONT_SIZE,
+                        font_size: scaled(FONT_SIZE),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1805,21 +1826,21 @@ fn render_entries(
                         panel_x + 4.0,
                         cur_y,
                         panel_w - 8.0,
-                        ITEM_HEIGHT,
+                        scaled(ITEM_HEIGHT),
                         ITEM_HOVER_RADIUS,
                         Surface::Selected,
                     );
                 }
 
-                let text_y = cur_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
+                let text_y = cur_y + (scaled(ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
 
                 if *checked {
                     cmds.push(RenderCommand::Text {
-                        x: panel_x + DROPDOWN_HPAD + 4.0,
+                        x: panel_x + scaled(DROPDOWN_HPAD) + scaled(4.0),
                         y: text_y,
                         text: "\u{2713}".to_string(),
                         color: palette.ink(palette.blue),
-                        font_size: FONT_SIZE,
+                        font_size: scaled(FONT_SIZE),
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1827,11 +1848,11 @@ fn render_entries(
                 }
 
                 cmds.push(RenderCommand::Text {
-                    x: panel_x + DROPDOWN_HPAD + ICON_COL_WIDTH,
+                    x: panel_x + scaled(DROPDOWN_HPAD) + scaled(ICON_COL_WIDTH),
                     y: text_y,
                     text: label.clone(),
                     color: palette.text,
-                    font_size: FONT_SIZE,
+                    font_size: scaled(FONT_SIZE),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1845,20 +1866,20 @@ fn render_entries(
                         panel_x + 4.0,
                         cur_y,
                         panel_w - 8.0,
-                        ITEM_HEIGHT,
+                        scaled(ITEM_HEIGHT),
                         ITEM_HOVER_RADIUS,
                         Surface::Selected,
                     );
                 }
 
-                let text_y = cur_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
+                let text_y = cur_y + (scaled(ITEM_HEIGHT) - scaled(FONT_SIZE)) / 2.0;
 
                 cmds.push(RenderCommand::Text {
-                    x: panel_x + DROPDOWN_HPAD + ICON_COL_WIDTH,
+                    x: panel_x + scaled(DROPDOWN_HPAD) + scaled(ICON_COL_WIDTH),
                     y: text_y,
                     text: label.clone(),
                     color: palette.text,
-                    font_size: FONT_SIZE,
+                    font_size: scaled(FONT_SIZE),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1866,11 +1887,11 @@ fn render_entries(
 
                 // Arrow indicator.
                 cmds.push(RenderCommand::Text {
-                    x: panel_x + panel_w - DROPDOWN_HPAD - SUBMENU_ARROW_WIDTH,
+                    x: panel_x + panel_w - scaled(DROPDOWN_HPAD) - scaled(SUBMENU_ARROW_WIDTH),
                     y: text_y,
                     text: "\u{25B8}".to_string(),
                     color: palette.text,
-                    font_size: FONT_SIZE,
+                    font_size: scaled(FONT_SIZE),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1967,6 +1988,28 @@ mod tests {
     const SCREEN: (f32, f32) = (1920.0, 1080.0);
 
     // ── Test helpers ────────────────────────────────────────────────────
+
+    /// **A menu bar follows the user's text size** (on this test's thread):
+    /// at twice the size the bar is twice as tall and its labels twice as
+    /// large.
+    #[test]
+    fn a_menu_bar_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        assert_eq!(bar_height(), BAR_HEIGHT * 2.0);
+        let drawn = make_bar().render(&Palette::for_mode(false), 800);
+        let sizes: Vec<f32> = drawn
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert!(!sizes.is_empty(), "{drawn:?}");
+        assert!(
+            sizes.iter().all(|size| *size == FONT_SIZE * 2.0),
+            "{sizes:?}"
+        );
+    }
 
     fn make_bar() -> MenuBar {
         MenuBar::new(vec![

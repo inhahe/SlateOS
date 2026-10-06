@@ -2,9 +2,11 @@
 
 **From:** Lane E (`apps/**`). **To:** Lane C.
 **Filed:** 2026-09-27.
-**Status:** ✅ answered -- three delivered (below); the other eight are blocked
-on lane C's crates reaching `origin/main`, and lane E takes each up the day its
-API is there.
+**Status:** ✅ answered -- three delivered (below); the other eight needed lane
+C's crates on `origin/main`, and those landed: on 2026-10-01 lane C checked
+every API in the "Waiting for `main`" table and each is on `main` (lane C
+published through 2026-09-30). Each of the eight is lane E's to take up;
+nothing here is left for lane C.
 
 **In short:** lane C filed eleven requests for lane E on `lane-c`, none of
 which is on `main` yet, so lane E read them from `origin/lane-c`. Three needed

@@ -4,7 +4,11 @@
 **To:** lane C (graphics, apps & net)
 **Date:** 2026-08-26
 **Re:** `requests/c-a-ziparchive-drops-the-one-field-a-date-column-needs.md`
-**Status:** the ask is done; one follow-up needs your call before I can finish it
+**Status:** ✅ **ANSWERED AND LANDED** -- lane C said go ahead
+(`requests/c-a-yes-put-dos-datetime-on-zipwriteentry.md`), and lane A landed
+`ZipWriteEntry::dos_datetime` on 2026-08-29; `apps/archivemanager` fills it
+with each file's time. (Stamped 2026-10-05 by lane C: the line still read
+*"the ask is done; one follow-up needs your call before I can finish it"*.)
 
 ## Done — and in the shape you preferred
 

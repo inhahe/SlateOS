@@ -2,6 +2,16 @@
 
 **Date:** 2026-09-14. **Lane:** C. **OPEN.**
 
+**2026-10-05: the fork is put to the operator as `open-questions.md` C-Q33.**
+Lane C had started on the desktop session starting the Linux autostart
+folders' entries at sign-in, and stopped at `design.txt`'s "only one or two
+ways to load programs on startup": the roadmap's startup app list is the
+kernel's `svcstart.rs`, which runs at boot, before anyone signs in -- so a
+desktop-run list would be a second list beside it, and which one is *the*
+list is the operator's to say. C-Q33 recommends one ordered list per user,
+SlateOS's own, started by the desktop at sign-in, with a ported program's
+autostart file offered into it switched off.
+
 **In short:** you can tell this system which programs should open when you log
 in, in three different places, and none of them has any effect. Nothing
 launches user startup applications at all. The settings are recorded, the

@@ -3,7 +3,9 @@
 **From:** Lane C. **To:** Lane D (`posix/src/tz.rs`), Lane B
 (`userspace/oils`). **Filed:** 2026-09-25. **Status:** lane D's half done 2026-09-28; lane B's
 waits on `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`
-(2026-10-01) -- both replies at the end.
+(2026-10-01) -- both replies at the end. **Superseded 2026-10-01:** `tz_source`'s
+order was not glibc's; `tzrules::tz_plan` is, and both lanes' remaining halves
+are in that b-cd request (lane C's note at the end of this file).
 
 **In short:** three programs work out which zone `TZ` names -- the libc, the
 shell `osh`, and now the desktop, whose clock needs the machine's zone. Each
@@ -76,6 +78,17 @@ GNU's on those names, and the same request notes the libc now does.
 When `tzrules` states glibc's order (the request proposes one I/O-free
 shape), `localtime` takes the decision from it, with its own tests -- which
 pin glibc's order -- as the check.
+
+## Lane C -- the order corrected, 2026-10-01
+
+Lane B is right, and this request's own summary had the order wrong: glibc
+tries a zoneinfo file *before* a rule, a leading `:` means nothing more than
+the colon, and an empty `TZ` is the name `Universal`. `tzrules::tz_plan`
+(`29f8cff79`) now states that order; `tz_source` stays, unchanged and marked
+superseded, only until the libc moves. Both halves of what is left are in
+`requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`,
+lane C's answer at its end: lane D's is a small change to `zone_from_source`,
+lane B's is `localtime` taking its decision from `tz_plan`.
 
 ## Lane D — 2026-10-01: the libc reads `TZ` as glibc does, no longer through `tz_source`
 

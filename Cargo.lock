@@ -58,6 +58,7 @@ dependencies = [
  "pathcodec",
  "scratchdir",
  "settingsfile",
+ "sound",
  "yamldoc",
 ]
 
@@ -717,9 +718,27 @@ version = "0.1.0"
 name = "credentials"
 version = "0.1.0"
 dependencies = [
+ "guiremote",
+ "msgframe",
  "pwkdf",
  "randrange",
+ "secret",
  "sha2",
+ "svcconn",
+]
+
+[[package]]
+name = "credentialsd"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "credentials",
+ "guiremote",
+ "guitk",
+ "journalrec",
+ "oswindow",
+ "pathcodec",
+ "secret",
 ]
 
 [[package]]
@@ -875,9 +894,12 @@ dependencies = [
  "procinfo",
  "programs",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
  "settingswatch",
+ "sound",
  "tzrules",
+ "windowrules",
  "yamldoc",
 ]
 
@@ -1212,6 +1234,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filechooser"
+version = "0.1.0"
+dependencies = [
+ "guiremote",
+ "guitk",
+ "msgframe",
+ "svcconn",
+]
+
+[[package]]
 name = "filediff"
 version = "0.1.0"
 dependencies = [
@@ -1505,10 +1537,12 @@ name = "guitk"
 version = "0.1.0"
 dependencies = [
  "civildate",
+ "imagecodec",
  "osfont",
  "pathcodec",
  "randrange",
  "regex",
+ "secret",
  "settingsname",
  "textfind",
  "textfmt",
@@ -2510,6 +2544,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "msgframe"
+version = "0.1.0"
+
+[[package]]
 name = "musicplayer"
 version = "0.1.0"
 dependencies = [
@@ -2680,6 +2718,7 @@ dependencies = [
 name = "notifications"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -3482,6 +3521,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "secret"
+version = "0.1.0"
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3514,6 +3557,17 @@ name = "servicebus"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "servicemenus"
+version = "0.1.0"
+dependencies = [
+ "desktopentry",
+ "pathcodec",
+ "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -3730,6 +3784,16 @@ dependencies = [
  "oswindow",
  "randrange",
  "statehistory",
+]
+
+[[package]]
+name = "sound"
+version = "0.1.0"
+dependencies = [
+ "ogg",
+ "opus",
+ "scratchdir",
+ "vorbis",
 ]
 
 [[package]]
@@ -3961,6 +4025,14 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+]
+
+[[package]]
+name = "svcconn"
+version = "0.1.0"
+dependencies = [
+ "guiremote",
+ "msgframe",
 ]
 
 [[package]]
@@ -4660,6 +4732,14 @@ name = "whois"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "windowrules"
+version = "0.1.0"
+dependencies = [
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

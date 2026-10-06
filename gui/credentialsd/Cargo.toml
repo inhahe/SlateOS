@@ -1,0 +1,33 @@
+[package]
+name = "credentialsd"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS credential service's own windows: the prompt that asks you whether a program may have a password"
+
+# Its own crate, not a module of `gui/credentials`, so that a program asking
+# for a password -- which links `credentials` for `ask` -- does not link a
+# widget library to do it. The service's daemon lands here beside the prompt
+# once it can read the password manager's vault; it cannot live in
+# `gui/credentials`, whose package this one depends on.
+
+[dependencies]
+# The judgement the prompt answers for: `Prompt`, `Asking`, `Said`.
+credentials = { path = "../credentials" }
+# What the master password is typed into, and what it is kept in.
+guitk = { path = "../toolkit" }
+secret = { path = "../secret" }
+# The user's palette and focus width, as every window draws them.
+appearance = { path = "../appearance" }
+# A window on the user's display, and the loop that drives it.
+oswindow = { path = "../window" }
+# How a program's path is shown when it is not text.
+pathcodec = { path = "../pathcodec" }
+# The service registry's listener and the wait on it, on SlateOS; the
+# transport a program's connection is, everywhere.
+guiremote = { path = "../remote" }
+# One spelling of a journal record -- JSON lines, as `journalctl` reads them
+# -- for the service's log of who was given what.
+journalrec = { path = "../../userspace/journalrec" }
+
+[lints]
+workspace = true

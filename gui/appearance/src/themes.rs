@@ -13,7 +13,12 @@
 //! [`crate::icons`]; the widget-style axis, the shapes of the toolkit's
 //! controls, is [`WidgetTheme`] and its `widget-style` section; the
 //! animation axis, how the desktop's transitions move, is
-//! [`AnimationTheme`] and its `animation` section.
+//! [`AnimationTheme`] and its `animation` section; the window-decorations
+//! axis, the shape of every window's frame, is [`DecorationTheme`] and its
+//! `window-decorations` section; the taskbar-panel axis, the taskbar's finish
+//! and spacing, is [`PanelTheme`] and its `taskbar-panel` section; the
+//! wallpaper axis, the pictures it recommends for the desktop in each mode,
+//! is [`WallpaperTheme`] and its `wallpapers` section and folder.
 //!
 //! # A theme on disk
 //!
@@ -107,12 +112,13 @@
 //!
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
+use crate::decorations::DecorationStyle;
+use crate::panel::PanelStyle;
 use guitk::color::Color;
 use guitk::motion::Motion;
 use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors, syntax_roles};
 use guitk::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
@@ -122,10 +128,18 @@ use std::sync::Arc;
 use yamldoc::Document;
 
 mod animation;
+mod decorations;
+mod fonts;
+mod panel;
 mod values;
+mod wallpaper;
 mod widgets;
 
 pub use animation::AnimationTheme;
+pub use decorations::DecorationTheme;
+pub use fonts::{FONTS_SECTION, FontNames, FontTheme};
+pub use panel::PanelTheme;
+pub use wallpaper::{WALLPAPERS_DIR, WALLPAPERS_SECTION, WallpaperNames, WallpaperTheme};
 pub use widgets::WidgetTheme;
 
 /// The built-in theme's name: what `theme.colors` holds when the user has
@@ -143,6 +157,24 @@ pub const BUILT_IN_NAME: &str = "Aero";
 
 /// The file inside a theme's directory.
 pub const FILE_NAME: &str = "theme.yaml";
+
+/// The section describing a theme rather than setting anything: its name,
+/// author and the rest of [`ThemeMeta`].
+pub const META_SECTION: &str = "meta";
+
+/// The keys of the [`META_SECTION`] that are read, one per field of
+/// [`ThemeMeta`] -- held to it by a test, so a field added there is a key
+/// listed here, and the theme checker (`crate::themecheck`) does not call a
+/// key it reads ignored.
+pub const META_KEYS: [&str; 7] = [
+    "name",
+    "author",
+    "version",
+    "license",
+    "tags",
+    "screenshots",
+    "supports",
+];
 
 /// Where the system's themes are installed.
 pub const SYSTEM_DIR: &str = "/usr/share/slateos/themes";
@@ -177,6 +209,16 @@ pub const WIDGET_SECTION: &str = "widget-style";
 /// transitions take and the curve they follow, or that nothing moves
 /// ([`AnimationTheme`]). Named as the axis is in `meta.supports`.
 pub const ANIMATION_SECTION: &str = "animation";
+
+/// The section holding a theme's window frames: the title bar, its buttons,
+/// the border and the shadow ([`DecorationTheme`]). Named as the axis is in
+/// `meta.supports`.
+pub const DECORATIONS_SECTION: &str = "window-decorations";
+
+/// The section holding a theme's taskbar panel: how much glass it wears and
+/// how its tiles are spaced ([`PanelTheme`]). Named as the axis is in
+/// `meta.supports`.
+pub const PANEL_SECTION: &str = "taskbar-panel";
 
 /// The largest theme file that is read.
 ///
@@ -259,19 +301,11 @@ impl ThemeDirs {
     }
 }
 
-/// `$XDG_DATA_HOME/slateos/themes`, or `$HOME/.local/share/slateos/themes`.
+/// `$XDG_DATA_HOME/slateos/themes`, or `$HOME/.local/share/slateos/themes`:
+/// `themes` in the user's data directory, which `settingsfile` finds for
+/// everything kept there.
 fn user_dir() -> Option<PathBuf> {
-    let data = match env::var_os("XDG_DATA_HOME") {
-        Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
-        _ => {
-            let home = env::var_os("HOME")?;
-            if home.is_empty() {
-                return None;
-            }
-            PathBuf::from(home).join(".local").join("share")
-        }
-    };
-    Some(data.join("slateos").join("themes"))
+    crate::config::data_dir().map(|data| data.join("themes"))
 }
 
 /// Whether `id` can name a theme: a single ordinary path component, so that
@@ -321,6 +355,15 @@ pub enum ThemeError {
     NoWidgetStyle,
     /// The file was read but has no usable `animation` section.
     NoAnimation,
+    /// The file was read but has no usable `window-decorations` section.
+    NoDecorations,
+    /// The file was read but has no usable `taskbar-panel` section.
+    NoPanel,
+    /// The file was read but recommends no wallpaper that is in the theme's
+    /// folder.
+    NoWallpapers,
+    /// The file was read but has no usable `fonts` section.
+    NoFonts,
 }
 
 impl fmt::Display for ThemeError {
@@ -338,6 +381,10 @@ impl fmt::Display for ThemeError {
             Self::NoColors => f.write_str("sets no colours"),
             Self::NoWidgetStyle => f.write_str("sets no widget style"),
             Self::NoAnimation => f.write_str("sets no animation"),
+            Self::NoDecorations => f.write_str("sets no window frames"),
+            Self::NoPanel => f.write_str("sets no taskbar panel"),
+            Self::NoWallpapers => f.write_str("recommends no wallpaper"),
+            Self::NoFonts => f.write_str("recommends no fonts"),
         }
     }
 }
@@ -384,6 +431,22 @@ pub struct ThemeFile {
     /// [`Motion::STILL`] where it says `enabled: false`; `None` when it has no
     /// such section, or one that sets nothing usable.
     pub motion: Option<Motion>,
+    /// The window frames its `window-decorations` section sets, over the
+    /// built-in ones; `None` when it has no such section, or one that sets
+    /// nothing usable.
+    pub decorations: Option<DecorationStyle>,
+    /// The taskbar panel its `taskbar-panel` section sets, over the built-in
+    /// one; `None` when it has no such section, or one that sets nothing
+    /// usable.
+    pub panel: Option<PanelStyle>,
+    /// The wallpapers its `wallpapers` section recommends, as it names them
+    /// ([`WallpaperTheme`] finds them); `None` when it has no such section,
+    /// or one that names no picture.
+    pub wallpapers: Option<WallpaperNames>,
+    /// The fonts its `fonts` section recommends, as it names them
+    /// ([`FontTheme`] chooses among them); `None` when it has no such
+    /// section, or one that names no family.
+    pub fonts: Option<FontNames>,
     /// What in it was not understood and so was ignored -- a colour this
     /// desktop has no role for, a value that is not a colour. For the theme's
     /// author, and for a theme browser to show them: the theme is used without
@@ -400,13 +463,13 @@ pub fn parse(text: &str) -> ThemeFile {
     let doc = Document::parse(text);
     let mut warnings = Warnings::default();
     let meta = ThemeMeta {
-        name: scalar(&doc, &["meta", "name"]),
-        author: scalar(&doc, &["meta", "author"]),
-        version: scalar(&doc, &["meta", "version"]),
-        license: scalar(&doc, &["meta", "license"]),
-        tags: list(&doc, &["meta", "tags"]),
-        screenshots: list(&doc, &["meta", "screenshots"]),
-        supports: list(&doc, &["meta", "supports"]),
+        name: scalar(&doc, &[META_SECTION, "name"]),
+        author: scalar(&doc, &[META_SECTION, "author"]),
+        version: scalar(&doc, &[META_SECTION, "version"]),
+        license: scalar(&doc, &[META_SECTION, "license"]),
+        tags: list(&doc, &[META_SECTION, "tags"]),
+        screenshots: list(&doc, &[META_SECTION, "screenshots"]),
+        supports: list(&doc, &[META_SECTION, "supports"]),
     };
     let colors = ThemeColors {
         dark: read_colors(&doc, DARK_SECTION, &mut warnings),
@@ -418,11 +481,19 @@ pub fn parse(text: &str) -> ThemeFile {
     };
     let widget_style = widgets::read(&doc, &mut warnings);
     let motion = animation::read(&doc, &mut warnings);
+    let decorations = decorations::read(&doc, &mut warnings);
+    let panel = panel::read(&doc, &mut warnings);
+    let wallpapers = wallpaper::read(&doc, &mut warnings);
+    let fonts = fonts::read(&doc, &mut warnings);
     ThemeFile {
         meta,
         colors,
         widget_style,
         motion,
+        decorations,
+        panel,
+        wallpapers,
+        fonts,
         warnings: warnings.finish(),
     }
 }
@@ -587,7 +658,7 @@ fn read_section(
 
 /// A value as a warning quotes it: whole if short, cut and marked if not, so
 /// a quarter-megabyte value cannot become a quarter-megabyte message.
-fn quoted(value: &str) -> String {
+pub(crate) fn quoted(value: &str) -> String {
     let mut chars = value.chars();
     let head: String = chars.by_ref().take(MAX_QUOTED_CHARS).collect();
     if chars.next().is_some() {
@@ -630,7 +701,7 @@ fn read_theme_file(path: &Path) -> Result<ThemeFile, ThemeError> {
 }
 
 /// The bytes of the theme file at `path`, within [`MAX_FILE_BYTES`].
-fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
+pub(crate) fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
     let unreadable = |e: std::io::Error| ThemeError::Unreadable(e.to_string());
     let file = fs::File::open(path).map_err(unreadable)?;
     let size = file.metadata().map_err(unreadable)?.len();
@@ -652,8 +723,10 @@ fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
 
 /// What the settings read from `doc` depend on besides the document itself:
 /// the files of the themes chosen for the axes read with them -- the colours,
-/// the widget style and the animation -- where each was found, and what it
-/// holds. The dependency fingerprint of [`crate::watcher`].
+/// the widget style, the animation, the window frames, the taskbar panel, the
+/// wallpapers and the fonts -- where each was found, and what it holds; and
+/// which of the wallpaper theme's recommended pictures are there. The
+/// dependency fingerprint of [`crate::watcher`].
 ///
 /// A theme chosen for several axes is one file, and is counted once.
 pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
@@ -663,6 +736,10 @@ pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
         crate::color_theme_name(doc),
         crate::widget_theme_name(doc),
         crate::animation_theme_name(doc),
+        crate::decoration_theme_name(doc),
+        crate::panel_theme_name(doc),
+        crate::wallpaper_theme_name(doc),
+        crate::font_theme_name(doc),
     ]
     .into_iter()
     .flatten()
@@ -680,6 +757,15 @@ pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
             out.extend_from_slice(b"\0\0");
         }
         out.extend_from_slice(&part);
+    }
+    // Outside the loop: the pictures count even when the wallpaper theme's
+    // file was counted for another axis.
+    if let Some(id) = crate::wallpaper_theme_name(doc) {
+        let pictures = wallpaper::fingerprint(&id);
+        if !pictures.is_empty() {
+            out.extend_from_slice(b"\0\0");
+            out.extend_from_slice(&pictures);
+        }
     }
     out
 }
@@ -874,6 +960,23 @@ pub struct ThemeInfo {
     /// Whether it has a usable `animation` section: how the desktop's
     /// transitions move.
     pub has_animation: bool,
+    /// Whether it has a usable `window-decorations` section: the shape of
+    /// the windows' frames.
+    pub has_decorations: bool,
+    /// Whether it has a usable `taskbar-panel` section: the taskbar's finish
+    /// and spacing.
+    pub has_panel: bool,
+    /// Whether its `wallpapers` section recommends a picture that is in its
+    /// folder: what choosing it for the wallpaper axis shows.
+    pub has_wallpapers: bool,
+    /// The pictures its [`WALLPAPERS_DIR`] bundles, by name: what a list can
+    /// offer as pictures to choose, recommended or not.
+    pub wallpapers: Vec<PathBuf>,
+    /// The fonts its `fonts` section recommends, by role, in the order they
+    /// are tried: what a font page shows, with which of them this machine
+    /// has (`guitk::text::family_installed`). Empty for the built-in theme,
+    /// which recommends none.
+    pub fonts: FontNames,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -906,6 +1009,22 @@ impl ThemeInfo {
         self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_animation)
     }
 
+    /// Whether it can be chosen for the window-decorations axis: it was
+    /// read, and its `window-decorations` section sets something -- or it is
+    /// the built-in theme, whose frames are compiled in.
+    #[must_use]
+    pub fn provides_decorations(&self) -> bool {
+        self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_decorations)
+    }
+
+    /// Whether it can be chosen for the taskbar-panel axis: it was read, and
+    /// its `taskbar-panel` section sets something -- or it is the built-in
+    /// theme, whose panel is compiled in.
+    #[must_use]
+    pub fn provides_panel(&self) -> bool {
+        self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_panel)
+    }
+
     /// Whether it can be chosen for the icons axis: its folder holds an
     /// [`icons`](crate::icons::ICONS_DIR) directory -- or it is the built-in
     /// theme, whose icons are compiled in. A folder with icons and no
@@ -921,6 +1040,24 @@ impl ThemeInfo {
                 .dir
                 .as_ref()
                 .is_some_and(|dir| dir.join(crate::icons::ICONS_DIR).is_dir())
+    }
+
+    /// Whether it can be chosen for the wallpaper axis: it was read, and
+    /// recommends a picture that is in its folder. Not the built-in theme,
+    /// which recommends none -- choosing it is choosing your own picture.
+    #[must_use]
+    pub fn provides_wallpapers(&self) -> bool {
+        self.problem.is_none() && self.has_wallpapers
+    }
+
+    /// Whether it can be chosen for the fonts axis: it was read, and
+    /// recommends a family -- installed here or not, since a family is
+    /// installed where it is used and a font page offers to install it. Not
+    /// the built-in theme, which recommends none -- choosing it is choosing
+    /// your own fonts.
+    #[must_use]
+    pub fn provides_fonts(&self) -> bool {
+        self.problem.is_none() && !self.fonts.is_empty()
     }
 }
 
@@ -1008,17 +1145,30 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             has_light: true,
             has_widget_style: true,
             has_animation: true,
+            has_decorations: true,
+            has_panel: true,
+            has_wallpapers: false,
+            wallpapers: Vec::new(),
+            fonts: FontNames::default(),
             warnings: Vec::new(),
             problem: None,
         }
     };
-    // Whatever its file says, the built-in theme's colours, icons, controls
-    // and motion are compiled in: it covers both modes, draws every icon and
-    // every control, moves everything, and cannot fail to load.
+    // Whatever its file says, the built-in theme's colours, icons, controls,
+    // motion, window frames and taskbar panel are compiled in: it covers both
+    // modes, draws every icon, control, frame and bar, moves everything, and
+    // cannot fail to load. And it recommends no wallpaper: choosing it for
+    // that axis is choosing your own picture (`WallpaperTheme::built_in`) --
+    // and no font: choosing it for the fonts is choosing your own
+    // (`FontTheme::built_in`).
     info.has_dark = true;
     info.has_light = true;
     info.has_widget_style = true;
     info.has_animation = true;
+    info.has_decorations = true;
+    info.has_panel = true;
+    info.has_wallpapers = false;
+    info.fonts = FontNames::default();
     info.problem = None;
     info
 }
@@ -1044,15 +1194,30 @@ fn describe(
                     )),
                 }
             }
+            // As choosing it would find them: a recommendation counts when it
+            // is a picture in the theme's folder (`WallpaperTheme::load`).
+            let has_wallpapers = file.wallpapers.as_ref().is_some_and(|names| {
+                [&names.dark, &names.light]
+                    .into_iter()
+                    .flatten()
+                    .any(|name| confined(&dir, name).is_some_and(|path| path.is_file()))
+            });
+            let wallpapers = wallpaper::bundled(&dir);
+            let fonts = file.fonts.unwrap_or_default();
             ThemeInfo {
                 id: id.to_owned(),
                 name: file.meta.name.clone().unwrap_or(shown),
                 origin,
-                dir: Some(dir),
                 has_dark: !file.colors.dark.is_empty(),
                 has_light: !file.colors.light.is_empty(),
                 has_widget_style: file.widget_style.is_some(),
                 has_animation: file.motion.is_some(),
+                has_decorations: file.decorations.is_some(),
+                has_panel: file.panel.is_some(),
+                has_wallpapers,
+                wallpapers,
+                fonts,
+                dir: Some(dir),
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -1063,13 +1228,18 @@ fn describe(
             id: id.to_owned(),
             name: shown,
             origin,
-            dir: Some(dir),
             meta: ThemeMeta::default(),
             screenshots: Vec::new(),
             has_dark: false,
             has_light: false,
             has_widget_style: false,
             has_animation: false,
+            has_decorations: false,
+            has_panel: false,
+            has_wallpapers: false,
+            wallpapers: wallpaper::bundled(&dir),
+            fonts: FontNames::default(),
+            dir: Some(dir),
             warnings: Vec::new(),
             problem: Some(err),
         },
@@ -1078,7 +1248,7 @@ fn describe(
 
 /// `name` resolved inside `dir`, if it stays there: relative, and made only
 /// of ordinary components (and `.`).
-fn confined(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn confined(dir: &Path, name: &str) -> Option<PathBuf> {
     let relative = Path::new(name);
     let inside = !name.is_empty()
         && relative

@@ -382,7 +382,17 @@ exclude = [
 # that feature. Declaring the name here keeps ordinary `cargo build` free of
 # `unexpected_cfgs` warnings. It lives at workspace scope because a crate that
 # sets `lints.workspace = true` may not also define its own `[lints.rust]`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kasan_instrumented)'] }
+#
+# `target_vendor = "slateos"` is the vendor of SlateOS's own target
+# (`toolchain/x86_64-slateos.json`), which the compiler's list of known
+# vendors does not have: every `#[cfg(target_vendor = "slateos")]` in the tree
+# -- the channel transport in `gui/remote`, the file chooser in
+# `gui/filechooser` -- was an `unexpected_cfgs` warning, and an error under
+# `RUSTDOCFLAGS=-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(kasan_instrumented)',
+    'cfg(target_vendor, values("slateos"))',
+] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

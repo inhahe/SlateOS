@@ -2658,10 +2658,13 @@ terminal, so what you type goes nowhere.\r\n"
         }
 
         // Alt and a character: ESC and the character, the meta convention --
-        // Alt+B is readline's back-a-word. It sent nothing.
-        if mods.alt && !mods.ctrl && event.types_text() {
+        // Alt+B is readline's back-a-word. It sent nothing. The character is
+        // the key's own `text`: Alt+B is a command to a text field, and
+        // `typed` -- what a field types -- yields nothing for one.
+        let meta: String = event.text.chars().filter(|c| !c.is_control()).collect();
+        if mods.alt && !mods.ctrl && !meta.is_empty() {
             let mut bytes = vec![0x1b];
-            bytes.extend(event.typed().collect::<String>().bytes());
+            bytes.extend(meta.bytes());
             return bytes;
         }
 

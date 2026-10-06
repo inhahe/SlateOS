@@ -312,17 +312,6 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
   - [x] System load average (EWMA of runnable tasks, BSP-driven 1Hz sample)
   - [x] Per-CPU utilization tracking (total/idle tick counters, cpuinfo command)
 - [x] Capability-gated syscalls
-- [x] "Request capability from user" dialog mechanism
-  - [x] Capability request broker (kernel-side queue, approve/deny/cancel/timeout)
-  - [x] Auto-deny fail-safe when no policy handler registered
-  - [x] Per-process request limit (4 pending max)
-  - [x] System-wide request limit (32 pending max)
-  - [x] Audit trail for all requests (pending/approved/denied/timed-out/cancelled)
-  - [x] Handler register/unregister with auto-deny on unregister
-  - [x] Kshell `capreq`/`cr` command (list/approve/deny/handler/test)
-  - [x] Self-test (7 tests: auto-deny, pending, approve, deny, cancel, limits, unregister)
-  - [x] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL)
-  - [x] GUI security dialog integration (security_dialog.rs: UAC-style modal prompt, risk-level assessment, remember decisions, queue system, keyboard nav, 26 tests)
 - [x] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware
   - [x] CPUID detection of SHSTK and IBT support
   - [x] MSR configuration (IA32_S_CET, IA32_U_CET, PL0/PL3 SSP)
@@ -1297,6 +1286,12 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
 - [x] Default apps settings (default_apps.rs: 12 content categories, 10 built-in apps, per-category/extension handlers, app register/unregister, 3-tab panel)
 - [x] Backup settings (backup_settings.rs: full/incremental/differential/mirror, 5 frequencies, local/network targets, source/exclusion management, retention policies, history, 5-tab panel)
 - [x] Device settings (device_settings.rs: 10 device categories, 6 device statuses, 5 driver states, power management, device preferences, hardware report export, 4-tab panel, 20 tests)
+- [x] `[C]` Desktop with draggable icons (snap-to-grid or free placement)
+  - [x] Grid snapping (cells sized by the icon-size setting), free placement + auto-arrange modes, chosen from the desktop menu's View submenu and saved in `deskicons.yaml` — **really done 2026-09-25**: this line was ticked from the start while the only modes were a snap and an always-sorted arrange, with no way to choose; see lane C's entry above and `design-decisions.md` §869
+  - [x] Rubber-band selection, Ctrl+A select all, Ctrl+Click toggle -- **really done 2026-10-05**: Ctrl+click (and a rubber band dragged with Ctrl held) was not reachable until then, because the desktop was never told that Ctrl is held; lane F put the modifiers on every pointer event and the shell now reads them (`known-issues/TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION.md`). Corrected 2026-09-25
+  - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
+  - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
+  - [x] Double-click activate, right-click context menu, F2 rename, Delete -- **really done 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Rename, Pin to taskbar, Remove from desktop), Delete and F2 rename in place are all real now.
 
 # OS Development Roadmap — SIX-AGENT EDITION
 ## Phase 3: Graphics and GUI

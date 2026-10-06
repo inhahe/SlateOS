@@ -51,6 +51,11 @@ settingsfile = { path = "../settingsfile", features = ["testing"] }
 # `themes.rs`, which pass their directories in rather than use the scratch
 # user's.
 scratchdir = { path = "../../userspace/scratchdir" }
+# The sound player, for the tests alone: the theme checker's sound checks
+# are held to its own size limit and container test, which this crate does
+# not depend on for its build (it would pull every decoder into every
+# program that draws).
+sound = { path = "../sound" }
 
 [features]
 # Compiles `appearance::palette_check`, the sweep that proves a module draws

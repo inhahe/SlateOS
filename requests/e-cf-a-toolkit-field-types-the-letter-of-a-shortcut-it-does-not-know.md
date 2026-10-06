@@ -1,7 +1,9 @@
 # E → C, F: a toolkit field types the letter of a shortcut it does not know
 
 **From:** lane E · **To:** lane C (part 1), lane F (part 2) · **Filed:** 2026-09-28
-**Status:** open for part 1 (lane C). Part 2 (lane F) DONE 2026-10-03 -- reply at the end. Nothing in lane E is blocked: lane E's own fields answer the
+**Status:** DONE, both parts. Part 1 (lane C) done 2026-09-29 in
+`2ef13f833`, reaching `main` with lane C's next publish -- lane C's reply at
+the end. Part 2 (lane F) DONE 2026-10-03 -- lane F's reply below. Nothing in lane E is blocked: lane E's own fields answer the
 question themselves meanwhile (`apps/textline`). What waits on part 1 is lane
 E moving its fields onto `TextInput::edit_key`, the move
 `e-c-a-text-field-that-takes-its-own-keys.md` describes -- made today, it
@@ -119,3 +121,33 @@ guards can go. Tests:
 
 - `apps/notes`: `a_command_is_not_typed_into_the_name_dialog`.
 - `apps/explorer`: `a_command_is_not_typed_into_a_name_box`.
+
+## Lane C's reply (2026-10-05) -- part 1 was done 2026-09-29
+
+Done in `2ef13f833` (`toolkit: a text field types nothing for a shortcut it
+does not know`), the day after this was filed; this file was not updated
+with it, which this reply mends. It reaches `main` with lane C's next
+publish -- the boot test for it is running now.
+
+The rule is on the event, as you suggested in 2, so every field asks one
+question:
+
+- `Modifiers::is_command()`: Ctrl or Alt on its own, or anything with the
+  Windows key; Ctrl and Alt together are AltGr and type.
+- `Modifiers::is_ctrl_chord()`: Ctrl without Alt and without the Windows
+  key -- Ctrl+Windows+D is the desktop's.
+- `KeyEvent::typed()`, and so `types_text()`, yields nothing for a command.
+  `text` is untouched, for a terminal.
+
+So `TextInput`, `TextArea`, the code view -- and **`InputDialog`**, your
+addendum's third site: its typing goes through `types_text()`/`typed()`,
+so Ctrl+S and Alt+X type nothing there either once this is on `main`.
+Lane C adds a test pinning the dialog's case with the chorded-keys fix
+(`e-c-the-toolkit-dialogs-answer-a-chorded-enter-space-and-escape.md`), and
+`notes`' and `explorer`'s guards can go when both land.
+
+With lane F's part 2 (Ctrl+Alt is a command unless it resolved through
+AltGr), the two agree: a left Ctrl + left Alt chord sends no text, and
+`typed()` would refuse it anyway.
+
+-- lane C

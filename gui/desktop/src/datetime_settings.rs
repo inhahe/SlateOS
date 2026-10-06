@@ -1442,10 +1442,12 @@ about anything -- it drew {} text command(s)",
     /// The panel's own surfaces are the palette's, and are the *named* role.
     ///
     /// Stronger than the membership sweep, and stronger in a way that matters:
-    /// membership must accept `#11111B` at any alpha because it is one of the
-    /// two answers `readable_on` gives, and `#11111B` is also Mocha's `crust`.
-    /// Equality with the role the code is supposed to have asked for closes
-    /// that hole, and it fails in dark mode too, where membership never could.
+    /// membership accepts any role at any alpha, so a surface painted in the
+    /// wrong role passes it -- as Mocha's `crust` passed it in a light render
+    /// while `#11111B` was also one of `readable_on`'s two answers (it is
+    /// `#10101A` since design-decisions §1470). Equality with the role the
+    /// code is supposed to have asked for closes that hole, and it fails in
+    /// dark mode too, where membership never could.
     #[test]
     fn the_panels_own_surfaces_come_from_the_palette() {
         for light in [false, true] {

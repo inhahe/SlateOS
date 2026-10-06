@@ -64,7 +64,7 @@ struct NodeId(usize);
 const ROOT: NodeId = NodeId(0);
 
 /// One step, where it hangs, and where redo goes from it.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Node<E> {
     /// The step. `None` only for the root, which is the state before every
     /// step the history still holds.
@@ -92,7 +92,10 @@ struct Node<E> {
 /// parent's redo branch, and pruning keeps the redo index on the same child.
 /// Undo and a journey *up* to a fork then need to set nothing: the branch
 /// redo takes from there is already the one just left.
-#[derive(Debug)]
+///
+/// Cloned whole, branches and all: a copied field undoes as its original
+/// would.
+#[derive(Clone, Debug)]
 pub struct UndoHistory<E> {
     /// Every node, by id; `None` for a freed slot.
     nodes: Vec<Option<Node<E>>>,
@@ -231,6 +234,48 @@ impl<E: Clone> UndoHistory<E> {
     #[must_use]
     pub fn can_redo(&self) -> bool {
         self.redo_child(self.current).is_some()
+    }
+
+    /// How many steps undo can take from here, one [`undo`](Self::undo) at a
+    /// time: the steps between the state the document is at and the earliest
+    /// state the history still holds. What a status bar shows as "Undo: 3".
+    #[must_use]
+    pub fn undo_depth(&self) -> usize {
+        self.line_up(self.current).len().saturating_sub(1)
+    }
+
+    /// How many steps redo can take from here, one [`redo`](Self::redo) at a
+    /// time, down the branch each step's redo goes to.
+    #[must_use]
+    pub fn redo_depth(&self) -> usize {
+        let mut depth = 0_usize;
+        let mut at = self.current;
+        // Bounded by the node count, as `line_up` is: a cycle, which `record`
+        // cannot make, ends rather than hangs.
+        while depth < self.nodes.len() {
+            match self.redo_child(at) {
+                Some(child) => {
+                    depth = depth.saturating_add(1);
+                    at = child;
+                }
+                None => break,
+            }
+        }
+        depth
+    }
+
+    /// Whether [`later`](Self::later) would go anywhere: some state was first
+    /// reached after this one, on whichever branch.
+    ///
+    /// Not [`can_redo`](Self::can_redo)'s question. A state undone out of and
+    /// then left for a new branch has nothing to redo -- and still a later
+    /// state, the new branch made after it. ([`earlier`](Self::earlier)'s
+    /// question is `can_undo`'s: every state but the earliest held has one
+    /// before it in time.)
+    #[must_use]
+    pub fn can_later(&self) -> bool {
+        let here = self.seq_of(self.current);
+        self.live().any(|(_, n)| n.seq > here)
     }
 
     /// Take back the step the document is at: the step to revert, or `None`
@@ -580,6 +625,67 @@ mod tests {
         undoing(&mut h, &mut doc);
         assert!(!h.select_branch(1));
         assert_eq!(h.branch(), 0);
+    }
+
+    /// **The depths are how many steps undo and redo take**, one at a time,
+    /// along the line and down each step's redo branch -- the branch chosen
+    /// included -- and a limit holds undo's to it.
+    #[test]
+    fn the_depths_are_the_steps_undo_and_redo_take() {
+        let mut h = history(10);
+        assert_eq!((h.undo_depth(), h.redo_depth()), (0, 0));
+        for word in ["a", "b", "c"] {
+            h.record(Push(word));
+        }
+        assert_eq!((h.undo_depth(), h.redo_depth()), (3, 0));
+        h.undo();
+        h.undo();
+        assert_eq!((h.undo_depth(), h.redo_depth()), (1, 2));
+        // A new branch at "a": redo goes down it, one step.
+        h.record(Push("d"));
+        h.undo();
+        assert_eq!((h.undo_depth(), h.redo_depth()), (1, 1));
+        // The old branch, "b" then "c": two.
+        assert!(h.select_branch(0));
+        assert_eq!(h.redo_depth(), 2);
+        // Counted as redo goes: each step taken is one fewer to take.
+        let mut steps = 0;
+        while h.redo().is_some() {
+            steps += 1;
+        }
+        assert_eq!(steps, 2);
+        assert_eq!((h.undo_depth(), h.redo_depth()), (3, 0));
+
+        let mut short = history(2);
+        for word in ["a", "b", "c", "d", "e"] {
+            short.record(Push(word));
+        }
+        assert_eq!(short.undo_depth(), 2, "the limit holds undo's depth");
+    }
+
+    /// **`can_later` is whether later goes anywhere** -- not whether redo
+    /// does: a state left for a new branch has nothing to redo and still a
+    /// later state.
+    #[test]
+    fn can_later_is_whether_later_goes_anywhere() {
+        let mut h = history(10);
+        assert!(!h.can_later());
+        h.record(Push("a"));
+        h.record(Push("b"));
+        assert!(!h.can_later(), "the latest state");
+        h.undo();
+        assert!(h.can_later());
+        h.record(Push("c")); // a new branch at "a"
+        assert!(!h.can_later());
+        h.undo();
+        assert!(h.select_branch(0));
+        h.redo(); // at "b": first reached before "c"
+        assert!(!h.can_redo(), "nothing to redo at b");
+        assert!(h.can_later(), "c was reached after b");
+        // Later goes there: back out of "b", on down to "c".
+        let journey = h.later();
+        assert_eq!(journey.len(), 2, "{journey:?}");
+        assert!(!h.can_later(), "later went to the latest");
     }
 
     /// Earlier and later walk every state in the order it was first reached,

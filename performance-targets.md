@@ -30,6 +30,7 @@ These subsystems are on the hot path for virtually every workload. Naive impleme
 | **VFS path lookup** | Every file open, every path resolution | Linux: cached lookup ~200-500ns per component. Use dcache equivalent. |
 | **Filesystem read/write** | All I/O | Compare to ext4 on Linux for sequential and random I/O throughput. Target: within 20% of Linux ext4. |
 | **Compositor frame** | Every display refresh | Must composite a full desktop in < 2ms at 4K to not miss 144Hz vsync. |
+| **libc memory and string functions** | Every program's copies and text: every Rust `Vec`/`String` copy in the userland is the C library's `memcpy` (the sysroot's `compiler_builtins` has no `mem` feature), and every C string passes through `strlen` | glibc 2.39 on the same machine, 1 MiB: `memcpy` ~19 GB/s, `memset` ~28, `strlen` ~49, `memchr` ~30 (its AVX2 versions). Target: within 2x of glibc at every size. `cargo bench -p posix --target x86_64-pc-windows-gnu --bench mem` measures ours; `posix/benches/glibc-reference.c` measures glibc's the same way. Searches (`strstr`, `memmem`) must be linear in their inputs. |
 
 #### A caveat on the compositor row: the instrument exists and asserts nothing
 

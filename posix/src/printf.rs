@@ -4,22 +4,33 @@
 //! wrappers to capture variadic arguments from registers into a flat
 //! array, then pass that array to a Rust formatting engine.
 //!
-//! ## Supported Format Specifiers
+//! ## What it formats
 //!
-//! - `%d`, `%i` — signed decimal integer
-//! - `%u` — unsigned decimal integer
-//! - `%x`, `%X` — unsigned hexadecimal (lower/upper)
-//! - `%o` — unsigned octal
-//! - `%s` — null-terminated string
-//! - `%c` — single character
-//! - `%p` — pointer (prints as `0x` + hex)
-//! - `%%` — literal percent
-//! - `%ld`, `%li`, `%lu`, `%lx`, `%lX`, `%lo` — long variants (same as base on LP64)
-//! - `%f`, `%F` — fixed-point decimal (e.g. `3.140000`)
-//! - `%e`, `%E` — scientific notation (e.g. `3.140000e+00`)
-//! - `%g`, `%G` — auto (%e or %f, whichever is shorter)
-//! - Width and precision: `%10d`, `%-10s`, `%08x`, `%.5s`, `%*d`
-//! - Flags: `-` (left-align), `0` (zero-pad), `+` (sign), ` ` (space), `#` (alt form)
+//! glibc 2.39's printf, as the oracle tables beside this file record it
+//! (`printf_int_oracle.txt` for everything but the floating conversions,
+//! which have their own; `posix/tools/oracle/` makes them):
+//!
+//! - `%d %i %u %o %x %X`, and C23's `%b %B`, with every length modifier
+//!   glibc knows -- `hh h l ll q L j z Z t`, and C23's `wN` and `wfN` --
+//!   each reading only its type's bits of the argument ([`Length`]);
+//! - `%c` and `%s`; `%lc` (`%C`) and `%ls` (`%S`), through `wcrtomb`;
+//! - `%p`: `%#x` of the address, or `(nil)`;
+//! - `%n`, storing in the object its length names;
+//! - `%f %F %e %E %g %G %a %A`, of a `double` or (`L`) a `long double`;
+//! - glibc's `%m` and `%#m`, and `%%`;
+//! - the flags `- + # 0` and space, and `'` and `I`, which change nothing
+//!   in the C locale, as in glibc's;
+//! - widths and precisions, given or `*`;
+//! - arguments by position, `%n$` and `*m$`, up to [`NL_ARGMAX`];
+//! - a conversion glibc does not know, written back as glibc writes it; a
+//!   format that ends inside a specification, which fails or is written back
+//!   as glibc's two passes do ([`format_specs`]); a number past `INT_MAX`,
+//!   `EOVERFLOW`.
+//!
+//! It differs from glibc on purpose in two places, each pinned by the
+//! oracle test's `DEVIATIONS`: `%lc` of a code point past U+10FFFF fails,
+//! `EILSEQ` (`uchar.rs` says why), and a number past `INT_MAX` fails the
+//! call wherever it is, where glibc's positional pass ignores it ([`INT_MAX`]).
 //!
 //! ## Architecture
 //!
@@ -496,41 +507,104 @@ pub(crate) unsafe fn va_arg_long_double(va: &mut VaList) -> crate::x87::LongDoub
     crate::x87::LongDouble::from_bits(sign_exp, significand)
 }
 
-/// Consume the length modifier at `*fpos`, reporting whether it was `L`.
+/// A conversion's length modifier: the type of the argument it takes.
 ///
-/// `L` is the only modifier that changes an argument's *size*: on LP64 every
-/// integer type occupies one 8-byte slot however it is spelled, but `L` on a
-/// floating conversion promotes it to a 16-byte, stack-passed `long double`.
-/// Both the collection pass and the formatting pass must skip the modifier
-/// identically, so they share this function.
+/// It decides how much of the argument's 8-byte slot is the value. An `int`
+/// -- what a conversion without a modifier takes, and what `hh` and `h` take
+/// after the default promotions -- occupies only the low 32 bits of its slot,
+/// and the upper 32 are whatever the caller's register held: a compiler
+/// passing `-7` writes `movl $-7`, and the slot reads `0x00000000fffffff9`.
+/// Until 2026-10-05 every integer was read as all 64 bits, so `printf("%d",
+/// -7)` from C printed 4294967289, `%hhd` of 300 printed 300 where glibc
+/// prints 44, and `%n` stored an `int` whatever it was given.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Length {
+    /// None: `int`, `unsigned int`, `double`.
+    Int,
+    /// `hh`: `signed char`, `unsigned char`.
+    Char,
+    /// `h`: `short`, `unsigned short`.
+    Short,
+    /// `l`: `long`; on `%c` and `%s`, a wide character and a wide string.
+    Long,
+    /// `ll` and glibc's `q`: `long long` -- and, as glibc reads them on a
+    /// floating conversion, `long double`.
+    LongLong,
+    /// `L`: `long double`; on an integer conversion, `long long`, as glibc
+    /// reads it.
+    LongDouble,
+    /// `j`, `z`, glibc's `Z`, `t`: `intmax_t`, `size_t`, `ptrdiff_t`, all
+    /// 64 bits here.
+    Word,
+    /// C23's `wN` and `wfN`: an integer of exactly (or, `f`, at least) `N`
+    /// bits -- `int8_t` ... `int64_t`, `int_fast8_t` ... `int_fast64_t`,
+    /// which glibc on x86-64 makes 8, 64, 64 and 64 bits wide.
+    Bits(u32),
+    /// A `w` without one of the widths C23 allows after it: glibc fails the
+    /// whole call, `EINVAL`.
+    Invalid,
+}
+
+impl Length {
+    /// How many bits of an integer argument's slot are its value.
+    const fn int_bits(self) -> u32 {
+        match self {
+            Self::Int => 32,
+            Self::Char => 8,
+            Self::Short => 16,
+            Self::Bits(n) => n,
+            Self::Long | Self::LongLong | Self::LongDouble | Self::Word | Self::Invalid => 64,
+        }
+    }
+
+    /// A floating conversion with this length takes a `long double`.
+    const fn is_long_double(self) -> bool {
+        matches!(self, Self::LongDouble | Self::LongLong)
+    }
+}
+
+/// Read the length modifier at `*fpos` and move past it.
 ///
 /// # Safety
 /// `fmt` must be NUL-terminated and `*fpos` a valid index into it.
-unsafe fn skip_length_modifier(fmt: *const u8, fpos: &mut usize) -> bool {
-    // SAFETY: caller guarantees fmt is NUL-terminated and fpos in range.
-    match unsafe { *fmt.add(*fpos) } {
-        b'l' => {
-            *fpos = fpos.wrapping_add(1);
-            // SAFETY: as above.
-            if unsafe { *fmt.add(*fpos) } == b'l' {
-                *fpos = fpos.wrapping_add(1);
+unsafe fn parse_length(fmt: *const u8, fpos: &mut usize) -> Length {
+    // SAFETY: the caller's contract, at every read: each is at or before
+    // the NUL, which no arm moves past.
+    let at = |i: usize| unsafe { *fmt.add(i) };
+    let c = at(*fpos);
+    let next = fpos.wrapping_add(1);
+    let (len, end) = match c {
+        b'h' if at(next) == b'h' => (Length::Char, next.wrapping_add(1)),
+        b'h' => (Length::Short, next),
+        b'l' if at(next) == b'l' => (Length::LongLong, next.wrapping_add(1)),
+        b'l' => (Length::Long, next),
+        b'q' => (Length::LongLong, next),
+        b'L' => (Length::LongDouble, next),
+        b'j' | b'z' | b'Z' | b't' => (Length::Word, next),
+        b'w' => {
+            let fast = at(next) == b'f';
+            let mut i = if fast { next.wrapping_add(1) } else { next };
+            let mut n = 0u32;
+            while at(i).is_ascii_digit() {
+                n = n
+                    .saturating_mul(10)
+                    .saturating_add(u32::from(at(i).wrapping_sub(b'0')));
+                i = i.wrapping_add(1);
             }
+            let len = match (fast, n) {
+                (false, 8 | 16 | 32 | 64) => Length::Bits(n),
+                // glibc's fast types on x86-64: `int_fast8_t` is a
+                // `signed char`, the other three a `long`.
+                (true, 8) => Length::Bits(8),
+                (true, 16 | 32 | 64) => Length::Bits(64),
+                _ => Length::Invalid,
+            };
+            (len, i)
         }
-        b'h' => {
-            *fpos = fpos.wrapping_add(1);
-            // SAFETY: as above.
-            if unsafe { *fmt.add(*fpos) } == b'h' {
-                *fpos = fpos.wrapping_add(1);
-            }
-        }
-        b'z' | b'j' | b't' => *fpos = fpos.wrapping_add(1),
-        b'L' => {
-            *fpos = fpos.wrapping_add(1);
-            return true;
-        }
-        _ => {}
-    }
-    false
+        _ => (Length::Int, *fpos),
+    };
+    *fpos = end;
+    len
 }
 
 /// The argument source for one formatting pass.
@@ -543,10 +617,15 @@ unsafe fn skip_length_modifier(fmt: *const u8, fpos: &mut usize) -> bool {
 /// represent a MEMORY-class `long double` at all, and required a second
 /// format-string walk that had to stay in exact lock-step with this one.
 ///
+/// A format that names its arguments by position (`%2$d`, `*1$`) cannot be
+/// read in document order, and reads them through [`Positional`] instead.
+///
 /// `None` means "no arguments available" — a null `va_list`, which the C
 /// standard leaves undefined but which we render as zeros rather than a fault.
 pub(crate) struct Args<'a> {
     va: Option<&'a mut VaList>,
+    /// Set for a format with positional arguments.
+    positional: Option<PositionalReader<'a>>,
 }
 
 impl<'a> Args<'a> {
@@ -559,7 +638,10 @@ impl<'a> Args<'a> {
     /// any `v*printf`, and it is checked nowhere: the whole unsafety of the
     /// printf family lives in this one constructor.
     pub(crate) const unsafe fn new(va: Option<&'a mut VaList>) -> Self {
-        Self { va }
+        Self {
+            va,
+            positional: None,
+        }
     }
 
     /// Wrap a possibly-null `va_list` pointer, as the C entry points receive
@@ -574,21 +656,39 @@ impl<'a> Args<'a> {
             // SAFETY: non-null, and the caller's va_list contract carries over.
             Self {
                 va: Some(unsafe { &mut *va }),
+                positional: None,
             }
         }
     }
 
     /// An argument source with nothing in it; every request yields zero.
     pub(crate) const fn empty() -> Self {
-        Self { va: None }
+        Self {
+            va: None,
+            positional: None,
+        }
     }
 
-    /// Next integer/pointer argument.
+    /// For a positional format: the argument the next fetch reads, by
+    /// position (`n$`, `*m$`), or `None` for glibc's next unnumbered one.
+    /// A format read in order ignores it.
+    fn select(&mut self, position: Option<usize>) {
+        if let Some(r) = self.positional.as_mut() {
+            r.cursor = position;
+        }
+    }
+
+    /// Next integer/pointer argument: its whole 8-byte slot.
     ///
     /// Pointers share the INTEGER class on System V, so this is also the only
     /// accessor `scanf.rs` needs: every scanf conversion consumes exactly one
-    /// destination pointer.
+    /// destination pointer. A narrower integer is the slot's low bits, which
+    /// the caller takes ([`signed_arg`], [`unsigned_arg`]).
     pub(crate) fn int(&mut self) -> u64 {
+        if let Some(r) = self.positional.as_mut() {
+            let n = r.take();
+            return r.table.int(n);
+        }
         match self.va.as_deref_mut() {
             // SAFETY: the va_list contract is upheld by `Args::new`.
             Some(va) => unsafe { va_arg_int(va) },
@@ -598,6 +698,10 @@ impl<'a> Args<'a> {
 
     /// Next `double` argument, as raw bits.
     fn double(&mut self) -> u64 {
+        if let Some(r) = self.positional.as_mut() {
+            let n = r.take();
+            return r.table.double(n);
+        }
         match self.va.as_deref_mut() {
             // SAFETY: the va_list contract is upheld by `Args::new`.
             Some(va) => unsafe { va_arg_double(va) },
@@ -605,13 +709,285 @@ impl<'a> Args<'a> {
         }
     }
 
-    /// Next `long double` argument, narrowed to `f64` bits.
+    /// Next `long double` argument.
     fn long_double(&mut self) -> crate::x87::LongDouble {
+        if let Some(r) = self.positional.as_mut() {
+            let n = r.take();
+            return r.table.long_double(n);
+        }
         match self.va.as_deref_mut() {
             // SAFETY: the va_list contract is upheld by `Args::new`.
             Some(va) => unsafe { va_arg_long_double(va) },
             None => crate::x87::LongDouble::from_bits(0, 0),
         }
+    }
+
+    /// A `*`'s width or precision: an `int`, its slot's low 32 bits.
+    fn int_for_star(&mut self, star: Star) -> i32 {
+        if let Star::At(m) = star {
+            self.select(Some(m));
+        }
+        // An `int`'s value is the low half of its slot; the high half is
+        // whatever the caller's register held.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let w = self.int() as u32 as i32;
+        w
+    }
+
+    /// The integer argument `spec` formats, its whole slot.
+    fn value_int(&mut self, spec: &FormatSpec) -> u64 {
+        self.select(spec.position);
+        self.int()
+    }
+
+    /// The `double` argument `spec` formats, as raw bits.
+    fn value_double(&mut self, spec: &FormatSpec) -> u64 {
+        self.select(spec.position);
+        self.double()
+    }
+
+    /// The `long double` argument `spec` formats.
+    fn value_long_double(&mut self, spec: &FormatSpec) -> crate::x87::LongDouble {
+        self.select(spec.position);
+        self.long_double()
+    }
+}
+
+/// glibc's `NL_ARGMAX`: the most arguments a format may name by position.
+const NL_ARGMAX: usize = 4096;
+
+/// What one position of a positional format holds -- how far reading it
+/// moves a `va_list`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ArgKind {
+    /// Named by no conversion: read as an `int`, as glibc reads a gap.
+    Unnamed,
+    Int,
+    Double,
+    LongDouble,
+}
+
+/// The arguments of a format that names them by position -- POSIX's `%n$`
+/// and `*m$`, glibc's `printf_positional`: each position's kind, from a scan
+/// of the whole format before anything is formatted, and the `va_list` as it
+/// stood before any argument was read. A position is read by walking a copy
+/// of that `va_list` past the ones before it, so the format may name its
+/// arguments in any order, and one more than once. glibc reads them all into
+/// an array first; walking again for each costs nothing at the handful of
+/// arguments a format has, and allocates nothing.
+struct Positional {
+    start: Option<VaList>,
+    kinds: [ArgKind; NL_ARGMAX],
+}
+
+/// A [`Positional`] being read: which position the next fetch takes.
+struct PositionalReader<'a> {
+    table: &'a Positional,
+    /// Set by [`Args::select`]: the position the next fetch reads.
+    cursor: Option<usize>,
+    /// glibc's `posn`: how many arguments unnumbered conversions and `*`s
+    /// have taken. The next one is `posn + 1`.
+    posn: usize,
+}
+
+impl PositionalReader<'_> {
+    /// The position the next fetch reads: the one selected, else the next
+    /// unnumbered one.
+    fn take(&mut self) -> usize {
+        self.cursor.take().unwrap_or_else(|| {
+            self.posn = self.posn.saturating_add(1);
+            self.posn
+        })
+    }
+}
+
+impl Positional {
+    /// The positional table for `fmt`, or `None` when no specification
+    /// names an argument by position -- it is then read in order.
+    /// `Err(EINVAL)` for a position past [`NL_ARGMAX`], or a `w` with no
+    /// width C23 allows; `Err(EOVERFLOW)` for a number past [`INT_MAX`] --
+    /// whichever comes first, as glibc's first pass meets them.
+    ///
+    /// The conversions are walked as the formatting pass walks them, and each
+    /// argument a conversion or a `*` takes is recorded at its position --
+    /// unnumbered ones at glibc's next `posn`, in the same order -- with the
+    /// kind its conversion reads. A position named twice keeps the first.
+    /// An `n$` makes the format positional whether or not its conversion
+    /// takes an argument: glibc switches passes at the `$`, so `"abc%2$"`,
+    /// which ends inside the specification, is written `abc%`.
+    fn scan(fmt: *const u8, start: Option<VaList>) -> Result<Option<Self>, i32> {
+        // Cheap refusal for the usual format: a position needs a `$`.
+        let mut i = 0usize;
+        let mut dollar = false;
+        loop {
+            // SAFETY: `fmt` is NUL-terminated (the callers' contract); this
+            // stops at the NUL.
+            match unsafe { *fmt.add(i) } {
+                0 => break,
+                b'$' => {
+                    dollar = true;
+                    break;
+                }
+                _ => i = i.wrapping_add(1),
+            }
+        }
+        if !dollar {
+            return Ok(None);
+        }
+
+        let mut table = Self {
+            start,
+            kinds: [ArgKind::Unnamed; NL_ARGMAX],
+        };
+        let mut named = false;
+        let mut posn = 0usize;
+        let mut set = |pos: usize, kind: ArgKind| -> Result<(), i32> {
+            let slot = pos
+                .checked_sub(1)
+                .and_then(|k| table.kinds.get_mut(k))
+                .ok_or(crate::errno::EINVAL)?;
+            if *slot == ArgKind::Unnamed {
+                *slot = kind;
+            }
+            Ok(())
+        };
+        let next = |posn: &mut usize| {
+            *posn = posn.saturating_add(1);
+            *posn
+        };
+        let mut fpos = 0usize;
+        loop {
+            // SAFETY: as above, and `fpos` never passes the NUL: each step
+            // below stops at it.
+            let c = unsafe { *fmt.add(fpos) };
+            if c == 0 {
+                break;
+            }
+            fpos = fpos.wrapping_add(1);
+            if c != b'%' {
+                continue;
+            }
+            let raw = parse_spec(fmt, &mut fpos);
+            if raw.overflow {
+                return Err(crate::errno::EOVERFLOW);
+            }
+            if raw.length == Length::Invalid {
+                return Err(crate::errno::EINVAL);
+            }
+            named |= raw.position.is_some();
+            for count in [Some(raw.width), raw.precision].into_iter().flatten() {
+                match count {
+                    Count::Given(_) => {}
+                    Count::Star(Star::At(m)) => {
+                        named = true;
+                        set(m, ArgKind::Int)?;
+                    }
+                    Count::Star(Star::Next) => set(next(&mut posn), ArgKind::Int)?,
+                }
+            }
+            // SAFETY: `parse_spec` stops at the conversion, or at the NUL.
+            let conv = unsafe { *fmt.add(fpos) };
+            let kind = match conv {
+                0 => break,
+                b'd' | b'i' | b'u' | b'o' | b'x' | b'X' | b'b' | b'B' | b'c' | b'C' | b'p'
+                | b'n' | b's' | b'S' => Some(ArgKind::Int),
+                b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => {
+                    Some(if raw.length.is_long_double() {
+                        ArgKind::LongDouble
+                    } else {
+                        ArgKind::Double
+                    })
+                }
+                _ => None,
+            };
+            fpos = fpos.wrapping_add(1);
+            if let Some(kind) = kind {
+                let pos = raw.position.unwrap_or_else(|| next(&mut posn));
+                set(pos, kind)?;
+            }
+        }
+        Ok(named.then_some(table))
+    }
+
+    /// A copy of the `va_list` with the arguments before `position` read,
+    /// or `None` without one.
+    fn walk_to(&self, position: usize) -> Option<VaList> {
+        let mut va = self.start?;
+        for kind in self.kinds.iter().take(position.saturating_sub(1)) {
+            // SAFETY: the copy reads the caller's arguments in order, each as
+            // the format says it is -- the `va_list` contract `Args::new`
+            // carries -- and a gap as an `int`, as glibc reads one.
+            unsafe {
+                match kind {
+                    ArgKind::Unnamed | ArgKind::Int => {
+                        va_arg_int(&mut va);
+                    }
+                    ArgKind::Double => {
+                        va_arg_double(&mut va);
+                    }
+                    ArgKind::LongDouble => {
+                        va_arg_long_double(&mut va);
+                    }
+                }
+            }
+        }
+        Some(va)
+    }
+
+    fn int(&self, position: usize) -> u64 {
+        self.walk_to(position).map_or(0, |mut va| {
+            // SAFETY: as in `walk_to`: the argument at `position`.
+            unsafe { va_arg_int(&mut va) }
+        })
+    }
+
+    fn double(&self, position: usize) -> u64 {
+        self.walk_to(position).map_or(0, |mut va| {
+            // SAFETY: as in `walk_to`: the argument at `position`.
+            unsafe { va_arg_double(&mut va) }
+        })
+    }
+
+    fn long_double(&self, position: usize) -> crate::x87::LongDouble {
+        self.walk_to(position)
+            .map_or(crate::x87::LongDouble::from_bits(0, 0), |mut va| {
+                // SAFETY: as in `walk_to`: the argument at `position`.
+                unsafe { va_arg_long_double(&mut va) }
+            })
+    }
+}
+
+/// The integer argument `spec` formats, signed: its slot's low
+/// `length.int_bits()` bits, sign-extended -- `%hhd` of 300 is 44, as
+/// glibc's is, and an `int` whose slot's high half the caller left zero is
+/// still negative.
+fn signed_arg(args: &mut Args, spec: &FormatSpec) -> i64 {
+    let v = args.value_int(spec);
+    // The truncations are the conversion: the value is the low bits.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
+    match spec.length.int_bits() {
+        8 => i64::from(v as u8 as i8),
+        16 => i64::from(v as u16 as i16),
+        32 => i64::from(v as u32 as i32),
+        _ => v as i64,
+    }
+}
+
+/// The integer argument `spec` formats, unsigned: its slot's low
+/// `length.int_bits()` bits.
+fn unsigned_arg(args: &mut Args, spec: &FormatSpec) -> u64 {
+    let v = args.value_int(spec);
+    // The truncations are the conversion: the value is the low bits.
+    #[allow(clippy::cast_possible_truncation)]
+    match spec.length.int_bits() {
+        8 => u64::from(v as u8),
+        16 => u64::from(v as u16),
+        32 => u64::from(v as u32),
+        _ => v,
     }
 }
 
@@ -1054,8 +1430,9 @@ mod gnu_obstack_printf {
 // Core formatting engine
 // ---------------------------------------------------------------------------
 
-/// Maximum digits in any formatted number (u64 in octal = 22 digits + sign + prefix).
-const NUM_BUF_SIZE: usize = 32;
+/// Room for the digits of any integer this formats: a `u64` in binary, `%b`'s
+/// 64 digits, with the margin the others never reach.
+const NUM_BUF_SIZE: usize = 66;
 
 /// Output destination for the formatting engine.
 ///
@@ -1186,94 +1563,218 @@ fn write_all(fd: i32, data: *const u8, len: usize) -> bool {
     true
 }
 
-/// Parsed format specifier state.
+/// What a `*` names: the next argument in order, or (`*m$`) the `m`th.
+#[derive(Clone, Copy, Debug)]
+enum Star {
+    Next,
+    At(usize),
+}
+
+/// A width or precision as the format gives it: a number, or a `*`.
+#[derive(Clone, Copy, Debug)]
+enum Count {
+    Given(usize),
+    Star(Star),
+}
+
+/// One conversion's specification as written, before any argument is
+/// read: what [`parse_spec`] produces, and what a format with positional
+/// arguments is scanned for ([`Positional::scan`]).
+struct RawSpec {
+    /// `n$`: the argument the conversion formats, by position.
+    position: Option<usize>,
+    flags: FormatFlags,
+    width: Count,
+    precision: Option<Count>,
+    length: Length,
+    /// A number in it -- a position, a width, a precision, or the digits
+    /// after a `*`, `$` or not -- is past [`INT_MAX`]: the call fails,
+    /// `EOVERFLOW`, as glibc's `read_int` makes it fail.
+    overflow: bool,
+}
+
+/// C's `INT_MAX`: the largest position, width or precision a format may
+/// write. glibc's first pass fails a call with a larger one, `EOVERFLOW`;
+/// its positional pass ignores one -- `"%1$d %2147483648d"` of 5 is `5 5`
+/// there -- which this library does not copy: past `INT_MAX` is `EOVERFLOW`
+/// wherever the number is.
+const INT_MAX: usize = 0x7fff_ffff;
+
+/// Parsed format specifier state, its `*`s read.
 struct FormatSpec {
     flags: FormatFlags,
     width: usize,
     precision: Option<usize>,
-    /// The `L` length modifier was present, so a floating conversion must
-    /// fetch a 16-byte `long double` rather than a `double`.
-    long_double: bool,
+    /// The argument's type ([`Length`]).
+    length: Length,
+    /// `n$`: the argument to format, by position; `None` for the next.
+    position: Option<usize>,
 }
 
-/// Parse flags, width, precision, and length modifier from a format string.
+/// A decimal number at `*fpos`, and `*fpos` moved past it; saturates rather
+/// than wrapping, so an absurd width is still absurd.
 ///
-/// `fpos` points past the initial '%'.  On return, `fpos` points to
-/// the conversion character (d, s, x, etc.).  Width/precision `*`
-/// arguments are consumed from `args`.
-fn parse_spec(fmt: *const u8, fpos: &mut usize, args: &mut Args) -> FormatSpec {
-    let mut flags = FormatFlags::new();
+/// # Safety
+/// `fmt` must be NUL-terminated and `*fpos` a valid index into it.
+unsafe fn parse_number(fmt: *const u8, fpos: &mut usize) -> usize {
+    let mut n: usize = 0;
+    // SAFETY: the caller's contract; the loop stops at the NUL, which is
+    // no digit.
+    while unsafe { *fmt.add(*fpos) }.is_ascii_digit() {
+        // SAFETY: the byte just read, a digit, before the NUL.
+        let d = usize::from(unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0'));
+        n = n.saturating_mul(10).saturating_add(d);
+        *fpos = fpos.wrapping_add(1);
+    }
+    n
+}
 
-    // Flags.
+/// `m$` at `*fpos` -- digits, then a `$`, `m` not 0 -- read and moved past;
+/// otherwise `None`, and `*fpos` where it was: the digits are a width, or,
+/// after a `*`, the conversion. Digits past [`INT_MAX`] set `overflow`,
+/// with a `$` or without, as glibc's first pass reads them.
+///
+/// # Safety
+/// `fmt` must be NUL-terminated and `*fpos` a valid index into it.
+unsafe fn parse_position(fmt: *const u8, fpos: &mut usize, overflow: &mut bool) -> Option<usize> {
+    let start = *fpos;
+    // SAFETY: the caller's contract.
+    let n = unsafe { parse_number(fmt, fpos) };
+    *overflow |= n > INT_MAX;
+    // SAFETY: as above; `parse_number` stopped at or before the NUL.
+    if n != 0 && unsafe { *fmt.add(*fpos) } == b'$' {
+        *fpos = fpos.wrapping_add(1);
+        return Some(n);
+    }
+    *fpos = start;
+    None
+}
+
+/// Parse an optional position, flags, width, precision and length modifier.
+///
+/// `fpos` points past the initial '%'.  On return, `fpos` points to the
+/// conversion character (d, s, x, etc.).  Nothing is read from the
+/// arguments: a `*` is recorded, and [`resolve_spec`] reads it.
+fn parse_spec(fmt: *const u8, fpos: &mut usize) -> RawSpec {
+    // SAFETY: `fmt` is NUL-terminated -- the callers' contract -- and no
+    // step below moves past the NUL, so every index `at` is given is in it.
+    let at = |i: usize| unsafe { *fmt.add(i) };
+    let mut overflow = false;
+    // SAFETY: as for `at`.
+    let position = unsafe { parse_position(fmt, fpos, &mut overflow) };
+
+    let mut flags = FormatFlags::new();
     loop {
-        match unsafe { *fmt.add(*fpos) } {
+        match at(*fpos) {
             b'-' => flags.left_align = true,
             b'+' => flags.force_sign = true,
             b' ' => flags.space_sign = true,
             b'0' => flags.zero_pad = true,
             b'#' => flags.alt_form = true,
+            // `'`, grouping by the locale's thousands separator, and glibc's
+            // `I`, the locale's own digits: this library's locale is C, which
+            // has neither, so both format as if absent -- as glibc's do in C
+            // and C.UTF-8 -- but are kept, for an unknown conversion's text.
+            b'\'' => flags.group = true,
+            b'I' => flags.i18n = true,
             _ => break,
         }
         *fpos = fpos.wrapping_add(1);
     }
 
-    // Width.
-    let mut width: usize = 0;
-    if unsafe { *fmt.add(*fpos) } == b'*' {
-        let w = args.int() as i64;
-        if w < 0 {
-            flags.left_align = true;
-            // Negate safely: wrapping_neg of i64::MIN is still negative,
-            // so saturate at i64::MAX to avoid a huge spurious width.
-            let pos = w.wrapping_neg();
-            width = (if pos < 0 { i64::MAX } else { pos }) as usize;
-        } else {
-            width = w as usize;
-        }
+    let width = if at(*fpos) == b'*' {
         *fpos = fpos.wrapping_add(1);
+        // SAFETY: as for `at`.
+        match unsafe { parse_position(fmt, fpos, &mut overflow) } {
+            Some(m) => Count::Star(Star::At(m)),
+            None => Count::Star(Star::Next),
+        }
     } else {
-        while unsafe { *fmt.add(*fpos) }.is_ascii_digit() {
-            width = width
-                .saturating_mul(10)
-                .saturating_add((unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0')) as usize);
-            *fpos = fpos.wrapping_add(1);
-        }
-    }
+        // SAFETY: as for `at`.
+        let w = unsafe { parse_number(fmt, fpos) };
+        overflow |= w > INT_MAX;
+        Count::Given(w)
+    };
 
-    // Precision.
-    let mut precision: Option<usize> = None;
-    if unsafe { *fmt.add(*fpos) } == b'.' {
+    let precision = if at(*fpos) == b'.' {
         *fpos = fpos.wrapping_add(1);
-        if unsafe { *fmt.add(*fpos) } == b'*' {
-            let p = args.int() as i32;
-            if p >= 0 {
-                precision = Some(p as usize);
-            }
+        if at(*fpos) == b'*' {
             *fpos = fpos.wrapping_add(1);
+            // SAFETY: as for `at`.
+            Some(match unsafe { parse_position(fmt, fpos, &mut overflow) } {
+                Some(m) => Count::Star(Star::At(m)),
+                None => Count::Star(Star::Next),
+            })
         } else {
-            let mut p: usize = 0;
-            while unsafe { *fmt.add(*fpos) }.is_ascii_digit() {
-                p = p
-                    .saturating_mul(10)
-                    .saturating_add((unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0')) as usize);
-                *fpos = fpos.wrapping_add(1);
-            }
-            precision = Some(p);
+            // SAFETY: as for `at`.
+            let p = unsafe { parse_number(fmt, fpos) };
+            overflow |= p > INT_MAX;
+            Some(Count::Given(p))
         }
+    } else {
+        None
+    };
+
+    // SAFETY: as for `at`.
+    let length = unsafe { parse_length(fmt, fpos) };
+
+    RawSpec {
+        position,
+        flags,
+        width,
+        precision,
+        length,
+        overflow,
     }
+}
 
-    // Length modifier.  Only `L` matters: every integer type occupies one
-    // 8-byte slot on LP64 however it is spelled, but `L` on a floating
-    // conversion promotes the argument to a 16-byte, stack-passed
-    // `long double`, so the fetch below has to know.
-    // SAFETY: fmt is NUL-terminated and fpos is in range.
-    let long_double = unsafe { skip_length_modifier(fmt, fpos) };
+/// Whether glibc's printf, meeting conversion `conv` after `length`, leaves
+/// its first pass for its positional one, `printf_positional`, for the rest
+/// of the format -- as it does at a `$` too ([`Positional::scan`]). It does
+/// at a conversion it does not know, and, after a lone `h`, at one that
+/// formats no integer: its table for that step knows only `d i u o x X b B
+/// n %`, though the positional pass formats `%hs` as `%s`. The passes
+/// differ in what this library copies in one way: a format that ends inside
+/// a specification fails in the first (`EINVAL`) and is written back in the
+/// second (`abc%` is `abc%`) -- see [`format_specs`].
+fn leaves_glibcs_first_pass(length: Length, conv: u8) -> bool {
+    match conv {
+        b'%' | b'd' | b'i' | b'u' | b'o' | b'x' | b'X' | b'b' | b'B' | b'n' => false,
+        b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' | b'c' | b'C' | b's' | b'S'
+        | b'p' | b'm' => length == Length::Short,
+        _ => true,
+    }
+}
 
+/// Read a spec's `*`s from the arguments: a negative width is a `-` flag
+/// and its magnitude, a negative precision is none at all (C17 7.21.6.1
+/// ¶5). Each `*` takes an `int`, its slot's low 32 bits.
+fn resolve_spec(raw: RawSpec, args: &mut Args) -> FormatSpec {
+    let mut flags = raw.flags;
+    let width = match raw.width {
+        Count::Given(w) => w,
+        Count::Star(star) => {
+            let w = args.int_for_star(star);
+            if w < 0 {
+                flags.left_align = true;
+            }
+            usize::try_from(w.unsigned_abs()).unwrap_or(usize::MAX)
+        }
+    };
+    let precision = match raw.precision {
+        None => None,
+        Some(Count::Given(p)) => Some(p),
+        Some(Count::Star(star)) => {
+            let p = args.int_for_star(star);
+            usize::try_from(p).ok()
+        }
+    };
     FormatSpec {
         flags,
         width,
         precision,
-        long_double,
+        length: raw.length,
+        position: raw.position,
     }
 }
 
@@ -1284,50 +1785,89 @@ fn dispatch_spec(
     dst: &mut FmtOutput,
     fmt: *const u8,
     fpos: usize,
-    spec_start: usize,
     spec: &FormatSpec,
     args: &mut Args,
 ) -> usize {
+    // SAFETY: `parse_spec` left `fpos` at the conversion character, before
+    // the format's NUL.
     let ch = unsafe { *fmt.add(fpos) };
     let next = fpos.wrapping_add(1);
 
+    // A `w` with no width C23 allows after it fails the call, as glibc's
+    // does (`%w12d`, `%wd`): `EINVAL`, -1.
+    if spec.length == Length::Invalid {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        dst.failed = true;
+        return next;
+    }
+
     match ch {
+        // glibc prints one `%` whatever is between, a width included.
         b'%' => emit_byte(dst, b'%'),
 
         b'm' => format_errno(dst, spec),
 
         b'd' | b'i' => {
-            let val = args.int() as i64;
+            let val = signed_arg(args, spec);
             format_signed(dst, val, &spec.flags, spec.width, spec.precision);
         }
 
-        b'u' => {
-            let val = args.int();
-            format_unsigned(dst, val, 10, false, &spec.flags, spec.width, spec.precision);
+        b'u' | b'x' | b'X' | b'o' | b'b' | b'B' => {
+            let val = unsigned_arg(args, spec);
+            let (base, upper) = match ch {
+                b'u' => (10, false),
+                b'x' => (16, false),
+                b'X' => (16, true),
+                b'o' => (8, false),
+                b'b' => (2, false),
+                _ => (2, true),
+            };
+            format_unsigned(
+                dst,
+                val,
+                base,
+                upper,
+                &spec.flags,
+                spec.width,
+                spec.precision,
+            );
         }
 
-        b'x' => {
-            let val = args.int();
-            format_unsigned(dst, val, 16, false, &spec.flags, spec.width, spec.precision);
+        // `%ls` and its old spelling `%S`: a wide string, written as the
+        // multibyte text `wcrtomb` makes of it.
+        b'S' => {
+            let ws = args.value_int(spec) as *const crate::wchar::WcharT;
+            format_wide_string(dst, ws, spec);
         }
-
-        b'X' => {
-            let val = args.int();
-            format_unsigned(dst, val, 16, true, &spec.flags, spec.width, spec.precision);
-        }
-
-        b'o' => {
-            let val = args.int();
-            format_unsigned(dst, val, 8, false, &spec.flags, spec.width, spec.precision);
+        b's' if spec.length == Length::Long => {
+            let ws = args.value_int(spec) as *const crate::wchar::WcharT;
+            format_wide_string(dst, ws, spec);
         }
 
         b's' => {
-            let ptr = args.int() as *const u8;
+            let ptr = args.value_int(spec) as *const u8;
             format_string(dst, ptr, &spec.flags, spec.width, spec.precision);
         }
 
+        // `%lc` and `%C`: a wide character (a `wint_t`, the slot's low 32
+        // bits), written as its multibyte sequence.
+        b'C' => {
+            // The truncation is the conversion: a `wint_t` is 32 bits.
+            #[allow(clippy::cast_possible_truncation)]
+            let wc = args.value_int(spec) as u32;
+            format_wide_char(dst, wc, spec);
+        }
+        b'c' if spec.length == Length::Long => {
+            // As above.
+            #[allow(clippy::cast_possible_truncation)]
+            let wc = args.value_int(spec) as u32;
+            format_wide_char(dst, wc, spec);
+        }
+
         b'c' => {
-            let ch_val = args.int() as u8;
+            // `(unsigned char)` of the promoted `int`, as glibc writes it.
+            #[allow(clippy::cast_possible_truncation)]
+            let ch_val = args.value_int(spec) as u8;
             if spec.width > 1 && !spec.flags.left_align {
                 emit_padding(dst, b' ', spec.width.wrapping_sub(1));
             }
@@ -1338,41 +1878,30 @@ fn dispatch_spec(
         }
 
         b'p' => {
-            let val = args.int();
-            // Count hex digits to determine total output width for padding.
-            let hex_len = if val == 0 {
-                1usize
-            } else {
-                let mut n = val;
-                let mut count = 0usize;
-                while n > 0 {
-                    count = count.wrapping_add(1);
-                    n = n.wrapping_shr(4);
-                }
-                count
-            };
-            let total = 2usize.wrapping_add(hex_len); // "0x" + digits
-
-            // Right-justify padding.
-            if !spec.flags.left_align && spec.width > total {
-                emit_padding(dst, b' ', spec.width.wrapping_sub(total));
-            }
-            emit_byte(dst, b'0');
-            emit_byte(dst, b'x');
-            // Emit hex digits without additional padding (handled here).
-            format_unsigned(dst, val, 16, false, &FormatFlags::new(), 0, None);
-            // Left-justify padding.
-            if spec.flags.left_align && spec.width > total {
-                emit_padding(dst, b' ', spec.width.wrapping_sub(total));
-            }
+            let val = args.value_int(spec);
+            format_pointer(dst, val, spec);
         }
 
+        // The count so far, stored in an object of the length's type: an
+        // `int` without one, a `signed char` for `hh`, a `long` for `l`, and
+        // so on. It stored an `int` for every length until 2026-10-05 -- four
+        // bytes over a `signed char`, three of them its neighbours'.
         b'n' => {
-            let ptr = args.int() as *mut i32;
+            let ptr = args.value_int(spec) as *mut u8;
             if !ptr.is_null() {
-                // SAFETY: Caller guarantees ptr is valid.
+                let count = dst.pos;
+                // The truncations are C's: the count is stored in the
+                // object's type, as an assignment would store it.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                // SAFETY: the caller's contract: a pointer to an object of
+                // the type the length names.
                 unsafe {
-                    *ptr = dst.pos as i32;
+                    match spec.length.int_bits() {
+                        8 => ptr.cast::<i8>().write_unaligned(count as i8),
+                        16 => ptr.cast::<i16>().write_unaligned(count as i16),
+                        32 => ptr.cast::<i32>().write_unaligned(count as i32),
+                        _ => ptr.cast::<i64>().write_unaligned(count as i64),
+                    }
                 }
             }
         }
@@ -1380,31 +1909,19 @@ fn dispatch_spec(
         // Floating-point specifiers.  `%Lf` fetches 16 bytes from the overflow
         // area (X87/X87UP is MEMORY-class), not a `double` from %xmm.
         b'f' | b'F' => {
-            let arg = if spec.long_double {
-                FloatArg::Long(args.long_double())
-            } else {
-                FloatArg::Double(f64::from_bits(args.double()))
-            };
+            let arg = float_arg(args, spec);
             let prec = spec.precision.unwrap_or(6);
             format_float_fixed(dst, arg, ch == b'F', &spec.flags, spec.width, prec);
         }
 
         b'e' | b'E' => {
-            let arg = if spec.long_double {
-                FloatArg::Long(args.long_double())
-            } else {
-                FloatArg::Double(f64::from_bits(args.double()))
-            };
+            let arg = float_arg(args, spec);
             let prec = spec.precision.unwrap_or(6);
             format_float_sci(dst, arg, ch == b'E', &spec.flags, spec.width, prec);
         }
 
         b'g' | b'G' => {
-            let arg = if spec.long_double {
-                FloatArg::Long(args.long_double())
-            } else {
-                FloatArg::Double(f64::from_bits(args.double()))
-            };
+            let arg = float_arg(args, spec);
             let prec = if spec.precision == Some(0) {
                 1
             } else {
@@ -1414,11 +1931,7 @@ fn dispatch_spec(
         }
 
         b'a' | b'A' => {
-            let arg = if spec.long_double {
-                FloatArg::Long(args.long_double())
-            } else {
-                FloatArg::Double(f64::from_bits(args.double()))
-            };
+            let arg = float_arg(args, spec);
             // No default precision: C99 says an absent one means "as many
             // digits as it takes to be exact", which is not any fixed number.
             format_float_hex(
@@ -1431,18 +1944,148 @@ fn dispatch_spec(
             );
         }
 
-        _ => {
-            // Unknown specifier or premature end — emit raw.
-            emit_byte(dst, b'%');
-            let mut re = spec_start;
-            while re < next {
-                emit_byte(dst, unsafe { *fmt.add(re) });
-                re = re.wrapping_add(1);
-            }
-        }
+        // A conversion character glibc does not know is written back as
+        // glibc's `printf_unknown` writes it.
+        _ => format_unknown(dst, spec, ch),
     }
 
     next
+}
+
+/// The floating argument `spec` formats: a `long double` for `L` (and
+/// glibc's `ll` and `q`), else a `double`.
+fn float_arg(args: &mut Args, spec: &FormatSpec) -> FloatArg {
+    if spec.length.is_long_double() {
+        FloatArg::Long(args.value_long_double(spec))
+    } else {
+        FloatArg::Double(f64::from_bits(args.value_double(spec)))
+    }
+}
+
+/// `%lc`: the wide character `wc` as `wcrtomb` writes it -- UTF-8 here --
+/// padded to the width in bytes, as glibc pads it. A character with no
+/// multibyte form (a surrogate, or past U+10FFFF, which this library
+/// refuses as its `wcrtomb` does: `uchar.rs` says why) fails the call,
+/// `EILSEQ`, as glibc's does. `wc` 0 is one NUL byte.
+fn format_wide_char(dst: &mut FmtOutput, wc: u32, spec: &FormatSpec) {
+    let mut bytes = [0u8; 4];
+    let n = crate::wchar::utf8_encode(wc, &mut bytes);
+    if n == 0 {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        dst.failed = true;
+        return;
+    }
+    let text = bytes.get(..n).unwrap_or_default();
+    if !spec.flags.left_align && spec.width > n {
+        emit_padding(dst, b' ', spec.width.wrapping_sub(n));
+    }
+    emit_bytes(dst, text);
+    if spec.flags.left_align && spec.width > n {
+        emit_padding(dst, b' ', spec.width.wrapping_sub(n));
+    }
+}
+
+/// A conversion character glibc does not know, written back as glibc's
+/// `printf_unknown` writes it: `%`, the flags in its own order -- `#`, `'`,
+/// `+` or else a space, `-`, `0` unless `-` is there too, `I` -- the width
+/// when not 0, `.` and the precision when given, and the character, if the
+/// format did not end first. The length modifier is not written, and a `*`
+/// is the number it read: `%-0 +#y` is `%#+-y`, `%ly` is `%y`, `%*y` of 7
+/// is `%7y`. Nothing else is read.
+fn format_unknown(dst: &mut FmtOutput, spec: &FormatSpec, ch: u8) {
+    let f = &spec.flags;
+    emit_byte(dst, b'%');
+    for (on, byte) in [
+        (f.alt_form, b'#'),
+        (f.group, b'\''),
+        (f.force_sign, b'+'),
+        (f.space_sign && !f.force_sign, b' '),
+        (f.left_align, b'-'),
+        (f.zero_pad && !f.left_align, b'0'),
+        (f.i18n, b'I'),
+    ] {
+        if on {
+            emit_byte(dst, byte);
+        }
+    }
+    let mut digits = [0u8; NUM_BUF_SIZE];
+    if spec.width != 0 {
+        let n = u64_to_dec(spec.width as u64, &mut digits);
+        emit_bytes(
+            dst,
+            digits
+                .get(NUM_BUF_SIZE.saturating_sub(n)..)
+                .unwrap_or_default(),
+        );
+    }
+    if let Some(p) = spec.precision {
+        emit_byte(dst, b'.');
+        let n = u64_to_dec(p as u64, &mut digits);
+        emit_bytes(
+            dst,
+            digits
+                .get(NUM_BUF_SIZE.saturating_sub(n)..)
+                .unwrap_or_default(),
+        );
+    }
+    if ch != 0 {
+        emit_byte(dst, ch);
+    }
+}
+
+/// `%ls`: the wide string at `ws` as `wcrtomb` writes it, character by
+/// character. The precision is a count of bytes, and a character that would
+/// pass it is not written in part but left out, with the rest; the width
+/// pads in bytes. A NULL string is `(null)`, as `%s`'s is. A character with
+/// no multibyte form, before the precision ends, fails the call, `EILSEQ`.
+fn format_wide_string(dst: &mut FmtOutput, ws: *const crate::wchar::WcharT, spec: &FormatSpec) {
+    if ws.is_null() {
+        format_string(
+            dst,
+            core::ptr::null(),
+            &spec.flags,
+            spec.width,
+            spec.precision,
+        );
+        return;
+    }
+    let max = spec.precision.unwrap_or(usize::MAX);
+    // First: how many bytes, and how many characters make them.
+    let mut len = 0usize;
+    let mut chars = 0usize;
+    loop {
+        // SAFETY: the caller's contract: a NUL-terminated wide string; this
+        // stops at its NUL.
+        let wc = unsafe { *ws.add(chars) };
+        if wc == 0 || len >= max {
+            break;
+        }
+        let mut bytes = [0u8; 4];
+        let n = u32::try_from(wc).map_or(0, |c| crate::wchar::utf8_encode(c, &mut bytes));
+        if n == 0 {
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            dst.failed = true;
+            return;
+        }
+        if len.saturating_add(n) > max {
+            break;
+        }
+        len = len.saturating_add(n);
+        chars = chars.saturating_add(1);
+    }
+    if !spec.flags.left_align && spec.width > len {
+        emit_padding(dst, b' ', spec.width.wrapping_sub(len));
+    }
+    for i in 0..chars {
+        // SAFETY: one of the `chars` characters read above.
+        let wc = unsafe { *ws.add(i) };
+        let mut bytes = [0u8; 4];
+        let n = u32::try_from(wc).map_or(0, |c| crate::wchar::utf8_encode(c, &mut bytes));
+        emit_bytes(dst, bytes.get(..n).unwrap_or_default());
+    }
+    if spec.flags.left_align && spec.width > len {
+        emit_padding(dst, b' ', spec.width.wrapping_sub(len));
+    }
 }
 
 /// Format a printf-style string into a buffer.
@@ -1467,12 +2110,50 @@ fn format_into(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
     if fmt.is_null() {
         return -1;
     }
+    // A format that names its arguments by position is scanned whole before
+    // anything is written, and reads them through the table that makes.
+    let start = args.va.as_deref().copied();
+    match Positional::scan(fmt, start) {
+        Err(e) => {
+            crate::errno::set_errno(e);
+            dst.failed = true;
+            -1
+        }
+        Ok(Some(table)) => {
+            let mut positional = Args {
+                va: None,
+                positional: Some(PositionalReader {
+                    table: &table,
+                    cursor: None,
+                    posn: 0,
+                }),
+            };
+            format_specs(dst, fmt, &mut positional)
+        }
+        Ok(None) => format_specs(dst, fmt, args),
+    }
+}
 
+/// [`format_into`]'s walk of the format: its text, and each conversion.
+/// It stops at a conversion that fails -- `EILSEQ`, `EINVAL`, `EOVERFLOW`,
+/// no memory, or a sink that refused a write -- as glibc's does, so nothing
+/// after it is read or stored.
+///
+/// A format that ends inside a specification (`"abc%"`, `"%-5"`) fails,
+/// `EINVAL`, if glibc's printf would still be in its first pass there, and
+/// is written back as an unknown conversion (`abc%`, `%-5`) if it would be
+/// in its positional one: it switches at an `n$` or `*m$` (then
+/// [`Args::positional`] is set) or at a conversion its first pass does not
+/// know ([`leaves_glibcs_first_pass`]).
+fn format_specs(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
     let mut fpos: usize = 0;
+    let mut glibc_positional = args.positional.is_some();
 
     loop {
+        // SAFETY: `fmt` is NUL-terminated (the callers' contract), and the
+        // walk stops at the NUL.
         let ch = unsafe { *fmt.add(fpos) };
-        if ch == 0 {
+        if ch == 0 || dst.failed {
             break;
         }
 
@@ -1484,14 +2165,28 @@ fn format_into(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
 
         fpos = fpos.wrapping_add(1); // skip '%'
 
-        // Handle premature end.
-        if unsafe { *fmt.add(fpos) } == 0 {
+        let raw = parse_spec(fmt, &mut fpos);
+        if raw.overflow {
+            crate::errno::set_errno(crate::errno::EOVERFLOW);
+            dst.failed = true;
             break;
         }
-
-        let spec_start = fpos;
-        let spec = parse_spec(fmt, &mut fpos, args);
-        fpos = dispatch_spec(dst, fmt, fpos, spec_start, &spec, args);
+        let spec = resolve_spec(raw, args);
+        // SAFETY: `parse_spec` stopped at the conversion, or at the NUL.
+        let conv = unsafe { *fmt.add(fpos) };
+        if conv == 0 {
+            // The format ends inside a specification -- a `%` the format
+            // ends with, too.
+            if glibc_positional {
+                format_unknown(dst, &spec, 0);
+            } else {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                dst.failed = true;
+            }
+            break;
+        }
+        glibc_positional |= leaves_glibcs_first_pass(spec.length, conv);
+        fpos = dispatch_spec(dst, fmt, fpos, &spec, args);
     }
 
     // POSIX: "[EOVERFLOW] The value to be returned is greater than
@@ -1515,6 +2210,12 @@ struct FormatFlags {
     force_sign: bool,
     space_sign: bool,
     alt_form: bool,
+    /// `'`: group by the locale's thousands separator. This library's
+    /// locale is C, which has none, so it changes no number -- as glibc's
+    /// does not in C and C.UTF-8 -- and is kept for [`format_unknown`].
+    group: bool,
+    /// glibc's `I`: the locale's own digits, which C has not either.
+    i18n: bool,
 }
 
 impl FormatFlags {
@@ -1525,6 +2226,8 @@ impl FormatFlags {
             force_sign: false,
             space_sign: false,
             alt_form: false,
+            group: false,
+            i18n: false,
         }
     }
 }
@@ -1569,7 +2272,9 @@ fn emit_bytes(dst: &mut FmtOutput, data: &[u8]) {
     }
 }
 
-/// Format a signed integer (%d, %i).
+/// Format a signed integer (%d, %i): its sign -- `-`, or for the `+` and
+/// space flags `+` and a space -- and its magnitude, laid out as an
+/// unsigned number is ([`format_number`]).
 fn format_signed(
     dst: &mut FmtOutput,
     val: i64,
@@ -1577,87 +2282,89 @@ fn format_signed(
     width: usize,
     precision: Option<usize>,
 ) {
-    let negative = val < 0;
-    let abs_val = if negative {
-        val.wrapping_neg() as u64
-    } else {
-        val as u64
-    };
-
-    // Convert to digits.
-    let mut num_buf = [0u8; NUM_BUF_SIZE];
-    let mut num_len = u64_to_dec(abs_val, &mut num_buf);
-    // POSIX/C99: precision 0 with value 0 produces no digit output.
-    if precision == Some(0) && abs_val == 0 {
-        num_len = 0;
-    }
-    let digits = if let Some(p) = precision {
-        if p > num_len { p } else { num_len }
-    } else {
-        num_len
-    };
-
-    // Sign character.
-    let sign: Option<u8> = if negative {
+    let sign = if val < 0 {
         Some(b'-')
-    } else if flags.force_sign {
+    } else {
+        flag_sign(flags)
+    };
+    format_number(
+        dst,
+        val.unsigned_abs(),
+        10,
+        false,
+        sign,
+        flags,
+        width,
+        precision,
+    );
+}
+
+/// The sign the `+` and space flags write before a number that is not
+/// negative: `+` over a space when both are given, as C says.
+fn flag_sign(flags: &FormatFlags) -> Option<u8> {
+    if flags.force_sign {
         Some(b'+')
     } else if flags.space_sign {
         Some(b' ')
     } else {
         None
-    };
-
-    let sign_len: usize = usize::from(sign.is_some());
-    let total_len = sign_len.wrapping_add(digits);
-
-    let pad_char = if flags.zero_pad && !flags.left_align && precision.is_none() {
-        b'0'
-    } else {
-        b' '
-    };
-
-    // Right-justify padding (before sign if space-padded, after sign if zero-padded).
-    if !flags.left_align && width > total_len && pad_char == b' ' {
-        emit_padding(dst, b' ', width.wrapping_sub(total_len));
-    }
-
-    // Sign.
-    if let Some(s) = sign {
-        emit_byte(dst, s);
-    }
-
-    // Zero padding (after sign, before digits).
-    if !flags.left_align && width > total_len && pad_char == b'0' {
-        emit_padding(dst, b'0', width.wrapping_sub(total_len));
-    }
-
-    // Precision zero-padding.
-    if let Some(p) = precision
-        && p > num_len
-    {
-        emit_padding(dst, b'0', p.wrapping_sub(num_len));
-    }
-
-    // Digits.
-    let start = NUM_BUF_SIZE.wrapping_sub(num_len);
-    if let Some(slice) = num_buf.get(start..) {
-        emit_bytes(dst, slice);
-    }
-
-    // Left-justify padding.
-    if flags.left_align && width > total_len {
-        emit_padding(dst, b' ', width.wrapping_sub(total_len));
     }
 }
 
-/// Format an unsigned integer (%u, %x, %X, %o).
-#[allow(clippy::too_many_arguments)]
+/// Format an unsigned integer (%u, %x, %X, %o, and C23's %b and %B). It has
+/// no sign: C gives the `+` and space flags to signed conversions only, and
+/// glibc drops them here.
 fn format_unsigned(
     dst: &mut FmtOutput,
     val: u64,
     base: u32,
     upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: Option<usize>,
+) {
+    format_number(dst, val, base, upper, None, flags, width, precision);
+}
+
+/// `%p`, as glibc writes it: a null pointer is `(nil)`, whole whatever the
+/// precision, padded as `%s` pads; any other is `%#x` of its address --
+/// except that the `+` and space flags write their sign, which `%#x` would
+/// drop (`%+p` is `+0x1234`): glibc's pointer conversion joins its number
+/// code past the step that clears them. Until 2026-10-05 this wrote `0x0`
+/// for a null pointer, and kept only the width and `-` flag of the rest.
+fn format_pointer(dst: &mut FmtOutput, val: u64, spec: &FormatSpec) {
+    if val == 0 {
+        format_string(dst, b"(nil)\0".as_ptr(), &spec.flags, spec.width, None);
+        return;
+    }
+    let flags = FormatFlags {
+        alt_form: true,
+        ..spec.flags
+    };
+    format_number(
+        dst,
+        val,
+        16,
+        false,
+        flag_sign(&spec.flags),
+        &flags,
+        spec.width,
+        spec.precision,
+    );
+}
+
+/// An integer conversion's text, as glibc lays it out: `sign`; the `0x`,
+/// `0X`, `0b` or `0B` of the `#` flag on a nonzero number; zeros, to the
+/// precision -- or, with the `0` flag, no precision and no `-`, to the
+/// width; then the digits of `val` in `base`. Spaces pad it to the width,
+/// before it or (`-`) after.
+#[allow(clippy::too_many_arguments)]
+fn format_number(
+    dst: &mut FmtOutput,
+    val: u64,
+    base: u32,
+    upper: bool,
+    sign: Option<u8>,
     flags: &FormatFlags,
     width: usize,
     precision: Option<usize>,
@@ -1683,10 +2390,11 @@ fn format_unsigned(
     // which emitted a separate '0' and produced too many leading zeros
     // when precision already forced a leading zero.
     //
-    // %#x/%#X uses a "0x"/"0X" prefix for nonzero values (different rule).
+    // %#x/%#X uses a "0x"/"0X" prefix for nonzero values (different rule),
+    // and C23's %#b/%#B a "0b"/"0B" one, as glibc writes it.
     let prefix_len: usize = if flags.alt_form {
         match base {
-            16 if val != 0 => 2, // "0x" or "0X"
+            16 | 2 if val != 0 => 2, // "0x", "0X", "0b" or "0B"
             8 => {
                 // C99: "increase precision to force first digit to be zero."
                 // "if the value and precision are both 0, a single 0 is printed."
@@ -1713,7 +2421,9 @@ fn format_unsigned(
         0
     };
 
-    let total_len = prefix_len.wrapping_add(digits);
+    let total_len = usize::from(sign.is_some())
+        .wrapping_add(prefix_len)
+        .wrapping_add(digits);
     let pad_char = if flags.zero_pad && !flags.left_align && precision.is_none() {
         b'0'
     } else {
@@ -1725,10 +2435,22 @@ fn format_unsigned(
         emit_padding(dst, b' ', width.wrapping_sub(total_len));
     }
 
-    // Prefix (only for %#x / %#X).
+    if let Some(s) = sign {
+        emit_byte(dst, s);
+    }
+
+    // Prefix (only for %#x / %#X and %#b / %#B).
     if prefix_len == 2 {
         emit_byte(dst, b'0');
-        emit_byte(dst, if upper { b'X' } else { b'x' });
+        emit_byte(
+            dst,
+            match (base, upper) {
+                (2, false) => b'b',
+                (2, true) => b'B',
+                (_, false) => b'x',
+                (_, true) => b'X',
+            },
+        );
     }
 
     // Right-justify zero padding.
@@ -1753,7 +2475,6 @@ fn format_unsigned(
     }
 }
 
-/// Format a string (%s).
 /// glibc's `%m`: the text of the `errno` the call began with, and `%#m`
 /// its name -- each formatted as `%s` formats a string. `%#m` of a number
 /// that names no error is the number, formatted as `%d` would format it
@@ -1813,6 +2534,11 @@ fn format_errno(dst: &mut FmtOutput, spec: &FormatSpec) {
     format_string(dst, text.as_ptr(), &spec.flags, spec.width, spec.precision);
 }
 
+/// Format a string (%s): up to the precision's count of its bytes, padded
+/// with spaces to the width -- spaces whatever the `0` flag says, as glibc
+/// pads a string. A null pointer is glibc's `(null)` when the precision
+/// leaves room for all of it, and nothing when it does not: `%.3s` of NULL
+/// is empty, not `(nu`, which this wrote until 2026-10-05.
 fn format_string(
     dst: &mut FmtOutput,
     s: *const u8,
@@ -1821,19 +2547,16 @@ fn format_string(
     precision: Option<usize>,
 ) {
     if s.is_null() {
-        // glibc prints "(null)" for NULL, respecting width and precision.
-        let null_str: &[u8] = b"(null)";
-        let len = if let Some(p) = precision {
-            if p < 6 { p } else { 6 }
+        let null_str: &[u8] = if precision.is_none_or(|p| p >= 6) {
+            b"(null)"
         } else {
-            6
+            b""
         };
+        let len = null_str.len();
         if !flags.left_align && width > len {
             emit_padding(dst, b' ', width.wrapping_sub(len));
         }
-        if let Some(slice) = null_str.get(..len) {
-            emit_bytes(dst, slice);
-        }
+        emit_bytes(dst, null_str);
         if flags.left_align && width > len {
             emit_padding(dst, b' ', width.wrapping_sub(len));
         }
@@ -1920,7 +2643,7 @@ fn u64_to_base(mut val: u64, base: u32, upper: bool, buf: &mut [u8; NUM_BUF_SIZE
             *slot = d;
         }
         #[allow(clippy::arithmetic_side_effects)]
-        // base_u64 is always >= 2 (only called with base 8/10/16), so no divide-by-zero.
+        // base_u64 is always >= 2 (only called with base 2/8/10/16), so no divide-by-zero.
         {
             val = val.wrapping_div(base_u64);
         }
@@ -3546,10 +4269,11 @@ pub(crate) mod tests {
         assert_eq!(s, "0x1234");
     }
 
+    /// A null pointer is glibc's `(nil)`; this wrote `0x0` until 2026-10-05.
     #[test]
     fn fmt_p_zero() {
         let (s, _) = snprintf_str(b"%p\0", &[0u64], &[]);
-        assert_eq!(s, "0x0");
+        assert_eq!(s, "(nil)");
     }
 
     #[test]
@@ -3636,11 +4360,15 @@ pub(crate) mod tests {
         assert_eq!(s, "42");
     }
 
+    /// `%u` takes an `unsigned int`: the low 32 bits of the slot, whatever
+    /// is above them. A 64-bit value is `%lu`'s.
     #[test]
     fn fmt_u_large() {
         let val = u64::MAX;
-        let (s, _) = snprintf_str(b"%u\0", &[val], &[]);
+        let (s, _) = snprintf_str(b"%lu\0", &[val], &[]);
         assert_eq!(s, "18446744073709551615");
+        let (s, _) = snprintf_str(b"%u\0", &[val], &[]);
+        assert_eq!(s, "4294967295");
     }
 
     // -----------------------------------------------------------------------
@@ -4025,19 +4753,24 @@ pub(crate) mod tests {
     #[test]
     fn fmt_unknown_specifier() {
         // Unknown specifier should be emitted raw
-        let (s, _) = snprintf_str(b"%q\0", &[42], &[]);
-        // Should emit "%q" raw
+        // (`%q` is not one: `q` is glibc's `long long`, so `"%q"` is a
+        // specification the format ends inside, and fails, `EINVAL`.)
+        let (s, _) = snprintf_str(b"%y\0", &[42], &[]);
+        // Should emit "%y" raw
         assert!(
-            s.contains("%q"),
+            s.contains("%y"),
             "unknown specifier should be emitted raw: {s}"
         );
     }
 
+    /// A `%` the format ends with fails the call, `EINVAL`, as glibc's does
+    /// (its first pass: read by position, it is written back -- the oracle
+    /// test has both). This wrote `test` and succeeded until 2026-10-05.
     #[test]
     fn fmt_trailing_percent() {
-        // "%" at end of string (premature end)
-        let (s, _) = snprintf_str(b"test%\0", &[], &[]);
-        assert_eq!(s, "test");
+        crate::errno::set_errno(0);
+        let (_, n) = snprintf_str(b"test%\0", &[], &[]);
+        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EINVAL));
     }
 
     // -----------------------------------------------------------------------
@@ -5703,6 +6436,242 @@ pub(crate) mod tests {
             compared += 1;
         }
         assert_eq!(compared, 210, "the whole oracle");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// One argument of a `printf_int_oracle.txt` line, built as a C caller
+    /// leaves it.
+    enum OracleArg {
+        /// A whole 8-byte slot: an integer, or (for `i`, `u` and `w`) a
+        /// 32-bit one under junk -- a C caller's register keeps whatever its
+        /// upper half held, which the conversion must not read.
+        Slot(u64),
+        /// A narrow string, NUL-terminated.
+        Narrow(std::vec::Vec<u8>),
+        /// A wide string, NUL-terminated.
+        Wide(std::vec::Vec<i32>),
+        /// `%n`'s object, by kind: `hh`, `h`, `i` or `l`.
+        Store(&'static str),
+    }
+
+    /// What an `int`'s slot holds above its 32 bits, in these tests.
+    const JUNK: u64 = 0xA5A5_A5A5_0000_0000;
+
+    fn oracle_arg(token: &str) -> OracleArg {
+        let (t, v) = token.split_once(':').expect("type:value");
+        match t {
+            "i" => OracleArg::Slot(JUNK | u64::from(v.parse::<i32>().expect("int") as u32)),
+            "u" | "w" => OracleArg::Slot(JUNK | u64::from(v.parse::<u32>().expect("32 bits"))),
+            "p" => OracleArg::Slot(u64::from_str_radix(v, 16).expect("an address")),
+            "l" => OracleArg::Slot(
+                v.parse::<i64>()
+                    .map_or_else(|_| v.parse::<u64>().expect("64 bits"), |n| n as u64),
+            ),
+            "s" => {
+                let mut s = if v == "-" {
+                    std::vec::Vec::new()
+                } else {
+                    dehex_m(v)
+                };
+                s.push(0);
+                OracleArg::Narrow(s)
+            }
+            "S" => {
+                let mut w: std::vec::Vec<i32> = if v == "-" {
+                    std::vec::Vec::new()
+                } else {
+                    v.split('.')
+                        .map(|c| i32::from_str_radix(c, 16).expect("code point"))
+                        .collect()
+                };
+                w.push(0);
+                OracleArg::Wide(w)
+            }
+            "nhh" => OracleArg::Store("hh"),
+            "nh" => OracleArg::Store("h"),
+            "ni" => OracleArg::Store("i"),
+            "nl" => OracleArg::Store("l"),
+            _ => panic!("unknown argument {token}"),
+        }
+    }
+
+    /// What `%n` stored in a canary-filled object of `kind`, if it wrote
+    /// exactly that object's bytes and none past them.
+    fn stored(kind: &str, object: &[u8; 8]) -> Result<i64, std::string::String> {
+        let width = match kind {
+            "hh" => 1,
+            "h" => 2,
+            "i" => 4,
+            _ => 8,
+        };
+        if object[width..].iter().any(|&b| b != 0x55) {
+            return Err(std::format!(
+                "%n of kind {kind} wrote past its object: {object:02x?}"
+            ));
+        }
+        Ok(match width {
+            1 => i64::from(object[0] as i8),
+            2 => i64::from(i16::from_ne_bytes([object[0], object[1]])),
+            4 => i64::from(i32::from_ne_bytes(object[..4].try_into().unwrap())),
+            _ => i64::from_ne_bytes(*object),
+        })
+    }
+
+    /// [`leaves_glibcs_first_pass`] calls a conversion unknown, without a
+    /// length, exactly when [`dispatch_spec`] writes it back as one: every
+    /// byte that is a conversion where it stands, formatted with zeros for
+    /// arguments, is `%` and itself just when the classifier says so. A
+    /// conversion taught to one and not the other fails here.
+    #[test]
+    fn the_first_pass_knows_what_dispatch_knows() {
+        for c in 1u8..=255 {
+            let fmt = [b'%', c, 0];
+            let mut fpos = 1;
+            let _ = parse_spec(fmt.as_ptr(), &mut fpos);
+            if fpos != 1 {
+                continue; // a flag, a digit, a `*`, `.` or a length
+            }
+            let mut buf = [0u8; 64];
+            crate::errno::set_errno(0);
+            let n = with_args(&[0, 0], &[0], |args| {
+                _snprintf_impl(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), args)
+            });
+            let written_back = n == 2 && buf[..2] == [b'%', c];
+            assert_eq!(
+                leaves_glibcs_first_pass(Length::Int, c),
+                written_back,
+                "{c:#04x} ({:?}): {n} {:?}",
+                c as char,
+                &buf[..usize::try_from(n).unwrap_or(0).min(64)]
+            );
+        }
+    }
+
+    /// Where this library means to differ from glibc on a line of
+    /// `printf_int_oracle.txt`: the format and arguments, and the return
+    /// value and `errno` it gives instead.
+    const DEVIATIONS: &[(&str, &str, i32, i32)] = &[
+        // `%lc` of a code point past U+10FFFF: this library refuses it, as
+        // its `wcrtomb` and `c32rtomb` do -- the difference from glibc
+        // `uchar.rs`'s module doc records -- where glibc writes the old
+        // four-byte form.
+        ("[%lc]", "w:1114112", -1, crate::errno::EILSEQ),
+        // A number past INT_MAX after glibc has left its first pass, which
+        // its positional pass ignores (`INT_MAX`'s doc): `EOVERFLOW` here,
+        // as its first pass answers the same specification.
+        ("%1$d %2147483648d", "i:5", -1, crate::errno::EOVERFLOW),
+        ("%1$d %.2147483648d", "i:5", -1, crate::errno::EOVERFLOW),
+        ("%1$d %99999999999$d", "i:5", -1, crate::errno::EOVERFLOW),
+        ("[%y %2147483648d]", "i:5", -1, crate::errno::EOVERFLOW),
+    ];
+
+    /// glibc's printf for every length modifier -- `hh h l ll q L j z Z t`
+    /// and C23's `wN`, `wfN` -- on `%d %i %u %o %x %X` and C23's `%b %B`;
+    /// `%c` and `%lc`, `%s` and `%ls`, NULL for both; `%p`; `%m`; `%n` at
+    /// every width; the `'` and `I` flags; positional arguments; unknown
+    /// conversions; a format cut short, in each of glibc's two passes; and
+    /// numbers past INT_MAX: every line of `printf_int_oracle.txt`
+    /// (`posix/tools/oracle/printf_int_harness.py`), each argument built as
+    /// a C caller leaves it, less the [`DEVIATIONS`], which are pinned to
+    /// their own answers. Until 2026-10-05 every integer was read as its
+    /// whole slot: `%d` of -7 from C printed 4294967289, `%hhd` of 300
+    /// printed 300, `%n` always stored an `int`, and `%2$d` printed itself.
+    #[test]
+    fn printf_is_glibcs_for_every_length_modifier() {
+        let oracle = include_str!("printf_int_oracle.txt");
+        let mut failures = std::vec::Vec::new();
+        let mut compared = 0usize;
+        let mut deviations = 0usize;
+        for line in oracle.lines() {
+            let (left, right) = line.split_once(" | ").expect("line");
+            let (fmt_hex, args_text) = left.split_once(' ').expect("format and arguments");
+            let mut fmt = dehex_m(fmt_hex);
+            let shown = std::string::String::from_utf8_lossy(&fmt).into_owned();
+            fmt.push(0);
+            let mut parts: std::vec::Vec<std::string::String> =
+                right.split(' ').map(std::string::String::from).collect();
+            if let Some(&(_, _, ret, errno)) =
+                DEVIATIONS.iter().find(|d| d.0 == shown && d.1 == args_text)
+            {
+                deviations += 1;
+                parts = std::vec![ret.to_string(), std::format!("-e{errno}")];
+            }
+            let want_ret: i32 = parts[0].parse().expect("return value");
+            let built: std::vec::Vec<OracleArg> = if args_text == "-" {
+                std::vec::Vec::new()
+            } else {
+                args_text.split(',').map(oracle_arg).collect()
+            };
+            let mut objects = std::vec![[0x55u8; 8]; built.len()];
+            let slots: std::vec::Vec<u64> = built
+                .iter()
+                .zip(objects.iter_mut())
+                .map(|(a, object)| match a {
+                    OracleArg::Slot(v) => *v,
+                    OracleArg::Narrow(s) => s.as_ptr() as u64,
+                    OracleArg::Wide(w) => w.as_ptr() as u64,
+                    OracleArg::Store(_) => object.as_mut_ptr() as u64,
+                })
+                .collect();
+            let mut buf = [0u8; 512];
+            crate::errno::set_errno(0);
+            let got_ret = with_args(&slots, &[], |args| {
+                _snprintf_impl(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), args)
+            });
+            let got_errno = crate::errno::get_errno();
+            compared += 1;
+            if want_ret < 0 {
+                let want_errno: i32 = parts[1]
+                    .strip_prefix("-e")
+                    .and_then(|e| e.parse().ok())
+                    .expect("errno");
+                if got_ret != -1 || got_errno != want_errno {
+                    failures.push(std::format!(
+                        "{shown:?} {args_text}: glibc -1 errno {want_errno}, here {got_ret} errno {got_errno}"
+                    ));
+                    continue;
+                }
+            } else {
+                let want = if parts[1] == "-" {
+                    std::vec::Vec::new()
+                } else {
+                    dehex_m(&parts[1])
+                };
+                let got = usize::try_from(got_ret)
+                    .ok()
+                    .and_then(|n| buf.get(..n))
+                    .unwrap_or(&[]);
+                if got_ret != want_ret || got != want.as_slice() {
+                    failures.push(std::format!(
+                        "{shown:?} {args_text}: glibc {want_ret} {:?}, here {got_ret} {:?}",
+                        std::string::String::from_utf8_lossy(&want),
+                        std::string::String::from_utf8_lossy(got)
+                    ));
+                    continue;
+                }
+            }
+            // What `%n` stored -- before a failure too: glibc stores as it
+            // goes, so `"[%hn abc%"` stores 1 and then fails.
+            let mut want_stores = parts[2..].iter().map(|n| n.parse::<i64>().expect("stored"));
+            for (a, object) in built.iter().zip(objects.iter()) {
+                if let OracleArg::Store(kind) = a {
+                    let want = want_stores.next().expect("a stored value");
+                    match stored(kind, object) {
+                        Ok(v) if v == want => {}
+                        Ok(v) => {
+                            failures.push(std::format!("{shown:?}: %n stored {v}, glibc {want}"))
+                        }
+                        Err(e) => failures.push(std::format!("{shown:?}: {e}")),
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 632, "the whole oracle");
+        assert_eq!(
+            deviations,
+            DEVIATIONS.len(),
+            "every deviation is a line of it"
+        );
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

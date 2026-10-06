@@ -327,6 +327,9 @@ pub struct Query {
     pub key: Option<String>,
     /// Text its value holds, whatever the case.
     pub text: Option<String>,
+    /// Whether it could take the keyboard: what a tool walking the controls
+    /// as Tab walks them asks for.
+    pub focusable: Option<bool>,
 }
 
 impl Query {
@@ -357,6 +360,7 @@ impl Query {
                 Some(Value::Text(held)) => held.to_lowercase().contains(&text.to_lowercase()),
                 _ => false,
             })
+            && self.focusable.is_none_or(|f| f == node.focusable)
     }
 }
 

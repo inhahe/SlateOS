@@ -349,6 +349,16 @@ fn a_search_finds_by_role_name_key_and_text() {
         ..Query::default()
     };
     assert!(f.tree.find(&both).is_empty(), "every part must fit");
+    // What could take the keyboard, in the order Tab walks it -- less what
+    // its program keeps from tools.
+    let keyboard = f.tree.find(&Query {
+        focusable: Some(true),
+        ..Query::default()
+    });
+    let mut tab = f.tree.root.focus_order();
+    tab.retain(|&id| id != f.kept_button);
+    assert_eq!(keyboard, tab);
+    assert!(!keyboard.contains(&f.delete), "a disabled button cannot");
 }
 
 /// **A button pressed is clicked, as its user clicks it -- and one its user

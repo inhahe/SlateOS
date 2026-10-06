@@ -52,6 +52,11 @@ fn an_emoji_is_drawn_in_a_skin_tone() {
         assert!(variant.text.ends_with(tone.modifier()), "{tone:?}");
         assert!(variant.name.contains(tone.name()), "{tone:?}");
     }
+    for tone in SkinTone::ALL {
+        assert_eq!(SkinTone::named(tone.name()), Some(tone));
+    }
+    assert_eq!(SkinTone::named("purple"), None);
+    assert_eq!(SkinTone::named("Medium"), None, "spelled as CLDR spells it");
     let grin = emoji().next().unwrap().found();
     assert!(!grin.has_tones());
     assert_eq!(grin.in_tone(SkinTone::Dark), grin);

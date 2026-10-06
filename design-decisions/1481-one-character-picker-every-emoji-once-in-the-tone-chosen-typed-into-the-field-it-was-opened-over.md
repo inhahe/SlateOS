@@ -27,6 +27,7 @@ to apps), so users learn one dialog"; `design.txt` line 711's emoji input.
 | **A pick reaches a field as a key that types it** | an "insert" call per field | Each field already does what follows typing -- the Run box suggests, the start menu searches, a note is saved, a name is kept -- and the window system's eventual delivery to other programs will be the same typed key. | A field that treated a key with no keyboard key differently would need to learn it; none here does. |
 | **In the shell, the picker closes when something is picked** | staying open for more | It was asked for over a field the user was typing in, as a menu row is chosen. The dialog itself stays open on a pick; a host decides. | Several characters take several openings. |
 | **Ctrl+. opens it over a field** | Super+. (Windows) | It is the toolkits' chord (GTK's emoji chooser), types nothing in any field here, and leaves Super+. for the system-wide picker, which needs the window system. | Windows users reach for Super+. first. |
+| **The recent picks and the tone are one file every host shares**, `charpicker.yaml` (`charpicker::Remembered`), read when a host starts and written when the picker comes down having learned something | each host keeping its own | A character picked in one program is recent in the next, and one tone choice holds everywhere -- the one-dialog promise kept across programs, not only in how it looks. | Two hosts open at once each write what they learned; the last to close wins the list. |
 
 **Not done here, and why:**
 
@@ -38,5 +39,3 @@ to apps), so users learn one dialog"; `design.txt` line 711's emoji input.
 - *Characters no installed face draws are offered all the same*, and draw as
   boxes, until the font stack can say whether it can draw one --
   `requests/c-f-ask-whether-a-character-can-be-drawn.md`.
-- *The recent picks and the tone last only while the shell runs* --
-  `known-issues/TD-C-THE-SHELLS-CHARACTER-PICKER-FORGETS-ITS-RECENT-PICKS-AT-LOGOUT.md`.

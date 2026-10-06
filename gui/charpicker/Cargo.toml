@@ -8,6 +8,17 @@ description = "SlateOS character picker: every emoji and the symbols, maths, arr
 # The names, keywords, groups and search it shows.
 charnames = { path = "../charnames" }
 guitk = { path = "../toolkit" }
+# Where `charpicker.yaml` -- the recent picks and the skin tone every host
+# shares -- lives, and how it is replaced without losing the user's copy
+# (src/remembered.rs).
+settingsfile = { path = "../settingsfile" }
+# The file's YAML, rewritten key by key so a user's comments in it survive.
+yamldoc = { path = "../../yamldoc" }
+
+[dev-dependencies]
+# `settingsfile::testing`, for the test that saves and loads the file in a
+# scratch settings directory rather than the developer's own.
+settingsfile = { path = "../settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

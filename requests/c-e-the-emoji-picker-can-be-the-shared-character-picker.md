@@ -26,8 +26,10 @@ table and grid.
 - `gui/charpicker` -- the dialog, `CharPicker`: `handle_key(key, w, h)`,
   `handle_mouse(event, w, h)` and `render(palette, w, h)` / `frame(...)`, as
   `guitk::fontpicker` has them; `CharPickerEvent::{Picked(String), Cancelled}`;
-  `with_recent`/`recent` and `with_tone`/`tone` for a host to keep the user's
-  history and tone; `preferred_size()`.
+  `preferred_size()`; and `Remembered` -- the recent picks and the skin tone
+  in `charpicker.yaml`, one file every host reads (`Remembered::load`,
+  `save`; `CharPicker::with_remembered`, `remembered`), so a character picked
+  in the shell is recent in your window too.
 
 ## What `apps/emojipicker` would become
 

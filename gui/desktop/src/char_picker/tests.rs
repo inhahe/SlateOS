@@ -301,8 +301,10 @@ fn the_picker_remembers_its_picks_and_tone() {
     type_text(&mut shell, "waving hand");
     key(&mut shell, &pressed(Key::Enter));
     assert_eq!(shell.run_dialog.line(), "\u{1F44B}\u{1F3FD}");
-    assert_eq!(shell.char_recent, ["\u{1F44B}"]);
-    assert_eq!(shell.char_tone, Some(SkinTone::Medium));
+    assert_eq!(shell.char_remembered.recent, ["\u{1F44B}"]);
+    assert_eq!(shell.char_remembered.tone, Some(SkinTone::Medium));
+    assert!(shell.take_char_picker_dirty(), "learned something to save");
+    assert!(!shell.take_char_picker_dirty(), "the flag is taken once");
 
     key(&mut shell, &ctrl_period());
     let open = shell.char_picker.as_ref().unwrap();
@@ -312,9 +314,35 @@ fn the_picker_remembers_its_picks_and_tone() {
         open.picker.shown().collect::<Vec<_>>(),
         ["\u{1F44B}\u{1F3FD}"]
     );
-    // Turned down, it still keeps what it learned.
+    // Turned down having learned nothing, it keeps what it had, and there
+    // is nothing new to save.
     key(&mut shell, &pressed(Key::Escape));
-    assert_eq!(shell.char_recent, ["\u{1F44B}"]);
+    assert_eq!(shell.char_remembered.recent, ["\u{1F44B}"]);
+    assert!(!shell.take_char_picker_dirty());
+}
+
+/// **What the picker remembers is saved for the next login, and read back
+/// at its start.**
+#[test]
+fn what_the_picker_remembers_outlives_the_session() {
+    settingsfile::testing::with_scratch_config("desktop-char-picker", |_root| {
+        let mut shell = run_box_with("");
+        shell.load_char_picker();
+        assert_eq!(shell.char_remembered, charpicker::Remembered::default());
+        key(&mut shell, &ctrl_period());
+        type_text(&mut shell, "U+2605");
+        key(&mut shell, &pressed(Key::Enter));
+        assert!(shell.take_char_picker_dirty());
+        shell.save_char_picker().expect("saved");
+
+        let mut next = run_box_with("");
+        next.load_char_picker();
+        assert_eq!(next.char_remembered.recent, ["\u{2605}"]);
+        key(&mut next, &ctrl_period());
+        let open = next.char_picker.as_ref().unwrap();
+        assert_eq!(open.picker.category(), charpicker::Category::Recent);
+        assert_eq!(open.picker.shown().collect::<Vec<_>>(), ["\u{2605}"]);
+    });
 }
 
 /// **Whatever takes the popups down takes the picker with them**, so it is

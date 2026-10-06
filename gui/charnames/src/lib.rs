@@ -84,6 +84,13 @@ impl SkinTone {
         }
     }
 
+    /// The tone CLDR calls `name` ("medium-light"), as [`name`](Self::name)
+    /// spells it; `None` for any other word.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tone| tone.name() == name)
+    }
+
     /// The modifier character that sets it, U+1F3FB to U+1F3FF -- which an
     /// emoji face draws alone as a swatch of the tone.
     #[must_use]

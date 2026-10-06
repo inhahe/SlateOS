@@ -8019,6 +8019,13 @@ fn a_notes_character_picker_is_drawn_and_its_pick_is_the_notes() {
             .filter_map(|k| saved.get_str(&["widgets", k, "text"]))
             .collect();
         assert_eq!(texts, ["\u{2615}"], "the note's pick is not on disk");
+        // And the picker's memory of it, for the next login and every other
+        // program that offers the picker.
+        assert_eq!(
+            charpicker::Remembered::load().recent,
+            ["\u{2615}"],
+            "the pick is not among the recent ones on disk"
+        );
     });
 }
 

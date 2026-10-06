@@ -25,10 +25,12 @@
 //!
 //! # What it learns
 //!
-//! The recent picks and the skin tone are kept while the shell runs and
-//! handed back each time the picker opens. They are not yet kept from one
-//! login to the next (`known-issues.md`,
-//! `TD-C-THE-SHELLS-CHARACTER-PICKER-FORGETS-ITS-RECENT-PICKS-AT-LOGOUT`).
+//! The recent picks and the skin tone are handed back each time the picker
+//! opens, and kept from one login to the next in `charpicker.yaml`, the file
+//! every host of the picker shares ([`charpicker::Remembered`]): the session
+//! reads it at the start ([`DesktopShell::load_char_picker`]) and writes it
+//! when the picker comes down having learned something
+//! ([`DesktopShell::save_char_picker`]).
 
 use charpicker::{CharPicker, CharPickerEvent};
 use guitk::event::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
@@ -112,8 +114,7 @@ impl DesktopShell {
         )]
         let screen = (self.screen_width as f32, self.screen_height as f32);
         let picker = CharPicker::new()
-            .with_recent(self.char_recent.clone())
-            .with_tone(self.char_tone)
+            .with_remembered(self.char_remembered.clone())
             .with_focus_ring(self.appearance.focus_ring_width())
             .with_caret_width(self.appearance.caret_width());
         self.char_picker = Some(FieldPicker {
@@ -129,12 +130,37 @@ impl DesktopShell {
         self.char_picker.is_some()
     }
 
-    /// Take the picker down, keeping what it learned for the next time.
+    /// Take the picker down, keeping what it learned for the next time --
+    /// and for the next login, when it learned something.
     pub(crate) fn close_char_picker(&mut self) {
         if let Some(open) = self.char_picker.take() {
-            self.char_recent = open.picker.recent().to_vec();
-            self.char_tone = open.picker.tone();
+            let now = open.picker.remembered();
+            if now != self.char_remembered {
+                self.char_remembered = now;
+                self.char_picker_dirty = true;
+            }
         }
+    }
+
+    /// Read what the picker remembers from `charpicker.yaml`: for the
+    /// session, at its start.
+    pub fn load_char_picker(&mut self) {
+        self.char_remembered = charpicker::Remembered::load();
+    }
+
+    /// Whether what the picker remembers needs writing, clearing the flag.
+    pub fn take_char_picker_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.char_picker_dirty)
+    }
+
+    /// Write what the picker remembers to `charpicker.yaml`.
+    ///
+    /// # Errors
+    ///
+    /// The write's own error. What it remembers still holds for this
+    /// session.
+    pub fn save_char_picker(&self) -> std::io::Result<()> {
+        self.char_remembered.save()
     }
 
     /// Ctrl+. in `field`: the picker, beside it. Answers whether `key` was

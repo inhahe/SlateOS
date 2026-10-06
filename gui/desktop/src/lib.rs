@@ -2153,11 +2153,13 @@ pub struct DesktopShell {
     /// The character picker, while it is up over one of those fields
     /// (`char_picker`).
     char_picker: Option<char_picker::FieldPicker>,
-    /// What was picked lately in the character picker, most recent first:
-    /// handed back to it each time it opens.
-    char_recent: Vec<String>,
-    /// The skin tone the character picker draws emoji in.
-    char_tone: Option<charpicker::SkinTone>,
+    /// What the character picker remembers -- the recent picks and the skin
+    /// tone -- handed back to it each time it opens; `charpicker.yaml`'s,
+    /// read at the start of the session.
+    char_remembered: charpicker::Remembered,
+    /// The picker came down remembering something new, which
+    /// [`save_char_picker`](Self::save_char_picker) is to write.
+    char_picker_dirty: bool,
     /// How far the wallpaper's picture can move across and down the screen:
     /// the screen's size less the picture's as it is drawn, negative where it
     /// overflows; `None` when no picture is up or it fills the screen
@@ -2894,8 +2896,8 @@ impl DesktopShell {
             notification_menu: None,
             field_menu: None,
             char_picker: None,
-            char_recent: Vec::new(),
-            char_tone: None,
+            char_remembered: charpicker::Remembered::default(),
+            char_picker_dirty: false,
             wallpaper_room: None,
             wallpaper_move: None,
             pin_drag: None,

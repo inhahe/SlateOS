@@ -1713,17 +1713,16 @@ live.
   arrows, currency signs and Latin, Greek and Cyrillic letters by name,
   generated from Unicode's and CLDR's files (`gen.py`), with a ranked search
   by name, keyword or code point; `gui/charpicker` is the dialog (categories,
-  grid, search, skin tones, recent picks). The shell's own text fields offer
-  it -- "Emoji & Symbols…" on a field's menu, Ctrl+. in the field -- and a
-  pick is typed into the field (`gui/desktop/src/char_picker.rs`). **Open:**
-  other programs' fields, the tray's emoji entry and the hotkey action above
-  wait on lane F letting the shell type into the focused window
+  grid, search, skin tones, and recent picks kept with the tone in
+  `charpicker.yaml`, one file for every host). The shell's own text fields
+  offer it -- "Emoji & Symbols…" on a field's menu, Ctrl+. in the field --
+  and a pick is typed into the field (`gui/desktop/src/char_picker.rs`).
+  **Open:** other programs' fields, the tray's emoji entry and the hotkey
+  action above wait on lane F letting the shell type into the focused window
   (`requests/c-f-let-the-shell-type-into-the-focused-window.md`); characters
   no face draws are offered as boxes
-  (`requests/c-f-ask-whether-a-character-can-be-drawn.md`); the recent picks
-  last only while the shell runs
-  (`known-issues/TD-C-THE-SHELLS-CHARACTER-PICKER-FORGETS-ITS-RECENT-PICKS-AT-LOGOUT.md`);
-  lane E's emoji picker could be this one
+  (`requests/c-f-ask-whether-a-character-can-be-drawn.md`); lane E's emoji
+  picker could be this one
   (`requests/c-e-the-emoji-picker-can-be-the-shared-character-picker.md`).
 
 - `[C]` **Desktop icons: snap to grid or place freely, as a user option** —

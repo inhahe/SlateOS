@@ -33,10 +33,12 @@
 //!
 //! # What a host keeps
 //!
-//! The tone and the recent picks are the user's. A host that keeps them
-//! between openings reads [`CharPicker::tone`] and [`CharPicker::recent`] when
-//! the picker closes, and hands them back with [`CharPicker::with_tone`] and
-//! [`CharPicker::with_recent`].
+//! The tone and the recent picks are the user's, and every host keeps them in
+//! the one place ([`remembered`]): it opens the picker
+//! [`with_remembered`](CharPicker::with_remembered) what
+//! [`Remembered::load`] reads from `charpicker.yaml`, and when the picker
+//! closes saves what it [`remembered`](CharPicker::remembered), if that
+//! changed -- so a character picked in one program is recent in the next.
 //!
 //! # The keyboard
 //!
@@ -64,6 +66,9 @@ use guitk::textinput::{KeyEdit, TextInput};
 use guitk::{field, grid, scroll_window, scrollbar, wheel};
 
 pub use charnames::SkinTone;
+
+pub mod remembered;
+pub use remembered::Remembered;
 
 /// How many recent picks the picker keeps.
 pub const MAX_RECENT: usize = 32;

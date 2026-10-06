@@ -647,6 +647,31 @@ fn a_held_components_parts_are_renamed_and_nothing_else() {
     }
 }
 
+/// **A component's tree drawn elsewhere by its host has every box moved
+/// with it**, the held ones too, and nothing else changed.
+#[test]
+fn a_tree_drawn_elsewhere_has_every_box_moved() {
+    let f = form();
+    let tree = f.tree.automation().unwrap();
+    let moved = tree.clone().translated(30.0, -5.0);
+    let before: Vec<&Node> = tree.walk().collect();
+    let after: Vec<&Node> = moved.walk().collect();
+    assert_eq!(after.len(), before.len());
+    assert!(before.len() > 1, "held nodes are moved too");
+    for (old, new) in before.iter().zip(&after) {
+        assert_eq!(
+            new.bounds,
+            old.bounds.translated(30.0, -5.0),
+            "{}",
+            old.name
+        );
+        assert_eq!(
+            (new.id, &new.name, &new.value),
+            (old.id, &old.name, &old.value)
+        );
+    }
+}
+
 /// **A walk visits every node once, in order.**
 #[test]
 fn a_walk_visits_every_node_in_order() {

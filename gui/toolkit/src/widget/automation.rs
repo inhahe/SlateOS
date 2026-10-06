@@ -280,6 +280,20 @@ impl<Id> Node<Id> {
         }
     }
 
+    /// It and every node under it, each box moved by `(dx, dy)`: for a
+    /// component laid out in its own space -- a dialog, a picker -- that its
+    /// host draws at `(dx, dy)` in the host's.
+    #[must_use]
+    pub fn translated(mut self, dx: f32, dy: f32) -> Self {
+        self.bounds = self.bounds.translated(dx, dy);
+        self.children = self
+            .children
+            .into_iter()
+            .map(|child| child.translated(dx, dy))
+            .collect();
+        self
+    }
+
     /// It and every node under it, depth first, in order.
     pub fn walk(&self) -> impl Iterator<Item = &Self> {
         let mut stack = vec![self];

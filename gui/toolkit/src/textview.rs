@@ -1403,6 +1403,10 @@ fn resolve_span_bg(palette: &Palette, style: &AnsiStyle) -> Option<Color> {
 /// The narrowest gutter either view will draw, in digits.
 const MIN_GUTTER_DIGITS: usize = 3;
 
+/// The most times the rich view lays its blocks out again for a wider
+/// gutter: one for each digit its count of rows could grow by, and more.
+const MAX_GUTTER_PASSES: usize = 8;
+
 /// How many digits the largest line number needs.
 ///
 /// Both views computed this, and both relied on `log10(0)` being negative
@@ -1932,8 +1936,45 @@ impl RichTextView {
 
     /// Rebuild wrapped lines from blocks.
     fn rebuild_layout(&mut self) {
-        self.wrapped_lines.clear();
-        let available_width = self.width - self.gutter_width();
+        let (lines, height) = self.layout();
+        self.wrapped_lines = lines;
+        self.content_height = height;
+    }
+
+    /// The blocks laid out at the view's width: every row, and how tall the
+    /// rows are together.
+    ///
+    /// Laid out beside a gutter as wide as the count of rows needs -- which
+    /// is what laying out works out. So the gutter is first taken for no
+    /// rows, the narrowest, and the blocks laid out again beside a wider one
+    /// until the count fits it. A wider gutter leaves less room, so as many
+    /// rows or more, never fewer, and the count settles within a pass or two.
+    ///
+    /// The layout used to clear the rows and then ask the gutter how wide it
+    /// was -- for no rows -- while drawing asked after, for all of them: past
+    /// 999 rows, every row was wrapped a digit wider than the room it was
+    /// drawn in, and ran past the view's edge.
+    fn layout(&self) -> (Vec<WrappedLine>, f32) {
+        let mut rows = 0;
+        let mut laid = self.layout_beside(self.gutter_width_for(rows));
+        // A pass for each digit the count could grow by is more than it
+        // takes; the bound only keeps a float's surprise from looping.
+        for _ in 0..MAX_GUTTER_PASSES {
+            if !self.config.show_line_numbers
+                || line_number_digits(laid.0.len()) == line_number_digits(rows)
+            {
+                break;
+            }
+            rows = laid.0.len();
+            laid = self.layout_beside(self.gutter_width_for(rows));
+        }
+        laid
+    }
+
+    /// The blocks laid out beside a gutter `gutter` wide.
+    fn layout_beside(&self, gutter: f32) -> (Vec<WrappedLine>, f32) {
+        let mut rows: Vec<WrappedLine> = Vec::new();
+        let available_width = self.width - gutter;
         let mut y: f32 = 0.0;
 
         for (block_idx, block) in self.blocks.iter().enumerate() {
@@ -1946,7 +1987,7 @@ impl RichTextView {
                     y += spacing_above * self.config.line_height;
                     let lines = self.wrap_spans(spans, available_width, None);
                     for (i, line_spans) in lines.into_iter().enumerate() {
-                        self.wrapped_lines.push(WrappedLine {
+                        rows.push(WrappedLine {
                             block_idx,
                             spans: line_spans,
                             y,
@@ -1963,7 +2004,7 @@ impl RichTextView {
                     let h_line_height = self.config.line_height * level.size_multiplier();
                     let lines = self.wrap_spans(spans, available_width, Some(*level));
                     for (i, line_spans) in lines.into_iter().enumerate() {
-                        self.wrapped_lines.push(WrappedLine {
+                        rows.push(WrappedLine {
                             block_idx,
                             spans: line_spans,
                             y,
@@ -1988,7 +2029,7 @@ impl RichTextView {
                         .max(self.config.char_width);
                     let lines = self.wrap_spans(spans, content_width, None);
                     for (i, line_spans) in lines.into_iter().enumerate() {
-                        self.wrapped_lines.push(WrappedLine {
+                        rows.push(WrappedLine {
                             block_idx,
                             spans: line_spans,
                             y,
@@ -2003,7 +2044,7 @@ impl RichTextView {
                     y += self.config.code_block_padding;
                     let indent = self.config.code_block_padding;
                     for line in code.lines() {
-                        self.wrapped_lines.push(WrappedLine {
+                        rows.push(WrappedLine {
                             block_idx,
                             spans: vec![RichSpan::plain(line)],
                             y,
@@ -2015,7 +2056,7 @@ impl RichTextView {
                     }
                     // If code is empty, still show one blank line
                     if code.is_empty() {
-                        self.wrapped_lines.push(WrappedLine {
+                        rows.push(WrappedLine {
                             block_idx,
                             spans: vec![RichSpan::plain("")],
                             y,
@@ -2029,7 +2070,7 @@ impl RichTextView {
                 }
                 RichBlock::HorizontalRule => {
                     y += self.config.line_height * 0.5;
-                    self.wrapped_lines.push(WrappedLine {
+                    rows.push(WrappedLine {
                         block_idx,
                         spans: Vec::new(),
                         y,
@@ -2046,7 +2087,7 @@ impl RichTextView {
                     alt_text,
                 } => {
                     y += 4.0; // small gap
-                    self.wrapped_lines.push(WrappedLine {
+                    rows.push(WrappedLine {
                         block_idx,
                         spans: vec![RichSpan::plain(format!("[Image: {}]", alt_text))],
                         y,
@@ -2060,7 +2101,7 @@ impl RichTextView {
             }
         }
 
-        self.content_height = y;
+        (rows, y)
     }
 
     /// The size and weight a span is drawn in.
@@ -2205,28 +2246,40 @@ impl RichTextView {
                     current_width = 0.0;
                 }
 
-                // If a single word is longer than available width, force it on its own line
+                // A word longer than the whole row is broken wherever the
+                // room runs out, as many times as it takes.
                 if word_width > available_width && current_width == 0.0 && !word.is_empty() {
-                    // Broken at the last character that fits. `fit` returns a
-                    // byte index on a character boundary; the old code divided
-                    // the width by a nominal cell to get a *character* count and
-                    // then sliced the string by it as if it were a byte offset,
-                    // which panicked outright on any multi-byte word.
-                    let cut = crate::text::fit(word, available_width, size, weight).max(
-                        // Never zero: a single glyph wider than the whole
-                        // column still has to be emitted, or wrapping loops
-                        // forever making no progress.
-                        word.chars().next().map_or(0, char::len_utf8),
-                    );
-                    let (chunk, leftover) = word.split_at(cut.min(word.len()));
-                    current_line.push(RichSpan::styled(chunk, span.style.clone()));
-                    result.push(core::mem::take(&mut current_line));
-                    current_width = 0.0;
-                    remaining = rest;
-                    if !leftover.is_empty() {
-                        current_line.push(RichSpan::styled(leftover, span.style.clone()));
-                        current_width += measure(leftover);
+                    let mut piece = word;
+                    loop {
+                        // Broken at the last character that fits. `fit`
+                        // returns a byte index on a character boundary; the
+                        // old code divided the width by a nominal cell to get
+                        // a *character* count and then sliced the string by
+                        // it as if it were a byte offset, which panicked
+                        // outright on any multi-byte word.
+                        let cut = crate::text::fit(piece, available_width, size, weight).max(
+                            // Never zero: a single glyph wider than the
+                            // whole column still has to be emitted, or
+                            // wrapping loops forever making no progress.
+                            piece.chars().next().map_or(0, char::len_utf8),
+                        );
+                        let (chunk, leftover) = piece.split_at(cut.min(piece.len()));
+                        current_line.push(RichSpan::styled(chunk, span.style.clone()));
+                        if leftover.is_empty() {
+                            // The last of it fits, and the row goes on after
+                            // it.
+                            current_width += measure(chunk);
+                            break;
+                        }
+                        // The rest goes on a row of its own. It used to go
+                        // there whole, broken once only: a word longer than
+                        // two rows -- a link, a hash -- ran on past the
+                        // view's edge from its second row.
+                        result.push(core::mem::take(&mut current_line));
+                        current_width = 0.0;
+                        piece = leftover;
                     }
+                    remaining = rest;
                     continue;
                 }
 
@@ -2251,8 +2304,13 @@ impl RichTextView {
 
     /// Width of the line-number gutter.
     fn gutter_width(&self) -> f32 {
+        self.gutter_width_for(self.wrapped_lines.len())
+    }
+
+    /// Width of the line-number gutter beside `rows` rows.
+    fn gutter_width_for(&self, rows: usize) -> f32 {
         if self.config.show_line_numbers {
-            let digits = line_number_digits(self.wrapped_lines.len());
+            let digits = line_number_digits(rows);
             (digits as f32 + 1.0) * self.config.char_width
         } else {
             0.0
@@ -3779,6 +3837,74 @@ mod tests {
             rejoined, word,
             "breaking the word dropped or duplicated text"
         );
+    }
+
+    /// **A word longer than two rows is broken as often as it takes, every
+    /// row of it inside the view**: it was broken once, and the rest went
+    /// on its second row whole, past the view's edge.
+    #[test]
+    fn a_word_longer_than_two_rows_is_broken_on_every_row() {
+        let word = "é".repeat(60);
+        let mut view = rich_view(40.0, 400.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain(word.clone()), RichSpan::plain(" end")],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+        view.ensure_layout();
+        assert!(
+            view.wrapped_lines.len() >= 4,
+            "{}",
+            view.wrapped_lines.len()
+        );
+        for line in &view.wrapped_lines {
+            let width: f32 = line.spans.iter().map(|s| view.span_width(s, None)).sum();
+            assert!(width <= 40.0 + 0.01, "a row {width} wide in a view 40 wide");
+        }
+        let rejoined: String = view
+            .wrapped_lines
+            .iter()
+            .flat_map(|wl| wl.spans.iter().map(|s| s.text.as_str()))
+            .collect();
+        assert_eq!(rejoined, format!("{word} end"), "nothing dropped");
+    }
+
+    /// **Past 999 rows, a rich view's rows are wrapped for the gutter they
+    /// are drawn beside**: the layout asked how wide the gutter was with the
+    /// rows just cleared -- three digits' worth -- and drawing asked after,
+    /// with a thousand rows and four, so a full row ran a digit past the
+    /// view's edge.
+    #[test]
+    fn a_rich_views_rows_fit_beside_the_gutter_they_are_drawn_with() {
+        let mut view = RichTextView::with_config(
+            300.0,
+            200.0,
+            RichTextViewConfig {
+                show_line_numbers: true,
+                ..RichTextViewConfig::default()
+            },
+        );
+        let one = |text: String| RichBlock::Paragraph {
+            spans: vec![RichSpan::plain(text)],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        };
+        let mut blocks: Vec<RichBlock> = (0..1000).map(|_| one("a".to_owned())).collect();
+        // One long word, broken wherever the room runs out: each of its rows
+        // fills the room to within a narrow glyph.
+        blocks.push(one("i".repeat(400)));
+        view.set_blocks(blocks);
+        view.ensure_layout();
+        let gutter = view.gutter_width();
+        assert!(gutter > view.gutter_width_for(0), "four digits: {gutter}");
+        for line in &view.wrapped_lines {
+            let width: f32 = line.spans.iter().map(|s| view.span_width(s, None)).sum();
+            assert!(
+                gutter + line.indent + width <= 300.0 + 0.01,
+                "a row runs to {} in a view 300 wide",
+                gutter + line.indent + width
+            );
+        }
     }
 
     #[test]

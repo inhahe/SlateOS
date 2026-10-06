@@ -102,11 +102,12 @@ will close them myself as each one goes on.
 | `ctest-mmap-file` | -- (filed with file mappings, 2026-10-06; `d-a-a-native-program-cannot-map-a-file.md` is the kernel's half) | file | 30 |
 | `ctest-resuid` | -- (filed with `getresuid`, 2026-10-06); starts as root and drops to uid 1000 | creds | 30 |
 | `ctest-groups` | -- (filed with `getgroups`, 2026-10-06); installs groups, reads them back, and runs a copy of itself from `/tmp` under a name that forges a `Groups:` line | file,creds | 30 |
+| `ctest-fallocate` | -- (filed with `fallocate`, 2026-10-06); grows a file in `/tmp` by 200 KB of zeros | file | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
-The last seven rows were added on 2026-10-06, which makes nineteen fixtures
+The last eight rows were added on 2026-10-06, which makes twenty fixtures
 waiting where the summary above says eleven. `ctest-llvm-tools` runs LLVM's
 three tools from the image, each bounded at 60 s, hence its 600.
 `ctest-pi-mutex` sets its threads' scheduler priorities itself

@@ -65,6 +65,12 @@
 //! the frame where it is rather than recomputing it. Recomputing row geometry
 //! outside this module is the one thing not to do: it is a second copy of the
 //! layout, and the bug then lives in whichever copy you are not reading.
+//!
+//! ## To tools
+//!
+//! The same targets name the dialog's parts to automation and assistive
+//! tools: [`FileDialog`] implements
+//! [`Accessible`](crate::widget::automation::Accessible), in `accessible`.
 
 use crate::date::Date;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -84,6 +90,8 @@ use core::ops::Range;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 pub use tzrules::Tz;
+
+mod accessible;
 
 // --- Catppuccin Mocha palette ---
 

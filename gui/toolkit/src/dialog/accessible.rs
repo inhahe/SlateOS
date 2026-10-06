@@ -59,12 +59,8 @@ impl FileDialog {
         let Some(&(drawn, at)) = frame_rows.first() else {
             return Rect::new(list.x, list.y, list.w, 0.0);
         };
-        let step = scaled(ROW_HEIGHT);
-        let offset = if index >= drawn {
-            count(index - drawn) * step
-        } else {
-            -count(drawn - index) * step
-        };
+        let rows = count(index.abs_diff(drawn)) * scaled(ROW_HEIGHT);
+        let offset = if index >= drawn { rows } else { -rows };
         Rect::new(at.x, at.y + offset, at.w, at.h)
     }
 }
@@ -311,9 +307,7 @@ impl Accessible for FileDialog {
             (DialogTarget::AddressBar | DialogTarget::FilenameInput, _) => {
                 Err(not_for(Role::TextField))
             }
-            (DialogTarget::Shortcut(_) | DialogTarget::Entry(_), _) => {
-                Err(not_for(Role::ListItem))
-            }
+            (DialogTarget::Shortcut(_) | DialogTarget::Entry(_), _) => Err(not_for(Role::ListItem)),
             (DialogTarget::List | DialogTarget::Places, _) => Err(not_for(Role::List)),
             (DialogTarget::Chrome, _) => Err(not_for(Role::Dialog)),
             // Not parts a tool sees: the scrollbar is the list's, and the

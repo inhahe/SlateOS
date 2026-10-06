@@ -8,6 +8,10 @@
 //! - Prints a welcome banner via `SYS_CONSOLE_WRITE`.
 //! - Names the machine from `/etc/hostname`, before any service starts
 //!   (systemd's `hostname_setup()`; the reading is `lib.rs`'s).
+//! - Starts the login records: `/var/run/utmp` emptied with this boot's
+//!   `BOOT_TIME` record, which `/var/log/wtmp` gains too, and `btmp` and
+//!   `lastlog` made if missing (systemd's `utmp_put_reboot`; the record is
+//!   `lib.rs`'s).
 //! - Runs a poll-based main loop that interleaves keyboard input with
 //!   service health monitoring.
 //! - Built-in commands: `help`, `echo`, `exit`, `ls`, `cat`, `stat`,
@@ -100,6 +104,9 @@ const SYS_FS_RMDIR: u64 = 605;
 const SYS_FS_STAT: u64 = 606;
 const SYS_LOG_READ: u64 = 102;
 const SYS_HOSTNAME_SET: u64 = 1072;
+const SYS_CLOCK_REALTIME: u64 = 14;
+const SYS_FS_SET_PERMS: u64 = 631;
+const SYS_FS_APPEND: u64 = 643;
 
 /// Directory entry size from kernel (name[256] + size[4] + type[1] + pad[3]).
 const FS_DIR_ENTRY_SIZE: usize = 264;
@@ -263,6 +270,11 @@ fn clock_monotonic() -> i64 {
     syscall0(SYS_CLOCK_MONOTONIC)
 }
 
+/// The real-time clock: nanoseconds since the epoch.
+fn clock_realtime() -> i64 {
+    syscall0(SYS_CLOCK_REALTIME)
+}
+
 /// Map anonymous memory pages.  Returns the virtual address or
 /// negative error.  `size` is rounded up to the 16 KiB frame size.
 fn mmap(size: u64) -> i64 {
@@ -298,6 +310,29 @@ fn fs_write_file(path: &[u8], data: &[u8]) -> i64 {
         path.len() as u64,
         data.as_ptr() as u64,
         data.len() as u64,
+    )
+}
+
+/// Append data to the end of a file, creating it if it is missing; nothing
+/// appended still creates it.  Returns 0 or negative error.
+fn fs_append(path: &[u8], data: &[u8]) -> i64 {
+    syscall4(
+        SYS_FS_APPEND,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        data.as_ptr() as u64,
+        data.len() as u64,
+    )
+}
+
+/// Set a file's permission bits (the low 0o7777).  Returns 0 or negative
+/// error.
+fn fs_set_perms(path: &[u8], mode: u64) -> i64 {
+    syscall3(
+        SYS_FS_SET_PERMS,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        mode,
     )
 }
 
@@ -2228,6 +2263,90 @@ fn apply_etc_hostname() {
     }
 }
 
+/// Start this boot's login records, as an init does before anything can log
+/// in (`requests/d-b-utmp-is-a-real-file-now-create-it-and-write-logins.md`,
+/// item 1): `/var/run/utmp` emptied -- its records describe the running
+/// system, so last boot's are wrong -- and a `BOOT_TIME` record written to it
+/// and appended to the history in `/var/log/wtmp`, as systemd's
+/// `utmp_put_reboot` writes it ([`init::boot_record`]). `login` and
+/// util-linux leave a missing file alone, so `/var/log/btmp` and
+/// `/var/log/lastlog` are made here if they are missing, and kept if not.
+///
+/// The modes are Linux's: `utmp` and `wtmp` 0664, `lastlog` 0644, and `btmp`
+/// 0600 -- it records whatever was typed at a failed login's name prompt,
+/// which is sometimes a password.
+///
+/// The C library never creates these files (glibc does not either): every
+/// `getutxent`, `pututxline` and `getlogin` answers `ENOENT` until they
+/// exist, and `login` says once per session that it is not in the records.
+/// So a step that fails is reported, and the boot goes on.
+fn start_login_records() {
+    for dir in [b"/var" as &[u8], b"/var/run", b"/var/log"] {
+        if fs_mkdir(dir) < 0 {
+            // Already there is the usual case; anything else is a failure,
+            // and the files below will say so too.
+            let mut st = [0u8; 80];
+            if fs_stat(dir, &mut st) < 0 {
+                report_record_failure(dir, b"cannot be made");
+                return;
+            }
+        }
+    }
+
+    let (sec, usec) = init::boot_time(clock_realtime(), clock_monotonic());
+    let mut release_buf = [0u8; 65];
+    let n = fs_read_file(b"/proc/sys/kernel/osrelease", &mut release_buf);
+    let release = usize::try_from(n)
+        .ok()
+        .and_then(|n| release_buf.get(..n))
+        .map_or(&[][..], trim);
+    let record = init::boot_record(sec, usec, release);
+
+    let steps: [(&[u8], i64, u64); 4] = [
+        (
+            b"/var/run/utmp",
+            fs_write_file(b"/var/run/utmp", &record),
+            0o664,
+        ),
+        (
+            b"/var/log/wtmp",
+            fs_append(b"/var/log/wtmp", &record),
+            0o664,
+        ),
+        (b"/var/log/btmp", fs_append(b"/var/log/btmp", &[]), 0o600),
+        (
+            b"/var/log/lastlog",
+            fs_append(b"/var/log/lastlog", &[]),
+            0o644,
+        ),
+    ];
+    let mut written = 0usize;
+    for (path, rc, mode) in steps {
+        if rc < 0 {
+            report_record_failure(path, b"cannot be written");
+            continue;
+        }
+        if fs_set_perms(path, mode) < 0 {
+            report_record_failure(path, b"keeps the mode it was made with");
+        }
+        written = written.saturating_add(1);
+    }
+    if written == steps.len() {
+        print("[init] Login records started: /var/run/utmp, /var/log/wtmp (boot at ");
+        print_i64(sec);
+        print(")\n");
+    }
+}
+
+/// `[init] <path> <what>`, for a login-record step that failed.
+fn report_record_failure(path: &[u8], what: &[u8]) {
+    print("[init] ");
+    console_write(path);
+    print(" ");
+    console_write(what);
+    print("; logins will not be recorded in it\n");
+}
+
 /// Load the startup service list from `/etc/startup.conf`.
 ///
 /// Not `/etc/services`: that name is the IANA port/protocol database that
@@ -2434,6 +2553,7 @@ pub extern "C" fn _start() -> ! {
     print("\n");
 
     apply_etc_hostname();
+    start_login_records();
 
     let mut registry = ServiceRegistry::new();
 

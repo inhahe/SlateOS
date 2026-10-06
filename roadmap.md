@@ -1815,8 +1815,24 @@ live.
   unreadable, and one that cannot be used leaves the built-in colours and a
   notice. The built-in theme ships as a complete file to copy
   (`gui/appearance/themes/aero/theme.yaml`). The Settings picker is lane E's,
-  installing the file lane D's; an in-place edit of the chosen theme is not
-  yet noticed (`TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`).
+  installing the file lane D's; an in-place edit of the chosen theme is
+  noticed since 2026-10-06, when the desktop began following the chosen
+  themes' folders (§1483,
+  `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE` closed).
+
+- `[C]` **Making themes: derive, edit, install, export, remove** -- model and
+  program done 2026-10-06 (`design-decisions.md` §1483).
+  `appearance::themes::authoring` makes a theme of the user's from any theme
+  (the built-in one from its compiled-in template and icons), edits its
+  colours and description as text so the file's comments survive, installs a
+  folder or a lone `theme.yaml` only once the copy passes `themecheck`, copies
+  one out to share with the check a repository would run, and removes one.
+  Every folder is built aside and renamed into place. The `theme` program
+  drives all of it from a terminal. The desktop's settings watcher now follows
+  what the appearance settings name -- the chosen themes' folders and the
+  user's own pictures -- so a theme or a picture saved over reaches every
+  window at once. The Settings page is lane E's
+  (`requests/c-e-a-theme-editor-on-the-themes-page.md`).
 
 - `[C]` **The clock's settings have a file, and the zone is the machine's** --
   done 2026-09-25 (`design-decisions.md` §875). The taskbar clock's zone, its

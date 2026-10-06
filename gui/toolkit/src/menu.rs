@@ -3151,4 +3151,30 @@ mod tests {
         let ids: Vec<u64> = pictures(&cmds).iter().map(|p| p.0).collect();
         assert_eq!(ids, [9, 6, 12], "the viewer's picture in the submenu");
     }
+
+    /// **A row's picture follows the user's text size** (on this test's
+    /// thread): at twice the size the owner is asked for it twice as large,
+    /// and it is drawn that large, still centred in its column and its row
+    /// -- not a small picture in the corner of a row grown round it.
+    #[test]
+    fn a_rows_picture_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let big_owner = |name: &str, px: u32| {
+            asked.borrow_mut().push(px);
+            (name != "unknown").then(|| u64::try_from(name.len()).unwrap())
+        };
+        let mut menu = ContextMenu::new(pictured_items());
+        menu.show(100.0, 50.0, SCREEN);
+        let cmds = menu.render_with_icons(&Palette::for_mode(false), &big_owner);
+        assert!(
+            !asked.borrow().is_empty() && asked.borrow().iter().all(|&px| px == ICON_SIZE * 2),
+            "asked for {:?}",
+            asked.borrow()
+        );
+        let side = 32.0;
+        let x = 100.0 + HORIZONTAL_PADDING * 2.0 + (ICON_COLUMN_WIDTH * 2.0 - side) / 2.0;
+        let row = 50.0 + VERTICAL_PADDING * 2.0 + (ITEM_HEIGHT * 2.0 - side) / 2.0;
+        assert_eq!(pictures(&cmds).first(), Some(&(9, x, row, side)));
+    }
 }

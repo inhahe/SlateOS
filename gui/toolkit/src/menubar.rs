@@ -2011,6 +2011,34 @@ mod tests {
         );
     }
 
+    /// **A menu bar's dropdown rows follow the text size too** (on this
+    /// test's thread): at twice the size each row is twice as tall, and a
+    /// separator's room is -- so labels drawn twice as large have rows to
+    /// sit in, and a press lands on the row it was aimed at.
+    #[test]
+    fn a_menu_bars_rows_follow_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let mut bar = make_bar();
+        bar.handle_mouse_event(&click(10.0, bar_height() / 2.0), SCREEN);
+        assert!(bar.is_open(), "the premise: the first menu opened");
+        let panel = bar.dropdown_panel(0);
+        let children = children_of(&bar.items, 0).to_vec();
+        assert!(
+            children
+                .iter()
+                .any(|e| matches!(e, MenuBarEntry::Separator)),
+            "the premise: a separator to measure"
+        );
+        let strip = panel.strip(&children);
+        for (idx, entry) in children.iter().enumerate() {
+            let want = match entry {
+                MenuBarEntry::Separator => SEPARATOR_HEIGHT * 2.0,
+                _ => ITEM_HEIGHT * 2.0,
+            };
+            assert_eq!(strip.height(idx), Some(want), "row {idx}");
+        }
+    }
+
     fn make_bar() -> MenuBar {
         MenuBar::new(vec![
             MenuBarItem {

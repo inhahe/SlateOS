@@ -2433,6 +2433,23 @@ mod tests {
         assert!(!d.resize(&layout, &[0], 0, 5.0, 100.0), "no such split");
     }
 
+    /// **The smallest group follows the user's text size** (on this test's
+    /// thread): at twice the size a divider stops at twice the least size --
+    /// room for a tab bar twice as tall, and the start of what is under it.
+    #[test]
+    fn the_smallest_group_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let mut d = dock("h(0.5:[*files],0.5:[*editor])");
+        let layout = d.layout(area(), &kinds());
+        assert!(d.resize(&layout, &[], 0, 5.0, 100.0));
+        let layout = d.layout(area(), &kinds());
+        assert!(
+            (layout.groups[0].rect.w - MIN_GROUP * 2.0).abs() < 0.5,
+            "{:?}",
+            layout.groups[0].rect
+        );
+    }
+
     // ---- Input ----------------------------------------------------------------------
 
     #[test]

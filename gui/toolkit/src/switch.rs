@@ -376,6 +376,23 @@ mod tests {
         assert!((w - (height() - INSET * 4.0)).abs() < 0.01, "{w}");
     }
 
+    /// **A switch drawn as a check box follows the text size too** (on this
+    /// test's thread): its box is the toolkit's box at the user's size, as a
+    /// check box's is, centred down the room the switch offers.
+    #[test]
+    fn a_switchs_box_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let room = Rect::new(10.0, 20.0, width(), height());
+        let b = box_in(room);
+        assert!((b.w - checkbox::SIZE * 2.0).abs() < 0.01, "{b:?}");
+        assert!((b.h - b.w).abs() < 0.01, "square: {b:?}");
+        assert!((b.x - room.x).abs() < 0.01, "at the left: {b:?}");
+        assert!(
+            (b.y + b.h / 2.0 - (room.y + room.h / 2.0)).abs() < 0.01,
+            "centred down: {b:?}"
+        );
+    }
+
     /// Every hue the palette can be asked to make its accent.
     fn accents(p: &Palette) -> [(&'static str, Color); 14] {
         [

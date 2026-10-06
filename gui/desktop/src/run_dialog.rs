@@ -1629,6 +1629,38 @@ mod tests {
         }
     }
 
+    /// **What hangs under the field keeps its gap at any text size**: at
+    /// twice the size the error line is set twice the gap below the field,
+    /// as large as the rest -- the suggestions hang from the same place.
+    #[test]
+    fn what_hangs_under_the_field_keeps_its_gap_at_any_text_size() {
+        guitk::text::set_base_size(guitk::text::DEFAULT_SIZE * 2.0);
+        let mut dialog = RunDialog::new();
+        dialog.known_apps.clear();
+        dialog.path_dirs.clear();
+        dialog.show();
+        dialog.input.set_text("nonexistent!@#");
+        dialog.handle_key_event(&make_key(Key::Enter, false, false, None));
+        let error = dialog.error_message.clone().expect("the premise: an error");
+        let field = dialog.field_rect();
+        let (y, size) = dialog
+            .render(&Palette::for_mode(false))
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    text, y, font_size, ..
+                } if text == error => Some((y, font_size)),
+                _ => None,
+            })
+            .expect("the error line is drawn");
+        assert!(
+            (y - (field.y + field.h + UNDER_FIELD_GAP * 2.0)).abs() < 0.01,
+            "{y} under a field ending at {}",
+            field.y + field.h
+        );
+        assert!((size - ERROR_FONT_SIZE * 2.0).abs() < 0.01, "{size}");
+    }
+
     /// Where the dialog *draws* its caret, in the order it drew it.
     fn drawn_caret_x(dialog: &RunDialog, p: &Palette) -> f32 {
         dialog

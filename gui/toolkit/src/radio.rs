@@ -30,7 +30,7 @@
 //! Home and End choose the first and last. Space chooses the option the
 //! keyboard is on. Keys with Ctrl, Alt or Super are the program's.
 
-use crate::checkbox::{FONT_SIZE, LABEL_GAP, SIZE};
+use crate::checkbox::{FONT_SIZE, LABEL_GAP};
 use crate::color::Color;
 use crate::disabled::DISABLED_OPACITY;
 use crate::event::{Key, KeyEvent};
@@ -302,8 +302,11 @@ fn draw_to(
     } else {
         p.surface1
     };
+    // Everything below is measured from the circle, which is the user's text
+    // size's (`checkbox::box_rect`): its roundness, the dot, the ring round
+    // it and the label's gap -- so a larger size is the same option, larger.
     let c = circle_rect(x, y, h);
-    let round = CornerRadii::all(SIZE / 2.0);
+    let round = CornerRadii::all(c.w / 2.0);
     sink.emit(RenderCommand::FillRect {
         x: c.x,
         y: c.y,
@@ -333,7 +336,7 @@ fn draw_to(
     }
     if state.focused && !state.disabled && focus_ring > 0.0 && focus_ring.is_finite() {
         let reach = FOCUS_GAP + focus_ring;
-        let d = SIZE + reach * 2.0;
+        let d = c.w + reach * 2.0;
         sink.emit(RenderCommand::StrokeRect {
             x: c.x - reach,
             y: c.y - reach,
@@ -346,7 +349,10 @@ fn draw_to(
     }
     if !label.is_empty() {
         sink.emit(crate::checkbox::label_text(
-            (c.right() + LABEL_GAP, y + (h - FONT_SIZE) / 2.0),
+            (
+                c.right() + scaled(LABEL_GAP),
+                y + (h - scaled(FONT_SIZE)) / 2.0,
+            ),
             label,
             fade(p.text),
             room,
@@ -359,7 +365,7 @@ mod tests {
     #![allow(clippy::panic, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
-    use crate::checkbox::HEIGHT;
+    use crate::checkbox::{HEIGHT, SIZE};
     use crate::event::Modifiers;
 
     fn key(k: Key) -> KeyEvent {
@@ -584,5 +590,99 @@ mod tests {
         let held = hit_in(10.0, 20.0, HEIGHT, 150.0, label);
         assert!((held.right() - 160.0).abs() < 1e-3, "{held:?}");
         assert!(hit(10.0, 20.0, HEIGHT, label).right() > held.right());
+    }
+
+    /// **An option follows the user's text size** (on this test's thread), as
+    /// the check box beside it does: at twice the size its circle is twice as
+    /// large and still a circle, the dot in its middle is twice as large, the
+    /// keyboard's ring goes round the circle at the ring's own distance, and
+    /// the label keeps twice the gap, set for twice the size and centred down
+    /// the row.
+    #[test]
+    fn an_option_follows_the_text_size() {
+        crate::text::set_base_size(crate::text::DEFAULT_SIZE * 2.0);
+        let p = Palette::for_mode(false);
+        let h = crate::checkbox::height();
+        let mut cmds = Vec::new();
+        draw(
+            &mut cmds,
+            &p,
+            (0.0, 0.0, h),
+            "Any size",
+            true,
+            State {
+                focused: true,
+                ..State::default()
+            },
+            2.0,
+        );
+        let c = circle_rect(0.0, 0.0, h);
+        assert!((c.w - SIZE * 2.0).abs() < 0.01, "{c:?}");
+
+        let fills: Vec<(f32, f32, f32, f32, f32)> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    corner_radii,
+                    ..
+                } => Some((*x, *y, *width, *height, corner_radii.top_left)),
+                _ => None,
+            })
+            .collect();
+        let [well, dot] = fills[..] else {
+            panic!("a well and a dot: {fills:?}")
+        };
+        assert!((well.2 - c.w).abs() < 0.01, "{well:?}");
+        assert!((well.4 - c.w / 2.0).abs() < 0.01, "a circle: {well:?}");
+        assert!((dot.2 - DOT * 2.0).abs() < 0.01, "{dot:?}");
+        assert!((dot.4 - DOT).abs() < 0.01, "a round dot: {dot:?}");
+        assert!(
+            (dot.0 + dot.2 / 2.0 - (c.x + c.w / 2.0)).abs() < 0.01,
+            "centred across: {dot:?}"
+        );
+        assert!(
+            (dot.1 + dot.3 / 2.0 - (c.y + c.h / 2.0)).abs() < 0.01,
+            "centred down: {dot:?}"
+        );
+
+        let ring = cmds
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    color,
+                    corner_radii,
+                    ..
+                } if *color == p.accent => Some((*x, *y, *width, corner_radii.top_left)),
+                _ => None,
+            })
+            .expect("the ring");
+        let reach = FOCUS_GAP + 2.0;
+        assert!((ring.0 - (c.x - reach)).abs() < 0.01, "{ring:?}");
+        assert!((ring.1 - (c.y - reach)).abs() < 0.01, "{ring:?}");
+        assert!(
+            (ring.2 - (c.w + reach * 2.0)).abs() < 0.01,
+            "round the circle: {ring:?}"
+        );
+        assert!((ring.3 - ring.2 / 2.0).abs() < 0.01, "and round: {ring:?}");
+
+        let (lx, ly, size) = cmds
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text {
+                    x, y, font_size, ..
+                } => Some((*x, *y, *font_size)),
+                _ => None,
+            })
+            .expect("the label");
+        assert!((lx - (c.right() + LABEL_GAP * 2.0)).abs() < 0.01, "{lx}");
+        assert!((size - FONT_SIZE * 2.0).abs() < 0.01, "{size}");
+        assert!((ly - (h - FONT_SIZE * 2.0) / 2.0).abs() < 0.01, "{ly}");
     }
 }

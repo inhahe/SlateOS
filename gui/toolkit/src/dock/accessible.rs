@@ -196,13 +196,18 @@ impl Accessible for DockAccess<'_> {
                 );
                 item.value = Some(Value::Chosen(front == Some(panel)));
                 item.focusable = true;
+                // A tab laid out past the end of its bar is not drawn there,
+                // and the dock's hit test does not find it: not shown.
+                item.shown = tab.rect.x < group.strip.right();
                 if let Some(close) = tab.close {
-                    item.children.push(Node::new(
+                    let mut button = Node::new(
                         DockPart::Close(panel.clone()),
                         Role::Button,
                         format!("Close {title}"),
                         close,
-                    ));
+                    );
+                    button.shown = close.x < group.strip.right();
+                    item.children.push(button);
                 }
                 node.children.push(item);
             }

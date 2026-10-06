@@ -56,6 +56,10 @@ fn an_item_is_chosen_as_clicked() {
         "the last below the grid: {:?}",
         last.bounds
     );
+    assert!(
+        root.children.iter().all(|item| !item.focused),
+        "the keyboard on none before a click"
+    );
 
     let said = act(&mut grid, GridPart::Item(119), Action::Choose)
         .unwrap()
@@ -64,8 +68,11 @@ fn an_item_is_chosen_as_clicked() {
         said.contains(&GridEvent::SelectionChanged(vec![19])),
         "{said:?}"
     );
-    let chosen = grid.automation(0.0, 0.0).children[19].clone();
+    let after = grid.automation(0.0, 0.0);
+    let chosen = after.children[19].clone();
     assert_eq!(chosen.value, Some(Value::Chosen(true)));
+    assert!(chosen.focused, "the keyboard on the item clicked");
+    assert!(!after.children[3].focused);
     assert!(
         chosen.bounds.y >= 0.0 && chosen.bounds.bottom() <= 300.0,
         "scrolled into view: {:?}",

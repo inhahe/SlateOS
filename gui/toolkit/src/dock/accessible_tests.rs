@@ -156,6 +156,54 @@ fn a_tab_is_brought_to_the_front_and_closed() {
     );
 }
 
+/// **A tab past the end of its bar is not shown, and is not pressed**: the
+/// dock lays its tabs out end to end whatever the bar's width, draws none
+/// past its end and finds none there -- a press at the tab's middle would
+/// land beside the dock -- so a tool's is refused, and nothing changes.
+#[test]
+fn a_tab_past_the_end_of_its_bar_is_refused() {
+    let (mut dock, mut input, kinds) = (
+        Dock::from_text("[*files,editor,outline]", |_| true).expect("an arrangement"),
+        DockInput::new(),
+        kinds(),
+    );
+    let mut tool = DockAccess {
+        dock: &mut dock,
+        input: &mut input,
+        area: Rect::new(0.0, 0.0, 120.0, 400.0),
+        kinds: &kinds,
+    };
+    let root = tool.automation(0.0, 0.0);
+    let group = &root.children[0];
+    let past = group
+        .children
+        .iter()
+        .find(|n| n.role == Role::Tab && n.bounds.x >= group.bounds.right())
+        .expect("a tab laid out past the bar's end")
+        .clone();
+    assert!(!past.shown, "{past:?}");
+    assert!(past.children.iter().all(|close| !close.shown));
+    assert!(group.children[0].shown, "the first, at the bar's start");
+
+    assert_eq!(
+        act(&mut tool, past.id.clone(), Action::Choose),
+        Err(Refusal::Hidden)
+    );
+    let DockPart::Tab(panel) = past.id else {
+        panic!("a tab: {:?}", past.id);
+    };
+    assert_eq!(
+        act(&mut tool, DockPart::Close(panel.clone()), Action::Press),
+        Err(Refusal::Hidden)
+    );
+    assert!(tool.dock.contains(&panel), "not closed");
+    assert_eq!(
+        node(&tool, &DockPart::Tab(id("files"))).value,
+        Some(Value::Chosen(true)),
+        "the front one still in front"
+    );
+}
+
 /// **A divider set to a place is dragged there**, as the pointer drags it,
 /// and says where it stands now; a value that is no number is refused.
 #[test]

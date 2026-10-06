@@ -1214,7 +1214,8 @@ fn splat_wide(wc: WcharT) -> __m128i {
 ///
 /// `block` is 16-byte aligned and holds a readable byte, which makes all
 /// sixteen readable: an aligned block lies within one page.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn wide_block_masks(block: *const WcharT, needle: __m128i) -> (u32, u32) {
     let zeros: u32;
     let hits: u32;
@@ -1245,7 +1246,8 @@ unsafe fn wide_block_masks(block: *const WcharT, needle: __m128i) -> (u32, u32) 
 /// # Safety
 ///
 /// `a` and `b` readable for sixteen bytes each.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn wide_stop_masks(a: *const WcharT, b: *const WcharT) -> (u32, u32) {
     let equal: u32;
     let zeros: u32;

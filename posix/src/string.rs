@@ -89,6 +89,15 @@ use crate::types::SizeT;
 // of exactly that name, which a helper is not.  `memchr`, `memcmp` and
 // `strlen` copy nothing, and are Rust over SSE2 intrinsics where they read
 // within their bounds; `strlen`, which has no bound, is assembly too (below).
+//
+// EVERY HELPER WITH SSE ASSEMBLY SAYS SO: `#[target_feature(enable =
+// "sse2")]`, and `#[inline]` rather than `#[inline(always)]`, which may not
+// be combined with it.  The libc's own target has SSE2, so there it changes
+// nothing.  But every kernel build compiles posix for the stock
+// `x86_64-unknown-none` as well (the workspace's `default-members`), a
+// soft-float target with SSE off, where an `xmm_reg` operand is refused
+// unless the function enables SSE itself -- as the intrinsics these
+// functions also call do.  That build links into nothing.
 
 /// Below this many bytes, a copy or fill is a few overlapping loads and
 /// stores; from it up, a loop.
@@ -149,7 +158,8 @@ unsafe fn copy_small(dst: *mut u8, src: *const u8, n: usize) {
 /// # Safety
 ///
 /// `src` readable and `dst` writable for `n` bytes, `n >= SMALL`.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn copy_forward(dst: *mut u8, src: *const u8, n: usize) {
     if n >= REP_THRESHOLD {
         // SAFETY: the caller's bounds; `rep movsb` copies `rcx` bytes from
@@ -222,7 +232,8 @@ unsafe fn copy_forward(dst: *mut u8, src: *const u8, n: usize) {
 /// # Safety
 ///
 /// `src` readable and `dst` writable for `n` bytes, `n >= SMALL`.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn copy_backward(dst: *mut u8, src: *const u8, n: usize) {
     // SAFETY: the caller's bounds.  The first 16 bytes are loaded before the
     // loops and stored after them: they cover the remainder, read before any
@@ -323,7 +334,8 @@ unsafe fn fill_small(dst: *mut u8, byte: u8, n: usize) {
 /// # Safety
 ///
 /// `dst` writable for `n` bytes, `n >= SMALL`.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn fill_large(dst: *mut u8, byte: u8, n: usize) {
     if n >= REP_THRESHOLD {
         // SAFETY: the caller's bound; `rep stosb` stores `al` into `rcx`
@@ -697,7 +709,8 @@ unsafe fn scan_aligned(
 /// # Safety
 ///
 /// `block` is 16-byte aligned and holds a readable byte.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn zeros16(block: *const u8) -> u32 {
     let mask: u32;
     // SAFETY: the caller's readable block, aligned as the memory operand of
@@ -722,7 +735,8 @@ unsafe fn zeros16(block: *const u8) -> u32 {
 /// # Safety
 ///
 /// `chunk` is 64-byte aligned and holds a readable byte.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn zeros64(chunk: *const u8) -> u32 {
     let mask: u32;
     // SAFETY: the caller's readable chunk, which lies within one page; each
@@ -819,7 +833,8 @@ fn within_page(p: *const u8) -> bool {
 ///
 /// `block` is 16-byte aligned and holds a readable byte, which makes all
 /// sixteen readable: an aligned block lies within one page.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn block_masks(block: *const u8, needle: __m128i) -> (u32, u32) {
     let zeros: u32;
     let hits: u32;
@@ -850,7 +865,8 @@ unsafe fn block_masks(block: *const u8, needle: __m128i) -> (u32, u32) {
 /// # Safety
 ///
 /// `a` and `b` readable for sixteen bytes each.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn stops16(a: *const u8, b: *const u8) -> u32 {
     let mask: u32;
     // SAFETY: the caller's readable bytes; unaligned loads.
@@ -918,7 +934,8 @@ unsafe fn byte_or_nul(s: *const u8, byte: u8) -> *const u8 {
 /// # Safety
 ///
 /// `block` is 16-byte aligned and holds a readable byte.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn zero_or_byte16(block: *const u8, needle: __m128i) -> u32 {
     let mask: u32;
     // SAFETY: the caller's readable, aligned block.
@@ -949,7 +966,8 @@ unsafe fn zero_or_byte16(block: *const u8, needle: __m128i) -> u32 {
 /// # Safety
 ///
 /// `chunk` is 64-byte aligned and holds a readable byte.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn zero_or_byte64(chunk: *const u8, needle: __m128i) -> u32 {
     let mask: u32;
     // SAFETY: the caller's readable chunk, which lies within one page.
@@ -996,7 +1014,8 @@ unsafe fn zero_or_byte64(chunk: *const u8, needle: __m128i) -> u32 {
 /// # Safety
 ///
 /// `chunk` is 64-byte aligned and holds a readable byte.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn byte64(chunk: *const u8, needle: __m128i) -> u32 {
     let mask: u32;
     // SAFETY: the caller's readable chunk, which lies within one page.
@@ -1735,7 +1754,8 @@ impl SmallSet {
 /// # Safety
 ///
 /// `block` is 16-byte aligned and holds a readable byte.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn load_block(block: *const u8) -> __m128i {
     let bytes: __m128i;
     // SAFETY: the caller's readable, aligned block.
@@ -2282,7 +2302,8 @@ pub extern "C" fn ffsll(i: i64) -> i32 {
 /// # Safety
 ///
 /// `a` and `b` readable for sixteen bytes each.
-#[inline(always)]
+#[inline]
+#[target_feature(enable = "sse2")]
 unsafe fn folded_stops16(a: *const u8, b: *const u8) -> u32 {
     let mask: u32;
     // SAFETY: the caller's readable bytes; unaligned loads.

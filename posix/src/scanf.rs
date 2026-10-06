@@ -3736,6 +3736,17 @@ mod tests {
         assert_eq!(n, 0, "infin is consumed and is no number");
         let (n, v, rest) = scan_hex("infx", b"%lf%s\0");
         assert_eq!((n, v, rest.as_str()), (2, f64::INFINITY, "x"));
+        // A `0x` and a point with no hex digit: the text `0x.` is collected
+        // and `strtod` reads its `0`, so glibc converts it to zero -- the
+        // two cases known-issues-resolved/TD-POSIX-SCANF-GLIBC-DIGITLESS-HEX
+        // recorded from glibc 2.39 when this library answered otherwise.
+        let (n, v, rest) = scan_hex("0x.z", b"%lf%s\0");
+        assert_eq!((n, v, rest.as_str()), (2, 0.0, "z"));
+        let (n, v, rest) = scan_hex("0x.8p1", b"%3lf%s\0");
+        assert_eq!((n, v, rest.as_str()), (2, 0.0, "8p1"));
+        // A bare `0x` is no number, as in glibc.
+        let (n, _, _) = scan_hex("0xz", b"%lf%s\0");
+        assert_eq!(n, 0);
     }
 
     #[test]

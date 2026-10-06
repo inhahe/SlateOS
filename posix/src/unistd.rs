@@ -3777,36 +3777,42 @@ pub extern "C" fn setresgid(rgid: GidT, egid: GidT, sgid: GidT) -> i32 {
 
 /// Get real, effective, and saved set-user-ID.
 ///
-/// Stub: returns 0 (root) for all three.
+/// The kernel keeps one uid for a process, which is all three; `getuid` and
+/// `geteuid` report it too. Until 2026-10-06 this answered 0 -- root -- for
+/// all three whatever the process was, so a program that checked its ids
+/// before doing something privileged (OpenSSH, sudo, polkit do) was told it
+/// was root after it had dropped to another user.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getresuid(ruid: *mut UidT, euid: *mut UidT, suid: *mut UidT) -> i32 {
     if ruid.is_null() || euid.is_null() || suid.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
+    let (uid, _) = process_credentials();
     // SAFETY: All pointers verified non-null.
     unsafe {
-        *ruid = 0;
-        *euid = 0;
-        *suid = 0;
+        *ruid = uid;
+        *euid = uid;
+        *suid = uid;
     }
     0
 }
 
-/// Get real, effective, and saved set-group-ID.
-///
-/// Stub: returns 0 (root) for all three.
+/// Get real, effective, and saved set-group-ID: the process's one gid, as
+/// [`getresuid`] reports its one uid. It answered 0 for all three until
+/// 2026-10-06.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getresgid(rgid: *mut GidT, egid: *mut GidT, sgid: *mut GidT) -> i32 {
     if rgid.is_null() || egid.is_null() || sgid.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
+    let (_, gid) = process_credentials();
     // SAFETY: All pointers verified non-null.
     unsafe {
-        *rgid = 0;
-        *egid = 0;
-        *sgid = 0;
+        *rgid = gid;
+        *egid = gid;
+        *sgid = gid;
     }
     0
 }
@@ -5536,16 +5542,17 @@ mod tests {
     // getresuid / getresgid
     // ------------------------------------------------------------------
 
+    /// All three are the process's one uid, the one `getuid` and `geteuid`
+    /// report (root in the host's tests, which have no kernel; on SlateOS
+    /// `services/ctest-resuid` drops to another user and reads them back).
     #[test]
-    fn test_getresuid_fills_zeros() {
+    fn test_getresuid_reports_the_process_uid() {
         let mut ruid: UidT = 99;
         let mut euid: UidT = 99;
         let mut suid: UidT = 99;
         let ret = getresuid(&raw mut ruid, &raw mut euid, &raw mut suid);
         assert_eq!(ret, 0);
-        assert_eq!(ruid, 0);
-        assert_eq!(euid, 0);
-        assert_eq!(suid, 0);
+        assert_eq!((ruid, euid, suid), (getuid(), geteuid(), getuid()));
     }
 
     #[test]
@@ -5560,16 +5567,15 @@ mod tests {
         );
     }
 
+    /// As `getresuid`, for the process's one gid.
     #[test]
-    fn test_getresgid_fills_zeros() {
+    fn test_getresgid_reports_the_process_gid() {
         let mut rgid: GidT = 99;
         let mut egid: GidT = 99;
         let mut sgid: GidT = 99;
         let ret = getresgid(&raw mut rgid, &raw mut egid, &raw mut sgid);
         assert_eq!(ret, 0);
-        assert_eq!(rgid, 0);
-        assert_eq!(egid, 0);
-        assert_eq!(sgid, 0);
+        assert_eq!((rgid, egid, sgid), (getgid(), getegid(), getgid()));
     }
 
     #[test]

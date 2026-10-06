@@ -92,11 +92,12 @@ will close them myself as each one goes on.
 | `ctest-pi-mutex` | -- (filed with priority-inheritance mutexes, 2026-10-06; §1177) | - | 60 |
 | `ctest-system` | -- (filed with `system()`, 2026-10-06); needs a `/bin/sh` in the root (`d-ab-the-booted-system-has-no-bin-sh.md`) | file | 60 |
 | `ctest-mmap-file` | -- (filed with file mappings, 2026-10-06; `d-a-a-native-program-cannot-map-a-file.md` is the kernel's half) | file | 30 |
+| `ctest-resuid` | -- (filed with `getresuid`, 2026-10-06); starts as root and drops to uid 1000 | - | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
-The last five rows were added on 2026-10-06, which makes seventeen fixtures
+The last six rows were added on 2026-10-06, which makes eighteen fixtures
 waiting where the summary above says eleven. `ctest-llvm-tools` runs LLVM's
 three tools from the image, each bounded at 60 s, hence its 600.
 `ctest-pi-mutex` sets its threads' scheduler priorities itself

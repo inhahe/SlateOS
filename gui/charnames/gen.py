@@ -12,7 +12,9 @@ Unicode License:
     https://github.com/unicode-org/cldr/blob/main/common/annotations/en.xml
     https://github.com/unicode-org/cldr/blob/main/common/annotationsDerived/en.xml
 
-Writes `gui/charnames/src/emoji_table.rs` and `gui/charnames/src/names_table.rs`:
+Writes `gui/charnames/src/emoji_table.rs` and `gui/charnames/src/names_table.rs`,
+formatted by rustfmt as every source in the tree is (so `rustfmt` must be on
+the path):
 
 * every emoji once, in CLDR's order -- its sequence, its name, its subgroup,
   its keywords, and, for one that comes in skin tones, where its five toned
@@ -42,6 +44,7 @@ has exactly one variant per tone -- and refuses a file that breaks it.
 import io
 import pathlib
 import re
+import subprocess
 import sys
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -303,8 +306,17 @@ def main(argv):
     e, n_emoji, n_toned = emoji(argv[1], kw)
     t, n_names = names(argv[2], kw)
     src = HERE / "src"
-    (src / "emoji_table.rs").write_bytes(e.encode("utf-8"))
-    (src / "names_table.rs").write_bytes(t.encode("utf-8"))
+    for name, text in (("emoji_table.rs", e), ("names_table.rs", t)):
+        path = src / name
+        path.write_bytes(text.encode("utf-8"))
+        # Formatted as every source in the tree is -- rustfmt's defaults, no
+        # file exempt (CLAUDE.md) -- so what is checked in is what this
+        # writes, and the pre-push gate, which formats each pushed file on
+        # its own, finds nothing to change.
+        done = subprocess.run(["rustfmt", "--edition", "2024", str(path)])
+        if done.returncode != 0:
+            print(f"rustfmt failed on {path}", file=sys.stderr)
+            return 1
     print(f"{n_emoji} emoji ({n_toned} in skin tones), {n_names} named characters")
     return 0
 

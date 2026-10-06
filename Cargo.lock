@@ -1082,6 +1082,10 @@ name = "dyndnsproviders"
 version = "0.1.0"
 
 [[package]]
+name = "dyndnsrouter"
+version = "0.1.0"
+
+[[package]]
 name = "earlyoom"
 version = "0.1.0"
 dependencies = [

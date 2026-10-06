@@ -296,9 +296,11 @@ members = [
     # requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md):
     # `std` crates named inside the excluded `services`, as `backupd` is, and
     # out of `default-members` for the same reason. The provider crate is
-    # shared with Settings' Dynamic DNS page.
+    # shared with Settings' Dynamic DNS page; the router crate is the
+    # service's NAT-PMP and UPnP, for the router's address and port forwards.
     "services/dyndns",
     "services/dyndns/providers",
+    "services/dyndns/router",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

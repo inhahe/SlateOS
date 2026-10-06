@@ -35,6 +35,7 @@ own to invent for failures.
 | cancel | open it again | the file on disk is untouched until `save` |
 | import (a folder or a `theme.yaml`) | `authoring::install(&dirs, path, &authoring::id_for(&dirs, name))` | the copy is checked before it is put in place; `Refused(report)` carries every finding to show, `report.findings` |
 | export | `authoring::export(&dirs, id, destination)` | the destination must not exist; the returned report is the check a theme repository would run -- worth showing before the user shares it |
+| save the look the user has put together as one theme ("export current customizations") | `authoring::compose(&dirs, &settings, &authoring::id_for(&dirs, name), name)` | each axis as the theme chosen for it writes it; the wallpaper and icon themes' files copied in; what it says (cursors and sounds left to their own themes, a chosen theme not installed) is worth showing. Then `export` to share it |
 | remove | `authoring::remove(&dirs, id)` | only the user's own; a choice of it in `appearance.yaml` stays and shows the built-in colours with a problem, as for any missing theme -- choose another first, or ask |
 
 `dirs` is `themes::ThemeDirs::standard()` -- the page already holds one

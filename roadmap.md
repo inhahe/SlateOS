@@ -1826,7 +1826,8 @@ live.
   (the built-in one from its compiled-in template and icons), edits its
   colours and description as text so the file's comments survive, installs a
   folder or a lone `theme.yaml` only once the copy passes `themecheck`, copies
-  one out to share with the check a repository would run, and removes one.
+  one out to share with the check a repository would run, makes one theme of
+  the user's mix of axes (`compose`), and removes one.
   Every folder is built aside and renamed into place. The `theme` program
   drives all of it from a terminal. The desktop's settings watcher now follows
   what the appearance settings name -- the chosen themes' folders and the

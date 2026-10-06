@@ -3,9 +3,10 @@
 **Date:** 2026-10-06 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
 
 **In short:** a user can now make a theme of their own from any theme they
-have -- the built-in one included -- change its colours and what describes
-it, install a theme someone sent them, copy a theme out to share, and remove
-one of their own. Each is one function in `appearance::themes::authoring`,
+have -- the built-in one included -- or from the look they have put
+together out of several (one theme's colours, another's controls), change
+its colours and what describes it, install a theme someone sent them, copy a
+theme out to share, and remove one of their own. Each is one function in `appearance::themes::authoring`,
 which the Settings app's theme editor is to use, and the new `theme` program
 drives from a terminal (`theme derive nord "Nord, warmer"`, `theme set ...
 colors base 3b4252`). And when the theme in use is edited -- by either of
@@ -32,6 +33,7 @@ colors? (make your own theme)").
 | **The built-in theme is derived from its template and its icons, compiled in** | refusing, or copying the system's installed folder | It can be derived from on a machine with nothing installed. The template is held to the compiled palette by tests already. Each icon is a file of its own, so a name sharing another's picture is drawn exactly as the built-in theme draws it. | About 70 small SVG files in a theme that may only want new colours. |
 | **A copy's screenshots are left out; its author and licence stay** | keeping everything, or making the user the author | Screenshots picture the source -- a theme browser would show them as pictures of the copy, and the repository's review asks whether screenshots match. A licence that asks for credit is honoured by leaving the credit where it is; the user changes `author` when they share. | A copy shared without new screenshots has none until its author takes some. |
 | **A theme being changed is its file as text, edited through `yamldoc`; its meaning is always `themes::parse` of that text** | a typed model written back out | A colour set is one line changed: the author's comments, order and spelling survive. A preview drawn from the draft is what the desktop will draw, since the same reader reads both. | Only the colour sections and `meta` have typed setters; the other axes are carried as written. |
+| **The user's mix is exported as one theme by taking each section as the chosen theme writes it** (`compose`): the colours' six sections from the colours theme, `widget-style` from the controls', and so on; the built-in theme's from its template; the wallpaper theme's pictures copied in and named for their modes; the icon theme's icons copied in | writing each axis's values out from what was read | A section comes as its author wrote it -- comments, spelling, values the desktop ignored -- and a theme read back reads the same. Taking the built-in theme's sections too means whoever chooses the result for every axis sees what its maker saw. | Cursors and sounds are left to their own themes -- they come from other desktops' folders, through chains of inheritance, and are often licensed apart -- which `compose` says. |
 | **Install copies first and checks the copy** (`themecheck`), and only a copy that passes is put in place | checking the source, then copying | What is checked is what is installed: nothing can change between the two, and what the copy left out is part of the verdict. | A theme that fails is copied in full before it is refused (then deleted). |
 | **A copy follows the checker's reading of a folder**: links to a file inside become hard links; hidden entries, links leading out or to folders, devices and oversized files are left out and said | copying the tree as it is | A copy reads nothing outside the folder, so a shared theme cannot carry one of the user's files out with it. Hard links keep a cursor theme's dozens of alias names from costing a copy each. | A theme that worked through a link to a shared folder loses that file in a copy, and says so. |
 | **Every folder is built inside a hidden holder beside where it goes and renamed into place; a removed theme is renamed aside before it is deleted** | writing in place | A crash leaves the old theme or the new one, never half a theme in the list. | A crash can leave a hidden folder no list shows. |

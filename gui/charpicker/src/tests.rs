@@ -271,6 +271,25 @@ fn the_arrows_move_through_the_grid() {
     assert_eq!(picker.cursor(), Some(len - 1), "nowhere below the last row");
     key(&mut picker, Key::Right);
     assert_eq!(picker.cursor(), Some(len - 1));
+    // From a cell of the last row that is not its last, Down stays put too:
+    // there is no row below it to land in.
+    if cells.column_of(len - 1) > 0 {
+        key(&mut picker, Key::Left);
+        assert_eq!(picker.cursor(), Some(len - 2));
+        key(&mut picker, Key::Down);
+        assert_eq!(
+            picker.cursor(),
+            Some(len - 2),
+            "down from the last row moved"
+        );
+    }
+    // From the row above a shorter last row, Down lands on its last cell.
+    let above = (cells.row_of(len - 1) - 1) * columns + (columns - 1);
+    if cells.column_of(len - 1) < columns - 1 {
+        picker.cursor = Some(above);
+        key(&mut picker, Key::Down);
+        assert_eq!(picker.cursor(), Some(len - 1), "into the short last row");
+    }
     key(&mut picker, Key::Home);
     assert_eq!(picker.cursor(), Some(0));
     key(&mut picker, Key::PageDown);
@@ -638,4 +657,76 @@ fn code_points_are_written_as_unicode_writes_them() {
     assert_eq!(code_points("\u{E9}"), "U+00E9");
     assert_eq!(code_points("\u{1F44B}\u{1F3FD}"), "U+1F44B U+1F3FD");
     assert_eq!(code_points(""), "");
+}
+
+/// **Ctrl+. is the chord, and nothing like it is**: not a full stop typed,
+/// not a release, not with Shift, and not with Alt -- AltGr, which types a
+/// character on several layouts, arrives as Ctrl+Alt.
+#[test]
+fn ctrl_period_is_the_chord() {
+    let chord = |modifiers: Modifiers, pressed: bool| KeyEvent {
+        key: Key::Period,
+        pressed,
+        modifiers,
+        text: String::new(),
+    };
+    assert!(is_shortcut(&chord(Modifiers::ctrl(), true)));
+    assert!(
+        !is_shortcut(&chord(Modifiers::NONE, true)),
+        "a full stop typed"
+    );
+    assert!(!is_shortcut(&chord(Modifiers::ctrl(), false)), "a release");
+    let ctrl_shift = Modifiers {
+        shift: true,
+        ..Modifiers::ctrl()
+    };
+    assert!(!is_shortcut(&chord(ctrl_shift, true)));
+    let altgr = Modifiers {
+        alt: true,
+        ..Modifiers::ctrl()
+    };
+    assert!(!is_shortcut(&chord(altgr, true)), "AltGr types a character");
+    assert!(!is_shortcut(&KeyEvent {
+        key: Key::A,
+        ..chord(Modifiers::ctrl(), true)
+    }));
+}
+
+/// How many boxes inside `area` are filled in the selection's colour.
+fn chosen_in(picker: &CharPicker, area: Rect) -> usize {
+    let palette = Palette::for_mode(false);
+    let fill = palette.selection_fill();
+    picker
+        .render(&palette, W, H)
+        .iter()
+        .filter(|c| {
+            matches!(c, RenderCommand::FillRect { x, y, color, .. }
+                if *color == fill && area.contains(*x + 1.0, *y + 1.0))
+        })
+        .count()
+}
+
+/// **Only what the keyboard acts on is drawn chosen**: the category while no
+/// search has replaced its cells, and the grid's cursor while the keyboard
+/// is in the grid or the search field, whose Enter picks it -- not while it
+/// is among the categories, where Enter picks nothing.
+#[test]
+fn only_what_the_keyboard_acts_on_is_drawn_chosen() {
+    let layout = Layout::new(W, H);
+    let mut picker = CharPicker::new();
+    assert_eq!(chosen_in(&picker, layout.sidebar), 1, "the category chosen");
+    type_text(&mut picker, "cat");
+    assert_eq!(
+        chosen_in(&picker, layout.sidebar),
+        0,
+        "a search's results drawn as a category's"
+    );
+    assert_eq!(chosen_in(&picker, layout.grid), 1, "the best match");
+    key(&mut picker, Key::Tab);
+    assert_eq!(picker.focus(), Part::Categories);
+    assert_eq!(
+        chosen_in(&picker, layout.grid),
+        0,
+        "the cursor drawn where Enter does not reach it"
+    );
 }

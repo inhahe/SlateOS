@@ -2748,9 +2748,11 @@ authors never wrote a single automation handler.
   panel's contents for the application to fill, and each divider, where it
   stands and dragged to where it is set. Its icon grid
   (`guitk::grid::GridPart`): every item, chosen as clicked and opened as
-  double-clicked, scrolled into view first. Not yet: the toolkit's radio
-  group, which no program uses yet, and its text views (`codeview`,
-  `textview`, `richinput`). There is no font picker yet to show.*
+  double-clicked, scrolled into view first. Its radio group
+  (`guitk::radio::RadioAccess`): each option where its host draws it, the
+  chosen one chosen, chosen as clicked. Not yet: its text views
+  (`codeview`, `textview`, `richinput`). There is no font picker yet to
+  show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

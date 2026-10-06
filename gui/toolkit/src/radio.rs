@@ -29,6 +29,12 @@
 //! (the WAI-ARIA radio group pattern, which is what the other toolkits do).
 //! Home and End choose the first and last. Space chooses the option the
 //! keyboard is on. Keys with Ctrl, Alt or Super are the program's.
+//!
+//! # To tools
+//!
+//! A group with its options as its host lays them out ([`RadioAccess`]) is a
+//! group of radio buttons to automation and assistive tools, each chosen as
+//! a click chooses it ([`RadioPart`]).
 
 use crate::checkbox::{FONT_SIZE, LABEL_GAP};
 use crate::color::Color;
@@ -41,6 +47,9 @@ use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
 use crate::text::scaled;
+
+mod accessible;
+pub use accessible::{RadioAccess, RadioPart};
 
 /// The dot's diameter in a chosen option.
 const DOT: f32 = 6.0;

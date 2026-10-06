@@ -80,10 +80,11 @@ instead of `0`.
 - **Waiting on lane A:** init does not hold either capability yet, and the
   kernel delegates only what the parent holds. Until lane A grants them, a
   line naming them is refused at spawn with `PermissionDenied`, and init says
-  so. Asked in `requests/d-a-init-needs-inputdevice-and-service-to-hand-on.md`,
-  together with who writes `/etc/startup.conf`. The kernel writes it at every
-  boot, so the compositor's line has to go into the kernel's default, or the
-  kernel has to leave an existing file alone.
+  so. Asked in `requests/d-a-init-needs-inputdevice-and-service-to-hand-on.md`.
+  Where the compositor's line can live is lane D's older question to lane A,
+  `requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md`. The
+  kernel writes `/etc/startup.conf` at every boot, and `/` is not the
+  system image.
 - **Point 2 (the shell's key) is lane B's,** as you said: the shell is not
   started from `/etc/startup.conf`. If it ever is, the same keyword carries
   it: `caps:Service/8925341740578567520/r`. Init would then have to hold that

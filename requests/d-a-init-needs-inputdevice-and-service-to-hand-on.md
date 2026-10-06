@@ -22,11 +22,11 @@ and init prints why.
    `(ResourceType::Service, 0, Rights::WRITE)`. Add `TRANSFER` too if that
    is the convention for what init holds only to hand on, as on the three
    §312 objects.
-2. **Say who owns `/etc/startup.conf`'s contents.** The kernel writes the
-   file at every boot (`/bin/ticker` only), so a line the rootfs recipe put
-   there would be overwritten. The compositor's line needs a home: your
-   default, or the recipe's, with the kernel writing its default only when
-   the file is missing. Lane D can take the recipe side either way.
+2. **Where the compositor's line goes** is the question already open in
+   `requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md`.
+   The kernel writes `/etc/startup.conf` at every boot (`/bin/ticker`
+   only), and `/` is not the system image. Whatever settles that settles
+   this line too; nothing more is asked here.
 
 ## Why this does not reopen 706's hole
 

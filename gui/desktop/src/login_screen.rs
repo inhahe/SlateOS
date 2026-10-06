@@ -1029,6 +1029,62 @@ impl LoginScreen {
         }
     }
 
+    /// Where the password view is centred across: the screen's middle,
+    /// moved by the shake after a refused password -- everything in the
+    /// view is drawn there, and pressed there.
+    fn password_view_x(&self) -> f32 {
+        self.screen_width / 2.0 + self.shake_offset
+    }
+
+    /// The password field, in the password view.
+    #[must_use]
+    pub fn password_field_rect(&self) -> Hit {
+        let (w, h) = (260.0, 36.0);
+        Hit {
+            x: self.password_view_x() - w / 2.0,
+            y: self.screen_height / 2.0 + 20.0,
+            w,
+            h,
+        }
+    }
+
+    /// The eye at the password field's right end, which shows the password
+    /// or hides it: a target the field's height, its icon in the middle.
+    #[must_use]
+    pub fn reveal_rect(&self) -> Hit {
+        let field = self.password_field_rect();
+        Hit {
+            x: field.x + field.w - 35.0,
+            y: field.y,
+            w: 28.0,
+            h: field.h,
+        }
+    }
+
+    /// The Sign In button under the password field.
+    #[must_use]
+    pub fn sign_in_rect(&self) -> Hit {
+        let field = self.password_field_rect();
+        Hit {
+            x: self.password_view_x() - 50.0,
+            y: field.y + field.h + 12.0,
+            w: 100.0,
+            h: 32.0,
+        }
+    }
+
+    /// The arrow back to the accounts, at the password view's top left --
+    /// drawn, and pressed, only with more than one account to go back to.
+    #[must_use]
+    pub fn back_rect(&self) -> Hit {
+        Hit {
+            x: self.password_view_x() - 124.0,
+            y: self.screen_height / 2.0 - 84.0,
+            w: 28.0,
+            h: 28.0,
+        }
+    }
+
     /// The accessibility menu's outer rectangle, above its button: its
     /// right edge at the button's, as far left as its width takes it. Only
     /// meaningful while [`a11y_menu_open`](Self::a11y_menu_open).
@@ -1197,18 +1253,61 @@ impl LoginScreen {
         }
     }
 
+    /// Ask to sign in with what is typed: what Enter and the Sign In button
+    /// both do.
+    fn sign_in(&mut self) -> LoginAction {
+        match self.submit_password() {
+            Some(username) => LoginAction::Authenticate {
+                username,
+                password: self.password_input.clone(),
+            },
+            // Locked out, or no user to log in as. `submit_password`
+            // leaves the phase alone in both cases, so there is nothing to
+            // redraw either.
+            None => LoginAction::Ignored,
+        }
+    }
+
+    /// A press in the password view: on the back arrow, back to the
+    /// accounts; on the eye, the password shown or hidden; on Sign In, as
+    /// Enter. After a refusal, a press on the field, the eye or the button
+    /// starts again, as any key does. `None` where it is on none of them.
+    fn press_password_view(&mut self, x: f32, y: f32) -> Option<LoginAction> {
+        if !matches!(self.phase, LoginPhase::PasswordEntry | LoginPhase::Failed)
+            || self.current_user().is_none()
+        {
+            return None;
+        }
+        if self.users.len() > 1 && self.back_rect().contains(x, y) {
+            self.back_to_user_select();
+            return Some(LoginAction::Redraw);
+        }
+        let on_view = [
+            self.password_field_rect(),
+            self.reveal_rect(),
+            self.sign_in_rect(),
+        ]
+        .iter()
+        .any(|rect| rect.contains(x, y));
+        if self.phase == LoginPhase::Failed {
+            return on_view.then(|| {
+                self.retry();
+                LoginAction::Redraw
+            });
+        }
+        if self.reveal_rect().contains(x, y) {
+            self.show_password = !self.show_password;
+            return Some(LoginAction::Redraw);
+        }
+        if self.sign_in_rect().contains(x, y) {
+            return Some(self.sign_in());
+        }
+        None
+    }
+
     fn key_password_entry(&mut self, event: &KeyEvent) -> LoginAction {
         match event.key {
-            Key::Enter => match self.submit_password() {
-                Some(username) => LoginAction::Authenticate {
-                    username,
-                    password: self.password_input.clone(),
-                },
-                // Locked out, or no user to log in as. `submit_password`
-                // leaves the phase alone in both cases, so there is nothing to
-                // redraw either.
-                None => LoginAction::Ignored,
-            },
+            Key::Enter => self.sign_in(),
             Key::Backspace => {
                 self.backspace();
                 LoginAction::Redraw
@@ -1297,6 +1396,13 @@ impl LoginScreen {
         if self.config.show_accessibility && self.a11y_button_rect().contains(x, y) {
             self.toggle_a11y_menu();
             return LoginAction::Redraw;
+        }
+        // The password view's controls: drawn since the screen was, and
+        // until 2026-10-06 answered by nothing -- Sign In, the eye and the
+        // back arrow were each a press that did nothing, Enter and Escape
+        // the only ways through.
+        if let Some(action) = self.press_password_view(x, y) {
+            return action;
         }
         if self.phase == LoginPhase::UserSelect {
             for i in 0..self.users.len() {
@@ -1622,10 +1728,8 @@ impl LoginScreen {
             );
 
             // Password field. A panel, so its contents take ordinary roles.
-            let field_w = 260.0;
-            let field_h = 36.0;
-            let field_x = cx - field_w / 2.0;
-            let field_y = cy + 20.0;
+            let field = self.password_field_rect();
+            let (field_x, field_y, field_w, field_h) = (field.x, field.y, field.w, field.h);
 
             // Judgement 3: a rejected password must read as a rejection under
             // every accent, so this is `p.red` and never `p.accent`.
@@ -1673,11 +1777,13 @@ impl LoginScreen {
             });
 
             // Show/hide toggle: an open eye while the password shows, a
-            // struck one while it is hidden.
+            // struck one while it is hidden -- in the middle of what a press
+            // on it lands on.
+            let eye = self.reveal_rect();
             self.icon(
                 commands,
-                field_x + field_w - 28.0,
-                field_y + (field_h - 14.0) / 2.0,
+                eye.x + (eye.w - 14.0) / 2.0,
+                eye.y + (eye.h - 14.0) / 2.0,
                 14.0,
                 if self.show_password {
                     "view-reveal"
@@ -1690,12 +1796,13 @@ impl LoginScreen {
             // Submit button — the screen's default action, so it takes the
             // accent, and its label is derived from that accent rather than
             // named. See judgement 2.
-            let btn_y = field_y + field_h + 12.0;
+            let button = self.sign_in_rect();
+            let btn_y = button.y;
             commands.push(RenderCommand::FillRect {
-                x: cx - 50.0,
-                y: btn_y,
-                width: 100.0,
-                height: 32.0,
+                x: button.x,
+                y: button.y,
+                width: button.w,
+                height: button.h,
                 color: p.accent,
                 corner_radii: CornerRadii::all(8.0),
             });
@@ -1751,12 +1858,13 @@ impl LoginScreen {
 
             // Back button.
             if self.users.len() > 1 {
+                let back = self.back_rect();
                 push_on_background(
                     commands,
                     p,
                     RenderCommand::Text {
-                        x: cx - 120.0,
-                        y: cy - 80.0,
+                        x: back.x + 4.0,
+                        y: back.y + 4.0,
                         text: "\u{2190}".to_string(),
                         font_size: 20.0,
                         color: p.on_wallpaper_dim(),
@@ -3971,6 +4079,136 @@ mod tests {
     #[test]
     fn two_accounts_open_on_the_user_list() {
         assert_eq!(make_screen().phase, LoginPhase::UserSelect);
+    }
+
+    /// A press at the middle of `rect`.
+    fn press_middle(rect: Hit) -> MouseEvent {
+        click_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+    }
+
+    /// **Sign In signs in, as Enter does**: drawn as the screen's default
+    /// action, in the accent, and until 2026-10-06 a press on it did nothing.
+    #[test]
+    fn the_sign_in_button_signs_in_as_enter_does() {
+        let mut screen = make_screen();
+        screen.select_user(1);
+        screen.type_char('p');
+        screen.type_char('w');
+        assert_eq!(
+            screen.handle_mouse(&press_middle(screen.sign_in_rect())),
+            LoginAction::Authenticate {
+                username: "bob".to_owned(),
+                password: "pw".to_owned(),
+            }
+        );
+        assert_eq!(screen.phase, LoginPhase::Authenticating);
+    }
+
+    /// **The eye shows the password, and hides it again.**
+    #[test]
+    fn the_eye_shows_and_hides_the_password() {
+        let mut screen = make_screen();
+        screen.select_user(0);
+        screen.type_char('a');
+        let eye = press_middle(screen.reveal_rect());
+        assert_eq!(screen.handle_mouse(&eye), LoginAction::Redraw);
+        assert!(screen.show_password);
+        assert_eq!(screen.password_display(), "a");
+        assert_eq!(screen.handle_mouse(&eye), LoginAction::Redraw);
+        assert!(!screen.show_password);
+        assert_eq!(screen.password(), "a", "the password as it was");
+    }
+
+    /// **The back arrow goes back to the accounts** -- and with one account
+    /// there is none, and a press where it would be does nothing.
+    #[test]
+    fn the_back_arrow_goes_back_to_the_accounts() {
+        let mut screen = make_screen();
+        screen.select_user(1);
+        assert_eq!(
+            screen.handle_mouse(&press_middle(screen.back_rect())),
+            LoginAction::Redraw
+        );
+        assert_eq!(screen.phase, LoginPhase::UserSelect);
+
+        let mut solo = LoginScreen::new(
+            1920.0,
+            1080.0,
+            vec![LoginUser::new(Some(1), "solo", "Solo")],
+        );
+        assert_eq!(
+            solo.handle_mouse(&press_middle(solo.back_rect())),
+            LoginAction::Ignored
+        );
+        assert_eq!(solo.phase, LoginPhase::PasswordEntry);
+    }
+
+    /// **After a refusal, a press on the field, the eye or Sign In starts
+    /// again**, as any key does -- and not a sign in with the field just
+    /// cleared.
+    #[test]
+    fn a_press_on_the_view_after_a_refusal_starts_again() {
+        for target in [
+            LoginScreen::password_field_rect,
+            LoginScreen::reveal_rect,
+            LoginScreen::sign_in_rect,
+        ] {
+            let mut screen = make_screen();
+            screen.select_user(0);
+            screen.type_char('x');
+            assert!(screen.submit_password().is_some());
+            screen.auth_failure("Incorrect password");
+            assert_eq!(
+                screen.handle_mouse(&press_middle(target(&screen))),
+                LoginAction::Redraw
+            );
+            assert_eq!(screen.phase, LoginPhase::PasswordEntry);
+            assert!(screen.password().is_empty());
+        }
+    }
+
+    /// **Each of the password view's controls is pressed where it is drawn**
+    /// -- the button filled at its rectangle, the arrow and the eye drawn
+    /// inside theirs -- and moves with the view as it shakes.
+    #[test]
+    fn the_password_views_controls_are_pressed_where_they_are_drawn() {
+        let p = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut screen = make_screen();
+        screen.select_user(1);
+        let cmds = screen.render(&p);
+        let button = screen.sign_in_rect();
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::FillRect { x, y, width, height, .. }
+                    if (*x - button.x).abs() < 0.01
+                        && (*y - button.y).abs() < 0.01
+                        && (*width - button.w).abs() < 0.01
+                        && (*height - button.h).abs() < 0.01
+            )),
+            "the button"
+        );
+        let back = screen.back_rect();
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, x, y, .. } if text == "\u{2190}" && back.contains(*x, *y)
+            )),
+            "the arrow"
+        );
+        let eye = screen.reveal_rect();
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::Image { x, y, width, .. }
+                    if *width == 14.0 && eye.contains(*x, *y) && eye.contains(*x + 13.9, *y + 13.9)
+            )),
+            "the eye"
+        );
+
+        screen.shake_offset = 8.0;
+        assert!((screen.sign_in_rect().x - (button.x + 8.0)).abs() < 0.01);
+        assert!((screen.back_rect().x - (back.x + 8.0)).abs() < 0.01);
     }
 
     /// The fill a switch's track is drawn with in the accessibility menu's

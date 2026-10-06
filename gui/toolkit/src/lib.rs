@@ -31,6 +31,7 @@ pub mod codeedit;
 pub mod codeview;
 pub mod color;
 pub mod colorpicker;
+pub mod css;
 pub mod date;
 pub mod datetime;
 pub mod dialog;

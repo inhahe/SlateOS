@@ -266,6 +266,12 @@ pub struct Style {
     pub line_height: f32,
 
     // Size constraints
+    /// A fixed width for the border box, as a style sheet's `width` gives
+    /// one (`box-sizing: border-box`); `None` sizes it by its content and
+    /// its container.
+    pub width: Option<f32>,
+    /// A fixed height for the border box, as `width` is for its width.
+    pub height: Option<f32>,
     pub min_width: Option<f32>,
     pub max_width: Option<f32>,
     pub min_height: Option<f32>,
@@ -279,6 +285,11 @@ pub struct Style {
 
     // Box shadow (simplified: single shadow)
     pub shadow: Option<BoxShadow>,
+
+    /// A shadow under the text: drawn as a copy of the text, offset and in
+    /// its colour. Its blur is not drawn -- the renderer has no blurred
+    /// text -- and its spread is not a text shadow's.
+    pub text_shadow: Option<BoxShadow>,
 }
 
 impl Default for Style {
@@ -297,6 +308,8 @@ impl Default for Style {
             font_weight: FontWeight::Regular,
             text_align: TextAlign::Left,
             line_height: 1.4,
+            width: None,
+            height: None,
             min_width: None,
             max_width: None,
             min_height: None,
@@ -304,6 +317,7 @@ impl Default for Style {
             opacity: 1.0,
             cursor: Cursor::Default,
             shadow: None,
+            text_shadow: None,
         }
     }
 }

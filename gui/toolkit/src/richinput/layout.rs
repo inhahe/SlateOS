@@ -8,13 +8,24 @@
 //! stops fitting. The spaces after a word stay on its line, past its end,
 //! as the plain field's do (`text::wrap_ranges`).
 //!
-//! Lines run left to right: a rich input lays its runs out in the order
-//! they are written, so a line mixing writing directions shows each run in
-//! its own direction but the runs in written order
-//! (`known-issues/TD-C-A-RICH-INPUT-LAYS-ITS-RUNS-OUT-LEFT-TO-RIGHT.md`).
+//! # Two writing directions on one line
+//!
+//! A line mixing right-to-left writing with left-to-right is laid out by
+//! the Unicode bidirectional algorithm over its whole paragraph, as the
+//! plain fields' lines are within one font: each character's level is
+//! resolved once (`osfont::bidi`), a line's pieces are cut where the level
+//! changes as well as where the format does, and the pieces are placed in
+//! the order the levels put them on the screen (rule L2), the spaces that
+//! end a line kept at the paragraph's level (rule L1). Within a piece --
+//! one format, one direction -- the toolkit's own caret and click
+//! arithmetic (`text::caret_x`, `text::cursor_at`) places the caret, so a
+//! right-to-left piece's first character is at its right edge.
+
+use osfont::bidi::{self, Base, Level};
 
 use super::doc::{Format, RichDoc};
 use crate::render::FontWeightHint;
+use crate::text::TextCursor;
 
 /// What a rich input is laid out for.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,8 +38,8 @@ pub struct Metrics {
     pub wrap: bool,
 }
 
-/// A stretch of a line in one format: where it starts on the line and how
-/// wide it is.
+/// A stretch of a line in one format and one writing direction: where it
+/// starts on the line and how wide it is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Piece {
     /// Its first byte.
@@ -41,6 +52,9 @@ pub struct Piece {
     pub width: f32,
     /// Its format.
     pub format: Format,
+    /// Whether it runs right to left: its first character at its right
+    /// edge.
+    pub rtl: bool,
 }
 
 /// One line on the screen.
@@ -57,15 +71,74 @@ pub struct Line {
     pub height: f32,
     /// From its top to its baseline: its tallest text's.
     pub ascent: f32,
-    /// Its pieces, left to right.
+    /// Its pieces, left to right on the screen -- which, on a line mixing
+    /// writing directions, is not the order they are written in.
     pub pieces: Vec<Piece>,
+    /// Whether its paragraph runs right to left: begins at the right.
+    pub rtl: bool,
 }
 
 impl Line {
-    /// Its width: where its last piece ends.
+    /// Its width: where its rightmost piece ends.
     #[must_use]
     pub fn width(&self) -> f32 {
-        self.pieces.last().map_or(0.0, |p| p.x + p.width)
+        self.pieces
+            .iter()
+            .map(|p| p.x + p.width)
+            .fold(0.0, f32::max)
+    }
+
+    /// Whether every piece runs left to right: a line of one direction, on
+    /// which the screen's order is the text's.
+    #[must_use]
+    pub fn is_ltr(&self) -> bool {
+        self.pieces.iter().all(|p| !p.rtl)
+    }
+}
+
+/// Each character's bidirectional level in one paragraph, by its byte
+/// offset in the document.
+struct Levels {
+    /// The paragraph's own level: 0 left to right, 1 right to left.
+    base: Level,
+    /// Each character's offset and level, in order; empty for a paragraph
+    /// all of one direction at level 0, the common case.
+    chars: Vec<(usize, Level)>,
+}
+
+impl Levels {
+    /// The levels of the paragraph from `start` to `end` of `text`, its
+    /// direction found from its first strong character (rules P2, P3).
+    fn of(text: &str, start: usize, end: usize) -> Self {
+        let para = text.get(start..end).unwrap_or("");
+        if bidi::is_trivially_ltr(para) {
+            return Self {
+                base: 0,
+                chars: Vec::new(),
+            };
+        }
+        let chars: Vec<char> = para.chars().collect();
+        let resolved = bidi::resolve(&chars, Base::Auto);
+        let levels = resolved.render_levels();
+        Self {
+            base: resolved.level(),
+            chars: para
+                .char_indices()
+                .zip(levels)
+                .map(|((at, _), level)| (start.saturating_add(at), level))
+                .collect(),
+        }
+    }
+
+    /// The level of the character at byte `at`.
+    fn at(&self, at: usize) -> Level {
+        match self.chars.binary_search_by_key(&at, |&(offset, _)| offset) {
+            Ok(i) => self.chars.get(i).map_or(self.base, |&(_, level)| level),
+            Err(i) => i
+                .checked_sub(1)
+                .and_then(|i| self.chars.get(i))
+                .map_or(self.base, |&(_, level)| level),
+        }
     }
 }
 
@@ -119,6 +192,9 @@ pub fn lay_out(doc: &RichDoc, m: &Metrics) -> Vec<Line> {
 
 /// The paragraph from `start` to `end` in lines, at the top.
 fn paragraph(doc: &RichDoc, start: usize, end: usize, m: &Metrics) -> Vec<Line> {
+    let levels = Levels::of(doc.text(), start, end);
+    // The line from `from` to `to`, laid out at the paragraph's levels.
+    let laid = |from: usize, to: usize| line(doc, from, to, m.size, &levels);
     let mut lines = Vec::new();
     // The line being filled starts here; it holds a word once a word starts
     // after it.
@@ -129,7 +205,7 @@ fn paragraph(doc: &RichDoc, start: usize, end: usize, m: &Metrics) -> Vec<Line> 
         let ink_end = trimmed_end(doc.text(), ws, we);
         let ink = span_width(doc, ws, ink_end, m.size);
         if m.wrap && line_start < ws && used + ink > m.width {
-            lines.push(line(doc, line_start, ws, m.size));
+            lines.push(laid(line_start, ws));
             line_start = ws;
             used = 0.0;
         }
@@ -142,7 +218,7 @@ fn paragraph(doc: &RichDoc, start: usize, end: usize, m: &Metrics) -> Vec<Line> 
                 if cut >= ink_end {
                     break;
                 }
-                lines.push(line(doc, from, cut, m.size));
+                lines.push(laid(from, cut));
                 from = cut;
             }
             line_start = from;
@@ -151,7 +227,7 @@ fn paragraph(doc: &RichDoc, start: usize, end: usize, m: &Metrics) -> Vec<Line> 
         }
         used += span_width(doc, ws, we, m.size);
     }
-    lines.push(line(doc, line_start, end, m.size));
+    lines.push(laid(line_start, end));
     lines
 }
 
@@ -225,10 +301,23 @@ fn fit_from(doc: &RichDoc, from: usize, end: usize, width: f32, base: f32) -> us
     }
 }
 
-/// The line from `start` to `end`, its pieces placed, at the top.
-fn line(doc: &RichDoc, start: usize, end: usize, base: f32) -> Line {
-    let mut pieces: Vec<Piece> = Vec::new();
-    let mut x = 0.0;
+/// The line from `start` to `end`, its pieces placed, at the top -- cut
+/// where the format or the writing direction changes, and placed in the
+/// order `levels` puts them on the screen.
+fn line(doc: &RichDoc, start: usize, end: usize, base: f32, levels: &Levels) -> Line {
+    let text = doc.text();
+    // The spaces that end a line sit at the paragraph's level (rule L1), so
+    // they hang past the line's end whichever way it runs.
+    let trailing = trimmed_end(text, start, end);
+    let level_at = |at: usize| {
+        if at >= trailing {
+            levels.base
+        } else {
+            levels.at(at)
+        }
+    };
+    // In written order first: each stretch of one format and one level.
+    let mut written: Vec<(Piece, Level)> = Vec::new();
     let mut height: f32 = 0.0;
     let mut ascent: f32 = 0.0;
     for (s, e, format) in doc.spans() {
@@ -237,17 +326,46 @@ fn line(doc: &RichDoc, start: usize, end: usize, base: f32) -> Line {
             continue;
         }
         let (size, weight) = font_of(&format, base);
-        let width = crate::text::measure(doc.text().get(s..e).unwrap_or(""), size, weight);
         height = height.max(crate::text::line_height(size, weight));
         ascent = ascent.max(crate::text::ascent(size, weight));
-        pieces.push(Piece {
-            start: s,
-            end: e,
-            x,
-            width,
-            format,
-        });
-        x += width;
+        let mut from = s;
+        while from < e {
+            let level = level_at(from);
+            let to = text
+                .get(from..e)
+                .and_then(|rest| {
+                    rest.char_indices()
+                        .map(|(i, _)| from.saturating_add(i))
+                        .find(|&at| level_at(at) != level)
+                })
+                .unwrap_or(e);
+            let width = crate::text::measure(text.get(from..to).unwrap_or(""), size, weight);
+            written.push((
+                Piece {
+                    start: from,
+                    end: to,
+                    x: 0.0,
+                    width,
+                    format,
+                    // Odd levels run right to left.
+                    rtl: level & 1 == 1,
+                },
+                level,
+            ));
+            from = to;
+        }
+    }
+    // Then in the order the screen shows them, left to right (rule L2).
+    let order = bidi::visual_order(&written.iter().map(|(_, l)| *l).collect::<Vec<_>>());
+    let mut pieces: Vec<Piece> = Vec::with_capacity(written.len());
+    let mut x = 0.0;
+    for i in order {
+        if let Some((piece, _)) = written.get(i) {
+            let mut piece = piece.clone();
+            piece.x = x;
+            x += piece.width;
+            pieces.push(piece);
+        }
     }
     if pieces.is_empty() {
         // An empty line is as tall as text typed into it would be.
@@ -263,6 +381,7 @@ fn line(doc: &RichDoc, start: usize, end: usize, base: f32) -> Line {
         height,
         ascent,
         pieces,
+        rtl: levels.base & 1 == 1,
     }
 }
 
@@ -285,37 +404,122 @@ pub fn line_of(lines: &[Line], at: usize, upstream: bool) -> usize {
     }
 }
 
-/// How far across its line `at` is.
+/// The piece of `line` the caret at `at` is drawn in: the one whose
+/// character it follows (`upstream`) -- where typing carries on -- or the
+/// one whose character it comes before; either, where only one has it.
+///
+/// Where the direction changes, the two can be far apart on the screen: the
+/// gap between an English word and the Hebrew after it is, at the Hebrew's
+/// end, also its left edge. On a line of one direction they are the same
+/// place.
+fn piece_at(line: &Line, at: usize, upstream: bool) -> Option<&Piece> {
+    let before = line.pieces.iter().find(|p| at > p.start && at <= p.end);
+    let after = line.pieces.iter().find(|p| at >= p.start && at < p.end);
+    if upstream {
+        before.or(after)
+    } else {
+        after.or(before)
+    }
+}
+
+/// How far across `piece` the caret at `at`, inside it, is drawn: from its
+/// left edge, in its own direction.
+fn x_in(doc: &RichDoc, piece: &Piece, at: usize, base: f32) -> f32 {
+    let text = doc.text().get(piece.start..piece.end).unwrap_or("");
+    let (size, weight) = font_of(&piece.format, base);
+    let into = at.saturating_sub(piece.start).min(text.len());
+    if piece.rtl {
+        crate::text::caret_x(text, TextCursor::from(into), size, weight)
+    } else {
+        // The width of what is before it: what `caret_x` gives a stretch in
+        // one direction, without shaping it a second time.
+        width_of(text.get(..into).unwrap_or(""), &piece.format, base)
+    }
+}
+
+/// How far across its line `at` is, drawn after the character before it.
 #[must_use]
 pub fn x_of(doc: &RichDoc, line: &Line, at: usize, base: f32) -> f32 {
+    x_at(doc, line, at, true, base)
+}
+
+/// How far across its line `at` is: after the character before it
+/// (`upstream`) or before the character after it -- the same place but
+/// where the writing direction changes (see [`piece_at`]).
+#[must_use]
+pub fn x_at(doc: &RichDoc, line: &Line, at: usize, upstream: bool, base: f32) -> f32 {
+    match piece_at(line, at, upstream) {
+        Some(piece) => piece.x + x_in(doc, piece, at, base),
+        None if at <= line.start => 0.0,
+        None => line.width(),
+    }
+}
+
+/// Every place a caret can be on `line`, left to right: how far across it
+/// is, the offset it stands for, and whether it is drawn after the
+/// character before (`upstream`) -- see [`x_at`].
+#[must_use]
+pub fn caret_stops(doc: &RichDoc, line: &Line, base: f32) -> Vec<(f32, usize, bool)> {
+    let text = doc.text();
+    let mut stops: Vec<(f32, usize, bool)> = Vec::new();
     for piece in &line.pieces {
-        if at >= piece.start && at <= piece.end {
-            let before = doc.text().get(piece.start..at).unwrap_or("");
-            return piece.x + width_of(before, &piece.format, base);
+        let inside = text.get(piece.start..piece.end).unwrap_or("");
+        let offsets = inside
+            .char_indices()
+            .map(|(i, _)| piece.start.saturating_add(i))
+            .chain(core::iter::once(piece.end));
+        for at in offsets {
+            stops.push((piece.x + x_in(doc, piece, at, base), at, at > piece.start));
         }
     }
-    if at <= line.start { 0.0 } else { line.width() }
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    stops
 }
 
 /// The offset nearest `x` across `line` -- the gap between characters a
-/// click there means -- and whether it is the line's end, which a wrap
-/// shares with the start of the next line: a click past a line's end puts
-/// the caret at the end of that line, not the start of the one below.
+/// click there means -- and whether the caret there is drawn after the
+/// character before it (`upstream`). On a line of one direction that is
+/// whether it is the line's end, which a wrap shares with the start of the
+/// next line: a click past a line's end puts the caret at the end of that
+/// line, not the start of the one below. On a line of two, it is also which
+/// side of a change of direction the click was on.
 #[must_use]
 pub fn offset_at(doc: &RichDoc, line: &Line, x: f32, base: f32) -> (usize, bool) {
-    if x <= 0.0 {
-        return (line.start, false);
-    }
-    for piece in &line.pieces {
-        if x <= piece.x + piece.width {
-            let text = doc.text().get(piece.start..piece.end).unwrap_or("");
-            let (size, weight) = font_of(&piece.format, base);
-            let at = crate::text::cursor_at(text, x - piece.x, size, weight);
-            let at = piece.start.saturating_add(at.byte()).min(piece.end);
-            return (at, at == line.end);
+    if line.is_ltr() {
+        if x <= 0.0 {
+            return (line.start, false);
         }
+        for piece in &line.pieces {
+            if x <= piece.x + piece.width {
+                let text = doc.text().get(piece.start..piece.end).unwrap_or("");
+                let (size, weight) = font_of(&piece.format, base);
+                let at = crate::text::cursor_at(text, x - piece.x, size, weight);
+                let at = piece.start.saturating_add(at.byte()).min(piece.end);
+                return (at, at == line.end);
+            }
+        }
+        return (line.end, true);
     }
-    (line.end, true)
+    // Two directions: the piece under the pointer -- or, off either end of
+    // the line, the one there -- and the gap in it nearest the pointer, in
+    // its own direction.
+    let width = line.width();
+    let x = x.clamp(0.0, width);
+    let Some(piece) = line
+        .pieces
+        .iter()
+        .find(|p| x <= p.x + p.width)
+        .or_else(|| line.pieces.last())
+    else {
+        return (line.start, false);
+    };
+    let text = doc.text().get(piece.start..piece.end).unwrap_or("");
+    let (size, weight) = font_of(&piece.format, base);
+    let at = crate::text::cursor_at(text, x - piece.x, size, weight);
+    let at = piece.start.saturating_add(at.byte()).min(piece.end);
+    // Drawn in the piece clicked: after its character, unless the click was
+    // at its very start.
+    (at, at > piece.start)
 }
 
 #[cfg(test)]

@@ -62,3 +62,20 @@ per-application sections, which still have nothing behind them.
   nothing** (`sound::MAX_FILE_BYTES`), and one longer than 30 seconds is cut
   there (`sound::MAX_SECONDS`); a file chooser filtering for `.oga`, `.ogg`
   and `.wav` matches what the player reads.
+
+## Added 2026-10-06: the Output section's master volume is real too
+
+The machine's master volume and mute -- not the system sounds' own volume
+above, which only scales the desktop's chimes -- are now reachable as
+Linux's are, through the sound card's ALSA control device
+(`design-decisions.md` §1485): `sound::mixer::open_master()` gives a
+`Master` with `level()` and `set_level(0..=100)`, `muted()` and
+`set_muted(bool)`; its error's `Display` is a sentence, and
+`desktop::volume::why` the few words the desktop shows for each. The
+desktop's quick settings, volume keys and tray speaker use it, so the
+Output section's slider would be the same volume they move. On SlateOS
+`open_master()` fails (`MixerError::Open`) until a native program can
+reach the card (the e-ad request above; lane D's door names the control
+device too), which the section can show as the desktop does: the reason
+-- "No sound card reachable" -- in the slider's place.
+For a test, `sound::mixer::Simulated` is a card in memory.

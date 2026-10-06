@@ -607,3 +607,106 @@ fn runs_of_two_sizes_share_the_lines_baseline() {
         "the small run is set at the line's top"
     );
 }
+
+/// "Shalom", in Hebrew: a right-to-left word of four letters, two bytes
+/// each.
+const SHALOM: &str = "\u{5e9}\u{5dc}\u{5d5}\u{5dd}";
+
+/// Where the caret of `input` is drawn on its first line.
+fn caret_x(input: &RichInput) -> f32 {
+    let palette = Palette::for_mode(false);
+    let look = Look {
+        rect: (0.0, 0.0, 1000.0, 100.0),
+        focused: true,
+        placeholder: "",
+    };
+    let mut tree = RenderTree::new();
+    input.draw(&mut tree, &palette, &look, &wide());
+    tree.commands
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::FillRect {
+                x, width, color, ..
+            } if *color == palette.text && *width < 4.0 => Some(*x),
+            _ => None,
+        })
+        .expect("the caret is drawn")
+}
+
+/// **Right goes right on the screen across a right-to-left word**: from
+/// before the space ahead of it, each press moves the caret further right
+/// -- to the Hebrew's left edge, through it from its end to its start, to
+/// its right edge -- and on into the English after it; Left retraces it.
+#[test]
+fn right_goes_right_across_a_right_to_left_word() {
+    let text = format!("ab {SHALOM} cd");
+    let mut input = RichInput::with_doc(RichDoc::plain(&text, Format::default()));
+    input.set_cursor(2);
+    let mut seen = vec![input.cursor()];
+    let mut xs = vec![caret_x(&input)];
+    for _ in 0..7 {
+        input.handle_key(&key(Key::Right, false, false), &wide());
+        seen.push(input.cursor());
+        xs.push(caret_x(&input));
+    }
+    assert!(
+        xs.windows(2).all(|p| p[1] > p[0]),
+        "each press further right: {xs:?} at {seen:?}"
+    );
+    // The Hebrew's left edge is its end, so the letters go from its last.
+    assert_eq!(seen, [2, 3, 9, 7, 5, 3, 12, 13], "{xs:?}");
+    for _ in 0..7 {
+        input.handle_key(&key(Key::Left, false, false), &wide());
+    }
+    assert_eq!(input.cursor(), 2, "Left retraces it");
+    assert!((caret_x(&input) - xs[0]).abs() < 0.01);
+}
+
+/// **A selection across a change of direction is drawn where its text is**:
+/// from inside the English into the Hebrew, two boxes -- the selected
+/// Hebrew letters are at the word's right, not beside the English.
+#[test]
+fn a_selection_across_two_directions_is_drawn_where_its_text_is() {
+    let palette = Palette::for_mode(false);
+    let look = Look {
+        rect: (0.0, 0.0, 400.0, 100.0),
+        focused: false,
+        placeholder: "",
+    };
+    let text = format!("ab {SHALOM} cd");
+    let mut input = RichInput::with_doc(RichDoc::plain(&text, Format::default()));
+    input.set_cursor(1);
+    // To the end of the Hebrew word's first letter.
+    for _ in 0..3 {
+        input.move_right(true);
+    }
+    assert_eq!(input.selection_range(), Some((1, 5)));
+    let mut tree = RenderTree::new();
+    input.draw(&mut tree, &palette, &look, &wide());
+    let fill = palette.selection_fill();
+    let boxes: Vec<(f32, f32)> = tree
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::FillRect {
+                x, width, color, ..
+            } if *color == fill => Some((*x, *width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(boxes.len(), 2, "{boxes:?}");
+    let lines = layout::lay_out(input.doc(), &wide());
+    let hebrew = lines[0]
+        .pieces
+        .iter()
+        .find(|p| p.rtl)
+        .expect("the Hebrew piece");
+    let right = hebrew.x + hebrew.width;
+    assert!(
+        boxes
+            .iter()
+            .any(|&(x, w)| (x + w - right).abs() < 0.5 && w < hebrew.width),
+        "a box at the Hebrew's right end: {boxes:?}, the word {}..{right}",
+        hebrew.x
+    );
+}

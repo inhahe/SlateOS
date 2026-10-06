@@ -768,6 +768,52 @@ impl RichInput {
         self.moved();
     }
 
+    /// One place left on the screen, or right (`rightward`) -- what the arrow
+    /// keys do. On a line of one direction that is one character back or on
+    /// ([`move_left`](Self::move_left), [`move_right`](Self::move_right)); on
+    /// a line mixing directions it is the next place a caret can be on the
+    /// screen, which in a right-to-left stretch is the character *ahead*
+    /// for Left. Past the line's edge it goes on as the text does.
+    pub fn step_on_screen(&mut self, rightward: bool, shift: bool, m: &Metrics) {
+        let lines = layout::lay_out(&self.doc, m);
+        let here = layout::line_of(&lines, self.cursor, self.upstream);
+        let mixed = lines.get(here).filter(|line| !line.is_ltr());
+        let collapsing = !shift && self.selection_range().is_some();
+        let Some(line) = mixed.filter(|_| !collapsing) else {
+            if rightward {
+                self.move_right(shift);
+            } else {
+                self.move_left(shift);
+            }
+            return;
+        };
+        let now = layout::x_at(&self.doc, line, self.cursor, self.upstream, m.size);
+        let stops = layout::caret_stops(&self.doc, line, m.size);
+        // The nearest place strictly past this one, the way asked: a hair's
+        // tolerance, so the two offsets a direction change gives one place
+        // count as one place and are stepped over together.
+        const SAME: f32 = 0.5;
+        let next = if rightward {
+            stops.iter().find(|&&(x, _, _)| x > now + SAME)
+        } else {
+            stops.iter().rev().find(|&&(x, _, _)| x < now - SAME)
+        };
+        match next {
+            Some(&(_, at, upstream)) => {
+                self.begin_or_end_selection(shift);
+                self.cursor = at;
+                self.moved();
+                // Drawn where the stop is: which side of a change of
+                // direction it was found on.
+                self.upstream = upstream;
+            }
+            // Off the line's edge: on as the text goes -- which, off the
+            // right of a right-to-left line, is back.
+            None if rightward != line.rtl => self.move_right(shift),
+            None => self.move_left(shift),
+        }
+    }
+
     /// To the start of the word before the caret: past any spaces, then past
     /// the word's letters.
     pub fn move_word_left(&mut self, shift: bool) {
@@ -807,9 +853,9 @@ impl RichInput {
         let lines = layout::lay_out(&self.doc, m);
         let here = layout::line_of(&lines, self.cursor, self.upstream);
         let x = self.goal_x.unwrap_or_else(|| {
-            lines
-                .get(here)
-                .map_or(0.0, |l| layout::x_of(&self.doc, l, self.cursor, m.size))
+            lines.get(here).map_or(0.0, |l| {
+                layout::x_at(&self.doc, l, self.cursor, self.upstream, m.size)
+            })
         });
         let target = if down {
             here.saturating_add(1)
@@ -936,8 +982,8 @@ impl RichInput {
                 Key::Delete => {
                     self.delete();
                 }
-                Key::Left => self.move_left(shift),
-                Key::Right => self.move_right(shift),
+                Key::Left => self.step_on_screen(false, shift, m),
+                Key::Right => self.step_on_screen(true, shift, m),
                 Key::Up => self.move_up(shift, m),
                 Key::Down => self.move_down(shift, m),
                 Key::Home => self.line_start(shift, m),
@@ -977,7 +1023,14 @@ impl RichInput {
             self.cursor = at;
             self.typing = None;
             self.goal_x = None;
-            self.upstream = upstream && line.end == at;
+            // On a line of one direction the flag is only the line's end; on
+            // a line of two it also says which side of a change of direction
+            // the click was on.
+            self.upstream = if line.is_ltr() {
+                upstream && line.end == at
+            } else {
+                upstream
+            };
         }
     }
 
@@ -1062,7 +1115,7 @@ impl RichInput {
         if look.focused {
             let here = layout::line_of(&lines, self.cursor, self.upstream);
             if let Some(line) = lines.get(here) {
-                let x = layout::x_of(&self.doc, line, self.cursor, m.size);
+                let x = layout::x_at(&self.doc, line, self.cursor, self.upstream, m.size);
                 tree.push(RenderCommand::FillRect {
                     x: bx + x,
                     y: top + line.y,
@@ -1093,19 +1146,50 @@ impl RichInput {
         if from > to || (from == to && !past_end) {
             return;
         }
-        let x0 = layout::x_of(&self.doc, line, from, base);
-        let mut x1 = layout::x_of(&self.doc, line, to, base);
-        if past_end {
-            x1 += crate::text::measure(" ", base, FontWeightHint::Regular);
+        let space = crate::text::measure(" ", base, FontWeightHint::Regular);
+        let mut boxes: Vec<(f32, f32)> = Vec::new();
+        if line.is_ltr() {
+            let x0 = layout::x_of(&self.doc, line, from, base);
+            let mut x1 = layout::x_of(&self.doc, line, to, base);
+            if past_end {
+                x1 += space;
+            }
+            boxes.push((x0, (x1 - x0).max(0.0)));
+        } else {
+            // Across two directions the selected text need not be one
+            // stretch of the screen: a box for each piece's part of it, in
+            // the piece's own direction.
+            for piece in &line.pieces {
+                let (f, t) = (from.max(piece.start), to.min(piece.end));
+                if f >= t {
+                    continue;
+                }
+                let text = self.doc.text().get(piece.start..piece.end).unwrap_or("");
+                let (size, weight) = layout::font_of(&piece.format, base);
+                for (x, w) in crate::text::selection_boxes(
+                    text,
+                    f.saturating_sub(piece.start),
+                    t.saturating_sub(piece.start),
+                    size,
+                    weight,
+                ) {
+                    boxes.push((piece.x + x, w));
+                }
+            }
+            if past_end {
+                boxes.push((layout::x_of(&self.doc, line, line.end, base), space));
+            }
         }
-        tree.push(RenderCommand::FillRect {
-            x: left + x0,
-            y: line_top,
-            width: (x1 - x0).max(0.0),
-            height: line.height,
-            color: palette.selection_fill(),
-            corner_radii: CornerRadii::ZERO,
-        });
+        for (x, width) in boxes {
+            tree.push(RenderCommand::FillRect {
+                x: left + x,
+                y: line_top,
+                width,
+                height: line.height,
+                color: palette.selection_fill(),
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
     }
 }
 
@@ -1153,9 +1237,16 @@ fn draw_piece(
     } else {
         crate::text::measure(ink, size, weight)
     };
+    // The spaces after the ink are at its end: the right of a left-to-right
+    // piece, the left of a right-to-left one.
+    let ink_x = if piece.rtl {
+        piece.x + (piece.width - width).max(0.0)
+    } else {
+        piece.x
+    };
     let mut stroke = |y: f32| {
         tree.push(RenderCommand::FillRect {
-            x: left + piece.x,
+            x: left + ink_x,
             y,
             width,
             height: thickness,

@@ -131,3 +131,121 @@ fn a_wraps_offset_belongs_where_the_caret_was_put() {
     assert_eq!(line_of(&two, 3, true), 1);
     assert_eq!(line_of(&two, 2, false), 0);
 }
+
+// ---- Two writing directions ----
+
+/// "Shalom", in Hebrew: a right-to-left word.
+const SHALOM: &str = "\u{5e9}\u{5dc}\u{5d5}\u{5dd}";
+/// "World", in Hebrew.
+const OLAM: &str = "\u{5e2}\u{5d5}\u{5dc}\u{5dd}";
+
+/// The pieces of `line` as (text, whether right to left), left to right on
+/// the screen.
+fn shown<'a>(doc: &'a RichDoc, line: &Line) -> Vec<(&'a str, bool)> {
+    line.pieces
+        .iter()
+        .map(|p| (doc.text().get(p.start..p.end).unwrap(), p.rtl))
+        .collect()
+}
+
+/// **A right-to-left word in a left-to-right line is a piece of its own,
+/// running right to left**, between its neighbours, the pieces touching.
+#[test]
+fn a_right_to_left_word_is_a_piece_of_its_own() {
+    let doc = plain(&format!("abc {SHALOM} def"));
+    let lines = lay_out(&doc, &metrics(1000.0));
+    let line = &lines[0];
+    assert_eq!(
+        shown(&doc, line),
+        [("abc ", false), (SHALOM, true), (" def", false)]
+    );
+    for pair in line.pieces.windows(2) {
+        assert!((pair[0].x + pair[0].width - pair[1].x).abs() < 0.01);
+    }
+    let hebrew = &line.pieces[1];
+    // Each letter further left than the one before it, the word's end at
+    // its left edge.
+    let xs: Vec<f32> = (1..=4)
+        .map(|k| x_of(&doc, line, hebrew.start + 2 * k, SIZE))
+        .collect();
+    assert!(xs.windows(2).all(|p| p[1] < p[0]), "{xs:?}");
+    assert!(xs[0] < hebrew.x + hebrew.width, "{xs:?}");
+    assert!((xs[3] - hebrew.x).abs() < 0.5, "{xs:?} from {}", hebrew.x);
+}
+
+/// **A right-to-left paragraph puts its first word at the right**, and a
+/// left-to-right word inside it reads left to right in its place.
+#[test]
+fn a_right_to_left_paragraph_starts_at_the_right() {
+    let doc = plain(&format!("{SHALOM} abc {OLAM}"));
+    let line = &lay_out(&doc, &metrics(1000.0))[0];
+    let texts: Vec<&str> = shown(&doc, line)
+        .into_iter()
+        .map(|(t, _)| t.trim())
+        .collect();
+    assert_eq!(texts.first(), Some(&OLAM), "the last word at the left");
+    assert_eq!(texts.last(), Some(&SHALOM), "the first at the right");
+    let abc = line
+        .pieces
+        .iter()
+        .find(|p| doc.text().get(p.start..p.end) == Some("abc"))
+        .expect("abc is a piece of its own");
+    assert!(!abc.rtl);
+}
+
+/// **A piece is cut where the format changes as well as where the direction
+/// does**: bold across a Hebrew word and on into English is two pieces.
+#[test]
+fn a_piece_is_cut_at_a_format_and_at_a_direction() {
+    let mut doc = plain(&format!("{SHALOM}ab"));
+    // Bold over the last two Hebrew letters and the "a".
+    let from = SHALOM.len() - 4;
+    doc.apply(from, SHALOM.len() + 1, |f| f.bold = true);
+    let line = &lay_out(&doc, &metrics(1000.0))[0];
+    let pieces: Vec<(usize, usize, bool, bool)> = line
+        .pieces
+        .iter()
+        .map(|p| (p.start, p.end, p.rtl, p.format.bold))
+        .collect();
+    assert_eq!(pieces.len(), 4, "{pieces:?}");
+    assert!(pieces.contains(&(0, from, true, false)));
+    assert!(pieces.contains(&(from, SHALOM.len(), true, true)));
+    assert!(pieces.contains(&(SHALOM.len(), SHALOM.len() + 1, false, true)));
+    assert!(pieces.contains(&(SHALOM.len() + 1, SHALOM.len() + 2, false, false)));
+}
+
+/// **A click finds the place the caret is drawn**, in either direction: every
+/// place on a mixed line, measured and clicked, comes back as itself.
+#[test]
+fn a_click_finds_where_the_caret_is_drawn() {
+    let doc = plain(&format!("abc {SHALOM} def"));
+    let line = &lay_out(&doc, &metrics(1000.0))[0];
+    for (x, at, upstream) in caret_stops(&doc, line, SIZE) {
+        assert!(
+            (x_at(&doc, line, at, upstream, SIZE) - x).abs() < 0.01,
+            "a stop is where its caret is drawn"
+        );
+        let (found, side) = offset_at(&doc, line, x, SIZE);
+        let back = x_at(&doc, line, found, side, SIZE);
+        assert!(
+            (back - x).abs() < 0.5,
+            "the place of {at} at {x} clicked gives {found} at {back}"
+        );
+    }
+    // Off either end.
+    assert_eq!(offset_at(&doc, line, -5.0, SIZE).0, 0);
+    assert_eq!(offset_at(&doc, line, 5000.0, SIZE), (doc.len(), true));
+}
+
+/// **A line of one direction is laid out as it always was**: its pieces in
+/// written order, none right to left.
+#[test]
+fn a_line_of_one_direction_is_unchanged() {
+    let mut doc = plain("one two three");
+    doc.apply(4, 7, |f| f.bold = true);
+    let line = &lay_out(&doc, &metrics(1000.0))[0];
+    assert!(line.is_ltr());
+    let starts: Vec<usize> = line.pieces.iter().map(|p| p.start).collect();
+    assert_eq!(starts, [0, 4, 7]);
+    assert!((line.pieces[1].x - w("one ")).abs() < 0.01);
+}

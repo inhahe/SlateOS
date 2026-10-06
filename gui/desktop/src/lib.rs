@@ -6685,6 +6685,13 @@ impl DesktopShell {
             let notches = whole.clamp(-20.0, 20.0) as i16;
             if notches != 0 {
                 self.step_volume(notches.saturating_mul(VolumeStep::SIZE));
+                // The speaker's tooltip named the level before the turn; the
+                // overlay names it now, and a tooltip saying otherwise beside
+                // it would be the one wrong thing on screen.
+                if matches!(self.tooltip, Some((TooltipKey::Volume, _))) {
+                    self.tooltip = None;
+                    self.hover_changed = true;
+                }
             }
             return ShellAction::Consumed;
         }

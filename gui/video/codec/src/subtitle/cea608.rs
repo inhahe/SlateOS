@@ -925,22 +925,24 @@ mod tests {
 
     #[test]
     fn roll_up_rolls_its_window_and_a_line_shows_from_its_first_character() {
+        // The line rolled off the top is longer than the one typed after
+        // it: nothing of it comes round to the base row.
         let s = Script::default()
             .ru(2)
             .cr()
             .pac15()
-            .text("one")
+            .text("first line")
             .wait(4)
             .cr()
             .text("two")
             .wait(4)
             .cr()
-            .text("three")
+            .text("3")
             .wait(4)
             .edm();
         let t = texts(s);
         let lines: Vec<&str> = t.iter().map(|c| c.2.as_str()).collect();
-        assert_eq!(lines, ["one", "one\ntwo", "two\nthree"]);
+        assert_eq!(lines, ["first line", "first line\ntwo", "two\n3"]);
         // The first line from its first character (pair 6), not the
         // Carriage Return before it (pair 2).
         assert_eq!(t[0].0, 6000);

@@ -411,6 +411,14 @@ def synthetic():
     out["empty_edit.mp4"] = mp4([Trak(b"vide", av01, 10240, v12, [6, 6], edits=[(200, -1), (1200, 0)])])
     # An edit from the middle of a group of pictures.
     out["edit_mid_gop.mp4"] = mp4([Trak(b"vide", av01, 10240, v12, [12], edits=[(900, 2560)])])
+    # Two edits, the first inside a long frame that reaches past its end:
+    # the frame is dropped and the edit ends there, never reaching its
+    # start. The second starts inside a short frame, dropped before it --
+    # counted back from the edit by its own 300 ticks, not the long frame's
+    # 2000, which FFmpeg writes over (`frame_duration_buffer`).
+    varied = [(sample(i, 10), d, True, 0) for i, d in enumerate([1000, 2000, 300, 1000, 1000])]
+    out["edits_stale_discards.mp4"] = mp4([Trak(b"vide", av01, 10240, varied, [5],
+                                                edits=[(10, 1500), (98, 3100)])])
     # Sound whose edit starts inside its second frame: the frame is kept,
     # its sound before the edit skipped.
     s20 = [(sample(i, 8), 960, True, 0) for i in range(20)]
@@ -804,6 +812,13 @@ FOUND = {
     # to allocate 46 GB for their times and was killed; FFmpeg indexes
     # none, as it cannot allocate the index.
     "found_tx3g_claims_billions.mp4",
+    # The mp4 target, 2026-10-05: a picture track whose edits leave half its
+    # index discarded above the time a seek back past the start looks for.
+    # FFmpeg's search steps over the run an entry at a time, once for each
+    # entry of it: a third of a second for this 33 KB file, eight seconds a
+    # seek under the fuzzer's instrumentation. The crate's search took the
+    # same walks; it now takes each in one step (index.rs, `Walks`).
+    "found_seek_over_discards.mp4",
 }
 
 

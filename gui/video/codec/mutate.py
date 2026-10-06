@@ -92,6 +92,63 @@ DVB_DAMAGE = "dvb_damage_taken_as_ffmpeg_takes_it"
 DVB_SEEK = "a_seek_in_dvb_pictures_reads_from_where_they_begin_afresh"
 DVB_FORGETS = "a_seek_in_dvb_pictures_forgets_what_was_read"
 
+# WebVTT in MP4: each sample the cues showing through it, joined again
+# (isovtt.rs).
+VTT_SAMPLE = "a_sample_is_its_cues_in_order_and_an_empty_one_none"
+VTT_SIZES = "a_box_of_size_zero_runs_to_the_end_and_one_of_size_one_is_long"
+VTT_WHOLE = "a_cue_split_across_samples_is_whole_again"
+VTT_CONTIGUOUS = "a_cue_goes_on_only_into_the_sample_its_last_one_ended_at"
+VTT_TWICE = "two_cues_alike_in_one_sample_are_two_cues"
+VTT_ORDER = "cues_come_in_the_order_they_began"
+VTT_TOGETHER = "cues_that_began_together_come_in_their_samples_order"
+
+WEBVTT_MP4 = "webvtt_in_mp4"
+WEBVTT_JOINED = "webvtt_in_mp4_cut_into_samples_is_joined_again"
+WEBVTT_MP4_FORGETS = "a_seek_in_webvtt_in_mp4_forgets_the_cue_showing_before_it"
+WEBVTT_MP4_DAMAGE = "a_damaged_webvtt_sample_in_mp4_shows_nothing_and_is_counted"
+
+# Pieces of cues joined again (joined.rs), for WebVTT's samples and TTML's.
+J_ONE = "a_cue_in_samples_one_after_another_is_one_cue"
+J_GAP = "a_cue_after_a_gap_is_another_cue"
+J_WAITS = "an_ended_cue_waits_for_one_begun_before_it"
+J_ALIKE = "two_cues_alike_are_two_cues_each_going_on_once"
+J_INSIDE = "pieces_inside_a_sample_join_where_they_meet"
+J_REFERENCE = "whole_samples_join_as_the_first_joining_did"
+
+# TTML in MP4 (ttml.rs, xml.rs): the module's own.
+TT_TIMES = "time_expressions_are_read_exactly"
+TT_NEAREST = "nanoseconds_are_the_nearest"
+TT_EXACT_NS = "nanoseconds_are_exact_however_large_the_terms"
+TT_ORDER = "times_order_exactly_however_large_the_terms"
+TT_STRETCHES = "a_documents_stretches_are_what_it_shows_at_every_moment"
+TT_SLOW = "a_paragraph_made_to_be_slow_is_given_up_on"
+TT_WHITE = "white_space_is_ttconvs"
+TT_REFERENCED = "styles_inline_over_referenced_and_the_last_reference_over_the_first"
+TT_SPAN = "a_span_shows_from_its_own_begin"
+TT_SEQ = "text_lasts_as_long_as_its_parent_and_a_seq_puts_children_in_turn"
+TT_LATE = "a_container_beginning_late_lasts_until_its_last_child_ends"
+TT_OWN_REGION = "a_paragraph_naming_another_region_than_its_body_shows_in_none"
+TT_HIDDEN = "hidden_text_and_display_none_show_nothing"
+TT_THIRDS = "a_region_s_place_is_said_in_thirds"
+TT_NOT_ALLOWED = "an_element_where_ttml_allows_none_is_passed_over_alone"
+XML_ROOT = "a_document_is_its_root_names_resolved"
+XML_REFERENCES = "references_cdata_and_line_endings_are_read"
+XML_SCOPED = "a_default_namespace_is_scoped_to_its_element"
+XML_LAUGHS = "a_doctype_is_passed_over_and_its_entities_never_read"
+XML_REFUSED = "what_is_not_well_formed_is_refused"
+XML_DEEP = "elements_nest_only_so_deep"
+XML_SCOPE_ENDS = "a_declaration_is_in_scope_until_its_element_ends"
+# The TTML fixtures'.
+TTML_MP4 = "ttml_in_mp4"
+TTML_SPLIT = "ttml_in_samples_of_two_seconds_is_joined_again"
+TTML_TIMING = "ttml_timing"
+TTML_TIMING_SPLIT = "ttml_timing_cut_into_samples"
+TTML_OWN_STRETCH = "ttml_shows_each_sample_only_in_its_own_stretch"
+TTML_REGIONS = "ttml_regions"
+TTML_DEFAULT = "ttml_without_regions"
+TTML_SEEK = "a_seek_in_ttml_gives_the_cues_showing_then"
+TTML_FORGETS = "a_seek_in_ttml_forgets_what_was_read"
+
 # (name, old, new, [tests that must fail])
 PICTURES = [
     (
@@ -345,6 +402,56 @@ READER = [
         "            Reader::Dvb(_) => 0,",
         [DVB_DAMAGE],
     ),
+    # WebVTT in MP4.
+    (
+        "MP4's WebVTT is read as Matroska's",
+        '            SubtitleFormat::WebVtt if chosen.codec_id == b"wvtt" => {',
+        "            SubtitleFormat::WebVtt if false => {",
+        [WEBVTT_MP4, WEBVTT_JOINED],
+    ),
+    (
+        "MP4's WebVTT gives no cue still showing at the track's end",
+        "            let whole = joined.finish();\n            self.give(whole);",
+        "            let whole: Vec<isovtt::Whole> = {\n                let _ = joined.finish();\n                Vec::new()\n            };\n            self.give(whole);",
+        [WEBVTT_MP4, WEBVTT_JOINED],
+    ),
+    (
+        "damage in MP4's WebVTT is not counted",
+        "        if !readable {",
+        "        if false && !readable {",
+        [WEBVTT_MP4_DAMAGE],
+    ),
+    (
+        "a seek in MP4's WebVTT keeps the cues showing before it",
+        "            Reader::IsoVtt(joined) => joined.clear(),",
+        "            Reader::IsoVtt(_) => {}",
+        [WEBVTT_MP4_FORGETS],
+    ),
+    # TTML in MP4.
+    (
+        "MP4's TTML gives no cue still showing at the track's end",
+        "            let whole = joined.finish();\n            self.give_shown(whole);",
+        "            let _ = joined.finish();\n            self.give_shown(Vec::new());",
+        [TTML_MP4, TTML_SPLIT, TTML_TIMING],
+    ),
+    (
+        "a TTML sample that is no document is not counted",
+        "        if shown.is_none() {",
+        "        if false && shown.is_none() {",
+        [TTML_MP4],
+    ),
+    (
+        "a seek in MP4's TTML keeps what was read before it",
+        "            Reader::Ttml(joined) => joined.clear(),",
+        "            Reader::Ttml(_) => {}",
+        [TTML_FORGETS],
+    ),
+    (
+        "TTML's cues are given without a seek's time",
+        "            let (start, end) = (w.start.to_ns(), w.end.to_ns());\n            if self.kept(start, end) {",
+        "            let (start, end) = (w.start.to_ns(), w.end.to_ns());\n            if true {",
+        [TTML_SEEK],
+    ),
 ]
 
 DVD = [
@@ -464,12 +571,296 @@ DVD = [
     ),
 ]
 
+# WebVTT in MP4's samples. The check of a box's size before its body is
+# taken has no row, its mutant doing nothing (`get` refuses the same sizes).
+# The joining of their cues is JOINED's.
+ISOVTT = [
+    (
+        "a cue's identifier is not read",
+        '                b"iden" => &mut cue.id,',
+        '                b"iden" => continue,',
+        [VTT_SAMPLE, WEBVTT_JOINED],
+    ),
+    (
+        "a cue's settings are not read",
+        '                b"sttg" => &mut cue.settings,',
+        '                b"sttg" => continue,',
+        [VTT_SAMPLE, WEBVTT_MP4, WEBVTT_JOINED],
+    ),
+    (
+        "a box of size zero is damage",
+        "            0 => (8, rest.len()),",
+        "            0 => return None,",
+        [VTT_SIZES],
+    ),
+    (
+        "a box of size one keeps its size in its body",
+        "                (16, usize::try_from(large).ok()?)",
+        "                (8, usize::try_from(large).ok()?)",
+        [VTT_SIZES],
+    ),
+]
+
+# Pieces of cues joined again: WebVTT's samples' (through isovtt.rs, whose
+# tests are WebVTT's rules for it) and TTML's paragraphs'. Three pieces have
+# no row, their mutants changing only when a cue is given and not which or
+# in what order: the cues reaching a time before a piece's ended there, the
+# cues reaching a time no piece goes on from ended at it, and those reaching
+# a time before the sample's end ended at the end -- each would instead end
+# at the next sample, or at the track's end, where they are given the same.
+JOINED = [
+    (
+        "each piece of a cue is a cue of its own",
+        "                let (order, start) = match reaching.get_mut(&cue).and_then(BTreeSet::pop_first) {",
+        "                let (order, start) = match None::<(u64, T)> {",
+        [J_ONE, J_INSIDE, J_REFERENCE, VTT_WHOLE, WEBVTT_JOINED, TTML_SPLIT, TTML_TIMING_SPLIT],
+    ),
+    (
+        "a cue goes on across a gap",
+        "            self.end_before(from);\n            let mut reaching = self.open.remove(&from).unwrap_or_default();",
+        "            let mut reaching = self.open.pop_first().map(|(_, r)| r).unwrap_or_default();",
+        [J_GAP, VTT_CONTIGUOUS],
+    ),
+    (
+        "two cues alike go on as one",
+        "reaching.get_mut(&cue).and_then(BTreeSet::pop_first)",
+        "reaching.get(&cue).and_then(|s| s.first().copied())",
+        [J_ALIKE, VTT_TWICE],
+    ),
+    (
+        "an ended cue is given before one that began earlier",
+        "            if first_open.is_some_and(|first| (next.start, next.order) >= first) {",
+        "            if false && first_open.is_some_and(|first| (next.start, next.order) >= first) {",
+        [J_WAITS, J_REFERENCE, VTT_WHOLE, VTT_ORDER, WEBVTT_JOINED],
+    ),
+    (
+        "cues that began together come in the order they ended",
+        "        (&self.start, self.order).cmp(&(&other.start, other.order))",
+        "        (&self.start, &self.end).cmp(&(&other.start, &other.end))",
+        [VTT_TOGETHER, J_REFERENCE],
+    ),
+]
+
+# TTML: its times, its documents worked out paragraph by paragraph, its
+# styles, regions and white space, and how it is said.
+TTML = [
+    # Times.
+    (
+        "a clock time's frames are not counted",
+        "                total = total.add(Ratio::whole(f).div(self.frame_rate)?)?;",
+        "                let _ = f;",
+        [TT_TIMES, TTML_TIMING, TTML_TIMING_SPLIT],
+    ),
+    (
+        "a tick is a second",
+        '            "t" => Ratio::whole(1).div(self.tick_rate)?,',
+        '            "t" => Ratio::whole(1),',
+        [TT_TIMES, TTML_TIMING, TTML_TIMING_SPLIT],
+    ),
+    (
+        "a fraction's comparison is not turned round",
+        "                        reversed = !reversed;",
+        "                        reversed = reversed;",
+        [TT_ORDER],
+    ),
+    (
+        "half a nanosecond rounds down",
+        "        if rest.saturating_mul(2) >= den {",
+        "        if rest.saturating_mul(2) > den {",
+        [TT_NEAREST, TT_EXACT_NS],
+    ),
+    (
+        "the long multiplication adds half",
+        "            rest = rest.saturating_add(a);",
+        "            rest = rest.saturating_add(a / 2);",
+        [TT_NEAREST, TT_EXACT_NS],
+    ),
+    # Timing, as ttconv's and TTML's.
+    (
+        "a sequence's children all begin with it",
+        "    let implicit_begin = if parent.seq {",
+        "    let implicit_begin = if false && parent.seq {",
+        [TT_SEQ, TT_STRETCHES, TTML_TIMING, TTML_TIMING_SPLIT],
+    ),
+    (
+        "a parallel container ends with its first child to end",
+        "                        (Some(a), Some(b)) => Some(a.max(b)),",
+        "                        (Some(a), Some(b)) => Some(a.min(b)),",
+        [TT_STRETCHES, TTML_TIMING],
+    ),
+    (
+        "a container beginning late ends early, as ttconv's",
+        "                let end = desired_end.and_then(|end| end.add(timing.desired_begin));",
+        "                let end = desired_end;",
+        [TT_LATE],
+    ),
+    (
+        "an element not allowed where it is takes every one after it",
+        "                if child.name.namespace != TT || !allowed.contains(&child.name.local.as_str()) {\n                    continue;",
+        "                if child.name.namespace != TT || !allowed.contains(&child.name.local.as_str()) {\n                    break;",
+        [TT_NOT_ALLOWED],
+    ),
+    # Paragraph by paragraph.
+    (
+        "a paragraph is worked out only where its stretch begins",
+        "                changes_inside(child, f.begin, f.end, (start, stop), &mut points, &mut cost);",
+        "                let _ = (child, &mut points, &mut cost);",
+        [TT_STRETCHES, TTML_TIMING],
+    ),
+    (
+        "a paragraph associated with no region shows in none",
+        "        regions_inside(&f.p.children, &mut named);",
+        "        let _ = &f.p.children;",
+        [TT_STRETCHES, TTML_REGIONS],
+    ),
+    (
+        "an element naming another region than its ancestors' shows in its own",
+        "        && own != theirs",
+        "        && own != theirs && false",
+        [TT_STRETCHES, TTML_REGIONS],
+    ),
+    (
+        "a paragraph not displayed is found",
+        "    if c.styles.display_none == Some(true) {\n        return;\n    }\n    let here = Ancestors {",
+        "    if false && c.styles.display_none == Some(true) {\n        return;\n    }\n    let here = Ancestors {",
+        [TT_STRETCHES, TTML_REGIONS],
+    ),
+    (
+        "a paragraph's stretches of showing the same are not one",
+        "                        (Some((_, end, shown)), Some(text)) if *shown == text => *end = until,",
+        "                        (Some((_, end, shown)), Some(text)) if false && *shown == text => *end = until,",
+        [TT_STRETCHES],
+    ),
+    (
+        "a document made to be slow is read through",
+        "                    budget = budget.checked_sub(cost.saturating_add(1))?;",
+        "                    budget = budget.saturating_sub(cost.saturating_add(1));",
+        [TT_SLOW],
+    ),
+    # Styles, white space, and how it is said.
+    (
+        "a referenced style over the element's own",
+        "            s = s.under(r);",
+        "            s = r.under(&s);",
+        [TT_REFERENCED, TTML_MP4, TTML_SPLIT],
+    ),
+    (
+        "a leading space is kept after white space",
+        "        if after_space && collapsed.starts_with(' ') {",
+        "        if false && after_space && collapsed.starts_with(' ') {",
+        [TT_WHITE, TTML_MP4, TTML_SPLIT],
+    ),
+    (
+        "hidden text is shown",
+        "            Piece::Text { style, .. } if style.hidden => {}",
+        "            Piece::Text { style, .. } if false && style.hidden => {}",
+        [TT_HIDDEN, TTML_MP4, TTML_SPLIT],
+    ),
+    (
+        "white is written as a colour",
+        "                    writer.op(Op::Colour((want != rgb(WHITE)).then_some(want)));",
+        "                    writer.op(Op::Colour(Some(want)));",
+        [TTML_MP4, TTML_SPLIT],
+    ),
+    (
+        "an anchor at a third goes in the third before",
+        "        if v < one {",
+        "        if v <= one {",
+        [TT_THIRDS],
+    ),
+]
+
+# What TTML needs of XML.
+XML = [
+    (
+        "line endings are kept as written",
+        '        normalized = text.replace("\\r\\n", "\\n").replace(\'\\r\', "\\n");',
+        "        normalized = text.to_owned();",
+        [XML_REFERENCES],
+    ),
+    (
+        "an ampersand's reference is another character",
+        "            \"amp\" => '&',",
+        "            \"amp\" => '+',",
+        [XML_REFERENCES, TTML_SPLIT],
+    ),
+    (
+        "nesting goes one past the bound",
+        "        if self.open.len() >= MAX_DEPTH {",
+        "        if self.open.len() > MAX_DEPTH {",
+        [XML_DEEP],
+    ),
+    (
+        "a DOCTYPE ends at its first '>'",
+        "                (None, '>') if depth == 0 => {",
+        "                (None, '>') => {",
+        [XML_LAUGHS],
+    ),
+    (
+        "an attribute written twice is read",
+        "            if !written_names.insert(attribute) {",
+        "            if !written_names.insert(attribute) && false {",
+        [XML_REFUSED],
+    ),
+    (
+        "two attributes resolving alike are read",
+        "            if !names.insert(n.clone()) {",
+        "            if !names.insert(n.clone()) && false {",
+        [XML_REFUSED],
+    ),
+    (
+        "a declaration stays in scope after its element",
+        "                namespaces.pop();",
+        "                let _ = &namespaces;",
+        [XML_SCOPE_ENDS, XML_SCOPED],
+    ),
+    (
+        "an outer declaration hides an inner one",
+        "                .and_then(|namespaces| namespaces.last())",
+        "                .and_then(|namespaces| namespaces.first())",
+        [XML_SCOPE_ENDS],
+    ),
+    (
+        "a prefix bound by nothing is in no namespace",
+        "                None => return Err(XmlError::UnboundPrefix),",
+        "                None => String::new(),",
+        [XML_REFUSED, XML_SCOPE_ENDS],
+    ),
+]
+
+CONTAINER = [
+    (
+        "MP4's WebVTT is not offered as subtitles",
+        '                        || (t.kind == mp4::TrackKind::Data && t.codec_tag == *b"wvtt")',
+        "                        || false",
+        [WEBVTT_MP4, WEBVTT_JOINED],
+    ),
+    (
+        "MP4's WebVTT is offered as a format not read",
+        '                        } else if t.codec_tag == *b"wvtt" {',
+        "                        } else if false {",
+        [WEBVTT_MP4],
+    ),
+    (
+        "MP4's TTML is offered as a format not read",
+        "                        } else if t.codec == mp4::Codec::Ttml {",
+        "                        } else if false {",
+        [TTML_MP4, TTML_DEFAULT],
+    ),
+]
+
 LIB = [
     (
         "DVB's pictures are not read",
         "        self.is_text() || matches!(self, Self::Pgs | Self::VobSub | Self::Dvb)",
         "        self.is_text() || matches!(self, Self::Pgs | Self::VobSub)",
         [OPENED],
+    ),
+    (
+        "TTML is not text",
+        "            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText | Self::Ttml",
+        "            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText",
+        [TTML_MP4, TTML_DEFAULT],
     ),
 ]
 
@@ -534,7 +925,7 @@ DVB_ROWS = [
         "a mode change does not begin afresh",
         "        if state == 1 || state == 2 {",
         "        if state == 1 {",
-        [DVB],
+        [DVB, DVB_VERSION],
     ),
     (
         "a page lists a region twice",
@@ -797,7 +1188,12 @@ if __name__ == "__main__":
         (SRC / "subtitle" / "pgs.rs", PICTURES),
         (SRC / "subtitle" / "vobsub.rs", DVD),
         (SRC / "subtitle" / "dvb.rs", DVB_ROWS),
+        (SRC / "subtitle" / "isovtt.rs", ISOVTT),
+        (SRC / "subtitle" / "joined.rs", JOINED),
+        (SRC / "subtitle" / "ttml.rs", TTML),
+        (SRC / "subtitle" / "xml.rs", XML),
         (SRC / "subtitle.rs", READER),
+        (SRC / "container.rs", CONTAINER),
         (SRC / "lib.rs", LIB),
     ]
     names = [name for _, rows in tables for name, *_ in rows]

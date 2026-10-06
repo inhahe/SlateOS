@@ -4354,7 +4354,24 @@ lane C's `guitk`.
       CLUTs, a region's background before its objects, the non-modifying
       colour, several display sets in a block. Five fixtures written
       segment by segment, in a Matroska file of the generator's own.
-    - `[ ]` MP4's WebVTT and TTML
+    - `[x]` MP4's WebVTT (`wvtt`, 2026-10-05, design-decisions §1367): what
+      DASH and HLS segments carry, which FFmpeg does not read. Each sample
+      the cues showing through it, a cue cut wherever another begins or
+      ends; the pieces joined again and read as WebM's cues are. Held to
+      the same cues in WebM, through MP4Box (GPAC, the format's reference
+      implementation, built from source): plain, overlapping, fragmented,
+      and a seek.
+    - `[x]` MP4's TTML (`stpp`, 2026-10-05, design-decisions §1368): IMSC 1,
+      what broadcasters' DASH segments carry, which FFmpeg cannot decode.
+      Each sample a whole document shown for its own stretch, read as
+      ttconv reads it (timing, regions, styles, white space), each
+      paragraph's stretches joined across samples; a sample that is no XML
+      counted, as GPAC and ttconv count it. Each paragraph worked out only
+      where it changes, the whole-document reading held equal to it over
+      thousands of random documents; a document made to be slow given up
+      on. Held to ttconv's reading of each fixture's samples: MP4Box's, and
+      written box by box in samples of 2 s, 1.5 s and one, and a seek.
+    - `[ ]` CEA-608 captions in MP4 (`c608`)
       (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
 
 - `[-]` `[F]` **A display transport over channel IPC** for local clients,

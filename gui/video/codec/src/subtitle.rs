@@ -1,7 +1,7 @@
 //! A video file's subtitles, cue by cue: SubRip, ASS and SSA, and WebVTT, in
-//! Matroska and WebM; 3GPP timed text in MP4 -- and Blu-ray's PGS, DVD's
-//! VobSub and digital television's DVB subtitles, which are pictures of
-//! text.
+//! Matroska and WebM; 3GPP timed text, WebVTT and TTML in MP4 -- and
+//! Blu-ray's PGS, DVD's VobSub and digital television's DVB subtitles, which
+//! are pictures of text.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,10 +30,24 @@
 //!   styles from the track's header, and said in SRT as far as SRT can say
 //!   them: positions, rotation, karaoke and the like are dropped (`ass.rs`).
 //! - WebVTT (WebM's `D_WEBVTT/SUBTITLES`, Matroska's `S_TEXT/WEBVTT`) is read
-//!   as its specification reads it (`webvtt.rs`).
+//!   as its specification reads it (`webvtt.rs`). So is MP4's (`wvtt`, what
+//!   DASH and HLS segments carry), which FFmpeg does not read at all: its
+//!   samples cut a cue wherever another begins or ends, and the pieces are
+//!   joined again first (`isovtt.rs`, `joined.rs`). After a seek, a cue
+//!   showing at the time begins at the sample the seek landed in, as far as
+//!   the samples read say.
 //! - 3GPP timed text (MP4's `tx3g`) is read as ffmpeg's `mov_text` decoder
 //!   reads it, its default style, place and style runs said in SRT
 //!   (`movtext.rs`).
+//! - TTML (MP4's `stpp`: IMSC 1, the subtitles of broadcasting and of much
+//!   streaming), which FFmpeg cannot decode, is read as ttconv reads it --
+//!   each sample a whole document, shown only for the sample's stretch --
+//!   each paragraph a cue for each stretch it shows the same through, joined
+//!   across samples as WebVTT's pieces are, its styles and region's place
+//!   said in SRT (`ttml.rs`, its XML read by `xml.rs`). A sample that is no
+//!   well-formed TTML document shows nothing and is counted, as in GPAC and
+//!   ttconv; so is one that would cost far more to say than its size, which
+//!   only a document made to be slow does.
 //!
 //! **A cue of pictures** -- Blu-ray's PGS (`S_HDMV/PGS`), DVD's VobSub
 //! (`S_VOBSUB`) and DVB's (`S_DVBSUB`), subtitles stored as pictures of
@@ -62,12 +76,16 @@
 mod ass;
 mod colours;
 mod dvb;
+mod isovtt;
+mod joined;
 mod movtext;
 mod pgs;
 mod srt;
 mod subrip;
+mod ttml;
 mod vobsub;
 mod webvtt;
+mod xml;
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
@@ -139,6 +157,14 @@ enum Reader {
     WebVtt {
         webm: bool,
     },
+    /// WebVTT in MP4 (`wvtt`): each sample the cues showing through it, a
+    /// cue in every sample it shows in -- made whole again before it is
+    /// given.
+    IsoVtt(isovtt::Joined),
+    /// TTML in MP4 (`stpp`): each sample a whole document, shown for the
+    /// sample's stretch -- each paragraph's stretches of showing the same,
+    /// joined within a sample and across samples, on the exact clock.
+    Ttml(joined::Joined<ttml::Ratio, ttml::Shown>),
     MovText(movtext::Setup),
     /// Blu-ray's pictures, a display set a block.
     Pgs(pgs::Decoder),
@@ -221,10 +247,14 @@ impl<R: Read + Seek> Subtitles<R> {
             SubtitleFormat::Ass | SubtitleFormat::Ssa => {
                 Reader::Ass(ass::Script::parse(&chosen.config))
             }
+            SubtitleFormat::WebVtt if chosen.codec_id == b"wvtt" => {
+                Reader::IsoVtt(isovtt::Joined::default())
+            }
             SubtitleFormat::WebVtt => Reader::WebVtt {
                 webm: chosen.codec_id.starts_with(b"D_WEBVTT/"),
             },
             SubtitleFormat::MovText => Reader::MovText(movtext::Setup::parse(&chosen.config)),
+            SubtitleFormat::Ttml => Reader::Ttml(joined::Joined::default()),
             SubtitleFormat::Pgs => Reader::Pgs(pgs::Decoder::default()),
             SubtitleFormat::VobSub => Reader::VobSub(vobsub::Setup::parse(&chosen.config)),
             SubtitleFormat::Dvb => Reader::Dvb(dvb::Decoder::new(&chosen.config)),
@@ -279,6 +309,9 @@ impl<R: Read + Seek> Subtitles<R> {
                 self.damaged = self.damaged.saturating_add(1);
                 continue;
             };
+            if self.joins(&sample, ticks) || self.documents(&sample, ticks) {
+                continue;
+            }
             let start = time::to_ns(ticks, self.time_base);
             let length = time::duration_to_ns(sample.duration, self.time_base);
             if let Some(changes) = self.pictures(&sample, start, length) {
@@ -304,8 +337,17 @@ impl<R: Read + Seek> Subtitles<R> {
                 images: Vec::new(),
             }));
         }
-        // The end: the changes still to come are made, and pictures still on
+        // The end: WebVTT's cues in MP4 still showing end with their last
+        // samples; the changes still to come are made, and pictures still on
         // screen then stay until the film ends.
+        if let Reader::IsoVtt(joined) = &mut self.reader {
+            let whole = joined.finish();
+            self.give(whole);
+        }
+        if let Reader::Ttml(joined) = &mut self.reader {
+            let whole = joined.finish();
+            self.give_shown(whole);
+        }
         self.make_until(i64::MAX);
         if let Some(cue) = self.showing.take() {
             if self.kept(cue.start, cue.end) {
@@ -313,6 +355,90 @@ impl<R: Read + Seek> Subtitles<R> {
             }
         }
         Ok(self.ready.pop_front())
+    }
+
+    /// For WebVTT in MP4, `sample` (at `ticks`) joined to the samples before
+    /// it ([`isovtt::Joined`]), and the cues it ends that can now be given
+    /// made ready; `false` for a track of any other kind. A sample that
+    /// cannot be read is counted, and shows nothing: the cues showing end at
+    /// it.
+    fn joins(&mut self, sample: &Sample, ticks: i64) -> bool {
+        let Reader::IsoVtt(joined) = &mut self.reader else {
+            return false;
+        };
+        let (cues, readable) = match isovtt::cues(&sample.data) {
+            Some(cues) => (cues, true),
+            None => (Vec::new(), false),
+        };
+        let end = ticks.saturating_add(i64::try_from(sample.duration).unwrap_or(i64::MAX));
+        let whole = joined.sample(ticks, end, cues);
+        if !readable {
+            self.damaged = self.damaged.saturating_add(1);
+        }
+        self.give(whole);
+        true
+    }
+
+    /// Whole WebVTT cues from MP4, given -- each as WebM's are read, its text
+    /// and settings by WebVTT's rules -- unless a seek has passed them by.
+    fn give(&mut self, whole: Vec<isovtt::Whole>) {
+        for w in whole {
+            let start = time::to_ns(w.start, self.time_base);
+            let end = time::to_ns(w.end, self.time_base);
+            if !self.kept(start, end) {
+                continue;
+            }
+            let text = write(webvtt::ops(
+                w.cue.text.trim_end_matches(['\r', '\n']),
+                &w.cue.settings,
+            ));
+            self.ready.push_back(Cue {
+                start,
+                end,
+                text,
+                images: Vec::new(),
+            });
+        }
+    }
+
+    /// For TTML in MP4, `sample` (at `ticks`) read: what its document shows
+    /// in the sample's stretch, paragraph by paragraph
+    /// ([`ttml::Document::showings`]), joined to what showed before
+    /// ([`joined::Joined`]) on the exact clock, and the cues ended that can
+    /// now be given made ready; `false` for a track of any other kind. A
+    /// sample that is no TTML document -- or one that would cost more to say
+    /// than its size allows -- is counted, and shows nothing.
+    fn documents(&mut self, sample: &Sample, ticks: i64) -> bool {
+        let Reader::Ttml(joined) = &mut self.reader else {
+            return false;
+        };
+        let end_ticks = ticks.saturating_add(i64::try_from(sample.duration).unwrap_or(i64::MAX));
+        let start = ttml::Ratio::exact(ticks, self.time_base);
+        let end = ttml::Ratio::exact(end_ticks, self.time_base);
+        let shown = ttml::Document::read(&sample.data).and_then(|d| d.showings(start, end));
+        if shown.is_none() {
+            self.damaged = self.damaged.saturating_add(1);
+        }
+        let whole = joined.sample(end, shown.unwrap_or_default());
+        self.give_shown(whole);
+        true
+    }
+
+    /// Whole TTML paragraphs given -- their text SRT markup already, their
+    /// times rounded to the nanosecond only now -- unless a seek has passed
+    /// them by.
+    fn give_shown(&mut self, whole: Vec<joined::Whole<ttml::Ratio, ttml::Shown>>) {
+        for w in whole {
+            let (start, end) = (w.start.to_ns(), w.end.to_ns());
+            if self.kept(start, end) {
+                self.ready.push_back(Cue {
+                    start,
+                    end,
+                    text: w.cue.text,
+                    images: Vec::new(),
+                });
+            }
+        }
     }
 
     /// For a track of pictures, the changes `sample` (at `start`, lasting
@@ -416,7 +542,7 @@ impl<R: Read + Seek> Subtitles<R> {
     /// Pictures are read from far enough back that what is on screen at the
     /// time is known: Blu-ray's and DVB's from the start of the epoch the
     /// time falls in -- the display set that defines afresh what the ones
-    /// after it show -- up to [`EPOCH_STEPS`] display sets back; DVD's from
+    /// after it show -- up to 64 display sets back; DVD's from
     /// the SPU before the one at the time, which may still show.
     ///
     /// # Errors
@@ -438,6 +564,10 @@ impl<R: Read + Seek> Subtitles<R> {
         match &mut self.reader {
             Reader::Pgs(decoder) => decoder.reset(),
             Reader::Dvb(decoder) => decoder.reset(),
+            // What showed before the seek is no cue to join the next
+            // samples to: a cue showing at the time is in its sample.
+            Reader::IsoVtt(joined) => joined.clear(),
+            Reader::Ttml(joined) => joined.clear(),
             _ => {}
         }
         self.showing = None;
@@ -583,8 +713,14 @@ fn said(reader: &Reader, sample: &Sample) -> Said {
             })
         }
         Reader::Ass(script) => ass::cue(script, text).map_or(Said::Damaged, Said::Cue),
-        // Read above, as bytes; pictures are not read here.
-        Reader::MovText(_) | Reader::Pgs(_) | Reader::VobSub(_) | Reader::Dvb(_) => Said::Damaged,
+        // Read above, as bytes; WebVTT's in MP4 and pictures are not read
+        // here.
+        Reader::MovText(_)
+        | Reader::IsoVtt(_)
+        | Reader::Ttml(_)
+        | Reader::Pgs(_)
+        | Reader::VobSub(_)
+        | Reader::Dvb(_) => Said::Damaged,
     }
 }
 

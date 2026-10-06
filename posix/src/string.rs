@@ -1101,61 +1101,105 @@ mod gnu_strnlen {
 }
 pub use gnu_strnlen::strnlen;
 
-/// Compare two C strings.
-///
-/// Returns 0 if equal, else the difference of the first differing bytes
-/// as unsigned values (`s1`'s less `s2`'s): negative if `s1` sorts first.
-/// Sixteen bytes a step, a byte at a time where sixteen would cross a page.
-///
-/// # Safety
-///
-/// Both strings must be valid null-terminated strings.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
-    let mut i = 0usize;
-    // SAFETY: both strings are readable to their terminators, and nothing
-    // is compared past the first difference or the first terminator (a
-    // shorter string's terminator is a difference).  Sixteen bytes are read
-    // only where neither run crosses a page, so each shares a page with its
-    // string's byte `i`, which is readable; otherwise one byte of each.
-    unsafe {
-        loop {
-            let (a, b) = (s1.wrapping_add(i), s2.wrapping_add(i));
-            if within_page(a) && within_page(b) {
-                let stops = stops16(a, b);
-                if stops != 0 {
-                    let at = stops.trailing_zeros() as usize;
-                    return byte_difference(a.add(at), b.add(at));
-                }
-                i = i.wrapping_add(16);
-            } else {
-                let (x, y) = (a.read(), b.read());
-                if x != y || x == 0 {
-                    return i32::from(x).wrapping_sub(i32::from(y));
-                }
-                i = i.wrapping_add(1);
-            }
-        }
-    }
+/// The last offset in a page at which 64 bytes still fit.
+const LAST64_IN_PAGE: usize = PAGE - 64;
+
+/// Whether the 64 bytes from `p` lie within one page.
+#[inline(always)]
+fn within_page64(p: *const u8) -> bool {
+    p as usize & IN_PAGE <= LAST64_IN_PAGE
 }
 
-/// Compare at most `n` bytes of two C strings, as `strcmp`.
+/// Nonzero when the 64 bytes at `a` and `b` hold a place where `strcmp`
+/// stops: [`stops16`]'s lanes for four runs of sixteen, folded with their
+/// unsigned minimum and tested once.
 ///
 /// # Safety
 ///
-/// Both strings must be valid for at least `n` bytes or be
-/// null-terminated before `n`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strncmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 {
+/// `a` and `b` readable for 64 bytes each.
+#[inline]
+#[target_feature(enable = "sse2")]
+unsafe fn stops64(a: *const u8, b: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable bytes; unaligned loads.
+    unsafe {
+        core::arch::asm!(
+            // Each run: `a`'s byte where the two agree, 0 where they do not
+            // (`stops16`'s `pcmpeqb` and `pminub`); the four folded with
+            // their minimum, which is 0 in a lane where any run stops.
+            "movdqu {x}, xmmword ptr [{a}]",
+            "movdqu {acc}, xmmword ptr [{b}]",
+            "pcmpeqb {acc}, {x}",
+            "pminub {acc}, {x}",
+            "movdqu {x}, xmmword ptr [{a} + 16]",
+            "movdqu {y}, xmmword ptr [{b} + 16]",
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            "pminub {acc}, {y}",
+            "movdqu {x}, xmmword ptr [{a} + 32]",
+            "movdqu {y}, xmmword ptr [{b} + 32]",
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            "pminub {acc}, {y}",
+            "movdqu {x}, xmmword ptr [{a} + 48]",
+            "movdqu {y}, xmmword ptr [{b} + 48]",
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            "pminub {acc}, {y}",
+            "pxor {x}, {x}",
+            "pcmpeqb {acc}, {x}",
+            "pmovmskb {mask:e}, {acc}",
+            a = in(reg) a,
+            b = in(reg) b,
+            x = out(xmm_reg) _,
+            y = out(xmm_reg) _,
+            acc = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// `strncmp`, which `strcmp` is with no bound: sixteen bytes a step over
+/// the first 64 -- most comparisons end there -- then 64 a step, where
+/// neither run of 64 crosses a page and the bound lies beyond them; a run of
+/// sixteen where that fits; a byte at a time near a page's end.
+///
+/// # Safety
+///
+/// Both strings valid for `n` bytes or terminated before `n`.
+#[inline(always)]
+unsafe fn compare_strings(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     let mut i = 0usize;
-    // SAFETY: as `strcmp`'s, comparing nothing from `n` on.  A run of
-    // sixteen may extend past `n`, but shares a page with its string's
-    // byte `i`, which is below `n` and so readable.
+    // SAFETY: both strings are readable to their terminators or for `n`
+    // bytes, and nothing is compared past the first difference, the first
+    // terminator (a shorter string's terminator is a difference) or `n`.  A
+    // run of 64 or of 16 is read only where neither crosses a page, so each
+    // shares a page with its string's byte `i`, which is readable; it may
+    // reach past `n` or a terminator, but no stop there is acted on.
+    // Otherwise one byte of each.
     unsafe {
         while i < n {
             let (a, b) = (s1.wrapping_add(i), s2.wrapping_add(i));
+            let left = n.wrapping_sub(i);
+            if i >= 64 && left > 64 && within_page64(a) && within_page64(b) {
+                if stops64(a, b) == 0 {
+                    i = i.wrapping_add(64);
+                    continue;
+                }
+                // One of its four runs holds the stop, below `left`.
+                let mut k = 0usize;
+                loop {
+                    let stops = stops16(a.add(k), b.add(k));
+                    if stops != 0 {
+                        let at = k.wrapping_add(stops.trailing_zeros() as usize);
+                        return byte_difference(a.add(at), b.add(at));
+                    }
+                    k = k.wrapping_add(16);
+                }
+            }
             if within_page(a) && within_page(b) {
-                let left = n.wrapping_sub(i);
                 let stops = stops16(a, b);
                 if stops != 0 {
                     let at = stops.trailing_zeros() as usize;
@@ -1178,6 +1222,34 @@ pub unsafe extern "C" fn strncmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 
         }
     }
     0
+}
+
+/// Compare two C strings.
+///
+/// Returns 0 if equal, else the difference of the first differing bytes
+/// as unsigned values (`s1`'s less `s2`'s): negative if `s1` sorts first.
+/// Sixteen bytes a step, then 64 past the first 64 ([`compare_strings`]);
+/// a byte at a time where a run would cross a page.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated strings.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
+    // SAFETY: the caller's terminated strings, with no bound.
+    unsafe { compare_strings(s1, s2, usize::MAX) }
+}
+
+/// Compare at most `n` bytes of two C strings, as `strcmp`.
+///
+/// # Safety
+///
+/// Both strings must be valid for at least `n` bytes or be
+/// null-terminated before `n`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strncmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 {
+    // SAFETY: the caller's strings and bound.
+    unsafe { compare_strings(s1, s2, n) }
 }
 
 /// Copy a C string (including null terminator).
@@ -4026,6 +4098,73 @@ mod tests {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        /// Long strings, for the 64-byte steps past the first 64: equal, and
+        /// differing in each of a step's four runs and either side of the
+        /// steps' boundaries, by a low and a high byte, at several
+        /// alignments, and a prefix of each length.
+        #[test]
+        fn strcmp_and_strncmp_over_long_strings() {
+            for len in [64, 65, 100, 127, 128, 129, 200, 300] {
+                let base = filler(len, len + 3);
+                let mut pairs = vec![(base.clone(), base.clone())];
+                let places = [
+                    0, 15, 16, 63, 64, 65, 79, 80, 95, 96, 111, 112, 127, 128, 150, 191, 192, 255,
+                    299,
+                ];
+                for d in places.into_iter().filter(|&d| d < len) {
+                    for v in [0x01, 0xFF] {
+                        if v != base[d] {
+                            let mut other = base.clone();
+                            other[d] = v;
+                            pairs.push((base.clone(), other));
+                        }
+                    }
+                    pairs.push((base.clone(), base[..d].to_vec()));
+                }
+                for (a, b) in &pairs {
+                    for (x, y) in [(a, b), (b, a)] {
+                        let (x, y) = (terminated(x), terminated(y));
+                        for (ax, ay) in [(0, 0), (1, 0), (7, 13), (15, 15)] {
+                            let (bx, px) = place(&x, ax);
+                            let (by, py) = place(&y, ay);
+                            let (p, q) =
+                                (bx.as_ptr().wrapping_add(px), by.as_ptr().wrapping_add(py));
+                            // SAFETY: terminated strings.
+                            unsafe {
+                                assert_eq!(
+                                    strcmp(p, q),
+                                    byte_strncmp(&x, &y, usize::MAX),
+                                    "len {len}, at {ax}/{ay}"
+                                );
+                                for n in [63, 64, 65, 100, 128, 129, len, usize::MAX] {
+                                    assert_eq!(
+                                        strncmp(p, q, n),
+                                        byte_strncmp(&x, &y, n),
+                                        "len {len}, n {n}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Equal runs straddling a page boundary at every offset near it,
+            // so the 64-byte steps give way to sixteen and to single bytes.
+            let base = terminated(&filler(400, 5));
+            for k in (60..=200).step_by(7) {
+                let ((mut bx, ox), (mut by, oy)) = (straddling(), straddling());
+                let (sx, sy) = (ox - k, oy - (k / 2 + 1));
+                bx[sx..sx + base.len()].copy_from_slice(&base);
+                by[sy..sy + base.len()].copy_from_slice(&base);
+                let (p, q) = (bx.as_ptr().wrapping_add(sx), by.as_ptr().wrapping_add(sy));
+                // SAFETY: terminated strings.
+                unsafe {
+                    assert_eq!(strcmp(p, q), 0, "{k} before the boundary");
+                    assert_eq!(strncmp(p, q, 350), 0, "{k} before the boundary");
                 }
             }
         }

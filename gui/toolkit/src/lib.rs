@@ -27,6 +27,7 @@ pub mod button;
 pub mod canvas;
 pub mod checkbox;
 pub mod clipboard;
+mod clock;
 pub mod codeedit;
 pub mod codeview;
 pub mod color;

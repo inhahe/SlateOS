@@ -42,6 +42,7 @@ mod tree_tests;
 
 pub use signal::{MAX_QUEUED_SIGNALS, Signal, SignalKind, SlotId};
 
+use crate::clock::Clock;
 use crate::color::Color;
 use crate::event::{Event, EventResult, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::layout::{
@@ -2440,40 +2441,6 @@ pub struct WidgetTree {
     next_slot: u64,
 }
 
-/// What a tree tells the time by, for its transitions.
-#[derive(Clone, Copy, Debug)]
-enum Clock {
-    /// The machine's, from when the tree was made: a transition is over on
-    /// time whether or not its program sends ticks, so one that never does
-    /// sees it finished at the first event it hands the tree after its end,
-    /// rather than stuck part-way for good.
-    Real(std::time::Instant),
-    /// Its ticks', in milliseconds: time passes only as [`Event::Tick`]s
-    /// say -- what a test steps through, a frame at a time.
-    Ticks(f64),
-}
-
-impl Clock {
-    /// Milliseconds since the clock started.
-    fn now_ms(&self) -> f64 {
-        match self {
-            Self::Real(epoch) => epoch.elapsed().as_secs_f64() * 1000.0,
-            Self::Ticks(ms) => *ms,
-        }
-    }
-
-    /// A tick of `elapsed_ms`: the time it says has passed, for a clock of
-    /// ticks; the machine's has its own.
-    fn tick(&mut self, elapsed_ms: u64) {
-        if let Self::Ticks(ms) = self {
-            // Exact below 2^53 ms -- some 285,000 years of ticks.
-            #[allow(clippy::cast_precision_loss)]
-            let elapsed = elapsed_ms as f64;
-            *ms += elapsed;
-        }
-    }
-}
-
 impl WidgetTree {
     /// A tree for a window `width` by `height`, drawn in the light palette
     /// until its program gives it the user's: this crate cannot read the
@@ -2488,7 +2455,7 @@ impl WidgetTree {
             sheet_warnings: Vec::new(),
             px_per_mm: crate::css::value::Units::REFERENCE_PX_PER_MM,
             styled: false,
-            clock: Clock::Real(std::time::Instant::now()),
+            clock: Clock::real(),
             animating: false,
             queued: std::collections::VecDeque::new(),
             slots: Vec::new(),
@@ -2565,7 +2532,7 @@ impl WidgetTree {
     /// for a test that steps a transition through, or a program that draws
     /// frames at a time of its own (a recording). The clock starts at nought.
     pub fn time_by_ticks(&mut self) {
-        self.clock = Clock::Ticks(0.0);
+        self.clock = Clock::ticks();
     }
 
     /// Whether a transition is moving: while it is, its program sends the

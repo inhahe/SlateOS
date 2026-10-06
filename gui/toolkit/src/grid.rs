@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Grid view widget for icon-based displays.
 //!
 //! Provides a scrollable grid of items suitable for file explorers, image galleries,
@@ -24,6 +23,7 @@
 
 use core::num::NonZeroUsize;
 
+use crate::clock::Clock;
 use crate::color::Color;
 use crate::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -362,7 +362,7 @@ enum DragState {
         item_index: usize,
     },
     /// Drag is active (threshold exceeded).
-    Dragging { item_index: usize },
+    Dragging,
 }
 
 // =============================================================================
@@ -374,18 +374,19 @@ enum DragState {
 struct TypeAhead {
     /// Characters typed so far.
     buffer: String,
-    /// Timestamp of last keystroke (for timeout reset), in milliseconds.
-    last_input_ms: u64,
+    /// When the last character was typed, in its grid's clock's
+    /// milliseconds.
+    last_input_ms: f64,
 }
 
 impl TypeAhead {
-    /// Timeout after which the buffer resets (ms).
-    const TIMEOUT_MS: u64 = 1000;
+    /// How long a pause starts the search again, in milliseconds.
+    const TIMEOUT_MS: f64 = 1000.0;
 
     /// Push a character, returning the current search string.
     /// Resets buffer if too much time has elapsed.
-    fn push(&mut self, ch: char, now_ms: u64) -> &str {
-        if now_ms.saturating_sub(self.last_input_ms) > Self::TIMEOUT_MS {
+    fn push(&mut self, ch: char, now_ms: f64) -> &str {
+        if now_ms - self.last_input_ms > Self::TIMEOUT_MS {
             self.buffer.clear();
         }
         self.buffer.push(ch);
@@ -457,8 +458,6 @@ struct LayoutCache {
     total_rows: usize,
     /// Total content height (for scrolling).
     content_height: f32,
-    /// Container width used to compute this cache.
-    container_width: f32,
     /// Container height (viewport).
     container_height: f32,
 }
@@ -515,7 +514,6 @@ impl LayoutCache {
             columns,
             total_rows,
             content_height,
-            container_width,
             container_height,
         }
     }
@@ -727,8 +725,12 @@ pub struct GridView {
     drag: DragState,
     /// Type-ahead search state.
     type_ahead: TypeAhead,
-    /// Monotonic time in ms (updated via Tick events).
-    current_time_ms: u64,
+    /// What it tells the time by: the machine's clock, unless told to tell
+    /// it by its ticks ([`time_by_ticks`](Self::time_by_ticks)). It took
+    /// each tick's `elapsed_ms` for the time, while a tick says how long since
+    /// the one before -- a frame's length -- and comes only while something
+    /// moves, so the type-ahead never started again after a pause.
+    clock: Clock,
     /// Pending events for the application to consume.
     pending_events: Vec<GridEvent>,
 }
@@ -748,7 +750,7 @@ impl GridView {
             rubber_band: None,
             drag: DragState::Idle,
             type_ahead: TypeAhead::default(),
-            current_time_ms: 0,
+            clock: Clock::real(),
             pending_events: Vec::new(),
         }
     }
@@ -765,10 +767,14 @@ impl GridView {
     // Item management
     // -------------------------------------------------------------------------
 
-    /// Set the items displayed in the grid, clearing selection.
+    /// Set the items displayed in the grid, clearing selection -- and what
+    /// was typed to find one of the items before, which is no prefix of
+    /// these: a folder opened with a name half-typed in the one before
+    /// would otherwise search on from that half.
     pub fn set_items(&mut self, items: Vec<GridItem>) {
         self.items = items;
         self.selection.clear();
+        self.type_ahead.clear();
         self.invalidate_layout();
         self.clamp_scroll();
     }
@@ -791,6 +797,14 @@ impl GridView {
     /// Mutably access the selection state.
     pub fn selection_mut(&mut self) -> &mut SelectionState {
         &mut self.selection
+    }
+
+    /// Tell the time by its ticks from now on -- each [`Event::Tick`]'s
+    /// `elapsed_ms`, the time since the tick before -- rather than by the
+    /// machine's clock: for a test that steps through time, or a program
+    /// that draws frames at a time of its own. The clock starts at nought.
+    pub fn time_by_ticks(&mut self) {
+        self.clock = Clock::ticks();
     }
 
     // -------------------------------------------------------------------------
@@ -926,7 +940,7 @@ impl GridView {
                 EventResult::Consumed
             }
             Event::Tick { elapsed_ms } => {
-                self.current_time_ms = *elapsed_ms;
+                self.clock.tick(*elapsed_ms);
                 self.tick_scroll(*elapsed_ms);
                 EventResult::Ignored
             }
@@ -1006,7 +1020,7 @@ impl GridView {
                 self.emit_selection_changed();
                 EventResult::Consumed
             }
-            DragState::Dragging { .. } => {
+            DragState::Dragging => {
                 // Drag ended — the drop target handles it via dnd system.
                 EventResult::Consumed
             }
@@ -1064,7 +1078,7 @@ impl GridView {
             let dy = y - start_y;
             let dist = (dx * dx + dy * dy).sqrt();
             if dist >= self.config.drag_threshold {
-                self.drag = DragState::Dragging { item_index };
+                self.drag = DragState::Dragging;
                 // Ensure the dragged item is selected.
                 if !self.selection.is_selected(item_index) {
                     self.selection.select_single(item_index);
@@ -1295,7 +1309,7 @@ impl GridView {
 
     /// Type-ahead search: find first item whose label starts with the typed prefix.
     fn type_ahead_search(&mut self, ch: char) -> EventResult {
-        let now = self.current_time_ms;
+        let now = self.clock.now_ms();
         let prefix = self.type_ahead.push(ch, now).to_lowercase();
 
         for (i, item) in self.items.iter().enumerate() {
@@ -2120,6 +2134,7 @@ mod tests {
         items[3].label = "Downloads".to_string();
         grid.set_items(items);
         grid.set_container_size(400.0, 600.0);
+        grid.time_by_ticks();
 
         // Type 'D' — should find "Documents" (index 5? actually "Downloads" is at 3, first match).
         // Items are: Item 0..2, Downloads(3), Item 4, Documents(5), Item 6..9.
@@ -2134,7 +2149,7 @@ mod tests {
         assert_eq!(grid.selection.focused(), Some(3));
 
         // Type 'o' to refine to "do" — still "Downloads" at 3.
-        grid.current_time_ms = 100; // Within timeout.
+        tick(&mut grid, 100); // Within timeout.
         let key2 = KeyEvent {
             key: Key::O,
             pressed: true,
@@ -2145,7 +2160,7 @@ mod tests {
         assert_eq!(grid.selection.focused(), Some(3));
 
         // Type 'c' to refine to "doc" — now "Documents" at 5.
-        grid.current_time_ms = 200;
+        tick(&mut grid, 100);
         let key3 = KeyEvent {
             key: Key::C,
             pressed: true,
@@ -2154,6 +2169,61 @@ mod tests {
         };
         grid.handle_key(&key3);
         assert_eq!(grid.selection.focused(), Some(5));
+    }
+
+    /// A tick of `ms`, as a program's frame clock sends one: the time since
+    /// the tick before.
+    fn tick(grid: &mut GridView, ms: u64) {
+        // A tick is never the grid's to take; it only tells it the time.
+        let _told = grid.handle_event(&Event::Tick { elapsed_ms: ms });
+    }
+
+    fn typed(ch: char) -> KeyEvent {
+        KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: ch.to_string(),
+        }
+    }
+
+    /// **A pause starts the search again by the machine's clock, with no
+    /// tick at all**: ticks come only while something moves, so a grid
+    /// telling the time by them alone never saw the pause.
+    #[test]
+    fn a_pause_is_measured_by_the_machines_clock() {
+        let mut grid = GridView::new();
+        let mut items = make_items(5);
+        items[1].label = "Alpha".to_string();
+        items[2].label = "Beta".to_string();
+        grid.set_items(items);
+        grid.set_container_size(400.0, 600.0);
+        grid.handle_key(&typed('a'));
+        assert_eq!(grid.selection.focused(), Some(1));
+        // Typed two seconds ago, as far as its clock is concerned.
+        grid.type_ahead.last_input_ms -= 2000.0;
+        grid.handle_key(&typed('b'));
+        assert_eq!(grid.selection.focused(), Some(2), "Beta, not \"ab\"");
+    }
+
+    /// **New items start the search again**: what was typed to find one of
+    /// the items before is no prefix of these.
+    #[test]
+    fn new_items_start_the_search_again() {
+        let mut grid = GridView::new();
+        grid.time_by_ticks();
+        let mut items = make_items(3);
+        items[1].label = "Downloads".to_string();
+        grid.set_items(items);
+        grid.set_container_size(400.0, 600.0);
+        grid.handle_key(&typed('d'));
+        assert_eq!(grid.selection.focused(), Some(1));
+
+        let mut opened = make_items(3);
+        opened[2].label = "Orange".to_string();
+        grid.set_items(opened);
+        grid.handle_key(&typed('o'));
+        assert_eq!(grid.selection.focused(), Some(2), "\"o\", not \"do\"");
     }
 
     #[test]
@@ -2166,7 +2236,7 @@ mod tests {
         grid.set_container_size(400.0, 600.0);
 
         // Type 'a' — matches "Alpha" at 1.
-        grid.current_time_ms = 0;
+        grid.time_by_ticks();
         let key = KeyEvent {
             key: Key::A,
             pressed: true,
@@ -2177,7 +2247,11 @@ mod tests {
         assert_eq!(grid.selection.focused(), Some(1));
 
         // Wait past timeout, then type 'b' — should match "Beta" at 2, not "ab".
-        grid.current_time_ms = 2000; // Well past 1000ms timeout.
+        // Each tick says how long since the one before, and these two add
+        // up past the 1000 ms timeout though neither alone reaches it: the
+        // grid took each for the time, and saw 600 ms pass, then 600 again.
+        tick(&mut grid, 600);
+        tick(&mut grid, 600);
         let key2 = KeyEvent {
             key: Key::B,
             pressed: true,

@@ -100,9 +100,11 @@ fn the_dialog_shows_tools_every_part() {
         "{:?}",
         files.children[1].description
     );
-    assert!(node(&dialog, DialogTarget::Header(SortColumn::Name))
-        .description
-        .is_some_and(|d| d.contains("ascending")));
+    assert!(
+        node(&dialog, DialogTarget::Header(SortColumn::Name))
+            .description
+            .is_some_and(|d| d.contains("ascending"))
+    );
     let home = Query {
         role: Some(Role::ListItem),
         name: Some("home".to_owned()),
@@ -143,7 +145,10 @@ fn a_files_box_is_where_it_is_clicked() {
 fn navigation_as_a_user_navigates() {
     let mut dialog = FileDialog::open().with_initial_path("/docs");
     let press = |dialog: &mut FileDialog, part| dialog.invoke(&part, Action::Press, W, H);
-    assert_eq!(press(&mut dialog, DialogTarget::Back), Err(Refusal::Disabled));
+    assert_eq!(
+        press(&mut dialog, DialogTarget::Back),
+        Err(Refusal::Disabled)
+    );
     assert_eq!(
         press(&mut dialog, DialogTarget::Up),
         Ok(Some(DialogAction::NavigatedTo(PathBuf::from("/"))))
@@ -237,7 +242,9 @@ fn files_chosen_opened_and_named() {
     );
     assert_eq!(
         dialog.invoke(&DialogTarget::Confirm, Action::Press, W, H),
-        Ok(Some(DialogAction::Selected(PathBuf::from("/docs/notes.txt"))))
+        Ok(Some(DialogAction::Selected(PathBuf::from(
+            "/docs/notes.txt"
+        ))))
     );
     assert_eq!(
         dialog.invoke(&DialogTarget::Cancel, Action::Press, W, H),
@@ -256,9 +263,11 @@ fn headings_sort_and_the_rest_refuse() {
         dialog.invoke(&DialogTarget::Header(SortColumn::Name), Action::Press, W, H),
         Ok(None)
     );
-    assert!(node(&dialog, DialogTarget::Header(SortColumn::Name))
-        .description
-        .is_some_and(|d| d.contains("descending")));
+    assert!(
+        node(&dialog, DialogTarget::Header(SortColumn::Name))
+            .description
+            .is_some_and(|d| d.contains("descending"))
+    );
     assert_eq!(node(&dialog, DialogTarget::Entry(0)).name, "b.txt");
     assert_eq!(
         dialog.invoke(

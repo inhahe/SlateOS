@@ -115,10 +115,14 @@ fn an_answer_is_not_changed_while_the_dialog_fades() {
         dialog.button_rect(1).map(rect_of).unwrap(),
         dialog.button_rect(0).map(rect_of).unwrap(),
     );
+    // The keyboard on "Erase Disk", so Enter would answer it too.
+    let _ = dialog.handle_event(&key(Key::Tab, Modifiers::NONE, ""));
+    assert_eq!(dialog.focused_button(), 0);
     let _ = dialog.handle_event(&click(cancel.centre()));
     let _ = dialog.handle_event(&click(erase.centre()));
+    assert_eq!(dialog.result(), Some(&DialogResult::Cancel), "a click");
     let _ = dialog.handle_event(&key(Key::Enter, Modifiers::NONE, ""));
-    assert_eq!(dialog.result(), Some(&DialogResult::Cancel));
+    assert_eq!(dialog.result(), Some(&DialogResult::Cancel), "a key");
     let _ = dialog.handle_event(&Event::Tick { elapsed_ms: 1000 });
     assert!(!dialog.is_active(), "the fade still runs");
 
@@ -348,6 +352,12 @@ fn a_floating_dialog_is_closed() {
     );
     let close = &root.children[0];
     assert_eq!((close.role, close.name.as_str()), (Role::Button, "Close"));
+    let (_, middle) = close.bounds.centre();
+    assert!(
+        (middle - (60.0 + crate::text::scaled(super::super::TITLE_BAR_HEIGHT) / 2.0)).abs() < 0.01,
+        "centred in the title bar: {:?}",
+        close.bounds
+    );
     assert_eq!(act(&mut dialog, ModalPart::Close, Action::Press), Ok(None));
     assert!(!dialog.is_visible());
 }

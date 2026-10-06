@@ -113,6 +113,14 @@ fn strings_keep_their_text() {
     );
     assert_eq!(kinds("\"a\\\"b\""), [Token::Str("a\"b".into())]);
     assert_eq!(kinds("\"\\41 B\""), [Token::Str("AB".into())]);
+    // An escape naming no character -- nought, a surrogate, past the last
+    // code point -- is the replacement character, as CSS has it: never a
+    // NUL in a name or a string.
+    assert_eq!(kinds("\"\\0 a\""), [Token::Str("\u{FFFD}a".into())]);
+    assert_eq!(kinds("\"\\000000a\""), [Token::Str("\u{FFFD}a".into())]);
+    assert_eq!(kinds("\"\\D800 a\""), [Token::Str("\u{FFFD}a".into())]);
+    assert_eq!(kinds("\"\\110000 a\""), [Token::Str("\u{FFFD}a".into())]);
+    assert_eq!(kinds("\\0 ab"), [ident("\u{FFFD}ab")]);
     assert_eq!(
         kinds("\"cut\noff\""),
         [

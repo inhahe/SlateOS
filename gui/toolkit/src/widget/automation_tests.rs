@@ -314,6 +314,40 @@ fn a_nodes_box_is_where_its_widget_is() {
     assert_eq!(f.tree.focused_id(), Some(f.inside));
 }
 
+/// **A box is placed in the window through every container holding it** --
+/// across as well as down: a button in a row's second column is as far right
+/// as that column, and its padding, put it.
+#[test]
+fn a_box_is_placed_through_every_container_holding_it() {
+    let first = Widget::button("First").css("width: 120px");
+    let inner = Widget::button("Inner");
+    let inner_id = inner.id;
+    let column = Widget::container()
+        .with_flex_direction(FlexDirection::Column)
+        .css("padding-left: 15px; padding-top: 7px")
+        .with_child(inner);
+    let column_id = column.id;
+    let root = Widget::container()
+        .with_flex_direction(FlexDirection::Row)
+        .with_children(vec![first, column]);
+    let mut tree = WidgetTree::new(root, 400.0, 200.0);
+    tree.set_palette(Palette::for_mode(false));
+    tree.layout();
+    let held = node(&tree, column_id).bounds;
+    let b = node(&tree, inner_id).bounds;
+    assert!(held.x >= 120.0, "{held:?}");
+    assert!(
+        b.x >= held.x + 15.0 && b.x < held.x + held.w,
+        "{b:?} in {held:?}"
+    );
+    assert!(
+        b.y >= held.y + 7.0 && b.y < held.y + held.h,
+        "{b:?} in {held:?}"
+    );
+    press_at(&mut tree, b.x + b.w / 2.0, b.y + b.h / 2.0);
+    assert_eq!(tree.focused_id(), Some(inner_id));
+}
+
 /// **A search finds by role, name, the program's name and text**, every
 /// part given having to fit.
 #[test]

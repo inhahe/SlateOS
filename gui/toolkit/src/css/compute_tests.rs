@@ -161,6 +161,21 @@ fn a_child_inherits_what_a_style_set() {
     };
     let child = computed("", &Style::default(), &coded, &Inherited::default());
     assert_eq!(child.style.font_size, Style::default().font_size);
+    // And so its colour: a text colour set in code is the parent's own, not
+    // passed down -- only `currentcolor` and `inherit` ask for it.
+    let red_in_code = Style {
+        foreground: Some(Color::rgba(255, 0, 0, 255)),
+        ..Style::default()
+    };
+    let child = computed("", &Style::default(), &red_in_code, &Inherited::default());
+    assert_eq!(child.style.foreground, Style::default().foreground);
+    let asked = computed(
+        "color: inherit",
+        &Style::default(),
+        &red_in_code,
+        &Inherited::default(),
+    );
+    assert_eq!(asked.style.foreground, Some(Color::rgba(255, 0, 0, 255)));
     // A background is not inherited, by a style or otherwise.
     let parent = top("background-color: red");
     let child = computed("", &Style::default(), &parent.style, &parent.inherited);

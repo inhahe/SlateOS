@@ -356,6 +356,22 @@ fn dismissing_the_popups_takes_the_picker_down() {
     assert!(!shell.any_popup_open());
 }
 
+/// **The picker counts as a popup of the shell's while it is up**, so the
+/// shell holds Escape for it: over a note -- which is no popup itself -- the
+/// picker alone is what is open, and with it down nothing is.
+#[test]
+fn the_picker_up_over_a_note_is_a_popup_holding_escape() {
+    let mut shell = DesktopShell::new(1600, 1000);
+    let _ = writing_note(&mut shell);
+    assert!(!shell.any_popup_open(), "a note being written is no popup");
+    key(&mut shell, &ctrl_period());
+    assert!(shell.char_picker_open());
+    assert!(shell.any_popup_open(), "the picker is up and not counted");
+    key(&mut shell, &pressed(Key::Escape));
+    assert!(!shell.char_picker_open());
+    assert!(!shell.any_popup_open());
+}
+
 /// **Nothing opens over a field that is not up.**
 #[test]
 fn nothing_opens_over_a_field_that_is_not_up() {

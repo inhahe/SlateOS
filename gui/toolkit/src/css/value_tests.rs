@@ -67,6 +67,12 @@ fn a_length_needs_a_unit_it_knows() {
         len("50%", false).is_err(),
         "a percentage where none is taken"
     );
+    // Nor one inside a calculation, where the token itself is not the
+    // length's first: the sum is looked at whole.
+    let inside = len("calc(50% + 2px)", false).unwrap_err();
+    assert!(inside.contains("percentage"), "{inside}");
+    assert!(len("calc(2px + 50%)", false).is_err());
+    assert!(len("calc(50% + 2px)", true).is_ok());
     assert!(len("red", true).is_err());
 }
 

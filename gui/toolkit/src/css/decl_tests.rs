@@ -123,7 +123,11 @@ fn border_sets_width_style_and_colour() {
     )));
     assert!(get("border", "1px 2px solid").is_err(), "two widths");
     assert!(get("border", "solid wobbly").is_err());
+    // The three keywords, each its own width: CSS's 1px, 3px and 5px.
+    assert_eq!(one("border-left-width", "thin"), px(1.0));
+    assert_eq!(one("border-left-width", "medium"), px(3.0));
     assert_eq!(one("border-left-width", "thick"), px(5.0));
+    assert_eq!(one("border-top-width", "MEDIUM"), px(3.0), "any case");
     assert_eq!(
         one("border-right-style", "dashed"),
         Value::BorderStyle(BorderStyle::Solid),

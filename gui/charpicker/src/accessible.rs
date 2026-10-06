@@ -329,6 +329,15 @@ mod tests {
             .unwrap();
         let tree = picker.automation(W, H);
         assert_eq!(tree.children[2].name, "Search results");
+        // While a search shows, no category is: the sidebar marks none
+        // chosen, as it draws none lit.
+        assert!(
+            tree.children[1]
+                .children
+                .iter()
+                .all(|n| n.value == Some(Value::Chosen(false))),
+            "a category chosen under a search"
+        );
         let wave = Query {
             name: Some("waving hand".into()),
             ..Query::default()

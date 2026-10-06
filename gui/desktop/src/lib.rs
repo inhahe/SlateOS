@@ -549,6 +549,10 @@ const TRAY_BELL_WIDTH: f32 = 24.0;
 /// the bell's is, so the level it shows never widens the tray.
 const TRAY_VOLUME_WIDTH: f32 = 24.0;
 
+/// How far one press of a brightness key moves the screen's brightness, in
+/// points of 100: ten presses from dark to full, as most laptops step.
+const BRIGHTNESS_STEP: i16 = 10;
+
 /// How strongly the speaker is drawn while there is no sound card to turn:
 /// the disabled controls' opacity, so it reads as there and unusable.
 const SPEAKER_OUT_OF_REACH_ALPHA: u8 = 128;
@@ -8418,13 +8422,20 @@ impl DesktopShell {
             | HotkeyAction::ScreenshotWindowToFile => {
                 HotkeyOutcome::start(action.launch().into_iter().collect())
             }
-            // Nothing can carry these out: there is no backlight channel out of
-            // the shell, and inventing one would mean a request the compositor
-            // has no verb for. Consumed regardless — the user bound the chord,
-            // so passing it to the focused window would be worse than doing
-            // nothing visibly. See `known-issues.md` →
-            // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
-            HotkeyAction::BrightnessUp | HotkeyAction::BrightnessDown => HotkeyOutcome::consumed(),
+            // The screen's brightness, as the kernel has it and sets it --
+            // where the desktop may -- and the overlay saying the level, or
+            // why it cannot move (`step_brightness`). No chord by default: a
+            // laptop's brightness pair sends no key at all
+            // (`TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`), so the user binds one.
+            HotkeyAction::BrightnessUp | HotkeyAction::BrightnessDown => {
+                let delta = if matches!(action, HotkeyAction::BrightnessUp) {
+                    BRIGHTNESS_STEP
+                } else {
+                    -BRIGHTNESS_STEP
+                };
+                self.step_brightness(delta);
+                HotkeyOutcome::consumed()
+            }
             // The compositor's to do: it owns the displays, and the input that
             // wakes them never reaches the shell either.
             HotkeyAction::SleepDisplay => HotkeyOutcome::ask(Some(ShellRequest::SleepDisplays)),
@@ -12862,6 +12873,35 @@ impl DesktopShell {
                 self.notifications.show_fixed_brightness(level, why);
             }
         }
+    }
+
+    /// One press of a brightness key: the screen's brightness, read as the
+    /// kernel has it now, moved by `delta` points and set where the desktop
+    /// may -- and the overlay showing the level, or, where it cannot move,
+    /// saying why in the words the pane uses ("Can't be changed yet"). A
+    /// shell with no screen attached moves the pane's own number, as the
+    /// volume keys do with no card.
+    fn step_brightness(&mut self, delta: i16) {
+        self.read_brightness();
+        if self.notifications.brightness_fixed().is_none() {
+            let level = i16::from(self.notifications.brightness())
+                .saturating_add(delta)
+                .clamp(0, 100);
+            // In 0..=100 by the clamp just above.
+            let level = u8::try_from(level).unwrap_or(0);
+            self.notifications.show_screen_brightness(level);
+            self.write_brightness();
+        }
+        let kind = match self.notifications.brightness_fixed() {
+            Some(why) => osd::OsdKind::Custom {
+                icon: osd::OsdIcon::Brightness,
+                message: why.to_string(),
+            },
+            None => osd::OsdKind::Brightness {
+                level: self.notifications.brightness(),
+            },
+        };
+        self.show_osd(kind);
     }
 
     /// Put the pane's brightness on the screen, if the slider is the

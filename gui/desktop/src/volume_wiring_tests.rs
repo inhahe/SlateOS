@@ -2,7 +2,8 @@
 //! key and the pane's slider turn the card's master volume, from its level
 //! as it is now -- and say why they cannot when the card is out of reach,
 //! moving nothing (design-decisions §1485). And the pane's brightness row,
-//! which shows the level the kernel reports and says it cannot be changed.
+//! which shows the level the kernel reports and says it cannot be changed --
+//! and the brightness keys, a user's chords, which step it the same way.
 
 #![cfg(test)]
 #![allow(
@@ -359,6 +360,119 @@ fn a_shell_with_no_screen_keeps_its_brightness_slider() {
     s.toggle_notifications();
     assert!(brightness_track(&s).is_some());
     assert_eq!(s.notifications.brightness_fixed(), None);
+}
+
+// ---- The brightness keys ----
+
+/// Bind Super+F6 and Super+F5 to brightness up and down, as a user binds
+/// them on the shortcut card -- a laptop's own pair sends no key.
+fn bind_brightness(s: &mut DesktopShell) {
+    use crate::hotkeys::{Hotkey, HotkeyAction};
+    s.hotkeys
+        .register(
+            Hotkey::new(Key::F6, Modifiers::super_key()),
+            HotkeyAction::BrightnessUp,
+        )
+        .unwrap();
+    s.hotkeys
+        .register(
+            Hotkey::new(Key::F5, Modifiers::super_key()),
+            HotkeyAction::BrightnessDown,
+        )
+        .unwrap();
+}
+
+/// Press `key` with Super held, as a bound brightness chord.
+fn press_super(s: &mut DesktopShell, key: Key) {
+    let outcome = s.handle_hotkey(&KeyEvent {
+        key,
+        pressed: true,
+        modifiers: Modifiers::super_key(),
+        text: String::new(),
+    });
+    assert!(outcome.consumed, "{key:?} is the shell's");
+}
+
+/// **The brightness keys set the screen's brightness where the desktop
+/// may**: from the level the kernel reports, a step at a time, onto the
+/// screen, the overlay showing the level -- and no further than the ends.
+#[test]
+fn the_brightness_keys_set_the_screen() {
+    let dir = scratchdir::ScratchDir::new("keys-brightness-live");
+    let report = dir.path("brightness");
+    std::fs::write(
+        &report,
+        "display_count: 1\nDisplays:\n  4   Panel                 35%  min   5%  [manual]\n",
+    )
+    .unwrap();
+    let mut s = shell();
+    bind_brightness(&mut s);
+    let setter = Recording::default();
+    s.attach_backlight(Backlight::with(report.clone(), Box::new(setter.clone())));
+    press_super(&mut s, Key::F6);
+    assert_eq!(
+        setter.asked.borrow().last(),
+        Some(&(4, 45)),
+        "onto the screen"
+    );
+    assert!(
+        overlay_text(&s).iter().any(|t| t == "Brightness  45%"),
+        "{:?}",
+        overlay_text(&s)
+    );
+    // The kernel's level is read again at each press: another program
+    // dimmed it to 10 since.
+    std::fs::write(
+        &report,
+        "display_count: 1\nDisplays:\n  4   Panel                 10%  min   5%  [manual]\n",
+    )
+    .unwrap();
+    press_super(&mut s, Key::F5);
+    press_super(&mut s, Key::F5);
+    assert_eq!(setter.asked.borrow().last(), Some(&(4, 0)), "held at dark");
+    assert_eq!(s.notifications.brightness(), 0);
+}
+
+/// **Where the desktop may not set it, a brightness key moves nothing and
+/// says why**, in the pane's words.
+#[test]
+fn a_brightness_key_that_cannot_set_it_says_why() {
+    let dir = scratchdir::ScratchDir::new("keys-brightness-fixed");
+    let report = dir.path("brightness");
+    std::fs::write(
+        &report,
+        "display_count: 1\nDisplays:\n  0   Built-in display      35%  min   5%  [manual]\n",
+    )
+    .unwrap();
+    let mut s = shell();
+    bind_brightness(&mut s);
+    let refused = Recording::default();
+    *refused.refuse.borrow_mut() = Some(1);
+    s.attach_backlight(Backlight::with(report, Box::new(refused.clone())));
+    press_super(&mut s, Key::F6);
+    assert_eq!(s.notifications.brightness(), 35, "nothing moved");
+    assert!(
+        refused.asked.borrow().iter().all(|&(_, level)| level == 35),
+        "only the probe, the level it has: {:?}",
+        refused.asked.borrow()
+    );
+    assert!(
+        overlay_text(&s).iter().any(|t| t == "Can't be changed yet"),
+        "{:?}",
+        overlay_text(&s)
+    );
+}
+
+/// **A shell with no screen attached moves its own number**, as its volume
+/// keys do with no card.
+#[test]
+fn a_shell_with_no_screen_steps_its_own_brightness() {
+    let mut s = shell();
+    bind_brightness(&mut s);
+    let level = s.notifications.brightness();
+    press_super(&mut s, Key::F5);
+    assert_eq!(s.notifications.brightness(), level.saturating_sub(10));
+    assert!(overlay_text(&s).iter().any(|t| t.starts_with("Brightness")));
 }
 
 // ---- The tray's speaker and its flyout ----

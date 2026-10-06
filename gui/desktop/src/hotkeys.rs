@@ -585,10 +585,10 @@ pub enum HotkeyAction {
     VolumeMute,
 
     // ---- display --------------------------------------------------------
-    /// Increase display brightness.
-    ///
-    /// Nothing carries this out yet; there is no backlight channel out of the
-    /// shell. Kept bindable so the chord survives the channel arriving. See
+    /// Increase display brightness: the screen's, through the kernel's
+    /// backlight where the desktop may set it, the overlay saying why where
+    /// it may not (`crate::backlight`). No chord by default -- a laptop's
+    /// brightness pair sends no key at all -- so the user binds one; see
     /// `known-issues.md` → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
     BrightnessUp,
     /// Decrease display brightness. See [`BrightnessUp`](Self::BrightnessUp).

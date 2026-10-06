@@ -1,5 +1,19 @@
 ## `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS` (lane C, 2026-08-26)
 
+**Status:** OPEN for the second half only (a source of brightness events).
+**2026-10-06: the first half exists, and the actions use it.** The kernel
+reports each display's brightness (`/proc/brightness`) and sets it
+(`SYS_BRIGHTNESS_SET`, for a process holding `SET_BRIGHTNESS`), and
+`HotkeyAction::BrightnessUp`/`BrightnessDown` now step the screen's
+brightness through it (`gui/desktop/src/backlight.rs`,
+`DesktopShell::step_brightness`), the overlay showing the level -- or, while
+the desktop is not given the right, saying "Can't be changed yet"
+(`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`). So, as this entry
+foresaw, the actions are useful bound to a chord of the user's choosing
+(Super+F5, say). What stays open is part 2 below: a laptop's own pair still
+reaches nothing, because it sends no key; its ACPI notify events are lane A's
+to deliver as system events.
+
 **In short:** the desktop has actions named "brightness up" and "brightness
 down", but nothing in this system can ever trigger them, and nothing in this
 system can change a screen's brightness even if they were triggered. A laptop's

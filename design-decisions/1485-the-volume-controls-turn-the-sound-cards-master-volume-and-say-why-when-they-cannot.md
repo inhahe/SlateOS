@@ -52,7 +52,11 @@ screen's; where it may not, the row shows the level and says "Can't be
 changed yet" in the slider's place -- or "No brightness control reachable"
 with no report to read. A shell that asked for no screen keeps its own
 slider, as for the volume. The day the desktop is given the right, the
-slider comes back with no change to the desktop.
+slider comes back with no change to the desktop. *2026-10-06:* the
+brightness keys -- the actions a user binds to a chord, since a laptop's
+pair sends no key (`TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`) -- step the same
+level ten points a press, the overlay showing it, or "Can't be changed yet"
+where the slider would say so.
 
 ### The speaker in the tray
 

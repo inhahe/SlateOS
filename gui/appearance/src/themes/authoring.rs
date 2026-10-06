@@ -1427,15 +1427,7 @@ fn copy_folder(
     to: &Path,
     leave: &BTreeSet<PathBuf>,
 ) -> Result<Vec<Finding>, AuthoringError> {
-    let root = fs::canonicalize(from).map_err(|err| io_error("read", from, &err))?;
-    let mut copier = Copier {
-        from: from.to_path_buf(),
-        root,
-        to: to.to_path_buf(),
-        leave,
-        found: Vec::new(),
-        links: Vec::new(),
-    };
+    let mut copier = Copier::new(from, to, leave)?;
     copier.walk()?;
     copier.make_links()?;
     Ok(copier.found)
@@ -1454,6 +1446,30 @@ struct Copier<'a> {
     /// Each link that leads to a file inside the folder, and that file, both
     /// as paths inside it: made once every file is there.
     links: Vec<(PathBuf, PathBuf)>,
+    /// The most files and folders the copy looks at: [`MAX_ENTRIES`], the
+    /// checker's -- or fewer in a test, which cannot make ten thousand.
+    max_entries: usize,
+    /// The largest file the copy takes: [`MAX_COPIED_BYTES`] -- or less in a
+    /// test, which need not write sixty-four megabytes to pass it.
+    max_bytes: u64,
+}
+
+impl<'a> Copier<'a> {
+    /// A copy of `from` into `to`, but for `leave`, within the checker's
+    /// bounds.
+    fn new(from: &Path, to: &Path, leave: &'a BTreeSet<PathBuf>) -> Result<Self, AuthoringError> {
+        let root = fs::canonicalize(from).map_err(|err| io_error("read", from, &err))?;
+        Ok(Self {
+            from: from.to_path_buf(),
+            root,
+            to: to.to_path_buf(),
+            leave,
+            found: Vec::new(),
+            links: Vec::new(),
+            max_entries: MAX_ENTRIES,
+            max_bytes: MAX_COPIED_BYTES,
+        })
+    }
 }
 
 impl Copier<'_> {
@@ -1496,12 +1512,13 @@ impl Copier<'_> {
             names.sort();
             for name in names {
                 seen = seen.saturating_add(1);
-                if seen > MAX_ENTRIES {
+                if seen > self.max_entries {
+                    let most = self.max_entries;
                     self.left_out(
                         Severity::Error,
                         Path::new(""),
                         format!(
-                            "holds more than {MAX_ENTRIES} files and folders, more than any theme; the rest were not copied"
+                            "holds more than {most} files and folders, more than any theme; the rest were not copied"
                         ),
                     );
                     return Ok(());
@@ -1573,14 +1590,15 @@ impl Copier<'_> {
     /// Copy the file at `source` to `rel` in the copy, or say why not.
     fn copy(&mut self, source: &Path, rel: &Path) -> Result<(), AuthoringError> {
         let target = self.to.join(rel);
-        match copy_file(source, &target, MAX_COPIED_BYTES) {
+        match copy_file(source, &target, self.max_bytes) {
             Ok(Copied::Whole) => Ok(()),
             Ok(Copied::TooLarge(size)) => {
+                let most = self.max_bytes;
                 self.left_out(
                     Severity::Error,
                     rel,
                     format!(
-                        "is {size} bytes, larger than any file in a theme ({MAX_COPIED_BYTES}), and was not copied"
+                        "is {size} bytes, larger than any file in a theme ({most}), and was not copied"
                     ),
                 );
                 Ok(())
@@ -1668,6 +1686,14 @@ enum CopyFailure {
 fn copy_file(from: &Path, to: &Path, limit: u64) -> Result<Copied, CopyFailure> {
     let source = fs::File::open(from).map_err(CopyFailure::Read)?;
     let size = source.metadata().map_err(CopyFailure::Read)?.len();
+    copy_within(source, size, to, limit)
+}
+
+/// Copy what `source` holds -- `size` bytes, as its file said when asked --
+/// to the new file `to`, within `limit` bytes: nothing read, and nothing
+/// made, where `size` is over it already; the copy taken back where what
+/// was read went over it after all.
+fn copy_within(source: impl Read, size: u64, to: &Path, limit: u64) -> Result<Copied, CopyFailure> {
     if size > limit {
         return Ok(Copied::TooLarge(size));
     }

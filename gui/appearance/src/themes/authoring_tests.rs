@@ -836,6 +836,225 @@ fn a_file_larger_than_any_in_a_theme_is_not_copied() {
     ));
 }
 
+/// **What the copy left out is listed most severe first**, though it was
+/// found in another order: a hidden file, found first -- the walk goes in
+/// name order, and a dot comes first -- is listed after a folder too deep.
+#[test]
+fn what_a_copy_left_out_is_listed_most_severe_first() {
+    let fx = Fixture::new("left-out-order");
+    let from = fx.outside("ocean");
+    fx.write(&from, FILE_NAME, NORD);
+    fx.write(&from, ".DS_Store", "junk");
+    let deep = (0..MAX_DEPTH)
+        .map(|n| format!("d{n}"))
+        .collect::<Vec<_>>()
+        .join("/");
+    fx.write(&from, &format!("{deep}/x.txt"), "x");
+    let Err(AuthoringError::Refused(report)) = install(&fx.dirs(), &from, os("ocean")) else {
+        panic!("a theme deeper than any was installed");
+    };
+    let at = |wanted: &dyn Fn(&Finding) -> bool| {
+        report
+            .findings
+            .iter()
+            .position(wanted)
+            .unwrap_or_else(|| panic!("{}", listing(&report.findings)))
+    };
+    let hidden = at(&|finding| finding.place == ".DS_Store");
+    let too_deep = at(&|finding| finding.message.contains("folders down"));
+    assert!(too_deep < hidden, "{}", listing(&report.findings));
+    assert!(
+        report
+            .findings
+            .windows(2)
+            .all(|pair| pair[0].severity >= pair[1].severity),
+        "{}",
+        listing(&report.findings)
+    );
+}
+
+/// **A copy looks at no more files and folders than a theme can hold**:
+/// past the bound it stops, says so, and copies nothing more. A copy is
+/// made with the checker's bound; the test lowers it, as the checker's own
+/// tests lower theirs, rather than make ten thousand files.
+#[test]
+fn a_copy_stops_at_the_checkers_count_of_entries() {
+    let fx = Fixture::new("copy-entries");
+    let from = fx.outside("many");
+    let names = ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"];
+    for name in names {
+        fx.write(&from, name, name);
+    }
+    let leave = BTreeSet::new();
+    let copied = |most: usize, into: &str| {
+        let to = fx.outside(into);
+        fs::create_dir_all(&to).unwrap();
+        let mut copier = Copier::new(&from, &to, &leave).unwrap();
+        assert_eq!(copier.max_entries, MAX_ENTRIES, "the checker's bound");
+        copier.max_entries = most;
+        copier.walk().unwrap();
+        let mut made: Vec<String> = fs::read_dir(&to)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        made.sort();
+        (made, copier.found)
+    };
+
+    let (made, found) = copied(3, "three");
+    assert_eq!(made, ["a.txt", "b.txt", "c.txt"]);
+    assert!(
+        found
+            .iter()
+            .any(|finding| finding.severity == Severity::Error
+                && finding.message.contains("more than 3 files and folders")),
+        "{}",
+        listing(&found)
+    );
+
+    let (made, found) = copied(5, "five");
+    assert_eq!(made, names);
+    assert!(found.is_empty(), "{}", listing(&found));
+}
+
+/// **A file larger than any in a theme is left out of a copy, and said by
+/// its size and the bound.** The copy is made with the bound a theme's
+/// pictures have; the test lowers it rather than write sixty-four megabytes.
+#[test]
+fn a_copy_leaves_out_a_file_over_its_bound_and_says_how_large() {
+    let fx = Fixture::new("copy-bytes");
+    let from = fx.outside("pictures");
+    fx.write(&from, "big.bin", [1_u8; 11]);
+    fx.write(&from, "small.bin", [2_u8; 10]);
+    let to = fx.outside("copy");
+    fs::create_dir_all(&to).unwrap();
+    let leave = BTreeSet::new();
+    let mut copier = Copier::new(&from, &to, &leave).unwrap();
+    assert_eq!(copier.max_bytes, MAX_COPIED_BYTES, "a theme's bound");
+    copier.max_bytes = 10;
+    copier.walk().unwrap();
+
+    assert!(!to.join("big.bin").exists(), "the large file was copied");
+    assert_eq!(fs::read(to.join("small.bin")).unwrap(), [2_u8; 10]);
+    assert!(
+        copier
+            .found
+            .iter()
+            .any(|finding| finding.severity == Severity::Error
+                && finding.place == "big.bin"
+                && finding.message.contains("is 11 bytes")
+                && finding.message.contains("(10)")),
+        "{}",
+        listing(&copier.found)
+    );
+}
+
+/// **What is over the bound already is not read at all, and nothing is
+/// made for it**: its size says so before a byte is.
+#[test]
+fn a_file_over_the_bound_is_not_read() {
+    /// A file that must not be read.
+    struct Unread;
+    impl Read for Unread {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            panic!("a file over the bound was read");
+        }
+    }
+    let fx = Fixture::new("copy-unread");
+    let to = fx.outside("copy");
+    fs::create_dir_all(&to).unwrap();
+    assert!(matches!(
+        copy_within(Unread, 11, &to.join("big.bin"), 10),
+        Ok(Copied::TooLarge(11))
+    ));
+    assert!(!to.join("big.bin").exists());
+}
+
+/// **A file that grows past the bound while it is copied is not kept** --
+/// its size was within it when asked, what was read was not -- and the half
+/// copy is taken back. Within the bound however it came, it is copied whole.
+#[test]
+fn a_file_that_grows_past_the_bound_while_copied_is_not_kept() {
+    let fx = Fixture::new("copy-grows");
+    let to = fx.outside("copy");
+    fs::create_dir_all(&to).unwrap();
+    let grown = [7_u8; 100];
+    assert!(matches!(
+        copy_within(&grown[..], 10, &to.join("grew.bin"), 50),
+        Ok(Copied::TooLarge(51))
+    ));
+    assert!(!to.join("grew.bin").exists(), "the half copy was kept");
+    assert!(matches!(
+        copy_within(&grown[..], 10, &to.join("fits.bin"), 100),
+        Ok(Copied::Whole)
+    ));
+    assert_eq!(fs::read(to.join("fits.bin")).unwrap(), grown);
+}
+
+/// **A hidden folder is no theme of the user's**, whatever it holds: it
+/// does not open and is not removed. A name beginning with a dot is a
+/// tool's or the system's, never one a theme was given.
+#[test]
+fn a_hidden_folder_is_no_theme_of_the_users() {
+    let fx = Fixture::new("hidden-own");
+    let hidden = fx.user_theme(".cache", NORD);
+    let dirs = fx.dirs();
+    assert_eq!(
+        ThemeDraft::open(&dirs, os(".cache")),
+        Err(AuthoringError::NotInstalled)
+    );
+    assert_eq!(
+        remove(&dirs, os(".cache")),
+        Err(AuthoringError::NotInstalled)
+    );
+    assert!(hidden.join(FILE_NAME).is_file(), "the hidden folder went");
+}
+
+/// Make `link` a link to the folder `target`: a junction on Windows, which
+/// any user may make, and a symbolic link elsewhere.
+fn link_folder(link: &Path, target: &Path) {
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+/// **A link to a folder inside the theme -- not out of it -- is still a
+/// link to a folder**, which nothing in a theme is: left out, and said so,
+/// rather than copied as though it were a file.
+#[test]
+fn a_link_to_a_folder_inside_is_left_out_and_said() {
+    let fx = Fixture::new("link-inside");
+    let from = fx.outside("ocean");
+    fx.write(&from, FILE_NAME, NORD);
+    fx.write(&from, "icons/folder.svg", SQUARE);
+    link_folder(&from.join("extras"), &from.join("icons"));
+    let Err(AuthoringError::Refused(report)) = install(&fx.dirs(), &from, os("ocean")) else {
+        panic!("a theme with a link to a folder was installed");
+    };
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.severity == Severity::Error
+                && finding.place == "extras"
+                && finding.message.contains("link to a folder")),
+        "{}",
+        listing(&report.findings)
+    );
+    assert_eq!(fx.user_entries(), Vec::<OsString>::new());
+}
+
 /// A link to a file inside the folder is kept as a second name for it; one
 /// leading out is not followed, and a theme with one is not installed.
 #[cfg(unix)]

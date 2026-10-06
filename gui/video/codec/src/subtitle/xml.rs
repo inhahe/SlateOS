@@ -617,6 +617,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::cost;
 
     const TT: &str = "http://www.w3.org/ns/ttml";
     const TTS: &str = "http://www.w3.org/ns/ttml#styling";
@@ -935,12 +936,12 @@ mod tests {
             .collect();
         let attributes: String = (0..n).map(|i| format!(r#" p{i}:a="{i}""#)).collect();
         let doc = format!("<r{declarations}><e{attributes}/></r>");
-        let started = std::time::Instant::now();
-        let root = parse(doc.as_bytes()).unwrap();
+        let (root, cost) = cost::of(|| parse(doc.as_bytes()));
+        let root = root.unwrap();
         let e = root.elements().next().unwrap();
         assert_eq!(e.attributes.len(), n);
         assert_eq!(e.attribute("urn:99999", "a"), Some("99999"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(cost < cost::BOUND, "{cost:?}");
         // And the same attribute twice, the last of them, is still seen.
         let twice = format!("<r{declarations}><e{attributes} p0:a='x'/></r>");
         assert_eq!(

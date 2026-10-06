@@ -1613,6 +1613,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::cost;
 
     fn secs(n: i128, d: i128) -> Ratio {
         Ratio::new(n, d).unwrap()
@@ -2216,12 +2217,12 @@ mod tests {
             .collect();
         let text = format!(r#"<tt xmlns="{TT}"><body><div>{body}</div></body></tt>"#);
         let d = Document::read(text.as_bytes()).unwrap();
-        let started = std::time::Instant::now();
-        let stretches = d.showings(Ratio::ZERO, Ratio::whole(200_000)).unwrap();
+        let (stretches, cost) = cost::of(|| d.showings(Ratio::ZERO, Ratio::whole(200_000)));
+        let stretches = stretches.unwrap();
         assert_eq!(stretches.len(), 100_000);
         // No layout: the root container's top left.
         assert_eq!(stretches[99_999].2.text, "{\\an7}line 99999");
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(cost < cost::BOUND, "{cost:?}");
     }
 
     /// One paragraph of six thousand spans, each beginning at its own time,
@@ -2235,9 +2236,9 @@ mod tests {
             .collect();
         let text = format!(r#"<tt xmlns="{TT}"><body><div><p>{spans}</p></div></body></tt>"#);
         let d = Document::read(text.as_bytes()).unwrap();
-        let started = std::time::Instant::now();
-        assert_eq!(d.showings(Ratio::ZERO, Ratio::whole(10_000)), None);
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let (given_up, cost) = cost::of(|| d.showings(Ratio::ZERO, Ratio::whole(10_000)));
+        assert_eq!(given_up, None);
+        assert!(cost < cost::BOUND, "{cost:?}");
         // A few hundred such spans -- karaoke, a syllable at a time -- are
         // said.
         let syllables: String = (0..300)
@@ -2278,14 +2279,15 @@ mod tests {
         let text = format!(
             r#"<tt xmlns="{TT}" xmlns:tts="{TTS}"><head><styling>{styles}</styling><layout>{regions}</layout></head><body><div>{body}</div></body></tt>"#
         );
-        let started = std::time::Instant::now();
-        let d = Document::read(text.as_bytes()).unwrap();
-        let stretches = d
-            .showings(Ratio::ZERO, Ratio::whole(i128::from(n)))
-            .unwrap();
+        let (stretches, cost) = cost::of(|| {
+            Document::read(text.as_bytes())
+                .unwrap()
+                .showings(Ratio::ZERO, Ratio::whole(i128::from(n)))
+        });
+        let stretches = stretches.unwrap();
         assert_eq!(stretches.len(), usize::try_from(n).unwrap());
         assert!(stretches[0].2.text.contains("<b>"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(cost < cost::BOUND, "{cost:?}");
     }
 
     /// White space in a paragraph of a hundred thousand pieces, most of them
@@ -2305,9 +2307,8 @@ mod tests {
                 style: Computed::INITIAL,
             });
         }
-        let started = std::time::Instant::now();
-        lwsp(&mut pieces);
+        let ((), cost) = cost::of(|| lwsp(&mut pieces));
         assert_eq!(pieces.len(), 1000);
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(cost < cost::BOUND, "{cost:?}");
     }
 }

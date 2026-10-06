@@ -97,6 +97,8 @@
 
 mod colour;
 mod container;
+#[cfg(test)]
+mod cost;
 mod decoder;
 mod orientation;
 mod picture;

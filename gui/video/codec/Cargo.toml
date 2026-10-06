@@ -28,5 +28,10 @@ mp3 = { path = "../mp3" }
 # The fixtures' answers are MD5s of each frame's pixels.
 md5 = { path = "../../../md5" }
 
+[target.'cfg(unix)'.dev-dependencies]
+# The thread's CPU time a cost test measures (src/cost.rs): clock_gettime's
+# thread clock. Windows' is kernel32's, which std links already.
+libc = "0.2"
+
 [lints]
 workspace = true

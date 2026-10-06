@@ -4530,6 +4530,7 @@ name = "videocodec"
 version = "0.1.0"
 dependencies = [
  "flac",
+ "libc",
  "matroska",
  "md5",
  "mp3",

@@ -123,6 +123,12 @@ fn the_password_is_typed_and_signed_in_with() {
         Ok(Some(LoginAction::Redraw))
     );
     assert_eq!(s.password(), "pw", "emptied first, as a new password");
+    s.power_menu_open = true;
+    assert!(
+        !node(&s, LoginPart::Password).unwrap().focused,
+        "the keyboard is the menu's while it is up"
+    );
+    s.power_menu_open = false;
 
     assert_eq!(
         act(&mut s, LoginPart::Reveal, Action::Toggle),

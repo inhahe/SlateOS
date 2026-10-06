@@ -34,7 +34,9 @@
 //!   once in a dialog ([`customize`]) -- and kept as one line of text
 //!   ([`Ribbon::customization_text`], [`Ribbon::apply_customization`]);
 //! - **drawing** ([`draw`]), the strip in the title bar's colour, so that a
-//!   ribbon under a title bar reads as one piece of window.
+//!   ribbon under a title bar reads as one piece of window;
+//! - **tools** ([`RibbonAccess`]): its tabs, groups, controls and open menu
+//!   shown to automation and assistive tools, each used as clicked.
 //!
 //! The application owns the [`Ribbon`], lays it out each frame at the top of
 //! its window, draws its own page in what is left under
@@ -3971,6 +3973,9 @@ fn draw_control<S: CommandSink + ?Sized>(
 
 #[path = "ribbon_customize.rs"]
 pub mod customize;
+
+mod accessible;
+pub use accessible::{RibbonAccess, RibbonPart};
 
 #[cfg(test)]
 #[path = "ribbon_tests.rs"]

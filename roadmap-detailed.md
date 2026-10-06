@@ -2739,10 +2739,14 @@ authors never wrote a single automation handler.
   would. And the tiling overlay -- its zones, each tiling the focused
   window as clicked, and its picker's layouts, chosen as the pointer
   chooses one -- and the list a shut down waits on: its programs, and
-  "... anyway" and Cancel. Not yet: the toolkit's icon grid, ribbon, dock,
-  radio group and text views (`codeview`, `textview`, `richinput`) -- none
-  of the first four has a program using it yet. There is no font picker
-  yet to show.*
+  "... anyway" and Cancel. The toolkit's ribbon
+  (`guitk::ribbon::RibbonAccess`): its tabs, each group's controls --
+  buttons, toggles, split buttons and their arrows, drop-downs, galleries --
+  a folded group's button and panel, the Quick Access Toolbar and an open
+  menu's rows, each used as clicked. Not yet: the toolkit's icon grid,
+  dock, radio group and text views (`codeview`, `textview`, `richinput`)
+  -- none of the first three has a program using it yet. There is no font
+  picker yet to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

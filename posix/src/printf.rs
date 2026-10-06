@@ -32,6 +32,12 @@
 //! `EILSEQ` (`uchar.rs` says why), and a number past `INT_MAX` fails the
 //! call wherever it is, where glibc's positional pass ignores it ([`INT_MAX`]).
 //!
+//! The wide family (`swprintf`, `fwprintf`, ...) is this engine too, run by
+//! the wide family's rules ([`OutKind`], `wprintf_oracle.txt`): a width, a
+//! precision and `%n` count characters; `%s`'s multibyte argument is read as
+//! `mbsrtowcs` reads it; and `swprintf` writes what `%ls`, `%lc` and `%c`
+//! give as the `wchar_t` values they are.
+//!
 //! ## Architecture
 //!
 //! 1. Assembly wrappers (`printf`, `fprintf`, `dprintf`, `sprintf`,
@@ -333,6 +339,21 @@ pub(crate) fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: &mut Args) -> i3
 /// `va_list` cannot be rewound: each pass starts from its own copy, which is
 /// exactly what C's `va_copy` is for.
 pub(crate) unsafe fn _asprintf_impl(strp: *mut *mut u8, fmt: *const u8, va: Option<VaList>) -> i32 {
+    // SAFETY: the caller's contract, passed on.
+    unsafe { asprintf_kind(strp, fmt, va, OutKind::Bytes) }
+}
+
+/// [`_asprintf_impl`], for output of `kind`: [`OutKind::Bytes`], or the
+/// wide family's [`OutKind::WideUtf8`] (`vfwprintf`).
+///
+/// # Safety
+/// As [`_asprintf_impl`].
+unsafe fn asprintf_kind(
+    strp: *mut *mut u8,
+    fmt: *const u8,
+    va: Option<VaList>,
+    kind: OutKind,
+) -> i32 {
     if strp.is_null() {
         return -1;
     }
@@ -341,7 +362,7 @@ pub(crate) unsafe fn _asprintf_impl(strp: *mut *mut u8, fmt: *const u8, va: Opti
     let mut measure = va;
     // SAFETY: the caller's contract on `va` is passed straight through.
     let mut margs = unsafe { Args::new(measure.as_mut()) };
-    let n = format_core(core::ptr::null_mut(), 0, fmt, &mut margs);
+    let n = format_core_kind(core::ptr::null_mut(), 0, fmt, &mut margs, kind);
     if n < 0 {
         unsafe {
             *strp = core::ptr::null_mut();
@@ -363,7 +384,7 @@ pub(crate) unsafe fn _asprintf_impl(strp: *mut *mut u8, fmt: *const u8, va: Opti
     let mut write = va;
     // SAFETY: as for the measuring pass.
     let mut wargs = unsafe { Args::new(write.as_mut()) };
-    let written = format_core(buf, alloc_size, fmt, &mut wargs);
+    let written = format_core_kind(buf, alloc_size, fmt, &mut wargs, kind);
 
     // Null-terminate.
     let term_pos = if written >= 0 && (written as usize) < alloc_size {
@@ -1104,15 +1125,15 @@ unsafe fn narrow_wide_format(fmt: *const crate::wchar::WcharT) -> Option<*mut u8
 
 /// `vfwprintf(stream, fmt, ap)` — `fwprintf` with a `va_list`.
 ///
-/// Built the way [`vswprintf`] is, on the narrow engine: the format is
-/// narrowed, formatted (into a buffer sized by a measuring pass, as
-/// `vasprintf` does), checked as UTF-8 and counted in wide characters, and
-/// the bytes written to the stream.  A stream holds the multibyte form of
-/// what a wide function writes, so those bytes are exactly what `fputws` of
-/// the wide result would produce.  The return value is in **wide
-/// characters**, as C says, and output that is not valid UTF-8 -- a `%s`
-/// argument with a broken sequence -- is `EILSEQ` with nothing written, as it
-/// would be when glibc converts it to a wide string.
+/// Built on the narrow engine, as [`vswprintf`] is: the format is narrowed,
+/// formatted by the wide family's rules ([`OutKind::WideUtf8`]: widths,
+/// precisions and `%n` count characters) into a buffer sized by a measuring
+/// pass, as `vasprintf` does, counted in wide characters, and the bytes
+/// written to the stream.  A stream holds the multibyte form of what a wide
+/// function writes, so those bytes are exactly what `fputws` of the wide
+/// result would produce.  The return value is in **wide characters**, as C
+/// says, and a `%s` argument with a broken sequence is `EILSEQ` with
+/// nothing written, as it is when glibc converts it to a wide string.
 ///
 /// The stream is held for the call and claimed wide, as glibc's `ORIENT`
 /// claims it: on a byte stream -- one `printf` or `fputs` has written -- this
@@ -1141,9 +1162,10 @@ pub unsafe extern "C" fn vfwprintf(
         return -1;
     };
     let mut out: *mut u8 = core::ptr::null_mut();
-    // SAFETY: `ap` is a valid `va_list` (caller contract); `_asprintf_impl`
-    // replays a copy of it for its second pass, as `vasprintf` does.
-    let bytes = unsafe { _asprintf_impl(&raw mut out, narrow_fmt, Some(*ap)) };
+    // SAFETY: `ap` is a valid `va_list` (caller contract); `asprintf_kind`
+    // replays a copy of it for its second pass, as `vasprintf` does. The
+    // wide family's rules: widths, precisions and `%n` count characters.
+    let bytes = unsafe { asprintf_kind(&raw mut out, narrow_fmt, Some(*ap), OutKind::WideUtf8) };
     // SAFETY: `narrow_fmt` came from `malloc` and is not used again.
     unsafe { crate::malloc::free(narrow_fmt) };
     if bytes < 0 || out.is_null() {
@@ -1200,29 +1222,26 @@ pub unsafe extern "C" fn vwprintf(fmt: *const crate::wchar::WcharT, ap: *mut VaL
 /// A wide `printf` engine would be a second copy of the 3,000 lines below,
 /// and the module header already records what happens when one format path
 /// exists twice: "a fix to one silently missed the other". So the format is
-/// narrowed, [`format_core`] runs exactly as it does for `snprintf`, and the
-/// result is widened. Conversion specifiers need no translation — C gives
+/// narrowed and the engine reads it as it reads `snprintf`'s, but it writes
+/// `wchar_t` units into the caller's buffer ([`OutKind::WideUnits`]): the
+/// format's own text a character at a time, and what `%ls`, `%lc` and `%c`
+/// give as the values they are -- a lone surrogate, or glibc's `WEOF` for a
+/// `%c` byte that is not ASCII, as glibc's `swprintf` writes them. Widths,
+/// precisions and `%n` count characters, as the wide family's do. C gives
 /// `%s` a `char *` and `%ls` a `wchar_t *` in *both* families, so the
 /// argument list is identical.
 ///
-/// # Why the intermediate needs no buffer of its own
-///
-/// The narrow text is formatted **into the caller's own buffer** and then
-/// expanded in place, back to front. That is safe rather than merely lucky:
-/// character `i` starts at byte offset `s_i`, and since each of the `i`
-/// characters before it takes at least one byte and at most four,
-/// `i <= s_i <= 4i`. The destination slot for character `i` is exactly
-/// `[4i, 4i+4)`, so `4i >= s_i` always — the write never reaches below the
-/// byte the character was decoded from, and going back to front means every
-/// source byte above `s_i` has already been consumed.
+/// Until 2026-10-05 the narrow text was formatted into the buffer and
+/// expanded in place, so every width and precision on a string counted
+/// bytes -- `%5ls` of `é` was three spaces and the `é`, `%.2s` of `héllo`
+/// failed on the half character it cut -- and `%n` counted bytes too.
 ///
 /// # Truncation is `swprintf`'s, not `snprintf`'s
 ///
 /// `snprintf` returns the length it *would* have written. `swprintf` returns
-/// a negative value instead, and C is explicit about it. A caller that read
-/// the would-be length here and resized would be acting on a number this
-/// function is not allowed to give it, so the two must not share a return
-/// path — they only share an engine.
+/// a negative value instead, and C is explicit about it -- with `errno`
+/// untouched, as glibc leaves it. The buffer then holds the `n - 1` units
+/// that fit and a terminator, as glibc's does.
 ///
 /// # Safety
 ///
@@ -1238,93 +1257,37 @@ pub unsafe extern "C" fn vswprintf(
     if ws.is_null() || fmt.is_null() || ap.is_null() || n == 0 {
         return -1;
     }
-    let Some(capacity) = n.checked_mul(core::mem::size_of::<crate::wchar::WcharT>()) else {
-        crate::errno::set_errno(crate::errno::EOVERFLOW);
-        return -1;
-    };
-
-    // 1. Narrow the format.
     // SAFETY: `fmt` is a valid wide string (caller contract).
     let Some(narrow_fmt) = (unsafe { narrow_wide_format(fmt) }) else {
         return -1;
     };
-
-    // 2. Format narrow, into the caller's buffer viewed as bytes.
-    let base = ws.cast::<u8>();
     // SAFETY: `ap` is a valid `va_list` (caller contract).
     let mut args = unsafe { Args::new(Some(&mut *ap)) };
-    let needed = format_core(base, capacity, narrow_fmt, &mut args);
+    // Room for `n - 1` units: the last is the terminator's.
+    let room = n.saturating_sub(1);
+    let units = format_core_kind(
+        ws.cast::<u8>(),
+        room,
+        narrow_fmt,
+        &mut args,
+        OutKind::WideUnits,
+    );
     // SAFETY: `narrow_fmt` came from `malloc` above and is not used again.
     unsafe { crate::malloc::free(narrow_fmt) };
-    if needed < 0 {
+    let Ok(units) = usize::try_from(units) else {
+        // Failed: `errno` says why. Nothing is promised of the buffer, but
+        // it is left terminated.
+        // SAFETY: `n >= 1`.
+        unsafe { *ws = 0 };
+        return -1;
+    };
+    // SAFETY: `min(units, room) < n`, inside the caller's `n` units.
+    unsafe { *ws.add(units.min(room)) = 0 };
+    if units > room {
+        // Did not fit.
         return -1;
     }
-    #[allow(clippy::cast_sign_loss)]
-    let byte_len = needed as usize;
-    if byte_len >= capacity {
-        // The narrow form did not fit, so it was truncated and cannot be
-        // recovered. `swprintf` says negative rather than a length.
-        return -1;
-    }
-    // `format_core` does not terminate what it writes -- `_snprintf_impl`
-    // does that for the narrow family -- so terminate it here, before step 3
-    // reads it as a string. Until 2026-09-26 this was missing and step 3 read
-    // on into whatever the caller's buffer held: a zeroed buffer hid it, an
-    // uninitialised one (the usual kind) made `swprintf` miscount or fail.
-    // SAFETY: `byte_len < capacity`, the buffer's size in bytes.
-    unsafe { *base.add(byte_len) = 0 };
-
-    // 3. How many wide characters is that?
-    // SAFETY: `base` now holds the null-terminated narrow string just
-    // written; a null destination asks only for the count.
-    let wide_len = unsafe { crate::wchar::mbstowcs(core::ptr::null_mut(), base, 0) };
-    if wide_len == usize::MAX {
-        crate::errno::set_errno(crate::errno::EILSEQ);
-        return -1;
-    }
-    if wide_len >= n {
-        // No room for the terminating null.
-        return -1;
-    }
-
-    // 4. Expand in place, back to front. See the note above for why this
-    //    cannot overwrite a byte it has not already consumed.
-    let mut read = byte_len;
-    let mut i = wide_len;
-    while i > 0 {
-        // Saturating throughout this loop: every subtraction below is already
-        // guarded by the condition above it, so the saturating form is exact
-        // and says so, rather than relying on a reader to re-derive it.
-        i = i.saturating_sub(1);
-        let mut start = read;
-        // Walk back over UTF-8 continuation bytes to this character's first.
-        while start > 0 {
-            start = start.saturating_sub(1);
-            // SAFETY: `start` is within the formatted bytes.
-            if unsafe { *base.add(start) } & 0xC0 != 0x80 {
-                break;
-            }
-        }
-        let mut wc: crate::wchar::WcharT = 0;
-        // SAFETY: `[start, read)` is a complete character's bytes, still
-        // untouched: the previous iteration wrote at or above `4*(i+1)`,
-        // which is at or above `read`.
-        let used = unsafe {
-            crate::wchar::mbtowc(&raw mut wc, base.add(start), read.saturating_sub(start))
-        };
-        if used <= 0 {
-            crate::errno::set_errno(crate::errno::EILSEQ);
-            return -1;
-        }
-        // SAFETY: `i < wide_len < n`, so this slot is inside the caller's
-        // buffer, and `4*i >= start` keeps it clear of unread bytes.
-        unsafe { *ws.add(i) = wc };
-        read = start;
-    }
-    // SAFETY: `wide_len < n`, so the terminator is in bounds.
-    unsafe { *ws.add(wide_len) = 0 };
-
-    i32::try_from(wide_len).unwrap_or(-1)
+    i32::try_from(units).unwrap_or(-1)
 }
 
 /// Own archive member — gnulib replaces `vasprintf`. See `gnu_asprintf` above.
@@ -1464,15 +1427,43 @@ enum Sink {
     Capture(*mut std::vec::Vec<u8>),
 }
 
+/// What a [`FmtOutput`] writes, and what its widths count.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OutKind {
+    /// Bytes: the narrow family. A width or a precision on `%s`, `%ls` or
+    /// `%lc` is a count of bytes, as C says for it.
+    Bytes,
+    /// The wide family's text as its multibyte form, UTF-8 bytes:
+    /// `fwprintf`, whose stream takes that form. A width, a precision and
+    /// `%n` count characters, as C says for the wide family.
+    WideUtf8,
+    /// The wide family's text as `wchar_t` units in the caller's wide
+    /// buffer: `swprintf`. `buf` holds `size` units, `pos` counts them, and
+    /// a `wchar_t` an argument gives (`%ls`, `%lc`) is written as it is,
+    /// whatever its value -- a lone surrogate too, as glibc's is.
+    WideUnits,
+}
+
 struct FmtOutput {
     buf: *mut u8,
+    /// `buf`'s room: bytes, or for [`OutKind::WideUnits`], units.
     size: usize,
-    /// Bytes emitted so far: the count `printf` returns and `%n` stores.
+    /// Bytes emitted so far -- units, for [`OutKind::WideUnits`]: the count
+    /// the narrow family returns and its `%n` stores.
     pos: usize,
+    /// Characters emitted so far: what the wide family's `%n` stores. Every
+    /// byte but a UTF-8 continuation byte starts one; every unit is one.
+    chars: usize,
     /// How many of `pos` have been handed to the sink (always 0 when it is
     /// [`Sink::Bounded`]).  The buffer holds bytes `flushed..pos`.
     flushed: usize,
     sink: Sink,
+    kind: OutKind,
+    /// For [`OutKind::WideUnits`]: the character the bytes emitted so far
+    /// have begun -- the format's own text arrives as the UTF-8 its wide
+    /// form was narrowed to, a byte at a time, and each character it
+    /// completes is one unit.
+    pending: crate::wchar::MbstateT,
     /// The sink refused a write; nothing more is written, and the call
     /// fails.
     failed: bool,
@@ -1483,15 +1474,7 @@ struct FmtOutput {
 
 impl FmtOutput {
     const fn new(buf: *mut u8, size: usize) -> Self {
-        Self {
-            buf,
-            size,
-            pos: 0,
-            flushed: 0,
-            sink: Sink::Bounded,
-            failed: false,
-            errno: 0,
-        }
+        Self::streaming(buf, size, Sink::Bounded)
     }
 
     const fn streaming(buf: *mut u8, size: usize, sink: Sink) -> Self {
@@ -1499,10 +1482,27 @@ impl FmtOutput {
             buf,
             size,
             pos: 0,
+            chars: 0,
             flushed: 0,
             sink,
+            kind: OutKind::Bytes,
+            pending: crate::wchar::MbstateT::new(),
             failed: false,
             errno: 0,
+        }
+    }
+
+    /// Output in `kind`.
+    const fn of_kind(mut self, kind: OutKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// The count a wide function's `%n` stores, or a narrow one's.
+    const fn count_for_n(&self) -> usize {
+        match self.kind {
+            OutKind::Bytes => self.pos,
+            OutKind::WideUtf8 | OutKind::WideUnits => self.chars,
         }
     }
 
@@ -1864,6 +1864,22 @@ fn dispatch_spec(
             format_wide_char(dst, wc, spec);
         }
 
+        // The wide family's `%c`: glibc's `btowc` of the byte -- itself, if
+        // ASCII, and `WEOF` if not, which no UTF-8 byte alone is -- one
+        // character wide. `WEOF` is written as glibc's `swprintf` writes it,
+        // and fails `fwprintf`, `EILSEQ`: it has no multibyte form.
+        b'c' if dst.kind != OutKind::Bytes => {
+            // As below: the truncation is C's.
+            #[allow(clippy::cast_possible_truncation)]
+            let byte = args.value_int(spec) as u8;
+            let wc = if byte.is_ascii() {
+                u32::from(byte)
+            } else {
+                crate::wchar::WEOF.cast_unsigned()
+            };
+            format_wide_char(dst, wc, spec);
+        }
+
         b'c' => {
             // `(unsigned char)` of the promoted `int`, as glibc writes it.
             #[allow(clippy::cast_possible_truncation)]
@@ -1886,10 +1902,11 @@ fn dispatch_spec(
         // `int` without one, a `signed char` for `hh`, a `long` for `l`, and
         // so on. It stored an `int` for every length until 2026-10-05 -- four
         // bytes over a `signed char`, three of them its neighbours'.
+        // The wide family counts characters, not bytes.
         b'n' => {
             let ptr = args.value_int(spec) as *mut u8;
             if !ptr.is_null() {
-                let count = dst.pos;
+                let count = dst.count_for_n();
                 // The truncations are C's: the count is stored in the
                 // object's type, as an assignment would store it.
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -1967,7 +1984,21 @@ fn float_arg(args: &mut Args, spec: &FormatSpec) -> FloatArg {
 /// multibyte form (a surrogate, or past U+10FFFF, which this library
 /// refuses as its `wcrtomb` does: `uchar.rs` says why) fails the call,
 /// `EILSEQ`, as glibc's does. `wc` 0 is one NUL byte.
+///
+/// In the wide family the width counts characters -- `%5lc` of `é` is four
+/// spaces and the `é` -- and the character is written as [`emit_wchar`]
+/// writes it.
 fn format_wide_char(dst: &mut FmtOutput, wc: u32, spec: &FormatSpec) {
+    if dst.kind != OutKind::Bytes {
+        if !spec.flags.left_align && spec.width > 1 {
+            emit_padding(dst, b' ', spec.width.wrapping_sub(1));
+        }
+        emit_wchar(dst, wc);
+        if spec.flags.left_align && spec.width > 1 {
+            emit_padding(dst, b' ', spec.width.wrapping_sub(1));
+        }
+        return;
+    }
     let mut bytes = [0u8; 4];
     let n = crate::wchar::utf8_encode(wc, &mut bytes);
     if n == 0 {
@@ -2038,6 +2069,10 @@ fn format_unknown(dst: &mut FmtOutput, spec: &FormatSpec, ch: u8) {
 /// pass it is not written in part but left out, with the rest; the width
 /// pads in bytes. A NULL string is `(null)`, as `%s`'s is. A character with
 /// no multibyte form, before the precision ends, fails the call, `EILSEQ`.
+///
+/// In the wide family the precision and the width count characters, and
+/// each character is written as [`emit_wchar`] writes it -- glibc's
+/// `wcsnlen` and copy.
 fn format_wide_string(dst: &mut FmtOutput, ws: *const crate::wchar::WcharT, spec: &FormatSpec) {
     if ws.is_null() {
         format_string(
@@ -2047,6 +2082,29 @@ fn format_wide_string(dst: &mut FmtOutput, ws: *const crate::wchar::WcharT, spec
             spec.width,
             spec.precision,
         );
+        return;
+    }
+    if dst.kind != OutKind::Bytes {
+        let max = spec.precision.unwrap_or(usize::MAX);
+        let mut chars = 0usize;
+        // SAFETY: the caller's contract: a NUL-terminated wide string; this
+        // stops at its NUL, or at the precision.
+        while chars < max && unsafe { *ws.add(chars) } != 0 {
+            chars = chars.saturating_add(1);
+        }
+        if !spec.flags.left_align && spec.width > chars {
+            emit_padding(dst, b' ', spec.width.wrapping_sub(chars));
+        }
+        for i in 0..chars {
+            // SAFETY: one of the `chars` characters counted above.
+            emit_wchar(dst, unsafe { *ws.add(i) }.cast_unsigned());
+            if dst.failed {
+                return;
+            }
+        }
+        if spec.flags.left_align && spec.width > chars {
+            emit_padding(dst, b' ', spec.width.wrapping_sub(chars));
+        }
         return;
     }
     let max = spec.precision.unwrap_or(usize::MAX);
@@ -2098,7 +2156,18 @@ fn format_wide_string(dst: &mut FmtOutput, ws: *const crate::wchar::WcharT, spec
 /// left out of the output and the call returned the rest's length, as if it
 /// had succeeded.
 fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -> i32 {
-    let mut dst = FmtOutput::new(out, out_size);
+    format_core_kind(out, out_size, fmt, args, OutKind::Bytes)
+}
+
+/// [`format_core`], for output of `kind`.
+fn format_core_kind(
+    out: *mut u8,
+    out_size: usize,
+    fmt: *const u8,
+    args: &mut Args,
+    kind: OutKind,
+) -> i32 {
+    let mut dst = FmtOutput::new(out, out_size).of_kind(kind);
     dst.errno = crate::errno::get_errno();
     let n = format_into(&mut dst, fmt, args);
     if dst.failed { -1 } else { n }
@@ -2233,8 +2302,28 @@ impl FormatFlags {
 }
 
 /// Emit a single byte to the output buffer, handing a full buffer to its
-/// sink first if it has one.
+/// sink first if it has one. For [`OutKind::WideUnits`] the byte is part of
+/// a character's UTF-8 -- the format's text, or the engine's own ASCII --
+/// and the character it completes is emitted as one unit.
 fn emit_byte(dst: &mut FmtOutput, byte: u8) {
+    if dst.kind == OutKind::WideUnits {
+        // SAFETY: one byte, `byte`, is read.
+        match unsafe { crate::wchar::decode(&mut dst.pending, &raw const byte, 1) } {
+            crate::wchar::Decoded::Char { cp, .. } => emit_unit(dst, cp),
+            crate::wchar::Decoded::Incomplete => {}
+            // Nothing this engine emits as bytes is other than UTF-8: the
+            // format was narrowed by `wcstombs`, and what the conversions
+            // write themselves is ASCII. Refused, not guessed at.
+            crate::wchar::Decoded::Invalid => {
+                crate::errno::set_errno(crate::errno::EILSEQ);
+                dst.failed = true;
+            }
+        }
+        return;
+    }
+    if byte & 0xC0 != 0x80 {
+        dst.chars = dst.chars.wrapping_add(1);
+    }
     if !dst.buf.is_null() {
         let mut at = dst.pos.wrapping_sub(dst.flushed);
         if at >= dst.size && dst.size > 0 && dst.drain() {
@@ -2262,7 +2351,9 @@ fn emit_padding(dst: &mut FmtOutput, pad_char: u8, count: usize) {
         emit_byte(dst, pad_char);
         left = left.wrapping_sub(1);
     }
+    // ASCII: each counted byte is a character, and a unit.
     dst.pos = dst.pos.wrapping_add(left);
+    dst.chars = dst.chars.wrapping_add(left);
 }
 
 /// Emit a byte slice.
@@ -2270,6 +2361,43 @@ fn emit_bytes(dst: &mut FmtOutput, data: &[u8]) {
     for &b in data {
         emit_byte(dst, b);
     }
+}
+
+/// Emit one `wchar_t` unit to a [`OutKind::WideUnits`] buffer: written
+/// while there is room, counted always.
+fn emit_unit(dst: &mut FmtOutput, wc: u32) {
+    if !dst.buf.is_null() && dst.pos < dst.size {
+        // SAFETY: a `WideUnits` buffer is the caller's `wchar_t` array of
+        // `size` units (`vswprintf`), so unit `pos < size` is inside it.
+        unsafe {
+            dst.buf
+                .cast::<crate::wchar::WcharT>()
+                .add(dst.pos)
+                .write(wc.cast_signed())
+        };
+    }
+    dst.pos = dst.pos.wrapping_add(1);
+    dst.chars = dst.chars.wrapping_add(1);
+}
+
+/// Emit the wide character `wc` an argument gave (`%lc`, `%ls`, the wide
+/// family's `%c`): as itself, whatever its value, to a
+/// [`OutKind::WideUnits`] buffer, as glibc's `swprintf` writes it; as its
+/// UTF-8 elsewhere, where one with none -- a surrogate, a value past
+/// U+10FFFF -- fails the call, `EILSEQ`.
+fn emit_wchar(dst: &mut FmtOutput, wc: u32) {
+    if dst.kind == OutKind::WideUnits {
+        emit_unit(dst, wc);
+        return;
+    }
+    let mut bytes = [0u8; 4];
+    let n = crate::wchar::utf8_encode(wc, &mut bytes);
+    if n == 0 {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        dst.failed = true;
+        return;
+    }
+    emit_bytes(dst, bytes.get(..n).unwrap_or_default());
 }
 
 /// Format a signed integer (%d, %i): its sign -- `-`, or for the `+` and
@@ -2534,11 +2662,60 @@ fn format_errno(dst: &mut FmtOutput, spec: &FormatSpec) {
     format_string(dst, text.as_ptr(), &spec.flags, spec.width, spec.precision);
 }
 
+/// The wide family's `%s`: the multibyte string `s` read as `mbsrtowcs`
+/// reads it, strict UTF-8 -- glibc's `outstring_converted_wide_string`. The
+/// precision is how many characters to write, and the width counts
+/// characters too: `%.2s` of `héllo` is `hé`, where the narrow family's is
+/// `h` and half an `é`. An invalid sequence among the characters it would
+/// write fails the call, `EILSEQ`, and one past the precision is never
+/// read. Until 2026-10-05 the wide family counted bytes here, and failed
+/// `%.2s` of `héllo` for the half character it cut.
+fn format_mb_string_wide(
+    dst: &mut FmtOutput,
+    s: *const u8,
+    flags: &FormatFlags,
+    width: usize,
+    precision: Option<usize>,
+) {
+    let max = precision.unwrap_or(usize::MAX);
+    // First: how many characters, and how many bytes they are.
+    let mut chars = 0usize;
+    let mut bytes = 0usize;
+    let mut state = crate::wchar::MbstateT::new();
+    while chars < max {
+        // SAFETY: `s` is NUL-terminated (the caller's contract), `bytes` is
+        // where the previous character ended, before the NUL, and `decode`
+        // reads at most one character's bytes -- it stops at a NUL, which is
+        // no continuation byte.
+        match unsafe { crate::wchar::decode(&mut state, s.add(bytes), 4) } {
+            crate::wchar::Decoded::Char { cp: 0, .. } => break,
+            crate::wchar::Decoded::Char { took, .. } => {
+                chars = chars.saturating_add(1);
+                bytes = bytes.saturating_add(took);
+            }
+            crate::wchar::Decoded::Incomplete | crate::wchar::Decoded::Invalid => {
+                crate::errno::set_errno(crate::errno::EILSEQ);
+                dst.failed = true;
+                return;
+            }
+        }
+    }
+    if !flags.left_align && width > chars {
+        emit_padding(dst, b' ', width.wrapping_sub(chars));
+    }
+    // SAFETY: the `bytes` bytes just read, whole characters.
+    emit_bytes(dst, unsafe { core::slice::from_raw_parts(s, bytes) });
+    if flags.left_align && width > chars {
+        emit_padding(dst, b' ', width.wrapping_sub(chars));
+    }
+}
+
 /// Format a string (%s): up to the precision's count of its bytes, padded
 /// with spaces to the width -- spaces whatever the `0` flag says, as glibc
 /// pads a string. A null pointer is glibc's `(null)` when the precision
 /// leaves room for all of it, and nothing when it does not: `%.3s` of NULL
-/// is empty, not `(nu`, which this wrote until 2026-10-05.
+/// is empty, not `(nu`, which this wrote until 2026-10-05. The wide family's
+/// is [`format_mb_string_wide`].
 fn format_string(
     dst: &mut FmtOutput,
     s: *const u8,
@@ -2560,6 +2737,10 @@ fn format_string(
         if flags.left_align && width > len {
             emit_padding(dst, b' ', width.wrapping_sub(len));
         }
+        return;
+    }
+    if dst.kind != OutKind::Bytes {
+        format_mb_string_wide(dst, s, flags, width, precision);
         return;
     }
 
@@ -6672,6 +6853,119 @@ pub(crate) mod tests {
             DEVIATIONS.len(),
             "every deviation is a line of it"
         );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Code points, hex, `.`-joined, as `wprintf_harness.py` writes them:
+    /// `-` for none.
+    fn code_points(text: &str) -> std::vec::Vec<crate::wchar::WcharT> {
+        if text == "-" {
+            return std::vec::Vec::new();
+        }
+        text.split('.')
+            .map(|c| {
+                u32::from_str_radix(c, 16)
+                    .expect("a code point")
+                    .cast_signed()
+            })
+            .collect()
+    }
+
+    /// glibc's wide printf: every line of `wprintf_oracle.txt`
+    /// (`posix/tools/oracle/wprintf_harness.py`) through `vswprintf` at its
+    /// size -- the return value, the text and its terminator, `errno` for
+    /// -1, and what `%n` stored -- each argument built as a C caller leaves
+    /// it. Widths, precisions and `%n` count characters; `%s` is read as
+    /// `mbsrtowcs` reads it; `%ls`, `%lc` and `%c` write the values they
+    /// give, a lone surrogate and `WEOF` included; a buffer too small is -1
+    /// with `errno` untouched. Until 2026-10-05 the wide family counted
+    /// bytes, and a value with no UTF-8 failed the call.
+    #[test]
+    fn swprintf_is_glibcs() {
+        let oracle = include_str!("wprintf_oracle.txt");
+        let mut failures = std::vec::Vec::new();
+        let mut compared = 0usize;
+        for line in oracle.lines() {
+            let (left, right) = line.split_once(" | ").expect("line");
+            let mut fields = left.splitn(3, ' ');
+            let (Some(fmt_text), Some(size_text), Some(args_text)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                panic!("format, size and arguments: {line}");
+            };
+            let mut wfmt = code_points(fmt_text);
+            wfmt.push(0);
+            let size: usize = size_text.parse().expect("size");
+            let built: std::vec::Vec<OracleArg> = if args_text == "-" {
+                std::vec::Vec::new()
+            } else {
+                args_text.split(',').map(oracle_arg).collect()
+            };
+            let mut objects = std::vec![[0x55u8; 8]; built.len()];
+            let slots: std::vec::Vec<u64> = built
+                .iter()
+                .zip(objects.iter_mut())
+                .map(|(a, object)| match a {
+                    OracleArg::Slot(v) => *v,
+                    OracleArg::Narrow(s) => s.as_ptr() as u64,
+                    OracleArg::Wide(w) => w.as_ptr() as u64,
+                    OracleArg::Store(_) => object.as_mut_ptr() as u64,
+                })
+                .collect();
+            let mut buf = [0x5555_5555 as crate::wchar::WcharT; 512];
+            crate::errno::set_errno(0);
+            let got_ret = with_valist(&slots, &[], |ap| unsafe {
+                vswprintf(buf.as_mut_ptr(), size, wfmt.as_ptr(), ap)
+            });
+            let got_errno = crate::errno::get_errno();
+            let shown = std::string::String::from_utf16_lossy(
+                &wfmt[..wfmt.len() - 1]
+                    .iter()
+                    .filter_map(|&c| char::from_u32(c.cast_unsigned()))
+                    .collect::<std::string::String>()
+                    .encode_utf16()
+                    .collect::<std::vec::Vec<u16>>(),
+            );
+            compared += 1;
+            let parts: std::vec::Vec<&str> = right.split(' ').collect();
+            let want_ret: i32 = parts[0].parse().expect("return value");
+            if want_ret < 0 {
+                let want_errno: i32 = parts[1]
+                    .strip_prefix("-e")
+                    .and_then(|e| e.parse().ok())
+                    .expect("errno");
+                if got_ret != -1 || got_errno != want_errno {
+                    failures.push(std::format!(
+                        "{shown:?} n={size} {args_text}: glibc -1 errno {want_errno}, here {got_ret} errno {got_errno}"
+                    ));
+                    continue;
+                }
+            } else {
+                let want = code_points(parts[1]);
+                let n = usize::try_from(got_ret).unwrap_or(0);
+                if got_ret != want_ret || buf[..n] != want[..] || buf[n] != 0 {
+                    failures.push(std::format!(
+                        "{shown:?} n={size} {args_text}: glibc {want_ret} {want:x?}, here {got_ret} {:x?}",
+                        &buf[..n.min(64)]
+                    ));
+                    continue;
+                }
+            }
+            let mut want_stores = parts[2..].iter().map(|n| n.parse::<i64>().expect("stored"));
+            for (a, object) in built.iter().zip(objects.iter()) {
+                if let OracleArg::Store(kind) = a {
+                    let want = want_stores.next().expect("a stored value");
+                    match stored(kind, object) {
+                        Ok(v) if v == want => {}
+                        Ok(v) => {
+                            failures.push(std::format!("{shown:?}: %n stored {v}, glibc {want}"))
+                        }
+                        Err(e) => failures.push(std::format!("{shown:?}: {e}")),
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 80, "the whole oracle");
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

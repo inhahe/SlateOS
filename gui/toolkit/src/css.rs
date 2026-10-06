@@ -24,8 +24,23 @@
 //!   for its states (`&:hover { ... }`), and style sheets of rules chosen by
 //!   selectors (kind, `.class`, `#name`, states, `>`).
 //!
-//! The widget tree's side, transitions and positioning follow
-//! (`design-decisions.md` §1478 says how each is to work).
+//! The widget tree is where it is used: [`Widget::css`] gives a widget its
+//! own block, [`Widget::class`] and [`Widget::named`] what selectors ask
+//! for, and [`WidgetTree::set_style_sheet`] a tree its sheet. Every layout
+//! computes each widget's style in its present state -- and a styled tree
+//! lays itself out again when the pointer or a key changes a state -- over
+//! the program's own style, which is kept apart ([`Widget::look`] is the
+//! style it is drawn in). Percentages are settled as each container lays
+//! its children out; a box's and a label's text shadows are drawn.
+//!
+//! Font families, transitions and positioning follow (`design-decisions.md`
+//! §1478).
+//!
+//! [`Widget::css`]: crate::widget::Widget::css
+//! [`Widget::class`]: crate::widget::Widget::class
+//! [`Widget::named`]: crate::widget::Widget::named
+//! [`Widget::look`]: crate::widget::Widget::look
+//! [`WidgetTree::set_style_sheet`]: crate::widget::WidgetTree::set_style_sheet
 
 pub mod compute;
 pub mod decl;

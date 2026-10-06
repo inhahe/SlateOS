@@ -12,13 +12,59 @@ use crate::color::Color;
 use crate::frame::Rect;
 use crate::palette::{Palette, readable_on};
 use crate::render::{RenderCommand, RenderTree, TextOverflow};
-use crate::style::{CornerRadii, FOCUS_RING_WIDTH};
+use crate::style::{CornerRadii, FOCUS_RING_WIDTH, TextAlign};
 
 impl Widget {
+    /// A label's text, `(cx, cy, cw)` its content box's corner and width:
+    /// placed as its style aligns it, and over its shadow where its style
+    /// gives it one -- the text again, offset and in the shadow's colour
+    /// (the renderer draws no blurred text, so a blur is not drawn).
+    fn draw_label(
+        &self,
+        text: &str,
+        p: &Palette,
+        tree: &mut RenderTree,
+        (cx, cy, cw): (f32, f32, f32),
+    ) {
+        let look = self.look();
+        let size = look.font_size;
+        let weight = weight_to_hint(look.font_weight);
+        // A text narrower than the box moves within it; one wider starts at
+        // the box's left and is cut at its end, whatever the alignment.
+        let x = match look.text_align {
+            TextAlign::Left => cx,
+            align => {
+                let spare = (cw - crate::text::measure(text, size, weight)).max(0.0);
+                if align == TextAlign::Center {
+                    cx + spare / 2.0
+                } else {
+                    cx + spare
+                }
+            }
+        };
+        let room = (cw - (x - cx)).max(0.0);
+        let text_at = |x: f32, y: f32, color: Color| RenderCommand::Text {
+            x,
+            y,
+            text: text.to_string(),
+            color,
+            font_size: size,
+            font_weight: weight,
+            max_width: Some(room),
+            overflow: TextOverflow::Ellipsis,
+        };
+        if let Some(s) = look.text_shadow
+            && s.color.a > 0
+        {
+            tree.push(text_at(x + s.offset_x, cy + s.offset_y, s.color));
+        }
+        tree.push(text_at(x, cy, self.ink(p)));
+    }
+
     /// The colour of this widget's text: its style's, or else the palette's
     /// text -- the disabled grey for a widget that cannot be used.
     pub(super) fn ink(&self, p: &Palette) -> Color {
-        self.style
+        self.look()
             .foreground
             .unwrap_or(if self.enabled { p.text } else { p.overlay0 })
     }
@@ -27,8 +73,8 @@ impl Widget {
     /// style's, or else the user's accent and what reads on it.
     fn selection(&self, p: &Palette) -> (Color, Color) {
         (
-            self.style.selection_bg.unwrap_or(p.accent),
-            self.style
+            self.look().selection_bg.unwrap_or(p.accent),
+            self.look()
                 .selection_fg
                 .unwrap_or_else(|| readable_on(p.accent)),
         )
@@ -40,8 +86,8 @@ impl Widget {
         crate::textarea::Metrics::new(
             self.layout.width,
             self.layout.height,
-            self.style.font_size,
-            weight_to_hint(self.style.font_weight),
+            self.look().font_size,
+            weight_to_hint(self.look().font_weight),
         )
     }
 
@@ -90,16 +136,7 @@ impl Widget {
         match &self.kind {
             // What they hold is drawn as their children.
             WidgetKind::Container | WidgetKind::ScrollView { .. } => {}
-            WidgetKind::Label { text } => tree.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: text.clone(),
-                color: self.ink(p),
-                font_size: self.style.font_size,
-                font_weight: weight_to_hint(self.style.font_weight),
-                max_width: Some(cw),
-                overflow: TextOverflow::Ellipsis,
-            }),
+            WidgetKind::Label { text } => self.draw_label(text, p, tree, (cx, cy, cw)),
             WidgetKind::Button { text, pressed } => crate::button::draw(
                 tree,
                 p,
@@ -152,7 +189,7 @@ impl Widget {
                         selection_bg,
                         selection_fg,
                         focused: self.focused,
-                        caret_width: self.style.caret_width,
+                        caret_width: self.look().caret_width,
                         placeholder: Some((placeholder, p.subtext0)),
                     },
                 );
@@ -226,7 +263,7 @@ impl Widget {
                 }
             }
             WidgetKind::Separator { vertical } => {
-                let color = self.style.foreground.unwrap_or(p.border);
+                let color = self.look().foreground.unwrap_or(p.border);
                 let (x1, y1, x2, y2) = if *vertical {
                     (cx + cw / 2.0, cy, cx + cw / 2.0, cy + ch)
                 } else {
@@ -265,15 +302,15 @@ impl Widget {
         selection_anchor: Option<usize>,
     ) {
         let (cx, cy) = self.content_origin();
-        let line_h = self.style.font_size * self.style.line_height;
+        let line_h = self.look().font_size * self.look().line_height;
         if value.is_empty() {
             tree.push(RenderCommand::Text {
                 x: cx,
                 y: cy,
                 text: placeholder.to_owned(),
                 color: p.subtext0,
-                font_size: self.style.font_size,
-                font_weight: weight_to_hint(self.style.font_weight),
+                font_size: self.look().font_size,
+                font_weight: weight_to_hint(self.look().font_weight),
                 max_width: Some(self.layout.width),
                 overflow: TextOverflow::Ellipsis,
             });
@@ -284,7 +321,7 @@ impl Widget {
                     cy,
                     line_h,
                     self.ink(p),
-                    self.style.caret_width,
+                    self.look().caret_width,
                 );
             }
             return;
@@ -301,12 +338,12 @@ impl Widget {
                 y: cy,
                 width: self.layout.width,
                 line_height: line_h,
-                font_size: self.style.font_size,
-                weight: weight_to_hint(self.style.font_weight),
+                font_size: self.look().font_size,
+                weight: weight_to_hint(self.look().font_weight),
                 color: self.ink(p),
                 selection_bg,
                 selection_fg,
-                caret_width: self.style.caret_width,
+                caret_width: self.look().caret_width,
             },
         );
     }

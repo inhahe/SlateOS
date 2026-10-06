@@ -28,6 +28,8 @@
 //! cuts it to its box, and draws its bars: down its right edge for content
 //! taller than it, across its foot for content wider.
 
+#[cfg(test)]
+mod css_tests;
 mod draw;
 #[cfg(test)]
 mod tree_tests;
@@ -42,6 +44,12 @@ use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, RenderTree};
 use crate::style::{CornerRadii, Edges, FontWeight, Style};
 use crate::text::TextCursor;
+
+use std::sync::Arc;
+
+use crate::css::compute::{self as css_compute, Computed, Env as CssEnv, Inherited};
+use crate::css::decl::Declared;
+use crate::css::sheet::{self as css_sheet, Block, StyleSheet, Subject, Warning};
 
 /// How tall a progress bar is by default.
 const PROGRESS_HEIGHT: f32 = 12.0;
@@ -107,6 +115,57 @@ pub struct Widget {
     hovered: bool,
     /// Tooltip text.
     pub tooltip: Option<String>,
+    /// Its classes, for a style sheet's `.class` selectors
+    /// ([`Widget::class`]).
+    pub classes: Vec<String>,
+    /// Its name, for a style sheet's `#name` selector ([`Widget::named`]).
+    pub name: Option<String>,
+    /// Its own CSS ([`Widget::css`]): applied after its tree's style
+    /// sheet's rules, and what it sets that is inherited reaches its
+    /// children.
+    css: Option<Arc<OwnCss>>,
+    /// Its style as CSS left it at the last layout: what it is laid out and
+    /// drawn in when there is one ([`Widget::look`]).
+    computed: Option<Box<Computed>>,
+}
+
+/// A widget's own CSS, read: its block, and what in it was not.
+#[derive(Debug)]
+struct OwnCss {
+    block: Block,
+    warnings: Vec<Warning>,
+}
+
+/// A widget's states as selectors ask about them: hover, active, focus,
+/// enabled, checked ([`Widget::states`]).
+type States = [bool; 5];
+
+/// One of a widget's ancestors, as a style sheet's selectors ask about it.
+#[derive(Clone, Debug)]
+struct Ancestor {
+    kind: &'static str,
+    classes: Vec<String>,
+    name: Option<String>,
+    hover: bool,
+    active: bool,
+    focus: bool,
+    enabled: bool,
+    checked: bool,
+}
+
+impl Ancestor {
+    fn subject(&self) -> Subject<'_> {
+        Subject {
+            kind: self.kind,
+            classes: &self.classes,
+            name: self.name.as_deref(),
+            hover: self.hover,
+            active: self.active,
+            focus: self.focus,
+            enabled: self.enabled,
+            checked: self.checked,
+        }
+    }
 }
 
 /// Widget content type.
@@ -235,6 +294,10 @@ impl Widget {
             focused: false,
             hovered: false,
             tooltip: None,
+            classes: Vec::new(),
+            name: None,
+            css: None,
+            computed: None,
         }
     }
 
@@ -428,6 +491,201 @@ impl Widget {
     pub fn with_background(mut self, color: Color) -> Self {
         self.style.background = color;
         self
+    }
+
+    /// Style it with CSS -- `color: var(--accent); padding: 4px 8px` --
+    /// with blocks for its states: `&:hover { background-color:
+    /// var(--surface1) }`. Applied over its [`style`](Self::style), after its
+    /// tree's style sheet ([`WidgetTree::set_style_sheet`]), in the order
+    /// written; what cannot be read is dropped, and
+    /// [`WidgetTree::css_warnings`] says what. See [`crate::css`].
+    #[must_use]
+    pub fn css(mut self, text: &str) -> Self {
+        let (block, warnings) = css_sheet::parse_block(text);
+        self.css = Some(Arc::new(OwnCss { block, warnings }));
+        self
+    }
+
+    /// Give it the class `class`, for a style sheet's `.class` selectors.
+    #[must_use]
+    pub fn class(mut self, class: &str) -> Self {
+        self.classes.push(class.to_string());
+        self
+    }
+
+    /// Name it `name`, for a style sheet's `#name` selector.
+    #[must_use]
+    pub fn named(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
+        self
+    }
+
+    /// Its style as it is laid out and drawn: its program's
+    /// [`style`](Self::style), as CSS left it at the last layout.
+    ///
+    /// The program's own is kept apart and is what CSS starts from each
+    /// time, so a state's style -- `:hover`'s -- comes off when the state
+    /// does, and a change the program makes to `style` is taken up at the
+    /// next layout.
+    #[must_use]
+    pub fn look(&self) -> &Style {
+        self.computed.as_ref().map_or(&self.style, |c| &c.style)
+    }
+
+    /// Its kind's name, as a style sheet's selectors name it: `Button`,
+    /// `Label`, `TextInput` ...
+    #[must_use]
+    pub const fn kind_name(&self) -> &'static str {
+        match self.kind {
+            WidgetKind::Container => "Container",
+            WidgetKind::Label { .. } => "Label",
+            WidgetKind::Button { .. } => "Button",
+            WidgetKind::TextInput { .. } => "TextInput",
+            WidgetKind::TextArea { .. } => "TextArea",
+            WidgetKind::Checkbox { .. } => "Checkbox",
+            WidgetKind::RadioButton { .. } => "RadioButton",
+            WidgetKind::ScrollView { .. } => "ScrollView",
+            WidgetKind::Separator { .. } => "Separator",
+            WidgetKind::ProgressBar { .. } => "ProgressBar",
+            WidgetKind::Slider { .. } => "Slider",
+            WidgetKind::Image { .. } => "Image",
+        }
+    }
+
+    /// It, as a selector asks about it: its kind, classes, name and state.
+    fn ancestor(&self) -> Ancestor {
+        let [hover, active, focus, enabled, checked] = self.states();
+        Ancestor {
+            kind: self.kind_name(),
+            classes: self.classes.clone(),
+            name: self.name.clone(),
+            hover,
+            active,
+            focus,
+            enabled,
+            checked,
+        }
+    }
+
+    /// The states a selector asks about -- `:hover`, `:active`, `:focus`,
+    /// `:enabled` (`:disabled` its opposite) and `:checked` -- in that
+    /// order.
+    fn states(&self) -> States {
+        [
+            self.hovered,
+            matches!(self.kind, WidgetKind::Button { pressed: true, .. }),
+            self.focused,
+            self.enabled,
+            matches!(
+                self.kind,
+                WidgetKind::Checkbox {
+                    checked: CheckState::Checked,
+                    ..
+                } | WidgetKind::RadioButton { selected: true, .. }
+            ),
+        ]
+    }
+
+    /// Its [`states`](Self::states), and every widget's in it, in the
+    /// tree's order.
+    fn gather_states(&self, out: &mut Vec<States>) {
+        out.push(self.states());
+        for child in &self.children {
+            child.gather_states(out);
+        }
+    }
+
+    /// Compute its style, and its children's: the style sheet's rules that
+    /// choose it and its own CSS, in its present state, over its program's
+    /// style -- under a parent drawn in `parent_style` that left it
+    /// `inherited`, with `ancestors` its parents from the root.
+    ///
+    /// A widget nothing styles, under a parent that left it nothing, has no
+    /// computed style and is drawn in its program's: a tree with no CSS
+    /// draws exactly as it did.
+    fn compute_css(
+        &mut self,
+        sheet: &StyleSheet,
+        env: &CssEnv<'_>,
+        parent_style: &Style,
+        inherited: &Inherited,
+        ancestors: &mut Vec<Ancestor>,
+    ) {
+        let me = self.ancestor();
+        let computed = {
+            let mut path: Vec<Subject<'_>> = ancestors.iter().map(Ancestor::subject).collect();
+            path.push(me.subject());
+            let mut declared: Vec<&Declared> = sheet.applying(&path);
+            if let (Some(own), Some(subject)) = (self.css.as_deref(), path.last()) {
+                declared.extend(own.block.applying(subject));
+            }
+            let styled = !declared.is_empty() || *inherited != Inherited::default();
+            styled.then(|| {
+                Box::new(css_compute::compute(
+                    &self.style,
+                    &declared,
+                    parent_style,
+                    inherited,
+                    env,
+                ))
+            })
+        };
+        self.computed = computed;
+        ancestors.push(me);
+        let none = Inherited::default();
+        let Self {
+            style,
+            computed,
+            children,
+            ..
+        } = self;
+        let (own_style, leaves) = computed
+            .as_deref()
+            .map_or((&*style, &none), |c| (&c.style, &c.inherited));
+        for child in children.iter_mut() {
+            child.compute_css(sheet, env, own_style, leaves, ancestors);
+        }
+        ancestors.pop();
+    }
+
+    /// Settle its lengths that are percentages of its container, now that
+    /// the container's content is known to be `width` by `height`.
+    fn settle_lengths(&mut self, width: f32, height: f32) {
+        if let Some(c) = self.computed.as_deref_mut()
+            && c.lengths.waits()
+        {
+            let lengths = c.lengths;
+            lengths.apply(&mut c.style, width, height);
+        }
+    }
+
+    /// Whether it, or any widget in it, has CSS of its own that says
+    /// anything -- in any state, not only the present one.
+    fn any_css(&self) -> bool {
+        self.css.as_deref().is_some_and(|own| !own.block.is_empty())
+            || self.children.iter().any(Self::any_css)
+    }
+
+    /// What in this widget's CSS, and its children's, was not used: the
+    /// parse's warnings and the last computing's.
+    fn gather_css_warnings(&self, out: &mut Vec<String>) {
+        if let Some(own) = self.css.as_deref() {
+            out.extend(
+                own.warnings
+                    .iter()
+                    .map(|w| format!("{} (its CSS, at {}): {}", self.kind_name(), w.at, w.message)),
+            );
+        }
+        if let Some(c) = self.computed.as_deref() {
+            out.extend(
+                c.warnings
+                    .iter()
+                    .map(|w| format!("{}: {w}", self.kind_name())),
+            );
+        }
+        for child in &self.children {
+            child.gather_css_warnings(out);
+        }
     }
 
     pub fn with_flex_grow(mut self, grow: f32) -> Self {
@@ -675,8 +933,8 @@ impl Widget {
     fn measure(&self, text: &str) -> f32 {
         crate::text::measure(
             text,
-            self.style.font_size,
-            weight_to_hint(self.style.font_weight),
+            self.look().font_size,
+            weight_to_hint(self.look().font_weight),
         )
     }
 
@@ -689,15 +947,15 @@ impl Widget {
     pub fn intrinsic_size(&self, p: &Palette) -> Size {
         let padded = |w: f32, h: f32| {
             Size::new(
-                w + self.style.padding.horizontal(),
-                h + self.style.padding.vertical(),
+                w + self.look().padding.horizontal(),
+                h + self.look().padding.vertical(),
             )
         };
-        let line = self.style.font_size * self.style.line_height;
+        let line = self.look().font_size * self.look().line_height;
         let least = |w: f32, h: f32| {
             Size::new(
-                self.style.min_width.unwrap_or(w),
-                self.style.min_height.unwrap_or(h),
+                self.look().min_width.unwrap_or(w),
+                self.look().min_height.unwrap_or(h),
             )
         };
         match &self.kind {
@@ -716,8 +974,8 @@ impl Widget {
             }
             WidgetKind::ProgressBar { .. } => least(200.0, PROGRESS_HEIGHT),
             WidgetKind::Slider { .. } => Size::new(
-                self.style.min_width.unwrap_or(120.0),
-                SLIDER_HEIGHT.max(self.style.min_height.unwrap_or(0.0)),
+                self.look().min_width.unwrap_or(120.0),
+                SLIDER_HEIGHT.max(self.look().min_height.unwrap_or(0.0)),
             ),
             WidgetKind::Image { width, height, .. } => {
                 let side = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
@@ -740,10 +998,10 @@ impl Widget {
     /// The widths of this widget's border, from its style.
     fn border_edges(&self) -> Edges {
         Edges {
-            top: self.style.border.top.width,
-            right: self.style.border.right.width,
-            bottom: self.style.border.bottom.width,
-            left: self.style.border.left.width,
+            top: self.look().border.top.width,
+            right: self.look().border.right.width,
+            bottom: self.look().border.bottom.width,
+            left: self.look().border.left.width,
         }
     }
 
@@ -752,8 +1010,8 @@ impl Widget {
     fn frame(&self) -> (f32, f32) {
         let border = self.border_edges();
         (
-            self.style.padding.horizontal() + border.horizontal(),
-            self.style.padding.vertical() + border.vertical(),
+            self.look().padding.horizontal() + border.horizontal(),
+            self.look().padding.vertical() + border.vertical(),
         )
     }
 
@@ -812,6 +1070,15 @@ impl Widget {
             size.width = size.width.max(wide + frame_h);
             size.height = size.height.max(tall + frame_v);
         }
+        // A width or height its style fixes is its border box's, whatever
+        // its content would take.
+        let look = self.look();
+        if let Some(w) = look.width {
+            size.width = w;
+        }
+        if let Some(h) = look.height {
+            size.height = h;
+        }
         size
     }
 
@@ -821,17 +1088,30 @@ impl Widget {
     /// in a row or a column as they hold alone. The sizes are its border
     /// box's.
     fn flex_item_in_layout(&self) -> FlexItem {
-        let s = &self.style;
+        let s = self.look();
         let item = &self.flex_item;
+        let mut min = Size::new(
+            s.min_width.unwrap_or(0.0).max(item.min.width),
+            s.min_height.unwrap_or(0.0).max(item.min.height),
+        );
+        let mut max = Size::new(
+            s.max_width.unwrap_or(f32::INFINITY).min(item.max.width),
+            s.max_height.unwrap_or(f32::INFINITY).min(item.max.height),
+        );
+        // A fixed size is both limits -- held between them first, the least
+        // winning over the most, as CSS holds a `width` between `min-width`
+        // and `max-width`.
+        if let Some(w) = s.width {
+            let w = w.min(max.width).max(min.width);
+            (min.width, max.width) = (w, w);
+        }
+        if let Some(h) = s.height {
+            let h = h.min(max.height).max(min.height);
+            (min.height, max.height) = (h, h);
+        }
         FlexItem {
-            min: Size::new(
-                s.min_width.unwrap_or(0.0).max(item.min.width),
-                s.min_height.unwrap_or(0.0).max(item.min.height),
-            ),
-            max: Size::new(
-                s.max_width.unwrap_or(f32::INFINITY).min(item.max.width),
-                s.max_height.unwrap_or(f32::INFINITY).min(item.max.height),
-            ),
+            min,
+            max,
             margin: s.margin,
             ..item.clone()
         }
@@ -862,8 +1142,8 @@ impl Widget {
         let outer = constraint.constrain(self.border_box_size(p));
         self.layout.width = (outer.width - frame_h).max(0.0);
         self.layout.height = (outer.height - frame_v).max(0.0);
-        self.layout.padding = self.style.padding;
-        self.layout.margin = self.style.margin;
+        self.layout.padding = self.look().padding;
+        self.layout.margin = self.look().margin;
         self.layout.border_widths = self.border_edges();
 
         if let Some(ref flex) = self.flex_layout
@@ -881,6 +1161,12 @@ impl Widget {
                     (constraint.max_height - frame_v).max(0.0),
                 )
             };
+            // The children's lengths that are percentages of this widget's
+            // content, settled now that it is known -- before they are
+            // measured, which their padding and limits are part of.
+            for child in self.children.iter_mut().filter(|c| c.visible) {
+                child.settle_lengths(room.width, room.height);
+            }
             let boxes = flex_layout(room, flex, &self.flex_children(p), &Edges::ZERO);
 
             // `flex_children` takes the visible children in order and
@@ -990,7 +1276,7 @@ impl Widget {
         }
         // A NaN opacity is a style nobody set on purpose: drawn as the
         // default, opaque, rather than vanishing.
-        let opacity = self.style.opacity;
+        let opacity = self.look().opacity;
         if opacity.is_nan() || opacity >= 1.0 {
             self.render_opaque(p, ground, tree);
         } else if opacity > 0.0 {
@@ -1011,22 +1297,41 @@ impl Widget {
         let w = self.layout.border_box_width();
         let h = self.layout.border_box_height();
 
+        // Its shadow, under it: the box offset, grown by the spread and
+        // blurred, by the renderer.
+        if let Some(s) = self.look().shadow
+            && s.color.a > 0
+        {
+            tree.push(RenderCommand::BoxShadow {
+                x,
+                y,
+                width: w,
+                height: h,
+                offset_x: s.offset_x,
+                offset_y: s.offset_y,
+                blur: s.blur,
+                spread: s.spread,
+                color: s.color,
+                corner_radii: self.look().border_radius,
+            });
+        }
+
         // Background
-        if self.style.background.a > 0 {
+        if self.look().background.a > 0 {
             tree.push(RenderCommand::FillRect {
                 x,
                 y,
                 width: w,
                 height: h,
-                color: self.style.background,
-                corner_radii: self.style.border_radius,
+                color: self.look().background,
+                corner_radii: self.look().border_radius,
             });
         }
 
         // Border: one stroke round a box whose four sides agree, as most do,
         // round corners and all; otherwise each side its own strip, square
         // -- where it used to be the top side's width and colour all round.
-        let b = &self.style.border;
+        let b = &self.look().border;
         let same = |s: &crate::style::Border| {
             (s.width - b.top.width).abs() < f32::EPSILON && s.color == b.top.color
         };
@@ -1039,7 +1344,7 @@ impl Widget {
                     height: h,
                     color: b.top.color,
                     line_width: b.top.width,
-                    corner_radii: self.style.border_radius,
+                    corner_radii: self.look().border_radius,
                 });
             }
         } else {
@@ -1066,7 +1371,7 @@ impl Widget {
         // What the widget is, drawn by the component module for it, and its
         // children, on its background -- or, where it has none, on what it
         // is itself drawn on.
-        let ground = self.style.background.over(ground);
+        let ground = self.look().background.over(ground);
         self.draw_kind(p, ground, tree, (x, y, w, h));
 
         // Its children, from where they are -- a scroll view's scrolled -- and
@@ -1172,8 +1477,8 @@ impl Widget {
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
         let inside = self.contains(mouse.x, mouse.y);
-        let font_size = self.style.font_size;
-        let row = font_size * self.style.line_height;
+        let font_size = self.look().font_size;
+        let row = font_size * self.look().line_height;
         let (content_x, content_y) = self.content_origin();
         let (content_w, content_h) = (self.layout.width, self.layout.height);
         let focused = self.focused;
@@ -1318,7 +1623,7 @@ impl Widget {
         // it at the size it is *drawn* at (see the `Left` arm), which lives in
         // `style` — a different field of the same `self`. A text area's box is
         // read for the same reason.
-        let font_size = self.style.font_size;
+        let font_size = self.look().font_size;
         let metrics = self.text_metrics();
 
         let shift = key.modifiers.shift;
@@ -1538,6 +1843,18 @@ pub struct WidgetTree {
     /// ([`set_palette`](Self::set_palette)). Its theme's widget style also
     /// sizes the controls.
     palette: Palette,
+    /// The style sheet its widgets are styled by
+    /// ([`set_style_sheet`](Self::set_style_sheet)).
+    style_sheet: StyleSheet,
+    /// What in the style sheet was not read.
+    sheet_warnings: Vec<Warning>,
+    /// Pixels to a millimetre on the display, for CSS's `mm` and `cm`.
+    px_per_mm: f32,
+    /// Whether it had any CSS at the last layout -- a style sheet with
+    /// rules, or a widget with its own: what makes a change of state (the
+    /// pointer over a widget, the keyboard on one) worth styling it again
+    /// for, as a `:hover` may change a widget's look and size.
+    styled: bool,
 }
 
 impl WidgetTree {
@@ -1550,7 +1867,81 @@ impl WidgetTree {
             window_width: width,
             window_height: height,
             palette: Palette::for_mode(true),
+            style_sheet: StyleSheet::default(),
+            sheet_warnings: Vec::new(),
+            px_per_mm: crate::css::value::Units::REFERENCE_PX_PER_MM,
+            styled: false,
         }
+    }
+
+    /// Style its widgets with the style sheet `text` -- rules of selectors
+    /// and declarations, applied in the order written and before each
+    /// widget's own CSS ([`Widget::css`]) -- and lay it out again. Answers
+    /// what in it was not read. See [`crate::css`].
+    pub fn set_style_sheet(&mut self, text: &str) -> &[Warning] {
+        let (sheet, warnings) = css_sheet::parse_sheet(text);
+        self.style_sheet = sheet;
+        self.sheet_warnings = warnings;
+        self.layout();
+        &self.sheet_warnings
+    }
+
+    /// How many pixels make a millimetre on the display it is drawn on, for
+    /// CSS's `mm` and `cm`: CSS's 96 to the inch until a program that knows
+    /// the display's size says otherwise. A size that is not a positive
+    /// number is not taken.
+    pub fn set_pixels_per_mm(&mut self, px: f32) {
+        if px.is_finite() && px > 0.0 {
+            self.px_per_mm = px;
+            self.layout();
+        }
+    }
+
+    /// What in its CSS was not used, and why: its style sheet's, each
+    /// widget's own, and what the last layout could not compute (a variable
+    /// that stands for nothing).
+    #[must_use]
+    pub fn css_warnings(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .sheet_warnings
+            .iter()
+            .map(|w| format!("the style sheet, at {}: {}", w.at, w.message))
+            .collect();
+        self.root.gather_css_warnings(&mut out);
+        out
+    }
+
+    /// Compute every widget's style from the style sheet and its own CSS,
+    /// in its present state.
+    fn compute_css(&mut self) {
+        let zero_width =
+            |size: f32, weight: FontWeight| crate::text::measure("0", size, weight_to_hint(weight));
+        let env = CssEnv {
+            root_font_size: crate::text::scaled(Style::default().font_size),
+            viewport: (self.window_width, self.window_height),
+            px_per_mm: self.px_per_mm,
+            palette: &self.palette,
+            zero_width: &zero_width,
+        };
+        self.root.compute_css(
+            &self.style_sheet,
+            &env,
+            &Style::default(),
+            &Inherited::default(),
+            &mut Vec::new(),
+        );
+        self.styled = !self.style_sheet.rules.is_empty() || self.root.any_css();
+    }
+
+    /// Its widgets' [`states`](Widget::states) in tree order, if it is
+    /// styled: what [`restyle`](Self::restyle) compares with after
+    /// something that may have changed one.
+    fn states_if_styled(&self) -> Option<Vec<States>> {
+        self.styled.then(|| {
+            let mut states = Vec::new();
+            self.root.gather_states(&mut states);
+            states
+        })
     }
 
     /// Draw in `palette` from now on -- the user's, and again when the user
@@ -1567,11 +1958,16 @@ impl WidgetTree {
         &self.palette
     }
 
-    /// Perform layout on the entire tree.
+    /// Perform layout on the entire tree -- its styles computed first, from
+    /// its CSS, in each widget's present state.
     pub fn layout(&mut self) {
+        self.compute_css();
+        // The root's percentages are of the window.
+        self.root
+            .settle_lengths(self.window_width, self.window_height);
         // The root's border box is the window less the root's own margins:
         // the window is its margin box, at the window's corner.
-        let margin = self.root.style.margin;
+        let margin = self.root.look().margin;
         self.root.do_layout(
             SizeConstraint::tight(Size::new(
                 (self.window_width - margin.horizontal()).max(0.0),
@@ -1605,8 +2001,33 @@ impl WidgetTree {
     /// since the caller last looked must not leave the focus on the widget
     /// before it, which would silently redirect the next keystroke.
     pub fn focus(&mut self, id: Option<WidgetId>) -> bool {
+        let before = self.states_if_styled();
+        let landed = self.set_focus(id);
+        self.restyle(before);
+        landed
+    }
+
+    /// [`focus`](Self::focus), without styling the tree again: for a caller
+    /// that will once it is done.
+    fn set_focus(&mut self, id: Option<WidgetId>) -> bool {
         self.root.clear_focus();
         id.is_some_and(|id| self.root.focus_by_id(id))
+    }
+
+    /// Style and lay the tree out again if a widget's state changed since
+    /// its states were `before` ([`states_if_styled`](Self::states_if_styled)):
+    /// a change of state -- the pointer, the keyboard, a press -- may change
+    /// what its CSS gives a widget (`:hover { ... }`), and so its size.
+    ///
+    /// A tree no CSS styles has nothing that hangs on its state (`before`
+    /// is `None`), and a pointer moving within one widget changes none: the
+    /// tree is laid out again only when a style could have changed.
+    fn restyle(&mut self, before: Option<Vec<States>>) {
+        if let Some(before) = before
+            && self.states_if_styled().is_none_or(|now| now != before)
+        {
+            self.layout();
+        }
     }
 
     /// Focus the first widget that will take it, if any. Returns whether one
@@ -1621,12 +2042,18 @@ impl WidgetTree {
     /// With nothing focused it takes the first — which is what makes Tab work
     /// on a freshly-opened window that nobody has clicked in yet.
     pub fn focus_next(&mut self) -> bool {
-        self.step_focus(true)
+        let before = self.states_if_styled();
+        let landed = self.step_focus(true);
+        self.restyle(before);
+        landed
     }
 
     /// Move the focus to the previous focusable widget in tab order, wrapping.
     pub fn focus_prev(&mut self) -> bool {
-        self.step_focus(false)
+        let before = self.states_if_styled();
+        let landed = self.step_focus(false);
+        self.restyle(before);
+        landed
     }
 
     fn step_focus(&mut self, forward: bool) -> bool {
@@ -1646,7 +2073,7 @@ impl WidgetTree {
             None if forward => 0,
             None => order.len().saturating_sub(1),
         };
-        self.focus(order.get(next).copied())
+        self.set_focus(order.get(next).copied())
     }
 
     /// Dispatch an event to the widget tree.
@@ -1662,6 +2089,13 @@ impl WidgetTree {
     ///   is already focused — otherwise the first click into a field would
     ///   position a caret that was not yet being drawn.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // What the pointer or a key is about to do -- a press, a hover, a
+        // box ticked -- may change a state a style hangs on.
+        let before = if matches!(event, Event::Mouse(_) | Event::Key(_)) {
+            self.states_if_styled()
+        } else {
+            None
+        };
         match event {
             Event::Key(key) if key.pressed && key.key == crate::event::Key::Tab => {
                 if key.modifiers.shift {
@@ -1677,7 +2111,7 @@ impl WidgetTree {
                 // is how a user says "not that field any more", and a caret
                 // still blinking in a field the user has clicked away from is
                 // a caret that lies about where the next keystroke goes.
-                self.focus(self.root.focus_target_at(mouse.x, mouse.y));
+                self.set_focus(self.root.focus_target_at(mouse.x, mouse.y));
             }
             // The pointer's moves say what it is over, which lights a button
             // or a box as the pointer crosses it.
@@ -1691,7 +2125,9 @@ impl WidgetTree {
             }
             _ => {}
         }
-        self.root.handle_event(event)
+        let result = self.root.handle_event(event);
+        self.restyle(before);
+        result
     }
 
     /// Resize the window and re-layout.

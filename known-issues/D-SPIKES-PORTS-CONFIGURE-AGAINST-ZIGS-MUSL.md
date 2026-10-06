@@ -1,6 +1,6 @@
 ## D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL — the ported programs' configure scripts look for functions in zig's musl, not in our libc, so each port is built for a C library it does not run on (lane D, 2026-10-05)
 
-**Status:** OPEN — CPython's fixed (known-issues-resolved/D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md) make's and bash's (2026-10-05, below); coreutils measured, and waits until the port is staged (below).
+**Status:** OPEN — CPython's fixed (known-issues-resolved/D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md) make's and bash's (2026-10-05, below); CMake's (2026-10-06, below), eSpeak NG's measured and needing nothing; coreutils measured, and waits until the port is staged (below).
 
 **In short:** before a program is built, its `configure` script asks the C
 library what it can do -- is there a `renameat2`, an `fts_open`, an
@@ -72,6 +72,32 @@ failed one; and the copy of bash that runs on Linux (`build/spike/
 bash-musl.elf`, for measurements under WSL) is now a separate link of the same
 objects against musl, with `musl-shim.c` supplying the `arc4random` musl has
 not got.
+
+**CMake, fixed 2026-10-06; eSpeak NG measured, nothing to fix.** Both are
+CMake builds the image carries. Both configured with zig's musl compiler
+and relinked against our library only at the end, the same defect, but
+this entry had not listed them. Each was configured both ways, and the
+caches and `config.h` diffed:
+
+- **eSpeak NG 1.52:** its ten probes answer alike and its `config.h` is
+  identical. Nothing to change.
+- **CMake 4.4.3:** through our library, configure finds `arc4random`,
+  `arc4random_buf`, `closefrom` and `close_range`, and KWSys finds
+  `backtrace`, `cxxabi` demangling and `dladdr`. Every one is in
+  `libc.a`; zig's musl lacks them, or its headers hide them.
+  `scripts/cmake-spike/run.sh` now configures and builds through the link
+  wrapper. It runs in cross mode, so no probe runs on Linux, and nothing
+  the build makes is run there: `cmake --install` is the host's cmake.
+  Measured on the first run: configure, build and link all clean, 0
+  missing and 0 duplicate symbols, the stripped binary 24 MB, the module
+  tree 1,748 files.
+- **A third defect the first such build found:** a `find_path` lands on
+  the spike's own find-root include directory, which holds musl's
+  headers, and puts it on libarchive's compile line as an `-I`. That `-I`
+  comes ahead of the overlay the wrapper appends. So `arc4random_buf`,
+  which configure had found, had no declaration, and the build stopped.
+  The overlay is now copied over musl's headers in that directory; each
+  overlay header `#include_next`s musl's.
 
 **coreutils, measured 2026-10-05; not yet done.** Configured two ways, each
 with `-C` and the caches diffed: natively on Ubuntu 24.04 (glibc 2.39, every

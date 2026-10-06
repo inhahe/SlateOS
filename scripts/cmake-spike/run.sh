@@ -112,6 +112,15 @@ rm -rf "$FINDROOT"
 mkdir -p "$FINDROOT/include" "$FINDROOT/lib"
 cp -rn "$ZINC/x86_64-linux-musl/." "$FINDROOT/include/" 2>/dev/null
 cp -rn "$ZINC/generic-musl/." "$FINDROOT/include/" 2>/dev/null
+# And our header overlay (posix/include) over musl's, as the third thing this
+# spike found -- 2026-10-06, the first build configured through the link
+# wrapper: a `find_path` lands on this directory and puts it on the compile
+# line as an -I, ahead of the overlay the wrapper appends last, so
+# libarchive's <stdlib.h> was musl's alone. Configure had found
+# arc4random_buf in our libc.a; the compile then saw no declaration of it.
+# Each overlay header #include_next's musl's, which zig's own include
+# directories still hold behind every -I.
+cp -r "$SLATE_ROOT/posix/include/." "$FINDROOT/include/" || exit 1
 cp "$SYSROOT/libc.a" "$FINDROOT/lib/" || exit 1
 if [ ! -f "$FINDROOT/include/iconv.h" ]; then
     echo "NO_MUSL_HEADERS — $ZINC did not yield iconv.h, so the sysroot below is"
@@ -120,11 +129,26 @@ if [ ! -f "$FINDROOT/include/iconv.h" ]; then
 fi
 echo "SYSROOT_HEADERS=$(find "$FINDROOT/include" -name '*.h' | wc -l)"
 
+# CONFIGURED AND BUILT THROUGH THE LINK WRAPPER, so that every probe
+# configure makes -- check_function_exists, check_symbol_exists, try_compile
+# -- links against our libc.a and is answered by it rather than by zig's musl
+# (known-issues D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL). Measured
+# 2026-10-06 by configuring both ways and diffing the caches: through zig's
+# musl, cmake went without arc4random, arc4random_buf, closefrom and
+# close_range, and KWSys without backtrace, cxxabi demangling and dladdr --
+# every one of which our libc has. Cross mode (CMAKE_SYSTEM_NAME) keeps any
+# probe from being run on the host, and the build then links each program
+# against our libc.a: nothing it builds is run here (`cmake --install` below
+# is the host cmake's).
+mkdir -p "$SPIKE_LIBS"
+cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
+
 "$HOST_CMAKE" -S "cmake-$VER" -B bld \
     -DCMAKE_SYSTEM_NAME=Linux \
     -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
-    -DCMAKE_C_COMPILER="$SLATE_CC" \
-    -DCMAKE_CXX_COMPILER="$SLATE_CXX" \
+    -DCMAKE_C_COMPILER="$SLATE_LINK_CC" \
+    -DCMAKE_CXX_COMPILER="$SLATE_LINK_CXX" \
     -DCMAKE_FIND_ROOT_PATH="$FINDROOT" \
     -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
     -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
@@ -152,10 +176,8 @@ grep -iE "^.*error" build.log | head -20
 # every link, where it would supply whatever ours lacks instead of a missing
 # symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
 # libstubs.a is deliberately not linked -- it and libc.a each carry a panic
-# handler and collide on __rustc::rust_begin_unwind.
-mkdir -p "$SPIKE_LIBS"
-cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
-slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
+# handler and collide on __rustc::rust_begin_unwind. (The build above linked
+# through the same wrapper; this link is the one measured, symbol by symbol.)
 echo "LINK_WRAPPER=$SLATE_LINK_CXX:"
 grep '^libs=' "$SLATE_LINK_CXX"
 

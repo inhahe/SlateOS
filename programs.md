@@ -485,7 +485,7 @@ two disagree.
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
 | `backupd` | `backupd`'s loop: the clock, the user database, each run's identity and output. |  |  |  |
-| `dyndns` | Keeps dynamic-DNS hostnames pointed at this network's address. |  |  |  |
+| `dyndns` | Keeps dynamic-DNS hostnames pointed at this network's address, and asks the router for the port forwards this computer wants. |  |  |  |
 | `hello` | Hello world — a minimal userspace program. | in the kernel |  |  |
 | `httpget` | A minimal **Linux-ABI** ring-3 HTTP client. | in the kernel |  |  |
 | `init` | Userspace init process — the first process spawned by the kernel. | in the kernel |  |  |

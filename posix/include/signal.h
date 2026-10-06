@@ -28,6 +28,10 @@ void (*sysv_signal(int, void (*)(int)))(int);
 
 /* Send a signal to thread TID of process TGID (Linux; glibc 2.30). */
 int tgkill(pid_t, pid_t, int);
+
+/* Send a signal and a value to a thread of this process (glibc 2.11). The
+ * value cannot be carried here: a real send answers ENOSYS. */
+int pthread_sigqueue(pthread_t, int, union sigval);
 #endif
 
 #ifdef _SLATEOS_USE_MISC

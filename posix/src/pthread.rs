@@ -1473,6 +1473,35 @@ pub extern "C" fn pthread_kill(thread: PthreadT, sig: i32) -> i32 {
     0
 }
 
+/// glibc's internal signals -- `SIGCANCEL` (32) and `SIGSETXID` (33) -- which
+/// its `pthread_kill` and `pthread_sigqueue` refuse to send.
+fn is_internal_signal(sig: i32) -> bool {
+    sig == 32 || sig == 33
+}
+
+/// Send `sig` with `value` to `thread`, a thread of this process (glibc 2.11's
+/// `pthread_sigqueue`): `ESRCH` for a thread that is not live, `EINVAL` for a
+/// signal glibc keeps for itself or one past the range, 0 for signal 0 --
+/// the existence probe, answered here -- and otherwise `ENOSYS`. The kernel
+/// queues no value with a signal (`sigqueue` answers `ENOSYS` the same way),
+/// and a send without it would hand the handler a `si_value` the caller did
+/// not give; when the kernel can carry one, this sends it.
+///
+/// glibc's order: the thread first, then the signal.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_sigqueue(thread: PthreadT, sig: i32, _value: usize) -> i32 {
+    if !thread_is_live(thread) {
+        return errno::ESRCH;
+    }
+    if is_internal_signal(sig) || !(0..crate::signal::NSIG).contains(&sig) {
+        return errno::EINVAL;
+    }
+    if sig == 0 {
+        return 0;
+    }
+    errno::ENOSYS
+}
+
 /// Obtain a clock id that measures a thread's CPU time.
 ///
 /// Returns 0 on success or a positive errno; like the rest of this family it
@@ -5842,6 +5871,30 @@ mod tests {
         assert_eq!(pthread_kill(stale, crate::signal::NSIG), errno::EINVAL);
         // Same bad thread, valid signal -> the thread verdict surfaces.
         assert_eq!(pthread_kill(stale, crate::signal::SIGTERM), errno::ESRCH);
+    }
+
+    /// `pthread_sigqueue`, in glibc's order: the thread, then the signal --
+    /// its own two (32 and 33) and those past the range refused -- then the
+    /// probe answered, and a real send `ENOSYS`, the kernel carrying no
+    /// value with a signal.
+    #[test]
+    fn pthread_sigqueue_checks_as_glibcs_and_cannot_send() {
+        let stale: PthreadT = u64::MAX - 1;
+        let me = pthread_self();
+        assert_eq!(pthread_sigqueue(stale, -1, 0), errno::ESRCH);
+        assert_eq!(
+            pthread_sigqueue(SLOT_EMPTY, crate::signal::SIGUSR1, 0),
+            errno::ESRCH
+        );
+        for sig in [-1, 32, 33, crate::signal::NSIG] {
+            assert_eq!(pthread_sigqueue(me, sig, 7), errno::EINVAL, "{sig}");
+        }
+        assert_eq!(pthread_sigqueue(me, 0, 7), 0);
+        assert_eq!(
+            pthread_sigqueue(me, crate::signal::SIGUSR1, 7),
+            errno::ENOSYS
+        );
+        assert_eq!(pthread_sigqueue(me, 34, 7), errno::ENOSYS);
     }
 
     /// Signal 0 is the existence probe: no signal is sent, and the

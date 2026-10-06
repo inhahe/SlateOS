@@ -63,9 +63,12 @@
 //!   in the parent after the spawn syscall completes.
 //!
 //! ## Limitations
-//! - `posix_spawnattr` flags are stored but only `POSIX_SPAWN_SETPGROUP`
-//!   is meaningfully supported (spawn attributes are recorded for
-//!   forward compatibility).
+//! - `posix_spawnattr`'s attributes are recorded, and none is applied: the
+//!   child starts in the parent's process group, session and signal mask
+//!   whatever the attribute object says (TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES;
+//!   until 2026-10-06 this line said `POSIX_SPAWN_SETPGROUP` was supported,
+//!   which no code did). What cannot be done at all is refused instead: a
+//!   cgroup (`ENOTSUP`) and a terminal's foreground group (`ENOSYS`).
 
 use crate::errno;
 use crate::mman;
@@ -935,6 +938,43 @@ pub extern "C" fn posix_spawn_file_actions_addclosefrom_np(
 }
 
 // ---------------------------------------------------------------------------
+// posix_spawn_file_actions_addtcsetpgrp_np -- the terminal's foreground group
+// ---------------------------------------------------------------------------
+
+/// The tag of a "make the child's process group the foreground group of the
+/// terminal at `fd`" action.
+const TAG_TCSETPGRP: u8 = 7;
+
+/// Record a "make the child's process group the foreground group of the
+/// terminal at `tcfd`" action (glibc 2.35): `tcsetpgrp (tcfd, pgrp)` in the
+/// child before it runs, `pgrp` the one `POSIX_SPAWN_SETPGROUP` gives it or
+/// its own.
+///
+/// `EBADF` now for a `tcfd` no descriptor can have, as glibc's
+/// `__spawn_valid_fd` does. A spawn with the action fails with `ENOSYS`:
+/// this system's spawn cannot set the group before the child runs, and
+/// setting it after would race the child's first read of the terminal.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawn_file_actions_addtcsetpgrp_np(
+    acts: *mut PosixSpawnFileActionsT,
+    tcfd: Fd,
+) -> i32 {
+    if !spawn_valid_fd(tcfd) {
+        return errno::EBADF;
+    }
+    if acts.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: acts is non-null (checked above).
+    let a = unsafe { &mut *acts };
+    a.push(FileActionSlot {
+        tag: TAG_TCSETPGRP,
+        fd: tcfd,
+        ..FileActionSlot::empty()
+    })
+}
+
+// ---------------------------------------------------------------------------
 // posix_spawnattr
 // ---------------------------------------------------------------------------
 
@@ -963,6 +1003,10 @@ pub const POSIX_SPAWN_SETSCHEDULER: i16 = 0x20;
 pub const POSIX_SPAWN_USEVFORK: i16 = 0x40;
 /// Place the child in a new session (POSIX.1-2018).
 pub const POSIX_SPAWN_SETSID: i16 = 0x80;
+/// Start the child in the cgroup `posix_spawnattr_setcgroup_np` named
+/// (glibc 2.35). There are no cgroups here: a spawn asking for one fails
+/// with `ENOTSUP`, glibc's answer on a kernel without `clone3`.
+pub const POSIX_SPAWN_SETCGROUP: i16 = 0x100;
 
 /// Union of every flag bit currently accepted by
 /// `posix_spawnattr_setflags`.  Any bit outside this mask causes
@@ -975,7 +1019,8 @@ pub const POSIX_SPAWN_VALID_FLAGS: i16 = POSIX_SPAWN_RESETIDS
     | POSIX_SPAWN_SETSCHEDPARAM
     | POSIX_SPAWN_SETSCHEDULER
     | POSIX_SPAWN_USEVFORK
-    | POSIX_SPAWN_SETSID;
+    | POSIX_SPAWN_SETSID
+    | POSIX_SPAWN_SETCGROUP;
 
 /// Spawn attributes object.
 ///
@@ -1035,8 +1080,12 @@ pub struct PosixSpawnattrT {
     schedpriority: i32,
     /// Scheduling policy (used if POSIX_SPAWN_SETSCHEDULER).
     schedpolicy: i32,
+    /// The cgroup's directory descriptor (used if POSIX_SPAWN_SETCGROUP),
+    /// `posix_spawnattr_setcgroup_np`'s: glibc's `__cgroup`, kept in what
+    /// musl's layout has as `__fn`, which no caller reads.
+    cgroup: i32,
     /// Padding out to musl's 336-byte object.  Never read.
-    _reserved: [u8; 64],
+    _reserved: [u8; 60],
 }
 
 /// This type was already correct and already had a layout *test*.  It gets the
@@ -1070,6 +1119,7 @@ pub extern "C" fn posix_spawnattr_init(attr: *mut PosixSpawnattrT) -> i32 {
         (*attr).sigmask = crate::signal::SigsetT::EMPTY;
         (*attr).schedpriority = 0;
         (*attr).schedpolicy = 0;
+        (*attr).cgroup = 0;
     }
     0
 }
@@ -1126,6 +1176,63 @@ pub extern "C" fn posix_spawnattr_getflags(attr: *const PosixSpawnattrT, flags: 
         *flags = (*attr).flags;
     }
     0
+}
+
+/// Record the cgroup the child is to start in: `cgroup`, a descriptor of
+/// its directory, used when `POSIX_SPAWN_SETCGROUP` is set. Stored as glibc
+/// stores it, unchecked; the spawn is where it is refused, there being no
+/// cgroups on this system.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_setcgroup_np(attr: *mut PosixSpawnattrT, cgroup: i32) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: attr is non-null (checked above).
+    unsafe { (*attr).cgroup = cgroup };
+    0
+}
+
+/// The cgroup descriptor `posix_spawnattr_setcgroup_np` recorded: 0 after
+/// `posix_spawnattr_init`, as glibc's is.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawnattr_getcgroup_np(
+    attr: *const PosixSpawnattrT,
+    cgroup: *mut i32,
+) -> i32 {
+    if attr.is_null() || cgroup.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both non-null (checked above).
+    unsafe { *cgroup = (*attr).cgroup };
+    0
+}
+
+/// What this system cannot do of what a spawn asks: `ENOTSUP` for a cgroup
+/// (`POSIX_SPAWN_SETCGROUP` -- there are none; glibc answers the same on a
+/// kernel without `clone3`), `ENOSYS` for a terminal's foreground group
+/// (`posix_spawn_file_actions_addtcsetpgrp_np` -- the kernel's spawn cannot
+/// yet set it before the child runs, and afterwards would race the child:
+/// requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md).
+/// Checked before anything is done, so nothing has started when it refuses.
+fn refused_request(
+    file_actions: *const PosixSpawnFileActionsT,
+    attrp: *const PosixSpawnattrT,
+) -> Option<i32> {
+    if !attrp.is_null() {
+        // SAFETY: non-null, the caller's attribute object.
+        let flags = unsafe { (*attrp).flags };
+        if flags & POSIX_SPAWN_SETCGROUP != 0 {
+            return Some(errno::ENOTSUP);
+        }
+    }
+    if !file_actions.is_null() {
+        // SAFETY: non-null, the caller's file-actions object.
+        let acts = unsafe { &*file_actions };
+        if acts.slots().iter().any(|slot| slot.tag == TAG_TCSETPGRP) {
+            return Some(errno::ENOSYS);
+        }
+    }
+    None
 }
 
 /// Set the process group in a spawn attributes object.
@@ -1917,10 +2024,13 @@ pub extern "C" fn posix_spawn(
     pid: *mut PidT,
     path: *const u8,
     file_actions: *const PosixSpawnFileActionsT,
-    _attrp: *const PosixSpawnattrT,
+    attrp: *const PosixSpawnattrT,
     argv: *const *const u8,
     envp: *const *const u8,
 ) -> i32 {
+    if let Some(e) = refused_request(file_actions, attrp) {
+        return e;
+    }
     // `None` — inherit everything. POSIX specifies `posix_spawn` as
     // fork+exec-equivalent, and `fork` hands the child the parent's whole
     // authority, so anything narrower here would be this libc inventing a
@@ -1985,7 +2095,7 @@ pub unsafe extern "C" fn slateos_spawn_caps(
     pid: *mut PidT,
     path: *const u8,
     file_actions: *const PosixSpawnFileActionsT,
-    _attrp: *const PosixSpawnattrT,
+    attrp: *const PosixSpawnattrT,
     argv: *const *const u8,
     envp: *const *const u8,
     caps: *const CapEntryInfo,
@@ -1993,6 +2103,9 @@ pub unsafe extern "C" fn slateos_spawn_caps(
 ) -> i32 {
     if caps.is_null() && cap_count != 0 {
         return errno::EINVAL;
+    }
+    if let Some(e) = refused_request(file_actions, attrp) {
+        return e;
     }
     if cap_count > SPAWN_CAP_MAX {
         return errno::EINVAL;
@@ -2313,6 +2426,9 @@ pub extern "C" fn posix_spawnp(
 ) -> i32 {
     if file.is_null() {
         return errno::EFAULT;
+    }
+    if let Some(e) = refused_request(file_actions, attrp) {
+        return e;
     }
     // SAFETY: `file` is a valid C string (the caller's contract).
     let file_len = unsafe { crate::file::c_strlen_pub(file) };
@@ -3419,7 +3535,8 @@ mod tests {
             sigmask: crate::signal::SigsetT::EMPTY,
             schedpriority: 0,
             schedpolicy: 0,
-            _reserved: [0; 64],
+            cgroup: 0,
+            _reserved: [0; 60],
         };
         let base = (&raw const a).cast::<u8>() as usize;
         let off = |p: usize| p - base;
@@ -3429,6 +3546,8 @@ mod tests {
         assert_eq!(off((&raw const a.sigmask).cast::<u8>() as usize), 136);
         assert_eq!(off((&raw const a.schedpriority).cast::<u8>() as usize), 264);
         assert_eq!(off((&raw const a.schedpolicy).cast::<u8>() as usize), 268);
+        // glibc's `__cgroup`, in musl's `__fn`: a C caller never reads it.
+        assert_eq!(off((&raw const a.cgroup).cast::<u8>() as usize), 272);
     }
 
     /// The same contract for the file-actions object — and the reason this
@@ -4808,14 +4927,16 @@ mod tests {
                 | POSIX_SPAWN_SETSCHEDULER
                 | POSIX_SPAWN_USEVFORK
                 | POSIX_SPAWN_SETSID
+                | POSIX_SPAWN_SETCGROUP
         );
     }
 
     #[test]
     fn test_posix_spawn_valid_flags_value() {
-        // Every flag from RESETIDS (0x01) through SETSID (0x80) =
-        // 0xFF.  This catches accidental gaps in the constants.
-        assert_eq!(POSIX_SPAWN_VALID_FLAGS, 0xFF);
+        // Every flag from RESETIDS (0x01) through SETCGROUP (0x100) =
+        // 0x1FF, glibc 2.35's __POSIX_SPAWN_MASK.  This catches accidental
+        // gaps in the constants.
+        assert_eq!(POSIX_SPAWN_VALID_FLAGS, 0x1FF);
     }
 
     #[test]
@@ -4829,9 +4950,116 @@ mod tests {
             POSIX_SPAWN_SETSCHEDULER,
             POSIX_SPAWN_USEVFORK,
             POSIX_SPAWN_SETSID,
+            POSIX_SPAWN_SETCGROUP,
         ] {
             assert_eq!(f.count_ones(), 1, "flag {f:#x} must be a single bit");
         }
+    }
+
+    // ---- glibc 2.35's cgroup and terminal requests ------------------------
+
+    /// The cgroup descriptor is stored and given back as it is, 0 after
+    /// `init`, as glibc's -- and a spawn asking for a cgroup is refused with
+    /// `ENOTSUP` before anything starts, there being none here.
+    #[test]
+    fn test_cgroup_np_round_trips_and_a_spawn_with_it_is_refused() {
+        let mut attr = fresh_attr();
+        let mut cg = -7;
+        assert_eq!(
+            posix_spawnattr_getcgroup_np(&raw const attr, &raw mut cg),
+            0
+        );
+        assert_eq!(cg, 0);
+        assert_eq!(posix_spawnattr_setcgroup_np(&raw mut attr, 42), 0);
+        assert_eq!(
+            posix_spawnattr_getcgroup_np(&raw const attr, &raw mut cg),
+            0
+        );
+        assert_eq!(cg, 42);
+        assert_eq!(
+            posix_spawnattr_setcgroup_np(core::ptr::null_mut(), 1),
+            errno::EFAULT
+        );
+        assert_eq!(
+            posix_spawnattr_getcgroup_np(&raw const attr, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+
+        // Without the flag the descriptor is only stored.
+        assert_eq!(refused_request(core::ptr::null(), &raw const attr), None);
+        assert_eq!(
+            posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_SETCGROUP | POSIX_SPAWN_SETSID),
+            0
+        );
+        assert_eq!(
+            refused_request(core::ptr::null(), &raw const attr),
+            Some(errno::ENOTSUP)
+        );
+        let argv = [c"x".as_ptr().cast::<u8>(), core::ptr::null()];
+        let envp = [core::ptr::null::<u8>()];
+        let mut pid: PidT = -1;
+        let ret = posix_spawn(
+            &raw mut pid,
+            c"/bin/true".as_ptr().cast(),
+            core::ptr::null(),
+            &raw const attr,
+            argv.as_ptr(),
+            envp.as_ptr(),
+        );
+        assert_eq!((ret, pid), (errno::ENOTSUP, -1));
+        let ret = posix_spawnp(
+            &raw mut pid,
+            c"true".as_ptr().cast(),
+            core::ptr::null(),
+            &raw const attr,
+            argv.as_ptr(),
+            envp.as_ptr(),
+        );
+        assert_eq!((ret, pid), (errno::ENOTSUP, -1));
+    }
+
+    /// The terminal action is recorded as glibc's is -- `EBADF` for a
+    /// descriptor none can be -- and a spawn with it is refused with
+    /// `ENOSYS`: the group cannot be set before the child runs.
+    #[test]
+    fn test_addtcsetpgrp_np_is_recorded_and_a_spawn_with_it_is_refused() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(
+            posix_spawn_file_actions_addtcsetpgrp_np(&raw mut acts, -1),
+            errno::EBADF
+        );
+        assert_eq!(
+            posix_spawn_file_actions_addtcsetpgrp_np(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
+        assert_eq!(refused_request(&raw const acts, core::ptr::null()), None);
+        assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 5), 0);
+        assert_eq!(
+            posix_spawn_file_actions_addtcsetpgrp_np(&raw mut acts, 0),
+            0
+        );
+        assert_eq!(
+            (acts.slots()[1].tag, acts.slots()[1].fd),
+            (TAG_TCSETPGRP, 0)
+        );
+        assert_eq!(
+            refused_request(&raw const acts, core::ptr::null()),
+            Some(errno::ENOSYS)
+        );
+        let argv = [c"x".as_ptr().cast::<u8>(), core::ptr::null()];
+        let envp = [core::ptr::null::<u8>()];
+        let mut pid: PidT = -1;
+        let ret = posix_spawn(
+            &raw mut pid,
+            c"/bin/true".as_ptr().cast(),
+            &raw const acts,
+            core::ptr::null(),
+            argv.as_ptr(),
+            envp.as_ptr(),
+        );
+        assert_eq!((ret, pid), (errno::ENOSYS, -1));
+        posix_spawn_file_actions_destroy(&raw mut acts);
     }
 
     #[test]
@@ -4853,18 +5081,23 @@ mod tests {
     }
 
     #[test]
-    fn test_setflags_rejects_bit_just_above_setsid() {
-        // First bit outside the mask = 0x100.
+    fn test_setflags_rejects_bit_just_above_setcgroup() {
+        // First bit outside glibc 2.35's mask = 0x200.
         let mut attr = fresh_attr();
-        let ret = posix_spawnattr_setflags(&raw mut attr, 0x100);
+        let ret = posix_spawnattr_setflags(&raw mut attr, 0x200);
         assert_eq!(ret, errno::EINVAL);
+        // SETCGROUP itself is accepted, as glibc's mask has it.
+        assert_eq!(
+            posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_SETCGROUP),
+            0
+        );
     }
 
     #[test]
     fn test_setflags_rejects_unknown_bit_combined_with_valid() {
-        // POSIX_SPAWN_SETSID | 0x100 — partially valid, must still fail.
+        // POSIX_SPAWN_SETSID | 0x200 — partially valid, must still fail.
         let mut attr = fresh_attr();
-        let bad = POSIX_SPAWN_SETSID | 0x100;
+        let bad = POSIX_SPAWN_SETSID | 0x200;
         let ret = posix_spawnattr_setflags(&raw mut attr, bad);
         assert_eq!(ret, errno::EINVAL);
     }

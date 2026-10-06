@@ -128,6 +128,7 @@ use std::sync::Arc;
 use yamldoc::Document;
 
 mod animation;
+pub mod authoring;
 mod decorations;
 mod fonts;
 mod panel;

@@ -1684,16 +1684,19 @@ impl Checker {
 // ============================================================================
 
 /// `rel` as a finding places it: `/`-separated, each name shown as
-/// `design-decisions.md` §426 shows one that is not text.
-fn place(rel: &Path) -> String {
+/// `design-decisions.md` §426 shows one that is not text. Shared with the
+/// copies `themes::authoring` makes, whose findings join a report of this
+/// checker's.
+pub(crate) fn place(rel: &Path) -> String {
     rel.iter()
         .map(pathcodec::display_os)
         .collect::<Vec<_>>()
         .join("/")
 }
 
-/// Whether the last part of `rel` is hidden: begins with a dot.
-fn is_hidden(rel: &Path) -> bool {
+/// Whether the last part of `rel` is hidden: begins with a dot. Shared with
+/// `themes::authoring`, which leaves out of a copy what this reports.
+pub(crate) fn is_hidden(rel: &Path) -> bool {
     rel.file_name()
         .is_some_and(|name| name.as_encoded_bytes().first() == Some(&b'.'))
 }

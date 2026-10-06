@@ -353,6 +353,15 @@ pub fn built_in_names() -> Vec<&'static str> {
     BUILT_IN.iter().map(|(name, _)| *name).collect()
 }
 
+/// The built-in theme's icons, `(name, SVG)`, one for each name it draws --
+/// what a theme made from it carries as files
+/// ([`themes::authoring::derive`]), so that it draws each name exactly as
+/// the built-in theme does: a name sharing another's picture gets a file of
+/// its own rather than the shorter name's.
+pub(crate) fn built_in_icons() -> &'static [(&'static str, &'static str)] {
+    BUILT_IN
+}
+
 /// Whether `name` can name an icon: lower-case letters, digits and `-` (and
 /// `_`, which some sets use), not empty and not starting with `-`. Anything
 /// else -- a `/`, a `.`, a `..` -- would be a path rather than a name.

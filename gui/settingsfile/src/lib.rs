@@ -203,7 +203,16 @@ pub fn store_data(name: &str, bytes: &[u8]) -> io::Result<()> {
 /// Write `bytes` to `path` through a temporary beside it renamed over it,
 /// creating the folder first: a reader -- or a crash -- sees the whole old
 /// file or the whole new one, never the middle of a write.
-fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+///
+/// Public for files that are not settings groups but are replaced the same
+/// way -- a theme's `theme.yaml`, saved by `appearance::themes::authoring`.
+/// The temporary is `<file>.new` beside it, so the folder must be one the
+/// caller may write.
+///
+/// # Errors
+///
+/// If the folder cannot be created, or the write or the rename fails.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }

@@ -1290,26 +1290,41 @@ pub extern "C" fn setregid(rgid: GidT, egid: GidT) -> i32 {
     0
 }
 
-/// Get the supplementary group IDs.
+mod groups;
+pub(crate) use groups::in_supplementary_groups;
+
+/// Get the supplementary group IDs: the kernel's list for this process, the
+/// one [`setgroups`] and `initgroups` install and the kernel's file access
+/// gate consults.
 ///
-/// Linux semantics (kernel/groups.c::SYSCALL_DEFINE2(getgroups)):
-/// * `size < 0` → `-EINVAL`.
-/// * `size == 0` → return the number of supplementary groups
-///   without touching `list` (the query form).
-/// * `size > 0` and our supplementary group count fits → copy the
-///   list and return the count.
+/// The native ABI has no call that reports the list, so it is read from
+/// `/proc/self/status`'s last `Groups:` line -- the last, because a task's
+/// name, which comes first and is written raw, can forge an earlier one
+/// (`unistd/groups.rs` has the details).
 ///
-/// We have no supplementary groups, so once the prologue passes we
-/// always return 0.  `list` is never dereferenced because there is
-/// nothing to copy — matching Linux's behaviour, which only invokes
-/// `copy_to_user` when `ngroups > 0`.
+/// Linux semantics (`kernel/groups.c::SYSCALL_DEFINE2(getgroups)`):
+/// * `size < 0` → `EINVAL`.
+/// * `size == 0` → the number of groups, `list` untouched (the query form).
+/// * `size` short of the number → `EINVAL`.
+/// * otherwise the groups, in ascending order as Linux keeps them, and their
+///   number; a NULL `list` is `EFAULT` there, unless there are none.
+///
+/// A list that cannot be read -- in a process holding no File capability,
+/// which opening `/proc/self/status` takes, or in a `chroot` without
+/// `/proc` -- is `EIO` (`known-issues/D-POSIX-GETGROUPS-NEEDS-A-FILE-CAPABILITY.md`).
+/// Not an empty list: "no groups" is a claim about the process. And not
+/// `ENOSYS`, which gnulib's `mgetgroups` takes to mean the system has no
+/// such lists, and answers from `/etc/group` instead -- vouching for groups
+/// the kernel may not have granted.
+///
+/// Until 2026-10-06 this answered 0 for every process. That was the truth
+/// until `setgroups` reached the kernel (2026-09-12) and `initgroups` called
+/// it (2026-09-27); after that, `id` left out every group `login` had
+/// installed, and `group_member` and the SysV IPC permission checks said a
+/// process was outside groups the kernel had it in.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
-    if size < 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    0
+pub extern "C" fn getgroups(size: i32, list: *mut GidT) -> i32 {
+    groups::getgroups_with(size, list, groups::supplementary_groups)
 }
 
 /// Set the supplementary group IDs.
@@ -1373,16 +1388,17 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 /// closed in between is why that could be wired up without auditing
 /// anything: nothing could have been relying on a success that never came.
 ///
-/// # Why [`getgroups`] still succeeds with zero groups
+/// # [`getgroups`] reads back what this installs
 ///
-/// That asymmetry is deliberate, not an oversight.  `getgroups` reports
-/// *state*, and "no supplementary groups" is a coherent state this libc
-/// can honestly report; `id(1)` is written against exactly that reading,
-/// synthesising a list only when `getgroups` fails with `ENOSYS` and
-/// never when it succeeds with none (see
-/// `userspace/coreutils/src/bin/id.rs`, which follows gnulib here).  A
-/// function that reports state may report an empty one.  A function that
-/// performs an action may not report having performed it.
+/// While this refused, [`getgroups`] answered "no supplementary groups",
+/// which was then the truth: a function that reports state may report an
+/// empty one, where a function that performs an action may not report
+/// having performed it. Once this reached the kernel, that answer was a
+/// claim about state that had changed; since 2026-10-06 [`getgroups`] reads
+/// the kernel's list. It fails with `EIO`, never `ENOSYS`, when the list
+/// cannot be read: `id(1)` synthesises a list from `/etc/group` only on
+/// `ENOSYS` (see `userspace/coreutils/src/bin/id.rs`, which follows gnulib
+/// here), and that list is not one the kernel vouches for.
 ///
 /// Returns 0, or -1 with `EPERM`, `EINVAL` or `EFAULT` as above, or with
 /// the kernel's refusal.  The host build has no kernel, and answers

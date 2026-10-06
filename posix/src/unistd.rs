@@ -1065,13 +1065,13 @@ pub extern "C" fn getegid() -> GidT {
 /// the caller already legitimately holds), or when the caller holds
 /// `CAP_SETUID`.  Anything else fails with `EPERM`.
 ///
-/// Our process model is single-user: real, effective, and saved uid
-/// are all `0` ("root").  That collapses the three matching arms into
-/// "uid == 0", so:
+/// The kernel keeps one uid a process -- real, effective and saved are the
+/// same -- which collapses the three matching arms into "uid == the
+/// current uid", so:
 ///
-/// * `setuid(0)`  — always succeeds, no cap required (target equals
-///                  current).
-/// * `setuid(N)` with `N != 0` — requires `CAP_SETUID`, else `EPERM`.
+/// * `setuid(getuid())` — always succeeds, no cap required (target equals
+///                        current).
+/// * any other uid — requires `CAP_SETUID`, else `EPERM`.
 ///
 /// **Phase 192:** pre-Phase-192 we returned `0` for *every* uid value,
 /// ignoring caps.  That let an unprivileged sandbox call
@@ -1117,8 +1117,9 @@ pub extern "C" fn setuid(uid: UidT) -> i32 {
 ///     return -EPERM;
 /// ```
 ///
-/// Match-against-any-current-uid OR `CAP_SETUID`.  Same collapse to
-/// "uid == 0" in our single-user model.
+/// Match-against-any-current-uid OR `CAP_SETUID`.  Same collapse as
+/// [`setuid`]'s: the process's one uid is all three, so "uid == the current
+/// uid".
 ///
 /// **Phase 192:** the previous "succeeds silently" stub had the same
 /// hole as [`setuid`] — `seteuid(1000)` looked like it dropped
@@ -1148,9 +1149,9 @@ pub extern "C" fn seteuid(uid: UidT) -> i32 {
 /// the real, effective, or saved gid OR the caller holds `CAP_SETGID`;
 /// otherwise `-EPERM`.  This is the gid analogue of `setuid`'s rule.
 ///
-/// In our flat single-gid (always 0) model the three match arms
-/// collapse to "target == 0 always OK; target != 0 requires
-/// CAP_SETGID".
+/// The kernel keeps one gid a process -- real, effective and saved are the
+/// same -- so the three match arms collapse to "target == the current gid
+/// always OK; any other requires CAP_SETGID".
 ///
 /// **Phase 193:** pre-Phase-193 the stub returned `0` for every gid
 /// value, mirroring the silent-success bug Phase 192 fixed for
@@ -1191,7 +1192,7 @@ pub extern "C" fn setgid(gid: GidT) -> i32 {
 ///     return -EPERM;
 /// ```
 ///
-/// Same collapse to "gid == 0" in our single-group model.
+/// Same collapse as [`setgid`]'s: "gid == the current gid".
 ///
 /// **Phase 193:** the previous "succeeds silently" stub had the same
 /// hole as [`setgid`] — `setegid(1000)` looked like it changed the
@@ -1228,9 +1229,9 @@ pub extern "C" fn setegid(gid: GidT) -> i32 {
 ///     return -EPERM;
 /// ```
 ///
-/// For the euid field the match list also includes `suid`.  In our
-/// flat single-uid (always 0) model both arms collapse to "value ==
-/// 0 or value == -1 always OK; any other value requires CAP_SETUID".
+/// For the euid field the match list also includes `suid`.  With the
+/// kernel's one uid a process, both arms collapse to "value == the current
+/// uid or value == -1 always OK; any other value requires CAP_SETUID".
 ///
 /// **Phase 194:** pre-Phase-194 we returned `0` for every (ruid,
 /// euid) pair, masking the same silent privilege-skip bug Phase 192
@@ -1334,18 +1335,20 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 ///      `groups_from_user`'s `copy_from_user` on a NULL grouplist).
 ///   4. `size == 0` passes validation regardless of `list` (Linux
 ///      explicitly permits a NULL `list` when `size == 0`).
-///   5. Validation having passed, the call fails with `ENOSYS` -- see
-///      below.  No per-gid validation (Linux accepts any gid_t value
-///      here; range/policy enforcement happens at the LSM layer, which
-///      we do not model), and none would mean anything, because
-///      nothing consumes the list.
+///   5. Validation having passed, the kernel installs the list
+///      (`SYS_PROCESS_SETGROUPS`, 1067), and refuses it with `EPERM` if
+///      the process lacks `(Process, SET_CREDENTIALS)`.  No per-gid
+///      validation (Linux accepts any gid_t value here; range/policy
+///      enforcement happens at the LSM layer, which we do not model).
+///      The kernel's file access gate consults the list
+///      (`check_path_access`, `kernel/src/fs/vfs.rs`).
 ///
 /// Note: our `_SC_NGROUPS_MAX` advertises 32 (the POSIX minimum
 /// guarantee), but Linux's kernel ceiling is 65536 and we accept up
 /// to that for binary-compat parity with programs probing the kernel
 /// limit directly.
 ///
-/// # Why this fails rather than succeeding
+/// # History: a false success, an honest refusal, then the real call
 ///
 /// Until 2026-09-07 the last line of this function was `0`: every
 /// well-formed call was told its supplementary groups had been set, and
@@ -1361,19 +1364,14 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 /// retains every supplementary group, and goes on to lower its uid.
 /// The check it wrote is the reason it stops looking.
 ///
-/// `ENOSYS` is accurate, and is what [`chroot`] in this file already
-/// returns for the identical reason: the kernel implements `setgroups`
-/// for real, but only in the Linux-ABI table
-/// (`kernel/src/syscall/linux.rs`), and `posix/src/syscall.rs` has no
-/// native `SYS_SETGROUPS` constant for native libc to call.  Filed as
-/// `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
-/// When that number exists this body becomes a real syscall and the
-/// `ENOSYS` goes away.
-///
-/// Failing closed is also the useful pressure: privilege-dropping code
-/// written against this libc can no longer ship believing it dropped
-/// something, which is the outcome the false success was quietly
-/// arranging for.
+/// From 2026-09-07 it failed with `ENOSYS` instead, as [`chroot`] did for
+/// the same reason: the kernel implemented `setgroups` only in the
+/// Linux-ABI table (`kernel/src/syscall/linux.rs`), with no native number
+/// for this library to call
+/// (`requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`).
+/// Since 2026-09-12 it calls lane A's `SYS_PROCESS_SETGROUPS`.  Failing
+/// closed in between is why that could be wired up without auditing
+/// anything: nothing could have been relying on a success that never came.
 ///
 /// # Why [`getgroups`] still succeeds with zero groups
 ///
@@ -1386,8 +1384,9 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 /// function that reports state may report an empty one.  A function that
 /// performs an action may not report having performed it.
 ///
-/// Returns -1 with `ENOSYS`, or -1 with `EPERM`, `EINVAL` or `EFAULT`
-/// if the corresponding validation fails first.
+/// Returns 0, or -1 with `EPERM`, `EINVAL` or `EFAULT` as above, or with
+/// the kernel's refusal.  The host build has no kernel, and answers
+/// `ENOSYS` once validation passes (`kernel_setgroups`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgroups(size: usize, list: *const GidT) -> i32 {
     const NGROUPS_KERNEL_MAX: usize = 65536;
@@ -1449,11 +1448,17 @@ fn kernel_setgroups(_size: usize, _list: *const GidT) -> i32 {
 ///
 /// Returns 1 if the process was started with elevated privileges
 /// (real uid != effective uid, or real gid != effective gid), 0
-/// otherwise.  Since our OS is single-user and always runs as root,
-/// this always returns 0.
+/// otherwise.  Always 0 here: the kernel keeps one uid and one gid a
+/// process, so the real and effective ids cannot differ, and `exec` does
+/// not honour a file's set-user-ID or set-group-ID bit, so nothing changes
+/// them when a program starts (the auxiliary vector's `AT_SECURE` is 0 for
+/// the same reason).  If `exec` ever honours the bits, this must answer 1
+/// for a program they raised.  (This said "the OS is single-user and always
+/// runs as root" until 2026-10-06; a process may run as any user, which
+/// does not change the answer.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn issetugid() -> i32 {
-    // Single-user OS: uid/gid are always 0/0.
+    // One uid and one gid a process, and exec honours no set-ID bit.
     0
 }
 
@@ -2942,10 +2947,12 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
 
 /// Change the root directory.
 ///
-/// Stub: validates arguments per Linux `fs/open.c::sys_chroot`, then
-/// returns `-1` with `ENOSYS` (filesystem-root remapping isn't wired
-/// up yet — `design.txt` puts root selection in the capability layer
-/// rather than via legacy chroot semantics).
+/// Validates its arguments as Linux's `fs/open.c::sys_chroot` does, then
+/// asks the kernel to install the new root (`SYS_PROCESS_CHROOT`, 1068,
+/// since 2026-09-07). The kernel's own Linux-ABI `chroot` refuses outright,
+/// because no Linux caller holds `CAP_SYS_CHROOT`; the native call is the
+/// one that installs a root. (This comment said "stub ... ENOSYS" until
+/// 2026-10-06, long after it stopped being true.)
 ///
 /// Errors (Linux-matching priority order — `fs/open.c::sys_chroot`
 /// resolves the user pointer with `user_path_at` *before* checking
@@ -2956,10 +2963,8 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
 ///                                rejects the empty-name path)
 /// 3. `!CAP_SYS_CHROOT`        → `EPERM`   (Phase 166)
 ///
-/// After argument and capability validation we return `ENOSYS`:
-/// filesystem-root remapping isn't wired up yet — `design.txt`
-/// puts root selection in the capability layer rather than via
-/// legacy chroot semantics.
+/// Then whatever the kernel answers -- `ENOENT`, `ENOTDIR` and the rest of
+/// a path lookup's errors.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chroot(path: *const u8) -> i32 {
     if path.is_null() {
@@ -3077,8 +3082,11 @@ pub extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
 /// 5-min, 15-min).  Returns the number of samples stored, or -1 on
 /// error.
 ///
-/// Stub: returns synthetic idle-system values (0.0) since our OS
-/// doesn't track load averages yet.
+/// The scheduler's 1-, 5- and 15-minute load averages (`SYS_LOADAVG`, the
+/// moving averages `/proc/loadavg` shows), as many as `nelem` asks for up to
+/// three. The host's tests have no scheduler and read 0.0. (This comment
+/// called it a stub returning 0.0 until 2026-10-06, long after the kernel
+/// kept the averages.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32 {
     if loadavg.is_null() || nelem <= 0 {
@@ -3692,9 +3700,9 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
 /// }
 /// ```
 ///
-/// In our flat single-uid (always 0) model each non-sentinel field
-/// must be 0 (matches current uid/euid/suid) OR the caller must
-/// hold CAP_SETUID.  Order: ruid → euid → suid (matches Linux).
+/// With the kernel's one uid a process, each non-sentinel field must be
+/// that uid (it is the current uid, euid and suid at once) OR the caller
+/// must hold CAP_SETUID.  Order: ruid → euid → suid (matches Linux).
 ///
 /// **Phase 195:** pre-Phase-195 returned `0` for every triple,
 /// continuing the silent-success bug pattern Phases 192-194 fixed
@@ -5505,7 +5513,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // uid/gid stubs (single-user → always 0/root)
+    // uid/gid (the host's tests have no kernel: every id reads 0, root)
     // ------------------------------------------------------------------
 
     #[test]
@@ -7741,9 +7749,9 @@ mod tests {
     //
     // Linux's `kernel/sys.c::sys_setuid` allows the call when the target
     // uid matches the real, effective, or saved uid OR the caller holds
-    // CAP_SETUID; otherwise EPERM.  Our flat single-uid (always 0) model
-    // collapses that to "target == 0 always OK; target != 0 needs
-    // CAP_SETUID".  Pre-Phase-192 we returned 0 unconditionally, which
+    // CAP_SETUID; otherwise EPERM.  The kernel's one uid a process
+    // collapses that to "target == the current uid always OK; any other
+    // needs CAP_SETUID" -- and the current uid is 0 in the host's tests.  Pre-Phase-192 we returned 0 unconditionally, which
     // silently masked sandbox-drop bugs in callers.
     mod setuid_cap_phase192 {
         use super::*;
@@ -8001,7 +8009,7 @@ mod tests {
         }
 
         /// A failed setuid must not perturb `getuid`/`geteuid` — they
-        /// remain 0 (the single-user model is unchanged).
+        /// remain 0, the host's tests' uid.
         #[test]
         fn test_setuid_phase192_failed_call_no_observable_uid_change() {
             let _g = CapGuard::snapshot();
@@ -8103,9 +8111,9 @@ mod tests {
     // Companion to Phase 192's setuid/seteuid gate.  Linux's
     // `kernel/sys.c::sys_setgid` allows the call when the target gid
     // matches the real, effective, or saved gid OR the caller holds
-    // CAP_SETGID; otherwise EPERM.  Our flat single-gid (always 0)
-    // model collapses that to "target == 0 always OK; target != 0
-    // needs CAP_SETGID".  Pre-Phase-193 we returned 0 unconditionally,
+    // CAP_SETGID; otherwise EPERM.  The kernel's one gid a process
+    // collapses that to "target == the current gid always OK; any other
+    // needs CAP_SETGID" -- and the current gid is 0 in the host's tests.  Pre-Phase-193 we returned 0 unconditionally,
     // silently masking group-drop bugs in callers.
     mod setgid_cap_phase193 {
         use super::*;
@@ -8435,9 +8443,10 @@ mod tests {
     // field independently.  The `(uid_t)-1` / `(gid_t)-1` sentinel
     // ("leave alone") bypasses its field's check.  Each non-sentinel
     // field must either match a currently-held id (real / effective /
-    // saved) OR the caller must hold the relevant SET-id cap.  In
-    // our flat single-id (always 0) model: value == 0 or value ==
-    // MAX always OK; any other value requires the cap.
+    // saved) OR the caller must hold the relevant SET-id cap.  With the
+    // kernel's one id of each kind a process (0 in the host's tests):
+    // value == that id or value == MAX always OK; any other value requires
+    // the cap.
     //
     // The order of evaluation matters for ordering tests: Linux
     // checks ruid before euid, so a (bad_ruid, bad_euid) call EPERMs
@@ -8806,9 +8815,10 @@ mod tests {
     // The three-arg saved-id variants.  Linux's sys_setresuid uses a
     // single CAP_SETUID outer-guard: if the cap is held, all three
     // fields are accepted; otherwise each non-sentinel field must
-    // match a currently-held id.  Order: ruid → euid → suid.  Our
-    // flat single-uid (always 0) model collapses to "value == 0 or
-    // value == MAX always OK; any other value requires the cap".
+    // match a currently-held id.  Order: ruid → euid → suid.  The
+    // kernel's one uid a process (0 in the host's tests) collapses that to
+    // "value == that uid or value == MAX always OK; any other value
+    // requires the cap".
     //
     // This was the highest-stakes silent-success bug in the
     // setuid-family series — setresuid is what sandbox/jail code

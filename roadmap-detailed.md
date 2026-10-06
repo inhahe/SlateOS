@@ -2715,7 +2715,8 @@ authors never wrote a single automation handler.
   opened), so any program's menus are seen; so do its tab bar
   (`guitk::tabs::TabPart`: each tab and its close button) and its tree
   (`guitk::treeview::TreePart`, through the view and its source together,
-  `TreeAccess`: rows nested as the tree nests them, each arrow and box),
+  `TreeAccess`: rows nested as the tree nests them, each arrow and box;
+  its directory tree the same, each folder read as a tool opens it),
   its menu bar (`guitk::menubar::MenuBarPart`: each title, the open menu's
   rows and every submenu open below it) and its path bar
   (`guitk::pathbar::PathBarPart`: the address, typed over and confirmed as

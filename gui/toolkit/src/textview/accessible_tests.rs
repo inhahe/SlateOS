@@ -101,7 +101,11 @@ fn a_plain_view_scrolls_by_whole_lines_as_far_as_it_goes() {
     assert_eq!(scroll(&mut view, line * 3.5), Ok(None));
     assert_eq!(view.scroll_offset, 3);
     assert_eq!(scroll(&mut view, 1.0e9), Ok(None));
-    assert!(view.is_at_bottom() && view.scroll_offset > 3);
+    assert_eq!(
+        view.scroll_offset,
+        50 - view.visible_lines(),
+        "the last screenful, no further"
+    );
     assert_eq!(scroll(&mut view, -40.0), Ok(None));
     assert_eq!(view.scroll_offset, 0);
 

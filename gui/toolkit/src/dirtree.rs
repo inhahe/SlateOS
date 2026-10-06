@@ -50,6 +50,12 @@
 //! it can only make it if the folder is not silently dropped from the set.
 //! Entries a listing could not read individually are counted on the folder's
 //! row rather than left out without a word.
+//!
+//! # To tools
+//!
+//! A [`DirectoryTree`] is a tree to automation and assistive tools, its rows
+//! used as its own clicks -- and a folder a tool opens is read as it opens,
+//! as a click's is (`accessible`).
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -61,6 +67,8 @@ use crate::event::{KeyEvent, MouseEvent};
 use crate::palette::Palette;
 use crate::render::RenderCommand;
 use crate::treeview::{TreeEvent, TreeItem, TreeSource, TreeView};
+
+mod accessible;
 
 /// What a directory listing shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -618,6 +626,58 @@ mod tests {
         scratch.file("c.TXT", 1);
         let tree = DirectoryTree::open(&scratch.0, DirOptions::default()).unwrap();
         assert_eq!(labels(&tree), ["Alpha", "zeta", "A.txt", "b.txt", "c.TXT"]);
+    }
+
+    /// **A folder a tool opens is read as it opens, as a click's is**: what
+    /// it holds is there to be seen, and opened in turn.
+    #[test]
+    fn a_folder_a_tool_opens_is_read() {
+        use crate::treeview::TreePart;
+        use crate::widget::automation::{Accessible, Action, Role};
+
+        let scratch = Scratch::new("tool");
+        scratch.file("docs/report.txt", 10);
+        scratch.file("docs/deep/x.bin", 1);
+        let mut tree = DirectoryTree::open(&scratch.0, DirOptions::default()).unwrap();
+        tree.view_mut()
+            .set_bounds(Rect::new(0.0, 0.0, 300.0, 240.0));
+        let root = tree.automation(0.0, 0.0);
+        assert_eq!(root.role, Role::Tree);
+        assert_eq!(root.children.len(), 1, "docs, closed: {root:?}");
+
+        let said = tree
+            .invoke(
+                &TreePart::Disclosure(vec![os("docs")]),
+                Action::Press,
+                0.0,
+                0.0,
+            )
+            .unwrap()
+            .expect("it opened");
+        assert!(
+            said.contains(&TreeEvent::Expanded(vec![os("docs")])),
+            "{said:?}"
+        );
+        assert!(tree.source().is_loaded(&[os("docs")]));
+        let names: Vec<String> = tree
+            .automation(0.0, 0.0)
+            .walk()
+            .filter(|n| n.role == Role::TreeItem)
+            .map(|n| n.name.clone())
+            .collect();
+        assert_eq!(names, ["docs", "deep", "report.txt"]);
+
+        tree.invoke(
+            &TreePart::Disclosure(vec![os("docs"), os("deep")]),
+            Action::Press,
+            0.0,
+            0.0,
+        )
+        .unwrap();
+        assert!(
+            tree.source().is_loaded(&[os("docs"), os("deep")]),
+            "and what it holds, opened in turn"
+        );
     }
 
     #[test]

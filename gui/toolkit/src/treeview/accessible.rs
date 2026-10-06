@@ -93,6 +93,90 @@ impl<K: Clone + Ord> TreeView<K> {
             self.scroll_to(index.saturating_add(1).saturating_sub(shown));
         }
     }
+
+    /// The tree as tools see it: what [`TreeAccess`] shows, which needs the
+    /// view alone -- for a component holding a tree, which shows it without
+    /// a source at hand to make a [`TreeAccess`] of.
+    pub(crate) fn tool_tree(&self) -> Node<TreePart<K>> {
+        let frame = self.hit_boxes();
+        let mut tree = Node::new(TreePart::Tree, Role::Tree, "Tree", self.bounds);
+        tree.enabled = !self.state.is_disabled();
+        tree.description = self.state.reason().map(str::to_owned);
+        // The rows in order, nested by depth: the open nodes' rows above
+        // their children's, each finished when the next row is no deeper.
+        let mut open: Vec<Node<TreePart<K>>> = Vec::new();
+        for (index, row) in self.rows.iter().enumerate() {
+            let Some(bounds) = self.row_box(index, &frame) else {
+                continue;
+            };
+            let mut node = Node::new(
+                TreePart::Row(row.path.clone()),
+                Role::TreeItem,
+                row.label.clone(),
+                bounds,
+            );
+            let chosen = self.selected.as_deref() == Some(row.path.as_slice());
+            node.value = Some(Value::Chosen(chosen));
+            node.focused = chosen;
+            node.focusable = true;
+            node.enabled = !row.state.is_disabled();
+            node.description = row
+                .state
+                .reason()
+                .map(str::to_owned)
+                .or_else(|| row.detail.clone());
+            let cell = |hit: TreeHit<K>| {
+                frame
+                    .rect_of(|drawn| *drawn == hit)
+                    .unwrap_or(Rect::new(bounds.x, bounds.y, 0.0, bounds.h))
+            };
+            if row.expandable {
+                let arrow = TreePart::Disclosure(row.path.clone());
+                let name = if row.expanded { "Collapse" } else { "Expand" };
+                node.children.push(Node::new(
+                    arrow,
+                    Role::Button,
+                    name,
+                    cell(TreeHit::Disclosure(row.path.clone())),
+                ));
+            }
+            if let Some(state) = self.check_state(&row.path) {
+                let mut check = Node::new(
+                    TreePart::Check(row.path.clone()),
+                    Role::CheckBox,
+                    row.label.clone(),
+                    cell(TreeHit::Check(row.path.clone())),
+                );
+                check.value = Some(Value::Check(state));
+                check.enabled = node.enabled;
+                node.children.push(check);
+            }
+            // Close every open row this one is not inside.
+            while let Some(parent) = open.last() {
+                let TreePart::Row(parent_path) = &parent.id else {
+                    break;
+                };
+                if row.path.starts_with(parent_path) && row.path.len() > parent_path.len() {
+                    break;
+                }
+                let Some(done) = open.pop() else {
+                    break;
+                };
+                match open.last_mut() {
+                    Some(above) => above.children.push(done),
+                    None => tree.children.push(done),
+                }
+            }
+            open.push(node);
+        }
+        while let Some(done) = open.pop() {
+            match open.last_mut() {
+                Some(above) => above.children.push(done),
+                None => tree.children.push(done),
+            }
+        }
+        tree
+    }
 }
 
 impl<K: Clone + Ord, S: TreeSource<Key = K>> TreeAccess<'_, K, S> {
@@ -147,85 +231,7 @@ where
     type Event = Vec<TreeEvent<K>>;
 
     fn automation(&self, _width: f32, _height: f32) -> Node<TreePart<K>> {
-        let view = &*self.view;
-        let frame = view.hit_boxes();
-        let mut tree = Node::new(TreePart::Tree, Role::Tree, "Tree", view.bounds);
-        tree.enabled = !view.state.is_disabled();
-        tree.description = view.state.reason().map(str::to_owned);
-        // The rows in order, nested by depth: the open nodes' rows above
-        // their children's, each finished when the next row is no deeper.
-        let mut open: Vec<Node<TreePart<K>>> = Vec::new();
-        for (index, row) in view.rows.iter().enumerate() {
-            let Some(bounds) = view.row_box(index, &frame) else {
-                continue;
-            };
-            let mut node = Node::new(
-                TreePart::Row(row.path.clone()),
-                Role::TreeItem,
-                row.label.clone(),
-                bounds,
-            );
-            let chosen = view.selected.as_deref() == Some(row.path.as_slice());
-            node.value = Some(Value::Chosen(chosen));
-            node.focused = chosen;
-            node.focusable = true;
-            node.enabled = !row.state.is_disabled();
-            node.description = row
-                .state
-                .reason()
-                .map(str::to_owned)
-                .or_else(|| row.detail.clone());
-            let cell = |hit: TreeHit<K>| {
-                frame
-                    .rect_of(|drawn| *drawn == hit)
-                    .unwrap_or(Rect::new(bounds.x, bounds.y, 0.0, bounds.h))
-            };
-            if row.expandable {
-                let arrow = TreePart::Disclosure(row.path.clone());
-                let name = if row.expanded { "Collapse" } else { "Expand" };
-                node.children.push(Node::new(
-                    arrow,
-                    Role::Button,
-                    name,
-                    cell(TreeHit::Disclosure(row.path.clone())),
-                ));
-            }
-            if let Some(state) = view.check_state(&row.path) {
-                let mut check = Node::new(
-                    TreePart::Check(row.path.clone()),
-                    Role::CheckBox,
-                    row.label.clone(),
-                    cell(TreeHit::Check(row.path.clone())),
-                );
-                check.value = Some(Value::Check(state));
-                check.enabled = node.enabled;
-                node.children.push(check);
-            }
-            // Close every open row this one is not inside.
-            while let Some(parent) = open.last() {
-                let TreePart::Row(parent_path) = &parent.id else {
-                    break;
-                };
-                if row.path.starts_with(parent_path) && row.path.len() > parent_path.len() {
-                    break;
-                }
-                let Some(done) = open.pop() else {
-                    break;
-                };
-                match open.last_mut() {
-                    Some(above) => above.children.push(done),
-                    None => tree.children.push(done),
-                }
-            }
-            open.push(node);
-        }
-        while let Some(done) = open.pop() {
-            match open.last_mut() {
-                Some(above) => above.children.push(done),
-                None => tree.children.push(done),
-            }
-        }
-        tree
+        self.view.tool_tree()
     }
 
     fn invoke(

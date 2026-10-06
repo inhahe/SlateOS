@@ -465,8 +465,10 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             return unsafe { crate::socket::recv(fd, buf, count, 0) } as SsizeT;
         }
         HandleKind::TcpListener => {
-            // Listeners are not readable via read(); use accept().
-            errno::set_errno(errno::EINVAL);
+            // A listener carries no data: `accept` it. Linux's
+            // `tcp_recvmsg` answers ENOTCONN for TCP_LISTEN (measured on
+            // 6.6: `read` of a listening socket, ENOTCONN); this was EINVAL.
+            errno::set_errno(errno::ENOTCONN);
             return -1;
         }
         HandleKind::Epoll => {
@@ -696,9 +698,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 })
             };
             if ret == errno::native::CHANNEL_CLOSED {
-                // Reader has closed — POSIX mandates EPIPE (not ECONNRESET).
-                errno::set_errno(errno::EPIPE);
-                return -1;
+                // Reader has closed: `SIGPIPE`, then EPIPE (not ECONNRESET),
+                // as Linux's `pipe_write` answers.
+                return crate::signal::broken_pipe(false);
             }
             ret
         }
@@ -718,19 +720,21 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 })
             };
             if ret == errno::native::CHANNEL_CLOSED {
-                // Peer's read side is gone — POSIX mandates EPIPE.  The
-                // kernel does not raise SIGPIPE (we have no signals), so a
-                // write to a broken stream socket simply fails with EPIPE.
-                errno::set_errno(errno::EPIPE);
-                return -1;
+                // Peer's read side is gone: `SIGPIPE`, then EPIPE, as
+                // Linux's `unix_stream_sendmsg` answers a `write` (which
+                // never carries `MSG_NOSIGNAL`).
+                return crate::signal::broken_pipe(false);
             }
             ret
         }
         HandleKind::Console => syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64),
         HandleKind::TcpStream => {
             if entry.handle == 0 {
-                errno::set_errno(errno::ENOTCONN);
-                return -1;
+                // Never connected: Linux's `tcp_sendmsg` waits for a
+                // connection only from SYN_SENT or SYN_RECV, and answers
+                // EPIPE -- with SIGPIPE -- from any other state (measured on
+                // 6.6). `read` of the same socket is ENOTCONN, above.
+                return crate::signal::broken_pipe(false);
             }
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             if !is_nb {
@@ -739,25 +743,23 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // bytes are accepted; programs depend on this (same
                 // behavior as send() on a blocking socket).
                 let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms, mark);
+                return crate::socket::tcp_send_wait(
+                    entry.handle,
+                    buf,
+                    count,
+                    timeout_ms,
+                    mark,
+                    false,
+                );
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
             if ret >= 0 {
                 return ret as SsizeT;
             }
-            // ChannelClosed (-300) needs EPIPE/ECONNRESET distinction:
-            // RST from peer → ECONNRESET; local shutdown/graceful close → EPIPE.
-            if ret == errno::native::CHANNEL_CLOSED {
-                let last = syscall1(crate::syscall::SYS_TCP_LAST_ERROR, entry.handle) as u8;
-                errno::set_errno(if last == 2 {
-                    errno::ECONNRESET
-                } else {
-                    errno::EPIPE
-                });
-                return -1;
-            }
-            return errno::translate(ret) as SsizeT;
+            // A reset is ECONNRESET; an orderly close EPIPE, with SIGPIPE: a
+            // `write` never carries MSG_NOSIGNAL.
+            return crate::socket::tcp_send_failed(entry.handle, ret, false);
         }
         HandleKind::UdpSocket => {
             // POSIX: write() on a connected UDP socket behaves like send().
@@ -770,9 +772,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             return unsafe { crate::socket::send(fd, buf, count, 0) } as SsizeT;
         }
         HandleKind::TcpListener => {
-            // Listeners are not writable via write(); use accept().
-            errno::set_errno(errno::EINVAL);
-            return -1;
+            // A listener is not connected: EPIPE with SIGPIPE, as for a
+            // socket never connected (measured on 6.6). This was EINVAL.
+            return crate::signal::broken_pipe(false);
         }
         HandleKind::Epoll => {
             // Linux: read/write on an epoll fd returns EINVAL.
@@ -866,6 +868,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // (`design-decisions.md` §259), and it is deliberate on both
                 // sides: bytes nobody can ever read are worth refusing
                 // early, bytes already printed are worth delivering late.
+                //
+                // No `SIGPIPE` with it: Linux sends none for a terminal --
+                // only pipes and stream sockets raise it.
                 errno::set_errno(errno::EPIPE);
                 return -1;
             }
@@ -5716,9 +5721,21 @@ fn tee_transfer_over<P: TeePipes>(pipes: &mut P, len: usize, nonblock: bool) -> 
             // `to_write <= chunk <= buf.len()`: `peek` returns at most what
             // it was given room for.
             let nw = pipes.write(buf.get(written..to_write).unwrap_or(&[]), nonblock);
+            if nw == errno::native::CHANNEL_CLOSED {
+                // The destination's readers are gone. Linux's `link_pipe`
+                // sends `SIGPIPE` whether or not anything was duplicated, and
+                // answers EPIPE only when nothing was -- a short transfer
+                // otherwise. (This was translated as a closed channel, which
+                // is not EPIPE, and sent no signal.)
+                if total > 0 || written > 0 {
+                    crate::signal::raise_sigpipe();
+                    return total.saturating_add(written) as isize;
+                }
+                return crate::signal::broken_pipe(false);
+            }
             if nw < 0 {
                 // Destination error.  If we've made progress, return it so the
-                // caller sees a short transfer (Linux behaviour on EAGAIN/EPIPE
+                // caller sees a short transfer (Linux behaviour on EAGAIN
                 // mid-tee).  Otherwise surface the error.
                 if total > 0 || written > 0 {
                     return total.saturating_add(written) as isize;
@@ -8771,6 +8788,65 @@ mod tests {
             src[..4096],
             "the reported bytes must be the right ones"
         );
+    }
+
+    /// A destination pipe whose readers are gone: Linux's `link_pipe` sends
+    /// `SIGPIPE` either way, and answers `EPIPE` when nothing was duplicated,
+    /// the count when something was. (It was a closed channel's errno, and
+    /// no signal.)
+    #[test]
+    fn tee_into_a_pipe_with_no_reader_raises_sigpipe() {
+        struct ReaderGone {
+            inner: FakePipes,
+            /// Writes accepted before the reader goes.
+            accepted: usize,
+        }
+        impl TeePipes for ReaderGone {
+            fn peek(&mut self, offset: u64, buf: &mut [u8]) -> i64 {
+                self.inner.peek(offset, buf)
+            }
+            fn write(&mut self, buf: &[u8], nb: bool) -> i64 {
+                if self.inner.writes >= self.accepted {
+                    self.inner.writes += 1;
+                    return errno::native::CHANNEL_CLOSED;
+                }
+                self.inner.write(buf, nb)
+            }
+            fn wait_readable(&mut self) -> i64 {
+                self.inner.wait_readable()
+            }
+        }
+        std::thread_local! {
+            static PIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+        }
+        extern "C" fn count_sigpipe(_sig: i32) {
+            PIPES.with(|p| p.set(p.get() + 1));
+        }
+        use crate::signal::{SIGPIPE, SighandlerT, signal};
+        let old = signal(SIGPIPE, count_sigpipe as *const () as SighandlerT);
+
+        let mut p = ReaderGone {
+            inner: FakePipes::with_source(b"hello"),
+            accepted: 0,
+        };
+        errno::set_errno(0);
+        assert_eq!(tee_transfer_over(&mut p, 5, false), -1);
+        assert_eq!(errno::get_errno(), errno::EPIPE);
+        assert_eq!(PIPES.with(core::cell::Cell::get), 1);
+
+        // One chunk across, then the reader goes: the chunk is the answer,
+        // and the signal is sent all the same.
+        let src: Vec<u8> = (0..5_000u32).map(|i| (i % 251) as u8).collect();
+        let mut p = ReaderGone {
+            inner: FakePipes::with_source(&src),
+            accepted: 1,
+        };
+        errno::set_errno(0);
+        assert_eq!(tee_transfer_over(&mut p, src.len(), false), 4096);
+        assert_eq!(errno::get_errno(), 0);
+        assert_eq!(PIPES.with(core::cell::Cell::get), 2);
+
+        signal(SIGPIPE, old);
     }
 
     #[test]

@@ -1637,6 +1637,43 @@ fn dispatch_self_signal(sig: i32) -> i32 {
     dispatch_from(sig, Origin::Raised)
 }
 
+/// A write found its pipe or stream socket with no one left to read it:
+/// `SIGPIPE` to the calling thread unless `nosignal`, then `EPIPE`. Returns
+/// -1.
+///
+/// This is what Linux's kernel does there -- `pipe_write`, `tee`'s and
+/// `splice`'s pipe paths, and the stream sockets' sends (`sk_stream_error`,
+/// `unix_stream_sendmsg`) each `send_sig(SIGPIPE, current, 0)` and return
+/// `-EPIPE`, except a send given `MSG_NOSIGNAL` -- and here the C library
+/// sees the broken pipe, so it sends the signal. Its default action ends the
+/// process, which is how `producer | head -1` stops the producer; a program
+/// that ignores the signal (Rust's runtime and CPython do, at start) or
+/// catches it gets `EPIPE` back. The signal is `SI_USER` from this process,
+/// as the kernel's `send_sig` makes it.
+///
+/// `errno` is set after the handler has run: the kernel's `-EPIPE` reaches
+/// the caller once the signal has been dealt with, so a handler that
+/// changes `errno` does not change what the write reports.
+pub(crate) fn broken_pipe(nosignal: bool) -> isize {
+    if !nosignal {
+        raise_sigpipe();
+    }
+    errno::set_errno(errno::EPIPE);
+    -1
+}
+
+/// `SIGPIPE` to the calling thread, as Linux's `send_sig(SIGPIPE, current,
+/// 0)`: for a transfer that met a pipe with no reader after it had moved
+/// some bytes, which it reports rather than `EPIPE` (`tee`'s `link_pipe`).
+/// `errno` is left as it was.
+pub(crate) fn raise_sigpipe() {
+    let saved = errno::get_errno();
+    // What dispatch reports is the handler's business: the transfer has
+    // its own answer, whatever happened to the signal.
+    let _ = dispatch_from(SIGPIPE, Origin::Killed);
+    errno::set_errno(saved);
+}
+
 /// [`dispatch_self_signal`], for a signal from `origin`: what an
 /// `SA_SIGINFO` handler is told of it, and the frame it may change.
 fn dispatch_from(sig: i32, origin: Origin) -> i32 {
@@ -7727,6 +7764,86 @@ mod tests {
         );
         SEEN.with(|s| s.set(Seen::default()));
         CHANGE.with(|c| c.set(None));
+    }
+
+    /// A broken pipe is what Linux's kernel makes of one: `SIGPIPE` to the
+    /// calling thread -- `SI_USER`, from this process -- then `EPIPE`, set
+    /// after the handler has run; nothing raised for `MSG_NOSIGNAL`; and an
+    /// ignored signal discarded, a blocked one left pending.
+    #[test]
+    fn a_broken_pipe_raises_sigpipe_then_answers_epipe() {
+        let mut old = Sigaction {
+            sa_handler: SIG_DFL,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        // SAFETY: reading the current action into a valid struct.
+        assert_eq!(
+            unsafe { sigaction(SIGPIPE, core::ptr::null(), &raw mut old) },
+            0
+        );
+        install_siginfo(SIGPIPE);
+
+        crate::errno::set_errno(0);
+        assert_eq!(broken_pipe(false), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPIPE);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.calls, seen.signo, seen.code), (1, SIGPIPE, SI_USER));
+        assert_eq!(seen.pid, crate::process::getpid());
+
+        // MSG_NOSIGNAL's form: EPIPE alone.
+        crate::errno::set_errno(0);
+        assert_eq!(broken_pipe(true), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPIPE);
+        assert_eq!(SEEN.with(core::cell::Cell::get).calls, 1);
+
+        // Raised for a transfer that reports its count: errno untouched.
+        crate::errno::set_errno(4321);
+        raise_sigpipe();
+        assert_eq!(crate::errno::get_errno(), 4321);
+        assert_eq!(SEEN.with(core::cell::Cell::get).calls, 2);
+
+        // A handler that changes errno does not change what the write says.
+        extern "C" fn clobbers_errno(_sig: i32) {
+            crate::errno::set_errno(crate::errno::EINTR);
+        }
+        signal(SIGPIPE, clobbers_errno as *const () as SighandlerT);
+        assert_eq!(broken_pipe(false), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPIPE);
+
+        // Ignored: discarded.
+        install_siginfo(SIGPIPE);
+        signal(SIGPIPE, SIG_IGN);
+        assert_eq!(broken_pipe(false), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPIPE);
+        assert_eq!(SEEN.with(core::cell::Cell::get).calls, 0);
+        assert!(kept_pending().is_empty());
+
+        // Blocked: left pending, the handler not run.
+        install_siginfo(SIGPIPE);
+        let mut set = SigsetT::EMPTY;
+        let mut was = SigsetT::EMPTY;
+        // SAFETY: valid sets.
+        unsafe {
+            assert_eq!(sigaddset(&raw mut set, SIGPIPE), 0);
+        }
+        assert_eq!(sigprocmask(SIG_BLOCK, &raw const set, &raw mut was), 0);
+        assert_eq!(broken_pipe(false), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPIPE);
+        assert_eq!(SEEN.with(core::cell::Cell::get).calls, 0);
+        let kept: std::vec::Vec<i32> = kept_pending().into_iter().map(|(sig, _)| sig).collect();
+        assert_eq!(kept, [SIGPIPE]);
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const was, core::ptr::null_mut()),
+            0
+        );
+
+        // SAFETY: restoring the action read at the start.
+        assert_eq!(
+            unsafe { sigaction(SIGPIPE, &raw const old, core::ptr::null_mut()) },
+            0
+        );
     }
 
     /// An `SA_SIGINFO` handler is called with a `siginfo_t` saying who sent

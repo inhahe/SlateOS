@@ -2935,6 +2935,18 @@ D's to act on once answered).
       both is `services/ctest-sysvipc`, run by lane A on request.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
+  **A broken pipe raises `SIGPIPE` -- 2026-10-06 (lane D).** A write into a
+  pipe or stream socket with no reader sends `SIGPIPE` to the writer, then
+  fails with `EPIPE`, as Linux's kernel does (design-decisions §1176), so a
+  C program behind `| head -1` ends as on Linux. `MSG_NOSIGNAL` and an
+  ignored signal leave `EPIPE` alone. With it, these now answer as Linux 6.6
+  does (measured):
+  - TCP sockets never connected, and listening ones, for read, write, send
+    and receive;
+  - `sendto` and `recvfrom` on unix-domain stream sockets.
+
+  The ring-3 check is `services/ctest-sigpipe`. The Linux ABI's half is
+  asked of lane A (`requests/d-a-linux-programs-never-get-sigpipe.md`).
 
 - `[x]` `[D]` **The image carries fonts -- 2026-09-26**, lane D's half of
   `requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`.

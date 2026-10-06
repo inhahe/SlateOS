@@ -72,11 +72,13 @@ impl Calls for Fake {
             errno::set_errno(e);
             return MAP_FAILED;
         }
-        let layout = Layout::from_size_align(length, PAGE).unwrap();
-        // SAFETY: `length` is not zero (mmap refused that already).
+        // Whole pages, as the kernel maps them.
+        let whole = length.next_multiple_of(PAGE);
+        let layout = Layout::from_size_align(whole, PAGE).unwrap();
+        // SAFETY: `whole` is not zero (mmap refused a zero length already).
         let p = unsafe { alloc_zeroed(layout) };
         assert!(!p.is_null());
-        *self.memory.borrow_mut() = Some((p, length));
+        *self.memory.borrow_mut() = Some((p, whole));
         p.cast()
     }
 
@@ -109,13 +111,11 @@ impl Calls for Fake {
 
     fn unmap(&self, p: *mut c_void, length: SizeT) -> i32 {
         self.log.borrow_mut().push(format!("unmap {length}"));
-        let mine = self.memory.borrow_mut().take();
-        assert_eq!(
-            mine.map(|(m, l)| (m.cast::<c_void>(), l)),
-            Some((p, length))
-        );
+        let (mine, whole) = self.memory.borrow_mut().take().unwrap();
+        assert_eq!(mine.cast::<c_void>(), p);
+        assert_eq!(whole, length.next_multiple_of(PAGE));
         // SAFETY: allocated by `anonymous` with this layout.
-        unsafe { dealloc(p.cast(), Layout::from_size_align(length, PAGE).unwrap()) };
+        unsafe { dealloc(mine, Layout::from_size_align(whole, PAGE).unwrap()) };
         0
     }
 
@@ -197,6 +197,33 @@ fn an_offset_maps_from_there() {
             .get(20_000 - 16384..)
             .is_some_and(|t| t.iter().all(|&b| b == 0))
     );
+}
+
+/// Linux maps whole pages: past `length`, to the end of its last page, the
+/// file's bytes are there too where the file has them, and zeros after.
+#[test]
+fn the_last_page_is_mapped_whole_as_linux_maps_it() {
+    let file: Vec<u8> = (0..1000u32)
+        .map(|i| u8::try_from(i % 200 + 1).unwrap())
+        .collect();
+    let fake = Fake::file(&file);
+    let fd = TestFd::new(HandleKind::File, O_RDONLY);
+    errno::set_errno(0);
+    let p = map_with(
+        &fake,
+        core::ptr::null_mut(),
+        100,
+        PROT_READ,
+        MAP_PRIVATE,
+        fd.0,
+        0,
+    );
+    assert_ne!(p, MAP_FAILED);
+    // SAFETY: the stand-in gave a whole page.
+    let page = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), PAGE) };
+    assert_eq!(page.get(..1000), Some(&file[..]));
+    assert!(page.get(1000..).is_some_and(|t| t.iter().all(|&b| b == 0)));
+    assert_eq!(fake.log().get(1), Some(&format!("read {PAGE} at 0")));
 }
 
 #[test]

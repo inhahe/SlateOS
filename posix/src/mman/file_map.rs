@@ -64,6 +64,10 @@ use crate::fcntl::{O_ACCMODE, O_RDONLY, O_RDWR, O_WRONLY, S_IFDIR, S_IFMT};
 use crate::fdtable::{self, HandleKind};
 use crate::types::{Fd, OffT, SizeT, SsizeT};
 
+/// The page a mapping is made of: the kernel maps whole ones, so a mapping's
+/// last page is all there, past `length`.
+const PAGE: SizeT = crate::unistd::PAGE_SIZE;
+
 /// Map `length` bytes of `fd`'s file from `offset` (`mmap` with
 /// `MAP_ANONYMOUS` clear, past its own checks).
 pub(super) fn map(
@@ -148,7 +152,10 @@ fn map_with(
     if p == MAP_FAILED {
         return MAP_FAILED;
     }
-    let made = fill(calls, p.cast(), length, fd, offset).and_then(|()| {
+    // Whole pages, as Linux maps them: the bytes from `length` to the end of
+    // its last page are the file's too, where the file has bytes there.
+    let span = length.checked_next_multiple_of(PAGE).unwrap_or(length);
+    let made = fill(calls, p.cast(), span, fd, offset).and_then(|()| {
         if prot == PROT_READ | PROT_WRITE || calls.protect(p, length, prot) == 0 {
             Ok(())
         } else {
@@ -202,9 +209,9 @@ fn refusal(
     Ok(())
 }
 
-/// Read the file into `dst` from `offset`, until `length` bytes or the end of
-/// the file. What lies past the end stays as the anonymous memory came:
-/// zeros.
+/// Read the file into `dst` from `offset`, until `length` bytes (`dst`'s
+/// whole pages) or the end of the file. What lies past the end stays as the
+/// anonymous memory came: zeros.
 fn fill(calls: &dyn Calls, dst: *mut u8, length: SizeT, fd: Fd, offset: OffT) -> Result<(), i32> {
     let mut done: SizeT = 0;
     while done < length {

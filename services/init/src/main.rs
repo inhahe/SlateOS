@@ -86,13 +86,13 @@ const SYS_SLEEP: u64 = 11;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CONSOLE_READ_CHAR: u64 = 101;
 const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
-const SYS_PROCESS_SPAWN: u64 = 500;
+const SYS_CAP_QUERY: u64 = 400;
 const SYS_PROCESS_WAIT: u64 = 501;
 const SYS_PROCESS_TRY_WAIT: u64 = 507;
 #[allow(dead_code)] // Services call this, not init itself.
 const SYS_NOTIFY_READY: u64 = 508;
 const SYS_PROCESS_IS_READY: u64 = 509;
-const SYS_PROCESS_SPAWN_EX: u64 = 517;
+const SYS_PROCESS_SPAWN_EX2: u64 = 559;
 const SYS_MMAP: u64 = 20;
 const SYS_MUNMAP: u64 = 21;
 const SYS_FS_READ_FILE: u64 = 600;
@@ -362,22 +362,11 @@ fn fs_rmdir(path: &[u8]) -> i64 {
     syscall2(SYS_FS_RMDIR, path.as_ptr() as u64, path.len() as u64)
 }
 
-/// Spawn a new process from ELF data in memory (simple variant).
-/// Returns the child PID (positive) or negative error.
-#[allow(dead_code)]
-fn process_spawn(elf: &[u8], name: &[u8]) -> i64 {
-    syscall4(
-        SYS_PROCESS_SPAWN,
-        elf.as_ptr() as u64,
-        elf.len() as u64,
-        name.as_ptr() as u64,
-        name.len() as u64,
-    )
-}
-
-/// Extended spawn arguments struct (matches kernel's SpawnExArgs layout).
+/// `SYS_PROCESS_SPAWN_EX2`'s argument: the kernel's `SpawnEx2Args`
+/// (`kernel/src/proc/spawn.rs`), every field a `u64`, its own size first.
 #[repr(C)]
-struct SpawnExArgs {
+struct SpawnEx2Args {
+    struct_size: u64,
     elf_ptr: u64,
     elf_len: u64,
     name_ptr: u64,
@@ -390,27 +379,67 @@ struct SpawnExArgs {
     envp_ptr: u64,
     envp_len: u64,
     envc: u64,
+    /// [`SPAWN_CAP_MODE_SUBSET`]: the child holds exactly `cap_ptr`'s list.
+    cap_mode: u64,
+    cap_ptr: u64,
+    cap_count: u64,
+    /// No directory of its own: the child starts in init's.
+    cwd_ptr: u64,
+    cwd_len: u64,
 }
 
-/// Spawn a process with arguments and environment variables.
+/// `SpawnEx2Args::cap_mode`: the child holds exactly the listed
+/// capabilities, each one the caller holds itself.
+const SPAWN_CAP_MODE_SUBSET: u64 = 1;
+
+/// The kernel's `PermissionDenied`: from a spawn, a `caps:` entry init does
+/// not hold.
+const ERR_PERMISSION_DENIED: i64 = -400;
+
+/// The most capabilities init hands one child: its class-wide grants -- six
+/// today -- and a service's `caps:`, up to `init::MAX_SVC_CAPS`.
+const MAX_CHILD_CAPS: usize = 32;
+
+/// How much of init's own capability table is read on the stack. It grows
+/// by a `Process` entry for each child init starts; a larger table is read
+/// into a mapping.
+const STACK_HELD_CAPS: usize = 64;
+
+/// Start a process from the ELF in `elf`: `argv_data` and `envp_data` are
+/// packed NUL-terminated strings, `argc` and `envc` of them. It holds the
+/// capabilities `init::child_caps` picks -- init's class-wide grants, less
+/// the kinds init holds only to pass on, plus `grants`, a service's `caps:`
+/// (design-decisions 1174). Every process init starts comes through here,
+/// so none is handed what init holds for one service.
 ///
-/// `elf`: raw ELF binary data.
-/// `name`: process name.
-/// `argv_data`: packed null-terminated argument strings.
-/// `argc`: number of arguments.
-/// `envp_data`: packed null-terminated environment strings.
-/// `envc`: number of environment variables.
-///
-/// Returns: child PID (positive) or negative error.
-fn process_spawn_ex(
+/// Returns the child's pid, or a negative error: the kernel's -- with
+/// [`ERR_PERMISSION_DENIED`] for a grant init does not hold -- or `-1` when
+/// init's own capabilities could not be read or are too many to pass on.
+fn process_spawn(
     elf: &[u8],
     name: &[u8],
     argv_data: &[u8],
     argc: usize,
     envp_data: &[u8],
     envc: usize,
+    grants: &[init::CapGrant],
 ) -> i64 {
-    let args = SpawnExArgs {
+    let mut child = [init::CapEntryInfo::default(); MAX_CHILD_CAPS];
+    let count = match with_own_caps(|held| init::child_caps(held, grants, &mut child)) {
+        Ok(Some(n)) => n,
+        Ok(None) => {
+            print("[init] more capabilities to pass on than a spawn can carry\n");
+            return -1;
+        }
+        Err(e) => {
+            print("[init] could not read init's own capabilities: error ");
+            print_i64(e);
+            print("\n");
+            return -1;
+        }
+    };
+    let args = SpawnEx2Args {
+        struct_size: core::mem::size_of::<SpawnEx2Args>() as u64,
         elf_ptr: elf.as_ptr() as u64,
         elf_len: elf.len() as u64,
         name_ptr: name.as_ptr() as u64,
@@ -423,8 +452,62 @@ fn process_spawn_ex(
         envp_ptr: envp_data.as_ptr() as u64,
         envp_len: envp_data.len() as u64,
         envc: envc as u64,
+        cap_mode: SPAWN_CAP_MODE_SUBSET,
+        cap_ptr: child.as_ptr() as u64,
+        cap_count: count as u64,
+        cwd_ptr: 0,
+        cwd_len: 0,
     };
-    syscall1(SYS_PROCESS_SPAWN_EX, &args as *const SpawnExArgs as u64)
+    syscall1(SYS_PROCESS_SPAWN_EX2, &args as *const SpawnEx2Args as u64)
+}
+
+/// Run `f` over init's own capability table, as `SYS_CAP_QUERY` reads it:
+/// into a stack buffer when it fits, else into a mapping unmapped after.
+/// Only init's own thread changes its table -- each spawn adds the child's
+/// `Process` entry -- so the count and the read agree; a table that grew
+/// between them anyway is the kernel's `BufferTooSmall`, returned.
+fn with_own_caps<R>(f: impl FnOnce(&[init::CapEntryInfo]) -> R) -> Result<R, i64> {
+    let count = syscall2(SYS_CAP_QUERY, 0, 0);
+    if count < 0 {
+        return Err(count);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let count = count as usize;
+    if count <= STACK_HELD_CAPS {
+        let mut buf = [init::CapEntryInfo::default(); STACK_HELD_CAPS];
+        let n = syscall2(
+            SYS_CAP_QUERY,
+            buf.as_mut_ptr() as u64,
+            STACK_HELD_CAPS as u64,
+        );
+        if n < 0 {
+            return Err(n);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let n = (n as usize).min(STACK_HELD_CAPS);
+        return Ok(f(&buf[..n]));
+    }
+    let size = count.saturating_mul(core::mem::size_of::<init::CapEntryInfo>()) as u64;
+    let mapped = mmap(size);
+    if mapped < 0 {
+        return Err(mapped);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let addr = mapped as u64;
+    let n = syscall2(SYS_CAP_QUERY, addr, count as u64);
+    let result = if n < 0 {
+        Err(n)
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        let n = (n as usize).min(count);
+        // SAFETY: the mapping is `size` writable bytes, page-aligned, room
+        // for `count` entries; the kernel wrote `n` of them, `n <= count`,
+        // and `CapEntryInfo` is plain integers, valid for any bytes.
+        let held = unsafe { core::slice::from_raw_parts(addr as *const init::CapEntryInfo, n) };
+        Ok(f(held))
+    };
+    munmap(addr, size);
+    result
 }
 
 /// Wait for a child process to exit.
@@ -673,7 +756,7 @@ const BACKOFF_RESET_THRESHOLD_NS: u64 = 10_000_000_000;
 /// forever at the supervisor's tick rate.
 const MAX_WAIT_ERRORS: u32 = 5;
 
-/// Maximum size of packed argv/envp data for `process_spawn_ex()`.
+/// Maximum size of packed argv/envp data for `process_spawn()`.
 const MAX_PACKED_ARGS: usize = 1024;
 
 /// Default environment passed to spawned processes.
@@ -748,6 +831,11 @@ struct Service {
     svc_env: [[u8; MAX_SVC_ENV_LEN]; MAX_SVC_ENV],
     svc_env_lens: [usize; MAX_SVC_ENV],
     svc_env_count: usize,
+
+    /// Capabilities beyond init's usual ones, from `caps:` in
+    /// /etc/startup.conf: the first `svc_cap_count` (design-decisions 1174).
+    svc_caps: [init::CapGrant; init::MAX_SVC_CAPS],
+    svc_cap_count: usize,
 }
 
 impl Service {
@@ -776,6 +864,8 @@ impl Service {
             svc_env: [[0u8; MAX_SVC_ENV_LEN]; MAX_SVC_ENV],
             svc_env_lens: [0; MAX_SVC_ENV],
             svc_env_count: 0,
+            svc_caps: [init::CapGrant::NONE; init::MAX_SVC_CAPS],
+            svc_cap_count: 0,
         }
     }
 }
@@ -871,9 +961,22 @@ impl ServiceRegistry {
         svc.waiting_on_deps = false;
         svc.svc_arg_count = 0;
         svc.svc_env_count = 0;
+        svc.svc_cap_count = 0;
 
         self.count += 1;
         Some(idx)
+    }
+
+    /// Set the capabilities a registered service gets beyond init's usual
+    /// ones (`caps:`). `parse_service_line` has already refused more than
+    /// the slots hold, so all of `caps` fits.
+    fn set_caps(&mut self, idx: usize, caps: &[init::CapGrant]) {
+        let Some(svc) = self.services.get_mut(idx) else {
+            return;
+        };
+        let n = caps.len().min(init::MAX_SVC_CAPS);
+        svc.svc_caps[..n].copy_from_slice(&caps[..n]);
+        svc.svc_cap_count = n;
     }
 
     /// Set extra arguments (argv[1..]) for a registered service.
@@ -1102,6 +1205,9 @@ impl ServiceRegistry {
             e += 1;
         }
 
+        let caps_copy = self.services[idx].svc_caps;
+        let cap_count = self.services[idx].svc_cap_count.min(init::MAX_SVC_CAPS);
+
         let path = &path_buf[..path_len];
         let name = &name_buf[..name_len];
 
@@ -1238,13 +1344,14 @@ impl ServiceRegistry {
             e += 1;
         }
 
-        let pid = process_spawn_ex(
+        let pid = process_spawn(
             elf_data,
             name,
             &argv_buf[..argv_pos],
             argc,
             &envp_buf[..envp_pos],
             envc,
+            &caps_copy[..cap_count],
         );
 
         // Free mmap'd buffer now that spawn has copied the ELF data.
@@ -1257,6 +1364,12 @@ impl ServiceRegistry {
             console_write(name);
             print(": error ");
             print_i64(pid);
+            if pid == ERR_PERMISSION_DENIED && cap_count > 0 {
+                // The kernel hands a child only what its parent holds, with
+                // the same id: a class grant passes on the class, not one
+                // object of it, and one object does not pass on the class.
+                print(" -- init does not hold a capability its caps: names, at that id");
+            }
             print("\n");
             return pid;
         }
@@ -1834,13 +1947,14 @@ fn cmd_spawn(args: &[u8]) {
     print_u64(file_size as u64);
     print(" bytes)...\n");
 
-    let pid = process_spawn_ex(
+    let pid = process_spawn(
         elf_data,
         name,
         &argv_data[..argv_pos],
         argc,
         DEFAULT_ENVP,
         DEFAULT_ENVP_COUNT,
+        &[],
     );
 
     // Free mmap'd buffer after spawn has copied the ELF.
@@ -2360,17 +2474,22 @@ fn report_record_failure(path: &[u8], what: &[u8]) {
 /// /bin/logger args:--verbose,-d
 /// /bin/network args:--dhcp depends:logger
 /// /bin/webserver args:--port,8080 env:PORT=8080 depends:logger,network
+/// /bin/compositor depends:logger caps:InputDevice/0/r,Service/0/w
 /// ```
 ///
 /// Each non-empty, non-comment line is a path optionally followed by
-/// keyword sections:
+/// keyword sections, in any order:
 ///   - `args:a,b,c` — extra arguments (argv[1..])
 ///   - `env:K=V,K2=V2` — per-service environment variables
 ///   - `depends:svc1,svc2` — dependency names
+///   - `caps:Type/id/rights,...` — capabilities beyond init's usual ones
+///     (design-decisions 1174; `init::parse_caps` says what it takes)
 ///
-/// Keywords can appear in any order.  Services with no dependencies
-/// are started immediately.  Services with dependencies are queued
-/// and started automatically once all deps have signaled ready.
+/// A line init cannot read -- an unknown keyword, one given twice, a
+/// `caps:` entry it does not know -- is refused: its service is not started,
+/// and the console says which word. Services with no dependencies are
+/// started immediately; services with dependencies are queued and started
+/// once all of them have signaled ready.
 ///
 /// If the file doesn't exist, this is a no-op.
 fn load_startup_services(registry: &mut ServiceRegistry) {
@@ -2397,36 +2516,9 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
 
         // Skip empty lines and comments.
         if !line.is_empty() && line[0] != b'#' {
-            let parsed = parse_service_line(line);
-
-            match registry.register(parsed.path) {
-                Some(idx) => {
-                    if !parsed.deps.is_empty() {
-                        registry.set_dependencies(idx, parsed.deps);
-                    }
-                    if !parsed.args.is_empty() {
-                        registry.set_arguments(idx, parsed.args);
-                    }
-                    if !parsed.env.is_empty() {
-                        registry.set_env(idx, parsed.env);
-                    }
-
-                    if registry.services[idx].dep_count > 0 {
-                        // Has dependencies — don't start yet, mark as waiting.
-                        registry.services[idx].waiting_on_deps = true;
-                        print("[init] ");
-                        console_write(parsed.path);
-                        print(" waiting on dependencies\n");
-                    } else {
-                        // No dependencies — start immediately.
-                        registry.start_service(idx);
-                    }
-                }
-                None => {
-                    print("[init] Warning: could not register ");
-                    console_write(parsed.path);
-                    print(" (registry full?)\n");
-                }
+            match init::parse_service_line(line) {
+                Ok(parsed) => register_startup_service(registry, &parsed),
+                Err(e) => report_refused_line(line, e),
             }
         }
 
@@ -2434,103 +2526,76 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
     }
 }
 
-/// Parsed fields from a service config line.
-struct ServiceLine<'a> {
-    path: &'a [u8],
-    args: &'a [u8],
-    env: &'a [u8],
-    deps: &'a [u8],
+/// Register one service `/etc/startup.conf` names, and start it unless it
+/// waits on others.
+fn register_startup_service(registry: &mut ServiceRegistry, parsed: &init::ServiceLine<'_>) {
+    match registry.register(parsed.path) {
+        Some(idx) => {
+            if !parsed.deps.is_empty() {
+                registry.set_dependencies(idx, parsed.deps);
+            }
+            if !parsed.args.is_empty() {
+                registry.set_arguments(idx, parsed.args);
+            }
+            if !parsed.env.is_empty() {
+                registry.set_env(idx, parsed.env);
+            }
+            registry.set_caps(idx, parsed.caps());
+
+            if registry.services[idx].dep_count > 0 {
+                // Has dependencies — don't start yet, mark as waiting.
+                registry.services[idx].waiting_on_deps = true;
+                print("[init] ");
+                console_write(parsed.path);
+                print(" waiting on dependencies\n");
+            } else {
+                // No dependencies — start immediately.
+                registry.start_service(idx);
+            }
+        }
+        None => {
+            print("[init] Warning: could not register ");
+            console_write(parsed.path);
+            print(" (registry full?)\n");
+        }
+    }
 }
 
-/// Find a keyword prefix (`"keyword:"`) in `line` and return the
-/// value after the colon (up to the next space or end of line) and
-/// the line with that keyword section removed.  Used by
-/// `parse_service_line` to extract `args:`, `env:`, `depends:`.
-fn find_keyword<'a>(line: &'a [u8], keyword: &[u8]) -> (Option<&'a [u8]>, &'a [u8]) {
-    let kw_len = keyword.len();
-    let mut i = 0;
-    while i + kw_len <= line.len() {
-        let mut matches = true;
-        let mut k = 0;
-        while k < kw_len {
-            if line[i + k] != keyword[k] {
-                matches = false;
-                break;
-            }
-            k += 1;
+/// Say on the console why a line of `/etc/startup.conf` starts nothing.
+fn report_refused_line(line: &[u8], e: init::LineError<'_>) {
+    print("[init] /etc/startup.conf: not starting `");
+    console_write(line);
+    print("`: ");
+    match e {
+        init::LineError::UnknownKeyword(word) => {
+            print("no keyword init knows in `");
+            console_write(word);
+            print("` (args:, env:, depends:, caps:)");
         }
-        if matches {
-            // Find end of value (next space or end of line).
-            let val_start = i + kw_len;
-            let mut val_end = val_start;
-            while val_end < line.len() && line[val_end] != b' ' && line[val_end] != b'\t' {
-                val_end += 1;
-            }
-            let value = trim(&line[val_start..val_end]);
-            // Return the portion before this keyword as the remaining
-            // line.  Keywords always appear after the path, so the
-            // path is preserved.  We can't concatenate slices without
-            // allocation, so each caller gets progressively shorter
-            // remaining text — but since keywords don't overlap, this
-            // correctly isolates the path.
-            let before = trim(&line[..i]);
-            return (Some(value), before);
+        init::LineError::Repeated(word) => {
+            print("a keyword given twice, at `");
+            console_write(word);
+            print("`");
         }
-        i += 1;
+        init::LineError::BadCap(entry) => {
+            print("caps: entry `");
+            console_write(entry);
+            print("` is not Type/id/rights, with a type init passes on (");
+            let mut first = true;
+            for &(name, _) in init::DELEGATED_TYPES {
+                if !first {
+                    print(", ");
+                }
+                console_write(name);
+                first = false;
+            }
+            print("), a decimal id, and rights from r and w, named once");
+        }
+        init::LineError::TooManyCaps => {
+            print("more caps: entries than init passes on to one service");
+        }
     }
-    (None, line)
-}
-
-/// Parse a service config line into components.
-///
-/// Format: `/path/to/binary [args:a,b,c] [env:K=V,K2=V2] [depends:svc1,svc2]`
-///
-/// Keywords can appear in any order after the path.  Values after
-/// each keyword run until the next whitespace.
-///
-/// Examples:
-/// ```text
-/// /bin/logger
-/// /bin/logger args:--verbose
-/// /bin/network args:--dhcp depends:logger
-/// /bin/webserver args:--port,8080 env:PORT=8080 depends:logger,network
-/// ```
-fn parse_service_line(line: &[u8]) -> ServiceLine<'_> {
-    let mut remaining = line;
-    let mut deps: &[u8] = &[];
-    let mut args: &[u8] = &[];
-    let mut env: &[u8] = &[];
-
-    // Extract depends: keyword.
-    let (d, rest) = find_keyword(remaining, b"depends:");
-    if let Some(d_val) = d {
-        deps = d_val;
-        remaining = rest;
-    }
-
-    // Extract args: keyword.
-    let (a, rest) = find_keyword(remaining, b"args:");
-    if let Some(a_val) = a {
-        args = a_val;
-        remaining = rest;
-    }
-
-    // Extract env: keyword.
-    let (e, rest) = find_keyword(remaining, b"env:");
-    if let Some(e_val) = e {
-        env = e_val;
-        remaining = rest;
-    }
-
-    // What's left (trimmed) is the path.
-    let path = trim(remaining);
-
-    ServiceLine {
-        path,
-        args,
-        env,
-        deps,
-    }
+    print("\n");
 }
 
 /// Process entry point.  Called by the kernel via IRETQ to ring 3.

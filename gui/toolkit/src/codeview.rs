@@ -60,6 +60,14 @@
 //! host: while [`CodeView::has_work`], it calls [`CodeView::work`] and draws
 //! again, and the colours arrive a frame at a time rather than the window
 //! stopping until they do.
+//!
+//! # To tools
+//!
+//! The code is a text area to automation and assistive tools
+//! (`accessible`, [`CodePart`]) -- set as a paste over all of it, scrolled
+//! as its scrollbar's thumb drags it -- with the find bar's fields and
+//! switches over it while the bar is open, each typed into or clicked as
+//! its user would.
 
 use core::ops::Range;
 use core::time::Duration;
@@ -80,8 +88,10 @@ use crate::text;
 use crate::theme::with_alpha;
 use crate::wheel;
 
+mod accessible;
 mod findbar;
 
+pub use accessible::CodePart;
 use findbar::{BarAction, Field, FindBar};
 
 /// Room between the gutter's numbers and its edges, in cells.

@@ -199,6 +199,37 @@ impl FindBar {
         *slot = !*slot;
     }
 
+    /// Whether a switch is on.
+    pub(super) fn is_on(&self, switch: Switch) -> bool {
+        match switch {
+            Switch::Case => self.case_sensitive,
+            Switch::Word => self.whole_word,
+            Switch::Regex => self.regex,
+        }
+    }
+
+    /// What the bar says of the matches -- why the pattern is not one, that
+    /// there are none, which of them the selection is on (`current`), or how
+    /// many -- and whether what it says is that the pattern is wrong; `None`
+    /// while there is nothing to find. What it draws, and what a tool reads.
+    pub(super) fn status(&self, current: Option<usize>) -> Option<(String, bool)> {
+        if let Some(error) = &self.error {
+            return Some((error.clone(), true));
+        }
+        if self.find.text().is_empty() {
+            return None;
+        }
+        if self.matches.is_empty() {
+            return Some(("No matches".to_owned(), false));
+        }
+        let of = self.matches.len();
+        let said = match current {
+            Some(i) => format!("{} of {of}", i.saturating_add(1)),
+            None => format!("{of} matches"),
+        };
+        Some((said, false))
+    }
+
     /// Where the parts of the bar are, for a bar across `bounds`' top: the
     /// find field, the replace field (when shown), and the three switches.
     pub(super) fn layout(&self, bounds: Rect) -> Layout {
@@ -280,11 +311,7 @@ impl FindBar {
             );
         }
         for (switch, rect) in layout.switches {
-            let on = match switch {
-                Switch::Case => self.case_sensitive,
-                Switch::Word => self.whole_word,
-                Switch::Regex => self.regex,
-            };
+            let on = self.is_on(switch);
             let label = match switch {
                 Switch::Case => "Aa",
                 Switch::Word => "W",
@@ -310,25 +337,12 @@ impl FindBar {
                 overflow: TextOverflow::Clip,
             });
         }
-        let (status, color) = if let Some(error) = &self.error {
-            (error.clone(), p.ink(p.red))
-        } else if self.find.text().is_empty() {
-            (String::new(), p.subtext0)
-        } else if self.matches.is_empty() {
-            ("No matches".to_owned(), p.subtext0)
-        } else {
-            let of = self.matches.len();
-            match current {
-                Some(i) => (format!("{} of {of}", i.saturating_add(1)), p.subtext0),
-                None => (format!("{of} matches"), p.subtext0),
-            }
-        };
-        if !status.is_empty() {
+        if let Some((status, wrong)) = self.status(current) {
             sink.emit(RenderCommand::Text {
                 x: layout.count.x,
                 y: layout.count.y + (layout.count.h - scaled(FONT_SIZE)) / 2.0,
                 text: status,
-                color,
+                color: if wrong { p.ink(p.red) } else { p.subtext0 },
                 font_size: scaled(FONT_SIZE),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((bounds.right() - layout.count.x - scaled(PADDING)).max(0.0)),

@@ -64,7 +64,15 @@
 //! Cut, Copy, Paste and *Paste as plain text*, Delete, Select all -- and
 //! Bold, Italic and Underline, ticked where what is shown has them
 //! ([`RichInput::edit_menu`], [`RichInput::edit_command`]).
+//!
+//! # To tools
+//!
+//! A field is a text area to automation and assistive tools, its toolbar's
+//! switches check boxes and its other buttons buttons, through the field
+//! with what its host draws it as ([`RichInputAccess`]): its text set as a
+//! paste over all of it, each button pressed as clicked.
 
+mod accessible;
 pub mod doc;
 pub mod layout;
 pub mod toolbar;
@@ -72,6 +80,7 @@ pub mod toolbar;
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
 
+pub use accessible::{RichInputAccess, RichInputPart};
 pub use doc::{Format, OBJECT, RichDoc, Run};
 pub use layout::{Line, Metrics, Piece, Shown};
 

@@ -2755,9 +2755,14 @@ authors never wrote a single automation handler.
   holding its text, scrolled as the wheel scrolls it; a rich view's
   blocks as what they are -- headings, paragraphs, items of a list,
   code, pictures by their words -- and its links, each pressed as
-  clicked, scrolled into sight first. Not yet: its code editor
-  (`codeview`) and rich field (`richinput`). There is no font picker yet
-  to show.*
+  clicked, scrolled into sight first. Its code editor
+  (`guitk::codeview::CodePart`): the code, set as a paste over all of it
+  and scrolled as its scrollbar's thumb drags it, and while it is open
+  the find bar -- its fields typed into, its switches clicked, and what
+  it says of the matches. Its rich field
+  (`guitk::richinput::RichInputAccess`): its text, set as a paste, and
+  its toolbar's switches and buttons, each pressed as clicked. There is
+  no font picker yet to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

@@ -3920,6 +3920,100 @@ fn read_process_count() -> u16 {
     1
 }
 
+/// What `sysinfo` takes from `/proc/meminfo`, which no system call reports:
+/// each in KiB, as the file gives it, and `None` where the file has no
+/// such line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MeminfoExtras {
+    swap_total: Option<u64>,
+    swap_free: Option<u64>,
+    shmem: Option<u64>,
+    buffers: Option<u64>,
+}
+
+/// Read the lines of a `/proc/meminfo` text `sysinfo` needs: `SwapTotal`,
+/// `SwapFree`, `Shmem` and `Buffers`, each `Key:`, blanks, a decimal count
+/// and ` kB`.  A line in another shape is passed over.
+fn parse_meminfo(text: &[u8]) -> MeminfoExtras {
+    let mut out = MeminfoExtras::default();
+    for line in text.split(|&b| b == b'\n') {
+        let Some((key, rest)) = line
+            .iter()
+            .position(|&b| b == b':')
+            .and_then(|colon| line.split_at_checked(colon))
+        else {
+            continue;
+        };
+        let slot = match key {
+            b"SwapTotal" => &mut out.swap_total,
+            b"SwapFree" => &mut out.swap_free,
+            b"Shmem" => &mut out.shmem,
+            b"Buffers" => &mut out.buffers,
+            _ => continue,
+        };
+        // `rest` is ":", blanks, the count, " kB".
+        let Some(digits) = rest
+            .get(1..)
+            .map(<[u8]>::trim_ascii)
+            .and_then(|r| r.strip_suffix(b" kB"))
+            .map(<[u8]>::trim_ascii_end)
+        else {
+            continue;
+        };
+        if digits.is_empty() {
+            continue;
+        }
+        *slot = digits.iter().try_fold(0u64, |n, &d| {
+            let digit = char::from(d).to_digit(10)?;
+            n.checked_mul(10)?.checked_add(u64::from(digit))
+        });
+    }
+    out
+}
+
+/// `/proc/meminfo`'s figures, or none when it cannot be read -- which
+/// takes a File capability (the same limit as
+/// `known-issues/D-POSIX-GETGROUPS-NEEDS-A-FILE-CAPABILITY.md`).
+#[cfg(target_os = "none")]
+fn read_meminfo() -> MeminfoExtras {
+    let saved = errno::get_errno();
+    let fd = crate::file::open(
+        b"/proc/meminfo\0".as_ptr(),
+        crate::fcntl::O_RDONLY | crate::fcntl::O_CLOEXEC,
+        0,
+    );
+    let mut out = MeminfoExtras::default();
+    if fd >= 0 {
+        // The file is about a kilobyte; a fuller one is read as far as
+        // this holds, and the keys wanted are in its first half.
+        let mut buf = [0u8; 4096];
+        let mut len = 0usize;
+        while let Some(room) = buf.get_mut(len..).filter(|r| !r.is_empty()) {
+            let n = crate::file::read(fd, room.as_mut_ptr(), room.len());
+            match usize::try_from(n) {
+                Ok(0) => break,
+                Ok(n) => len = len.saturating_add(n).min(buf.len()),
+                Err(_) if errno::get_errno() == errno::EINTR => {}
+                Err(_) => break,
+            }
+        }
+        // Nothing was written through `fd`, so a failed close loses nothing.
+        let _ = crate::file::close(fd);
+        out = parse_meminfo(buf.get(..len).unwrap_or_default());
+    }
+    errno::set_errno(saved);
+    out
+}
+
+/// The host's: it has no kernel and no `/proc`, so a stand-in of the file's
+/// shape, with nothing in swap, read by the target's parser.
+#[cfg(not(target_os = "none"))]
+fn read_meminfo() -> MeminfoExtras {
+    parse_meminfo(
+        b"MemTotal: 262144 kB\nBuffers: 0 kB\nShmem: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+    )
+}
+
 /// Return overall system statistics.
 ///
 /// Fills the `Sysinfo` structure from real kernel data on the kernel
@@ -3932,9 +4026,13 @@ fn read_process_count() -> u16 {
 ///   multiplied by `mem_unit` (which is set to our 16 KiB frame size).
 /// - `procs`: live process count from `SYS_PROCESS_COUNT`, capped to
 ///   `u16::MAX` (the Linux ABI uses `unsigned short` here).
-/// - `sharedram` / `bufferram` / `totalswap` / `freeswap` / `totalhigh`
-///   / `freehigh`: 0 (no swap, no buffer-cache accounting, no high-mem
-///   region — we're 64-bit only).
+/// - `totalswap` / `freeswap` / `sharedram` / `bufferram`: `/proc/meminfo`'s
+///   `SwapTotal`, `SwapFree`, `Shmem` and `Buffers`, in `mem_unit`s -- no
+///   system call reports them.  Until 2026-10-06 all four were 0, which said
+///   "no swap" of a kernel that always has zram swap.  They are 0 still
+///   where the file cannot be read (a process holding no File capability).
+/// - `totalhigh` / `freehigh`: 0 -- no high-memory region on a 64-bit
+///   machine, as on Linux.
 ///
 /// On host builds, returns synthetic values (256 MiB total / 128 MiB free,
 /// zero loads, uptime 0) so unit tests get deterministic output.
@@ -3963,10 +4061,6 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
     unsafe {
         let s = &mut *info;
         s.uptime = uptime;
-        s.sharedram = 0;
-        s.bufferram = 0;
-        s.totalswap = 0;
-        s.freeswap = 0;
         s.procs = read_process_count();
         s._pad = [0; 6];
         s.totalhigh = 0;
@@ -4016,6 +4110,21 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
             s.freeram = 128 * 1024 * 1024;
             s.mem_unit = 1;
         }
+
+        // KiB to `mem_unit`s: Linux keeps these in the same units as
+        // `totalram`.
+        let extras = read_meminfo();
+        let bytes_per_unit = u64::from(s.mem_unit.max(1));
+        let units = |kib: Option<u64>| {
+            kib.unwrap_or(0)
+                .saturating_mul(1024)
+                .checked_div(bytes_per_unit)
+                .unwrap_or(0)
+        };
+        s.totalswap = units(extras.swap_total);
+        s.freeswap = units(extras.swap_free);
+        s.sharedram = units(extras.shmem);
+        s.bufferram = units(extras.buffers);
     }
 
     0
@@ -10043,6 +10152,68 @@ mod tests {
             size >= 64,
             "Sysinfo should be at least 64 bytes, got {size}"
         );
+    }
+
+    /// The kernel's `/proc/meminfo`, trimmed: the four lines `sysinfo`
+    /// reads, among the rest.
+    const MEMINFO: &[u8] = b"MemTotal:       1048576 kB\nMemFree:        524288 kB\n\
+MemAvailable:   524288 kB\nBuffers:        1024 kB\nCached:         2048 kB\n\
+Shmem:          512 kB\nSReclaimable:   0 kB\nMemUsed:        524288 kB\n\
+SwapTotal:      262144 kB\nSwapFree:       200000 kB\nSwapUsed:       62144 kB\n";
+
+    #[test]
+    fn meminfo_gives_swap_shared_and_buffers() {
+        assert_eq!(
+            parse_meminfo(MEMINFO),
+            MeminfoExtras {
+                swap_total: Some(262_144),
+                swap_free: Some(200_000),
+                shmem: Some(512),
+                buffers: Some(1024),
+            }
+        );
+    }
+
+    /// A key not there is `None`; a line not in the file's shape is passed
+    /// over, never read as 0.
+    #[test]
+    fn meminfo_lines_out_of_shape_are_passed_over() {
+        assert_eq!(parse_meminfo(b""), MeminfoExtras::default());
+        assert_eq!(
+            parse_meminfo(b"MemTotal: 5 kB\n"),
+            MeminfoExtras::default(),
+            "no key of interest"
+        );
+        let bad = b"SwapTotal: 12\nSwapFree: x kB\nShmem: kB\nBuffers 7 kB\n";
+        assert_eq!(parse_meminfo(bad), MeminfoExtras::default());
+        assert_eq!(
+            parse_meminfo(b"SwapTotal:99999999999999999999 kB\n").swap_total,
+            None,
+            "past u64"
+        );
+        // Blanks around the count are the file's own (it aligns the column).
+        assert_eq!(parse_meminfo(b"SwapTotal:\t7 kB \n").swap_total, Some(7));
+        assert_eq!(parse_meminfo(b"SwapTotal:7 kB").swap_total, Some(7));
+    }
+
+    /// The host's stand-in has no swap, so neither has `sysinfo` there, in
+    /// bytes as its `mem_unit` of 1 says.
+    #[test]
+    fn test_sysinfo_swap_comes_from_meminfo() {
+        let mut info = core::mem::MaybeUninit::<Sysinfo>::zeroed();
+        assert_eq!(sysinfo(info.as_mut_ptr()), 0);
+        // SAFETY: `sysinfo` succeeded and wrote every field.
+        let info = unsafe { info.assume_init() };
+        assert_eq!(
+            (
+                info.totalswap,
+                info.freeswap,
+                info.sharedram,
+                info.bufferram
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(read_meminfo().swap_total, Some(0), "the stand-in is read");
     }
 
     #[test]

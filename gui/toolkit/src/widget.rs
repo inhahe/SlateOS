@@ -47,9 +47,10 @@ use crate::text::TextCursor;
 
 use std::sync::Arc;
 
-use crate::css::compute::{self as css_compute, Computed, Env as CssEnv, Inherited};
+use crate::css::compute::{self as css_compute, Computed, Env as CssEnv, Inherited, InheritedLine};
 use crate::css::decl::{Declared, Family};
 use crate::css::sheet::{self as css_sheet, Block, StyleSheet, Subject, Warning};
+use crate::css::transition::{Animated, TransitionSpec, Transitions};
 
 /// How tall a progress bar is by default.
 const PROGRESS_HEIGHT: f32 = 12.0;
@@ -132,6 +133,14 @@ pub struct Widget {
     /// face here -- or `None` where no style gave it one, and it is in
     /// whatever its drawing is.
     font: Option<FontFamily>,
+    /// Its style's transitions: what it last was, and what of it is moving
+    /// -- kept from one layout to the next while a style of it has a
+    /// `transition` ([`crate::css::transition`]).
+    transitions: Option<Box<Transitions>>,
+    /// Whether its style has been computed before: a style it was shown in
+    /// is what a change is a change from, and before its first there is
+    /// none -- a widget appears in its style, rather than moving into it.
+    styled_before: bool,
 }
 
 /// A widget's own CSS, read: its block, and what in it was not.
@@ -156,6 +165,47 @@ struct Ancestor {
     focus: bool,
     enabled: bool,
     checked: bool,
+}
+
+/// What a widget's parent leaves it as its style is computed.
+struct Parent<'p> {
+    /// The style the parent is drawn in: what `inherit` takes, and `em`s of
+    /// a font size are of.
+    style: &'p Style,
+    /// The family the parent's text is in, where a style gave it one.
+    font: Option<FontFamily>,
+    /// The inherited properties a style set on the parent.
+    inherited: &'p Inherited,
+    /// What moves in the parent: what `transition: inherit` takes.
+    transition: &'p TransitionSpec,
+}
+
+/// Put what `transitions` is moving, of what `computed` leaves its children
+/// -- the text's colour, the font's size, the line height, the text's
+/// shadow -- where it is now, so a child inheriting it moves with it, as a
+/// CSS child inherits its parent's value part-way. Only what a style set is
+/// left to children at all.
+fn carry_moving_inheritance(transitions: &Transitions, computed: &mut Computed) {
+    let shown = &computed.style;
+    let leaves = &mut computed.inherited;
+    if transitions.moves(Animated::Color) && leaves.color.is_some() {
+        leaves.color = shown.foreground;
+    }
+    if transitions.moves(Animated::FontSize) && leaves.font_size.is_some() {
+        leaves.font_size = Some(shown.font_size);
+    }
+    if transitions.moves(Animated::LineHeight) {
+        leaves.line_height = match leaves.line_height {
+            Some(InheritedLine::Multiple(_)) => Some(InheritedLine::Multiple(shown.line_height)),
+            Some(InheritedLine::Px(_)) => {
+                Some(InheritedLine::Px(shown.line_height * shown.font_size))
+            }
+            None => None,
+        };
+    }
+    if transitions.moves(Animated::TextShadow) && leaves.text_shadow.is_some() {
+        leaves.text_shadow = Some(shown.text_shadow);
+    }
 }
 
 /// Run `f` measuring in `font` where a style gave one
@@ -333,6 +383,8 @@ impl Widget {
             css: None,
             computed: None,
             font: None,
+            transitions: None,
+            styled_before: false,
         }
     }
 
@@ -632,8 +684,9 @@ impl Widget {
 
     /// Compute its style, and its children's: the style sheet's rules that
     /// choose it and its own CSS, in its present state, over its program's
-    /// style -- under a parent drawn in `parent_style` and `parent_font`
-    /// that left it `inherited`, with `ancestors` its parents from the root.
+    /// style -- under `parent`, with `ancestors` its parents from the root --
+    /// and take up what changed: a value its `transition` moves starts
+    /// moving from where it is shown.
     ///
     /// A widget nothing styles, under a parent that left it nothing, has no
     /// computed style and is drawn in its program's: a tree with no CSS
@@ -642,40 +695,42 @@ impl Widget {
         &mut self,
         sheet: &StyleSheet,
         env: &CssEnv<'_>,
-        parent_style: &Style,
-        parent_font: Option<FontFamily>,
-        inherited: &Inherited,
+        parent: &Parent<'_>,
         ancestors: &mut Vec<Ancestor>,
     ) {
         let me = self.ancestor();
-        let computed = {
+        let mut computed = {
             let mut path: Vec<Subject<'_>> = ancestors.iter().map(Ancestor::subject).collect();
             path.push(me.subject());
             let mut declared: Vec<&Declared> = sheet.applying(&path);
             if let (Some(own), Some(subject)) = (self.css.as_deref(), path.last()) {
                 declared.extend(own.block.applying(subject));
             }
-            let styled = !declared.is_empty() || *inherited != Inherited::default();
+            let styled = !declared.is_empty() || *parent.inherited != Inherited::default();
             styled.then(|| {
                 Box::new(css_compute::compute(
                     &self.style,
                     &declared,
-                    parent_style,
-                    inherited,
+                    parent.style,
+                    parent.inherited,
+                    parent.transition,
                     env,
                 ))
             })
         };
+        self.take_up_transitions(computed.as_deref_mut(), env);
+        self.styled_before = true;
         // Its family: the one its list draws in; and where it has none but
         // its parent has -- `font-family: initial` under a styled family --
         // the UI face, the initial one, not the parent's it is drawn inside.
         self.font = match computed.as_deref().and_then(|c| c.font_family.as_deref()) {
             Some(families) => Some(first_drawable(families)),
-            None => parent_font.map(|_| FontFamily::Ui),
+            None => parent.font.map(|_| FontFamily::Ui),
         };
         self.computed = computed;
         ancestors.push(me);
         let none = Inherited::default();
+        let still = TransitionSpec::default();
         let Self {
             style,
             computed,
@@ -683,24 +738,87 @@ impl Widget {
             font,
             ..
         } = self;
-        let (own_style, leaves) = computed
-            .as_deref()
-            .map_or((&*style, &none), |c| (&c.style, &c.inherited));
+        let leaves = computed.as_deref().map_or(
+            Parent {
+                style,
+                font: *font,
+                inherited: &none,
+                transition: &still,
+            },
+            |c| Parent {
+                style: &c.style,
+                font: *font,
+                inherited: &c.inherited,
+                transition: &c.transition,
+            },
+        );
         for child in children.iter_mut() {
-            child.compute_css(sheet, env, own_style, *font, leaves, ancestors);
+            child.compute_css(sheet, env, &leaves, ancestors);
         }
         ancestors.pop();
     }
 
+    /// Take up its newly computed style, `computed`, into its transitions,
+    /// at the tree's clock in `env`: what changed starts moving where its
+    /// `transition` says, and what moves is shown where it is now -- in its
+    /// style, and in what its children inherit, so a parent's moving colour
+    /// moves theirs.
+    ///
+    /// Its transitions are kept only while a style has some: the first one
+    /// that does starts them from the style it is shown in until then
+    /// ([`look`](Self::look)), so a change into a state whose style moves
+    /// -- `&:hover { color: red; transition: color 1s }` -- moves from where
+    /// it was. A change into a style with no `transition` is shown at once,
+    /// as in CSS.
+    fn take_up_transitions(&mut self, computed: Option<&mut Computed>, env: &CssEnv<'_>) {
+        let Some(c) = computed else {
+            self.transitions = None;
+            return;
+        };
+        if self.transitions.is_none() && c.transition.moves_anything() {
+            self.transitions = Some(Box::new(if self.styled_before {
+                Transitions::from_shown(self.look())
+            } else {
+                Transitions::default()
+            }));
+        }
+        let Some(t) = self.transitions.as_deref_mut() else {
+            return;
+        };
+        t.update(
+            &mut c.style,
+            &c.transition,
+            &c.lengths,
+            env.now_ms,
+            env.palette.motion,
+        );
+        carry_moving_inheritance(t, c);
+        if !t.is_moving() && !c.transition.moves_anything() {
+            self.transitions = None;
+        }
+    }
+
     /// Settle its lengths that are percentages of its container, now that
-    /// the container's content is known to be `width` by `height`.
+    /// the container's content is known to be `width` by `height` -- and
+    /// take them up into its transitions, those that waited on it as well.
     fn settle_lengths(&mut self, width: f32, height: f32) {
         if let Some(c) = self.computed.as_deref_mut()
             && c.lengths.waits()
         {
             let lengths = c.lengths;
             lengths.apply(&mut c.style, width, height);
+            if let Some(t) = self.transitions.as_deref_mut() {
+                t.settle(&mut c.style, &c.transition, &lengths);
+            }
         }
+    }
+
+    /// Whether anything in it, or in any widget in it, is moving.
+    fn any_moving(&self) -> bool {
+        self.transitions
+            .as_deref()
+            .is_some_and(Transitions::is_moving)
+            || self.children.iter().any(Self::any_moving)
     }
 
     /// Whether it, or any widget in it, has CSS of its own that says
@@ -1939,6 +2057,44 @@ pub struct WidgetTree {
     /// pointer over a widget, the keyboard on one) worth styling it again
     /// for, as a `:hover` may change a widget's look and size.
     styled: bool,
+    /// What its transitions tell the time by ([`time_by_ticks`](Self::time_by_ticks)).
+    clock: Clock,
+    /// Whether a transition was moving at the last layout
+    /// ([`animating`](Self::animating)).
+    animating: bool,
+}
+
+/// What a tree tells the time by, for its transitions.
+#[derive(Clone, Copy, Debug)]
+enum Clock {
+    /// The machine's, from when the tree was made: a transition is over on
+    /// time whether or not its program sends ticks, so one that never does
+    /// sees it finished at its next frame rather than stuck part-way.
+    Real(std::time::Instant),
+    /// Its ticks', in milliseconds: time passes only as [`Event::Tick`]s
+    /// say -- what a test steps through, a frame at a time.
+    Ticks(f64),
+}
+
+impl Clock {
+    /// Milliseconds since the clock started.
+    fn now_ms(&self) -> f64 {
+        match self {
+            Self::Real(epoch) => epoch.elapsed().as_secs_f64() * 1000.0,
+            Self::Ticks(ms) => *ms,
+        }
+    }
+
+    /// A tick of `elapsed_ms`: the time it says has passed, for a clock of
+    /// ticks; the machine's has its own.
+    fn tick(&mut self, elapsed_ms: u64) {
+        if let Self::Ticks(ms) = self {
+            // Exact below 2^53 ms -- some 285,000 years of ticks.
+            #[allow(clippy::cast_precision_loss)]
+            let elapsed = elapsed_ms as f64;
+            *ms += elapsed;
+        }
+    }
 }
 
 impl WidgetTree {
@@ -1955,7 +2111,26 @@ impl WidgetTree {
             sheet_warnings: Vec::new(),
             px_per_mm: crate::css::value::Units::REFERENCE_PX_PER_MM,
             styled: false,
+            clock: Clock::Real(std::time::Instant::now()),
+            animating: false,
         }
+    }
+
+    /// Tell the time for its transitions by its ticks from now on -- each
+    /// [`Event::Tick`]'s `elapsed_ms` -- rather than by the machine's clock:
+    /// for a test that steps a transition through, or a program that draws
+    /// frames at a time of its own (a recording). The clock starts at nought.
+    pub fn time_by_ticks(&mut self) {
+        self.clock = Clock::Ticks(0.0);
+    }
+
+    /// Whether a transition is moving: while it is, its program sends the
+    /// tree [`Event::Tick`]s (an `App`'s `tick_interval`) and draws it again
+    /// after each, and stops when this turns false. A program that sends
+    /// none sees each transition over by its next frame.
+    #[must_use]
+    pub const fn animating(&self) -> bool {
+        self.animating
     }
 
     /// Style its widgets with the style sheet `text` -- rules of selectors
@@ -2015,15 +2190,16 @@ impl WidgetTree {
             px_per_mm: self.px_per_mm,
             palette: &self.palette,
             zero_width: &zero_width,
+            now_ms: self.clock.now_ms(),
         };
-        self.root.compute_css(
-            &self.style_sheet,
-            &env,
-            &Style::default(),
-            None,
-            &Inherited::default(),
-            &mut Vec::new(),
-        );
+        let window = Parent {
+            style: &Style::default(),
+            font: None,
+            inherited: &Inherited::default(),
+            transition: &TransitionSpec::default(),
+        };
+        self.root
+            .compute_css(&self.style_sheet, &env, &window, &mut Vec::new());
         self.styled = !self.style_sheet.rules.is_empty() || self.root.any_css();
     }
 
@@ -2071,6 +2247,7 @@ impl WidgetTree {
         );
         self.root.layout.x = 0.0;
         self.root.layout.y = 0.0;
+        self.animating = self.root.any_moving();
     }
 
     /// Render the entire tree into a render command list, in its palette.
@@ -2182,7 +2359,18 @@ impl WidgetTree {
     ///   hit. The focus moves first, so the click is delivered to a widget that
     ///   is already focused — otherwise the first click into a field would
     ///   position a caret that was not yet being drawn.
+    ///
+    /// A tick moves its transitions on: while one is moving
+    /// ([`animating`](Self::animating)) the tree is laid out again at the
+    /// new time, and the tick is consumed -- the program's cue to draw it.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        if let Event::Tick { elapsed_ms } = event {
+            self.clock.tick(*elapsed_ms);
+            if self.animating {
+                self.layout();
+                return EventResult::Consumed;
+            }
+        }
         // What the pointer or a key is about to do -- a press, a hover, a
         // box ticked -- may change a state a style hangs on.
         let before = if matches!(event, Event::Mouse(_) | Event::Key(_)) {

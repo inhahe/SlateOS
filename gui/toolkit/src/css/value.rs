@@ -242,11 +242,12 @@ enum Calc {
     Length(Length),
 }
 
+/// `v` as the toolkit's `f32`.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "a style's numbers are read as f64 and used as f32, as every length in the toolkit is"
 )]
-fn narrow(v: f64) -> f32 {
+pub(super) fn narrow(v: f64) -> f32 {
     v as f32
 }
 

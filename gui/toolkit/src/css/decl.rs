@@ -8,6 +8,7 @@
 //! substitute ([`Declared::Custom`]).
 
 use super::token::{Spanned, Token};
+use super::transition::{StepPosition, Timing, TransitionTarget};
 use super::value::{self, ColorValue, Cursor, Length, ValueError};
 use crate::style::{Cursor as PointerCursor, TextAlign};
 
@@ -119,6 +120,14 @@ pub enum Property {
     TextShadow,
     /// `cursor`: the pointer's shape over it.
     Cursor,
+    /// `transition-property`: what moves when it changes.
+    TransitionProperty,
+    /// `transition-duration`: how long each takes.
+    TransitionDuration,
+    /// `transition-timing-function`: how each is eased.
+    TransitionTimingFunction,
+    /// `transition-delay`: how long each waits.
+    TransitionDelay,
 }
 
 impl Property {
@@ -220,6 +229,12 @@ pub enum Value {
     Shadow(ShadowValue),
     /// A pointer's shape.
     Cursor(PointerCursor),
+    /// What moves when it changes: `none` is an empty list.
+    Transitions(Vec<TransitionTarget>),
+    /// Times, in milliseconds: durations or delays.
+    Times(Vec<f32>),
+    /// Timing functions.
+    Timings(Vec<Timing>),
     /// `inherit`: the parent's value.
     Inherit,
     /// `initial`: the property's own default -- the toolkit's.
@@ -302,17 +317,7 @@ fn trim(tokens: &[Spanned]) -> &[Spanned] {
 /// What is said of a property this does not read.
 fn unknown(name: &str) -> String {
     match name {
-        "transition"
-        | "transition-property"
-        | "transition-duration"
-        | "transition-timing-function"
-        | "transition-delay"
-        | "position"
-        | "z-index"
-        | "top"
-        | "left"
-        | "right"
-        | "bottom" => {
+        "position" | "z-index" | "top" | "left" | "right" | "bottom" => {
             format!("`{name}` is not read yet")
         }
         _ => format!("`{name}` is not a property this reads"),
@@ -344,6 +349,10 @@ fn longhand(name: &str) -> Option<Property> {
         "box-shadow" => Some(Property::BoxShadow),
         "text-shadow" => Some(Property::TextShadow),
         "cursor" => Some(Property::Cursor),
+        "transition-property" => Some(Property::TransitionProperty),
+        "transition-duration" => Some(Property::TransitionDuration),
+        "transition-timing-function" => Some(Property::TransitionTimingFunction),
+        "transition-delay" => Some(Property::TransitionDelay),
         _ => None,
     };
     if simple.is_some() {
@@ -421,6 +430,7 @@ pub fn read(name: &str, tokens: &[Spanned]) -> Result<Vec<(Property, Value)>, Va
         "border-style" => sides(&mut c, Property::BorderStyle, border_style)?,
         "border-radius" => corners(&mut c)?,
         "border" => border_shorthand(&mut c, &Side::ALL)?,
+        "transition" => transition_shorthand(&mut c)?,
         _ => {
             if let Some(side) = Side::ALL
                 .into_iter()
@@ -455,6 +465,12 @@ fn properties_of(name: &str) -> Option<Vec<Property>> {
         "border-width" => per_side(Property::BorderWidth),
         "border-color" => per_side(Property::BorderColor),
         "border-style" => per_side(Property::BorderStyle),
+        "transition" => Some(vec![
+            Property::TransitionProperty,
+            Property::TransitionDuration,
+            Property::TransitionTimingFunction,
+            Property::TransitionDelay,
+        ]),
         "border-radius" => Some(
             Corner::ALL
                 .into_iter()
@@ -512,6 +528,10 @@ fn longhand_value(property: Property, c: &mut Cursor<'_>) -> Result<Value, Value
         Property::BoxShadow => shadow(c, true),
         Property::TextShadow => shadow(c, false),
         Property::Cursor => cursor(c),
+        Property::TransitionProperty => transition_property(c),
+        Property::TransitionDuration => list(c, |c| time(c, false)).map(Value::Times),
+        Property::TransitionTimingFunction => list(c, timing).map(Value::Timings),
+        Property::TransitionDelay => list(c, |c| time(c, true)).map(Value::Times),
     }
 }
 
@@ -965,6 +985,234 @@ fn font_shorthand(c: &mut Cursor<'_>) -> Result<Vec<(Property, Value)>, ValueErr
         (Property::FontSize, size),
         (Property::LineHeight, line),
         (Property::FontFamily, family),
+    ])
+}
+
+// ---------------------------------------------------------------------------
+// Transitions
+// ---------------------------------------------------------------------------
+
+/// Whether the next token is a comma; taken if it is.
+fn comma(c: &mut Cursor<'_>) -> bool {
+    if c.peek() == Some(&Token::Comma) {
+        c.advance();
+        true
+    } else {
+        false
+    }
+}
+
+/// One or more of what `item` reads, separated by commas.
+fn list<T>(
+    c: &mut Cursor<'_>,
+    mut item: impl FnMut(&mut Cursor<'_>) -> Result<T, ValueError>,
+) -> Result<Vec<T>, ValueError> {
+    let mut out = vec![item(c)?];
+    while comma(c) {
+        out.push(item(c)?);
+    }
+    Ok(out)
+}
+
+/// `transition-property`: `none`, or a list of `all` and properties.
+fn transition_property(c: &mut Cursor<'_>) -> Result<Value, ValueError> {
+    if keyword(c, "none") {
+        return Ok(Value::Transitions(Vec::new()));
+    }
+    list(c, |c| match c.advance() {
+        Some(Token::Ident(name)) => transition_target(name),
+        other => Err(format!("{other:?} where a property was wanted")),
+    })
+    .map(Value::Transitions)
+}
+
+/// What one name in a `transition-property` list moves: `all`, a property
+/// or a shorthand's, or -- a name this does not read -- nothing, kept so the
+/// lists line up, as CSS keeps it.
+fn transition_target(name: &str) -> Result<TransitionTarget, ValueError> {
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "all" => Ok(TransitionTarget::All),
+        "none" | "inherit" | "initial" | "unset" | "default" => Err(format!(
+            "`{lower}` names no property and cannot be one of a list"
+        )),
+        _ => Ok(properties_of(&lower).map_or(
+            TransitionTarget::Unknown(lower),
+            TransitionTarget::Properties,
+        )),
+    }
+}
+
+/// A time, in milliseconds: `200ms`, `0.2s`. A delay may be negative
+/// (`negative`); a duration may not.
+fn time(c: &mut Cursor<'_>, negative: bool) -> Result<f32, ValueError> {
+    let ms = match c.advance() {
+        Some(Token::Dimension(n, unit)) if unit.eq_ignore_ascii_case("ms") => value::narrow(*n),
+        Some(Token::Dimension(n, unit)) if unit.eq_ignore_ascii_case("s") => {
+            value::narrow(*n * 1000.0)
+        }
+        other => return Err(format!("{other:?} where a time (`ms`, `s`) was wanted")),
+    };
+    if !ms.is_finite() {
+        return Err("a time too long to hold".to_string());
+    }
+    if ms < 0.0 && !negative {
+        return Err("a negative duration".to_string());
+    }
+    Ok(ms)
+}
+
+/// Whether `word` is one of the timing functions' keywords.
+fn is_timing_keyword(word: &str) -> bool {
+    [
+        "linear",
+        "ease",
+        "ease-in",
+        "ease-out",
+        "ease-in-out",
+        "step-start",
+        "step-end",
+    ]
+    .contains(&word.to_ascii_lowercase().as_str())
+}
+
+/// A timing function: a keyword, `cubic-bezier()` or `steps()`.
+fn timing(c: &mut Cursor<'_>) -> Result<Timing, ValueError> {
+    match c.advance() {
+        Some(Token::Ident(word)) => match word.to_ascii_lowercase().as_str() {
+            "linear" => Ok(Timing::Linear),
+            "ease" => Ok(Timing::EASE),
+            "ease-in" => Ok(Timing::EASE_IN),
+            "ease-out" => Ok(Timing::EASE_OUT),
+            "ease-in-out" => Ok(Timing::EASE_IN_OUT),
+            "step-start" => Ok(Timing::Steps(1, StepPosition::JumpStart)),
+            "step-end" => Ok(Timing::Steps(1, StepPosition::JumpEnd)),
+            other => Err(format!("`{other}` is not a timing function")),
+        },
+        Some(Token::Function(f)) if f.eq_ignore_ascii_case("cubic-bezier") => {
+            let args = c.take_block().ok_or("a `cubic-bezier(` is never closed")?;
+            let mut a = Cursor::new(args);
+            let numbers = list(&mut a, value::number)?;
+            if !a.at_end() {
+                return Err("`cubic-bezier()` has more than its four numbers".to_string());
+            }
+            let &[x1, y1, x2, y2] = numbers.as_slice() else {
+                return Err("`cubic-bezier()` takes four numbers".to_string());
+            };
+            if !(0.0..=1.0).contains(&x1) || !(0.0..=1.0).contains(&x2) {
+                return Err("a `cubic-bezier()`'s x values are from 0 to 1".to_string());
+            }
+            if [y1, y2].iter().any(|y| !y.is_finite()) {
+                return Err("a `cubic-bezier()` y that is not a number".to_string());
+            }
+            Ok(Timing::CubicBezier(x1, y1, x2, y2))
+        }
+        Some(Token::Function(f)) if f.eq_ignore_ascii_case("steps") => {
+            let args = c.take_block().ok_or("a `steps(` is never closed")?;
+            let mut a = Cursor::new(args);
+            let n = value::number(&mut a)?;
+            let position = if comma(&mut a) {
+                match a.advance() {
+                    Some(Token::Ident(w)) => match w.to_ascii_lowercase().as_str() {
+                        "jump-start" | "start" => StepPosition::JumpStart,
+                        "jump-end" | "end" => StepPosition::JumpEnd,
+                        "jump-none" => StepPosition::JumpNone,
+                        "jump-both" => StepPosition::JumpBoth,
+                        other => return Err(format!("`{other}` is not where a step jumps")),
+                    },
+                    other => return Err(format!("{other:?} where a step's position was wanted")),
+                }
+            } else {
+                StepPosition::JumpEnd
+            };
+            if !a.at_end() {
+                return Err("`steps()` has more than its count and position".to_string());
+            }
+            let least = if position == StepPosition::JumpNone {
+                2.0
+            } else {
+                1.0
+            };
+            if !n.is_finite() || n < least || n > f32::from(u16::MAX) || n.fract() > 0.0 {
+                return Err(format!(
+                    "`steps()` takes a whole number of steps from {least} to {}",
+                    u16::MAX
+                ));
+            }
+            // Whole and in u16's range: checked just above.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Ok(Timing::Steps(n as u16, position))
+        }
+        other => Err(format!("{other:?} where a timing function was wanted")),
+    }
+}
+
+/// `transition`: each transition's property, duration, timing function and
+/// delay, in any order -- the first time its duration, the second its delay
+/// -- read into the four lists, each a transition long. What one leaves out
+/// is its initial value: `all`, `0s`, the desktop's curve, `0s`.
+fn transition_shorthand(c: &mut Cursor<'_>) -> Result<Vec<(Property, Value)>, ValueError> {
+    let mut properties = Vec::new();
+    let mut durations = Vec::new();
+    let mut timings = Vec::new();
+    let mut delays = Vec::new();
+    let mut none = false;
+    loop {
+        let (mut property, mut duration, mut ease, mut delay) = (None, None, None, None);
+        loop {
+            match c.peek() {
+                None | Some(Token::Comma) => break,
+                Some(Token::Dimension(..)) => {
+                    if duration.is_none() {
+                        duration = Some(time(c, false)?);
+                    } else if delay.is_none() {
+                        delay = Some(time(c, true)?);
+                    } else {
+                        return Err("a transition has more than two times".to_string());
+                    }
+                }
+                Some(Token::Function(_)) if ease.is_none() => ease = Some(timing(c)?),
+                Some(Token::Ident(w)) if ease.is_none() && is_timing_keyword(w) => {
+                    ease = Some(timing(c)?);
+                }
+                Some(Token::Ident(w)) if property.is_none() => {
+                    let w = w.clone();
+                    c.advance();
+                    property = Some(if w.eq_ignore_ascii_case("none") {
+                        none = true;
+                        None
+                    } else {
+                        Some(transition_target(&w)?)
+                    });
+                }
+                Some(other) => return Err(format!("{other:?} in a transition")),
+            }
+        }
+        if property.is_none() && duration.is_none() && ease.is_none() && delay.is_none() {
+            return Err("a transition with nothing in it".to_string());
+        }
+        match property {
+            None => properties.push(TransitionTarget::All),
+            Some(Some(target)) => properties.push(target),
+            // `none`: nothing moves.
+            Some(None) => {}
+        }
+        durations.push(duration.unwrap_or(0.0));
+        timings.push(ease.unwrap_or(Timing::Desktop));
+        delays.push(delay.unwrap_or(0.0));
+        if !comma(c) {
+            break;
+        }
+    }
+    // `none` moves nothing, and so is a list of its own.
+    if none && durations.len() > 1 {
+        return Err("`none` in a list of transitions".to_string());
+    }
+    Ok(vec![
+        (Property::TransitionProperty, Value::Transitions(properties)),
+        (Property::TransitionDuration, Value::Times(durations)),
+        (Property::TransitionTimingFunction, Value::Timings(timings)),
+        (Property::TransitionDelay, Value::Times(delays)),
     ])
 }
 

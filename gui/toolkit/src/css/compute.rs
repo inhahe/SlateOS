@@ -37,6 +37,7 @@ use super::decl::{
     self, BorderStyle, Corner, Declared, Family, LineHeight, Property, ShadowValue, Side, Value,
 };
 use super::token::{Spanned, Token};
+use super::transition::TransitionSpec;
 use super::value::{ColorValue, Length, Units};
 use crate::color::Color;
 use crate::palette::Palette;
@@ -57,6 +58,9 @@ pub struct Env<'a> {
     pub palette: &'a Palette,
     /// How wide a `0` is: what `ch` is.
     pub zero_width: &'a ZeroWidth<'a>,
+    /// The tree's clock, in milliseconds, when the style is computed: when
+    /// a transition its change starts begins ([`super::transition`]).
+    pub now_ms: f64,
 }
 
 /// How wide a `0` is at a size and weight, in a style's `font-family` list
@@ -214,6 +218,8 @@ pub struct Computed {
     pub lengths: BoxLengths,
     /// What it leaves its children.
     pub inherited: Inherited,
+    /// What of it moves when it changes, and how: its `transition`.
+    pub transition: TransitionSpec,
     /// What in its declarations was not used, and why.
     pub warnings: Vec<String>,
 }
@@ -378,14 +384,16 @@ const fn relative_weight(parent: u16, bolder: bool) -> u16 {
 }
 
 /// `style` with the declarations `declared`, in order, computed where the
-/// widget is: under a parent styled `parent_style` that left it `parent`, in
-/// `env`.
+/// widget is: under a parent styled `parent_style` that left it `parent`
+/// and moves as `parent_transition` says -- what `transition: inherit`
+/// takes -- in `env`.
 #[must_use]
 pub fn compute(
     base: &Style,
     declared: &[&Declared],
     parent_style: &Style,
     parent: &Inherited,
+    parent_transition: &TransitionSpec,
     env: &Env<'_>,
 ) -> Computed {
     let Gathered {
@@ -429,11 +437,13 @@ pub fn compute(
     c.uninherited(&units);
     c.border_styles();
     let lengths = c.box_lengths(units);
+    let transition = c.transition(parent_transition);
     Computed {
         style: c.style,
         font_family,
         lengths,
         inherited: c.inherited,
+        transition,
         warnings,
     }
 }
@@ -584,6 +594,34 @@ impl<'s> Computing<'s, '_> {
         match v {
             ColorValue::Color(c) => *c,
             ColorValue::CurrentColor => self.current(),
+        }
+    }
+
+    /// Its `transition-*` lists: what each says, `inherit` the parent's, and
+    /// what none says -- or `initial` -- the initial one's.
+    fn transition(&self, parent: &TransitionSpec) -> TransitionSpec {
+        let initial = TransitionSpec::default();
+        TransitionSpec {
+            properties: match self.get(Property::TransitionProperty) {
+                Some(Value::Transitions(t)) => t.clone(),
+                Some(Value::Inherit) => parent.properties.clone(),
+                _ => initial.properties,
+            },
+            durations: match self.get(Property::TransitionDuration) {
+                Some(Value::Times(t)) => t.clone(),
+                Some(Value::Inherit) => parent.durations.clone(),
+                _ => initial.durations,
+            },
+            timings: match self.get(Property::TransitionTimingFunction) {
+                Some(Value::Timings(t)) => t.clone(),
+                Some(Value::Inherit) => parent.timings.clone(),
+                _ => initial.timings,
+            },
+            delays: match self.get(Property::TransitionDelay) {
+                Some(Value::Times(t)) => t.clone(),
+                Some(Value::Inherit) => parent.delays.clone(),
+                _ => initial.delays,
+            },
         }
     }
 

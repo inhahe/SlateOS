@@ -23,6 +23,9 @@
 //! - [`sheet`]: what a program writes -- a widget's own block, with blocks
 //!   for its states (`&:hover { ... }`), and style sheets of rules chosen by
 //!   selectors (kind, `.class`, `#name`, states, `>`).
+//! - [`transition`]: a style moving from what it was to what it has become,
+//!   over the time its `transition` gives -- at the user's motion speed, and
+//!   not at all with animations off.
 //!
 //! The widget tree is where it is used: [`Widget::css`] gives a widget its
 //! own block, [`Widget::class`] and [`Widget::named`] what selectors ask
@@ -35,18 +38,22 @@
 //! `font-family` list draws in the first generic family of it (a family by
 //! name waits on `FontFamily::Named`), pushed round
 //! the widget's drawing and measured in while it is laid out, drawn and
-//! handles its events ([`crate::text::in_family`]).
+//! handles its events ([`crate::text::in_family`]). A tree moving a
+//! transition says so ([`WidgetTree::animating`]): its program sends it
+//! ticks until it is done.
 //!
-//! Transitions and positioning follow (`design-decisions.md` §1478).
+//! Positioning follows (`design-decisions.md` §1478).
 //!
 //! [`Widget::css`]: crate::widget::Widget::css
 //! [`Widget::class`]: crate::widget::Widget::class
 //! [`Widget::named`]: crate::widget::Widget::named
 //! [`Widget::look`]: crate::widget::Widget::look
 //! [`WidgetTree::set_style_sheet`]: crate::widget::WidgetTree::set_style_sheet
+//! [`WidgetTree::animating`]: crate::widget::WidgetTree::animating
 
 pub mod compute;
 pub mod decl;
 pub mod sheet;
 pub mod token;
+pub mod transition;
 pub mod value;

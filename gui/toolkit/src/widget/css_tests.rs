@@ -12,8 +12,9 @@
 
 use super::{Widget, WidgetKind, WidgetTree, weight_to_hint};
 use crate::color::Color;
-use crate::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+use crate::event::{Event, EventResult, MouseButton, MouseEvent, MouseEventKind};
 use crate::layout::FlexDirection;
+use crate::motion::{Curve, Motion};
 use crate::palette::Palette;
 use crate::render::{FontFamily, FontWeightHint, RenderCommand};
 use crate::style::Edges;
@@ -444,4 +445,149 @@ fn a_click_finds_the_caret_in_the_fields_family() {
         panic!("a text input");
     };
     assert_eq!(cursor, want);
+}
+
+/// `tree`, timed by its ticks, in a palette that moves at a constant speed
+/// at the standard pace -- or not at all, with `motion` still.
+fn ticking(mut tree: WidgetTree, motion: Motion) -> WidgetTree {
+    tree.time_by_ticks();
+    let mut palette = Palette::for_mode(false);
+    palette.motion = motion;
+    tree.set_palette(palette);
+    tree
+}
+
+fn tick(tree: &mut WidgetTree, ms: u64) -> EventResult {
+    tree.handle_event(&Event::Tick { elapsed_ms: ms })
+}
+
+/// The colour `p` of the way from `a` to `b`, as a transition mixes it.
+fn part_way(a: Color, b: Color, p: f32) -> Color {
+    let lerp = |x: u8, y: u8| {
+        let v = f32::from(x) + (f32::from(y) - f32::from(x)) * p;
+        // Opaque either side: a plain mix, rounded.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let v = v.round() as u8;
+        v
+    };
+    Color::rgba(lerp(a.r, b.r), lerp(a.g, b.g), lerp(a.b, b.b), 255)
+}
+
+const LINEAR: Motion = Motion::new(Motion::STANDARD_MS, Curve::Linear);
+
+/// **A style's transition moves a change of state over its time**: the
+/// pointer over a button moves its background from red to blue as the
+/// ticks come, and the tree says it is animating until it is there.
+#[test]
+fn a_change_of_state_moves_over_the_ticks() {
+    let mut tree = ticking(
+        tree_of(vec![Widget::button("Go").css(
+            "background-color: red; transition: background-color 100ms linear; \
+             &:hover { background-color: blue }",
+        )]),
+        LINEAR,
+    );
+    assert!(!tree.animating());
+    assert_eq!(tick(&mut tree, 16), EventResult::Ignored, "nothing moving");
+    let (x, y) = middle_of_first(&tree);
+    moved_to(&mut tree, x, y);
+    assert!(tree.animating());
+    assert_eq!(tree.root.children[0].look().background, RED, "from red");
+    assert_eq!(tick(&mut tree, 50), EventResult::Consumed, "draw again");
+    assert_eq!(
+        tree.root.children[0].look().background,
+        part_way(RED, BLUE, 0.5)
+    );
+    tick(&mut tree, 50);
+    assert_eq!(tree.root.children[0].look().background, BLUE);
+    assert!(!tree.animating(), "there");
+}
+
+/// **A child inherits its parent's colour part-way**, as it moves.
+#[test]
+fn a_child_inherits_a_moving_colour() {
+    let panel = Widget::container()
+        .with_flex_direction(FlexDirection::Column)
+        .css("color: red; transition: color 100ms linear; &:hover { color: blue }")
+        .with_child(Widget::label("text"));
+    let mut tree = ticking(tree_of(vec![panel]), LINEAR);
+    let (x, y) = middle_of_first(&tree);
+    moved_to(&mut tree, x, y);
+    tick(&mut tree, 50);
+    let label = &tree.root.children[0].children[0];
+    assert_eq!(label.look().foreground, Some(part_way(RED, BLUE, 0.5)));
+}
+
+/// **With animations off nothing moves**: the change is shown at once, and
+/// the tree never says it is animating.
+#[test]
+fn with_animations_off_a_change_is_shown_at_once() {
+    let mut tree = ticking(
+        tree_of(vec![Widget::button("Go").css(
+            "background-color: red; transition: background-color 100ms; \
+             &:hover { background-color: blue }",
+        )]),
+        Motion::STILL,
+    );
+    let (x, y) = middle_of_first(&tree);
+    moved_to(&mut tree, x, y);
+    assert_eq!(tree.root.children[0].look().background, BLUE);
+    assert!(!tree.animating());
+}
+
+/// **A state whose style moves moves into it, and is left at once** -- CSS's
+/// rule, that the transition is the new style's: the hover's own
+/// `transition` moves the button into its hover, and the style it leaves
+/// for has none.
+#[test]
+fn a_states_own_transition_moves_into_it_only() {
+    let mut tree = ticking(
+        tree_of(vec![Widget::button("Go").css(
+            "&:hover { background-color: blue; transition: background-color 100ms linear }",
+        )]),
+        LINEAR,
+    );
+    let program = tree.root.children[0].style.background;
+    let (x, y) = middle_of_first(&tree);
+    moved_to(&mut tree, x, y);
+    assert_eq!(
+        tree.root.children[0].look().background,
+        program,
+        "from its own"
+    );
+    tick(&mut tree, 50);
+    // A button's own background is the theme's to draw -- none of its own --
+    // so the blue fades in over it, rather than darkening through black.
+    assert_eq!(program.a, 0);
+    assert_eq!(
+        tree.root.children[0].look().background,
+        Color::rgba(0, 0, 255, 128)
+    );
+    moved_to(&mut tree, 399.0, 299.0);
+    assert_eq!(
+        tree.root.children[0].look().background,
+        program,
+        "back at once"
+    );
+    assert!(!tree.animating());
+}
+
+/// **A size moves too, and the tree is laid out as it does**: padding that
+/// grows on hover grows the button frame by frame.
+#[test]
+fn a_size_moves_and_is_laid_out_as_it_does() {
+    let mut tree = ticking(
+        tree_of(vec![Widget::label("x").css(
+            "padding: 0; transition: padding 100ms linear; &:hover { padding: 10px }",
+        )]),
+        LINEAR,
+    );
+    let width = |t: &WidgetTree| t.root.children[0].layout.border_box_height();
+    let before = width(&tree);
+    let (x, y) = middle_of_first(&tree);
+    moved_to(&mut tree, x, y);
+    tick(&mut tree, 50);
+    assert_eq!(width(&tree), before + 10.0, "half of 10 each side");
+    tick(&mut tree, 50);
+    assert_eq!(width(&tree), before + 20.0);
 }

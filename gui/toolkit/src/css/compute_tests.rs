@@ -9,6 +9,7 @@
 
 use super::super::decl::declare;
 use super::super::token::tokenize;
+use super::super::transition::{Timing, TransitionTarget};
 use super::*;
 use crate::style::Edges;
 
@@ -38,6 +39,7 @@ fn env(palette: &Palette) -> Env<'_> {
                 size / 2.0
             }
         },
+        now_ms: 0.0,
     }
 }
 
@@ -47,7 +49,14 @@ fn computed(text: &str, base: &Style, parent_style: &Style, parent: &Inherited) 
     let palette = Palette::for_mode(false);
     let all = decls(text);
     let refs: Vec<&Declared> = all.iter().collect();
-    compute(base, &refs, parent_style, parent, &env(&palette))
+    compute(
+        base,
+        &refs,
+        parent_style,
+        parent,
+        &TransitionSpec::default(),
+        &env(&palette),
+    )
 }
 
 fn top(text: &str) -> Computed {
@@ -362,4 +371,44 @@ fn a_ch_is_a_zero_in_the_widgets_family() {
     );
     assert_eq!(c.style.font_size, 20.0, "two of the parent's 0s");
     assert_eq!(c.style.padding.left, 20.0, "one of its own, inherited");
+}
+
+/// **A style's transitions are its `transition` lists**, a shorthand's
+/// leaving out what it does not say; none given is CSS's `all 0s`, which
+/// moves nothing; `inherit` is the parent's.
+#[test]
+fn transitions_are_computed_from_their_lists() {
+    let c = top("transition: color 200ms ease-in, padding 1s 50ms");
+    let padding: Vec<Property> = Side::ALL.into_iter().map(Property::Padding).collect();
+    assert_eq!(
+        c.transition.properties,
+        vec![
+            TransitionTarget::Properties(vec![Property::Color]),
+            TransitionTarget::Properties(padding),
+        ]
+    );
+    assert_eq!(c.transition.durations, vec![200.0, 1000.0]);
+    assert_eq!(c.transition.timings, vec![Timing::EASE_IN, Timing::Desktop]);
+    assert_eq!(c.transition.delays, vec![0.0, 50.0]);
+    assert_eq!(top("color: red").transition, TransitionSpec::default());
+
+    let palette = Palette::for_mode(false);
+    let all = decls("transition-duration: inherit; transition-delay: -1s");
+    let refs: Vec<&Declared> = all.iter().collect();
+    let parent = c.transition.clone();
+    let child = compute(
+        &Style::default(),
+        &refs,
+        &c.style,
+        &c.inherited,
+        &parent,
+        &env(&palette),
+    );
+    assert_eq!(child.transition.durations, parent.durations, "inherited");
+    assert_eq!(child.transition.delays, vec![-1000.0]);
+    assert_eq!(
+        child.transition.properties,
+        vec![TransitionTarget::All],
+        "its own initial"
+    );
 }

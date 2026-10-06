@@ -281,7 +281,7 @@ fn every_property_takes_inherit_and_initial() {
 fn what_is_not_read_is_refused() {
     assert!(get("colour", "red").unwrap_err().contains("not a property"));
     assert!(
-        get("transition", "all 1s")
+        get("position", "absolute")
             .unwrap_err()
             .contains("not read yet")
     );
@@ -325,4 +325,133 @@ fn the_inherited_properties_are_css_s() {
     assert!(!Property::BackgroundColor.inherited());
     assert!(!Property::Padding(Side::Top).inherited());
     assert!(!Property::Width.inherited());
+    assert!(!Property::TransitionDuration.inherited());
+}
+
+fn transitions(value: &str) -> Vec<(Property, Value)> {
+    get("transition", value).unwrap_or_else(|e| panic!("{value}: {e}"))
+}
+
+/// **The `transition` shorthand is read into its four lists**, a time first
+/// the duration and second the delay, in any order with the property and the
+/// timing function; what one leaves out is the initial value.
+#[test]
+fn transition_is_read_into_four_lists() {
+    let padding: Vec<Property> = Side::ALL.into_iter().map(Property::Padding).collect();
+    assert_eq!(
+        transitions("background-color 200ms, ease-in 1s padding -50ms"),
+        vec![
+            (
+                Property::TransitionProperty,
+                Value::Transitions(vec![
+                    TransitionTarget::Properties(vec![Property::BackgroundColor]),
+                    TransitionTarget::Properties(padding),
+                ])
+            ),
+            (
+                Property::TransitionDuration,
+                Value::Times(vec![200.0, 1000.0])
+            ),
+            (
+                Property::TransitionTimingFunction,
+                Value::Timings(vec![Timing::Desktop, Timing::EASE_IN])
+            ),
+            (Property::TransitionDelay, Value::Times(vec![0.0, -50.0])),
+        ]
+    );
+    let all = transitions("0.5s");
+    assert_eq!(
+        all[0].1,
+        Value::Transitions(vec![TransitionTarget::All]),
+        "all, unsaid"
+    );
+    assert_eq!(all[1].1, Value::Times(vec![500.0]));
+    let none = transitions("none");
+    assert_eq!(none[0].1, Value::Transitions(Vec::new()));
+    assert!(
+        get("transition", "none, color 1s").is_err(),
+        "none in a list"
+    );
+    assert!(get("transition", "color 1s 2s 3s").is_err(), "three times");
+    assert!(
+        get("transition", "color -1s").is_err(),
+        "a negative duration"
+    );
+    assert!(get("transition", "color 1s,").is_err(), "an empty one");
+    assert!(get("transition", "color 1").is_err(), "a time with no unit");
+}
+
+/// **The longhands take lists**, and a name this does not read is kept so the
+/// lists still line up.
+#[test]
+fn the_transition_longhands_take_lists() {
+    assert_eq!(
+        one("transition-property", "opacity, colour, all"),
+        Value::Transitions(vec![
+            TransitionTarget::Properties(vec![Property::Opacity]),
+            TransitionTarget::Unknown("colour".into()),
+            TransitionTarget::All,
+        ])
+    );
+    assert_eq!(
+        one("transition-property", "none"),
+        Value::Transitions(Vec::new())
+    );
+    assert!(get("transition-property", "color, none").is_err());
+    assert_eq!(
+        one("transition-duration", "1s, 250ms"),
+        Value::Times(vec![1000.0, 250.0])
+    );
+    assert!(get("transition-duration", "-1s").is_err());
+    assert_eq!(
+        one("transition-delay", "-250ms"),
+        Value::Times(vec![-250.0])
+    );
+}
+
+/// **Every timing function is read**: the keywords, `cubic-bezier()` with
+/// its x held to 0 to 1, and `steps()` with its positions.
+#[test]
+fn timing_functions_are_read() {
+    let timing = |text: &str| match one("transition-timing-function", text) {
+        Value::Timings(t) => t,
+        other => panic!("{text}: {other:?}"),
+    };
+    assert_eq!(
+        timing("linear, ease, ease-in-out, step-start, step-end"),
+        vec![
+            Timing::Linear,
+            Timing::EASE,
+            Timing::EASE_IN_OUT,
+            Timing::Steps(1, StepPosition::JumpStart),
+            Timing::Steps(1, StepPosition::JumpEnd),
+        ]
+    );
+    assert_eq!(
+        timing("cubic-bezier(0.1, -0.5, 0.9, 1.5)"),
+        vec![Timing::CubicBezier(0.1, -0.5, 0.9, 1.5)]
+    );
+    assert_eq!(
+        timing("steps(4), steps(3, jump-both), steps(2, jump-none), steps(5, start)"),
+        vec![
+            Timing::Steps(4, StepPosition::JumpEnd),
+            Timing::Steps(3, StepPosition::JumpBoth),
+            Timing::Steps(2, StepPosition::JumpNone),
+            Timing::Steps(5, StepPosition::JumpStart),
+        ]
+    );
+    for bad in [
+        "cubic-bezier(1.5, 0, 0, 1)",
+        "cubic-bezier(0, 0, 1)",
+        "steps(0)",
+        "steps(1.5)",
+        "steps(1, jump-none)",
+        "steps(2, sideways)",
+        "bounce",
+    ] {
+        assert!(
+            get("transition-timing-function", bad).is_err(),
+            "{bad} was read"
+        );
+    }
 }

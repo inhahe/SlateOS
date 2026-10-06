@@ -4355,6 +4355,41 @@ fn a_video_wallpaper_is_played_and_its_pictures_put_up() {
     assert_eq!(started.borrow().len(), 1, "not started again at a paint");
 }
 
+/// **The picture before a video is given back when the video's first
+/// picture goes up**, as one picture gives way to the next: the room a link
+/// keeps for pictures is never asked to hold both for good.
+#[test]
+fn the_picture_before_a_video_is_given_back() {
+    use crate::background_program::tests::frame;
+    let (mut session, desktop, _turn) = session();
+    let (script, _started) = script_backgrounds(&mut session);
+    let background = session.background().window();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    session.settle_pictures().expect("the picture went up");
+    let picture = session.wallpaper_mut().current_image_id();
+    assert_eq!(uploads(&desktop).len(), 1, "the picture is up");
+
+    session.shell_mut().appearance.wallpaper =
+        Some(std::path::PathBuf::from("/home/u/Videos/waves.webm"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    let video = session.wallpaper_mut().current_image_id();
+    assert_ne!(video, picture);
+    script
+        .frames
+        .borrow_mut()
+        .push_back(frame(2, 2, 0xFF00_0000));
+    session.pump().expect("pump");
+    assert!(
+        all_drops(&desktop).contains(&(background, picture)),
+        "the picture before was not given back: {:?}",
+        all_drops(&desktop)
+    );
+    assert!(background_names(&session, video));
+}
+
 /// **A background program that stops says why, and is not started again
 /// at every paint**, as a picture that will not open is not read again.
 #[test]

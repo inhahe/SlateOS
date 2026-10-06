@@ -1876,6 +1876,13 @@ impl<T: Transport> ShellSession<T> {
             return Ok(false);
         };
         let (width, height) = (frame.width, frame.height);
+        let first = self.background_size != Some((width, height));
+        // The picture before it -- a file, or another program's -- given
+        // back before this one goes up, as `adopt_picture` does, so a link
+        // whose room fits one full-screen picture is never asked for two.
+        if first && self.wallpaper_uploaded.is_some_and(|had| had != id) {
+            self.release_wallpaper_image()?;
+        }
         let bytes = guitk::canvas::WireBytes::from_le_argb(&frame.pixels);
         let Some(mut handle) = self.events.window_mut(self.background.window) else {
             return Ok(false);
@@ -1899,7 +1906,7 @@ impl<T: Transport> ShellSession<T> {
             }
             Err(other) => return Err(other),
         }
-        if self.background_size != Some((width, height)) {
+        if first {
             // The first picture, or one of a new size: the wallpaper places
             // it by its size, and draws it from now on. The pictures after it
             // replace its pixels under the same id, which the compositor

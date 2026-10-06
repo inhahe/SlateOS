@@ -2981,6 +2981,12 @@ D's to act on once answered).
   blocked while it waits, and the shell given its defaults and the old mask
   (`known-issues-resolved/D-SYSTEM-RAN-ITS-SHELL-WITH-NO-ENVIRONMENT.md`).
   The ring-3 check is `services/ctest-system`.
+  **Real-time scheduling is refused, not faked -- 2026-10-06 (lane D).**
+  `sched_setscheduler` told a permitted caller asking for `SCHED_FIFO` or
+  `SCHED_RR` that it had them, and changed nothing; it answers `EPERM` now.
+  The scheduler has no real-time class to give
+  (`known-issues/D-REAL-TIME-SCHEDULING-HAS-NO-CLASS.md`; asked of lane A in
+  `requests/d-a-real-time-scheduling-has-no-class-to-run-in.md`).
 
 - `[x]` `[D]` **The image carries fonts -- 2026-09-26**, lane D's half of
   `requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`.

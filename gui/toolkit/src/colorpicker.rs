@@ -37,6 +37,9 @@ use crate::style::CornerRadii;
 use crate::surface::Surface;
 use crate::text::scaled;
 
+mod accessible;
+pub use accessible::ColorPart;
+
 // ============================================================================
 // Catppuccin Mocha palette (UI chrome)
 // ============================================================================
@@ -1067,16 +1070,8 @@ impl ColorPickerDialog {
         }
 
         match event.key {
-            Key::Escape => {
-                self.cancelled = true;
-                self.picker.set_color(self.picker.original);
-                Some(ColorPickerEvent::Cancelled)
-            }
-            Key::Enter if !self.picker.hex_focused => {
-                self.confirmed = true;
-                self.picker.commit_to_recent();
-                Some(ColorPickerEvent::Confirmed(self.picker.current_color()))
-            }
+            Key::Escape => Some(self.cancel()),
+            Key::Enter if !self.picker.hex_focused => Some(self.confirm()),
             Key::Tab if event.modifiers.ctrl => {
                 // Switch slider tabs
                 self.slider_tab = match self.slider_tab {
@@ -1087,6 +1082,22 @@ impl ColorPickerDialog {
             }
             _ => self.picker.handle_key(event),
         }
+    }
+
+    /// Keep the colour chosen -- Enter, OK, or a tool pressing OK -- and
+    /// remember it among the recent ones.
+    fn confirm(&mut self) -> ColorPickerEvent {
+        self.confirmed = true;
+        self.picker.commit_to_recent();
+        ColorPickerEvent::Confirmed(self.picker.current_color())
+    }
+
+    /// Give the colour up, back to the one the dialog opened with -- Escape,
+    /// Cancel, or a tool pressing Cancel.
+    fn cancel(&mut self) -> ColorPickerEvent {
+        self.cancelled = true;
+        self.picker.set_color(self.picker.original);
+        ColorPickerEvent::Cancelled
     }
 
     /// Handle a mouse event against a dialog of this size, at coordinates
@@ -1123,6 +1134,17 @@ impl ColorPickerDialog {
             }
             if self.picker.hex_focused {
                 self.picker.commit_hex();
+            }
+
+            // OK and Cancel, as Enter and Escape: they were drawn and took no
+            // click, so a dialog could be left only from the keyboard. After
+            // the hex field's entry is finished, so a code typed and then OK
+            // pressed is the colour kept.
+            if layout.ok_button().contains(x, y) {
+                return Some(self.confirm());
+            }
+            if layout.cancel_button().contains(x, y) {
+                return Some(self.cancel());
             }
 
             if let Some(color) = self
@@ -1230,7 +1252,7 @@ impl ColorPickerDialog {
         cmds.push(RenderCommand::Text {
             x: scaled(PADDING),
             y: scaled(9.0),
-            text: String::from("Color Picker"),
+            text: String::from(DIALOG_TITLE),
             color: palette.text,
             font_size: scaled(13.0),
             font_weight: FontWeightHint::Bold,
@@ -1276,7 +1298,7 @@ impl ColorPickerDialog {
         // --- Preset palette, recent colours, buttons ---
         self.render_preset_palette(palette, &mut cmds, &layout);
         self.render_recent_colors(palette, &mut cmds, &layout);
-        self.render_bottom_buttons(palette, &mut cmds, layout.button_y, layout.width);
+        Self::render_bottom_buttons(palette, &mut cmds, &layout);
 
         cmds
     }
@@ -1808,31 +1830,26 @@ impl ColorPickerDialog {
     }
 
     fn render_bottom_buttons(
-        &self,
         palette: &Palette,
         cmds: &mut Vec<RenderCommand>,
-        y: f32,
-        width: f32,
+        layout: &DialogLayout,
     ) {
-        let btn_width = 70.0;
-        let btn_height = 28.0;
-
         // OK button
-        let ok_x = width - btn_width * 2.0 - scaled(PADDING) * 3.0;
+        let ok = layout.ok_button();
         cmds.push(RenderCommand::FillRect {
-            x: ok_x,
-            y,
-            width: btn_width,
-            height: btn_height,
+            x: ok.x,
+            y: ok.y,
+            width: ok.w,
+            height: ok.h,
             color: palette.blue,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
-            x: ok_x
-                + (btn_width - crate::text::measure("OK", scaled(FONT_SIZE), FontWeightHint::Bold))
+            x: ok.x
+                + (ok.w - crate::text::measure(OK_LABEL, scaled(FONT_SIZE), FontWeightHint::Bold))
                     / 2.0,
-            y: y + (btn_height - scaled(FONT_SIZE)) / 2.0,
-            text: String::from("OK"),
+            y: ok.y + (ok.h - scaled(FONT_SIZE)) / 2.0,
+            text: String::from(OK_LABEL),
             color: palette.base,
             font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Bold,
@@ -1841,22 +1858,26 @@ impl ColorPickerDialog {
         });
 
         // Cancel button
-        let cancel_x = width - btn_width - scaled(PADDING);
+        let cancel = layout.cancel_button();
         cmds.push(RenderCommand::FillRect {
-            x: cancel_x,
-            y,
-            width: btn_width,
-            height: btn_height,
+            x: cancel.x,
+            y: cancel.y,
+            width: cancel.w,
+            height: cancel.h,
             color: palette.surface1,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
-            x: cancel_x
-                + (btn_width
-                    - crate::text::measure("Cancel", scaled(FONT_SIZE), FontWeightHint::Regular))
+            x: cancel.x
+                + (cancel.w
+                    - crate::text::measure(
+                        CANCEL_LABEL,
+                        scaled(FONT_SIZE),
+                        FontWeightHint::Regular,
+                    ))
                     / 2.0,
-            y: y + (btn_height - scaled(FONT_SIZE)) / 2.0,
-            text: String::from("Cancel"),
+            y: cancel.y + (cancel.h - scaled(FONT_SIZE)) / 2.0,
+            text: String::from(CANCEL_LABEL),
             color: palette.ink(palette.red),
             font_size: scaled(FONT_SIZE),
             font_weight: FontWeightHint::Regular,
@@ -1905,20 +1926,12 @@ impl ColorPickerDialog {
     /// row only on the track's exact pixels, so a thumb at either end hung
     /// half outside the part that answered.
     fn hit_test_bars(&self, layout: &DialogLayout, x: f32, y: f32) -> Option<DragTarget> {
-        let (track_x, track_width) = layout.slider_track();
-        let thumb = scaled(SLIDER_THUMB);
         let row = |i: u8| {
             let target = match self.slider_tab {
                 SliderTab::Rgb => DragTarget::RgbSlider(i),
                 SliderTab::Hsv => DragTarget::HsvSlider(i),
             };
-            let covered = Rect::new(
-                track_x - thumb / 2.0,
-                layout.slider_row_y(i) + (scaled(SLIDER_HEIGHT) - thumb) / 2.0,
-                track_width + thumb,
-                thumb,
-            );
-            (target, covered)
+            (target, layout.row_hold(i))
         };
         grab::nearest(
             [
@@ -2048,6 +2061,14 @@ fn hex_field_rect(x: f32, y: f32, width: f32) -> crate::frame::Rect {
 const HEX_LABEL_WIDTH: f32 = 32.0;
 /// The hex field's height.
 const HEX_FIELD_HEIGHT: f32 = 22.0;
+/// The OK and Cancel buttons' size.
+const BUTTON_SIZE: (f32, f32) = (70.0, 28.0);
+/// What the dialog's buttons say.
+const OK_LABEL: &str = "OK";
+/// What the dialog's buttons say.
+const CANCEL_LABEL: &str = "Cancel";
+/// The dialog's title.
+const DIALOG_TITLE: &str = "Color Picker";
 
 struct DialogLayout {
     width: f32,
@@ -2182,6 +2203,37 @@ impl DialogLayout {
             SliderTab::Rgb => scaled(PADDING),
             SliderTab::Hsv => scaled(PADDING) + scaled(SLIDER_TAB_PITCH),
         }
+    }
+
+    /// Where slider row `row` is taken hold of: its track with the thumb's
+    /// overhang at both ends, as tall as the thumb -- for a press, and for a
+    /// tool asking where the slider is.
+    fn row_hold(&self, row: u8) -> Rect {
+        let (track_x, track_width) = self.slider_track();
+        let thumb = scaled(SLIDER_THUMB);
+        Rect::new(
+            track_x - thumb / 2.0,
+            self.slider_row_y(row) + (scaled(SLIDER_HEIGHT) - thumb) / 2.0,
+            track_width + thumb,
+            thumb,
+        )
+    }
+
+    /// The OK button: left of Cancel, at the strip's right.
+    fn ok_button(&self) -> Rect {
+        let (w, h) = BUTTON_SIZE;
+        Rect::new(
+            self.width - w * 2.0 - scaled(PADDING) * 3.0,
+            self.button_y,
+            w,
+            h,
+        )
+    }
+
+    /// The Cancel button, at the strip's right end.
+    fn cancel_button(&self) -> Rect {
+        let (w, h) = BUTTON_SIZE;
+        Rect::new(self.width - w - scaled(PADDING), self.button_y, w, h)
     }
 }
 
@@ -2383,6 +2435,59 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         }
+    }
+
+    /// **OK and Cancel take a click**, as Enter and Escape: OK keeps the
+    /// colour -- a code being typed first -- and Cancel goes back to the one
+    /// the dialog opened with. They were drawn and took none, so a dialog
+    /// could be left only from the keyboard.
+    #[test]
+    fn ok_and_cancel_take_a_click() {
+        let (w, h) = (400.0, 600.0);
+        let mut dialog = ColorPickerDialog::new(Color::rgb(10, 20, 30));
+        let layout = dialog.layout(w, h);
+        let middle = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+
+        // A code typed and not yet kept, then OK.
+        let field = hex_field_rect(layout.right_x, layout.hex_y, layout.right_width);
+        let (fx, fy) = middle(field);
+        assert_eq!(dialog.handle_mouse(&press(fx, fy), w, h), None);
+        assert!(dialog.hex_is_focused());
+        // The code there taken out, and a shorthand typed in its place.
+        let key = |key: Key, text: &str| KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: text.to_owned(),
+        };
+        for _ in 0..6 {
+            dialog.handle_key(&key(Key::Backspace, ""));
+        }
+        assert_eq!(dialog.picker().hex_input(), "");
+        for ch in ["F", "0", "0"] {
+            dialog.handle_key(&key(Key::Unknown(0), ch));
+        }
+        let (ox, oy) = middle(layout.ok_button());
+        assert_eq!(
+            dialog.handle_mouse(&press(ox, oy), w, h),
+            Some(ColorPickerEvent::Confirmed(Color::rgb(255, 0, 0)))
+        );
+        assert!(dialog.is_confirmed());
+        assert_eq!(
+            dialog.picker().recent_colors(),
+            [Color::rgb(255, 0, 0)],
+            "kept among the recent"
+        );
+
+        let mut dialog = ColorPickerDialog::new(Color::rgb(10, 20, 30));
+        dialog.picker_mut().set_color(Color::rgb(200, 0, 200));
+        let (cx, cy) = middle(layout.cancel_button());
+        assert_eq!(
+            dialog.handle_mouse(&press(cx, cy), w, h),
+            Some(ColorPickerEvent::Cancelled)
+        );
+        assert!(dialog.is_cancelled());
+        assert_eq!(dialog.current_color(), Color::rgb(10, 20, 30));
     }
 
     /// A slider row's track is eight pixels tall; its region is 24. A press two

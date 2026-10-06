@@ -2688,8 +2688,11 @@ authors never wrote a single automation handler.
   `hidden_from_automation` (`guitk::widget::automation`, `design-decisions.md`
   §1482). The hook for custom-drawn ones is `guitk::widget::automation::Accessible`
   -- a component names its parts by its own hit-box targets -- and the
-  character picker implements it. Not yet: the font picker, the file
-  dialog, the colour picker and the shell's surfaces.*
+  character picker implements it. The colour dialog since 2026-10-06
+  (`guitk::colorpicker::ColorPart`): its square's two axes, the hue and
+  opacity bars, the hex field, the eyedropper, the tabs and their
+  sliders, the presets, the recent colours, OK and Cancel. Not yet: the
+  font picker, the file dialog and the shell's surfaces.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

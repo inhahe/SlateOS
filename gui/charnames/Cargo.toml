@@ -1,0 +1,10 @@
+[package]
+name = "charnames"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS character names: every emoji in CLDR's order with its name and group, and the names of the characters a picker offers -- symbols, maths, arrows, currency, Latin, Greek, Cyrillic -- generated from the Unicode Consortium's data (gen.py), with a search over them."
+
+[dependencies]
+
+[lints]
+workspace = true

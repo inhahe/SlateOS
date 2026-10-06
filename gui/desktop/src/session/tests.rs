@@ -7117,6 +7117,53 @@ fn type_password(desktop: &Desktop, session: &mut Session, password: &str) {
     session.pump().expect("pump");
 }
 
+/// **High contrast switched at the login screen's accessibility menu is the
+/// screen's for the sitting**: drawn so at once -- the screen says the
+/// session drew it on -- with nobody's settings written, and gone once
+/// somebody signs in, whose own settings the session then has.
+#[test]
+fn high_contrast_switched_at_the_login_screen_is_for_the_sitting() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    let window = session.login_surface().window();
+    let chord = guitk::event::Event::Key(KeyEvent {
+        key: Key::U,
+        pressed: true,
+        modifiers: Modifiers {
+            super_key: true,
+            ..Modifiers::default()
+        },
+        text: String::new(),
+    });
+    desktop.borrow_mut().send_input(&[
+        InputEvent::new(window, chord),
+        InputEvent::new(window, key(Key::Space)),
+    ]);
+    session.pump().expect("pump");
+    let high = crate::login_screen::LoginAccess::HighContrast;
+    assert!(session.login().unwrap().access(high), "drawn on");
+    assert_eq!(session.login_high_contrast, Some(true));
+    assert!(
+        session.shell().appearance.high_contrast.is_none(),
+        "nobody's settings"
+    );
+
+    // Switched back, from the same row.
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(window, key(Key::Space))]);
+    session.pump().expect("pump");
+    assert!(!session.login().unwrap().access(high), "drawn off");
+
+    // Closed, and signed in: the sitting is over.
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(window, key(Key::Escape))]);
+    session.pump().expect("pump");
+    type_password(&desktop, &mut session, "password");
+    assert!(!session.is_locked());
+    assert_eq!(session.login_high_contrast, None);
+}
+
 /// The whole point of the feature: a machine with accounts comes up asking who
 /// you are, not showing you the desktop.
 #[test]

@@ -127,8 +127,6 @@ pub enum LoginPhase {
     LoggingIn,
     /// Login failed, showing error.
     Failed,
-    /// Locked (screen lock, not initial login).
-    Locked,
 }
 
 /// A user account entry for the login screen.
@@ -266,6 +264,22 @@ impl LoginPowerAction {
     }
 }
 
+/// An accessibility setting the login screen's accessibility menu
+/// switches.
+///
+/// For as long as the screen is up, and no longer: nobody has signed in to
+/// own a setting, so none is saved, and the session after signing in has its
+/// user's own (`design-decisions.md` §1492).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginAccess {
+    /// The high-contrast colours, white on black.
+    HighContrast,
+}
+
+/// The accessibility menu's rows, in the order they are drawn: each setting
+/// there is to switch, and what its row says.
+pub const ACCESS_MENU: [(LoginAccess, &str); 1] = [(LoginAccess::HighContrast, "High contrast")];
+
 /// Login configuration.
 #[derive(Clone, Debug)]
 pub struct LoginConfig {
@@ -281,7 +295,10 @@ pub struct LoginConfig {
     pub show_accessibility: bool,
     /// Show power button.
     pub show_power: bool,
-    /// Show on-screen keyboard button.
+    /// Show the on-screen keyboard's button. Off: there is no on-screen
+    /// keyboard yet, and a button with nothing behind it is a click that
+    /// does nothing, in the one place a user who needs one cannot go
+    /// elsewhere to look (`design-decisions.md` §1492).
     pub show_osk_button: bool,
     /// Maximum login attempts before lockout.
     pub max_attempts: u32,
@@ -302,7 +319,7 @@ impl Default for LoginConfig {
             show_keyboard_layout: true,
             show_accessibility: true,
             show_power: true,
-            show_osk_button: true,
+            show_osk_button: false,
             max_attempts: 5,
             lockout_seconds: 30,
             show_password_hint: false,
@@ -556,6 +573,10 @@ pub enum LoginAction {
     },
     /// The user chose an entry from the power menu.
     Power(LoginPowerAction),
+    /// The user switched a setting in the accessibility menu: switch it,
+    /// for as long as the screen is up, and say so with
+    /// [`LoginScreen::set_access`].
+    Access(LoginAccess),
 }
 
 // ============================================================================
@@ -635,6 +656,12 @@ pub struct LoginScreen {
     /// width (`AppearanceSettings::focus_ring_width`), pushed in by the
     /// session -- this screen is drawn from a palette, which is colours.
     focus_ring: f32,
+    /// Whether the high-contrast colours are on, as the session draws the
+    /// screen ([`set_access`](Self::set_access)): the menu shows each
+    /// switch as it is.
+    high_contrast: bool,
+    /// The accessibility menu's row the keyboard is on.
+    access_row: usize,
 }
 
 impl LoginScreen {
@@ -762,6 +789,8 @@ impl LoginScreen {
             background_image_h: 0.0,
             icon_registry: crate::IconRegistry::default(),
             focus_ring: guitk::style::FOCUS_RING_WIDTH,
+            high_contrast: false,
+            access_row: 0,
         }
     }
 
@@ -916,6 +945,22 @@ impl LoginScreen {
         self.power_menu_open = false;
     }
 
+    /// Whether `setting` is on, as the session draws the screen.
+    #[must_use]
+    pub const fn access(&self, setting: LoginAccess) -> bool {
+        match setting {
+            LoginAccess::HighContrast => self.high_contrast,
+        }
+    }
+
+    /// Say whether `setting` is on: the session's to say, as it draws the
+    /// screen in the colours the setting gives.
+    pub fn set_access(&mut self, setting: LoginAccess, on: bool) {
+        match setting {
+            LoginAccess::HighContrast => self.high_contrast = on,
+        }
+    }
+
     /// Currently selected user (if any).
     pub fn current_user(&self) -> Option<&LoginUser> {
         self.users.get(self.selected_user)
@@ -984,6 +1029,38 @@ impl LoginScreen {
         }
     }
 
+    /// The accessibility menu's outer rectangle, above its button: its
+    /// right edge at the button's, as far left as its width takes it. Only
+    /// meaningful while [`a11y_menu_open`](Self::a11y_menu_open).
+    #[must_use]
+    pub fn a11y_menu_rect(&self) -> Hit {
+        #[expect(clippy::cast_precision_loss, reason = "a handful of rows")]
+        let rows = ACCESS_MENU.len() as f32;
+        let (w, h) = (220.0, 16.0 + rows * 32.0);
+        let button = self.a11y_button_rect();
+        Hit {
+            x: (button.x + button.w - w).max(8.0),
+            y: self.screen_height - BAR_HEIGHT - h - 8.0,
+            w,
+            h,
+        }
+    }
+
+    /// The `index`th row of the accessibility menu, in the order
+    /// [`ACCESS_MENU`] lists them.
+    #[must_use]
+    pub fn a11y_menu_row_rect(&self, index: usize) -> Hit {
+        let menu = self.a11y_menu_rect();
+        #[expect(clippy::cast_precision_loss, reason = "a handful of rows")]
+        let i = index as f32;
+        Hit {
+            x: menu.x,
+            y: menu.y + 8.0 + i * 32.0,
+            w: menu.w,
+            h: 32.0,
+        }
+    }
+
     /// The `index`th row of the power menu, in the order
     /// [`POWER_MENU_ACTIONS`] lists them.
     #[must_use]
@@ -1019,10 +1096,21 @@ impl LoginScreen {
         if !event.pressed {
             return LoginAction::Ignored;
         }
+        // Super+U opens the accessibility menu, or closes it, wherever the
+        // keyboard is: the way to it without the pointer -- the menu is for
+        // the users who may not be able to use one -- on the chord other
+        // systems' accessibility settings answer.
+        if self.config.show_accessibility && event.modifiers.super_key && event.key == Key::U {
+            self.toggle_a11y_menu();
+            return LoginAction::Redraw;
+        }
+        if self.a11y_menu_open {
+            return self.key_a11y_menu(event);
+        }
         // A menu is modal over the phase beneath it. Checked first so that
         // Escape closes the menu rather than walking back a phase, and so that
         // the arrow keys below cannot move a selection hidden behind it.
-        if self.power_menu_open || self.a11y_menu_open {
+        if self.power_menu_open {
             return if event.key == Key::Escape {
                 self.power_menu_open = false;
                 self.a11y_menu_open = false;
@@ -1033,7 +1121,7 @@ impl LoginScreen {
         }
         match self.phase {
             LoginPhase::UserSelect => self.key_user_select(event),
-            LoginPhase::PasswordEntry | LoginPhase::Locked => self.key_password_entry(event),
+            LoginPhase::PasswordEntry => self.key_password_entry(event),
             // A failed attempt is cleared by any key at all, which is what a
             // user reaching for the keyboard to retype expects. The keystroke
             // is consumed rather than also typed: the field was just cleared,
@@ -1046,6 +1134,33 @@ impl LoginScreen {
             // Nothing to type into: the machine is busy answering the last
             // attempt, or already letting the user in.
             LoginPhase::Authenticating | LoginPhase::LoggingIn => LoginAction::Ignored,
+        }
+    }
+
+    /// A key while the accessibility menu is up: Up and Down walk its rows,
+    /// Space or Enter switches the one the keyboard is on, Escape closes it,
+    /// and nothing reaches the phase beneath.
+    fn key_a11y_menu(&mut self, event: &KeyEvent) -> LoginAction {
+        let last = ACCESS_MENU.len().saturating_sub(1);
+        match event.key {
+            Key::Escape => {
+                self.a11y_menu_open = false;
+                LoginAction::Redraw
+            }
+            Key::Up => {
+                self.access_row = self.access_row.saturating_sub(1);
+                LoginAction::Redraw
+            }
+            Key::Down => {
+                self.access_row = self.access_row.saturating_add(1).min(last);
+                LoginAction::Redraw
+            }
+            Key::Enter | Key::Space => ACCESS_MENU
+                .get(self.access_row)
+                .map_or(LoginAction::Ignored, |(setting, _)| {
+                    LoginAction::Access(*setting)
+                }),
+            _ => LoginAction::Ignored,
         }
     }
 
@@ -1161,6 +1276,17 @@ impl LoginScreen {
             return LoginAction::Redraw;
         }
         if self.a11y_menu_open {
+            for (i, (setting, _)) in ACCESS_MENU.iter().enumerate() {
+                if self.a11y_menu_row_rect(i).contains(x, y) {
+                    // A switch, not a choice: the menu stays up, to show it
+                    // switched and to switch it back.
+                    self.access_row = i;
+                    return LoginAction::Access(*setting);
+                }
+            }
+            // It opened a menu that was never drawn until 2026-10-06, so the
+            // button showed nothing and this, the next press anywhere, was
+            // spent closing what nobody could see.
             self.a11y_menu_open = false;
             return LoginAction::Redraw;
         }
@@ -1220,7 +1346,6 @@ impl LoginScreen {
             }
             LoginPhase::Authenticating => self.render_authenticating(p, &mut commands),
             LoginPhase::LoggingIn => self.render_logging_in(p, &mut commands),
-            LoginPhase::Locked => self.render_password_entry(p, &mut commands),
         }
 
         // Bottom bar (power, accessibility, keyboard layout).
@@ -1229,6 +1354,9 @@ impl LoginScreen {
         // Power menu overlay.
         if self.power_menu_open {
             self.render_power_menu(p, &mut commands);
+        }
+        if self.a11y_menu_open {
+            self.render_a11y_menu(p, &mut commands);
         }
 
         commands
@@ -1745,6 +1873,53 @@ impl LoginScreen {
                 "input-keyboard",
                 p.subtext0,
             );
+        }
+    }
+
+    /// The accessibility menu: each setting's row -- the one the keyboard is
+    /// on marked -- its label, and its switch as the session says it is.
+    fn render_a11y_menu(&self, p: &Palette, commands: &mut Vec<RenderCommand>) {
+        let menu = self.a11y_menu_rect();
+        p.push_surface(
+            commands,
+            menu.x,
+            menu.y,
+            menu.w,
+            menu.h,
+            8.0,
+            Surface::Panel,
+        );
+        for (i, (setting, label)) in ACCESS_MENU.iter().enumerate() {
+            let row = self.a11y_menu_row_rect(i);
+            if i == self.access_row {
+                commands.push(RenderCommand::FillRect {
+                    x: row.x + 4.0,
+                    y: row.y,
+                    width: row.w - 8.0,
+                    height: row.h,
+                    color: p.surface1,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
+            commands.push(RenderCommand::Text {
+                x: row.x + 12.0,
+                y: row.y + 7.0,
+                text: (*label).to_string(),
+                font_size: 13.0,
+                color: p.text,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(row.w - 24.0 - guitk::switch::WIDTH),
+                overflow: TextOverflow::Ellipsis,
+            });
+            let on = self.access(*setting);
+            let pill = guitk::frame::Rect::new(
+                row.x + row.w - 12.0 - guitk::switch::WIDTH,
+                row.y + (row.h - guitk::switch::HEIGHT) / 2.0,
+                guitk::switch::WIDTH,
+                guitk::switch::HEIGHT,
+            );
+            let track = if on { p.accent } else { p.surface2 };
+            commands.extend(guitk::switch::shapes(p, pill, on, track));
         }
     }
 
@@ -2380,6 +2555,7 @@ mod tests {
         s.type_char('h');
         s.error_message = Some("Bad password".to_string());
         s.locked_out = true;
+        s.config.show_osk_button = true;
         s
     }
 
@@ -2462,11 +2638,6 @@ mod tests {
         s.phase = LoginPhase::LoggingIn;
         v.push(("logging in".to_string(), s));
 
-        let mut s = base();
-        s.select_user(0);
-        s.phase = LoginPhase::Locked;
-        v.push(("locked".to_string(), s));
-
         // One user: no back arrow.
         let mut s = LoginScreen::new(
             1920.0,
@@ -2487,12 +2658,20 @@ mod tests {
         s.power_menu_open = true;
         v.push(("power menu".to_string(), s));
 
+        // The accessibility menu, its switch off and on.
+        let mut s = base();
+        s.a11y_menu_open = true;
+        v.push(("accessibility menu".to_string(), s));
+        let mut s = base();
+        s.a11y_menu_open = true;
+        s.set_access(LoginAccess::HighContrast, true);
+        v.push(("accessibility menu, high contrast".to_string(), s));
+
         // Every bottom-bar element off, which is four `if`s at once.
         let mut s = base();
         s.config.show_keyboard_layout = false;
         s.config.show_power = false;
         s.config.show_accessibility = false;
-        s.config.show_osk_button = false;
         v.push(("bare bottom bar".to_string(), s));
 
         v.push(("everything".to_string(), everything()));
@@ -2731,7 +2910,6 @@ mod tests {
             LoginPhase::Authenticating,
             LoginPhase::LoggingIn,
             LoginPhase::Failed,
-            LoginPhase::Locked,
         ] {
             assert!(
                 all.iter().any(|(_, s)| s.phase == phase),
@@ -2744,7 +2922,7 @@ mod tests {
         /// fixture.
         type Branch = (&'static str, fn(&LoginScreen) -> bool);
 
-        let both_ways: [Branch; 11] = [
+        let both_ways: [Branch; 13] = [
             ("show_clock", |s| s.config.show_clock),
             ("show_date", |s| s.config.show_date),
             ("show_keyboard_layout", |s| s.config.show_keyboard_layout),
@@ -2752,6 +2930,8 @@ mod tests {
             ("show_accessibility", |s| s.config.show_accessibility),
             ("show_osk_button", |s| s.config.show_osk_button),
             ("power_menu_open", |s| s.power_menu_open),
+            ("a11y_menu_open", |s| s.a11y_menu_open),
+            ("high contrast", |s| s.access(LoginAccess::HighContrast)),
             ("locked_out", |s| s.locked_out),
             ("error_message", |s| s.error_message.is_some()),
             ("password typed", |s| !s.password().is_empty()),
@@ -2981,8 +3161,30 @@ mod tests {
     #[test]
     fn every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims() {
         for (mode, p) in table_palettes() {
+            // The accessibility menu: a panel, as the power menu is, its
+            // rows in ordinary ink.
+            let mut s = base();
+            s.a11y_menu_open = true;
+            let cmds = s.render(&p);
+            let menu = s.a11y_menu_rect();
+            assert_eq!(
+                fill_of_size(&cmds, menu.w, menu.h),
+                p.surface_paint(appearance::Surface::Panel)
+                    .fill
+                    .unwrap_or(p.mantle),
+                "{mode}: the accessibility menu"
+            );
+            assert_eq!(
+                panel_text(&cmds, "High contrast", 13.0),
+                p.text,
+                "{mode}: its row"
+            );
+
             let mut s = base();
             s.power_menu_open = true;
+            // Drawn here to be judged, though no screen draws it until
+            // there is an on-screen keyboard.
+            s.config.show_osk_button = true;
             let cmds = s.render(&p);
 
             assert_eq!(
@@ -3769,5 +3971,118 @@ mod tests {
     #[test]
     fn two_accounts_open_on_the_user_list() {
         assert_eq!(make_screen().phase, LoginPhase::UserSelect);
+    }
+
+    /// The fill a switch's track is drawn with in the accessibility menu's
+    /// `index`th row.
+    fn switch_track(s: &LoginScreen, p: &Palette, index: usize) -> Color {
+        let row = s.a11y_menu_row_rect(index);
+        let left = row.x + row.w - 12.0 - guitk::switch::WIDTH;
+        s.render(p)
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect { x, y, color, .. }
+                    if (*x - left).abs() < 0.01 && *y >= row.y && *y < row.y + row.h =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .expect("a switch in the row")
+    }
+
+    /// **The accessibility button opens a menu that is drawn, each setting
+    /// switched as its row is clicked, the menu staying up to show it**: it
+    /// opened a menu nothing drew, so the button showed nothing and the next
+    /// press anywhere was spent closing what nobody could see. The switch is
+    /// drawn as the session says the setting is.
+    #[test]
+    fn the_accessibility_menu_is_drawn_and_switches_as_clicked() {
+        let p = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut s = make_screen();
+        let button = s.a11y_button_rect();
+        assert_eq!(
+            s.handle_mouse(&click_at(button.x + 4.0, button.y + 4.0)),
+            LoginAction::Redraw
+        );
+        assert!(s.a11y_menu_open);
+        assert!(
+            s.render(&p).iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == "High contrast"
+            )),
+            "drawn"
+        );
+        assert_eq!(switch_track(&s, &p, 0), p.surface2, "off");
+
+        let row = s.a11y_menu_row_rect(0);
+        assert_eq!(
+            s.handle_mouse(&click_at(row.x + 20.0, row.y + 10.0)),
+            LoginAction::Access(LoginAccess::HighContrast)
+        );
+        assert!(s.a11y_menu_open, "a switch: the menu stays");
+        s.set_access(LoginAccess::HighContrast, true);
+        assert_eq!(switch_track(&s, &p, 0), p.accent, "on, as the session says");
+
+        assert_eq!(s.handle_mouse(&click_at(10.0, 10.0)), LoginAction::Redraw);
+        assert!(!s.a11y_menu_open, "a press beside it closes it");
+        assert_eq!(s.phase, LoginPhase::UserSelect, "and does nothing else");
+    }
+
+    /// **Super+U opens the accessibility menu wherever the keyboard is, and its
+    /// keys walk and switch it** -- the way to it without a pointer. Escape
+    /// closes it rather than walking back the phase, and nothing typed while
+    /// it is up reaches the password field. Where the button is not shown,
+    /// neither is the menu.
+    #[test]
+    fn super_u_opens_the_accessibility_menu() {
+        let mut s = make_screen();
+        s.select_user(0);
+        let chord = KeyEvent {
+            key: Key::U,
+            pressed: true,
+            modifiers: Modifiers {
+                super_key: true,
+                ..Modifiers::default()
+            },
+            text: String::new(),
+        };
+        assert_eq!(s.handle_key(&chord), LoginAction::Redraw);
+        assert!(s.a11y_menu_open);
+        assert_eq!(s.handle_key(&press(Key::Down)), LoginAction::Redraw);
+        assert_eq!(s.handle_key(&press(Key::Up)), LoginAction::Redraw);
+        assert_eq!(
+            s.handle_key(&press(Key::Space)),
+            LoginAction::Access(LoginAccess::HighContrast)
+        );
+        assert_eq!(
+            s.handle_key(&press(Key::Enter)),
+            LoginAction::Access(LoginAccess::HighContrast)
+        );
+        assert_eq!(s.handle_key(&typed("x")), LoginAction::Ignored);
+        assert!(s.password().is_empty(), "nothing typed past the menu");
+        assert_eq!(s.handle_key(&press(Key::Escape)), LoginAction::Redraw);
+        assert!(!s.a11y_menu_open);
+        assert_eq!(
+            s.phase,
+            LoginPhase::PasswordEntry,
+            "the menu closed, not the phase"
+        );
+
+        assert_eq!(s.handle_key(&chord), LoginAction::Redraw);
+        assert_eq!(s.handle_key(&chord), LoginAction::Redraw);
+        assert!(!s.a11y_menu_open, "the chord closes it too");
+
+        s.config.show_accessibility = false;
+        let _not_mine = s.handle_key(&chord);
+        assert!(!s.a11y_menu_open, "no button, no menu");
+    }
+
+    /// **No button for an on-screen keyboard while there is none**: a button
+    /// with nothing behind it is a click that does nothing, in the one place a
+    /// user who needs it cannot go elsewhere to look.
+    #[test]
+    fn no_on_screen_keyboard_button_while_there_is_no_on_screen_keyboard() {
+        assert!(!LoginConfig::default().show_osk_button);
     }
 }

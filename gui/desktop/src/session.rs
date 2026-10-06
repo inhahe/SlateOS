@@ -97,7 +97,7 @@ use oswindow::{
 use crate::animations::{AnimationManager, WindowAnimation};
 use crate::autologin::StartConditions;
 use crate::background_program::{self, Source};
-use crate::login_screen::{LoginAction, LoginScreen, LoginUser};
+use crate::login_screen::{LoginAccess, LoginAction, LoginScreen, LoginUser};
 use crate::notif_pane;
 use crate::pictures::{Decoded, Job, PictureWorker, Slot};
 use crate::taskbar_autohide::{AutoHideConfig, AutoHideManager, ScreenEdge};
@@ -592,6 +592,11 @@ pub struct ShellSession<T: Transport> {
     /// a screen that refuses everyone is a machine that cannot be used at all.
     /// See `design-decisions.md` §824.
     login: Option<LoginScreen>,
+    /// The high-contrast colours as switched at the login screen's
+    /// accessibility menu, or `None` -- as the appearance has them -- until
+    /// they are. For the sitting: gone when the screen goes, and nobody's
+    /// settings written (`design-decisions.md` §1492).
+    login_high_contrast: Option<bool>,
     /// Where the accounts the login screen offers come from: the file given
     /// at start, or `None` for the system's own. Kept so that logging out
     /// returns to the screen the session started with, not to a different
@@ -1071,6 +1076,7 @@ impl<T: Transport> ShellSession<T> {
             // A login screen exactly when there is somebody to log in as
             // (`design-decisions.md` §824; see `greeter`).
             login: Self::greeter(users_yaml, display.width, display.height),
+            login_high_contrast: None,
             login_surface,
             // The compositor maps a new window; the first `paint_login` unmaps
             // it if no screen is up. Recording `true` here rather than `false`
@@ -1147,6 +1153,7 @@ impl<T: Transport> ShellSession<T> {
         // is a frame of feedback, not a step that can fail, and holding the
         // machine on it would be inventing a failure mode.
         self.login = None;
+        self.login_high_contrast = None;
     }
 
     /// The shell being driven.
@@ -1247,13 +1254,29 @@ impl<T: Transport> ShellSession<T> {
         // The user's focus width, for the password field's mark: pushed in
         // here, where the screen is drawn and the settings are both to hand.
         let focus_ring = self.shell.appearance.focus_ring_width();
+        // In the high-contrast colours as switched at the screen, else as the
+        // appearance has them -- its own scheme where it has one.
+        let mut appearance = self.shell.appearance.clone();
+        if let Some(on) = self.login_high_contrast {
+            appearance.high_contrast = if on {
+                appearance
+                    .high_contrast
+                    .or(Some(appearance::HighContrastScheme::WhiteOnBlack))
+            } else {
+                None
+            };
+        }
         if let Some(screen) = self.login.as_mut() {
             screen.set_focus_ring_width(focus_ring);
+            screen.set_access(
+                LoginAccess::HighContrast,
+                appearance.high_contrast.is_some(),
+            );
         }
         let Some(screen) = &self.login else {
             return Ok(());
         };
-        let palette = Palette::from_settings(&self.shell.appearance);
+        let palette = Palette::from_settings(&appearance);
         let mut tree = RenderTree::new();
         tree.extend(screen.render(&palette));
         self.send_frame(self.login_surface, &tree)
@@ -1321,6 +1344,13 @@ impl<T: Transport> ShellSession<T> {
             // drains `take_launches`. Until 2026-09-25 this had a queue of its
             // own, which the binary answered by exiting.
             LoginAction::Power(choice) => self.queue_launches(vec![choice.command()]),
+            // Switched for the sitting, and drawn so below.
+            LoginAction::Access(LoginAccess::HighContrast) => {
+                let now = self
+                    .login_high_contrast
+                    .unwrap_or(self.shell.appearance.high_contrast.is_some());
+                self.login_high_contrast = Some(!now);
+            }
         }
         self.paint_login()
     }
@@ -4534,6 +4564,7 @@ impl<T: Transport> ShellSession<T> {
             self.shell.screen_width,
             self.shell.screen_height,
         );
+        self.login_high_contrast = None;
         if self.login.is_some() {
             // Nobody is using the desktop until somebody signs in again.
             self.shell.set_user_name("");

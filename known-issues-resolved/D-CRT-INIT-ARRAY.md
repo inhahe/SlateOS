@@ -1,4 +1,6 @@
-### D-CRT-INIT-ARRAY. `.init_array`/`.preinit_array` constructor + `.fini_array` destructor support — MECHANISM LANDED (end-to-end C/C++ validation pending a consumer)
+### D-CRT-INIT-ARRAY. `.init_array`/`.preinit_array` constructor + `.fini_array` destructor support — FIXED 2026-07-01, proven on every boot since 2026-09-12 (closed 2026-10-05)
+
+**Status:** FIXED -- the walk runs; `ctest-initfini`'s rung proves it on every boot (see the end).
 
 **Status (2026-07-01):** The constructor/destructor machinery is now
 **implemented and host-tested**. What remains is purely *validating it
@@ -144,3 +146,29 @@ asserts 42 is lane A's and is now unblocked.
 
 **Discovered/documented:** 2026-06-30; mechanism implemented + host-tested
 2026-07-01.
+
+**Closed (lane D, 2026-10-05): the walk is proven to run, on every boot.**
+The kernel's rung for the fixture, `self_test_ctest_initfini`
+(`kernel/src/proc/spawn.rs`, lane A, since 263ab5989 on 2026-09-12), boots
+`/tests/ctest-initfini.elf` and passes only if the program exits 42 -- which
+its `main` cannot produce; only a destructor can. Boot 185 on lane D
+(6ef13dec3, main a0b0df297 merged), as every boot since:
+
+```
+[initfini] preinit_array entry ran
+[initfini] init_array ctor priority 101 ran
+[initfini] init_array ctor priority 102 ran
+[initfini] main ran
+[initfini] main returning 7; only the fini walk can make this 42
+[initfini] fini_array dtor priority 102 ran
+[initfini] fini_array dtor priority 101 ran
+[initfini] observed order: 1 2 3 4 5 6
+[initfini] PASS: preinit, init and fini arrays all walked in order
+```
+
+So the three things the paragraph above names as unproven are proven: the
+loader maps the arrays, `__libc_start_main` calls `run_constructors`, and
+`atexit(run_destructors)` fires, in POSIX's order. The C++ side is
+exercised by the C++ programs that run at boot since -- CMake's rung (its
+static objects constructed by the same `.init_array` walk, destroyed through
+`__cxa_atexit`) and `ctest-cxx-throw`.

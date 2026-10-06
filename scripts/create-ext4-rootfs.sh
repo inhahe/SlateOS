@@ -1111,6 +1111,23 @@ spike_rebuild_if_behind() {
     echo "[rootfs] $name rebuilt."
 }
 
+# Is the Oils spec bundle's harness the tree's? Byte for byte, file by file:
+# the driver, the harness and the helpers ported from Python 2, against the
+# copies build/oils-spec/ carries (scripts/oils-spec/bundle.sh). Its staleness
+# is content, not a libc link: the bundle is data and Python, recorded on
+# Linux by the harness it carries, so a harness that has moved on since makes
+# it another harness's expectations.
+oils_spec_current() {
+    local have="$ROOT_DIR/build/oils-spec/usr/share/oils-spec" src="$ROOT_DIR/scripts/oils-spec" f
+    for f in sh_spec.py run_all.py; do
+        cmp -s "$src/$f" "$have/$f" || return 1
+    done
+    for f in "$src"/bin/*.py; do
+        cmp -s "$f" "$have/spec/bin/${f##*/}" || return 1
+    done
+    return 0
+}
+
 if [ "${NO_SPIKE_REBUILD:-0}" = "1" ]; then
     echo "[rootfs] NOTE: NO_SPIKE_REBUILD=1 — not rebuilding stale spike artifacts."
     echo "[rootfs]       The staleness gates below still apply, so nothing stale ships."
@@ -1150,6 +1167,26 @@ else
     # stands for the three, which are always linked and staged together.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/opt-slateos.elf" \
         scripts/llvm-spike/slatelink.sh
+    # Oils' relink is seconds: slatelink.sh links the objects run.sh compiled
+    # against the new libc.a and stages the stripped binary again.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/oils-for-unix-slateos.elf" \
+        scripts/oils-spike/slatelink.sh
+    # Oils' spec tests are behind when the harness they carry is not the
+    # tree's (oils_spec_current). Rebuilding records the Linux expectations
+    # again, about seven minutes, which is the point: expectations recorded by
+    # another harness are not this one's. Absent stays absent, as above.
+    if [ -f "$ROOT_DIR/build/oils-spec/usr/share/oils-spec/run_all.py" ] \
+       && ! oils_spec_current; then
+        echo "[rootfs] the Oils spec bundle carries an older harness than scripts/oils-spec/ — rebuilding it"
+        if ! ( cd "$ROOT_DIR" && bash scripts/oils-spec/bundle.sh ) \
+                > /tmp/spike-rebuild-oils-spec.log 2>&1; then
+            echo "[rootfs] ERROR: scripts/oils-spec/bundle.sh failed while rebuilding the spec bundle."
+            echo "[rootfs]        Last 20 lines of /tmp/spike-rebuild-oils-spec.log:"
+            tail -20 /tmp/spike-rebuild-oils-spec.log | sed 's/^/[rootfs]        | /'
+            exit 1
+        fi
+        echo "[rootfs] the Oils spec bundle rebuilt."
+    fi
 fi
 
 # --- GNU bash 5.2, cross-compiled and linked against OUR OWN libc -------------
@@ -1347,6 +1384,88 @@ elif [ -e "$CMAKE_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $CMAKE_SLATE not found — /bin/cmake will be absent"
     echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh)"
+fi
+
+# --- Oils 0.38.0, OSH and YSH, likewise linked against OUR OWN libc ----------
+# Genuine Oils, upstream's C++ unmodified (scripts/oils-spike/, lane B's port):
+# OSH, which runs bash scripts, and YSH, its newer language. The operator
+# decided it becomes SlateOS's default shell (design-decisions.md §1043), with
+# our Rust OSH kept as a fallback; this puts it on the image, so a rung can
+# show it runs (requests/b-ad-genuine-oils-staged-and-run-at-boot.md).
+#
+# ONE binary under two names. It picks its language from the name it was run
+# by -- `ysh` is YSH, anything else is told by its first argument
+# (`oils-for-unix osh -c ...`) -- so /bin/ysh is a hard link, as the multi-call
+# aliases further down are, with a copy only if the link fails.
+#
+# NOT /bin/osh, and not /bin/sh. /bin/osh is our Rust OSH's name until genuine
+# Oils has run here and the Rust one is renamed -- a later step, taken with
+# /bin/sh, in that order (the request above).
+#
+# Staleness: the rule bash's has -- absent is honest (NOTE), older than libc.a
+# is a lie (fatal); the relink pass above is what normally keeps it fresh.
+# PROGRAM: /bin/oils-for-unix, /bin/ysh -- Oils 0.38.0: OSH, which runs bash scripts, and YSH, its newer language. (scripts/oils-spike/)
+OILS_SLATE="$ROOT_DIR/build/spike/oils-for-unix-slateos.elf"
+OILS_STALE=0
+if [ -e "$OILS_SLATE" ]; then
+    cp -L "$OILS_SLATE" "$STAGE/bin/oils-for-unix"
+    chmod 0755 "$STAGE/bin/oils-for-unix"
+    rm -f "$STAGE/bin/ysh"
+    ln "$STAGE/bin/oils-for-unix" "$STAGE/bin/ysh" 2>/dev/null \
+        || cp -L "$STAGE/bin/oils-for-unix" "$STAGE/bin/ysh"
+    echo "[rootfs] staged Oils 0.38.0 (linked against our libc.a): /bin/oils-for-unix," \
+         "/bin/ysh ($(stat -c %s "$STAGE/bin/oils-for-unix") bytes)"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$OILS_SLATE" ]; then
+        echo "[rootfs] WARNING: oils-for-unix-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/oils-spike/slatelink.sh"
+        OILS_STALE=1
+    fi
+else
+    echo "[rootfs] NOTE: $OILS_SLATE not found — /bin/oils-for-unix and /bin/ysh will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu --exec bash scripts/oils-spike/run.sh)"
+fi
+
+# --- Oils' spec tests --------------------------------------------------------
+# Upstream's 223 spec files -- about 4,000 cases of "this script must print
+# this and exit with that" -- with lane B's Python 3 port of upstream's harness
+# and the same run recorded on Linux, so a run here reports only what behaves
+# differently from Linux (scripts/oils-spec/, and
+# requests/b-ad-oils-spec-tests-on-the-image.md). The operator's §1043 has them
+# run on SlateOS before genuine Oils becomes the default shell:
+#     python3 /usr/share/oils-spec/run_all.py
+#
+# Built by scripts/oils-spec/bundle.sh into build/oils-spec/, a tree rooted as
+# the image is; about 1.3 MB. They test /bin/oils-for-unix and nothing else, so
+# they are staged only beside it, and need /bin/python3 with its standard
+# library to run. Absent is a NOTE. Without expected/ tables -- bundle.sh found
+# no native Oils to record them with -- they are staged with a WARNING: a run
+# then reports failures, not differences from Linux. A bundle whose harness is
+# not the tree's was rebuilt by the pass above; reaching here with one means
+# that pass was skipped, and that is a WARNING too.
+OILS_SPEC="$ROOT_DIR/build/oils-spec"
+if [ -f "$OILS_SPEC/usr/share/oils-spec/run_all.py" ] && [ -e "$STAGE/bin/oils-for-unix" ]; then
+    cp -r "$OILS_SPEC/." "$STAGE/"
+    echo "[rootfs] staged Oils' spec tests: /usr/share/oils-spec" \
+         "($(ls "$OILS_SPEC"/usr/share/oils-spec/spec/*.test.sh | wc -l) spec files," \
+         "$(du -sb "$OILS_SPEC" | cut -f1) bytes)"
+    if ! ls "$OILS_SPEC"/usr/share/oils-spec/expected/*.tsv >/dev/null 2>&1; then
+        echo "[rootfs] WARNING: the Oils spec bundle has no expected/ tables: a run reports"
+        echo "[rootfs]          failures, not differences from Linux. bundle.sh records them"
+        echo "[rootfs]          when it finds a native Oils (scripts/oils-spec/validate.sh builds one)."
+    fi
+    if ! oils_spec_current; then
+        echo "[rootfs] WARNING: the Oils spec bundle carries an older harness than scripts/oils-spec/:"
+        echo "[rootfs]          its expectations are another harness's. Rebuild it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/oils-spec/bundle.sh"
+    fi
+elif [ -f "$OILS_SPEC/usr/share/oils-spec/run_all.py" ]; then
+    echo "[rootfs] NOTE: Oils' spec tests are built but /bin/oils-for-unix is not staged —"
+    echo "[rootfs]       leaving them off: they test that program and nothing else."
+else
+    echo "[rootfs] NOTE: $OILS_SPEC not found — Oils' spec tests will be absent"
+    echo "[rootfs]       (build them with: wsl -d Ubuntu --exec bash scripts/oils-spec/bundle.sh)"
 fi
 
 # --- eSpeak NG 1.52, likewise linked against OUR OWN libc --------------------
@@ -2246,6 +2365,22 @@ if [ "$LLVM_STALE" -gt 0 ]; then
         echo "[rootfs]        against a libc that is no longer in the build. Relink them, a"
         echo "[rootfs]        minute from the objects already compiled:"
         echo "[rootfs]          wsl -d Ubuntu -- bash scripts/llvm-spike/slatelink.sh"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$OILS_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: oils-for-unix-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/oils-for-unix-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/oils-for-unix and /bin/ysh on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink it:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/oils-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

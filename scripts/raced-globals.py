@@ -230,6 +230,14 @@ _LOCK_HINT = re.compile(r"(?:\.|::)lock\(\)|\block_\w+|\b\w*_LOCK\b|#\[serial\]"
 # Add to this table, not to the baseline: a line here says *why* the tool is
 # wrong and can be argued with; a line in the baseline only says "known".
 IGNORE: dict[str, str] = {
+    # The registration lock of `<printf.h>` is itself a lock: a spin lock held
+    # only inside one `register_printf_*` call, never across a test's
+    # set-provoke-read. The tests that register run in a process of their own
+    # (`registration_child`, which does nothing unless the env variable
+    # `registration_is_glibcs` sets for its child is set, and that test only
+    # spawns it), and `parse_printf_format_is_glibcs` never takes it: it only
+    # loads the tables. Audited 2026-10-05.
+    "posix/src/printf_h.rs:LOCK": "the registration lock itself, held only within a register_* call; the registering test runs in a child process",
     # A global that only ever moves one way cannot give a test a wrong answer:
     # whichever sibling won the race, the value is still "some test has run".
     "*:TESTS_RAN": "monotonic flag; no test can observe a wrong value",

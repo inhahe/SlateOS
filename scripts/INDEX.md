@@ -19,7 +19,6 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/basenc-diff.sh` | basenc-diff.sh — compare our `base64`, `base32` and `basenc` against GNU's, |
 | `scripts/bash-spike/checksyms.sh` | Confirm the three functions the spike originally had to shim are now real |
 | `scripts/bash-spike/cross2.sh` | Cross-compile bash 5.2 -> x86_64-linux-musl (the ABI SlateOS's libc.a targets). |
-| `scripts/bash-spike/cross3.sh` | Continue the cross build after the strtoimax collision. |
 | `scripts/bash-spike/quality.sh` | Linking is not working: how many symbols bash actually uses are real |
 | `scripts/bash-spike/run.sh` | The shebang was missing until 2026-09-02 — the only one of the five |
 | `scripts/bash-spike/runbash.sh` | Does the cross-compiled musl bash actually execute? Run it on Linux first — |
@@ -295,6 +294,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/oils-spec/sh_spec.py` | Oils' spec-test harness, ported from Python 2 to Python 3 to run on SlateOS. |
 | `scripts/oils-spec/validate.sh` | Prove the Python 3 spec harness judges every case as upstream's does. |
 | `scripts/oils-spike/run.sh` | Cross-compile genuine Oils (oils-for-unix) and link it against SlateOS's libc.a. |
+| `scripts/oils-spike/slatelink.sh` | Link genuine Oils' built objects against the CURRENT libc.a, and stage it. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
 | `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
 | `scripts/option-gap.sh` | Options the reference implementation has that OURS REJECTS AS UNKNOWN. |

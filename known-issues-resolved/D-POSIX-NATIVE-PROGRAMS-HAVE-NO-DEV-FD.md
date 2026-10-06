@@ -1,6 +1,6 @@
 ## D-POSIX-NATIVE-PROGRAMS-HAVE-NO-DEV-FD — a native program cannot open `/dev/fd/N`, and its `/dev/stdin`, `/dev/stdout` and `/dev/stderr` are the console rather than its own descriptors (lane D, 2026-10-05)
 
-**Status:** OPEN — the C library's to fix; bash is built to cope meanwhile.
+**Status:** FIXED 2026-10-05
 
 **In short:** on Linux, `/dev/fd/3` names "my file descriptor 3", and
 `/dev/stdin` "my standard input", whatever that is -- a pipe, a file, a
@@ -40,3 +40,18 @@ descriptor, so `[ -p /dev/stdin ]` asks the right question, and `/dev/fd`
 lists the open descriptors. Then bash's `bash_cv_dev_fd` and
 `bash_cv_dev_stdin` go back to `standard` and `present`, and process
 substitution works without FIFOs.
+
+**Fixed (2026-10-05):** the C library answers the names itself
+(`posix/src/fdname.rs`; design-decisions 1171): `open` and `openat` of
+`/dev/fd/N`, `/dev/stdin` and kin, and `/proc/self/fd/N` give a new
+descriptor for N's object -- for a file a new open file description at
+offset 0, by `SYS_FS_DUP` or, for wider access, by the path N was opened by,
+as Linux's reopen; for a pipe, terminal or socket a duplicate -- and `stat`
+(`[ -p /dev/stdin ]` asks fstat of 0), `lstat` (links moded 0500, 0300 or
+0700 by N's access), `statx`, `access`, `readlink` (`/proc/self/fd`,
+`pipe:[h]`, a file's path) and `opendir("/dev/fd")` (one link per open
+descriptor) answer as Linux does, measured. The two deviations -- a pipe's
+other end, and wider access to a renamed file -- are `EACCES`. bash's
+configure keeps `bash_cv_dev_fd=absent` until a boot rung shows process
+substitution working through these names on SlateOS; FIFOs remain
+`ENOSYS`.

@@ -56,9 +56,8 @@ is a different shipped binary — and per §305 `bash-slateos.elf` *is* shipped.
 | `run.sh` | Native (glibc) build of bash 5.2. Baseline: proves the source tree is sound. |
 | `syms.sh` | Symbol diff — what `libc.a`/`libstubs.a` define vs what bash's objects reference. |
 | `quality.sh` | How many of bash's symbols are stub-only, and where `ENOSYS` lives in `posix/src`. |
-| `cross2.sh` | Cross-configure + cross-compile for `x86_64-linux-musl`. |
-| `cross3.sh` | Works around a bash 5.2 configure bug (below), then relinks. |
-| `runbash.sh` | Executes the musl binary on Linux to confirm the port actually works. |
+| `cross2.sh` | Cross-configure against SlateOS's `libc.a` (through `scripts/lib/worktree.sh`'s link wrapper) and compile; drops bash 5.2's inverted `strtoimax` replacement (below) between the two; links a copy against musl, `musl-shim.c` supplying the `arc4random` musl lacks, to run on Linux. |
+| `runbash.sh` | Executes that musl copy on Linux, to take a measurement of this build's bash outside SlateOS. |
 | `slatelink.sh` | **The decisive one** — relinks bash's objects against SlateOS's `libc.a`. |
 | `checksyms.sh` | Confirms the three once-missing functions are real symbols in `libc.a`. |
 
@@ -109,9 +108,12 @@ also happens under `/tmp`, since `/mnt/d` is slow over 9p.
 `lib/sh/strtoimax.c` to `LIBOBJS` when the system **has** a usable
 `strtoimax`. Against a dynamic glibc that is harmless. Against a static musl it
 is fatal — musl defines `strtoimax` in the same object as `strtol`, that object
-gets pulled in for `strtol`, and lld reports a duplicate symbol. Pass
-`bash_cv_func_strtoimax=no` to a fresh configure, or drop it from
-`lib/sh/Makefile`'s `LIBOBJS` as `cross3.sh` does.
+gets pulled in for `strtol`, and lld reports a duplicate symbol. `cross2.sh` drops it
+from `lib/sh/Makefile`'s `LIBOBJS` between configure and the first make --
+not by answering `bash_cv_func_strtoimax=no`, which makes the macro skip its
+checks and leaves `HAVE_STRTOIMAX` and `HAVE_DECL_STRTOIMAX` out of
+`config.h`. (It was `cross3.sh`, run after a failed first make, until
+2026-10-05.)
 
 **3. bash brings its own copies of six C library functions.**
 `lib/sh/getenv.c` defines `getenv`, `putenv`, `setenv` and `unsetenv` over

@@ -17,6 +17,9 @@
 #     tmpnam_r (known-issues-resolved/
 #     D-SPIKES-CPYTHON-WAS-CONFIGURED-FOR-MUSL-NOT-FOR-OUR-LIBC.md);
 #   * a compile sees posix/include, so what ours has beyond musl is declared;
+#   * ...behind the build's own headers, which reach it with #include_next,
+#     as gnulib's replacement headers reach the system's. Until 2026-10-05
+#     posix/include came first and hid GNU make's lib/glob.h;
 #   * the scratch objects of a split call are cleaned up, whether it links or
 #     not;
 #   * a link-only call keeps its inputs, and -o, and still refuses -shared;
@@ -108,6 +111,29 @@ if "$SLATE_LINK_CC" -shared -o m.so m.o >/dev/null 2>&1; then
     bad "-shared was accepted"
 else
     ok
+fi
+
+# 5. A build's own header stands in front of posix/include's, and reaches it
+#    with #include_next, as gnulib's replacement headers reach the system's.
+#    GLOB_ALTDIRFUNC is ours: musl's glob.h has not got it.
+mkdir -p own
+printf '#define OWN_GLOB_H 1\n#include_next <glob.h>\n' > own/glob.h
+printf '%s\n' '#include <glob.h>' '#ifndef OWN_GLOB_H' '#error posix/include came first' \
+    '#endif' '#ifndef GLOB_ALTDIRFUNC' '#error #include_next did not reach posix/include' '#endif' \
+    'int own_glob_ok;' > g.c
+if "$SLATE_LINK_CC" -Iown -c g.c -o g.o >g.log 2>&1; then
+    ok
+else
+    bad "a build's own header: $(head -2 g.log)"
+fi
+# ...and in the one-step call the split compiles itself.
+printf '%s\n' '#include <glob.h>' '#ifndef OWN_GLOB_H' '#error hidden' '#endif' \
+    'int main(void){ return 0; }' > g2.c
+rm -f g2
+if "$SLATE_LINK_CC" -Iown -o g2 g2.c >g2.log 2>&1 && [ -x g2 ]; then
+    ok
+else
+    bad "a build's own header, one-step: $(head -2 g2.log)"
 fi
 
 echo "test-link-wrappers: $PASS passed, $FAIL failed"

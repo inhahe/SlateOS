@@ -636,9 +636,10 @@ slate_zig_cxx_runtime() {
 }
 
 # Write DIR/cc and DIR/c++, and set SLATE_LINK_CC and SLATE_LINK_CXX to them:
-# zig's cc and c++ for a compile, with posix/include in front of musl's headers
-# (since 2026-10-05), and zig's ld.lld ITSELF for a link, which is made against
-# SlateOS's libc.a, with zig's C++ and compiler runtimes around it.
+# zig's cc and c++ for a compile, with posix/include behind the build's own
+# include directories and in front of musl's headers (since 2026-10-05), and
+# zig's ld.lld ITSELF for a link, which is made against SlateOS's libc.a, with
+# zig's C++ and compiler runtimes around it.
 #
 #   slate_make_link_wrappers "$WORK/bin"                 # the sysroot's libc.a
 #   slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS"   # a copy of it
@@ -757,6 +758,12 @@ _slate_write_link_wrapper() {
         # links but cannot declare -- close_range, sem_clockwait -- is an
         # implicit declaration, an error since C99. -I, not -isystem: zig's
         # driver searches its own libc headers before an -isystem directory.
+        # And the LAST -I, after the call's own: -I directories are searched
+        # in the order given, all before zig's, so a build's own headers --
+        # gnulib's glob.h, stdlib.h and the rest, which reach the system's
+        # with #include_next -- stand in front of ours as they stand in front
+        # of the system's. First, as until 2026-10-05, ours hid GNU make's
+        # lib/glob.h from its lib/glob.c, which then did not compile.
         printf 'overlay=%q\n' "$SLATE_ROOT/posix/include"
         printf 'ld=(%q ld.lld)\n' "$SLATE_ZIG"
         printf 'libs=('
@@ -768,7 +775,7 @@ _slate_write_link_wrapper() {
 for a in "$@"; do
     case "$a" in
         -c|-S|-E|-r|-x*|-|-###|--version|-dumpversion|-dumpfullversion|-dumpmachine|-dumpspecs|-print-*)
-            exec "$cc" -I"$overlay" "$@" ;;
+            exec "$cc" "$@" -I"$overlay" ;;
     esac
 done
 me="${0##*/}"
@@ -793,7 +800,7 @@ if [ ${#srcs[@]} -gt 0 ]; then
     n=0
     for s in "${srcs[@]}"; do
         n=$((n + 1))
-        if ! "$cc" -I"$overlay" "${cflags[@]}" -c "$s" -o "$tmp/$n.o"; then
+        if ! "$cc" "${cflags[@]}" -I"$overlay" -c "$s" -o "$tmp/$n.o"; then
             rm -rf "$tmp"
             exit 1
         fi

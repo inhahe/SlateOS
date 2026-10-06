@@ -876,26 +876,86 @@ impl Drop for GroupList {
 // Login name
 // ---------------------------------------------------------------------------
 
-/// Get the login name.
-///
-/// Returns "root" (our only user).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getlogin() -> *const u8 {
-    c"root".as_ptr().cast::<u8>()
+process_global! {
+    /// The name [`getlogin`] hands back: glibc's `static char
+    /// name[UT_NAMESIZE + 1]` (`login/getlogin.c`).
+    fn login_name() -> [u8; crate::utmpx::UT_NAMESIZE + 1] = [0; crate::utmpx::UT_NAMESIZE + 1];
 }
 
-/// Get the login name into a buffer.
+/// The name of the user logged in on the terminal on standard input: the
+/// `ut_user` of that terminal's login record in `utmp`, glibc's
+/// `getlogin_r_fd0` -- `ttyname_r(0)`, `/dev/` taken off, and the
+/// `USER_PROCESS` (or a `getty`'s `LOGIN_PROCESS`) record for that line
+/// ([`crate::utmpx::login_on_line`]). `login` writes the record when it
+/// opens a session; a process on no terminal, or on one nobody logged in
+/// on, has no login name, which is the case `logname`'s "no login name"
+/// exists for.
 ///
-/// Returns 0 on success, -1 on error.
+/// Not glibc's first step: on Linux it reads `/proc/self/loginuid`, the audit
+/// subsystem's record of the session's user, and when that says "unset"
+/// answers no login name without looking at `utmp` at all. SlateOS keeps no
+/// audit login sessions -- its `loginuid` is "unset" for every process,
+/// `kernel/src/fs/procfs.rs` says why -- so on that step every process would
+/// have no login name, a logged-in shell included. This takes the step glibc
+/// takes where `loginuid` cannot be read (design-decisions §1172).
+///
+/// Returns 0, or an error number -- POSIX's convention for this call, not -1
+/// and `errno` (until 2026-10-05 it was -1): `ttyname_r`'s (`ENOTTY`,
+/// `EBADF`), `ENOENT` for no record, the database's own error, or `ERANGE`
+/// when the name and its NUL do not fit in `bufsize` (with `errno` set too,
+/// as glibc's). A NULL `buf` with room enough is `EFAULT`, where glibc's
+/// `memcpy` would fault.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getlogin_r(buf: *mut u8, bufsize: usize) -> i32 {
-    if buf.is_null() || bufsize < 5 {
+    let (name, n) = match login_record_name() {
+        Ok(found) => found,
+        Err(e) => return e,
+    };
+    if n.saturating_add(1) > bufsize {
         errno::set_errno(errno::ERANGE);
-        return -1;
+        return errno::ERANGE;
     }
-    // SAFETY: `buf` holds at least 5 bytes.
-    unsafe { core::ptr::copy_nonoverlapping(b"root\0".as_ptr(), buf, 5) };
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return errno::EFAULT;
+    }
+    // SAFETY: `buf` is non-NULL and holds `bufsize >= n + 1` bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(name.as_ptr(), buf, n);
+        buf.add(n).write(0);
+    }
     0
+}
+
+/// [`getlogin_r`] into this process's buffer: the name, or NULL with `errno`
+/// set to what `getlogin_r` answered.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getlogin() -> *const u8 {
+    let buf = login_name();
+    // SAFETY: this process's buffer, one call at a time.
+    let len = unsafe { (*buf).len() };
+    let rc = getlogin_r(buf.cast::<u8>(), len);
+    if rc != 0 {
+        errno::set_errno(rc);
+        return core::ptr::null();
+    }
+    buf.cast::<u8>().cast_const()
+}
+
+/// The login name for the terminal on standard input, and its length:
+/// glibc's `getlogin_r_fd0` up to its copy.
+fn login_record_name() -> Result<([u8; crate::utmpx::UT_NAMESIZE], usize), i32> {
+    // glibc's `char tty_pathname[2 + 2 * NAME_MAX]`.
+    let mut tty = [0u8; 2 + 2 * crate::linux_limits::NAME_MAX];
+    let rc = crate::ioctl::ttyname_r(0, tty.as_mut_ptr(), tty.len());
+    if rc != 0 {
+        return Err(rc);
+    }
+    let len = tty.iter().position(|&b| b == 0).unwrap_or(tty.len());
+    // `real_tty_path += 5;  /* Remove "/dev/".  */` -- every name `ttyname`
+    // gives here begins with it.
+    let line = tty.get(5..len).unwrap_or(&[]);
+    crate::utmpx::login_on_line(line)
 }
 
 /// `L_cuserid` in musl's `<stdio.h>` -- the header a program compiled here
@@ -1633,15 +1693,18 @@ staff:x:50:bob,alice
 
     // -- the rest --
 
+    /// No login database (nothing has made `/var/run/utmp` in this test):
+    /// no login name -- not the constant `root` it was until 2026-10-05 --
+    /// and the error as `getlogin_r`'s return value, not -1. The answers
+    /// with a database are `utmpx.rs`'s tests, beside the file they read.
     #[test]
-    fn getlogin_returns_root() {
-        assert_eq!(s(getlogin()), b"root");
+    fn getlogin_without_a_login_database_has_no_name() {
         let mut buf = [0xAAu8; 8];
-        assert_eq!(getlogin_r(buf.as_mut_ptr(), 8), 0);
-        assert_eq!(&buf[..5], b"root\0");
-        assert_eq!(getlogin_r(buf.as_mut_ptr(), 4), -1);
-        assert_eq!(errno::get_errno(), errno::ERANGE);
-        assert_eq!(getlogin_r(core::ptr::null_mut(), 8), -1);
+        assert_eq!(getlogin_r(buf.as_mut_ptr(), 8), errno::ENOENT);
+        assert_eq!(buf, [0xAA; 8], "nothing written");
+        errno::set_errno(0);
+        assert!(getlogin().is_null());
+        assert_eq!(errno::get_errno(), errno::ENOENT);
     }
 
     #[test]

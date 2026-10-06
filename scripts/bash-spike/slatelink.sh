@@ -26,7 +26,7 @@ SYSROOT="$ROOT/toolchain/sysroot/lib"
 # lanes relinking at once cannot write each other's objects or sysroot copy.
 # The boot lock serialises QEMU, not this.
 LANE="$SLATE_LANE"
-# Must match cross2.sh/cross3.sh. This was `/tmp/bash-cross` — unkeyed — while
+# Must match cross2.sh. This was `/tmp/bash-cross` — unkeyed — while
 # the sysroot copy beside it was keyed, so two lanes relinking concurrently
 # shared one object tree and produced each other's bash-slateos.elf.
 BUILD="$SLATE_WORK/bash-cross"
@@ -50,7 +50,6 @@ if [ ! -d "$BUILD" ]; then
     echo "ERROR: $BUILD does not exist — bash's objects have not been compiled yet."
     echo "       This script only relinks objects the compile step produced. Run:"
     echo "         bash scripts/bash-spike/cross2.sh   # cross-configure + compile"
-    echo "         bash scripts/bash-spike/cross3.sh   # work around a 5.2 configure bug"
     echo "       then this script again. See scripts/bash-spike/README.md."
     exit 1
 fi

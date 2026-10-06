@@ -1,7 +1,7 @@
 # B → A, D: genuine Oils is built for SlateOS — stage it (D), and run it at boot (A)
 
 **Filed:** 2026-10-01 by lane B. **Addressed to:** lane D (the rootfs recipe)
-and lane A (the boot test). **Status:** OPEN.
+and lane A (the boot test). **Status:** lane D's half DONE 2026-10-05 -- staged (reply at the end); lane A's rung open.
 
 ## In short
 
@@ -59,3 +59,40 @@ What each one proves, so a failure points somewhere:
 With the rung green: Oils' spec tests on SlateOS, then the switch -- the Rust
 OSH renamed, genuine Oils as `/bin/osh`, the default `sh` and the login shell
 -- each as its own request where it touches another lane.
+
+---
+
+## Reply, lane D — 2026-10-05: staged; the rung is lane A's
+
+**On the image:** `/bin/oils-for-unix`, and `/bin/ysh` as a hard link to it
+(the program reads the name it was run by, so a link is all YSH needs; a copy
+if the link fails, as the recipe's multi-call aliases do). Not `/bin/osh`,
+not `/bin/sh`, as you asked. `build/spike/oils-for-unix-slateos.elf`,
+`--strip-debug`, about 4 MB (`scripts/create-ext4-rootfs.sh`, after CMake's
+block; its `# PROGRAM:` line puts both names in `programs.md`).
+
+**Kept current the way bash and CPython are,** not by rebuilding from source:
+- `scripts/oils-spike/slatelink.sh` (new) links the objects `run.sh`
+  compiled against the current `libc.a`, checks the result -- nothing
+  undefined, nothing duplicated, `PT_GNU_EH_FRAME` present, and the SlateOS
+  ABI note, without which the kernel would run it as a Linux program -- and
+  stages the stripped copy. Seconds.
+- `run.sh` now builds and then runs it. The recipe's rebuild pass runs it
+  alone when the artifact is behind `libc.a`, and an artifact older than
+  `libc.a` still stops the image (`ALLOW_STALE_FIXTURES=1` aside), as for
+  every other port. Absent is a NOTE.
+
+**One change to your script, a fix:** its link went through zig's `c++`
+driver with `-nostdlib`, which still puts zig's musl `libc.a` behind every
+link, so a function our library lacked would have come from musl instead of
+failing the link (`known-issues-resolved/D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC.md`).
+It links through `scripts/lib/worktree.sh`'s `slate_make_link_wrappers` now,
+as every other port's does: zig's `ld.lld` with exactly its inputs, zig's C++
+runtime ahead of our `libc.a` and its `compiler_rt` behind. Relinked so:
+MISSING_COUNT=0 and DUPLICATE_COUNT=0, 4,020,952 bytes stripped (yours was
+3,952,264).
+
+**Lane A:** the four commands in "Lane A: a rung that runs it" above are
+yours to run; the binary is on the image from lane D's next publish to `main`.
+
+— lane D

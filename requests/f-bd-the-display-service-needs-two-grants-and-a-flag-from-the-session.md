@@ -62,3 +62,30 @@ granted services hold that capability, so this is a note rather than a bug.
 If registration ever becomes per-name (`key_id(name)` with `WRITE`, say), the
 compositor's grant in point 1 would name the display service's key id
 instead of `0`.
+
+## Lane D (2026-10-05): init's side is done; the grant waits on lane A
+
+- **`caps:` is read.** `/etc/startup.conf` lines take
+  `caps:Type/id/rights` entries, comma-separated: `InputDevice/0/r,Service/0/w`
+  as you wrote it. The names are `InputDevice` and `Service`, and the rights
+  are `r` and `w`. Anything else refuses the line, and init prints the word
+  (`services/init/src/lib.rs`, `parse_service_line`). Your one-line form
+  (`/bin/compositor caps:... args:--require-shell-key`) parses as written.
+  This also fixed a parser bug: a keyword after another one was dropped, so
+  `args:` before `env:` lost the `env:`.
+- **Init passes them on through `SYS_PROCESS_SPAWN_EX2`,** and now starts
+  every process that way. Each process gets init's class-wide grants, less
+  `InputDevice` and `Service`; a service gets those only when its line names
+  them (design-decisions 1174).
+- **Waiting on lane A:** init does not hold either capability yet, and the
+  kernel delegates only what the parent holds. Until lane A grants them, a
+  line naming them is refused at spawn with `PermissionDenied`, and init says
+  so. Asked in `requests/d-a-init-needs-inputdevice-and-service-to-hand-on.md`.
+  Where the compositor's line can live is lane D's older question to lane A,
+  `requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md`. The
+  kernel writes `/etc/startup.conf` at every boot, and `/` is not the
+  system image.
+- **Point 2 (the shell's key) is lane B's,** as you said: the shell is not
+  started from `/etc/startup.conf`. If it ever is, the same keyword carries
+  it: `caps:Service/8925341740578567520/r`. Init would then have to hold that
+  same id, under lane A's exact-id rule.

@@ -151,7 +151,9 @@ DEF_RE = re.compile(
     # explicit discriminant (`ResourceExhausted = -304,`), by a comment, or by
     # nothing at all when it is the last one and has no comma.
     r"|^[ \t]+(?P<va>[A-Z][A-Za-z0-9_]*)\s*(?:[,({=]|//|$)"
-    r"|^[ \t]+(?:pub\s+)?(?P<fl>[a-z_][A-Za-z0-9_]*)\s*:",
+    # A field may be `pub`, or restricted -- `pub(crate)`, `pub(super)`,
+    # `pub(in path)` -- and is linkable either way.
+    r"|^[ \t]+(?:pub(?:\s*\([^)]*\))?\s+)?(?P<fl>[a-z_][A-Za-z0-9_]*)\s*:",
     re.M,
 )
 
@@ -1043,6 +1045,27 @@ def selftest() -> int:
     for name in ("ResourceExhausted", "NoSuchDevice", "Tuple", "Struct",
                  "Commented", "OnlyOne"):
         check(name in d.scope, f"variant {name!r} missing from scope")
+
+    # A field whose visibility is restricted is a field all the same, and
+    # rustdoc links `[`Packed::record_len`]` to it. Only a bare `pub` was read
+    # until 2026-10-05, when posix's `PackedEntry` made its fields
+    # `pub(crate)` and the gate refused a push over the one link to them.
+    fields = """
+        pub(crate) struct Packed<'a> {
+            pub(crate) record_len: usize,
+            pub(super) up_one: u8,
+            pub(in crate::dirent) scoped: u8,
+            pub plain: u8,
+            private: &'a [u8],
+        }
+    """
+    d = Defs()
+    defs_in_text(fields, d)
+    d.resolve()
+    for name in ("record_len", "up_one", "scoped", "plain", "private"):
+        check(name in d.scope, f"field {name!r} missing from scope")
+    for name in ("crate", "super", "in"):
+        check(name not in d.scope, f"visibility word {name!r} taken as a field")
 
     # THE EXIT-CODE CONTRACT, which is not a detail of link-finding and is the
     # one thing above that nothing above tests.

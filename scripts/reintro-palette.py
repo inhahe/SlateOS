@@ -571,11 +571,13 @@ DEFECTS = [
         "HH: the dismiss button, which only exists on hover, keeps Mocha surface2",
         NOTIF_PANE,
         [
-            ('            p.push_surface(\n                cmds,\n                btn_x,\n                btn_y,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE / 2.0,\n                Surface::Selected,\n            );\n',
-             '            let mut paint = p.surface_paint(Surface::Selected);\n            paint.fill = Some(Color::from_hex(0x585B70));\n            p.push_paint_radii(\n                cmds,\n                btn_x,\n                btn_y,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE,\n                CornerRadii::all(DISMISS_BTN_SIZE / 2.0),\n                paint,\n            );\n'),
+            ('            p.push_surface(\n                cmds,\n                cross.x,\n                cross.y,\n                cross.w,\n                cross.h,\n                cross.w / 2.0,\n                Surface::Selected,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::Selected);\n            paint.fill = Some(Color::from_hex(0x585B70));\n            p.push_paint_radii(\n                cmds,\n                cross.x,\n                cross.y,\n                cross.w,\n                cross.h,\n                CornerRadii::all(cross.w / 2.0),\n                paint,\n            );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: the button is drawn at `dismiss_rect`, where
+            # a press on it lands, rather than at a sum of its own.
             # Re-derived 2026-09-27 against the code as it now reads. The button is `Surface::Selected` now; this gives it a frozen fill.
             'every_colour_the_pane_draws_comes_from_its_palette',
         ],
@@ -3250,8 +3252,10 @@ DEFECTS = [
         "MMMMMMMMMMMMM: the close button keeps Mocha's red",
         OV,
         [
-            ('            height: 18.0,\n            color: p.red,',
-             '            height: 18.0,\n            color: Color::from_hex(0xF38BA8),'),
+            # Re-derived 2026-10-06: the button is drawn at `close_rect`, where
+            # a press on it lands, rather than at 18 pixels of its own.
+            ('            height: button.h,\n            color: p.red,',
+             '            height: button.h,\n            color: Color::from_hex(0xF38BA8),'),
         ],
         ["desktop"],
         [
@@ -3406,8 +3410,9 @@ DEFECTS = [
         "YYYYYYYYYYYYY: the close button follows the desktop's accent",
         OV,
         [
-            ('            height: 18.0,\n            color: p.red,',
-             '            height: 18.0,\n            color: p.accent,'),
+            # Re-derived 2026-10-06, as the one before it.
+            ('            height: button.h,\n            color: p.red,',
+             '            height: button.h,\n            color: p.accent,'),
         ],
         ["desktop"],
         [
@@ -17603,11 +17608,13 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the start menu reopens wherever it was last left",
         DESK,
         [
-            ('            self.shortcut_card_open = false;\n            self.start_menu_scroll = 0;\n',
-             '            self.shortcut_card_open = false;\n'),
+            ('            self.volume_flyout.set_visible(false);\n            self.start_menu_scroll = 0;\n',
+             '            self.volume_flyout.set_visible(false);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: the volume flyout's dismissal now sits
+            # between the card's and the rewind, so the rewind is found after it.
             # Re-derived 2026-09-27 against the code as it now reads. `toggle_start_menu` rewinds the list.
             # A menu that reopens scrolled hides the first application from a
             # user who has no idea it ever scrolled -- and who therefore has no
@@ -17664,11 +17671,13 @@ DEFECTS = [
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: dismissing the power menu takes the start menu down with it",
         DESK,
         [
-            ('            self.power_menu_open = false;\n            if !Self::keeps_start_menu_open(hit) {\n                self.close_start_menu();\n            }\n            return ShellAction::Consumed;\n',
-             '            self.power_menu_open = false;\n            self.close_start_menu();\n            return ShellAction::Consumed;\n'),
+            ('                    self.power_menu_open = false;\n                    if !Self::keeps_start_menu_open(hit) {\n                        self.close_start_menu();\n                    }\n',
+             '                    self.power_menu_open = false;\n                    self.close_start_menu();\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: what a press closes is one match on
+            # `closed_by_press`, which the shell's automation asks as well.
             # Re-derived 2026-09-27 against the code as it now reads.
             # `the_power_button_toggles_its_menu_and_leaves_the_start_menu_open` is gone
             # with the old power button, so it is no longer declared.

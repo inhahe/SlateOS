@@ -13,7 +13,7 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**465 programs; 306 on the image, 6 carried inside the kernel.**
+**468 programs; 306 on the image, 6 carried inside the kernel.**
 
 ## Userland utilities and services (`userspace/`, lane B) -- 297
 
@@ -468,7 +468,7 @@ two disagree.
 | `worldclock` | World Clock — multi-timezone clock display with analog/digital views. |  |  |  |
 | `yahtzee` | The dice game, in a window. |  |  |  |
 
-## Desktop, toolkit and graphics (`gui/`, lane C, F) -- 7
+## Desktop, toolkit and graphics (`gui/`, lane C, F) -- 10
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -478,7 +478,10 @@ two disagree.
 | `desktop` | The desktop shell. |  |  |  |
 | `desktop-demo` | The desktop shell's demonstration binary. |  | `desktop` |  |
 | `notifications` | Notification Daemon |  |  |  |
+| `theme` | Make, change, install, share and remove themes from a terminal. |  | `appearance` |  |
+| `theme-preview` | Draw a picture of a theme. |  | `themepreview` |  |
 | `themecheck` | Check a theme's folder before it is installed or shared. |  | `appearance` |  |
+| `wallvideo` | A video as the desktop's background: the background program (`gui/backdrop`) that plays `FILE`, looping, writing its pictures on standard output at the size... |  |  |  |
 
 ## System services (`services/`, lane D) -- 8
 

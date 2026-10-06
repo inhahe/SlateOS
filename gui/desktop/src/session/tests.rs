@@ -252,7 +252,7 @@ fn centre(r: Rect) -> (f32, f32) {
 fn the_shell_opens_a_background_a_panel_a_menu_a_notifications_and_an_overlay_surface() {
     let (session, desktop, _turn) = session();
     let specs = created(&desktop);
-    assert_eq!(specs.len(), 6, "a shell is six surfaces, not one");
+    assert_eq!(specs.len(), 7, "a shell is seven surfaces, not one");
 
     // The band each one is in is the load-bearing part: a taskbar in
     // `Layer::Normal` vanishes behind the first window the user opens.
@@ -261,15 +261,19 @@ fn the_shell_opens_a_background_a_panel_a_menu_a_notifications_and_an_overlay_su
         assert_eq!(spec.layer, oswindow::Layer::Overlay, "{}", spec.title);
     }
 
-    // The login screen is created *last* of the six, which is what puts it
-    // above the others within the band. Order is the only thing that says
-    // so -- there is no layer above `Overlay` -- so it is asserted here rather
-    // than left to the reading order of `start`. The notifications' surface
-    // comes after the menus' and before the overlays': a toast pops up over an
-    // open menu, and a volume report is read over a toast.
-    assert_eq!(specs[5].title, "Login");
-    assert_eq!(specs[3].title, "Notifications");
-    assert_eq!(specs[4].title, "Shell overlays");
+    // The login screen is created *last*, which is what puts it above the
+    // others within the band. Order is the only thing that says so -- there
+    // is no layer above `Overlay` -- so it is asserted here rather than left
+    // to the reading order of `start`. The menus' glass comes just before the
+    // menus, so it is under the panels it frosts and over the taskbar. The
+    // notifications' surface comes after the menus' and before the
+    // overlays': a toast pops up over an open menu, and a volume report is
+    // read over a toast.
+    assert_eq!(specs[6].title, "Login");
+    assert_eq!(specs[2].title, "Shell menu glass");
+    assert_eq!(specs[3].title, "Shell menus");
+    assert_eq!(specs[4].title, "Notifications");
+    assert_eq!(specs[5].title, "Shell overlays");
 
     // None of them is a window in the ordinary sense.
     for spec in &specs {
@@ -281,18 +285,21 @@ fn the_shell_opens_a_background_a_panel_a_menu_a_notifications_and_an_overlay_su
         );
     }
 
-    // The panel is exactly the taskbar; the other three are the whole display.
+    // The panel is exactly the taskbar; the desktop, the menus, the
+    // overlays and the login screen are the whole display.
     let bar = session.shell().taskbar_rect();
     assert_eq!(specs[1].position, Some((bar.x as i32, bar.y as i32)));
     assert_eq!(specs[1].width, bar.w.round() as u32);
     assert_eq!(specs[1].height, bar.h.round() as u32);
     assert_eq!((specs[0].width, specs[0].height), (2560, 1440));
-    assert_eq!((specs[2].width, specs[2].height), (2560, 1440));
-    assert_eq!((specs[4].width, specs[4].height), (2560, 1440));
+    assert_eq!((specs[3].width, specs[3].height), (2560, 1440));
     assert_eq!((specs[5].width, specs[5].height), (2560, 1440));
-    // The notifications' surface is as big as the stack of toasts on it, and
-    // there are none yet.
-    assert_eq!((specs[3].width, specs[3].height), (1, 1));
+    assert_eq!((specs[6].width, specs[6].height), (2560, 1440));
+    // The menus' glass is as big as the open menus' panels, and the
+    // notifications' surface as the stack of toasts on it; nothing is open
+    // and there are no toasts yet.
+    assert_eq!((specs[2].width, specs[2].height), (1, 1));
+    assert_eq!((specs[4].width, specs[4].height), (1, 1));
 
     // And the origins the session will translate by say the same thing.
     assert_eq!(session.background().origin(), (0.0, 0.0));
@@ -301,8 +308,9 @@ fn the_shell_opens_a_background_a_panel_a_menu_a_notifications_and_an_overlay_su
     assert_eq!(session.osd().origin(), (0.0, 0.0));
 }
 
-/// Exactly one of the shell's surfaces declines the mouse, and it is the one
-/// whose job is to be looked at rather than clicked.
+/// Exactly two of the shell's surfaces decline the mouse: the one whose job
+/// is to be looked at rather than clicked, and the menus' glass, which has
+/// nothing on it to click.
 ///
 /// Both halves matter. A clickable OSD is a full-screen sheet that eats the
 /// press aimed at the document under a volume indicator; a click-through
@@ -310,7 +318,7 @@ fn the_shell_opens_a_background_a_panel_a_menu_a_notifications_and_an_overlay_su
 /// `transparent`, so this is the assertion that keeps the two flags apart. See
 /// `design-decisions.md` 566.
 #[test]
-fn only_the_overlay_surface_refuses_the_mouse() {
+fn only_the_overlay_and_the_menus_glass_refuse_the_mouse() {
     let (_session, desktop, _turn) = session();
     let specs = created(&desktop);
     let click_through: Vec<&str> = specs
@@ -318,11 +326,12 @@ fn only_the_overlay_surface_refuses_the_mouse() {
         .filter(|s| s.input_transparent)
         .map(|s| s.title.as_str())
         .collect();
-    assert_eq!(click_through, ["Shell overlays"]);
-    // And it is created after the menus and the toasts, so it is above them:
-    // an overlay is a report, and a report under the start menu is a report
-    // nobody reads.
-    assert!(specs[4].input_transparent);
+    assert_eq!(click_through, ["Shell menu glass", "Shell overlays"]);
+    // And the overlays' is created after the menus and the toasts, so it is
+    // above them: an overlay is a report, and a report under the start menu
+    // is a report nobody reads.
+    assert_eq!(specs[5].title, "Shell overlays");
+    assert!(specs[5].input_transparent);
 }
 
 /// **What the settings watch reports is announced to every window, each file
@@ -6593,7 +6602,7 @@ fn the_desktops_shortcuts_do_nothing_while_the_machine_is_locked() {
 fn the_login_surface_is_created_last_and_accepts_the_mouse() {
     let (_session, desktop, _dir, _turn) = session_with_login();
     let specs = created(&desktop);
-    let login = specs.last().expect("five surfaces");
+    let login = specs.last().expect("the shell's surfaces");
     assert_eq!(login.title, "Login");
     assert!(
         !login.input_transparent,
@@ -9033,4 +9042,114 @@ fn ctrl_click_adds_a_desktop_icon_to_the_selection() {
     assert_eq!(click_with(&mut session, second, Modifiers::ctrl()), both);
     // A plain click replaces what was selected.
     assert_eq!(click_with(&mut session, third, Modifiers::NONE), [third]);
+}
+
+// ---- the menus' glass ----
+
+/// **A menu's glass is the box round the panels it fills**: translations
+/// followed, a scrim over the whole screen passed over, and nothing for a
+/// part that fills nothing but a scrim.
+#[test]
+fn a_menus_glass_is_the_box_round_its_panels() {
+    use super::glass_of;
+    let screen = Rect::new(0.0, 0.0, 800.0, 600.0);
+    let fill = |x: f32, y: f32, w: f32, h: f32| RenderCommand::FillRect {
+        x,
+        y,
+        width: w,
+        height: h,
+        color: guitk::color::Color::rgba(0, 0, 0, 200),
+        corner_radii: guitk::style::CornerRadii::default(),
+    };
+    let tree = |commands: Vec<RenderCommand>| guitk::render::RenderTree { commands };
+
+    assert_eq!(glass_of(&tree(Vec::new()), screen), None);
+    assert_eq!(
+        glass_of(&tree(vec![fill(0.0, 0.0, 800.0, 600.0)]), screen),
+        None,
+        "a scrim is no glass"
+    );
+    assert_eq!(
+        glass_of(
+            &tree(vec![
+                fill(0.0, 0.0, 800.0, 600.0),
+                fill(10.0, 20.0, 100.0, 50.0)
+            ]),
+            screen
+        ),
+        Some(Rect::new(10.0, 20.0, 100.0, 50.0))
+    );
+    // Two panels, one inside a translation: the box round both.
+    let both = tree(vec![
+        fill(10.0, 20.0, 100.0, 50.0),
+        RenderCommand::PushTranslate {
+            dx: 300.0,
+            dy: 100.0,
+        },
+        fill(0.0, 0.0, 40.0, 40.0),
+        RenderCommand::PopTranslate,
+        fill(5.0, 30.0, 10.0, 10.0),
+    ]);
+    assert_eq!(
+        glass_of(&both, screen),
+        Some(Rect::new(5.0, 20.0, 335.0, 120.0))
+    );
+    // A fill with no size is no panel.
+    assert_eq!(
+        glass_of(&tree(vec![fill(50.0, 50.0, 0.0, 10.0)]), screen),
+        None
+    );
+}
+
+/// **The menus' surface asks for no blur, and the glass under it does**:
+/// the whole-screen surface the menus are drawn on frosted the whole desktop
+/// round them; the glass is a click-through surface of its own, between the
+/// taskbar and the menus.
+#[test]
+fn the_menus_glass_is_a_surface_of_its_own() {
+    let (_session, desktop, _turn) = session();
+    let specs = created(&desktop);
+    let named = |title: &str| {
+        specs
+            .iter()
+            .position(|s| s.title == title)
+            .unwrap_or_else(|| panic!("no surface called {title}"))
+    };
+    let (panel, glass, menus) = (
+        named("Taskbar"),
+        named("Shell menu glass"),
+        named("Shell menus"),
+    );
+    assert!(
+        panel < glass && glass < menus,
+        "drawn between the taskbar and the menus"
+    );
+    assert_eq!(specs[menus].blur_behind, guiremote::control::BlurKind::None);
+    assert_eq!(specs[glass].blur_behind, guiremote::control::BlurKind::Menu);
+    assert!(specs[glass].input_transparent, "the glass takes no press");
+}
+
+/// **The glass is behind the open menu and nowhere else**: the start menu
+/// open, it is the start menu's box; closed, it is taken away.
+#[test]
+fn the_glass_is_behind_the_open_menu_alone() {
+    let (mut session, _desktop, _turn) = session();
+    session.repaint().expect("paint");
+    assert!(!session.glass_shown, "nothing is open");
+
+    session.shell_mut().toggle_start_menu();
+    session.repaint().expect("paint");
+    let menu = session.shell().start_menu_rect();
+    assert!(session.glass_shown);
+    assert_eq!(session.glass_at, Some(menu));
+    assert_eq!(session.glass.origin(), (menu.x.round(), menu.y.round()));
+    let screen = session.shell().screen();
+    assert!(
+        menu.w < screen.w && menu.h < screen.h,
+        "not the whole screen"
+    );
+
+    session.shell_mut().toggle_start_menu();
+    session.repaint().expect("paint");
+    assert!(!session.glass_shown, "the menu closed and its glass stayed");
 }

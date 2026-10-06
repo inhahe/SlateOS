@@ -3571,6 +3571,21 @@ impl DesktopShell {
         CornerRadii::all(self.scale(self.appearance.window_corners.radius()))
     }
 
+    /// The whole screen, in the coordinates everything the shell draws is in.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a display dimension is exact in f32 for every size hardware produces"
+    )]
+    pub fn screen(&self) -> Rect {
+        Rect::new(
+            0.0,
+            0.0,
+            self.screen_width as f32,
+            self.screen_height as f32,
+        )
+    }
+
     /// The taskbar panel.
     #[must_use]
     pub fn taskbar_rect(&self) -> Rect {

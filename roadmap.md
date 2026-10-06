@@ -1840,6 +1840,16 @@ live.
   themes' folders (§1483,
   `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE` closed).
 
+- `[C]` **Pictures of a theme** -- done 2026-10-06 (`design-decisions.md`
+  §1484). `theme-preview THEME OUT.png` draws one standard scene in a
+  theme -- its wallpaper with icons, the taskbar with the start menu open, a
+  window of controls in its frame, a notification -- by the desktop's own
+  drawing, composed by the compositor's own code run headless. For the
+  theme repository's CI and the theme browser. Its first picture found
+  that an open menu frosted the whole desktop; the menus' glass is now an
+  empty surface behind the panels they draw
+  (`TD-C-AN-OPEN-MENU-FROSTS-THE-WHOLE-SCREEN` closed).
+
 - `[C]` **Making themes: derive, edit, install, export, remove** -- model and
   program done 2026-10-06 (`design-decisions.md` §1483).
   `appearance::themes::authoring` makes a theme of the user's from any theme

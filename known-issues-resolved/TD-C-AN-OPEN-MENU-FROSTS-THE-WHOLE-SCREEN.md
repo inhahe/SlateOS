@@ -1,7 +1,17 @@
-## TD-C-AN-OPEN-MENU-FROSTS-THE-WHOLE-SCREEN (lane C, 2026-10-06) — OPEN
+## TD-C-AN-OPEN-MENU-FROSTS-THE-WHOLE-SCREEN (lane C, 2026-10-06) — FIXED 2026-10-06
 
-**Status:** OPEN -- found 2026-10-06 by the theme preview; the fix below
-(the second way) is lane C's next.
+**Status:** FIXED 2026-10-06 on lane C's branch, on main with lane C's next
+publish after its boot test -- the second way below. The menus' surface
+asks for no blur; an empty, click-through surface between the taskbar and
+the menus asks for the menus' glass and is put behind the panels the open
+menus draw (`desktop::session::glass_of`: the box round their fills,
+translations followed, a whole-screen scrim passed over), moved and sized
+as menus open and close, and unmapped while none is. Read from what is
+drawn rather than from a list of the menus, so a menu added later has its
+glass without a second list to keep. The theme preview draws its start
+menu the same way. Tests: `a_menus_glass_is_the_box_round_its_panels`,
+`the_menus_glass_is_a_surface_of_its_own`,
+`the_glass_is_behind_the_open_menu_alone` (`gui/desktop`).
 
 **In short:** while any of the shell's menus is open -- the start menu, the
 calendar, a right-click menu -- the whole screen behind it is blurred and

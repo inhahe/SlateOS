@@ -39,6 +39,7 @@ use compositor::{BufferFormat, Compositor, WindowId};
 use desktop::DesktopShell;
 use desktop::icons::{IconAction, IconType};
 use desktop::notif_pane::{NotifPriority, Notification};
+use desktop::session::glass_of;
 use desktop::wallpaper::WallpaperManager;
 use guiremote::control::{BlurKind, Layer, WindowSpec};
 use guitk::canvas::WireBytes;
@@ -158,7 +159,8 @@ pub struct Scene {
     pub window: (RenderTree, Rect),
     /// The taskbar, and where it is.
     pub taskbar: (RenderTree, Rect),
-    /// The start menu, open, and its box: where its glass is.
+    /// The start menu, open, and where its glass is: the box round the
+    /// panels it draws, as the session puts it.
     pub menus: (RenderTree, Rect),
     /// The notification, and where the stack of them is.
     pub toasts: Option<(RenderTree, Rect)>,
@@ -231,10 +233,10 @@ impl Scene {
         };
 
         shell.toggle_start_menu();
-        let menus = (
-            shell.render_start_menu().unwrap_or_default(),
-            shell.start_menu_rect(),
-        );
+        let menu = shell.render_start_menu().unwrap_or_default();
+        // Its glass where the session puts it: behind the panels it draws.
+        let glass = glass_of(&menu, shell.screen()).unwrap_or_else(|| shell.start_menu_rect());
+        let menus = (menu, glass);
         let taskbar = (shell.render_taskbar(), shell.taskbar_rect());
 
         // The window: towards the right, clear of the start menu and the
@@ -313,15 +315,10 @@ impl Scene {
             BlurKind::Taskbar,
         );
         self.submit(&mut c, panel, bar, *bar_at)?;
-        // The menu's glass behind the menu's box alone: an empty surface
-        // there asks for it, and the menu -- with the shadow and glow that
-        // fall outside its box -- is drawn over it on a clear surface the
-        // size of the screen, as the session draws its menus. The session
-        // asks for the glass on that whole-screen surface itself, which the
-        // compositor blurs whole, frosting the desktop round the menu as
-        // well, until a surface can say where its glass is (`known-issues.md`
-        // `TD-C-AN-OPEN-MENU-FROSTS-THE-WHOLE-SCREEN`): a picture of a theme
-        // shows the look meant.
+        // As the session draws its menus: their glass on an empty surface
+        // behind the panels they draw (`desktop::session::glass_of`), and the
+        // menus -- with the shadows and glows that fall outside their panels
+        // -- over it on a clear surface the size of the screen.
         let (menu, menu_at) = &self.menus;
         let _glass = self.surface(
             &mut c,

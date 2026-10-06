@@ -41,6 +41,17 @@ own to invent for failures.
 `dirs` is `themes::ThemeDirs::standard()` -- the page already holds one
 (`theme_dirs`).
 
+**A picture of a theme** -- for the editor's preview of a whole desktop, or
+a browser's grid, and for a theme with no screenshots of its own (every
+theme derived or composed here): `themepreview::render(&settings, w, h)`
+draws the standard scene (wallpaper and icons, taskbar with the start menu
+open, a window of controls in the theme's frame, a notification) and
+`Picture::png()` writes it; `settings.wear_theme(&info, &dirs)` first puts
+the theme on, as one click of "apply" would. Or run `theme-preview THEME
+OUT.png` (design-decisions §1484). It draws with the desktop's own code, so
+it costs the desktop and compositor crates as dependencies -- calling the
+program instead costs nothing.
+
 ## Not yet in the model
 
 - Setters for the other axes -- widget style, animation, window frames,

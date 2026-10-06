@@ -24,13 +24,18 @@
 //! |---|---|---|---|
 //! | background | [`Layer::Background`] | the whole screen | the wallpaper |
 //! | panel | [`Layer::Overlay`] | [`DesktopShell::taskbar_rect`] | the taskbar |
+//! | glass | [`Layer::Overlay`], click-through | the open menus' panels ([`glass_of`]) | nothing: it asks for the menus' blur behind it |
 //! | popups | [`Layer::Overlay`] | the whole screen | start menu, power menu, calendar, Alt-Tab |
 //! | toasts | [`Layer::Overlay`] | the stack of toasts ([`DesktopShell::toast_extent`]) | notifications popping up |
 //! | osd | [`Layer::Overlay`], click-through | the whole screen | the volume and brightness overlays |
 //! | login | [`Layer::Overlay`] | the whole screen | the login screen, above everything |
 //!
-//! The toasts' surface is the one that moves: it is exactly the stack, so a
-//! press beside a toast reaches the window under it (design-decisions §1447).
+//! The toasts' surface moves: it is exactly the stack, so a press beside a
+//! toast reaches the window under it (design-decisions §1447). So does the
+//! glass: the compositor blurs behind a surface's whole frame, so the
+//! frosting a menu stands on comes from an empty surface the size of the
+//! menu's panels rather than from the full-screen popups surface, which
+//! would frost the whole desktop round the menu (design-decisions §1484).
 //!
 //! The popup surface is full-screen rather than menu-sized, and that is the
 //! whole mechanism behind click-outside-to-dismiss: a press on bare desktop
@@ -40,12 +45,13 @@
 //! invisible sheet that eats every click.
 //!
 //! The overlay surface is full-screen for a quite different reason — an OSD is
-//! centred on the display and is *not* there to be clicked — and it is the one
-//! surface created `input_transparent`, so a press lands on whatever is
-//! underneath instead of on a volume indicator that happens to be fading over
-//! it. That is also why it cannot share the popup surface: those two want
-//! opposite answers to the same question, and they come and go on unrelated
-//! schedules, so one surface would have to be mapped whenever either wanted it.
+//! centred on the display and is *not* there to be clicked — and it is created
+//! `input_transparent` (as only the empty glass is besides), so a press lands
+//! on whatever is underneath instead of on a volume indicator that happens to
+//! be fading over it. That is also why it cannot share the popup surface:
+//! those two want opposite answers to the same question, and they come and go
+//! on unrelated schedules, so one surface would have to be mapped whenever
+//! either wanted it.
 //!
 //! # Two coordinate spaces, one origin
 //!
@@ -329,6 +335,17 @@ pub struct ShellSession<T: Transport> {
     wallpaper: WallpaperManager,
     background: Surface,
     panel: Surface,
+    /// The menus' glass (`glass_of`): an empty, click-through surface
+    /// between the taskbar and the menus, asking for the menus' blur, and
+    /// exactly as big as the panels the open menus draw -- moved and sized
+    /// by `paint_chrome`, as the toasts' surface is, and unmapped while
+    /// nothing is open.
+    glass: Surface,
+    /// Whether the glass is mapped, reconciled as `toasts_shown` is.
+    glass_shown: bool,
+    /// Where the glass was last put, in screen coordinates, so it is moved
+    /// only when what is open changes.
+    glass_at: Option<crate::Rect>,
     popups: Surface,
     /// Whether the popup surface is currently mapped. Tracked so that
     /// `set_visible` is a round trip only when the answer changes, rather than
@@ -778,6 +795,28 @@ impl<T: Transport> ShellSession<T> {
             ))?,
             origin: (bar.x, bar.y),
         };
+        // The menus' glass: an empty surface under the menus, asking for
+        // their blur and taking no input, put behind the panels they draw
+        // and nowhere else (`glass_of`). A pixel to begin with, as the
+        // toasts' surface is: `paint_chrome` places it, and unmaps it while
+        // nothing is open. The menus' own surface asks for no blur: it is
+        // the whole screen, and the compositor blurs behind a surface's
+        // whole frame -- which frosted the desktop round every menu
+        // (`TD-C-AN-OPEN-MENU-FROSTS-THE-WHOLE-SCREEN`).
+        let glass = Surface {
+            window: events.create(Spec {
+                input_transparent: true,
+                ..chrome(
+                    "Shell menu glass",
+                    1,
+                    1,
+                    (0, 0),
+                    Layer::Overlay,
+                    BlurKind::Menu,
+                )
+            })?,
+            origin: (0.0, 0.0),
+        };
         let popups = Surface {
             window: events.create(chrome(
                 "Shell menus",
@@ -785,7 +824,7 @@ impl<T: Transport> ShellSession<T> {
                 display.height,
                 (0, 0),
                 Layer::Overlay,
-                BlurKind::Menu,
+                BlurKind::None,
             ))?,
             origin: (0.0, 0.0),
         };
@@ -809,10 +848,11 @@ impl<T: Transport> ShellSession<T> {
         // the user opened while the volume was still fading.
         let osd = Surface {
             window: events.create(Spec {
-                // The one surface that declines the mouse. Everything else the
-                // shell owns is here to be clicked; this is here to be read,
-                // and a press aimed at the document under a volume indicator
-                // must reach the document. See `design-decisions.md` 566.
+                // Declines the mouse, as only the menus' empty glass does
+                // besides. Everything else the shell owns is here to be
+                // clicked; this is here to be read, and a press aimed at the
+                // document under a volume indicator must reach the document.
+                // See `design-decisions.md` 566.
                 input_transparent: true,
                 ..chrome(
                     "Shell overlays",
@@ -826,10 +866,10 @@ impl<T: Transport> ShellSession<T> {
             origin: (0.0, 0.0),
         };
 
-        // Last of the five, so within `Layer::Overlay` it is above the panel,
-        // the menus and the overlays: nothing the shell owns may be drawn over
-        // a login screen. The opposite of `osd` in the one property that
-        // matters — this surface exists to be typed into.
+        // Last of them all, so within `Layer::Overlay` it is above the panel,
+        // the menus, the notifications and the overlays: nothing the shell
+        // owns may be drawn over a login screen. The opposite of `osd` in the
+        // one property that matters — this surface exists to be typed into.
         let login_surface = Surface {
             window: events.create(chrome(
                 "Login",
@@ -909,6 +949,11 @@ impl<T: Transport> ShellSession<T> {
             wallpaper: WallpaperManager::new(),
             background,
             panel,
+            glass,
+            // Mapped by the compositor, unmapped by the first paint: as
+            // `popups_shown` below.
+            glass_shown: true,
+            glass_at: None,
             popups,
             // The compositor maps a new window; nothing is open yet, so the
             // first `paint_chrome` unmaps it. Recording `true` here rather than
@@ -2439,6 +2484,7 @@ impl<T: Transport> ShellSession<T> {
         .into_iter()
         .flatten()
         .collect();
+        self.place_glass(&parts)?;
         let open = !parts.is_empty();
         if open != self.popups_shown {
             if let Some(mut handle) = self.events.window_mut(self.popups.window) {
@@ -2528,6 +2574,41 @@ impl<T: Transport> ShellSession<T> {
         }
         if showing && let Some(tree) = self.shell.render_toasts() {
             self.send_frame(self.toasts, &tree)?;
+        }
+        Ok(())
+    }
+
+    /// Put the menus' glass behind the panels `parts` draw -- moved and
+    /// sized only when that changes -- or take it away while they draw
+    /// none.
+    fn place_glass(&mut self, parts: &[RenderTree]) -> Result<(), Error<T>> {
+        let screen = self.shell.screen();
+        let glass = parts
+            .iter()
+            .filter_map(|part| glass_of(part, screen))
+            .reduce(union);
+        if let Some(rect) = glass
+            && self.glass_at != Some(rect)
+        {
+            let (x, y) = (pos(rect.x), pos(rect.y));
+            if let Some(mut handle) = self.events.window_mut(self.glass.window) {
+                handle.set_position(x, y)?;
+                handle.set_size(px(rect.w), px(rect.h))?;
+            }
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a position on a display is exact in f32"
+            )]
+            let origin = (x as f32, y as f32);
+            self.glass.origin = origin;
+            self.glass_at = Some(rect);
+        }
+        let showing = glass.is_some();
+        if showing != self.glass_shown {
+            if let Some(mut handle) = self.events.window_mut(self.glass.window) {
+                handle.set_visible(showing)?;
+            }
+            self.glass_shown = showing;
         }
         Ok(())
     }
@@ -4254,6 +4335,65 @@ impl<T: Transport> ShellSession<T> {
     }
 }
 
+/// Where a menu's glass goes: the box round every panel `part` fills, in
+/// screen coordinates -- `None` for a part that fills nothing but a scrim.
+///
+/// A panel the shell draws over the desktop -- the start menu, the
+/// calendar, a right-click menu -- is a translucent fill with what it shows
+/// on it, and its glass, the blur and tint the compositor puts behind it
+/// (`BlurKind::Menu`), belongs behind that fill and nowhere else. Read from
+/// the fills themselves rather than asked of each part, so a part added
+/// later has its glass without a second list to keep in step with the
+/// first. A fill over the whole of `screen` is a scrim, which dims what is
+/// behind it rather than frosting it, and is passed over. Translations are
+/// followed; clips are not, so a fill cut short still has its whole glass.
+#[must_use]
+pub fn glass_of(part: &RenderTree, screen: crate::Rect) -> Option<crate::Rect> {
+    use guitk::render::RenderCommand;
+    let mut offsets: Vec<(f32, f32)> = Vec::new();
+    let mut offset = (0.0_f32, 0.0_f32);
+    let mut glass: Option<crate::Rect> = None;
+    for command in &part.commands {
+        match command {
+            RenderCommand::PushTranslate { dx, dy } => {
+                offsets.push(offset);
+                offset = (offset.0 + dx, offset.1 + dy);
+            }
+            RenderCommand::PopTranslate => offset = offsets.pop().unwrap_or((0.0, 0.0)),
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                let fill = crate::Rect::new(x + offset.0, y + offset.1, *width, *height);
+                let scrim = fill.x <= screen.x
+                    && fill.y <= screen.y
+                    && fill.x + fill.w >= screen.x + screen.w
+                    && fill.y + fill.h >= screen.y + screen.h;
+                if fill.w > 0.0 && fill.h > 0.0 && !scrim {
+                    glass = Some(glass.map_or(fill, |g| union(g, fill)));
+                }
+            }
+            _ => {}
+        }
+    }
+    glass
+}
+
+/// The smallest box holding both `a` and `b`.
+fn union(a: crate::Rect, b: crate::Rect) -> crate::Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    crate::Rect::new(
+        x,
+        y,
+        a.right().max(b.right()) - x,
+        a.bottom().max(b.bottom()) - y,
+    )
+}
+
 /// A surface spec for one of the shell's own windows.
 ///
 /// Undecorated, unresizable and opaque, every time: a title bar on the taskbar
@@ -4261,9 +4401,10 @@ impl<T: Transport> ShellSession<T> {
 /// drag to a different size is a shell panel that no longer matches the work
 /// area the windows were tiled into.
 ///
-/// Clickable, too. The one surface that is not — the heads-up overlay — says so
-/// at its own call site with `Spec { input_transparent: true, ..chrome(..) }`,
-/// which is where a reader will be asking the question.
+/// Clickable, too. The two surfaces that are not — the heads-up overlay and
+/// the menus' empty glass — say so at their own call sites with
+/// `Spec { input_transparent: true, ..chrome(..) }`, which is where a reader
+/// will be asking the question.
 fn chrome(
     title: &str,
     width: u32,
@@ -4274,13 +4415,13 @@ fn chrome(
 ) -> Spec {
     Spec {
         title: title.to_owned(),
-        // One id for all four surfaces, not one each: they are four windows of
-        // a single program, and saying so is exactly what an app id is for.
-        // Nothing reads it today — the shell's own chrome sits outside
+        // One id for all the shell's surfaces, not one each: they are windows
+        // of a single program, and saying so is exactly what an app id is
+        // for. Nothing reads it today — the shell's own chrome sits outside
         // `Layer::Normal`, so it never reaches the window list rules are
         // evaluated against — but leaving it empty would make the shell the one
         // program on the desktop that declines to name itself, and the first
-        // tool to group windows by program would show it as four unrelated
+        // tool to group windows by program would show it as so many unrelated
         // strangers.
         app_id: "slateos-shell".to_owned(),
         width,

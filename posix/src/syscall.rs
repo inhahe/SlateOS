@@ -1041,12 +1041,17 @@ pub const SYS_SOCKETPAIR_POLL: u64 = 308;
 pub const SYS_SOCKETPAIR_READABLE_BYTES: u64 = 309;
 pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
 
-// Futexes (IPC range 210-214)
+// Futexes (IPC range 210-219)
 pub const SYS_FUTEX_WAIT: u64 = 210;
 pub const SYS_FUTEX_WAKE: u64 = 211;
 pub const SYS_FUTEX_LOCK_PI: u64 = 212;
 pub const SYS_FUTEX_UNLOCK_PI: u64 = 213;
 pub const SYS_FUTEX_WAIT_TIMEOUT: u64 = 214;
+/// [`SYS_FUTEX_LOCK_PI`] for at most `arg1` nanoseconds, then `TimedOut`;
+/// 0 tries once without sleeping.  (216, `SYS_FUTEX_TRYLOCK_PI`, is not
+/// used: it takes only a word that is exactly 0, where Linux's
+/// `FUTEX_TRYLOCK_PI` also takes one a dead owner left -- which this does.)
+pub const SYS_FUTEX_LOCK_PI_TIMEOUT: u64 = 217;
 
 // Eventfd (IPC range 240-249)
 pub const SYS_EVENTFD_CREATE: u64 = 240;
@@ -1596,6 +1601,7 @@ mod tests {
             SYS_FUTEX_LOCK_PI,
             SYS_FUTEX_UNLOCK_PI,
             SYS_FUTEX_WAIT_TIMEOUT,
+            SYS_FUTEX_LOCK_PI_TIMEOUT,
             SYS_EVENTFD_CREATE,
             SYS_EVENTFD_WRITE,
             SYS_EVENTFD_READ,
@@ -1871,6 +1877,7 @@ mod tests {
             SYS_FUTEX_LOCK_PI,
             SYS_FUTEX_UNLOCK_PI,
             SYS_FUTEX_WAIT_TIMEOUT,
+            SYS_FUTEX_LOCK_PI_TIMEOUT,
             SYS_EVENTFD_CREATE,
             SYS_EVENTFD_WRITE,
             SYS_EVENTFD_READ,

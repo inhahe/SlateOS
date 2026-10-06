@@ -2959,6 +2959,21 @@ D's to act on once answered).
   `RUSAGE_CHILDREN`, for seven weeks after the kernel's per-process call
   landed. It now reads that call (`SYS_PROCESS_GET_RUSAGE`) through the
   converter `wait4` uses. The ring-3 check is `services/ctest-rusage`.
+  **Priority-inheritance mutexes -- 2026-10-06 (lane D).**
+  `PTHREAD_PRIO_INHERIT` was refused with `ENOTSUP`, though the kernel has
+  PI futexes. Such a mutex is now one, so a waiter lends its priority to the
+  holder. Every lock and unlock goes through the kernel for now, because
+  the kernel keeps no record of a holder that took its word in userspace
+  (design-decisions §1177;
+  `requests/d-a-pi-futex-owners-taken-in-userspace-are-invisible-to-the-kernel.md`).
+  The Linux `futex()` call's PI commands answer as Linux's:
+  - `FUTEX_LOCK_PI`'s deadline is honoured; it was judged and then ignored;
+  - `FUTEX_TRYLOCK_PI` and `FUTEX_LOCK_PI2` are new;
+  - an unlock by a non-owner is `EPERM`.
+
+  The ring-3 check is `services/ctest-pi-mutex`; it times a holder against
+  medium-priority threads. Priority ceilings (`PTHREAD_PRIO_PROTECT`) and
+  robust mutexes are still `ENOTSUP`.
 
 - `[x]` `[D]` **The image carries fonts -- 2026-09-26**, lane D's half of
   `requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`.

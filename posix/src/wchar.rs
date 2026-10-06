@@ -2167,32 +2167,38 @@ pub unsafe extern "C" fn wcswcs(haystack: *const WcharT, needle: *const WcharT) 
 
 /// Find a wide substring in a wide string.
 ///
+/// The Two-Way search `strstr` uses (`string::TwoWay`): linear time,
+/// constant space, where the loop it replaced took the product of the
+/// lengths.  The haystack's length is found only as far as the search goes.
+///
 /// # Safety
 ///
 /// Both strings must be valid null-terminated wide strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsstr(haystack: *const WcharT, needle: *const WcharT) -> *const WcharT {
-    if unsafe { *needle } == 0 {
-        return haystack;
-    }
-
-    let mut h: usize = 0;
-    while unsafe { *haystack.add(h) } != 0 {
-        let mut j: usize = 0;
-        loop {
-            let n_ch = unsafe { *needle.add(j) };
-            if n_ch == 0 {
-                return unsafe { haystack.add(h) };
-            }
-            let h_ch = unsafe { *haystack.add(h.wrapping_add(j)) };
-            if h_ch != n_ch {
-                break;
-            }
-            j = j.wrapping_add(1);
+    // SAFETY: the caller's strings.  The haystack is read one character
+    // past `known` only while `known` is before its terminator.
+    unsafe {
+        let nlen = wcslen(needle);
+        if nlen == 0 {
+            return haystack;
         }
-        h = h.wrapping_add(1);
+        // How many of the haystack's characters precede its terminator, as
+        // far as anyone has looked.
+        let mut known = 0usize;
+        let mut fits = |end: usize| {
+            while known < end && haystack.add(known).read() != 0 {
+                known = known.wrapping_add(1);
+            }
+            end <= known
+        };
+        // A haystack shorter than the needle holds no match, which is
+        // cheaper to see than the needle's factorization is to make.
+        if !fits(nlen) {
+            return core::ptr::null();
+        }
+        crate::string::TwoWay::new(needle, nlen, |wc: WcharT| wc).find(haystack, fits)
     }
-    core::ptr::null()
 }
 
 // ---------------------------------------------------------------------------
@@ -5446,6 +5452,56 @@ mod tests {
         let needle: &[WcharT] = &[0];
         let ret = unsafe { wcsstr(hay.as_ptr(), needle.as_ptr()) };
         assert_eq!(ret, hay.as_ptr());
+    }
+
+    /// `wcsstr` (the Two-Way search) against trying every place: every
+    /// needle and haystack over two alphabets, one of them with characters
+    /// past the BMP and a negative `wchar_t`, which the search orders as
+    /// signed numbers.
+    #[test]
+    fn wcsstr_agrees_with_trying_every_place() {
+        /// Every string over `alphabet` up to `max_len` long.
+        fn all(alphabet: &[WcharT], max_len: usize) -> Vec<Vec<WcharT>> {
+            let mut all = vec![Vec::new()];
+            let mut longest: Vec<Vec<WcharT>> = vec![Vec::new()];
+            for _ in 0..max_len {
+                longest = longest
+                    .iter()
+                    .flat_map(|s| {
+                        alphabet.iter().map(move |&c| {
+                            let mut t = s.clone();
+                            t.push(c);
+                            t
+                        })
+                    })
+                    .collect();
+                all.extend(longest.iter().cloned());
+            }
+            all
+        }
+        for (alphabet, needles, hays) in
+            [(&[0x61, 0x62][..], 6, 10), (&[0x41, 0x1F600, -5][..], 4, 7)]
+        {
+            let needles = all(alphabet, needles);
+            let hays = all(alphabet, hays);
+            for needle in &needles {
+                let mut n = needle.clone();
+                n.push(0);
+                for hay in &hays {
+                    let want = if needle.is_empty() {
+                        Some(0)
+                    } else {
+                        hay.windows(needle.len()).position(|w| w == &needle[..])
+                    };
+                    let mut h = hay.clone();
+                    h.push(0);
+                    // SAFETY: terminated wide strings.
+                    let got = unsafe { wcsstr(h.as_ptr(), n.as_ptr()) };
+                    let got = (!got.is_null()).then(|| (got as usize - h.as_ptr() as usize) / 4);
+                    assert_eq!(got, want, "wcsstr({hay:?}, {needle:?})");
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

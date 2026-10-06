@@ -41,6 +41,32 @@
 //! to 77 GB/s.  On SlateOS, where it is the symbol, LLVM leaves such a loop
 //! alone, and it compiled to one `movb` an iteration.  Now: 9.3 GB/s at 64
 //! bytes, 33.5 at 1 KiB.
+//!
+//! The string functions built on them, the same day (each reads the whole
+//! string: the byte sought is absent, the strings compared are equal):
+//!
+//! | call | 64 B | 1 KiB | 64 KiB | 1 MiB |
+//! |---|---|---|---|---|
+//! | `strnlen`, byte loop | 1.4 | 1.8 | 2.3 | 2.3 |
+//! | `strnlen` | 7.4 | 12.2 | 9.7 | 10.9 |
+//! | `strchr`, byte loop | 1.3 | 1.3 | 1.3 | 1.2 |
+//! | `strchr` | 7.9 | 12.0 | 14.6 | 11.8 |
+//! | `strrchr`, byte loop | 1.8 | 1.8 | 1.9 | 1.5 |
+//! | `strrchr` | 6.7 | 11.4 | 11.4 | 14.0 |
+//! | `strcmp`, byte loop | 2.5 | 2.0 | 2.3 | 1.7 |
+//! | `strcmp` | 4.0 | 9.3 | 6.4 | 5.2 |
+//! | `strcpy`, byte loop | 1.5 | 2.0 | 1.9 | 1.9 |
+//! | `strcpy` | 8.0 | 16.6 | 17.1 | 13.6 |
+//! | `strstr` (`x{31}y`), every place tried | 0.04 | 0.04 | 0.03 | 0.05 |
+//! | `strstr` (`x{31}y`), Two-Way | 0.21 | 0.45 | 0.45 | 0.38 |
+//!
+//! `strspn` is about what the loop it replaced was here, 1 GB/s: this set's
+//! first byte is the one that matches, the loop's best case.  The loop's
+//! cost grew with the set; the bit set's does not.  `strstr`'s real gain is
+//! not in the table: trying every place costs the needle's length times the
+//! haystack's, so a 10 KiB needle that nearly matches everywhere in a
+//! megabyte was ten billion comparisons, where Two-Way's are about two
+//! million.
 
 // A measuring harness, not shipped code: its sizes and offsets are
 // constants chosen to fit the buffers, and a panic would be a bench that
@@ -147,5 +173,56 @@ fn main() {
             unsafe { black_box(posix::string::strlen(black_box(s))) };
         });
         a[n + 1] = 0x5a;
+    }
+
+    // The scanners, over strings of `n` bytes ('x' throughout, terminated):
+    // each reads the whole string -- the byte sought is absent, the strings
+    // compared are equal.
+    for &n in &sizes {
+        a[1..=n].fill(b'x');
+        a[n + 1] = 0;
+        b[3..=n + 2].fill(b'x');
+        b[n + 3] = 0;
+        let s = a.as_ptr().wrapping_add(1);
+        let t = b.as_ptr().wrapping_add(3);
+        measure("strnlen", n, || {
+            // SAFETY: a NUL-terminated string.
+            unsafe { black_box(posix::string::strnlen(black_box(s), usize::MAX)) };
+        });
+        measure("strchr (absent)", n, || {
+            // SAFETY: a NUL-terminated string.
+            unsafe { black_box(posix::string::strchr(black_box(s), i32::from(b'q'))) };
+        });
+        measure("strrchr (absent)", n, || {
+            // SAFETY: a NUL-terminated string.
+            unsafe { black_box(posix::string::strrchr(black_box(s), i32::from(b'q'))) };
+        });
+        measure("strcmp (equal)", n, || {
+            // SAFETY: NUL-terminated strings, at different alignments.
+            unsafe { black_box(posix::string::strcmp(black_box(s), black_box(t))) };
+        });
+        measure("strspn", n, || {
+            // SAFETY: NUL-terminated strings.
+            unsafe { black_box(posix::string::strspn(black_box(s), c"xyz".as_ptr().cast())) };
+        });
+        measure("strstr (x{31}y)", n, || {
+            // SAFETY: NUL-terminated strings.  The needle matches 31 bytes
+            // at every place and then fails: 32 comparisons a place for a
+            // search that tries every place.
+            unsafe {
+                black_box(posix::string::strstr(
+                    black_box(s),
+                    c"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy".as_ptr().cast(),
+                ))
+            };
+        });
+        b[n + 3] = 0x5a;
+        let d = b.as_mut_ptr().wrapping_add(5);
+        measure("strcpy", n, || {
+            // SAFETY: a NUL-terminated string of `n` bytes, and room for it.
+            unsafe { black_box(posix::string::strcpy(black_box(d), black_box(s))) };
+        });
+        a[n + 1] = 0x5a;
+        b.fill(0xa5);
     }
 }

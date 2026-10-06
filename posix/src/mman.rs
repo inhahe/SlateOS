@@ -83,13 +83,22 @@ pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_v
 
 /// Map files or devices into memory.
 ///
-/// Our kernel's `SYS_MMAP` takes:
-/// - arg0: addr (hint or fixed address)
-/// - arg1: length
-/// - arg2: prot
-/// - arg3: flags
-/// - arg4: fd (-1 for anonymous)
-/// - arg5: offset
+/// The native `SYS_MMAP` makes anonymous memory, or maps device registers:
+/// - arg0: the address, taken exactly when it is not 0 -- and refused
+///   (`EEXIST`) when anything is mapped there;
+/// - arg1: the length;
+/// - arg2: its own flags: `MAP_READ`, `MAP_WRITE` and `MAP_EXEC` are
+///   `PROT_READ`'s, `PROT_WRITE`'s and `PROT_EXEC`'s numbers, and the rest are
+///   its own (8 is `MAP_NOCACHE`, uncached memory, which is also `PROT_SEM`'s
+///   number);
+/// - arg3: a physical address, for device registers only.
+///
+/// So only `prot`'s three access bits are passed, and nothing of `flags`
+/// (lane A's `requests/a-d-libc-mmap-should-say-map-shared-and-translate-prot.md`).
+/// Until 2026-10-06 `prot` went whole into arg2 and `flags` into arg3, and a
+/// `PROT_SEM` mapping would have been uncached. Where the mapping goes is
+/// `place`'s, as Linux places it. A file mapping goes to `file_map`: the
+/// native call takes no file.
 ///
 /// Argument-domain validation (Linux-matching, before the syscall):
 /// * `length == 0` → `EINVAL`.  Linux's
@@ -102,9 +111,9 @@ pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_v
 /// * `offset` is not a multiple of the 16 KiB page size → `EINVAL`.
 ///   `mm/util.c::vm_mmap_pgoff` rounds offset to page-granular
 ///   `pgoff_t` and refuses misaligned values.
-/// * `MAP_FIXED` is set and `addr` is not page-aligned → `EINVAL`.
-///   Without `MAP_FIXED`, the kernel may round the hint; with it, the
-///   address must be exact.
+/// * `MAP_FIXED` or `MAP_FIXED_NOREPLACE` is set and `addr` is not
+///   page-aligned → `EINVAL`.  Without either, `addr` is a hint, which is
+///   rounded; with one, the address must be exact.
 ///
 /// Returns the mapped address, or MAP_FAILED on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -147,8 +156,9 @@ pub extern "C" fn mmap(
         errno::set_errno(errno::EINVAL);
         return MAP_FAILED;
     }
-    // MAP_FIXED demands an exact, page-aligned addr.
-    if (flags & MAP_FIXED) != 0 && !is_page_aligned(addr.cast_const()) {
+    // MAP_FIXED, and MAP_FIXED_NOREPLACE (which Linux turns into it), demand
+    // an exact, page-aligned addr.
+    if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0 && !is_page_aligned(addr.cast_const()) {
         errno::set_errno(errno::EINVAL);
         return MAP_FAILED;
     }
@@ -162,14 +172,17 @@ pub extern "C" fn mmap(
         return file_map::map(addr, length, prot, flags, fd, offset);
     }
 
-    let ret = syscall6(
-        SYS_MMAP,
+    let access = native_access(prot);
+    let ret = place(
+        &mut |at| syscall6(SYS_MMAP, at, length as u64, access, 0, 0, 0),
+        &mut || {
+            // What was there goes, as MAP_FIXED has it. munmap's own
+            // answer is not this call's: a range with nothing in it unmaps
+            // to 0, and a bad one fails the mapping that follows.
+            let _ = munmap(addr, length);
+        },
         addr as u64,
-        length as u64,
-        prot as u64,
-        flags as u64,
-        fd as u64,
-        offset as u64,
+        flags,
     );
 
     if ret < 0 {
@@ -178,6 +191,48 @@ pub extern "C" fn mmap(
     }
 
     ret as *mut core::ffi::c_void
+}
+
+/// The native `SYS_MMAP`'s access flags for `prot`: its three access bits,
+/// which are the same numbers, and nothing else -- not `PROT_SEM`, which
+/// Linux ignores on x86 and which is the native `MAP_NOCACHE`, nor the
+/// `PROT_GROWS*` bits, which no native flag means.
+fn native_access(prot: i32) -> u64 {
+    u64::try_from(prot & (PROT_READ | PROT_WRITE | PROT_EXEC)).unwrap_or(0)
+}
+
+/// Map where Linux would put the mapping, through `map` (the native call,
+/// asked for an address: 0 for anywhere) and `unmap` (`munmap` of the range
+/// asked for). The native call takes a non-zero address exactly, and refuses
+/// one where anything is mapped, so:
+///
+/// * `MAP_FIXED`: whatever is mapped there is unmapped first, as Linux's
+///   `MAP_FIXED` discards it, and the mapping is made exactly there.
+/// * `MAP_FIXED_NOREPLACE`: exactly there, or `EEXIST` -- the native call's
+///   own answer.
+/// * Any other non-null `addr` is a hint. It is rounded up to a page, and the
+///   mapping goes there if that is free, wherever the kernel picks if not,
+///   as Linux does. Until 2026-10-06 a hint was taken as exact, so a busy one
+///   failed, and an unaligned one was refused.
+/// * NULL: wherever the kernel picks.
+fn place(map: &mut dyn FnMut(u64) -> i64, unmap: &mut dyn FnMut(), addr: u64, flags: i32) -> i64 {
+    if flags & MAP_FIXED != 0 {
+        unmap();
+        return map(addr);
+    }
+    if flags & MAP_FIXED_NOREPLACE != 0 || addr == 0 {
+        return map(addr);
+    }
+    if let Some(hint) = addr
+        .checked_next_multiple_of(MMAN_PAGE_SIZE)
+        .filter(|&h| usize::try_from(h).is_ok_and(|h| h < TASK_SIZE))
+    {
+        let ret = map(hint);
+        if ret >= 0 {
+            return ret;
+        }
+    }
+    map(0)
 }
 
 /// Unmap a region of memory.
@@ -242,7 +297,12 @@ pub extern "C" fn mprotect(addr: *mut core::ffi::c_void, len: SizeT, prot: i32) 
         }
         Ok(false) => 0,
         Ok(true) => {
-            let ret = syscall3(SYS_MPROTECT, addr as u64, len as u64, prot as u64);
+            // `PROT_SEM` is a no-op on x86, as Linux has it, and not passed:
+            // the native call refuses its bit as unknown. The `PROT_GROWS*`
+            // bits are passed, and refused as Linux refuses them on a mapping
+            // that does not grow -- here, every one.
+            let native = prot & !PROT_SEM;
+            let ret = syscall3(SYS_MPROTECT, addr as u64, len as u64, native as u64);
             errno::translate(ret) as i32
         }
     }
@@ -791,6 +851,85 @@ mod tests {
     }
 
     use super::*;
+
+    // -- What reaches the native call --
+
+    /// Only the three access bits are the native call's: `PROT_SEM` would be
+    /// its `MAP_NOCACHE`, and the `PROT_GROWS*` bits are no native flag.
+    #[test]
+    fn only_access_bits_reach_the_native_mmap() {
+        assert_eq!(native_access(PROT_NONE), 0);
+        assert_eq!(native_access(PROT_READ | PROT_WRITE | PROT_EXEC), 7);
+        assert_eq!(native_access(PROT_READ | PROT_SEM), 1);
+        assert_eq!(native_access(PROT_WRITE | PROT_GROWSDOWN), 2);
+    }
+
+    /// Where `place` asks the native call to map, and whether it unmapped
+    /// first: (the addresses asked for, in order, and the unmaps), given
+    /// the native call's answer for each address.
+    fn placed(
+        addr: u64,
+        flags: i32,
+        answer: impl Fn(u64) -> i64,
+    ) -> (i64, std::vec::Vec<u64>, usize) {
+        let mut asked = std::vec::Vec::new();
+        let mut unmaps = 0usize;
+        let ret = place(
+            &mut |at| {
+                asked.push(at);
+                answer(at)
+            },
+            &mut || unmaps += 1,
+            addr,
+            flags,
+        );
+        (ret, asked, unmaps)
+    }
+
+    const EEXIST_NATIVE: i64 = errno::native::ALREADY_EXISTS;
+
+    #[test]
+    fn a_fixed_mapping_replaces_what_is_there() {
+        let (ret, asked, unmaps) = placed(0x40_0000, MAP_PRIVATE | MAP_FIXED, |at| at as i64);
+        assert_eq!((ret, asked, unmaps), (0x40_0000, std::vec![0x40_0000], 1));
+    }
+
+    #[test]
+    fn fixed_noreplace_is_exact_and_refused_where_something_is() {
+        let flags = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
+        let (ret, asked, unmaps) = placed(0x40_0000, flags, |_| EEXIST_NATIVE);
+        assert_eq!(
+            (ret, asked, unmaps),
+            (EEXIST_NATIVE, std::vec![0x40_0000], 0)
+        );
+    }
+
+    #[test]
+    fn a_hint_is_used_when_free_and_left_when_not() {
+        // Free: there.
+        let (ret, asked, _) = placed(0x40_0000, MAP_PRIVATE, |at| at as i64);
+        assert_eq!((ret, asked), (0x40_0000, std::vec![0x40_0000]));
+        // Taken: anywhere else.
+        let (ret, asked, unmaps) = placed(0x40_0000, MAP_PRIVATE, |at| {
+            if at == 0 { 0x7000_0000 } else { EEXIST_NATIVE }
+        });
+        assert_eq!(
+            (ret, asked, unmaps),
+            (0x7000_0000, std::vec![0x40_0000, 0], 0)
+        );
+        // Not on a page: rounded up to one, not refused.
+        let (_, asked, _) = placed(0x40_0001, MAP_PRIVATE, |at| at as i64);
+        assert_eq!(asked, [0x40_4000]);
+        // Past user space: no use asking there.
+        let (_, asked, _) = placed(u64::MAX - 5, MAP_PRIVATE, |at| at as i64);
+        assert_eq!(asked, [0]);
+    }
+
+    #[test]
+    fn no_address_is_anywhere() {
+        let (_, asked, unmaps) = placed(0, MAP_SHARED, |_| 0x7000_0000);
+        assert_eq!((asked, unmaps), (std::vec![0], 0));
+    }
 
     // -- Protection flags match Linux x86_64 --
 

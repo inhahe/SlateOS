@@ -567,7 +567,8 @@ pub struct SimpleTextView {
 pub struct SearchState {
     /// Current search query (empty = no active search).
     pub query: String,
-    /// All match positions (line, start_col, end_col).
+    /// All match positions (line, start_col, end_col), the columns counted
+    /// in characters, as a [`TextPosition`]'s are.
     pub matches: Vec<(usize, usize, usize)>,
     /// Index of the currently-focused match (-1 = none).
     pub current_match: Option<usize>,
@@ -958,12 +959,9 @@ impl SimpleTextView {
             let end_col = if line_idx == sel.end.line {
                 sel.end.col
             } else {
-                text.len()
+                usize::MAX
             };
-
-            let start = start_col.min(text.len());
-            let end = end_col.min(text.len());
-            result.push_str(&text[start..end]);
+            result.push_str(char_slice(&text, start_col, end_col));
 
             if line_idx < sel.end.line {
                 result.push('\n');
@@ -1062,10 +1060,14 @@ impl SimpleTextView {
         let case = Case::sensitive(self.search.case_sensitive);
         for (line_idx, _) in self.lines.iter().enumerate() {
             let text = self.line_text(line_idx);
-            self.search.matches.extend(
-                textfind::matches(&text, &self.search.query, case)
-                    .map(|(start, end)| (line_idx, start, end)),
-            );
+            self.search
+                .matches
+                .extend(
+                    textfind::matches(&text, &self.search.query, case).map(|(start, end)| {
+                        let (start, end) = char_columns(&text, start, end);
+                        (line_idx, start, end)
+                    }),
+                );
         }
     }
 
@@ -1415,12 +1417,8 @@ fn line_number_digits(line_count: usize) -> usize {
     digits.saturating_add(1).max(MIN_GUTTER_DIGITS)
 }
 
-/// Check whether a byte is a "word" character (for double-click selection).
-fn is_word_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// The byte range of the word surrounding `col` in `text`.
+/// The columns of the word surrounding column `col` of `text`, in
+/// characters -- the currency of every [`TextPosition`].
 ///
 /// Both views wrote this scan out longhand — `while start > 0 && is_word_char(
 /// bytes[start - 1])` and its mirror — so the identical four lines appeared
@@ -1428,25 +1426,75 @@ fn is_word_char(b: u8) -> bool {
 /// `iter().rposition` and `iter().position` do the same walk with the bound
 /// inside the iterator, and there is now one copy of it.
 ///
+/// It walked bytes, asking each whether it was an ASCII letter, while `col`
+/// counted characters: on a line holding anything outside ASCII the column
+/// named the wrong byte, a letter like `ï` ended the word, and the range it
+/// gave back -- bytes -- was taken for characters. A word is what
+/// [`text::is_word_char`] says it is, as it is in a text area.
+///
 /// `col` is clamped into the string, so a stale caret from a shorter line
-/// cannot name a byte that is no longer there.
+/// cannot name a character that is no longer there.
+///
+/// [`text::is_word_char`]: crate::text::is_word_char
 fn word_range_at(text: &str, col: usize) -> (usize, usize) {
-    let bytes = text.as_bytes();
-    let col = col.min(bytes.len());
-    let (before, after) = bytes.split_at(col.min(bytes.len()));
+    let chars: Vec<char> = text.chars().collect();
+    let col = col.min(chars.len());
+    let (before, after) = chars.split_at(col);
 
-    // The first non-word byte scanning backwards ends the run; nothing before
-    // it belongs to the word, and no such byte means the run reaches the start.
+    // The first non-word character scanning backwards ends the run; nothing
+    // before it belongs to the word, and no such character means the run
+    // reaches the start.
     let start = before
         .iter()
-        .rposition(|b| !is_word_char(*b))
+        .rposition(|c| !crate::text::is_word_char(*c))
         .map_or(0, |last_gap| last_gap.saturating_add(1));
     let end = after
         .iter()
-        .position(|b| !is_word_char(*b))
-        .map_or(bytes.len(), |gap| col.saturating_add(gap));
+        .position(|c| !crate::text::is_word_char(*c))
+        .map_or(chars.len(), |gap| col.saturating_add(gap));
 
     (start, end)
+}
+
+/// Byte offset of character `col` of `s`, clamped to the end of the string.
+///
+/// Clamping rather than panicking is deliberate: `col` comes from a
+/// selection that a re-layout may have left pointing past the end of a line
+/// that got shorter, and a stale selection should paint the wrong highlight
+/// for one frame, not take the window down.
+fn byte_of_char(s: &str, col: usize) -> usize {
+    s.char_indices().nth(col).map_or(s.len(), |(i, _)| i)
+}
+
+/// Character columns of the bytes `start..end` of `line`: a range
+/// [`textfind`] found, in the views' currency.
+///
+/// The search hands back bytes, as it must -- they are what a replace
+/// slices -- while every mark these views draw is placed by character
+/// column. The ranges were stored as found, so on a line holding anything
+/// outside ASCII a search hit was highlighted one column to the right for
+/// every extra byte before it.
+fn char_columns(line: &str, start: usize, end: usize) -> (usize, usize) {
+    let column = |byte: usize| {
+        line.get(..byte)
+            .map_or_else(|| line.chars().count(), |head| head.chars().count())
+    };
+    (column(start), column(end))
+}
+
+/// The text of characters `from..to` of `line`, clamped to the line: what a
+/// selection covers of it.
+///
+/// Both views sliced the line with the selection's columns -- characters --
+/// as if they were bytes, and measured a whole line by its bytes: on a line
+/// holding anything outside ASCII, Ctrl+C copied the wrong text, and where a
+/// column fell inside a character it panicked and took the window with it.
+fn char_slice(line: &str, from: usize, to: usize) -> &str {
+    let start = byte_of_char(line, from);
+    let end = byte_of_char(line, to).max(start);
+    // Never the default: both ends are boundaries of `line`'s characters,
+    // in order.
+    line.get(start..end).unwrap_or_default()
 }
 
 // ===========================================================================
@@ -2050,16 +2098,6 @@ impl RichTextView {
         }
     }
 
-    /// Byte offset of character `col` of `s`, clamped to the end of the string.
-    ///
-    /// Clamping rather than panicking is deliberate: `col` comes from a
-    /// selection that a re-layout may have left pointing past the end of a line
-    /// that got shorter, and a stale selection should paint the wrong highlight
-    /// for one frame, not take the window down.
-    fn byte_of_char(s: &str, col: usize) -> usize {
-        s.char_indices().nth(col).map_or(s.len(), |(i, _)| i)
-    }
-
     /// The boxes to paint to highlight characters `from..to` of `wl`, as
     /// `(left, width)` pairs in pixels from the start of the line.
     ///
@@ -2097,8 +2135,8 @@ impl RichTextView {
                 // Character columns are the widget's currency; the shaper's is
                 // bytes. Converting here rather than at the call site keeps the
                 // conversion next to the string it indexes into.
-                let lo = Self::byte_of_char(&span.text, from.saturating_sub(seen));
-                let hi = Self::byte_of_char(&span.text, to.saturating_sub(seen));
+                let lo = byte_of_char(&span.text, from.saturating_sub(seen));
+                let hi = byte_of_char(&span.text, to.saturating_sub(seen));
                 let (size, weight) = self.span_font(span, heading);
                 for (bx, bw) in crate::text::selection_boxes(&span.text, lo, hi, size, weight) {
                     match boxes.last_mut() {
@@ -2307,11 +2345,9 @@ impl RichTextView {
             let end_col = if line_idx == sel.end.line {
                 sel.end.col
             } else {
-                text.len()
+                usize::MAX
             };
-            let start = start_col.min(text.len());
-            let end = end_col.min(text.len());
-            result.push_str(&text[start..end]);
+            result.push_str(char_slice(&text, start_col, end_col));
             if line_idx < sel.end.line {
                 result.push('\n');
             }
@@ -2330,7 +2366,9 @@ impl RichTextView {
         let Some(last) = self.wrapped_lines.len().checked_sub(1) else {
             return;
         };
-        let last_col = self.wrapped_line_text(last).len();
+        // Characters, as every column is: its bytes ran past the end of a
+        // last line holding anything outside ASCII.
+        let last_col = self.wrapped_line_text(last).chars().count();
         self.selection = Some(Selection::new(
             TextPosition::ZERO,
             TextPosition::new(last, last_col),
@@ -2397,7 +2435,10 @@ impl RichTextView {
             .flat_map(|(line_idx, wl)| {
                 let text: String = wl.spans.iter().map(|s| s.text.as_str()).collect();
                 textfind::matches(&text, &query, case)
-                    .map(|(start, end)| (line_idx, start, end))
+                    .map(|(start, end)| {
+                        let (start, end) = char_columns(&text, start, end);
+                        (line_idx, start, end)
+                    })
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -3545,8 +3586,104 @@ mod tests {
         view.find("ABC", false);
         assert_eq!(view.match_count(), 1);
         let &(line, start, end) = view.search.matches.first().expect("one match");
-        assert_eq!((line, start, end), (0, 2, 5));
-        assert_eq!(view.line_text(0).get(start..end), Some("abc"));
+        assert_eq!(
+            (line, start, end),
+            (0, 1, 4),
+            "columns, in characters, as a selection's are"
+        );
+        assert_eq!(char_slice(&view.line_text(0), start, end), "abc");
+    }
+
+    /// **A match is highlighted over the characters it matched**: the search
+    /// answers in bytes, the highlight is placed by character column, and
+    /// the bytes were used as columns -- so past an `é` every hit was drawn
+    /// a column to the right of its text.
+    #[test]
+    fn a_match_is_highlighted_over_the_characters_it_matched() {
+        let palette = Palette::for_mode(false);
+        let mut view = simple_view(400.0, 160.0);
+        view.set_text("café latte");
+        view.find("latte", true);
+        assert_eq!(view.search.matches, [(0, 5, 10)]);
+
+        let mut tree = RenderTree::new();
+        view.render(&palette, &mut tree);
+        let hit: Vec<(f32, f32)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x, width, color, ..
+                } if *color == with_alpha(palette.peach, 153) => Some((*x, *width)),
+                _ => None,
+            })
+            .collect();
+        let (from, to) = (view.col_x(0, 5), view.col_x(0, 10));
+        assert_eq!(hit, [(from, to - from)], "over `latte`, not past it");
+    }
+
+    /// **What is selected is what is copied, whatever its bytes** -- and a
+    /// line ending in a character of more than one byte is copied rather
+    /// than taking the window down: the columns were taken for bytes, and
+    /// one that fell inside a character panicked.
+    #[test]
+    fn copying_takes_the_characters_selected_whatever_their_bytes() {
+        let mut view = simple_view(400.0, 160.0);
+        view.set_text("aé\ncafé latte");
+        view.select_all();
+        assert_eq!(view.selected_text().as_deref(), Some("aé\ncafé latte"));
+
+        view.selection = Some(Selection::new(
+            TextPosition::new(1, 5),
+            TextPosition::new(1, 10),
+        ));
+        assert_eq!(view.selected_text().as_deref(), Some("latte"));
+        view.selection = Some(Selection::new(
+            TextPosition::new(0, 1),
+            TextPosition::new(1, 4),
+        ));
+        assert_eq!(view.selected_text().as_deref(), Some("é\ncafé"));
+    }
+
+    /// The rich view's copy, and its select-all, count characters too.
+    #[test]
+    fn the_rich_view_copies_the_characters_selected() {
+        let mut view = RichTextView::new(400.0, 200.0);
+        view.set_blocks(vec![RichBlock::Paragraph {
+            spans: vec![RichSpan::plain("naïve café")],
+            spacing_above: 0.0,
+            spacing_below: 0.0,
+        }]);
+        view.select_all();
+        assert_eq!(
+            view.selection.map(|s| s.end),
+            Some(TextPosition::new(0, 10)),
+            "ten characters, though twelve bytes"
+        );
+        assert_eq!(view.selected_text().as_deref(), Some("naïve café"));
+        view.selection = Some(Selection::new(
+            TextPosition::new(0, 6),
+            TextPosition::new(0, 10),
+        ));
+        assert_eq!(view.selected_text().as_deref(), Some("café"));
+    }
+
+    /// **A double-click selects the word, whatever its letters**: the scan
+    /// walked bytes and took only ASCII for letters, so `ï` ended a word --
+    /// and a column inside a word past it named the wrong byte.
+    #[test]
+    fn a_word_is_a_word_whatever_its_letters() {
+        assert_eq!(word_range_at("naïve fix", 1), (0, 5));
+        assert_eq!(word_range_at("naïve fix", 4), (0, 5));
+        assert_eq!(word_range_at("日本語 text", 1), (0, 3));
+        assert_eq!(word_range_at("é é", 2), (2, 3), "the second, by its column");
+
+        let mut view = simple_view(400.0, 160.0);
+        view.set_text("so naïve");
+        assert_eq!(
+            view.word_at(TextPosition::new(0, 6)),
+            Selection::new(TextPosition::new(0, 3), TextPosition::new(0, 8))
+        );
     }
 
     #[test]
@@ -3571,7 +3708,7 @@ mod tests {
         view.set_text("日本日本語");
 
         view.find("日本", true);
-        assert_eq!(view.search.matches, [(0, 0, 6), (0, 6, 12)]);
+        assert_eq!(view.search.matches, [(0, 0, 2), (0, 2, 4)]);
     }
 
     #[test]
@@ -3587,10 +3724,10 @@ mod tests {
         }]);
 
         view.find("ABC", false);
-        assert_eq!(view.search.matches, [(0, 2, 5)]);
+        assert_eq!(view.search.matches, [(0, 1, 4)]);
 
         view.find("aa", true);
-        assert_eq!(view.search.matches, [(0, 6, 8), (0, 8, 10)]);
+        assert_eq!(view.search.matches, [(0, 5, 7), (0, 7, 9)]);
     }
 
     // --- Word-wrap tests ---

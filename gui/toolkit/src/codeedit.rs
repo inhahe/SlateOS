@@ -47,6 +47,7 @@
 use core::num::NonZeroUsize;
 use core::ops::Range;
 
+use crate::text::is_word_char;
 use crate::textbuffer::{Changes, Edit, EditError, TextBuffer};
 use crate::undo::{Travel, UndoHistory};
 
@@ -227,7 +228,7 @@ impl Finder {
 fn is_whole_word(text: &str, range: Range<usize>) -> bool {
     let before = text.get(..range.start).and_then(|t| t.chars().next_back());
     let after = text.get(range.end..).and_then(|t| t.chars().next());
-    !before.is_some_and(is_word) && !after.is_some_and(is_word)
+    !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
 }
 
 /// The widest a tab may be set.
@@ -1232,13 +1233,13 @@ impl CodeEditor {
         let start = self
             .buffer
             .chars_rev(offset)
-            .take_while(|&(_, c)| is_word(c))
+            .take_while(|&(_, c)| is_word_char(c))
             .last()
             .map_or(offset, |(at, _)| at);
         let end = self
             .buffer
             .chars(offset)
-            .take_while(|&(_, c)| is_word(c))
+            .take_while(|&(_, c)| is_word_char(c))
             .last()
             .map_or(offset, |(at, c)| at.saturating_add(c.len_utf8()));
         start..end
@@ -1749,9 +1750,9 @@ impl CodeEditor {
         match chars.peek().copied() {
             Some((p, '\n')) => p,
             Some((_, c)) => {
-                let word = is_word(c);
+                let word = is_word_char(c);
                 for (p, c) in chars {
-                    if is_word(c) != word || c.is_whitespace() {
+                    if is_word_char(c) != word || c.is_whitespace() {
                         break;
                     }
                     at = p;
@@ -1777,9 +1778,9 @@ impl CodeEditor {
         match chars.peek().copied() {
             Some((p, '\n')) => p.saturating_add(1),
             Some((_, c)) => {
-                let word = is_word(c);
+                let word = is_word_char(c);
                 for (p, c) in chars {
-                    if is_word(c) != word || c.is_whitespace() {
+                    if is_word_char(c) != word || c.is_whitespace() {
                         break;
                     }
                     at = p.saturating_add(c.len_utf8());
@@ -1834,11 +1835,6 @@ fn to_next_stop(column: usize, tab: usize) -> usize {
     column
         .checked_rem(tab)
         .map_or(tab, |into| tab.saturating_sub(into))
-}
-
-/// Whether `c` is part of a word: letters, digits, the underscore.
-fn is_word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
 }
 
 fn closer_of(c: char) -> Option<char> {

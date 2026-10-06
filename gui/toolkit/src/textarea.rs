@@ -70,7 +70,9 @@ use crate::color::Color;
 use crate::event::{Key, KeyEvent};
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, TextSpan};
 use crate::style::CornerRadii;
-use crate::text::{self, Affinity, TextCursor};
+// `is_word_char`: what a double-click selects a run of, and where a run of
+// typing is split into undo steps.
+use crate::text::{self, Affinity, TextCursor, is_word_char};
 use crate::textedit;
 use crate::textinput::KeyEdit;
 use crate::undo::{Travel, UndoHistory};
@@ -241,12 +243,6 @@ impl core::fmt::Debug for TextArea {
 /// steps over invisibly.
 fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-/// Whether a character belongs to a word, for double-click selection and for
-/// where a run of typing is split into undo steps.
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
 }
 
 impl TextArea {

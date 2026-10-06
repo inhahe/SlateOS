@@ -1830,6 +1830,18 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
         .map_or_else(|| text.chars().count(), |prefix| prefix.chars().count())
 }
 
+/// Whether `c` belongs to a word: a letter or a digit, of any script, or the
+/// underscore. A double-click selects a run of these, and the word motions
+/// stop where one ends.
+///
+/// One rule for every text widget, so a word is the same word in each. The
+/// text area and the code editor each kept a copy of it, and the text views
+/// a third that asked of bytes whether they were ASCII letters -- so a
+/// double-click on `naïve` there selected `na`.
+pub(crate) fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 /// Cost of shaping, measured rather than guessed.
 ///
 /// `apps/editor` scrolls sideways by slicing each line at a byte offset and

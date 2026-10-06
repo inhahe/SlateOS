@@ -42,7 +42,7 @@ use crate::layout::{
 };
 use crate::palette::Palette;
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
-use crate::style::{CornerRadii, Edges, FontWeight, Style};
+use crate::style::{CornerRadii, Edges, FontWeight, Position, Style};
 use crate::text::TextCursor;
 
 use std::sync::Arc;
@@ -813,6 +813,33 @@ impl Widget {
         }
     }
 
+    /// The fixed widgets in it, at any depth -- each with its `z-index` and
+    /// its path of child indexes from it -- in tree order. A hidden subtree
+    /// is not drawn, and its fixed widgets are left out with it.
+    fn collect_fixed(&self, path: &mut Vec<usize>, out: &mut Vec<(i32, Vec<usize>)>) {
+        for (i, child) in self.children.iter().enumerate() {
+            if !child.visible {
+                continue;
+            }
+            path.push(i);
+            if child.is_fixed() {
+                out.push((child.look().z_index, path.clone()));
+            }
+            child.collect_fixed(path, out);
+            path.pop();
+        }
+    }
+
+    /// The widget `path` -- child indexes -- leads to from it.
+    fn at_path(&self, path: &[usize]) -> Option<&Self> {
+        path.iter().try_fold(self, |w, &i| w.children.get(i))
+    }
+
+    /// [`at_path`](Self::at_path), to change.
+    fn at_path_mut(&mut self, path: &[usize]) -> Option<&mut Self> {
+        path.iter().try_fold(self, |w, &i| w.children.get_mut(i))
+    }
+
     /// Whether anything in it, or in any widget in it, is moving.
     fn any_moving(&self) -> bool {
         self.transitions
@@ -1031,7 +1058,13 @@ impl Widget {
         // scroll view's scrolled, and shown only inside its box.
         if !self.scrolls() || self.shows_children_at(px, py) {
             let (ox, oy) = self.children_origin();
-            for child in self.children.iter().rev() {
+            // What is drawn on top first; a fixed child is the tree's to ask.
+            for child in self
+                .paint_order()
+                .into_iter()
+                .rev()
+                .filter_map(|i| self.children.get(i))
+            {
                 if let Some(hit) = child.focus_target_at(px - ox, py - oy) {
                     return Some(hit);
                 }
@@ -1047,14 +1080,27 @@ impl Widget {
     }
 
     /// Note where the pointer is, in this widget's parent's content space:
-    /// over this widget or not, and over which of its children.
+    /// over this widget or not, and over which of its children -- the one
+    /// drawn on top where two overlap, as CSS's `:hover` is the one hit and
+    /// what holds it, not what lies beneath. A fixed child is the tree's to
+    /// note ([`WidgetTree`]'s hover).
     fn set_hover(&mut self, px: f32, py: f32) {
         self.hovered = self.visible && self.contains(px, py);
         let reaches = self.hovered && (!self.scrolls() || self.shows_children_at(px, py));
         let (ox, oy) = self.children_origin();
-        for child in &mut self.children {
-            if reaches {
-                child.set_hover(px - ox, py - oy);
+        let (cx, cy) = (px - ox, py - oy);
+        let over = if reaches {
+            self.paint_order().into_iter().rev().find(|&i| {
+                self.children
+                    .get(i)
+                    .is_some_and(|c| c.visible && c.contains(cx, cy))
+            })
+        } else {
+            None
+        };
+        for (i, child) in self.children.iter_mut().enumerate() {
+            if Some(i) == over {
+                child.set_hover(cx, cy);
             } else {
                 child.clear_hover();
             }
@@ -1199,12 +1245,14 @@ impl Widget {
         )
     }
 
-    /// The visible children as a flex container lays them out: each one's
-    /// border box with room to spare, and its item.
+    /// The visible children in its flow as a flex container lays them out:
+    /// each one's border box with room to spare, and its item. A child
+    /// placed out of the flow (`position: absolute` or `fixed`) takes no
+    /// room in it.
     fn flex_children(&self, p: &Palette) -> Vec<(Size, FlexItem)> {
         self.children
             .iter()
-            .filter(|c| c.visible)
+            .filter(|c| c.visible && c.in_flow())
             .map(|c| (c.border_box_size(p), c.flex_item_in_layout()))
             .collect()
     }
@@ -1224,7 +1272,7 @@ impl Widget {
         );
         if let Some(ref flex) = self.flex_layout
             && !self.scrolls()
-            && self.children.iter().any(|c| c.visible)
+            && self.children.iter().any(|c| c.visible && c.in_flow())
         {
             let unbounded = Size::new(f32::INFINITY, f32::INFINITY);
             let boxes = flex_layout(unbounded, flex, &self.flex_children(p), &Edges::ZERO);
@@ -1316,7 +1364,7 @@ impl Widget {
         self.layout.border_widths = self.border_edges();
 
         if let Some(ref flex) = self.flex_layout
-            && self.children.iter().any(|c| c.visible)
+            && self.children.iter().any(|c| c.visible && c.in_flow())
         {
             let scrolls = self.scrolls();
             // The room inside: what the constraint allows less the frame,
@@ -1333,19 +1381,31 @@ impl Widget {
             // The children's lengths that are percentages of this widget's
             // content, settled now that it is known -- before they are
             // measured, which their padding and limits are part of.
-            for child in self.children.iter_mut().filter(|c| c.visible) {
+            for child in self
+                .children
+                .iter_mut()
+                .filter(|c| c.visible && c.in_flow())
+            {
                 child.settle_lengths(room.width, room.height);
             }
             let boxes = flex_layout(room, flex, &self.flex_children(p), &Edges::ZERO);
 
-            // `flex_children` takes the visible children in order and
-            // `flex_layout` answers one box each, so the visible children
-            // and the boxes pair off one to one -- which is what `zip` says.
-            for (child, lb) in self.children.iter_mut().filter(|c| c.visible).zip(&boxes) {
+            // `flex_children` takes the visible children in the flow, in
+            // order, and `flex_layout` answers one box each, so they and the
+            // boxes pair off one to one -- which is what `zip` says.
+            for (child, lb) in self
+                .children
+                .iter_mut()
+                .filter(|c| c.visible && c.in_flow())
+                .zip(&boxes)
+            {
                 // Its border box is exactly what the flex layout gave it.
                 child.do_layout(SizeConstraint::tight(Size::new(lb.width, lb.height)), p);
-                child.layout.x = lb.x;
-                child.layout.y = lb.y;
+                // Moved from there if it is placed relative to it -- after
+                // the flow is laid out, so nothing around it moves.
+                let (dx, dy) = child.relative_offset();
+                child.layout.x = lb.x + dx;
+                child.layout.y = lb.y + dy;
             }
 
             let wide = boxes
@@ -1370,21 +1430,154 @@ impl Widget {
                 *content_height = tall;
                 *scroll_x = scroll_x.clamp(0.0, (wide - view_w).max(0.0));
                 *scroll_y = scroll_y.clamp(0.0, (tall - view_h).max(0.0));
-                return;
-            }
-
-            if !constraint.max_width.is_finite() {
-                self.layout.width = wide;
-            }
-            if !constraint.max_height.is_finite() {
-                self.layout.height = tall;
+            } else {
+                if !constraint.max_width.is_finite() {
+                    self.layout.width = wide;
+                }
+                if !constraint.max_height.is_finite() {
+                    self.layout.height = tall;
+                }
             }
         }
+        // Its children placed out of its flow, in the padding box it now has.
+        self.place_absolute_children(p);
     }
 
     /// Whether this widget scrolls what it holds.
     const fn scrolls(&self) -> bool {
         matches!(self.kind, WidgetKind::ScrollView { .. })
+    }
+
+    /// Whether it is in its container's flow -- placed by the container's
+    /// layout, as a static or relative widget is -- rather than out of it.
+    fn in_flow(&self) -> bool {
+        matches!(self.look().position, Position::Static | Position::Relative)
+    }
+
+    /// Whether it is placed in the window, over everything
+    /// (`position: fixed`).
+    fn is_fixed(&self) -> bool {
+        self.look().position == Position::Fixed
+    }
+
+    /// How far a relative widget is moved from where the flow put it: its
+    /// left inset, else its right one leftward; its top, else its bottom
+    /// upward. Nothing for any other.
+    fn relative_offset(&self) -> (f32, f32) {
+        let look = self.look();
+        if look.position != Position::Relative {
+            return (0.0, 0.0);
+        }
+        let i = look.inset;
+        (
+            i.left.or(i.right.map(|r| -r)).unwrap_or(0.0),
+            i.top.or(i.bottom.map(|b| -b)).unwrap_or(0.0),
+        )
+    }
+
+    /// Its children in the order they are drawn -- by `z-index`, then as
+    /// they were added -- leaving out the fixed ones, which are drawn over
+    /// the whole window. The pointer is offered them the other way round,
+    /// so what is drawn on top takes it first.
+    fn paint_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = self
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_fixed())
+            .map(|(i, _)| i)
+            .collect();
+        // Stable: siblings at one level stay in the order they were added.
+        order.sort_by_key(|&i| self.children.get(i).map_or(0, |c| c.look().z_index));
+        order
+    }
+
+    /// Lay out its children placed out of its flow (`position: absolute`),
+    /// each by its insets in this widget's padding box -- which it has now
+    /// been given -- and their own percentages settled against that box.
+    fn place_absolute_children(&mut self, p: &Palette) {
+        let pad = self.layout.padding;
+        let block = Size::new(
+            self.layout.width + pad.horizontal(),
+            self.layout.height + pad.vertical(),
+        );
+        // Where an absolute widget with no insets sits: where this widget's
+        // content starts, as near as this comes to CSS's "where the flow
+        // would have put it".
+        let start = (pad.left, pad.top);
+        for child in self
+            .children
+            .iter_mut()
+            .filter(|c| c.visible && c.look().position == Position::Absolute)
+        {
+            child.settle_lengths(block.width, block.height);
+            let (x, y, size) = child.placed_in(block, start, p);
+            child.do_layout(SizeConstraint::tight(size), p);
+            // In this widget's content space, which starts a padding in from
+            // the padding box.
+            child.layout.x = x - pad.left;
+            child.layout.y = y - pad.top;
+        }
+    }
+
+    /// Where it goes in a block `block` big -- its parent's padding box, or
+    /// the window -- as CSS places an absolutely positioned box: its margin
+    /// box's corner, from the block's, and its border box's size.
+    ///
+    /// Each way, a size its style fixes is its own; with none, insets on
+    /// both sides stretch it between them, and otherwise it takes what its
+    /// content takes, no more than the room left. Its limits hold either
+    /// way. It sits at its start inset, else its end inset back from the far
+    /// side, else at `start` -- where the block's content begins.
+    fn placed_in(&self, block: Size, start: (f32, f32), p: &Palette) -> (f32, f32, Size) {
+        let look = self.look();
+        let inset = look.inset;
+        let margin = look.margin;
+        let natural = self.border_box_size(p);
+        let item = self.flex_item_in_layout();
+        let axis = |from: Option<f32>,
+                    to: Option<f32>,
+                    fixed: Option<f32>,
+                    natural: f32,
+                    extent: f32,
+                    (m_from, m_to): (f32, f32),
+                    (least, most): (f32, f32),
+                    at_start: f32| {
+            let room = extent - from.unwrap_or(0.0) - to.unwrap_or(0.0) - m_from - m_to;
+            let size = match (from, to, fixed) {
+                (_, _, Some(fixed)) => fixed,
+                (Some(_), Some(_), None) => room,
+                _ => natural.min(room.max(0.0)),
+            };
+            let size = size.min(most).max(least).max(0.0);
+            let at = match (from, to) {
+                (Some(from), _) => from,
+                (None, Some(to)) => extent - to - (size + m_from + m_to),
+                (None, None) => at_start,
+            };
+            (at, size)
+        };
+        let (x, width) = axis(
+            inset.left,
+            inset.right,
+            look.width,
+            natural.width,
+            block.width,
+            (margin.left, margin.right),
+            (item.min.width, item.max.width),
+            start.0,
+        );
+        let (y, height) = axis(
+            inset.top,
+            inset.bottom,
+            look.height,
+            natural.height,
+            block.height,
+            (margin.top, margin.bottom),
+            (item.min.height, item.max.height),
+            start.1,
+        );
+        (x, y, Size::new(width, height))
     }
 
     /// Where this widget's children are, in its parent's content space: its
@@ -1438,6 +1631,10 @@ impl Widget {
     /// Its text is drawn in the family a style gave it (`font-family`), in a
     /// [`RenderCommand::PushFont`] round it and its children -- which
     /// inherit it, and push again only a family of their own.
+    ///
+    /// Its children are drawn by `z-index`, then as added. A fixed one
+    /// (`position: fixed`) is not drawn here: it is placed in the window,
+    /// and [`WidgetTree::render`] draws it over everything.
     pub fn render(&self, p: &Palette, tree: &mut RenderTree) {
         self.render_on(p, p.base, None, tree);
     }
@@ -1584,7 +1781,13 @@ impl Widget {
                 height: self.layout.height,
             });
 
-            for child in &self.children {
+            // By `z-index`, then as added; a fixed one is drawn over the
+            // window, after everything ([`WidgetTree::render`]).
+            for child in self
+                .paint_order()
+                .into_iter()
+                .filter_map(|i| self.children.get(i))
+            {
                 child.render_on(p, ground, drawn_in, tree);
             }
 
@@ -1627,7 +1830,15 @@ impl Widget {
             event
         };
         if offer {
-            for index in (0..self.children.len()).rev() {
+            // The pointer goes to what is drawn on top first, and not to a
+            // fixed child -- the tree offers it that where it is in the
+            // window; a key goes to each child, as it always has.
+            let order: Vec<usize> = if matches!(event, Event::Mouse(_)) {
+                self.paint_order()
+            } else {
+                (0..self.children.len()).collect()
+            };
+            for index in order.into_iter().rev() {
                 let Some(child) = self.children.get_mut(index) else {
                     continue;
                 };
@@ -2247,13 +2458,106 @@ impl WidgetTree {
         );
         self.root.layout.x = 0.0;
         self.root.layout.y = 0.0;
+        self.place_fixed();
         self.animating = self.root.any_moving();
     }
 
-    /// Render the entire tree into a render command list, in its palette.
+    /// Its fixed widgets' paths, in the order they are drawn: by `z-index`,
+    /// then in tree order. Found afresh each time, from the tree as it is
+    /// -- a program may add and remove widgets between layouts, and a path
+    /// kept from before would lead to another widget.
+    fn fixed_paths(&self) -> Vec<Vec<usize>> {
+        let mut found = Vec::new();
+        self.root.collect_fixed(&mut Vec::new(), &mut found);
+        found.sort_by_key(|(z, _)| *z);
+        found.into_iter().map(|(_, path)| path).collect()
+    }
+
+    /// The fixed widget on top under the point, in the window, as its path.
+    fn fixed_at(&self, x: f32, y: f32) -> Option<Vec<usize>> {
+        self.fixed_paths()
+            .into_iter()
+            .rev()
+            .find(|path| self.root.at_path(path).is_some_and(|w| w.contains(x, y)))
+    }
+
+    /// Lay out its fixed widgets, each by its insets in the window -- its
+    /// percentages of the window -- after everything else.
+    fn place_fixed(&mut self) {
+        let window = Size::new(self.window_width, self.window_height);
+        for path in self.fixed_paths() {
+            let palette = &self.palette;
+            if let Some(w) = self.root.at_path_mut(&path) {
+                w.settle_lengths(window.width, window.height);
+                let (x, y, size) = w.placed_in(window, (0.0, 0.0), palette);
+                w.do_layout(SizeConstraint::tight(size), palette);
+                w.layout.x = x;
+                w.layout.y = y;
+            }
+        }
+    }
+
+    /// Note where the pointer is: over a fixed widget, that one, and
+    /// nothing beneath it; else whatever it is over in the tree.
+    fn hover_at(&mut self, x: f32, y: f32) {
+        match self.fixed_at(x, y) {
+            Some(path) => {
+                self.root.clear_hover();
+                if let Some(w) = self.root.at_path_mut(&path) {
+                    w.set_hover(x, y);
+                }
+            }
+            None => self.root.set_hover(x, y),
+        }
+    }
+
+    /// The topmost focusable widget under the point, in the window -- in a
+    /// fixed widget there, if one is, and nothing beneath it.
+    fn focus_target_at(&self, x: f32, y: f32) -> Option<WidgetId> {
+        match self.fixed_at(x, y) {
+            Some(path) => self
+                .root
+                .at_path(&path)
+                .and_then(|w| w.focus_target_at(x, y)),
+            None => self.root.focus_target_at(x, y),
+        }
+    }
+
+    /// Hand a pointer event to its widgets: to the fixed ones first, on top
+    /// and at their places in the window, then to the tree -- except a
+    /// press, a double click or a turn of the wheel over a fixed widget,
+    /// which lands on it and nothing beneath. A move or a release goes on,
+    /// so a drag begun beneath one follows the pointer across it.
+    fn pointer_event(&mut self, event: &Event, mouse: &MouseEvent) -> EventResult {
+        for path in self.fixed_paths().into_iter().rev() {
+            if let Some(w) = self.root.at_path_mut(&path)
+                && w.handle_event(event) == EventResult::Consumed
+            {
+                return EventResult::Consumed;
+            }
+        }
+        let aimed = matches!(
+            mouse.kind,
+            MouseEventKind::Press(_)
+                | MouseEventKind::DoubleClick(_)
+                | MouseEventKind::Scroll { .. }
+        );
+        if aimed && self.fixed_at(mouse.x, mouse.y).is_some() {
+            return EventResult::Ignored;
+        }
+        self.root.handle_event(event)
+    }
+
+    /// Render the entire tree into a render command list, in its palette --
+    /// its fixed widgets last, over everything, by `z-index`.
     pub fn render(&self) -> RenderTree {
         let mut tree = RenderTree::new();
         self.root.render(&self.palette, &mut tree);
+        for path in self.fixed_paths() {
+            if let Some(w) = self.root.at_path(&path) {
+                w.render(&self.palette, &mut tree);
+            }
+        }
         tree
     }
 
@@ -2393,21 +2697,24 @@ impl WidgetTree {
                 // is how a user says "not that field any more", and a caret
                 // still blinking in a field the user has clicked away from is
                 // a caret that lies about where the next keystroke goes.
-                self.set_focus(self.root.focus_target_at(mouse.x, mouse.y));
+                self.set_focus(self.focus_target_at(mouse.x, mouse.y));
             }
             // The pointer's moves say what it is over, which lights a button
             // or a box as the pointer crosses it.
             Event::Mouse(mouse)
                 if matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Enter) =>
             {
-                self.root.set_hover(mouse.x, mouse.y);
+                self.hover_at(mouse.x, mouse.y);
             }
             Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Leave) => {
                 self.root.clear_hover();
             }
             _ => {}
         }
-        let result = self.root.handle_event(event);
+        let result = match event {
+            Event::Mouse(mouse) => self.pointer_event(event, mouse),
+            _ => self.root.handle_event(event),
+        };
         self.restyle(before);
         result
     }

@@ -40,9 +40,10 @@
 //! the widget's drawing and measured in while it is laid out, drawn and
 //! handles its events ([`crate::text::in_family`]). A tree moving a
 //! transition says so ([`WidgetTree::animating`]): its program sends it
-//! ticks until it is done.
-//!
-//! Positioning follows (`design-decisions.md` §1478).
+//! ticks until it is done. `position` takes a widget out of its parent's
+//! flow -- `relative` moved from its place, `absolute` placed in its
+//! parent's padding box, `fixed` in the window and over everything -- and
+//! `z-index` orders siblings, drawn and hit (`design-decisions.md` §1478).
 //!
 //! [`Widget::css`]: crate::widget::Widget::css
 //! [`Widget::class`]: crate::widget::Widget::class

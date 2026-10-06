@@ -281,9 +281,9 @@ fn every_property_takes_inherit_and_initial() {
 fn what_is_not_read_is_refused() {
     assert!(get("colour", "red").unwrap_err().contains("not a property"));
     assert!(
-        get("position", "absolute")
+        get("position", "sticky")
             .unwrap_err()
-            .contains("not read yet")
+            .contains("not placed yet")
     );
     assert!(
         get("color", "red blue")
@@ -326,6 +326,42 @@ fn the_inherited_properties_are_css_s() {
     assert!(!Property::Padding(Side::Top).inherited());
     assert!(!Property::Width.inherited());
     assert!(!Property::TransitionDuration.inherited());
+}
+
+/// **`position`, the insets and `z-index` are read**: an inset may be
+/// negative or `auto`, `inset` sets all four as `margin` does, and a
+/// `z-index` is a whole number or `auto`.
+#[test]
+fn position_insets_and_z_index_are_read() {
+    assert_eq!(
+        one("position", "absolute"),
+        Value::Position(Position::Absolute)
+    );
+    assert_eq!(one("position", "fixed"), Value::Position(Position::Fixed));
+    assert!(get("position", "upside-down").is_err());
+    assert_eq!(one("top", "-5px"), px(-5.0));
+    assert_eq!(one("left", "auto"), Value::Auto);
+    assert_eq!(
+        one("right", "10%"),
+        Value::Length(Length {
+            percent: 10.0,
+            ..Length::default()
+        })
+    );
+    assert_eq!(
+        get("inset", "1px 2px").unwrap(),
+        vec![
+            (Property::Inset(Side::Top), px(1.0)),
+            (Property::Inset(Side::Right), px(2.0)),
+            (Property::Inset(Side::Bottom), px(1.0)),
+            (Property::Inset(Side::Left), px(2.0)),
+        ]
+    );
+    assert_eq!(one("z-index", "3"), Value::Integer(3));
+    assert_eq!(one("z-index", "-2"), Value::Integer(-2));
+    assert_eq!(one("z-index", "auto"), Value::Auto);
+    assert!(get("z-index", "1.5").is_err());
+    assert!(!Property::Position.inherited() && !Property::ZIndex.inherited());
 }
 
 fn transitions(value: &str) -> Vec<(Property, Value)> {

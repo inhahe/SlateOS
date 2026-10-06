@@ -290,6 +290,50 @@ pub struct Style {
     /// its colour. Its blur is not drawn -- the renderer has no blurred
     /// text -- and its spread is not a text shadow's.
     pub text_shadow: Option<BoxShadow>,
+
+    /// Where it is placed: in its container's flow, or out of it -- see
+    /// [`Position`].
+    pub position: Position,
+    /// How far a positioned widget's margin edges are from its container's
+    /// (or, for a relative one, from where the flow put it).
+    pub inset: Inset,
+    /// Where it is drawn among its siblings, and so which of two takes the
+    /// pointer where they overlap: higher above, and siblings alike in the
+    /// order they were added -- every widget is its children's stacking
+    /// context (`design-decisions.md` §1478).
+    pub z_index: i32,
+}
+
+/// How a widget is placed (CSS's `position`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Position {
+    /// In its container's flow, where the container's layout puts it.
+    #[default]
+    Static,
+    /// In the flow, then moved by its [`Inset`] -- nothing around it moves.
+    Relative,
+    /// Out of the flow, placed by its [`Inset`] in its container's padding
+    /// box -- its *parent's*, whatever the parent's own `position`.
+    Absolute,
+    /// Out of the flow, placed by its [`Inset`] in the window: drawn over
+    /// everything else, uncut by the widgets around it, and the first to
+    /// take the pointer.
+    Fixed,
+}
+
+/// How far a positioned widget's margin edges are from its container's
+/// edges: CSS's `top`, `right`, `bottom` and `left`, in pixels. `None` is
+/// `auto`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Inset {
+    /// From the top edge, down.
+    pub top: Option<f32>,
+    /// From the right edge, leftward.
+    pub right: Option<f32>,
+    /// From the bottom edge, upward.
+    pub bottom: Option<f32>,
+    /// From the left edge, rightward.
+    pub left: Option<f32>,
 }
 
 impl Default for Style {
@@ -318,6 +362,9 @@ impl Default for Style {
             cursor: Cursor::Default,
             shadow: None,
             text_shadow: None,
+            position: Position::Static,
+            inset: Inset::default(),
+            z_index: 0,
         }
     }
 }

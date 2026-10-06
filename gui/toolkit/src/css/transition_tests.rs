@@ -218,7 +218,7 @@ fn a_value_is_held_where_it_is_written() {
 fn every_value_is_written_and_read_as_itself() {
     let mut style = Style::default();
     let all: Vec<Animated> = Animated::all().collect();
-    assert_eq!(all.len(), 33);
+    assert_eq!(all.len(), 37);
     let written: Vec<Part> = all
         .iter()
         .enumerate()

@@ -125,6 +125,8 @@ pub struct BoxLengths {
     pub margin: [Option<Length>; 4],
     /// Each side's padding, top first.
     pub padding: [Option<Length>; 4],
+    /// Each side's inset (`top` ...), top first: `Some(None)` is `auto`.
+    pub inset: [Option<Option<Length>>; 4],
     /// What the units were worth where the style was computed.
     pub units: Option<Units>,
 }
@@ -144,6 +146,7 @@ impl BoxLengths {
             || has_opt(&self.max_height)
             || self.margin.iter().any(has)
             || self.padding.iter().any(has)
+            || self.inset.iter().any(has_opt)
     }
 
     /// Settle them into `style` with the container's content `width` and
@@ -203,6 +206,33 @@ impl BoxLengths {
         };
         sides(&mut style.margin, &self.margin, f32::NEG_INFINITY);
         sides(&mut style.padding, &self.padding, 0.0);
+        // Insets: the top and bottom of the height, the sides of the width
+        // -- unlike margins, which are all of the width -- and negative if
+        // they say so. One of what is not known is `auto`.
+        for (side, inset) in Side::ALL.iter().zip(&self.inset) {
+            let Some(inset) = inset else {
+                continue;
+            };
+            let of = match side {
+                Side::Top | Side::Bottom => height,
+                Side::Left | Side::Right => width,
+            };
+            let px = inset.and_then(|l| {
+                if of.is_finite() {
+                    Some(l.resolve(&units, of))
+                } else if l.has_percent() {
+                    None
+                } else {
+                    Some(l.resolve(&units, 0.0))
+                }
+            });
+            match side {
+                Side::Top => style.inset.top = px,
+                Side::Right => style.inset.right = px,
+                Side::Bottom => style.inset.bottom = px,
+                Side::Left => style.inset.left = px,
+            }
+        }
     }
 }
 
@@ -800,6 +830,20 @@ impl<'s> Computing<'s, '_> {
                 (Property::BorderRadius(corner), Value::Initial) => {
                     *radius_mut(&mut self.style, corner) = 0.0;
                 }
+                (Property::Position, Value::Position(p)) => self.style.position = *p,
+                (Property::Position, Value::Inherit) => {
+                    self.style.position = self.parent_style.position;
+                }
+                (Property::Position, Value::Initial) => self.style.position = initial.position,
+                (Property::ZIndex, Value::Integer(z)) => self.style.z_index = *z,
+                // `auto`: its siblings' level -- every widget is its
+                // children's stacking context, so it is nought's.
+                (Property::ZIndex, Value::Auto | Value::Initial) => {
+                    self.style.z_index = initial.z_index;
+                }
+                (Property::ZIndex, Value::Inherit) => {
+                    self.style.z_index = self.parent_style.z_index;
+                }
                 _ => {}
             }
         }
@@ -865,6 +909,23 @@ impl<'s> Computing<'s, '_> {
                     let edge = side_of(&parent.padding, side);
                     if let Some(slot) = lengths.padding.get_mut(side_index(side)) {
                         *slot = Some(own(Some(edge), Some(0.0)).unwrap_or_default());
+                    }
+                }
+                Property::Inset(side) => {
+                    let parents = match side {
+                        Side::Top => parent.inset.top,
+                        Side::Right => parent.inset.right,
+                        Side::Bottom => parent.inset.bottom,
+                        Side::Left => parent.inset.left,
+                    };
+                    let inset = match value {
+                        Value::Length(l) => Some(Some(*l)),
+                        Value::Auto | Value::Initial => Some(None),
+                        Value::Inherit => Some(parents.map(Length::px)),
+                        _ => None,
+                    };
+                    if let Some(slot) = lengths.inset.get_mut(side_index(side)) {
+                        *slot = inset;
                     }
                 }
                 _ => {}

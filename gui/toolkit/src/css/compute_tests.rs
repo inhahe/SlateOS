@@ -373,6 +373,31 @@ fn a_ch_is_a_zero_in_the_widgets_family() {
     assert_eq!(c.style.padding.left, 20.0, "one of its own, inherited");
 }
 
+/// **A position, its insets and its level are computed**; an inset that is
+/// a percentage waits for its container -- the top and bottom of its
+/// height, the sides of its width -- and `auto` is none.
+#[test]
+fn a_position_and_its_insets_are_computed() {
+    let c = top("position: absolute; top: 4px; left: 25%; right: auto; z-index: 7");
+    assert_eq!(c.style.position, crate::style::Position::Absolute);
+    assert_eq!(c.style.z_index, 7);
+    assert_eq!(c.style.inset.top, Some(4.0));
+    assert_eq!(c.style.inset.right, None);
+    assert!(c.lengths.waits(), "the percentage");
+    let mut settled = c.style.clone();
+    c.lengths.apply(&mut settled, 200.0, 100.0);
+    assert_eq!(settled.inset.left, Some(50.0), "a quarter of the width");
+    assert_eq!(settled.inset.top, Some(4.0));
+    let mut settled = c.style.clone();
+    c.lengths.apply(&mut settled, f32::INFINITY, f32::INFINITY);
+    assert_eq!(settled.inset.left, None, "of what is not known: auto");
+    let tall = top("bottom: 10%");
+    let mut settled = tall.style.clone();
+    tall.lengths.apply(&mut settled, 200.0, 100.0);
+    assert_eq!(settled.inset.bottom, Some(10.0), "of the height");
+    assert_eq!(top("z-index: auto").style.z_index, 0);
+}
+
 /// **A style's transitions are its `transition` lists**, a shorthand's
 /// leaving out what it does not say; none given is CSS's `all 0s`, which
 /// moves nothing; `inherit` is the parent's.

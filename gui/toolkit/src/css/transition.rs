@@ -304,6 +304,9 @@ pub enum Animated {
     MinHeight,
     /// The most height.
     MaxHeight,
+    /// A side's inset: a positioned widget's distance from its container's
+    /// edge.
+    Inset(Side),
 }
 
 impl Animated {
@@ -329,6 +332,7 @@ impl Animated {
             Property::MaxWidth => Self::MaxWidth,
             Property::MinHeight => Self::MinHeight,
             Property::MaxHeight => Self::MaxHeight,
+            Property::Inset(side) => Self::Inset(side),
             Property::FontFamily
             | Property::FontWeight
             | Property::TextAlign
@@ -337,7 +341,9 @@ impl Animated {
             | Property::TransitionProperty
             | Property::TransitionDuration
             | Property::TransitionTimingFunction
-            | Property::TransitionDelay => return None,
+            | Property::TransitionDelay
+            | Property::Position
+            | Property::ZIndex => return None,
         })
     }
 
@@ -349,6 +355,7 @@ impl Animated {
                 Self::BorderWidth(s),
                 Self::Padding(s),
                 Self::Margin(s),
+                Self::Inset(s),
             ]
         });
         [
@@ -377,13 +384,7 @@ impl Animated {
     pub fn waits_on_container(self, lengths: &BoxLengths) -> bool {
         let percent = |l: Option<super::value::Length>| l.is_some_and(|l| l.has_percent());
         let side = |edges: &[Option<super::value::Length>; 4], s: Side| {
-            let i = match s {
-                Side::Top => 0,
-                Side::Right => 1,
-                Side::Bottom => 2,
-                Side::Left => 3,
-            };
-            percent(edges.get(i).copied().flatten())
+            percent(edges.get(side_index(s)).copied().flatten())
         };
         match self {
             Self::Width => percent(lengths.width.flatten()),
@@ -394,6 +395,14 @@ impl Animated {
             Self::MaxHeight => percent(lengths.max_height.flatten()),
             Self::Padding(s) => side(&lengths.padding, s),
             Self::Margin(s) => side(&lengths.margin, s),
+            Self::Inset(s) => percent(
+                lengths
+                    .inset
+                    .get(side_index(s))
+                    .copied()
+                    .flatten()
+                    .flatten(),
+            ),
             _ => false,
         }
     }
@@ -403,13 +412,7 @@ impl Animated {
     #[must_use]
     pub fn set_in(self, lengths: &BoxLengths) -> bool {
         let side = |edges: &[Option<super::value::Length>; 4], s: Side| {
-            let i = match s {
-                Side::Top => 0,
-                Side::Right => 1,
-                Side::Bottom => 2,
-                Side::Left => 3,
-            };
-            edges.get(i).is_some_and(Option::is_some)
+            edges.get(side_index(s)).is_some_and(Option::is_some)
         };
         match self {
             Self::Width => lengths.width.is_some(),
@@ -420,6 +423,10 @@ impl Animated {
             Self::MaxHeight => lengths.max_height.is_some(),
             Self::Padding(s) => side(&lengths.padding, s),
             Self::Margin(s) => side(&lengths.margin, s),
+            Self::Inset(s) => lengths
+                .inset
+                .get(side_index(s))
+                .is_some_and(Option::is_some),
             _ => false,
         }
     }
@@ -462,6 +469,12 @@ impl Animated {
             Self::MaxWidth => Part::MaybeNumber(style.max_width),
             Self::MinHeight => Part::MaybeNumber(style.min_height),
             Self::MaxHeight => Part::MaybeNumber(style.max_height),
+            Self::Inset(s) => Part::MaybeNumber(match s {
+                Side::Top => style.inset.top,
+                Side::Right => style.inset.right,
+                Side::Bottom => style.inset.bottom,
+                Side::Left => style.inset.left,
+            }),
         }
     }
 
@@ -505,8 +518,25 @@ impl Animated {
             (Self::MaxWidth, Part::MaybeNumber(v)) => style.max_width = v.map(least),
             (Self::MinHeight, Part::MaybeNumber(v)) => style.min_height = v.map(least),
             (Self::MaxHeight, Part::MaybeNumber(v)) => style.max_height = v.map(least),
+            // An inset may be negative.
+            (Self::Inset(s), Part::MaybeNumber(v)) => match s {
+                Side::Top => style.inset.top = v,
+                Side::Right => style.inset.right = v,
+                Side::Bottom => style.inset.bottom = v,
+                Side::Left => style.inset.left = v,
+            },
             _ => {}
         }
+    }
+}
+
+/// `side`'s place in a box's per-side lists: top, right, bottom, left.
+const fn side_index(side: Side) -> usize {
+    match side {
+        Side::Top => 0,
+        Side::Right => 1,
+        Side::Bottom => 2,
+        Side::Left => 3,
     }
 }
 

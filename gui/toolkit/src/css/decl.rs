@@ -10,7 +10,7 @@
 use super::token::{Spanned, Token};
 use super::transition::{StepPosition, Timing, TransitionTarget};
 use super::value::{self, ColorValue, Cursor, Length, ValueError};
-use crate::style::{Cursor as PointerCursor, TextAlign};
+use crate::style::{Cursor as PointerCursor, Position, TextAlign};
 
 /// One side of a box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -128,6 +128,13 @@ pub enum Property {
     TransitionTimingFunction,
     /// `transition-delay`: how long each waits.
     TransitionDelay,
+    /// `position`: in the flow, or out of it.
+    Position,
+    /// `top`, `right`, `bottom`, `left`: a positioned widget's distance
+    /// from its container's edge.
+    Inset(Side),
+    /// `z-index`: its place among its siblings, drawn and hit.
+    ZIndex,
 }
 
 impl Property {
@@ -235,6 +242,10 @@ pub enum Value {
     Times(Vec<f32>),
     /// Timing functions.
     Timings(Vec<Timing>),
+    /// How a widget is placed.
+    Position(Position),
+    /// A whole number: a `z-index`.
+    Integer(i32),
     /// `inherit`: the parent's value.
     Inherit,
     /// `initial`: the property's own default -- the toolkit's.
@@ -316,12 +327,7 @@ fn trim(tokens: &[Spanned]) -> &[Spanned] {
 
 /// What is said of a property this does not read.
 fn unknown(name: &str) -> String {
-    match name {
-        "position" | "z-index" | "top" | "left" | "right" | "bottom" => {
-            format!("`{name}` is not read yet")
-        }
-        _ => format!("`{name}` is not a property this reads"),
-    }
+    format!("`{name}` is not a property this reads")
 }
 
 /// Whether `name` -- lower-cased -- is a property or shorthand this reads.
@@ -353,6 +359,12 @@ fn longhand(name: &str) -> Option<Property> {
         "transition-duration" => Some(Property::TransitionDuration),
         "transition-timing-function" => Some(Property::TransitionTimingFunction),
         "transition-delay" => Some(Property::TransitionDelay),
+        "position" => Some(Property::Position),
+        "top" => Some(Property::Inset(Side::Top)),
+        "right" => Some(Property::Inset(Side::Right)),
+        "bottom" => Some(Property::Inset(Side::Bottom)),
+        "left" => Some(Property::Inset(Side::Left)),
+        "z-index" => Some(Property::ZIndex),
         _ => None,
     };
     if simple.is_some() {
@@ -431,6 +443,7 @@ pub fn read(name: &str, tokens: &[Spanned]) -> Result<Vec<(Property, Value)>, Va
         "border-radius" => corners(&mut c)?,
         "border" => border_shorthand(&mut c, &Side::ALL)?,
         "transition" => transition_shorthand(&mut c)?,
+        "inset" => sides(&mut c, Property::Inset, inset_value)?,
         _ => {
             if let Some(side) = Side::ALL
                 .into_iter()
@@ -462,6 +475,7 @@ fn properties_of(name: &str) -> Option<Vec<Property>> {
         ]),
         "margin" => per_side(Property::Margin),
         "padding" => per_side(Property::Padding),
+        "inset" => per_side(Property::Inset),
         "border-width" => per_side(Property::BorderWidth),
         "border-color" => per_side(Property::BorderColor),
         "border-style" => per_side(Property::BorderStyle),
@@ -532,7 +546,50 @@ fn longhand_value(property: Property, c: &mut Cursor<'_>) -> Result<Value, Value
         Property::TransitionDuration => list(c, |c| time(c, false)).map(Value::Times),
         Property::TransitionTimingFunction => list(c, timing).map(Value::Timings),
         Property::TransitionDelay => list(c, |c| time(c, true)).map(Value::Times),
+        Property::Position => position(c),
+        Property::Inset(_) => inset_value(c),
+        Property::ZIndex => z_index(c),
     }
+}
+
+/// `position`'s value.
+fn position(c: &mut Cursor<'_>) -> Result<Value, ValueError> {
+    match c.advance() {
+        Some(Token::Ident(w)) => match w.to_ascii_lowercase().as_str() {
+            "static" => Ok(Value::Position(Position::Static)),
+            "relative" => Ok(Value::Position(Position::Relative)),
+            "absolute" => Ok(Value::Position(Position::Absolute)),
+            "fixed" => Ok(Value::Position(Position::Fixed)),
+            "sticky" => Err("`position: sticky` is not placed yet".to_string()),
+            other => Err(format!("`{other}` is not a position")),
+        },
+        other => Err(format!("{other:?} where a position was wanted")),
+    }
+}
+
+/// An inset: `auto`, or a length or percentage -- negative ones too.
+fn inset_value(c: &mut Cursor<'_>) -> Result<Value, ValueError> {
+    if keyword(c, "auto") {
+        Ok(Value::Auto)
+    } else {
+        Ok(Value::Length(value::length(c, true)?))
+    }
+}
+
+/// `z-index`: `auto`, or a whole number.
+fn z_index(c: &mut Cursor<'_>) -> Result<Value, ValueError> {
+    if keyword(c, "auto") {
+        return Ok(Value::Auto);
+    }
+    let n = value::number(c)?;
+    if !n.is_finite() || n.fract().abs() > 0.0 {
+        return Err("a `z-index` is a whole number".to_string());
+    }
+    // Held to i32's range first, so the cast is exact.
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(Value::Integer(
+        n.clamp(-2_147_483_648.0, 2_147_483_520.0) as i32
+    ))
 }
 
 /// Whether the next token is the keyword `word`; taken if it is.

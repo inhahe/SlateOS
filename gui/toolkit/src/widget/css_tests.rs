@@ -591,3 +591,162 @@ fn a_size_moves_and_is_laid_out_as_it_does() {
     tick(&mut tree, 50);
     assert_eq!(width(&tree), before + 20.0);
 }
+
+/// A press of the left button at a point.
+fn pressed_at(tree: &mut WidgetTree, x: f32, y: f32) -> EventResult {
+    tree.handle_event(&Event::Mouse(MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Press(MouseButton::Left),
+    }))
+}
+
+/// Whether the `index`th child of the root is a pressed button.
+fn is_pressed(tree: &WidgetTree, index: usize) -> bool {
+    matches!(
+        tree.root.children[index].kind,
+        WidgetKind::Button { pressed: true, .. }
+    )
+}
+
+/// **A relative widget moves from where the flow put it, and nothing
+/// around it moves.**
+#[test]
+fn a_relative_widget_moves_and_nothing_around_it_does() {
+    let still = tree_of(vec![Widget::label("a"), Widget::label("b")]);
+    let moved = tree_of(vec![
+        Widget::label("a").css("position: relative; left: 10px; top: 5px"),
+        Widget::label("b"),
+    ]);
+    let (a, b) = (&still.root.children, &moved.root.children);
+    assert_eq!(b[0].layout.x, a[0].layout.x + 10.0);
+    assert_eq!(b[0].layout.y, a[0].layout.y + 5.0);
+    assert_eq!(
+        (b[1].layout.x, b[1].layout.y),
+        (a[1].layout.x, a[1].layout.y),
+        "its neighbour stays"
+    );
+    let back = tree_of(vec![
+        Widget::label("a").css("position: relative; right: 4px; bottom: 2px"),
+    ]);
+    assert_eq!(back.root.children[0].layout.x, a[0].layout.x - 4.0);
+    assert_eq!(back.root.children[0].layout.y, a[0].layout.y - 2.0);
+}
+
+/// A panel 220 by 120 with 10 pixels of padding -- its content 200 by 100
+/// -- holding `children`, at the window's corner.
+fn panel_of(children: Vec<Widget>) -> WidgetTree {
+    tree_of(vec![
+        Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .css("width: 220px; height: 120px; padding: 10px")
+            .with_children(children),
+    ])
+}
+
+/// **An absolute widget is placed in its parent's padding box by its
+/// insets, and takes no room in the flow**: against the far corner by
+/// `right` and `bottom`, stretched between `left` and `right`, a
+/// percentage of the box.
+#[test]
+fn an_absolute_widget_is_placed_by_its_insets() {
+    let tree = panel_of(vec![
+        Widget::label("flow"),
+        Widget::label("corner")
+            .css("position: absolute; right: 0; bottom: 0; width: 50px; height: 20px"),
+        Widget::label("across").css("position: absolute; left: 10px; right: 10px; top: 0"),
+        Widget::label("half").css("position: absolute; left: 50%; top: 50%"),
+    ]);
+    let panel = &tree.root.children[0];
+    let [flow, corner, across, half] = [0, 1, 2, 3].map(|i| &panel.children[i]);
+    assert_eq!(
+        (flow.layout.x, flow.layout.y),
+        (0.0, 0.0),
+        "first in the flow"
+    );
+    // The padding box is 220 by 120, starting 10 before the content.
+    assert_eq!(corner.layout.x, 220.0 - 50.0 - 10.0);
+    assert_eq!(corner.layout.y, 120.0 - 20.0 - 10.0);
+    assert_eq!(corner.layout.border_box_width(), 50.0);
+    assert_eq!(across.layout.x, 10.0 - 10.0);
+    assert_eq!(
+        across.layout.border_box_width(),
+        200.0,
+        "220 less 10 each side"
+    );
+    assert_eq!(half.layout.x, 110.0 - 10.0);
+    assert_eq!(half.layout.y, 60.0 - 10.0);
+}
+
+/// **`z-index` orders siblings, drawn and hit**: the higher is drawn later,
+/// and where two overlap the pointer is the one on top's -- its hover, its
+/// press.
+#[test]
+fn z_index_orders_siblings_drawn_and_hit() {
+    let over = "position: absolute; left: 0; top: 0; width: 100px; height: 40px";
+    let mut tree = tree_of(vec![
+        Widget::button("high").css(&format!("{over}; z-index: 2")),
+        Widget::button("low").css(over),
+    ]);
+    let texts: Vec<String> = tree
+        .render()
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["low", "high"], "the higher drawn last");
+    moved_to(&mut tree, 20.0, 20.0);
+    assert!(tree.root.children[0].is_hovered(), "the one on top");
+    assert!(!tree.root.children[1].is_hovered(), "not what lies beneath");
+    pressed_at(&mut tree, 20.0, 20.0);
+    assert!(is_pressed(&tree, 0) && !is_pressed(&tree, 1));
+}
+
+/// **A fixed widget is placed in the window, drawn over everything, and
+/// takes the pointer first** -- wherever it is in the tree, and uncut by
+/// the panel it is in.
+#[test]
+fn a_fixed_widget_is_placed_in_the_window_over_everything() {
+    let mut tree = tree_of(vec![
+        Widget::button("beneath").css("width: 200px; height: 60px"),
+        Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .css("width: 50px; height: 50px; padding: 5px")
+            .with_child(Widget::button("toast").css(
+                "position: fixed; left: 10px; top: 10px; width: 120px; height: 30px; z-index: 1",
+            )),
+    ]);
+    let toast = &tree.root.children[1].children[0];
+    assert_eq!(
+        (toast.layout.x, toast.layout.y),
+        (10.0, 10.0),
+        "in the window"
+    );
+    assert_eq!(
+        toast.layout.border_box_width(),
+        120.0,
+        "wider than its panel"
+    );
+    let commands = tree.render().commands;
+    let last_text = commands.iter().rev().find_map(|c| match c {
+        RenderCommand::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    });
+    assert_eq!(last_text, Some("toast"), "drawn last");
+    // Over the button beneath it, the press is the toast's.
+    moved_to(&mut tree, 20.0, 20.0);
+    assert!(tree.root.children[1].children[0].is_hovered());
+    assert!(!tree.root.children[0].is_hovered(), "nothing beneath it");
+    pressed_at(&mut tree, 20.0, 20.0);
+    assert!(matches!(
+        tree.root.children[1].children[0].kind,
+        WidgetKind::Button { pressed: true, .. }
+    ));
+    assert!(!is_pressed(&tree, 0));
+    // Clear of it, the button beneath takes the press.
+    pressed_at(&mut tree, 150.0, 50.0);
+    assert!(is_pressed(&tree, 0));
+}

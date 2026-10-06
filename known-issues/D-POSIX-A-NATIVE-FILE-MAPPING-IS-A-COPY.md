@@ -24,8 +24,8 @@ Linux's order); `posix/src/mman.rs` (`mmap` sends a file mapping there).
 | A read-only `MAP_SHARED` mapping, after another writes the file | shows the new bytes | keeps the old ones |
 | A page wholly past the end of the file | SIGBUS when touched | zeros |
 | `MAP_SHARED` with `PROT_WRITE` | writes reach the file | `ENODEV` |
-| `madvise(MADV_DONTNEED)` on it | reads the file again | zeros |
-| `mremap` growing it | maps more of the file | zeros |
+| `madvise(MADV_DONTNEED)` on it | reads the file again | `EINVAL`, as for all memory here |
+| `mremap` growing it | maps more of the file | `ENOSYS`, as for all memory here |
 | `/proc/self/maps` | names the file | anonymous memory |
 
 **What was wrong before** (fixed 2026-10-06): `mmap` passed `prot` as the

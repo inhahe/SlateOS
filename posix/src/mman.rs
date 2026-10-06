@@ -690,6 +690,41 @@ fn is_known_madvise(advice: i32) -> bool {
     )
 }
 
+/// `MADV_REMOVE`: free the range, which then reads as zeros.
+const MADV_REMOVE: i32 = 9;
+/// `MADV_WIPEONFORK`: a child sees the range as zeros (Linux 4.14).
+const MADV_WIPEONFORK: i32 = 18;
+/// `MADV_KEEPONFORK`: undo `MADV_WIPEONFORK`.
+const MADV_KEEPONFORK: i32 = 19;
+/// `MADV_DONTNEED_LOCKED`: `MADV_DONTNEED` that applies to locked pages too
+/// (Linux 5.18).
+const MADV_DONTNEED_LOCKED: i32 = 24;
+
+/// The advice whose effect a program depends on, which no native call can
+/// give yet: there is no native `madvise`
+/// (`requests/d-a-a-native-program-has-no-madvise.md`).
+///
+/// * `MADV_DONTNEED`, `MADV_DONTNEED_LOCKED`, `MADV_REMOVE`: the range reads
+///   as zeros afterwards. Allocators count on it -- jemalloc, and glibc's for
+///   its arenas -- to skip zeroing what `calloc` hands out. Told 0, they
+///   would hand out old bytes as zeros. Refused, they keep the memory and
+///   zero it themselves.
+/// * `MADV_WIPEONFORK`: a child sees the range as zeros. BoringSSL keeps its
+///   random generator's fork-detection word there, and trusts the kernel
+///   when it answers 0. Told 0 and not wiped, a forked child would generate
+///   its parent's random numbers. Refused, it detects forks another way.
+///   `MADV_KEEPONFORK`, its undoing, goes with it.
+///
+/// `EINVAL` is what a Linux kernel without the advice answers, and what each
+/// of those programs handles.
+const MADV_NOT_YET: [i32; 5] = [
+    MADV_DONTNEED,
+    MADV_DONTNEED_LOCKED,
+    MADV_REMOVE,
+    MADV_WIPEONFORK,
+    MADV_KEEPONFORK,
+];
+
 /// MADV_HWPOISON — Linux kernel's "inject memory error" advice.  Routed
 /// through `madvise_inject_error` and gated on `CAP_SYS_ADMIN`.
 const MADV_HWPOISON: i32 = 100;
@@ -722,7 +757,13 @@ const MADV_SOFT_OFFLINE: i32 = 101;
 ///    memory-error injection backend; surfacing ENOSYS lets privileged
 ///    test tools (RAS validation suites, mce-test) distinguish "denied"
 ///    from "no backend".
-/// 5. All other recognised `MADV_*` values → `0` (advisory no-op).
+/// 5. The advice with an effect a program depends on (`MADV_DONTNEED` and
+///    its kin, `MADV_WIPEONFORK`) → `EINVAL`, there being no native call
+///    to give the effect (`MADV_NOT_YET`'s doc says why each matters).
+///    Until 2026-10-06 they answered 0 and did nothing.
+/// 6. All other recognised `MADV_*` values → `0`: hints a kernel may
+///    ignore, as Linux's own documentation allows (`MADV_FREE`'s pages may
+///    keep their bytes or not, so keeping them is one of its answers).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn madvise(addr: *mut core::ffi::c_void, length: SizeT, advice: i32) -> i32 {
     if !is_page_aligned(addr) || range_overflows(addr, length) {
@@ -745,6 +786,10 @@ pub extern "C" fn madvise(addr: *mut core::ffi::c_void, length: SizeT, advice: i
         }
         // Cap held but we have no memory-error injection backend.
         errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    if MADV_NOT_YET.contains(&advice) {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     0
@@ -1967,7 +2012,35 @@ mod tests {
         assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_RANDOM), 0);
         assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_SEQUENTIAL), 0);
         assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_WILLNEED), 0);
-        assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_DONTNEED), 0);
+    }
+
+    /// The advice with an effect a program depends on is refused, `EINVAL`,
+    /// not accepted and left undone: `MADV_DONTNEED` and its kin (the range
+    /// reads as zeros after) and `MADV_WIPEONFORK` (a child sees zeros).
+    /// Until 2026-10-06 each answered 0.
+    #[test]
+    fn madvise_refuses_what_it_cannot_do() {
+        for advice in [MADV_DONTNEED, 9, 18, 19, 24] {
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, advice),
+                -1,
+                "advice {advice}"
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL, "advice {advice}");
+        }
+        // Still EINVAL first for a bad address, as before.
+        errno::set_errno(0);
+        assert_eq!(
+            madvise(0x1 as *mut core::ffi::c_void, 16384, MADV_DONTNEED),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // POSIX's DONTNEED stays the hint POSIX makes it, as glibc's does.
+        assert_eq!(
+            posix_madvise(core::ptr::null_mut(), 16384, POSIX_MADV_DONTNEED),
+            0
+        );
     }
 
     #[test]
@@ -3596,7 +3669,7 @@ mod tests {
         fn test_madvise_phase189_other_advisories_no_cap_still_succeed() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
-            for advice in [MADV_DONTNEED, 8i32, 14, 25] {
+            for advice in [MADV_WILLNEED, 8i32, 14, 25] {
                 errno::set_errno(0);
                 assert_eq!(
                     madvise(core::ptr::null_mut(), 16384, advice),

@@ -33,8 +33,9 @@
 //! - The whole range is read when it is mapped, where Linux reads each page
 //!   at its first touch: mapping a large file costs its size in memory, and
 //!   the time to read it, at once.
-//! - `madvise(MADV_DONTNEED)` empties a page to zeros rather than reading the
-//!   file again, and an `mremap` that grows the mapping grows it with zeros.
+//! - `madvise(MADV_DONTNEED)` is refused (`EINVAL`), as it is for all memory
+//!   here, where Linux reads the file again; and an `mremap` that grows the
+//!   mapping is refused too (`ENOSYS`).
 //!
 //! # The refusals, in Linux's order
 //!

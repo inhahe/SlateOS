@@ -1338,3 +1338,116 @@ fn the_shut_down_list_is_not_pressed_under_the_overview_or_the_pane() {
     );
     assert!(pane.ending_listing(), "still waiting");
 }
+
+/// **The notifications popped up in the corner are seen -- each named and
+/// described as its card in the pane is, with its close button -- and one is
+/// opened as a click on it opens it**: read in the pane, its program asked
+/// for, and gone.
+#[test]
+fn a_popped_up_notification_is_opened_as_clicked() {
+    appearance::config::testing::with_scratch_config("acc-toast-open", |_root| {
+        let mut s = shell();
+        let mut lunch = notif("Chat", "Lunch?");
+        lunch.body = "At noon".to_owned();
+        lunch.action = Some("/bin/chat".to_owned());
+        let id = s.notify(lunch);
+        s.notify(notif("Mail", ""));
+        s.advance_toasts(1_000);
+
+        let toasts = node(&s, ShellPart::Toasts);
+        assert_eq!(
+            (toasts.role, toasts.name.as_str()),
+            (Role::List, "New notifications")
+        );
+        let items: Vec<(&str, Option<&str>)> = toasts
+            .children
+            .iter()
+            .map(|n| (n.name.as_str(), n.description.as_deref()))
+            .collect();
+        assert_eq!(
+            items,
+            [("Lunch?", Some("Chat. At noon")), ("Mail", Some("Mail"))],
+            "top to bottom, the oldest first"
+        );
+        let close = &toasts.children[0].children[0];
+        assert_eq!(
+            (close.id, close.role, close.name.as_str()),
+            (ShellPart::ToastClose(id), Role::Button, "Close")
+        );
+
+        let said = press(&mut s, ShellPart::Toast(id)).unwrap();
+        assert!(matches!(said, Some(ShellAction::Launch(_))), "{said:?}");
+        let filed = s.notifications.notifications();
+        assert!(
+            filed.iter().any(|n| n.id == id && n.read),
+            "read in the pane"
+        );
+        s.advance_toasts(1_000);
+        assert!(!s.toasts.ids().contains(&id), "and gone");
+    });
+}
+
+/// **A pop-up's close button pressed closes it, as clicked**: it goes, and
+/// its notification stays in the pane, unread. With none popped up there is
+/// no list, and no pop-up to press.
+#[test]
+fn a_popped_up_notification_is_closed_as_clicked() {
+    appearance::config::testing::with_scratch_config("acc-toast-close", |_root| {
+        let mut s = shell();
+        let id = s.notify(notif("Chat", "Lunch?"));
+        s.advance_toasts(1_000);
+        assert_eq!(press(&mut s, ShellPart::ToastClose(id)), Ok(None));
+        s.advance_toasts(1_000);
+        assert!(s.toasts.ids().is_empty());
+        let filed = s.notifications.notifications();
+        assert!(
+            filed.iter().any(|n| n.id == id && !n.read),
+            "unread in the pane"
+        );
+        assert!(tree(&s).walk().all(|n| n.id != ShellPart::Toasts));
+        assert_eq!(
+            press(&mut s, ShellPart::Toast(id)),
+            Err(Refusal::NoSuchWidget)
+        );
+    });
+}
+
+/// **A press a click could not make on a pop-up is refused, and nothing
+/// changes**: while a menu opened from one is up -- a click there only
+/// closes the menu -- and while it is still sliding in from beyond the
+/// screen's edge.
+#[test]
+fn a_popped_up_notification_a_click_cannot_reach_is_refused() {
+    appearance::config::testing::with_scratch_config("acc-toast-refused", |_root| {
+        let mut s = shell();
+        let id = s.notify(notif("Chat", "Lunch?"));
+        assert_eq!(
+            press(&mut s, ShellPart::Toast(id)),
+            Err(Refusal::Hidden),
+            "beyond the screen's edge, arriving"
+        );
+
+        s.advance_toasts(1_000);
+        let toast = s.toasts.placed()[0];
+        let _menu = s.handle_toast_mouse(&MouseEvent {
+            x: toast.rect.x + 40.0,
+            y: toast.rect.y + toast.rect.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        assert!(s.notification_menu.is_some(), "its menu is up");
+        assert_eq!(
+            press(&mut s, ShellPart::Toast(id)),
+            Err(Refusal::Hidden),
+            "under its menu"
+        );
+        assert!(s.notification_menu.is_some(), "and stays up");
+        assert!(s.notifications.notifications().iter().all(|n| !n.read));
+        assert_eq!(
+            s.invoke(&ShellPart::Toast(id), Action::Toggle, 0.0, 0.0),
+            Err(Refusal::NotApplicable {
+                role: Role::ListItem,
+                action: "toggle"
+            })
+        );
+    });
+}

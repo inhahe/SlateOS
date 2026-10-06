@@ -142,6 +142,15 @@ pub enum ShellPart {
     EndingPrograms,
     /// A program still open, by its window.
     EndingProgram(WindowId),
+    /// The notifications popped up in the corner above the taskbar, while
+    /// any are.
+    Toasts,
+    /// One of them, by its notification's id: pressed, it is opened, as a
+    /// click on it opens it.
+    Toast(u64),
+    /// Its close button: pressed, the pop-up goes and the notification
+    /// stays in the pane, unread.
+    ToastClose(u64),
 }
 
 /// A menu the shell opens over everything.
@@ -475,6 +484,94 @@ impl DesktopShell {
             cancel.centre()
         };
         Ok(self.click_at(x, y))
+    }
+
+    /// The notifications popped up in the corner, top to bottom, while any
+    /// are: each named and described as its card in the pane is -- by its
+    /// title, else its program, and by its program and what it says -- with
+    /// its close button. One whose notification has left the pane is
+    /// leaving, and is left out.
+    fn toasts_node(&self) -> Option<Node<ShellPart>> {
+        let placed = self.toasts.placed();
+        let bounds = placed.iter().map(|p| p.rect).reduce(|a, b| {
+            let (left, top) = (a.x.min(b.x), a.y.min(b.y));
+            Rect::new(
+                left,
+                top,
+                a.right().max(b.right()) - left,
+                a.bottom().max(b.bottom()) - top,
+            )
+        })?;
+        let mut list = Node::new(ShellPart::Toasts, Role::List, "New notifications", bounds);
+        let filed = self.notifications.notifications();
+        for toast in placed {
+            let Some(notif) = filed.iter().find(|n| n.id == toast.id) else {
+                continue;
+            };
+            let name = if notif.title.is_empty() {
+                notif.app_name.clone()
+            } else {
+                notif.title.clone()
+            };
+            let mut item = Node::new(ShellPart::Toast(toast.id), Role::ListItem, name, toast.rect);
+            let mut description = notif.app_name.clone();
+            if !notif.body.is_empty() {
+                description.push_str(". ");
+                description.push_str(&notif.body);
+            }
+            item.description = Some(description);
+            item.children.push(Node::new(
+                ShellPart::ToastClose(toast.id),
+                Role::Button,
+                "Close",
+                toast.close,
+            ));
+            list.children.push(item);
+        }
+        Some(list)
+    }
+
+    /// Press the pop-up `id` -- or, `close`, its close button -- as the
+    /// user's press on it: on the pop-ups' own surface, at the middle of
+    /// what is pressed, where it is drawn on the screen now. A press a menu
+    /// opened from a pop-up would take -- it only closes the menu -- or one
+    /// on a pop-up still sliding in off the screen's edge is refused.
+    fn press_toast(&mut self, id: u64, close: bool) -> Result<Option<ShellAction>, Refusal> {
+        self.sync_toast_place();
+        let toast = self
+            .toasts
+            .placed()
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or(Refusal::NoSuchWidget)?;
+        if self.notification_menu.is_some() {
+            return Err(Refusal::Hidden);
+        }
+        let (x, y) = if close {
+            toast.close.centre()
+        } else {
+            // Its middle, or nearer its left where the close button would
+            // take the middle of a short one.
+            let (cx, cy) = toast.rect.centre();
+            if toast.close.contains(cx, cy) {
+                (toast.rect.x + toast.rect.w / 4.0, cy)
+            } else {
+                (cx, cy)
+            }
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a display dimension is exact in f32 for every size hardware produces"
+        )]
+        let screen = self.screen_width as f32;
+        if !(0.0..screen).contains(&x) {
+            return Err(Refusal::Hidden);
+        }
+        Ok(answered(self.handle_toast_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })))
     }
 
     /// Whether a press at `(x, y)` on `hit` -- what the shell's hit test
@@ -1287,6 +1384,11 @@ impl Accessible for DesktopShell {
         if let Some(chooser) = self.chooser_node() {
             root.children.push(chooser);
         }
+        // The pop-ups on their own surface over the shell's; a menu opened
+        // from one is over them, and takes the press first.
+        if let Some(toasts) = self.toasts_node() {
+            root.children.push(toasts);
+        }
         // The menus last, as they are drawn over everything else -- the one
         // a press reaches first last of all.
         for which in ShellMenu::IN_PRESS_ORDER.into_iter().rev() {
@@ -1460,7 +1562,13 @@ impl Accessible for DesktopShell {
             (ShellPart::CharPicker(target), action) => {
                 self.invoke_char_picker(target, action).map(answered)
             }
-            (ShellPart::StartList | ShellPart::PowerMenu, _) => Err(not_for(Role::List)),
+            (ShellPart::Toast(id), Action::Press) => self.press_toast(id, false),
+            (ShellPart::ToastClose(id), Action::Press) => self.press_toast(id, true),
+            (ShellPart::Toast(_), _) => Err(not_for(Role::ListItem)),
+            (ShellPart::ToastClose(_), _) => Err(not_for(Role::Button)),
+            (ShellPart::StartList | ShellPart::PowerMenu | ShellPart::Toasts, _) => {
+                Err(not_for(Role::List))
+            }
             (ShellPart::StartMenu, _) => Err(not_for(Role::Dialog)),
             (ShellPart::Desktop | ShellPart::Taskbar | ShellPart::Volume, _) => {
                 Err(not_for(Role::Group))

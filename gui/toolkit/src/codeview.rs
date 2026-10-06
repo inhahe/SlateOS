@@ -370,6 +370,7 @@ impl CodeView {
             can_undo: self.editor.can_undo(),
             can_redo: self.editor.can_redo(),
             copies_line: true,
+            takes_pictures: false,
         })
     }
 

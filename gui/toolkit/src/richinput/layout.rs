@@ -20,10 +20,21 @@
 //! one format, one direction -- the toolkit's own caret and click
 //! arithmetic (`text::caret_x`, `text::cursor_at`) places the caret, so a
 //! right-to-left piece's first character is at its right edge.
+//!
+//! # Pictures
+//!
+//! A picture is a word of its own -- a line may break before it and after
+//! it -- and a piece of its own, as wide as it is shown: its own size, or
+//! the box's width where it is wider, its shape kept. It stands on the
+//! baseline, as a letter does, so a picture taller than the text lowers the
+//! line's baseline and makes the line taller, with the text's descent kept
+//! below it. A caret beside it is at one of its edges, and a click on it
+//! goes to the nearer.
 
 use osfont::bidi::{self, Base, Level};
 
-use super::doc::{Format, RichDoc};
+use super::doc::{Format, OBJECT, RichDoc};
+use crate::picture::Picture;
 use crate::render::FontWeightHint;
 use crate::text::TextCursor;
 
@@ -38,8 +49,8 @@ pub struct Metrics {
     pub wrap: bool,
 }
 
-/// A stretch of a line in one format and one writing direction: where it
-/// starts on the line and how wide it is.
+/// A stretch of a line in one format and one writing direction -- or one
+/// picture: where it starts on the line and how wide it is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Piece {
     /// Its first byte.
@@ -55,6 +66,19 @@ pub struct Piece {
     /// Whether it runs right to left: its first character at its right
     /// edge.
     pub rtl: bool,
+    /// The picture it is, where it is one -- one character, its width the
+    /// picture's as shown.
+    pub picture: Option<Shown>,
+}
+
+/// A picture on a line, and how tall it is shown: its width is its
+/// piece's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shown {
+    /// The picture.
+    pub picture: Picture,
+    /// How tall it is shown, standing on the line's baseline.
+    pub height: f32,
 }
 
 /// One line on the screen.
@@ -164,6 +188,43 @@ fn width_of(text: &str, format: &Format, base: f32) -> f32 {
     crate::text::measure(text, size, weight)
 }
 
+/// The stretch of `doc` from `start` to `end` cut at its pictures, in
+/// order: each part its start, its end, and the picture it is, where it is
+/// one. A stretch with no picture is one part.
+fn parts(doc: &RichDoc, start: usize, end: usize) -> Vec<(usize, usize, Option<&Picture>)> {
+    let mut out = Vec::new();
+    let mut from = start;
+    for (at, picture) in doc
+        .pictures()
+        .iter()
+        .filter(|&&(at, _)| at >= start && at < end)
+    {
+        if from < *at {
+            out.push((from, *at, None));
+        }
+        let to = at.saturating_add(OBJECT.len_utf8()).min(end);
+        out.push((*at, to, Some(picture)));
+        from = to;
+    }
+    if from < end {
+        out.push((from, end, None));
+    }
+    out
+}
+
+/// The width of the stretch of `doc` from `start` to `end`, which is in
+/// `format`: its text measured in its font, its pictures as wide as they
+/// are shown in a box `m.width` across.
+fn stretch_width(doc: &RichDoc, start: usize, end: usize, format: &Format, m: &Metrics) -> f32 {
+    parts(doc, start, end)
+        .into_iter()
+        .map(|(s, e, picture)| match picture {
+            Some(picture) => picture.fitted(m.width).0,
+            None => width_of(doc.text().get(s..e).unwrap_or(""), format, m.size),
+        })
+        .sum()
+}
+
 /// `doc` laid out in lines for `m`.
 #[must_use]
 pub fn lay_out(doc: &RichDoc, m: &Metrics) -> Vec<Line> {
@@ -194,7 +255,7 @@ pub fn lay_out(doc: &RichDoc, m: &Metrics) -> Vec<Line> {
 fn paragraph(doc: &RichDoc, start: usize, end: usize, m: &Metrics) -> Vec<Line> {
     let levels = Levels::of(doc.text(), start, end);
     // The line from `from` to `to`, laid out at the paragraph's levels.
-    let laid = |from: usize, to: usize| line(doc, from, to, m.size, &levels);
+    let laid = |from: usize, to: usize| line(doc, from, to, m, &levels);
     let mut lines = Vec::new();
     // The line being filled starts here; it holds a word once a word starts
     // after it.
@@ -203,18 +264,19 @@ fn paragraph(doc: &RichDoc, start: usize, end: usize, m: &Metrics) -> Vec<Line> 
     for (ws, we) in words(doc.text(), start, end) {
         // Measured without its trailing spaces: they hang past the edge.
         let ink_end = trimmed_end(doc.text(), ws, we);
-        let ink = span_width(doc, ws, ink_end, m.size);
+        let ink = span_width(doc, ws, ink_end, m);
         if m.wrap && line_start < ws && used + ink > m.width {
             lines.push(laid(line_start, ws));
             line_start = ws;
             used = 0.0;
         }
         // A word wider than the whole box, alone on its line: cut where it
-        // stops fitting, the rest carried on to the next.
+        // stops fitting, the rest carried on to the next. (Never a picture,
+        // which is shown no wider than the box.)
         if m.wrap && line_start == ws && ink > m.width {
             let mut from = ws;
             loop {
-                let cut = fit_from(doc, from, ink_end, m.width, m.size);
+                let cut = fit_from(doc, from, ink_end, m);
                 if cut >= ink_end {
                     break;
                 }
@@ -222,31 +284,36 @@ fn paragraph(doc: &RichDoc, start: usize, end: usize, m: &Metrics) -> Vec<Line> 
                 from = cut;
             }
             line_start = from;
-            used = span_width(doc, from, we, m.size);
+            used = span_width(doc, from, we, m);
             continue;
         }
-        used += span_width(doc, ws, we, m.size);
+        used += span_width(doc, ws, we, m);
     }
     lines.push(laid(line_start, end));
     lines
 }
 
 /// The words from `start` to `end`: each its letters and the spaces after
-/// them, tiling the stretch.
+/// them, tiling the stretch. A picture's character is a word of its own, as
+/// a picture in a word processor is: a line may break before it and after
+/// it.
 fn words(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let Some(stretch) = text.get(start..end) else {
         return out;
     };
     let mut word_start = 0;
-    let mut in_space = false;
+    // Whether a word may start at the next letter: after a space, or after
+    // a picture.
+    let mut open = false;
     for (i, c) in stretch.char_indices() {
         let space = c == ' ' || c == '\t';
-        if !space && in_space {
+        let picture = c == OBJECT;
+        if i > word_start && (picture || (!space && open)) {
             out.push((start.saturating_add(word_start), start.saturating_add(i)));
             word_start = i;
         }
-        in_space = space;
+        open = space || picture;
     }
     if word_start < stretch.len() {
         out.push((start.saturating_add(word_start), end));
@@ -260,36 +327,49 @@ fn trimmed_end(text: &str, start: usize, end: usize) -> usize {
     start.saturating_add(word.trim_end_matches([' ', '\t']).len())
 }
 
-/// The width of the text from `start` to `end`, each run in its own font.
-fn span_width(doc: &RichDoc, start: usize, end: usize, base: f32) -> f32 {
+/// The width of the text from `start` to `end`, each run in its own font
+/// and each picture as wide as it is shown.
+fn span_width(doc: &RichDoc, start: usize, end: usize, m: &Metrics) -> f32 {
     doc.spans()
         .filter_map(|(s, e, format)| {
             let (s, e) = (s.max(start), e.min(end));
-            (s < e).then(|| width_of(doc.text().get(s..e).unwrap_or(""), &format, base))
+            (s < e).then(|| stretch_width(doc, s, e, &format, m))
         })
         .sum()
 }
 
-/// Where the text from `from` stops fitting in `width`: the end of the
-/// last character that fits, and never `from` itself -- a glyph wider than
-/// the box still takes a line of its own.
-fn fit_from(doc: &RichDoc, from: usize, end: usize, width: f32, base: f32) -> usize {
+/// Where the text from `from` stops fitting in the box's width: the end of
+/// the last character that fits, and never `from` itself -- a glyph wider
+/// than the box still takes a line of its own.
+fn fit_from(doc: &RichDoc, from: usize, end: usize, m: &Metrics) -> usize {
     let text = doc.text();
     let mut used = 0.0;
     let mut at = from;
-    for (s, e, format) in doc.spans() {
+    'runs: for (s, e, format) in doc.spans() {
         let (s, e) = (s.max(from), e.min(end));
         if s >= e {
             continue;
         }
-        let piece = text.get(s..e).unwrap_or("");
-        let (size, weight) = font_of(&format, base);
-        let fits = crate::text::fit(piece, width - used, size, weight);
-        at = s.saturating_add(fits);
-        if fits < piece.len() {
-            break;
+        let (size, weight) = font_of(&format, m.size);
+        for (ps, pe, picture) in parts(doc, s, e) {
+            if let Some(picture) = picture {
+                // Whole, or not at all.
+                let width = picture.fitted(m.width).0;
+                if used + width > m.width {
+                    break 'runs;
+                }
+                used += width;
+                at = pe;
+                continue;
+            }
+            let piece = text.get(ps..pe).unwrap_or("");
+            let fits = crate::text::fit(piece, m.width - used, size, weight);
+            at = ps.saturating_add(fits);
+            if fits < piece.len() {
+                break 'runs;
+            }
+            used += crate::text::measure(piece, size, weight);
         }
-        used += crate::text::measure(piece, size, weight);
     }
     if at <= from {
         // Not even one character: take one.
@@ -302,9 +382,10 @@ fn fit_from(doc: &RichDoc, from: usize, end: usize, width: f32, base: f32) -> us
 }
 
 /// The line from `start` to `end`, its pieces placed, at the top -- cut
-/// where the format or the writing direction changes, and placed in the
-/// order `levels` puts them on the screen.
-fn line(doc: &RichDoc, start: usize, end: usize, base: f32, levels: &Levels) -> Line {
+/// where the format or the writing direction changes, and at each picture,
+/// and placed in the order `levels` puts them on the screen.
+fn line(doc: &RichDoc, start: usize, end: usize, m: &Metrics, levels: &Levels) -> Line {
+    let base = m.size;
     let text = doc.text();
     // The spaces that end a line sit at the paragraph's level (rule L1), so
     // they hang past the line's end whichever way it runs.
@@ -320,40 +401,79 @@ fn line(doc: &RichDoc, start: usize, end: usize, base: f32, levels: &Levels) -> 
     let mut written: Vec<(Piece, Level)> = Vec::new();
     let mut height: f32 = 0.0;
     let mut ascent: f32 = 0.0;
+    // Below the baseline: the deepest text's.
+    let mut descent: f32 = 0.0;
+    // The tallest picture, standing on the baseline.
+    let mut tallest: Option<f32> = None;
     for (s, e, format) in doc.spans() {
         let (s, e) = (s.max(start), e.min(end));
         if s >= e {
             continue;
         }
         let (size, weight) = font_of(&format, base);
-        height = height.max(crate::text::line_height(size, weight));
-        ascent = ascent.max(crate::text::ascent(size, weight));
-        let mut from = s;
-        while from < e {
-            let level = level_at(from);
-            let to = text
-                .get(from..e)
-                .and_then(|rest| {
-                    rest.char_indices()
-                        .map(|(i, _)| from.saturating_add(i))
-                        .find(|&at| level_at(at) != level)
-                })
-                .unwrap_or(e);
-            let width = crate::text::measure(text.get(from..to).unwrap_or(""), size, weight);
-            written.push((
-                Piece {
-                    start: from,
-                    end: to,
-                    x: 0.0,
-                    width,
-                    format,
-                    // Odd levels run right to left.
-                    rtl: level & 1 == 1,
-                },
-                level,
-            ));
-            from = to;
+        let (line_height, text_ascent) = (
+            crate::text::line_height(size, weight),
+            crate::text::ascent(size, weight),
+        );
+        height = height.max(line_height);
+        ascent = ascent.max(text_ascent);
+        descent = descent.max(line_height - text_ascent);
+        for (ps, pe, picture) in parts(doc, s, e) {
+            if let Some(picture) = picture {
+                let (width, shown) = picture.fitted(m.width);
+                tallest = Some(tallest.map_or(shown, |t| t.max(shown)));
+                let level = level_at(ps);
+                written.push((
+                    Piece {
+                        start: ps,
+                        end: pe,
+                        x: 0.0,
+                        width,
+                        format,
+                        rtl: level & 1 == 1,
+                        picture: Some(Shown {
+                            picture: picture.clone(),
+                            height: shown,
+                        }),
+                    },
+                    level,
+                ));
+                continue;
+            }
+            let mut from = ps;
+            while from < pe {
+                let level = level_at(from);
+                let to = text
+                    .get(from..pe)
+                    .and_then(|rest| {
+                        rest.char_indices()
+                            .map(|(i, _)| from.saturating_add(i))
+                            .find(|&at| level_at(at) != level)
+                    })
+                    .unwrap_or(pe);
+                let width = crate::text::measure(text.get(from..to).unwrap_or(""), size, weight);
+                written.push((
+                    Piece {
+                        start: from,
+                        end: to,
+                        x: 0.0,
+                        width,
+                        format,
+                        // Odd levels run right to left.
+                        rtl: level & 1 == 1,
+                        picture: None,
+                    },
+                    level,
+                ));
+                from = to;
+            }
         }
+    }
+    if let Some(tallest) = tallest {
+        // A picture stands on the baseline: one taller than the text lowers
+        // it, the text's descent still below.
+        ascent = ascent.max(tallest);
+        height = height.max(ascent + descent);
     }
     // Then in the order the screen shows them, left to right (rule L2).
     let order = bidi::visual_order(&written.iter().map(|(_, l)| *l).collect::<Vec<_>>());
@@ -425,6 +545,11 @@ fn piece_at(line: &Line, at: usize, upstream: bool) -> Option<&Piece> {
 /// How far across `piece` the caret at `at`, inside it, is drawn: from its
 /// left edge, in its own direction.
 fn x_in(doc: &RichDoc, piece: &Piece, at: usize, base: f32) -> f32 {
+    if piece.picture.is_some() {
+        // One character: before it, its leading edge; after it, its far one.
+        let after = at > piece.start;
+        return if after == piece.rtl { 0.0 } else { piece.width };
+    }
     let text = doc.text().get(piece.start..piece.end).unwrap_or("");
     let (size, weight) = font_of(&piece.format, base);
     let into = at.saturating_sub(piece.start).min(text.len());
@@ -491,10 +616,7 @@ pub fn offset_at(doc: &RichDoc, line: &Line, x: f32, base: f32) -> (usize, bool)
         }
         for piece in &line.pieces {
             if x <= piece.x + piece.width {
-                let text = doc.text().get(piece.start..piece.end).unwrap_or("");
-                let (size, weight) = font_of(&piece.format, base);
-                let at = crate::text::cursor_at(text, x - piece.x, size, weight);
-                let at = piece.start.saturating_add(at.byte()).min(piece.end);
+                let at = offset_in(doc, piece, x - piece.x, base);
                 return (at, at == line.end);
             }
         }
@@ -513,13 +635,28 @@ pub fn offset_at(doc: &RichDoc, line: &Line, x: f32, base: f32) -> (usize, bool)
     else {
         return (line.start, false);
     };
-    let text = doc.text().get(piece.start..piece.end).unwrap_or("");
-    let (size, weight) = font_of(&piece.format, base);
-    let at = crate::text::cursor_at(text, x - piece.x, size, weight);
-    let at = piece.start.saturating_add(at.byte()).min(piece.end);
+    let at = offset_in(doc, piece, x - piece.x, base);
     // Drawn in the piece clicked: after its character, unless the click was
     // at its very start.
     (at, at > piece.start)
+}
+
+/// The offset nearest `x` across `piece`, from its left edge: the gap
+/// between its characters a click there means, in its own direction -- or,
+/// on a picture, the nearer of its two edges.
+fn offset_in(doc: &RichDoc, piece: &Piece, x: f32, base: f32) -> usize {
+    if piece.picture.is_some() {
+        let right_half = x > piece.width / 2.0;
+        return if right_half == piece.rtl {
+            piece.start
+        } else {
+            piece.end
+        };
+    }
+    let text = doc.text().get(piece.start..piece.end).unwrap_or("");
+    let (size, weight) = font_of(&piece.format, base);
+    let at = crate::text::cursor_at(text, x, size, weight);
+    piece.start.saturating_add(at.byte()).min(piece.end)
 }
 
 #[cfg(test)]

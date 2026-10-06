@@ -134,3 +134,120 @@ fn appending_joins_alike_runs() {
     doc.append(&RichDoc::default());
     assert_eq!(doc.len(), 6);
 }
+
+// ---- Pictures ----
+
+/// A `width` by `height` picture of one colour.
+fn picture(width: u32, height: u32) -> Picture {
+    Picture::new(imagecodec::Image {
+        width,
+        height,
+        pixels: vec![0xFF33_6699; (width * height) as usize],
+    })
+    .unwrap()
+}
+
+/// The pictures as (offset, id) pairs.
+fn placed(doc: &RichDoc) -> Vec<(usize, u64)> {
+    doc.pictures().iter().map(|(at, p)| (*at, p.id())).collect()
+}
+
+/// "ab", a picture, "cd": the picture at offset 2.
+fn with_a_picture(p: &Picture) -> RichDoc {
+    let mut doc = RichDoc::plain("ab", plain());
+    doc.append(&RichDoc::picture(p.clone(), BOLD));
+    doc.append(&RichDoc::plain("cd", plain()));
+    doc
+}
+
+/// **A picture is one character of the text, kept beside it at that
+/// character**, in the format it was put in with; its plain text leaves it
+/// out.
+#[test]
+fn a_picture_is_a_character_of_the_text() {
+    let p = picture(4, 3);
+    let doc = with_a_picture(&p);
+    assert_eq!(doc.text(), "ab\u{fffc}cd");
+    assert_eq!(placed(&doc), [(2, p.id())]);
+    assert_eq!(doc.picture_at(2), Some(&p));
+    assert_eq!(doc.picture_at(1), None);
+    assert!(doc.format_at(2).bold);
+    assert_eq!(doc.plain_text(), "abcd");
+    // One typed as text is a character with no picture.
+    let typed = RichDoc::plain("x\u{fffc}y", plain());
+    assert!(typed.pictures().is_empty());
+    assert_eq!(typed.plain_text(), "x\u{fffc}y");
+}
+
+/// **A picture goes with the stretch it is in**: a slice holding it holds
+/// it, one cut short of it does not, and a replacement before it moves it
+/// along -- or takes it away, and putting back what it took brings it back.
+#[test]
+fn a_picture_goes_with_its_stretch() {
+    let p = picture(2, 2);
+    let mut doc = with_a_picture(&p);
+    let middle = doc.slice(1, 6);
+    assert_eq!(middle.text(), "b\u{fffc}c");
+    assert_eq!(placed(&middle), [(1, p.id())]);
+    assert!(doc.slice(0, 2).pictures().is_empty(), "cut short of it");
+    assert!(doc.slice(5, 7).pictures().is_empty(), "after it");
+    doc.replace(0, 1, &RichDoc::plain("xyz", plain()));
+    assert_eq!(placed(&doc), [(4, p.id())], "moved along by two");
+    let removed = doc.replace(3, 8, &RichDoc::default());
+    assert!(doc.pictures().is_empty(), "taken away");
+    assert_eq!(placed(&removed), [(1, p.id())]);
+    doc.replace(3, 3, &removed);
+    assert_eq!(doc, {
+        let mut back = with_a_picture(&p);
+        back.replace(0, 1, &RichDoc::plain("xyz", plain()));
+        back
+    });
+}
+
+/// **Two documents alike but for which picture they hold are not alike**:
+/// a picture is itself, not its pixels.
+#[test]
+fn a_document_is_its_pictures_too() {
+    let (p, q) = (picture(1, 1), picture(1, 1));
+    assert_ne!(with_a_picture(&p), with_a_picture(&q));
+    assert_eq!(with_a_picture(&p), with_a_picture(&p));
+}
+
+/// **In HTML a picture is an `<img>` holding it** -- a PNG, in base64 --
+/// or wherever the caller puts it; one given nowhere is left out.
+#[test]
+fn html_carries_the_pictures() {
+    let p = picture(1, 1);
+    let doc = with_a_picture(&p);
+    let html = doc.to_html();
+    let prefix = "ab<b><img src=\"data:image/png;base64,";
+    assert!(html.starts_with(prefix), "{html}");
+    let tail = "\" width=\"1\" height=\"1\" alt=\"\"></b>cd";
+    assert!(html.ends_with(tail), "{html}");
+    // The address holds the picture itself.
+    let encoded = &html[prefix.len()..html.len() - tail.len()];
+    assert_eq!(encoded, base64(&p.to_png().unwrap()));
+    assert_eq!(
+        doc.to_html_with(|q| Some(format!("cid:\"{}\"", q.width()))),
+        "ab<b><img src=\"cid:&quot;1&quot;\" width=\"1\" height=\"1\" alt=\"\"></b>cd",
+        "the caller's address, escaped"
+    );
+    assert_eq!(doc.to_html_with(|_| None), "ab<b></b>cd", "given nowhere");
+}
+
+/// **Base64 is RFC 4648's**: its test vectors.
+#[test]
+fn base64_is_the_rfcs() {
+    for (input, want) in [
+        ("", ""),
+        ("f", "Zg=="),
+        ("fo", "Zm8="),
+        ("foo", "Zm9v"),
+        ("foob", "Zm9vYg=="),
+        ("fooba", "Zm9vYmE="),
+        ("foobar", "Zm9vYmFy"),
+    ] {
+        assert_eq!(base64(input.as_bytes()), want, "{input}");
+    }
+    assert_eq!(base64(&[0xFB, 0xFF]), "+/8=", "the last two letters");
+}

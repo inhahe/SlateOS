@@ -237,6 +237,118 @@ fn a_click_finds_where_the_caret_is_drawn() {
     assert_eq!(offset_at(&doc, line, 5000.0, SIZE), (doc.len(), true));
 }
 
+// ---- Pictures ----
+
+/// A `width` by `height` picture of one colour.
+fn picture(width: u32, height: u32) -> Picture {
+    Picture::new(imagecodec::Image {
+        width,
+        height,
+        pixels: vec![0xFF80_4020; (width * height) as usize],
+    })
+    .unwrap()
+}
+
+/// `before`, `p`, then `after`, all plain.
+fn around(before: &str, p: &Picture, after: &str) -> RichDoc {
+    let mut doc = plain(before);
+    doc.append(&RichDoc::picture(p.clone(), Format::default()));
+    doc.append(&plain(after));
+    doc
+}
+
+/// **A picture is a piece of its own, as wide as it is, standing on the
+/// baseline**: one taller than the text lowers the baseline to its foot,
+/// the text's descent kept below it.
+#[test]
+fn a_picture_is_a_piece_standing_on_the_baseline() {
+    let p = picture(20, 50);
+    let doc = around("ab", &p, "cd");
+    let line = &lay_out(&doc, &metrics(1000.0))[0];
+    let pieces: Vec<(usize, usize, bool)> = line
+        .pieces
+        .iter()
+        .map(|piece| (piece.start, piece.end, piece.picture.is_some()))
+        .collect();
+    assert_eq!(pieces, [(0, 2, false), (2, 5, true), (5, 7, false)]);
+    let shown = &line.pieces[1];
+    assert!((shown.width - 20.0).abs() < 0.01);
+    assert_eq!(shown.picture.as_ref().map(|s| s.height), Some(50.0));
+    assert!((shown.x - w("ab")).abs() < 0.01, "after the text before it");
+    assert!((line.pieces[2].x - (w("ab") + 20.0)).abs() < 0.01);
+    let text_only = &lay_out(&plain("abcd"), &metrics(1000.0))[0];
+    let descent = text_only.height - text_only.ascent;
+    assert_eq!(line.ascent, 50.0, "the baseline at the picture's foot");
+    assert!((line.height - (50.0 + descent)).abs() < 0.01);
+    // A picture shorter than the text leaves the line as text has it.
+    let small = around("ab", &picture(2, 2), "cd");
+    let line = &lay_out(&small, &metrics(1000.0))[0];
+    assert_eq!(
+        (line.ascent, line.height),
+        (text_only.ascent, text_only.height)
+    );
+}
+
+/// **A picture wider than the box is shown at the box's width**, its shape
+/// kept.
+#[test]
+fn a_wide_picture_is_shown_at_the_boxs_width() {
+    let p = picture(400, 200);
+    let doc = around("", &p, "");
+    let line = &lay_out(&doc, &metrics(100.0))[0];
+    let piece = &line.pieces[0];
+    assert!((piece.width - 100.0).abs() < 0.01);
+    assert_eq!(piece.picture.as_ref().map(|s| s.height), Some(50.0));
+}
+
+/// **A line breaks before a picture and after it**, as between two words,
+/// though no space is there.
+#[test]
+fn a_line_breaks_either_side_of_a_picture() {
+    let p = picture(30, 10);
+    let doc = around("aaa", &p, "bbb");
+    // Room for the text and the picture, not the text after.
+    let lines = lay_out(&doc, &metrics(w("aaa") + 30.0 + 1.0));
+    assert_eq!(stretches(&lines), [(0, 6), (6, 9)]);
+    // Room for the text alone: the picture goes down a line, the text
+    // after it with it.
+    let lines = lay_out(&doc, &metrics(w("aaa") + 1.0));
+    assert_eq!(stretches(&lines)[0], (0, 3));
+    assert_eq!(lines[1].start, 3, "the picture starts the next line");
+}
+
+/// **A caret beside a picture is at its edge, and a click on it goes to the
+/// nearer edge** -- in a line of either direction.
+#[test]
+fn a_caret_beside_a_picture_is_at_its_edge() {
+    let p = picture(40, 10);
+    let doc = around("ab", &p, "cd");
+    let line = &lay_out(&doc, &metrics(1000.0))[0];
+    let piece = line.pieces[1].clone();
+    assert!((x_of(&doc, line, 2, SIZE) - piece.x).abs() < 0.01);
+    assert!((x_of(&doc, line, 5, SIZE) - (piece.x + 40.0)).abs() < 0.01);
+    assert_eq!(offset_at(&doc, line, piece.x + 5.0, SIZE).0, 2);
+    assert_eq!(offset_at(&doc, line, piece.x + 35.0, SIZE).0, 5);
+    // Between two right-to-left words the picture runs right to left: its
+    // start at its right edge.
+    let doc = around(SHALOM, &p, OLAM);
+    let line = &lay_out(&doc, &metrics(1000.0))[0];
+    let piece = line
+        .pieces
+        .iter()
+        .find(|piece| piece.picture.is_some())
+        .unwrap()
+        .clone();
+    assert!(piece.rtl);
+    let start = piece.start;
+    assert!((x_at(&doc, line, start, false, SIZE) - (piece.x + 40.0)).abs() < 0.01);
+    assert_eq!(offset_at(&doc, line, piece.x + 35.0, SIZE).0, start);
+    assert_eq!(offset_at(&doc, line, piece.x + 5.0, SIZE).0, piece.end);
+    for (x, at, upstream) in caret_stops(&doc, line, SIZE) {
+        assert!((x_at(&doc, line, at, upstream, SIZE) - x).abs() < 0.01);
+    }
+}
+
 /// **A line of one direction is laid out as it always was**: its pieces in
 /// written order, none right to left.
 #[test]

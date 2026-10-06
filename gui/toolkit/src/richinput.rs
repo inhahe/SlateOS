@@ -31,13 +31,30 @@
 //! both: typing is gathered a word at a time, deleting likewise, as the plain
 //! field gathers them.
 //!
+//! # Pictures
+//!
+//! A picture is one character of the text ([`doc::OBJECT`]), the picture
+//! kept beside it ([`doc`]'s "Pictures"), laid out as a piece of its own
+//! standing on the baseline ([`layout`]'s "Pictures"): it is selected,
+//! deleted, cut, copied, pasted and undone as a character is. A program puts
+//! one in with [`RichInput::insert_picture`] -- from its own "Insert
+//! picture" command, a file read with [`Picture::decode`] -- and one comes in
+//! with a paste or a drop ([`RichInput::drop_data`]).
+//!
+//! The field draws a picture by naming it (`RenderCommand::Image`), so the
+//! program hands the window each picture the field shows: every frame, the
+//! window's [`crate::picture::Uploads`] is asked with
+//! [`RichInput::pictures`].
+//!
 //! # The clipboard
 //!
 //! A copy puts the plain text on the program's clipboard ([`crate::clipboard`])
-//! and keeps the formatted text beside it; a paste of that same text brings
-//! the formatting back, and any other text pastes plain, in the format at the
-//! caret. Pictures pasted in wait on the clipboard carrying them
-//! (`known-issues/TD-C-A-RICH-INPUT-CANNOT-TAKE-A-PICTURE.md`).
+//! -- each picture in it left out, and a picture selected alone put there as
+//! the picture -- and keeps the copy whole beside it, formatting and
+//! pictures, tied to it by the clipboard's generation; a paste while that copy
+//! is still what the clipboard holds brings it back whole, and anything else
+//! pastes as the clipboard has it: its text, plain, in the format at the
+//! caret, or -- copied with no text -- its picture.
 //! Ctrl+Shift+V pastes the text alone, the copy's formatting left behind.
 //!
 //! # The menu
@@ -55,14 +72,16 @@ pub mod toolbar;
 use std::cell::RefCell;
 use std::num::NonZeroUsize;
 
-pub use doc::{Format, RichDoc, Run};
-pub use layout::{Line, Metrics, Piece};
+pub use doc::{Format, OBJECT, RichDoc, Run};
+pub use layout::{Line, Metrics, Piece, Shown};
 
 use crate::color::Color;
+use crate::dnd::{DataFormat, DataObject};
 use crate::editmenu::{EditCommand, EditState};
 use crate::event::{Key, KeyEvent};
 use crate::menu::{ContextMenu, MenuItem, MenuItemId};
 use crate::palette::Palette;
+use crate::picture::Picture;
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 use crate::textinput::KeyEdit;
@@ -195,10 +214,10 @@ struct Edit {
 }
 
 std::thread_local! {
-    /// The formatted text of this program's last rich copy, beside the plain
-    /// text it put on the clipboard: what a paste of that same text brings
-    /// back.
-    static RICH_CLIPBOARD: RefCell<Option<RichDoc>> = const { RefCell::new(None) };
+    /// This program's last rich copy, whole, and the clipboard's generation
+    /// it was put there with: what a paste brings back while that copy is
+    /// still the clipboard's.
+    static RICH_CLIPBOARD: RefCell<Option<(u64, RichDoc)>> = const { RefCell::new(None) };
 }
 
 /// How a field is drawn.
@@ -411,7 +430,8 @@ impl RichInput {
         self.typing = Some(format);
     }
 
-    /// Put `doc` in place of the selection, its formatting with it.
+    /// Put `doc` in place of the selection, its formatting and pictures
+    /// with it.
     pub fn insert_doc(&mut self, doc: &RichDoc) {
         let (start, end) = self.selection_range().unwrap_or((self.cursor, self.cursor));
         if doc.is_empty() && start == end {
@@ -419,6 +439,21 @@ impl RichInput {
         }
         self.replace(start, end, doc, Kind::Other);
         self.typing = None;
+    }
+
+    /// Put `picture` in place of the selection, as one step, its character
+    /// in the format typing takes there -- the caret after it.
+    pub fn insert_picture(&mut self, picture: Picture) {
+        let (start, end) = self.selection_range().unwrap_or((self.cursor, self.cursor));
+        let format = self.typing.unwrap_or_else(|| self.doc.format_before(start));
+        self.replace(start, end, &RichDoc::picture(picture, format), Kind::Other);
+        self.typing = None;
+    }
+
+    /// The pictures in the text, in order: what the window must hold for the
+    /// field to be drawn ([`crate::picture::Uploads::changes`]).
+    pub fn pictures(&self) -> impl Iterator<Item = &Picture> {
+        self.doc.pictures().iter().map(|(_, picture)| picture)
     }
 
     /// Delete the selection, or the character before the caret. Answers
@@ -542,17 +577,23 @@ impl RichInput {
         self.moved();
     }
 
-    /// Put the selection on the clipboard: its plain text for any program's
-    /// field, and its formatting kept for a paste here.
+    /// Put the selection on the clipboard: its plain text for any field --
+    /// its pictures left out -- and, selected alone, a picture as itself;
+    /// the copy whole, formatting and pictures, kept for a paste here.
     pub fn copy(&self) {
         let Some((s, e)) = self.selection_range() else {
             return;
         };
         let doc = self.doc.slice(s, e);
-        crate::clipboard::set_text(doc.text());
+        let alone = match doc.pictures() {
+            [(0, picture)] if doc.len() == OBJECT.len_utf8() => Some(picture.clone()),
+            _ => None,
+        };
+        crate::clipboard::set(&doc.plain_text(), alone);
+        let generation = crate::clipboard::generation();
         RICH_CLIPBOARD.with(|rich| {
             if let Ok(mut rich) = rich.try_borrow_mut() {
-                *rich = Some(doc);
+                *rich = Some((generation, doc));
             }
         });
     }
@@ -565,19 +606,52 @@ impl RichInput {
         }
     }
 
-    /// Paste the clipboard: formatted, if it holds what this program last
-    /// copied from a rich field; else its plain text, in the format at the
-    /// caret.
+    /// Paste the clipboard: whole -- formatting and pictures -- where it
+    /// holds what this program last copied from a rich field; else its text,
+    /// in the format at the caret; else, copied with no text, its picture.
     pub fn paste(&mut self) {
-        let text = crate::clipboard::text();
+        let generation = crate::clipboard::generation();
         let rich = RICH_CLIPBOARD
             .with(|rich| rich.try_borrow().ok().and_then(|r| r.clone()))
-            .filter(|doc| doc.text() == text);
-        match rich {
-            Some(doc) => self.insert_doc(&doc),
-            None if !text.is_empty() => self.insert_str(&text),
-            None => {}
+            .filter(|(copied, _)| *copied == generation);
+        if let Some((_, doc)) = rich {
+            self.insert_doc(&doc);
+            return;
         }
+        let text = crate::clipboard::text();
+        if !text.is_empty() {
+            self.insert_str(&text);
+        } else if let Some(picture) = crate::clipboard::picture() {
+            self.insert_picture(picture);
+        }
+    }
+
+    /// What was dropped on the field at `(x, y)` in its box, from its top
+    /// left, put where it was dropped -- as a paste is: its text, in the
+    /// format there, or, dropped with no text, its picture (a PNG or BMP
+    /// file's bytes). Answers whether it took anything; nothing it cannot
+    /// use moves the caret.
+    pub fn drop_data(&mut self, data: &DataObject, x: f32, y: f32, m: &Metrics) -> bool {
+        let text = data.get_text().filter(|t| !t.is_empty());
+        let picture = if text.is_none() {
+            [DataFormat::ImagePng, DataFormat::ImageBmp]
+                .iter()
+                .find_map(|format| data.get_data(format))
+                .and_then(|bytes| Picture::decode(bytes).ok())
+        } else {
+            None
+        };
+        if text.is_none() && picture.is_none() {
+            return false;
+        }
+        self.anchor = None;
+        self.drag_to(x, y, m);
+        match (text, picture) {
+            (Some(text), _) => self.insert_str(text),
+            (None, Some(picture)) => self.insert_picture(picture),
+            (None, None) => {}
+        }
+        true
     }
 
     /// Paste the clipboard's text alone, in the format at the caret, though
@@ -603,8 +677,10 @@ impl RichInput {
             can_undo: self.can_undo(),
             can_redo: self.can_redo(),
             copies_line: false,
+            takes_pictures: true,
         };
-        let nothing_copied = crate::clipboard::is_empty();
+        // Pasting as plain text takes the clipboard's text alone.
+        let no_text = crate::editmenu::why_no_paste(false);
         let row = |command: RichCommand, enabled: bool, checked: Option<bool>| MenuItem::Action {
             id: command.id(),
             label: command.label().to_owned(),
@@ -622,7 +698,7 @@ impl RichInput {
             .map_or(rows.len(), |at| at.saturating_add(1));
         rows.insert(
             after_paste,
-            row(RichCommand::PastePlain, !nothing_copied, None),
+            row(RichCommand::PastePlain, no_text.is_none(), None),
         );
         rows.push(MenuItem::Separator);
         for command in [
@@ -639,8 +715,8 @@ impl RichInput {
                 menu.explain(command.id(), why);
             }
         }
-        if nothing_copied {
-            menu.explain(RichCommand::PastePlain.id(), "Nothing has been copied");
+        if let Some(why) = no_text {
+            menu.explain(RichCommand::PastePlain.id(), why);
         }
         menu
     }
@@ -1110,6 +1186,21 @@ impl RichInput {
                     (bx, line_top),
                     m.size,
                 );
+                // A picture hides the selection drawn under it: a selected
+                // one is tinted over, as a word processor shows it.
+                if let (Some(shown), Some((s, e))) = (&piece.picture, selection)
+                    && piece.start >= s
+                    && piece.end <= e
+                {
+                    tree.push(RenderCommand::FillRect {
+                        x: bx + piece.x,
+                        y: line_top + line.ascent - shown.height,
+                        width: piece.width,
+                        height: shown.height,
+                        color: palette.selection_fill(),
+                        corner_radii: CornerRadii::ZERO,
+                    });
+                }
             }
         }
         if look.focused {
@@ -1164,6 +1255,11 @@ impl RichInput {
                 if f >= t {
                     continue;
                 }
+                if piece.picture.is_some() {
+                    // One character, so selected whole.
+                    boxes.push((piece.x, piece.width));
+                    continue;
+                }
                 let text = self.doc.text().get(piece.start..piece.end).unwrap_or("");
                 let (size, weight) = layout::font_of(&piece.format, base);
                 for (x, w) in crate::text::selection_boxes(
@@ -1194,7 +1290,7 @@ impl RichInput {
 }
 
 /// Draw one piece of `line`: its text, on the line's baseline, and its
-/// underline or line through.
+/// underline or line through -- or its picture, standing on the baseline.
 fn draw_piece(
     tree: &mut RenderTree,
     palette: &Palette,
@@ -1204,6 +1300,16 @@ fn draw_piece(
     (left, line_top): (f32, f32),
     base: f32,
 ) {
+    if let Some(shown) = &piece.picture {
+        tree.push(RenderCommand::Image {
+            x: left + piece.x,
+            y: line_top + line.ascent - shown.height,
+            width: piece.width,
+            height: shown.height,
+            image_id: shown.picture.id(),
+        });
+        return;
+    }
     let text = doc.text().get(piece.start..piece.end).unwrap_or("");
     let shown = text.trim_end_matches(['\n', '\r']);
     if shown.is_empty() {

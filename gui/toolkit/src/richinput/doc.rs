@@ -6,8 +6,26 @@
 //! exactly one [`Format`]. Neighbouring runs alike are always merged, so two
 //! documents that read the same are the same value, and a run never ends
 //! inside a character.
+//!
+//! # Pictures
+//!
+//! A picture in the text is one character, [`OBJECT`] -- the object
+//! replacement character every rich text format marks an object with -- and
+//! the picture itself is kept beside the text, at that character's offset.
+//! So a picture is cut, copied, pasted, deleted and undone as any other
+//! character is, by the same replacement of one stretch by another, and goes
+//! with the stretch it is in. An [`OBJECT`] typed or pasted as text is a
+//! character like any other, with no picture.
 
 use crate::color::Color;
+use crate::picture::Picture;
+
+/// The character a picture is in the text: the object replacement
+/// character.
+pub const OBJECT: char = '\u{FFFC}';
+
+/// [`OBJECT`]'s length in the text, in bytes.
+const OBJECT_LEN: usize = OBJECT.len_utf8();
 
 /// How a stretch of text is drawn: what its user set on it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -38,22 +56,27 @@ pub struct Run {
     pub format: Format,
 }
 
-/// A text and its formatting.
+/// A text, its formatting and its pictures.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RichDoc {
     text: String,
     /// Tiling `text`, ends ascending, the last at its length; empty for an
     /// empty text.
     runs: Vec<Run>,
+    /// The pictures in it, each at the offset of the [`OBJECT`] it is,
+    /// offsets ascending.
+    pictures: Vec<(usize, Picture)>,
 }
 
 impl RichDoc {
-    /// `text` in one format.
+    /// `text` in one format. An [`OBJECT`] in it is a character, not a
+    /// picture.
     #[must_use]
     pub fn plain(text: &str, format: Format) -> Self {
         let mut doc = Self {
             text: text.to_string(),
             runs: Vec::new(),
+            pictures: Vec::new(),
         };
         if !text.is_empty() {
             doc.runs.push(Run {
@@ -64,10 +87,50 @@ impl RichDoc {
         doc
     }
 
-    /// The text.
+    /// `picture` alone, its character in `format` -- what typing beside it
+    /// carries on in.
+    #[must_use]
+    pub fn picture(picture: Picture, format: Format) -> Self {
+        let mut doc = Self::plain(OBJECT.encode_utf8(&mut [0; 4]), format);
+        doc.pictures.push((0, picture));
+        doc
+    }
+
+    /// The text: each picture in it an [`OBJECT`].
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The text with each picture's character taken out: what is left of it
+    /// where only text can go.
+    #[must_use]
+    pub fn plain_text(&self) -> String {
+        let mut out = String::with_capacity(self.text.len());
+        let mut from = 0;
+        for &(at, _) in &self.pictures {
+            out.push_str(self.text.get(from..at).unwrap_or(""));
+            from = at.saturating_add(OBJECT_LEN);
+        }
+        out.push_str(self.text.get(from..).unwrap_or(""));
+        out
+    }
+
+    /// Its pictures, each with the offset of the character it is, in
+    /// order.
+    #[must_use]
+    pub fn pictures(&self) -> &[(usize, Picture)] {
+        &self.pictures
+    }
+
+    /// The picture the character at `at` is, if it is one.
+    #[must_use]
+    pub fn picture_at(&self, at: usize) -> Option<&Picture> {
+        self.pictures
+            .binary_search_by_key(&at, |&(offset, _)| offset)
+            .ok()
+            .and_then(|i| self.pictures.get(i))
+            .map(|(_, picture)| picture)
     }
 
     /// Its length in bytes.
@@ -133,8 +196,9 @@ impl RichDoc {
         at
     }
 
-    /// The part of it from `start` to `end`, formatting and all. Each bound
-    /// is held to the text and moved back to a character boundary.
+    /// The part of it from `start` to `end`, formatting, pictures and all.
+    /// Each bound is held to the text and moved back to a character
+    /// boundary.
     #[must_use]
     pub fn slice(&self, start: usize, end: usize) -> Self {
         let (start, end) = (self.boundary(start), self.boundary(end));
@@ -142,6 +206,14 @@ impl RichDoc {
         let mut out = Self {
             text: self.text.get(start..end).unwrap_or("").to_string(),
             runs: Vec::new(),
+            // A picture's character starts on a boundary, so one starting in
+            // the stretch ends in it too.
+            pictures: self
+                .pictures
+                .iter()
+                .filter(|&&(at, _)| at >= start && at < end)
+                .map(|(at, picture)| (at.saturating_sub(start), picture.clone()))
+                .collect(),
         };
         for (s, e, format) in self.spans() {
             let (s, e) = (s.max(start), e.min(end));
@@ -175,6 +247,12 @@ impl RichDoc {
         for (_, e, format) in other.spans() {
             self.push_run(base.saturating_add(e), format);
         }
+        self.pictures.extend(
+            other
+                .pictures
+                .iter()
+                .map(|(at, picture)| (base.saturating_add(*at), picture.clone())),
+        );
     }
 
     /// Insert `text` at `at` in `format`.
@@ -236,10 +314,20 @@ impl RichDoc {
     /// It as HTML -- what a mail program sends a formatted body as, and what
     /// any program that shows formatted text reads: each run in `<b>`, `<i>`,
     /// `<u>` and `<s>` as it has them, and a `<span>` for its colour and
-    /// size; line breaks as `<br>`. The text is escaped, so nothing in it is
-    /// read as markup.
+    /// size; line breaks as `<br>`; each picture an `<img>` holding the
+    /// picture itself, as a PNG (a `data:` address). The text is escaped, so
+    /// nothing in it is read as markup.
     #[must_use]
     pub fn to_html(&self) -> String {
+        self.to_html_with(data_url)
+    }
+
+    /// It as HTML, as [`to_html`](Self::to_html), each picture's `<img>`
+    /// naming the address `src` gives it -- a mail program's `cid:` for a
+    /// picture it sends as a part of the message, say. A picture `src` gives
+    /// no address is left out.
+    #[must_use]
+    pub fn to_html_with(&self, src: impl Fn(&Picture) -> Option<String>) -> String {
         let mut out = String::new();
         for (s, e, format) in self.spans() {
             let text = self.text.get(s..e).unwrap_or("");
@@ -266,7 +354,18 @@ impl RichDoc {
                     close.push(end);
                 }
             }
-            for c in text.chars() {
+            for (i, c) in text.char_indices() {
+                if let Some(picture) = self.picture_at(s.saturating_add(i)) {
+                    if let Some(address) = src(picture) {
+                        out.push_str(&format!(
+                            "<img src=\"{}\" width=\"{}\" height=\"{}\" alt=\"\">",
+                            escape_attribute(&address),
+                            picture.width(),
+                            picture.height()
+                        ));
+                    }
+                    continue;
+                }
                 match c {
                     '<' => out.push_str("&lt;"),
                     '>' => out.push_str("&gt;"),
@@ -292,6 +391,56 @@ impl RichDoc {
             _ => self.runs.push(Run { end, format }),
         }
     }
+}
+
+/// `picture` as an address holding it -- `data:image/png;base64,` and the
+/// picture as a PNG file -- or `None` for one too large for PNG.
+fn data_url(picture: &Picture) -> Option<String> {
+    picture
+        .to_png()
+        .ok()
+        .map(|png| format!("data:image/png;base64,{}", base64(&png)))
+}
+
+/// `bytes` in base64 (RFC 4648's alphabet, padded with `=`).
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let digit = |six: u32| {
+        // Six bits: an index into the 64 letters.
+        let at = usize::try_from(six & 0x3F).unwrap_or(0);
+        ALPHABET.get(at).map_or('A', |&b| char::from(b))
+    };
+    let mut out = String::with_capacity(bytes.len().div_ceil(3).saturating_mul(4));
+    for chunk in bytes.chunks(3) {
+        let (b0, b1, b2) = match *chunk {
+            [b0, b1, b2] => (b0, Some(b1), Some(b2)),
+            [b0, b1] => (b0, Some(b1), None),
+            [b0] => (b0, None, None),
+            _ => continue,
+        };
+        let n =
+            (u32::from(b0) << 16) | (u32::from(b1.unwrap_or(0)) << 8) | u32::from(b2.unwrap_or(0));
+        out.push(digit(n >> 18));
+        out.push(digit(n >> 12));
+        out.push(if b1.is_some() { digit(n >> 6) } else { '=' });
+        out.push(if b2.is_some() { digit(n) } else { '=' });
+    }
+    out
+}
+
+/// `value` made safe inside a double-quoted HTML attribute.
+fn escape_attribute(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

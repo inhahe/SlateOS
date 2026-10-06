@@ -116,6 +116,9 @@ pub struct EditState {
     /// line, as a code editor's keys do -- so they are lit whenever there is
     /// text, selected or not.
     pub copies_line: bool,
+    /// Whether a picture can be pasted in -- a rich field's text holds
+    /// pictures -- so that Paste is lit for a picture copied alone.
+    pub takes_pictures: bool,
 }
 
 /// Why the row for `command` is dimmed in a field in `state` -- what its
@@ -146,11 +149,33 @@ pub fn why_dimmed(command: EditCommand, state: EditState) -> Option<&'static str
         EditCommand::Undo => (!state.can_undo).then_some("There is nothing to undo"),
         EditCommand::Redo => (!state.can_redo).then_some("There is nothing to redo"),
         EditCommand::Cut | EditCommand::Copy => (!takes).then_some(SELECT),
-        EditCommand::Paste => crate::clipboard::is_empty().then_some("Nothing has been copied"),
+        EditCommand::Paste => why_no_paste(state.takes_pictures),
         EditCommand::Delete => (!state.selected).then_some(SELECT),
         EditCommand::SelectAll => (!state.has_text).then_some("There is no text"),
     }
 }
+
+/// What a paste into a field would find nothing to take in, if so: nothing
+/// copied, or -- where the field takes text alone (`pictures` false) -- a
+/// picture copied with no text, which it cannot hold. `None` when the
+/// clipboard has something the field can take.
+#[must_use]
+pub fn why_no_paste(pictures: bool) -> Option<&'static str> {
+    if crate::clipboard::has_text() || (pictures && crate::clipboard::has_picture()) {
+        None
+    } else if crate::clipboard::has_picture() {
+        Some(PICTURE_ONLY)
+    } else {
+        Some(NOTHING_COPIED)
+    }
+}
+
+/// Why Paste is dimmed with nothing on the clipboard.
+pub const NOTHING_COPIED: &str = "Nothing has been copied";
+
+/// Why Paste is dimmed in a field that takes text when a picture alone was
+/// copied.
+pub const PICTURE_ONLY: &str = "What was copied is a picture, not text";
 
 /// The rows of a field's menu: Undo and Redo where it keeps a history, then
 /// Cut, Copy, Paste and Delete, then Select all -- each dimmed when it would
@@ -487,5 +512,36 @@ mod tests {
         );
         assert_eq!(menu.reason(EditCommand::SelectAll.id()), None, "a lit row");
         assert_eq!(menu.reason(EditCommand::Undo.id()), None, "no history");
+    }
+
+    /// **A picture copied alone is pasted only where a picture can go**: a
+    /// field of text dims Paste and says what was copied, a rich field
+    /// lights it; text copied with the picture lights it everywhere.
+    #[test]
+    fn a_picture_alone_is_pasted_only_where_pictures_go() {
+        let picture = crate::picture::Picture::new(imagecodec::Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0xFF00_0000],
+        })
+        .unwrap();
+        crate::clipboard::set_picture(picture.clone());
+        let text_only = EditState {
+            editable: true,
+            ..EditState::default()
+        };
+        let rich = EditState {
+            takes_pictures: true,
+            ..text_only
+        };
+        assert_eq!(
+            why_dimmed(EditCommand::Paste, text_only),
+            Some(PICTURE_ONLY)
+        );
+        assert_eq!(why_dimmed(EditCommand::Paste, rich), None);
+        crate::clipboard::set("and words", Some(picture));
+        assert_eq!(why_dimmed(EditCommand::Paste, text_only), None);
+        crate::clipboard::set_text("");
+        assert_eq!(why_dimmed(EditCommand::Paste, rich), Some(NOTHING_COPIED));
     }
 }

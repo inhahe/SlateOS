@@ -710,3 +710,305 @@ fn a_selection_across_two_directions_is_drawn_where_its_text_is() {
         hebrew.x
     );
 }
+
+// ---- Pictures ----
+
+/// A `width` by `height` picture of one colour.
+fn picture(width: u32, height: u32) -> Picture {
+    Picture::new(imagecodec::Image {
+        width,
+        height,
+        pixels: vec![0xFF20_6080; (width * height) as usize],
+    })
+    .unwrap()
+}
+
+/// The ids of the pictures in `input`'s text, in order.
+fn ids(input: &RichInput) -> Vec<u64> {
+    input.pictures().map(Picture::id).collect()
+}
+
+/// "ab|cd", the caret at the bar.
+fn ab_cd() -> RichInput {
+    let mut input = RichInput::with_doc(RichDoc::plain("abcd", Format::default()));
+    input.set_cursor(2);
+    input
+}
+
+/// **A picture is put in at the caret as one character, and goes and comes
+/// back as one**: Backspace takes it, Undo brings the same picture back,
+/// Redo takes it again.
+#[test]
+fn a_picture_is_put_in_and_taken_out_as_a_character() {
+    let p = picture(8, 6);
+    let mut input = ab_cd();
+    input.insert_picture(p.clone());
+    assert_eq!(input.text(), "ab\u{fffc}cd");
+    assert_eq!(input.cursor(), 2 + OBJECT.len_utf8(), "the caret after it");
+    assert_eq!(ids(&input), [p.id()]);
+    assert!(input.backspace());
+    assert_eq!(input.text(), "abcd");
+    assert!(ids(&input).is_empty());
+    assert!(input.undo());
+    assert_eq!(ids(&input), [p.id()], "the same picture back");
+    assert!(input.redo());
+    assert!(ids(&input).is_empty());
+    // In place of a selection, in the format typing there would take: the
+    // bold "a" before it.
+    input.set_cursor(0);
+    input.move_right(true);
+    input.toggle(Toggle::Bold);
+    input.set_cursor(2);
+    input.move_left(true);
+    input.insert_picture(p.clone());
+    assert_eq!(input.text(), "a\u{fffc}cd");
+    assert!(input.doc().format_at(1).bold, "in the format before it");
+    assert!(
+        !input.doc().format_at(4).bold,
+        "the text after it as it was"
+    );
+}
+
+/// **A copy with a picture in it pastes whole here, the same picture; its
+/// plain text, for any field, leaves the picture out** -- and once another
+/// copy is made, a paste is that copy's.
+#[test]
+fn a_copy_with_a_picture_pastes_whole() {
+    let p = picture(4, 4);
+    let mut input = ab_cd();
+    input.insert_picture(p.clone());
+    input.select_all();
+    input.copy();
+    assert_eq!(crate::clipboard::text(), "abcd", "the picture left out");
+    assert!(
+        !crate::clipboard::has_picture(),
+        "text and a picture: the copy is not a picture alone"
+    );
+    let mut other = RichInput::new();
+    other.paste();
+    assert_eq!(other.text(), "ab\u{fffc}cd");
+    assert_eq!(ids(&other), [p.id()]);
+    crate::clipboard::set_text("abcd");
+    other.paste();
+    assert_eq!(
+        other.text(),
+        "ab\u{fffc}cdabcd",
+        "the same text copied again is another copy: plain"
+    );
+}
+
+/// **A picture selected alone goes on the clipboard as itself**, and a
+/// picture copied alone -- here or by anything else in the program -- is
+/// pasted as a picture; Paste as plain text has no text to take and says
+/// so.
+#[test]
+fn a_picture_selected_alone_is_copied_as_itself() {
+    let p = picture(3, 2);
+    let mut input = ab_cd();
+    input.insert_picture(p.clone());
+    input.move_left(true);
+    input.copy();
+    assert_eq!(crate::clipboard::picture(), Some(p.clone()));
+    assert_eq!(crate::clipboard::text(), "");
+    let shot = picture(5, 5);
+    crate::clipboard::set_picture(shot.clone());
+    let mut other = RichInput::new();
+    other.paste();
+    assert_eq!(ids(&other), [shot.id()], "a picture from elsewhere");
+    let rows = menu_rows(&other);
+    assert!(
+        rows.iter().any(|(l, lit, _)| l == "Paste" && *lit),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|(l, lit, _)| l == "Paste as plain text" && !*lit),
+        "{rows:?}"
+    );
+    assert_eq!(
+        other.edit_menu().reason(RichCommand::PastePlain.id()),
+        Some(crate::editmenu::PICTURE_ONLY)
+    );
+    let before = other.doc().clone();
+    other.paste_plain();
+    assert_eq!(other.doc(), &before, "no text to paste");
+}
+
+/// **A dropped picture lands where it was dropped**; dropped text, likewise;
+/// what the field cannot use changes nothing, the caret included.
+#[test]
+fn a_dropped_picture_lands_where_it_was_dropped() {
+    let p = picture(6, 6);
+    let mut data = DataObject::new();
+    data.set_data(DataFormat::ImagePng, p.to_png().unwrap());
+    let mut input = RichInput::with_doc(RichDoc::plain("abcd", Format::default()));
+    input.set_cursor(4);
+    let lines = layout::lay_out(input.doc(), &wide());
+    let x = layout::x_of(input.doc(), &lines[0], 1, SIZE);
+    assert!(input.drop_data(&data, x, 2.0, &wide()));
+    assert_eq!(input.text(), "a\u{fffc}bcd");
+    let dropped = input.pictures().next().unwrap();
+    assert_eq!(
+        (dropped.width(), dropped.height()),
+        (6, 6),
+        "the file's picture"
+    );
+    let caret = input.cursor();
+    let mut junk = DataObject::new();
+    junk.set_data(DataFormat::ImagePng, b"no picture".to_vec());
+    let before = input.doc().clone();
+    assert!(!input.drop_data(&junk, 0.0, 0.0, &wide()));
+    assert_eq!(input.doc(), &before);
+    assert_eq!(input.cursor(), caret, "the caret stays");
+    assert!(input.drop_data(&DataObject::with_text("Z"), 0.0, 2.0, &wide()));
+    assert!(input.text().starts_with('Z'), "{}", input.text());
+}
+
+/// **A picture is drawn where its piece is, standing on the baseline, and
+/// a selected one is tinted over**; the window is given each picture the
+/// field shows.
+#[test]
+fn a_picture_is_drawn_standing_on_the_baseline() {
+    let palette = Palette::for_mode(false);
+    let look = Look {
+        rect: (10.0, 20.0, 400.0, 200.0),
+        focused: false,
+        placeholder: "",
+    };
+    let p = picture(30, 40);
+    let mut input = ab_cd();
+    input.insert_picture(p.clone());
+    let lines = layout::lay_out(input.doc(), &m(400.0));
+    let line = &lines[0];
+    let piece = line
+        .pieces
+        .iter()
+        .find(|piece| piece.picture.is_some())
+        .unwrap();
+    let mut tree = RenderTree::new();
+    input.draw(&mut tree, &palette, &look, &m(400.0));
+    let image = tree
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::Image {
+                x,
+                y,
+                width,
+                height,
+                image_id,
+            } => Some((*x, *y, *width, *height, *image_id)),
+            _ => None,
+        })
+        .expect("the picture is drawn");
+    assert_eq!(
+        image,
+        (
+            10.0 + piece.x,
+            20.0 + line.ascent - 40.0,
+            30.0,
+            40.0,
+            p.id()
+        )
+    );
+    // Selected: a tint over it, after it.
+    input.select_all();
+    let mut tree = RenderTree::new();
+    input.draw(&mut tree, &palette, &look, &m(400.0));
+    let at = tree
+        .commands
+        .iter()
+        .position(|c| matches!(c, RenderCommand::Image { .. }))
+        .unwrap();
+    assert!(
+        tree.commands[at..].iter().any(|c| matches!(c,
+            RenderCommand::FillRect { x, width, color, .. }
+                if *color == palette.selection_fill()
+                    && (*x - image.0).abs() < 0.01
+                    && (*width - 30.0).abs() < 0.01)),
+        "{:?}",
+        tree.commands
+    );
+    let mut uploads = crate::picture::Uploads::new();
+    assert_eq!(
+        uploads.changes(input.pictures()),
+        [crate::picture::Change::Upload(p.clone())]
+    );
+    input.backspace();
+    assert_eq!(
+        uploads.changes(input.pictures()),
+        [crate::picture::Change::Drop(p.id())]
+    );
+}
+
+/// **A picture selected on a line of two directions is boxed where it is**:
+/// whole, its own width, however the line is ordered.
+#[test]
+fn a_selected_picture_between_two_directions_is_boxed_where_it_is() {
+    let palette = Palette::for_mode(false);
+    let look = Look {
+        rect: (0.0, 0.0, 400.0, 100.0),
+        focused: false,
+        placeholder: "",
+    };
+    let p = picture(24, 8);
+    let mut doc = RichDoc::plain(&format!("ab {SHALOM}"), Format::default());
+    doc.append(&RichDoc::picture(p, Format::default()));
+    doc.append(&RichDoc::plain(SHALOM, Format::default()));
+    let mut input = RichInput::with_doc(doc);
+    input.select_all();
+    let lines = layout::lay_out(input.doc(), &wide());
+    assert!(!lines[0].is_ltr());
+    let piece = lines[0]
+        .pieces
+        .iter()
+        .find(|piece| piece.picture.is_some())
+        .unwrap()
+        .clone();
+    let mut tree = RenderTree::new();
+    input.draw(&mut tree, &palette, &look, &wide());
+    let fill = palette.selection_fill();
+    let boxes: Vec<(f32, f32)> = tree
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                width,
+                height,
+                color,
+                ..
+            } if *color == fill && (*height - lines[0].height).abs() < 0.01 => Some((*x, *width)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        boxes
+            .iter()
+            .any(|&(x, w)| (x - piece.x).abs() < 0.01 && (w - 24.0).abs() < 0.01),
+        "the picture's box: {boxes:?}, the picture at {}",
+        piece.x
+    );
+}
+
+/// **A click on a picture puts the caret at its nearer edge, and the arrows
+/// step over it as over a letter.**
+#[test]
+fn a_click_on_a_picture_goes_to_its_nearer_edge() {
+    let p = picture(40, 20);
+    let mut input = ab_cd();
+    input.insert_picture(p);
+    let lines = layout::lay_out(input.doc(), &wide());
+    let piece = lines[0]
+        .pieces
+        .iter()
+        .find(|piece| piece.picture.is_some())
+        .unwrap()
+        .clone();
+    input.press(piece.x + 5.0, 2.0, false, &wide());
+    assert_eq!(input.cursor(), piece.start, "its left half: before it");
+    input.press(piece.x + 35.0, 2.0, false, &wide());
+    assert_eq!(input.cursor(), piece.end, "its right half: after it");
+    input.handle_key(&key(Key::Left, false, false), &wide());
+    assert_eq!(input.cursor(), piece.start, "one step back over it");
+}

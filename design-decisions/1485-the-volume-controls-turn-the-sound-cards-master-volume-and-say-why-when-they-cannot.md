@@ -86,9 +86,8 @@ does work joins them: **Dark Mode**, the quick toggle
 
 ### What it does not do
 
-- **Per-program volume, the output device, the volume flyout**
-  (`roadmap-detailed.md` §3.4): the kernel keeps per-program entries
+- **Per-program volume and the output device** (`roadmap-detailed.md`
+  §3.4's volume popup): the kernel keeps per-program entries
   (`fs::soundmixer`) with no interface to programs; the master is what the
-  control device offers.
-- **A volume icon in the tray**: the pane, the keys and the overlay are the
-  controls there are.
+  control device offers. The speaker's flyout has the master alone until
+  then.

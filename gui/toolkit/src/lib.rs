@@ -60,6 +60,7 @@ pub mod motion;
 mod osbytes;
 pub mod palette;
 pub mod pathbar;
+pub mod picture;
 pub mod probe;
 pub mod radio;
 pub mod ratio;

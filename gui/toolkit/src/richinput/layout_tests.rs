@@ -317,6 +317,27 @@ fn a_line_breaks_either_side_of_a_picture() {
     assert_eq!(lines[1].start, 3, "the picture starts the next line");
 }
 
+/// **A picture goes down a line by its own width, alone**: one too wide for
+/// what is left of the line goes to the next -- measured as wide as it is
+/// shown, not as the character that stands for it -- and straight after a
+/// word the word stays where it is, as Unicode's line breaking has it for
+/// an object (UAX #14, rule LB20: a break either side of one).
+#[test]
+fn a_picture_goes_down_a_line_by_its_own_width() {
+    // Room for the text and a character after it, not for the picture.
+    let p = picture(100, 10);
+    let doc = around("aaa", &p, "");
+    let lines = lay_out(&doc, &metrics(w("aaa") + 99.0));
+    assert_eq!(stretches(&lines)[0], (0, 3), "the picture measured whole");
+    // Straight after a word that fits, a picture that does not goes down
+    // a line without it.
+    let p = picture(20, 10);
+    let doc = around("xxxxxxxx aaa", &p, "bbb");
+    let lines = lay_out(&doc, &metrics(w("xxxxxxxx aaa") + 5.0));
+    assert_eq!(stretches(&lines)[0], (0, 12), "the word stays");
+    assert_eq!(lines[1].start, 12, "the picture starts the next line");
+}
+
 /// **A caret beside a picture is at its edge, and a click on it goes to the
 /// nearer edge** -- in a line of either direction.
 #[test]

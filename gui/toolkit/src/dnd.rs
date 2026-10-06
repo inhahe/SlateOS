@@ -1258,8 +1258,10 @@ mod tests {
         }
     }
 
-    /// Every effect, for a source or a target with no opinion.
-    const ALL: [DropEffect; 3] = [DropEffect::Copy, DropEffect::Move, DropEffect::Link];
+    /// The three effects that do something -- every one a source can allow or
+    /// a target have; `None` is the absence of one -- for a source or a
+    /// target with no opinion.
+    const EFFECTS: [DropEffect; 3] = [DropEffect::Copy, DropEffect::Move, DropEffect::Link];
 
     /// The events, each as a word and its target or effect, so a whole
     /// sequence can be compared at once.
@@ -1336,7 +1338,7 @@ mod tests {
 
         // Moved exactly the threshold -- 6 across and 8 down is 10 -- it is
         // a drag.
-        let ended = mgr.begin_drag(2, 0.0, 0.0, DataObject::with_text("x"), ALL.to_vec());
+        let ended = mgr.begin_drag(2, 0.0, 0.0, DataObject::with_text("x"), EFFECTS.to_vec());
         assert!(ended.is_empty());
         assert_eq!(said(&mgr.update_position(6.0, 8.0)), ["start 2", "move"]);
     }
@@ -1401,10 +1403,10 @@ mod tests {
     fn moving_between_targets_leaves_one_before_entering_the_next() {
         let mut mgr = dragging(
             vec![
-                text_target(1, 0.0, 0.0, &ALL),
-                text_target(2, 50.0, 0.0, &ALL),
+                text_target(1, 0.0, 0.0, &EFFECTS),
+                text_target(2, 50.0, 0.0, &EFFECTS),
             ],
-            &ALL,
+            &EFFECTS,
         );
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
@@ -1457,7 +1459,7 @@ mod tests {
                 0.0,
                 &[DropEffect::Move, DropEffect::Copy, DropEffect::Link],
             )],
-            &ALL,
+            &EFFECTS,
         );
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
@@ -1511,7 +1513,7 @@ mod tests {
             ..DragKeys::default()
         };
         assert!(mgr.set_keys(ctrl).is_empty());
-        let ended = mgr.begin_drag(3, 0.0, 0.0, DataObject::with_text("x"), ALL.to_vec());
+        let ended = mgr.begin_drag(3, 0.0, 0.0, DataObject::with_text("x"), EFFECTS.to_vec());
         assert!(ended.is_empty());
         assert!(mgr.set_keys(ctrl).is_empty(), "a press is not a drag yet");
         assert_eq!(
@@ -1600,7 +1602,7 @@ mod tests {
     /// never became a drag, or no drag at all, cancels nothing.
     #[test]
     fn a_cancel_over_a_target_leaves_it() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &EFFECTS)], &EFFECTS);
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
             ["enter 1 Copy", "move"]
@@ -1608,7 +1610,7 @@ mod tests {
         assert_eq!(said(&mgr.cancel()), ["leave 1", "ended 7 None"]);
         assert!(mgr.cancel().is_empty(), "nothing left to cancel");
 
-        let ended = mgr.begin_drag(2, 0.0, 0.0, DataObject::with_text("x"), ALL.to_vec());
+        let ended = mgr.begin_drag(2, 0.0, 0.0, DataObject::with_text("x"), EFFECTS.to_vec());
         assert!(ended.is_empty());
         assert!(mgr.cancel().is_empty(), "a press, not a drag");
         assert_eq!(mgr.state(), DragState::Idle);
@@ -1656,7 +1658,7 @@ mod tests {
     #[test]
     fn drag_manager_target_rejects_incompatible_format() {
         let mut mgr = DragDropManager::with_threshold(1.0);
-        mgr.register_target(text_target(19, 0.0, 0.0, &ALL));
+        mgr.register_target(text_target(19, 0.0, 0.0, &EFFECTS));
         // On top of it, a target that only takes images.
         mgr.register_target(DropTarget {
             id: 20,
@@ -1684,7 +1686,7 @@ mod tests {
     /// one put back with other effects says its new effect.
     #[test]
     fn a_target_changed_under_the_drag_says_so() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &[DropEffect::Copy])], &ALL);
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &[DropEffect::Copy])], &EFFECTS);
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
             ["enter 1 Copy", "move"]
@@ -1715,7 +1717,7 @@ mod tests {
     fn a_release_far_from_the_press_is_a_drop() {
         let mut mgr = DragDropManager::with_threshold(5.0);
         mgr.register_target(text_target(4, 100.0, 100.0, &[DropEffect::Copy]));
-        let ended = mgr.begin_drag(9, 0.0, 0.0, DataObject::with_text("x"), ALL.to_vec());
+        let ended = mgr.begin_drag(9, 0.0, 0.0, DataObject::with_text("x"), EFFECTS.to_vec());
         assert!(ended.is_empty());
         assert_eq!(
             said(&mgr.end_drag(110.0, 110.0)),
@@ -1732,12 +1734,12 @@ mod tests {
     /// **A press during a drag ends the drag first**, and says so.
     #[test]
     fn a_press_during_a_drag_ends_it_first() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &EFFECTS)], &EFFECTS);
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
             ["enter 1 Copy", "move"]
         );
-        let ended = mgr.begin_drag(8, 10.0, 10.0, DataObject::with_text("y"), ALL.to_vec());
+        let ended = mgr.begin_drag(8, 10.0, 10.0, DataObject::with_text("y"), EFFECTS.to_vec());
         assert_eq!(said(&ended), ["leave 1", "ended 7 None"]);
         assert_eq!(mgr.source(), Some(8));
         assert_eq!(mgr.state(), DragState::Pending);
@@ -1753,18 +1755,18 @@ mod tests {
         let ctrl = DragKeys { ctrl: true, ..no };
         let shift = DragKeys { shift: true, ..no };
         let alt = DragKeys { alt: true, ..no };
-        assert_eq!(negotiate(&ALL, &[Move, Copy], no), Move);
-        assert_eq!(negotiate(&ALL, &[Link, Move], no), Link);
+        assert_eq!(negotiate(&EFFECTS, &[Move, Copy], no), Move);
+        assert_eq!(negotiate(&EFFECTS, &[Link, Move], no), Link);
         assert_eq!(negotiate(&[Copy], &[Move, Copy], no), Copy);
         assert_eq!(negotiate(&[Copy], &[Move], no), None);
         assert_eq!(negotiate(&[None, Copy], &[None, Copy], no), Copy);
         assert_eq!(negotiate(&[None], &[None], no), None);
-        assert_eq!(negotiate(&ALL, &[], no), None);
-        assert_eq!(negotiate(&ALL, &[Move, Copy], ctrl), Copy);
-        assert_eq!(negotiate(&ALL, &[Copy, Move], shift), Move);
-        assert_eq!(negotiate(&ALL, &[Copy, Link], alt), Link);
+        assert_eq!(negotiate(&EFFECTS, &[], no), None);
+        assert_eq!(negotiate(&EFFECTS, &[Move, Copy], ctrl), Copy);
+        assert_eq!(negotiate(&EFFECTS, &[Copy, Move], shift), Move);
+        assert_eq!(negotiate(&EFFECTS, &[Copy, Link], alt), Link);
         assert_eq!(negotiate(&[Move], &[Move, Copy], ctrl), None);
-        assert_eq!(negotiate(&ALL, &[Move], ctrl), None);
+        assert_eq!(negotiate(&EFFECTS, &[Move], ctrl), None);
 
         // The keys' names, every combination.
         for (ctrl, shift, alt, asked) in [
@@ -1821,7 +1823,7 @@ mod tests {
                 0.0,
                 &[DropEffect::Move, DropEffect::Copy],
             )],
-            &ALL,
+            &EFFECTS,
         );
         assert!(mgr.take_outgoing().is_some());
         assert_eq!(
@@ -1847,7 +1849,7 @@ mod tests {
     /// second word changes nothing.
     #[test]
     fn a_carried_drag_dropped_elsewhere_ends_when_the_window_system_says() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &EFFECTS)], &EFFECTS);
         assert!(mgr.take_outgoing().is_some());
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
@@ -1868,7 +1870,7 @@ mod tests {
     /// which the window system takes during a drag.
     #[test]
     fn a_carried_drag_ended_over_this_window_leaves_its_target() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &EFFECTS)], &EFFECTS);
         assert!(mgr.take_outgoing().is_some());
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
@@ -1884,7 +1886,7 @@ mod tests {
     /// system's word after it is about a drag that is already over.
     #[test]
     fn a_carried_drag_dropped_here_ends_here() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &EFFECTS)], &EFFECTS);
         assert!(mgr.take_outgoing().is_some());
         assert_eq!(said(&mgr.pointer_left()), Vec::<String>::new());
         assert_eq!(
@@ -1904,7 +1906,7 @@ mod tests {
     /// not.
     #[test]
     fn a_carried_drag_given_up_here_is_withdrawn() {
-        let mut mgr = dragging(Vec::new(), &ALL);
+        let mut mgr = dragging(Vec::new(), &EFFECTS);
         assert!(mgr.take_outgoing().is_some());
         assert_eq!(said(&mgr.cancel()), ["ended 7 None"]);
         assert!(mgr.take_withdrawn());
@@ -1917,7 +1919,7 @@ mod tests {
     /// it is about.
     #[test]
     fn the_window_systems_word_ends_only_a_carried_drag() {
-        let mut mgr = dragging(Vec::new(), &ALL);
+        let mut mgr = dragging(Vec::new(), &EFFECTS);
         assert!(mgr.outgoing_ended(DropEffect::Copy).is_empty());
         assert!(mgr.is_dragging());
     }
@@ -1987,7 +1989,7 @@ mod tests {
     #[test]
     fn another_programs_drag_follows_the_keys_and_ends_here_when_it_leaves() {
         let mut mgr = html_or_text();
-        let entered = mgr.offer_entered(vec![DataFormat::PlainText], ALL.to_vec(), 10.0, 10.0);
+        let entered = mgr.offer_entered(vec![DataFormat::PlainText], EFFECTS.to_vec(), 10.0, 10.0);
         assert_eq!(said(&entered), ["enter 1 Copy", "move"]);
         let shift = DragKeys {
             shift: true,
@@ -2035,7 +2037,7 @@ mod tests {
     #[test]
     fn another_programs_drag_over_nothing_answers_nothing() {
         let mut mgr = html_or_text();
-        let entered = mgr.offer_entered(vec![DataFormat::PlainText], ALL.to_vec(), 100.0, 100.0);
+        let entered = mgr.offer_entered(vec![DataFormat::PlainText], EFFECTS.to_vec(), 100.0, 100.0);
         assert_eq!(said(&entered), ["move"]);
         assert_eq!(mgr.offer_status(), (DropEffect::None, None));
         let (events, asked) = mgr.offer_dropped(100.0, 100.0);
@@ -2049,13 +2051,13 @@ mod tests {
     fn data_not_as_asked_or_not_at_all_leaves_the_target() {
         let mut mgr = html_or_text();
         let offered = vec![DataFormat::PlainText, DataFormat::Html];
-        let _entered = mgr.offer_entered(offered.clone(), ALL.to_vec(), 10.0, 10.0);
+        let _entered = mgr.offer_entered(offered.clone(), EFFECTS.to_vec(), 10.0, 10.0);
         assert_eq!(mgr.offer_dropped(10.0, 10.0).1, Some(DataFormat::Html));
         assert_eq!(
             said(&mgr.offer_data(DataFormat::PlainText, b"x".to_vec())),
             ["leave 1"]
         );
-        let _entered = mgr.offer_entered(offered, ALL.to_vec(), 10.0, 10.0);
+        let _entered = mgr.offer_entered(offered, EFFECTS.to_vec(), 10.0, 10.0);
         assert_eq!(mgr.offer_dropped(10.0, 10.0).1, Some(DataFormat::Html));
         assert_eq!(said(&mgr.offer_failed()), ["leave 1"]);
         assert!(
@@ -2069,7 +2071,7 @@ mod tests {
     #[test]
     fn another_programs_drag_of_a_format_nothing_takes_enters_nothing() {
         let mut mgr = html_or_text();
-        let entered = mgr.offer_entered(vec![DataFormat::ImagePng], ALL.to_vec(), 10.0, 10.0);
+        let entered = mgr.offer_entered(vec![DataFormat::ImagePng], EFFECTS.to_vec(), 10.0, 10.0);
         assert_eq!(said(&entered), ["move"]);
         assert_eq!(mgr.offer_status(), (DropEffect::None, None));
     }
@@ -2079,7 +2081,7 @@ mod tests {
     /// leaves it under way.
     #[test]
     fn this_windows_own_drag_is_not_dropped_as_an_offer() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &EFFECTS)], &EFFECTS);
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
             ["enter 1 Copy", "move"]
@@ -2103,7 +2105,7 @@ mod tests {
     #[test]
     fn another_programs_drag_is_not_dropped_by_end_drag() {
         let mut mgr = html_or_text();
-        let _entered = mgr.offer_entered(vec![DataFormat::PlainText], ALL.to_vec(), 10.0, 10.0);
+        let _entered = mgr.offer_entered(vec![DataFormat::PlainText], EFFECTS.to_vec(), 10.0, 10.0);
         assert_eq!(said(&mgr.end_drag(10.0, 10.0)), ["move", "leave 1"]);
         assert_eq!(mgr.state(), DragState::Idle);
     }
@@ -2113,13 +2115,13 @@ mod tests {
     /// the window system is told this window gave its own up.
     #[test]
     fn another_programs_drag_ends_this_windows_first() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &EFFECTS)], &EFFECTS);
         assert!(mgr.take_outgoing().is_some());
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
             ["enter 1 Copy", "move"]
         );
-        let events = mgr.offer_entered(vec![DataFormat::PlainText], ALL.to_vec(), 20.0, 20.0);
+        let events = mgr.offer_entered(vec![DataFormat::PlainText], EFFECTS.to_vec(), 20.0, 20.0);
         assert_eq!(
             said(&events),
             ["leave 1", "ended 7 None", "enter 1 Copy", "move"]

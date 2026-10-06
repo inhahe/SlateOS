@@ -401,6 +401,15 @@ def resolve_enum(
     if path in per_file:
         return per_file[path], ""
 
+    # A non-enum of this name in this very file is what the name means here,
+    # whatever enums the crate has elsewhere: an item of the module shadows
+    # the crate's other items of that name. Checked before the crate's enums,
+    # since `gui/toolkit/src/button.rs`'s `struct State` -- its test list
+    # `STATES` -- was once judged against the toolkit's CSS `enum State`, and
+    # the boot test refused a clean tree over it.
+    if path in nonenum.get(elem, ()):
+        return None, f"`{elem}` is a struct/type alias in this file, not an enum"
+
     same_crate = {p: n for p, n in per_file.items() if crates[p] == crate}
     if same_crate:
         vals = set(same_crate.values())
@@ -592,6 +601,14 @@ RESOLVE_TESTS: list[tuple] = [
         "E", "a/src/x.rs", "a",
         {"E": {"a/src/y.rs": 4}}, {}, "",
         4,
+    ),
+    (
+        "a struct in the same file wins over an enum elsewhere in the crate",
+        "State", "gui/toolkit/src/button.rs", "gui/toolkit",
+        {"State": {"gui/toolkit/src/css/sheet.rs": 6}},
+        {"State": {"gui/toolkit/src/button.rs"}},
+        "",
+        None,
     ),
     (
         "a struct of that name in this crate is not an enum anywhere else",

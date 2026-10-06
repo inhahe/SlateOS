@@ -43,6 +43,7 @@
 apps/chess/src/main.rs	PieceKind::PROMOTION_KINDS	a pawn may not become a king, and staying a pawn is not a promotion
 apps/finance/src/main.rs	Category::EXPENSE_CATS	Savings, Income and Investment are where money comes from, not what it is spent on
 apps/pipes/src/main.rs	PipeKind::FILL	`Empty` is the absence of a pipe, so filling a cell with it would leave the cell unfilled
+gui/toolkit/src/dnd.rs	DropEffect::EFFECTS	`None` is the absence of an effect: a drag's source allows, and its target can have, only the three that do something
 userspace/coreutils/src/ls.rs	Ind::FILETYPE_INDICATORS	lane B's. `Ind` also carries the colour-control entries (Reset, Norm, Left, Right, End...), which are not file types
 
 # --- the variant carries data a fixed list cannot express --------------------

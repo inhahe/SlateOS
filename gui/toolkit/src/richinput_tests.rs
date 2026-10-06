@@ -207,6 +207,117 @@ fn ctrl_shift_v_pastes_the_text_alone() {
     );
 }
 
+/// The menu's rows as (label, lit, ticked), separators left out.
+fn menu_rows(input: &RichInput) -> Vec<(String, bool, Option<bool>)> {
+    input
+        .edit_menu()
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            crate::menu::MenuItem::Action {
+                label,
+                enabled,
+                checked,
+                ..
+            } => Some((label.clone(), *enabled, *checked)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A right-click offers what the keys do** -- the edit rows every field
+/// has, Paste as plain text beside Paste, and the switches, ticked where
+/// what is shown has them -- each lit only where it would do something.
+#[test]
+fn the_menu_offers_what_the_keys_do() {
+    crate::clipboard::set_text("");
+    let mut input = RichInput::with_doc(RichDoc::plain("ab", Format::default()));
+    let labels: Vec<String> = menu_rows(&input).into_iter().map(|(l, ..)| l).collect();
+    assert_eq!(
+        labels,
+        [
+            "Undo",
+            "Redo",
+            "Cut",
+            "Copy",
+            "Paste",
+            "Paste as plain text",
+            "Delete",
+            "Select all",
+            "Bold",
+            "Italic",
+            "Underline"
+        ]
+    );
+    let lit = |input: &RichInput, label: &str| {
+        menu_rows(input)
+            .into_iter()
+            .find(|(l, ..)| l == label)
+            .map(|(_, on, ticked)| (on, ticked))
+            .unwrap()
+    };
+    assert_eq!(
+        lit(&input, "Paste as plain text"),
+        (false, None),
+        "nothing copied"
+    );
+    assert_eq!(lit(&input, "Cut"), (false, None), "nothing selected");
+    assert_eq!(lit(&input, "Bold"), (true, Some(false)));
+    input.select_all();
+    input.toggle(Toggle::Bold);
+    assert_eq!(
+        lit(&input, "Bold"),
+        (true, Some(true)),
+        "ticked: all of it is"
+    );
+    assert_eq!(lit(&input, "Cut"), (true, None));
+    assert_eq!(lit(&input, "Undo"), (true, None));
+    crate::clipboard::set_text("x");
+    assert_eq!(lit(&input, "Paste as plain text"), (true, None));
+    let menu = input.edit_menu();
+    assert_eq!(
+        menu.reason(EditCommand::Redo.id()),
+        Some("There is nothing to redo")
+    );
+}
+
+/// **A row of the menu does what its keys do**, and answers as they would.
+#[test]
+fn a_menu_row_does_what_its_keys_do() {
+    let mut input = RichInput::with_doc(RichDoc::plain("ab", Format::default()));
+    input.select_all();
+    input.toggle(Toggle::Bold);
+    input.copy();
+    let mut other = RichInput::with_doc(RichDoc::plain("x", Format::default()));
+    other.doc_end(false);
+    assert_eq!(
+        other.edit_command(RichCommand::PastePlain.id()),
+        KeyEdit::Changed
+    );
+    assert_eq!(bold_runs(&other), [(0, 3, false)], "the text alone");
+    other.select_all();
+    assert_eq!(
+        other.edit_command(RichCommand::Italic.id()),
+        KeyEdit::Changed
+    );
+    assert!(other.doc().format_at(1).italic);
+    assert_eq!(
+        other.edit_command(EditCommand::SelectAll.id()),
+        KeyEdit::Handled
+    );
+    assert_eq!(other.edit_command(EditCommand::Cut.id()), KeyEdit::Changed);
+    assert_eq!(other.text(), "");
+    assert_eq!(crate::clipboard::text(), "xab");
+    assert_eq!(other.edit_command(EditCommand::Undo.id()), KeyEdit::Changed);
+    assert_eq!(other.text(), "xab");
+    assert_eq!(other.edit_command(0x1234), KeyEdit::Unhandled);
+    assert_eq!(
+        RichCommand::from_id(RichCommand::Bold.id()),
+        Some(RichCommand::Bold)
+    );
+    assert_eq!(RichCommand::from_id(EditCommand::Paste.id()), None);
+}
+
 /// **The keys: Ctrl+B switches, Enter breaks the line, Shift and an arrow
 /// select, Ctrl+Z undoes** -- each answered as a change or not.
 #[test]

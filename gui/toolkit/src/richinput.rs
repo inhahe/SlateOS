@@ -38,6 +38,15 @@
 //! the formatting back, and any other text pastes plain, in the format at the
 //! caret. Pictures pasted in wait on the clipboard carrying them
 //! (`known-issues/TD-C-A-RICH-INPUT-CANNOT-TAKE-A-PICTURE.md`).
+//! Ctrl+Shift+V pastes the text alone, the copy's formatting left behind.
+//!
+//! # The menu
+//!
+//! A right-click offers what the field's keys do, as every field's menu
+//! does (`design-decisions.md` §1454, [`crate::editmenu`]): Undo and Redo,
+//! Cut, Copy, Paste and *Paste as plain text*, Delete, Select all -- and
+//! Bold, Italic and Underline, ticked where what is shown has them
+//! ([`RichInput::edit_menu`], [`RichInput::edit_command`]).
 
 pub mod doc;
 pub mod layout;
@@ -50,7 +59,9 @@ pub use doc::{Format, RichDoc, Run};
 pub use layout::{Line, Metrics, Piece};
 
 use crate::color::Color;
+use crate::editmenu::{EditCommand, EditState};
 use crate::event::{Key, KeyEvent};
+use crate::menu::{ContextMenu, MenuItem, MenuItemId};
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
@@ -59,6 +70,73 @@ use crate::undo::UndoHistory;
 
 /// How many steps a field's history keeps.
 const HISTORY: usize = 500;
+
+/// Where the ids of a rich field's own menu rows start: far up the id space,
+/// beside the edit rows every field's menu has ([`crate::editmenu`]), so a
+/// window's own rows sit beside both without renumbering.
+const MENU_BASE: MenuItemId = 0xED18_0000_0000_0000;
+
+/// A row of a rich field's menu that is not one every field's has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RichCommand {
+    /// Paste the clipboard's text alone ([`RichInput::paste_plain`]).
+    PastePlain,
+    /// Switch bold.
+    Bold,
+    /// Switch italic.
+    Italic,
+    /// Switch underline.
+    Underline,
+}
+
+impl RichCommand {
+    /// Every one, in the menu's order.
+    pub const ALL: [Self; 4] = [Self::PastePlain, Self::Bold, Self::Italic, Self::Underline];
+
+    /// The id its row carries.
+    #[must_use]
+    pub const fn id(self) -> MenuItemId {
+        MENU_BASE | self as MenuItemId
+    }
+
+    /// The row an id names, if it is one of these.
+    #[must_use]
+    pub fn from_id(id: MenuItemId) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.id() == id)
+    }
+
+    /// Its row's name.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PastePlain => "Paste as plain text",
+            Self::Bold => "Bold",
+            Self::Italic => "Italic",
+            Self::Underline => "Underline",
+        }
+    }
+
+    /// The keys that do the same, shown beside the name.
+    #[must_use]
+    pub const fn keys(self) -> &'static str {
+        match self {
+            Self::PastePlain => "Ctrl+Shift+V",
+            Self::Bold => "Ctrl+B",
+            Self::Italic => "Ctrl+I",
+            Self::Underline => "Ctrl+U",
+        }
+    }
+
+    /// The switch it flips, for those that flip one.
+    const fn toggle(self) -> Option<Toggle> {
+        match self {
+            Self::PastePlain => None,
+            Self::Bold => Some(Toggle::Bold),
+            Self::Italic => Some(Toggle::Italic),
+            Self::Underline => Some(Toggle::Underline),
+        }
+    }
+}
 
 /// One of the switches the keys and the toolbar flip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -509,6 +587,100 @@ impl RichInput {
         let text = crate::clipboard::text();
         if !text.is_empty() {
             self.insert_str(&text);
+        }
+    }
+
+    /// The menu a right-click on the field puts up: what its keys do (the
+    /// module's "The menu"), each dimmed row saying why while the pointer
+    /// rests on it. The window shows it where the click landed.
+    #[must_use]
+    pub fn edit_menu(&self) -> ContextMenu {
+        let state = EditState {
+            selected: self.has_selection(),
+            editable: true,
+            has_text: !self.text().is_empty(),
+            history: true,
+            can_undo: self.can_undo(),
+            can_redo: self.can_redo(),
+            copies_line: false,
+        };
+        let nothing_copied = crate::clipboard::is_empty();
+        let row = |command: RichCommand, enabled: bool, checked: Option<bool>| MenuItem::Action {
+            id: command.id(),
+            label: command.label().to_owned(),
+            shortcut: Some(command.keys().to_owned()),
+            icon: None,
+            enabled,
+            checked,
+        };
+        let mut rows = crate::editmenu::rows(state);
+        let after_paste = rows
+            .iter()
+            .position(
+                |r| matches!(r, MenuItem::Action { id, .. } if *id == EditCommand::Paste.id()),
+            )
+            .map_or(rows.len(), |at| at.saturating_add(1));
+        rows.insert(
+            after_paste,
+            row(RichCommand::PastePlain, !nothing_copied, None),
+        );
+        rows.push(MenuItem::Separator);
+        for command in [
+            RichCommand::Bold,
+            RichCommand::Italic,
+            RichCommand::Underline,
+        ] {
+            let ticked = command.toggle().is_some_and(|t| self.shown_has(t));
+            rows.push(row(command, true, Some(ticked)));
+        }
+        let mut menu = ContextMenu::new(rows);
+        for command in EditCommand::ALL {
+            if let Some(why) = crate::editmenu::why_dimmed(command, state) {
+                menu.explain(command.id(), why);
+            }
+        }
+        if nothing_copied {
+            menu.explain(RichCommand::PastePlain.id(), "Nothing has been copied");
+        }
+        menu
+    }
+
+    /// Do what the row `id` of [`edit_menu`](Self::edit_menu) says, and
+    /// answer as the keys that do the same would: `Changed` where the
+    /// document changed, `Handled` where it did not, `Unhandled` for an id
+    /// that is none of the menu's rows.
+    pub fn edit_command(&mut self, id: MenuItemId) -> KeyEdit {
+        let before = self.doc.clone();
+        if let Some(command) = EditCommand::from_id(id) {
+            match command {
+                EditCommand::Undo => {
+                    self.undo();
+                }
+                EditCommand::Redo => {
+                    self.redo();
+                }
+                EditCommand::Cut => self.cut(),
+                EditCommand::Copy => self.copy(),
+                EditCommand::Paste => self.paste(),
+                EditCommand::Delete => {
+                    if self.has_selection() {
+                        self.delete();
+                    }
+                }
+                EditCommand::SelectAll => self.select_all(),
+            }
+        } else if let Some(command) = RichCommand::from_id(id) {
+            match command.toggle() {
+                Some(toggle) => self.toggle(toggle),
+                None => self.paste_plain(),
+            }
+        } else {
+            return KeyEdit::Unhandled;
+        }
+        if self.doc == before {
+            KeyEdit::Handled
+        } else {
+            KeyEdit::Changed
         }
     }
 

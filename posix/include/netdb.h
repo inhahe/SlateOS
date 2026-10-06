@@ -56,6 +56,29 @@ int getnetgrent(char **__restrict, char **__restrict, char **__restrict);
 int getnetgrent_r(char **__restrict, char **__restrict, char **__restrict, char *__restrict,
                   size_t);
 int innetgr(const char *, const char *, const char *, const char *);
+
+/* The BSD remote-execution calls. rcmd runs a command through a host's
+ * rshd from a reserved port, rexec through its rexecd with a name and
+ * password (from ~/.netrc when NULL): each the connection, the stderr
+ * channel's in *fd2p when it is not NULL, and *ahost the host's canonical
+ * name. ruserok says whether a remote user may log in as a local one, by
+ * /etc/hosts.equiv and ~/.rhosts (0 yes, -1 no); iruserok for an address.
+ * rresvport binds a socket to a reserved port, from *alport down. The _af
+ * forms take an address family. */
+int rcmd(char **__restrict, unsigned short int, const char *__restrict, const char *__restrict,
+         const char *__restrict, int *__restrict);
+int rcmd_af(char **__restrict, unsigned short int, const char *__restrict, const char *__restrict,
+            const char *__restrict, int *__restrict, sa_family_t);
+int rexec(char **__restrict, int, const char *__restrict, const char *__restrict,
+          const char *__restrict, int *__restrict);
+int rexec_af(char **__restrict, int, const char *__restrict, const char *__restrict,
+             const char *__restrict, int *__restrict, sa_family_t);
+int ruserok(const char *, int, const char *, const char *);
+int ruserok_af(const char *, int, const char *, const char *, sa_family_t);
+int iruserok(uint32_t, int, const char *, const char *);
+int iruserok_af(const void *, int, const char *, const char *, sa_family_t);
+int rresvport(int *);
+int rresvport_af(int *, sa_family_t);
 #endif
 
 #ifdef _GNU_SOURCE

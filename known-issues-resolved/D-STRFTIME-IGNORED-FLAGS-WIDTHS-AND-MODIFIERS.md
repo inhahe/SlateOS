@@ -42,7 +42,7 @@ its read-only data. In 2.39's build the call then fails and answers 0
 (73 of the oracle's calls).
 
 **How it is held:** `posix/tools/oracle/strftime_harness.py` records
-12,801 calls of glibc 2.39's `strftime` and `wcsftime` in C.UTF-8 into
+12,849 calls of glibc 2.39's `strftime` and `wcsftime` in C.UTF-8 into
 `posix/src/strftime_oracle.txt`. `strftime.rs`'s `strftime_is_glibcs`
 replays every one: the return value, `errno`, and every unit written,
 including what a call left in the buffer before it gave up.

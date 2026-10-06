@@ -195,4 +195,10 @@ fn a_list_says_which_themes_recommend_fonts() {
     assert_eq!(list[0].id, OsStr::new(super::super::BUILT_IN));
     assert!(!list[0].provides_fonts());
     assert!(list[0].fonts.is_empty());
+
+    // An entry that says it could not be read provides nothing, whatever
+    // else it holds -- as for every other axis.
+    let mut contradictory = find("nord").clone();
+    contradictory.problem = Some(super::super::ThemeError::NotText);
+    assert!(!contradictory.provides_fonts());
 }

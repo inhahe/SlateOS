@@ -1138,6 +1138,20 @@ fn a_wallpaper_the_theme_cannot_show_is_said() {
         "is not a picture",
     );
     assert!(!report.covers.contains(&"wallpapers"));
+
+    // And a section that names no wallpaper for either mode is as good as
+    // not there, and is said to be, as any other such section is.
+    let theme = Theme::tidy();
+    theme.write(
+        "theme.yaml",
+        format!("{TIDY}wallpapers:\n  dusk: dusk.png\n"),
+    );
+    assert_said(
+        &theme.check(),
+        Severity::Warning,
+        "theme.yaml",
+        "`wallpapers` sets nothing this desktop can use",
+    );
 }
 
 /// **A theme named for the built-in one is told what that means.**

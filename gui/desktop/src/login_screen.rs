@@ -47,6 +47,13 @@
 //! said "autologin" in the feature list above while none happened, which is
 //! the lesson worth keeping: a feature list is a claim like any other, and a
 //! doc comment is the one place such a claim is never caught by a test.
+//!
+//! # To tools
+//!
+//! The screen is a dialog to automation and assistive tools -- the first a
+//! screen reader meets -- its accounts, its password field (whose text is
+//! never shown), Sign In and the rest, and the bottom bar's buttons and
+//! menus, each pressed as clicked ([`LoginPart`], in `accessible`).
 
 use appearance::ImageFit;
 use appearance::Palette;
@@ -56,6 +63,9 @@ use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::listview::ListKey;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+
+mod accessible;
+pub use accessible::LoginPart;
 
 // ============================================================================
 // Colour
@@ -1073,6 +1083,41 @@ impl LoginScreen {
         }
     }
 
+    /// Where what the screen says is drawn: under Sign In in the password
+    /// view -- a refusal, a lockout -- or at the middle while it signs in.
+    fn message_rect(&self) -> Hit {
+        let cx = self.password_view_x();
+        if matches!(
+            self.phase,
+            LoginPhase::Authenticating | LoginPhase::LoggingIn
+        ) {
+            Hit {
+                x: cx - 120.0,
+                y: self.screen_height / 2.0 - 4.0,
+                w: 240.0,
+                h: 30.0,
+            }
+        } else {
+            let button = self.sign_in_rect();
+            Hit {
+                x: cx - 120.0,
+                y: button.y + button.h + 12.0,
+                w: 240.0,
+                h: 46.0,
+            }
+        }
+    }
+
+    /// Where the keyboard layout is drawn, at the bottom bar's left.
+    fn keyboard_layout_rect(&self) -> Hit {
+        Hit {
+            x: 8.0,
+            y: self.screen_height - BAR_HEIGHT,
+            w: 80.0,
+            h: BAR_HEIGHT,
+        }
+    }
+
     /// The arrow back to the accounts, at the password view's top left --
     /// drawn, and pressed, only with more than one account to go back to.
     #[must_use]
@@ -1640,11 +1685,12 @@ impl LoginScreen {
                 });
             }
 
-            // Name.
+            // Name: the account's own, or its login name where it gives
+            // none -- an account with no display name was a blank row.
             commands.push(RenderCommand::Text {
                 x: row_x + 52.0,
                 y: uy + 12.0,
-                text: user.display_name.clone(),
+                text: user.shown_name().to_owned(),
                 font_size: 16.0,
                 color: p.text,
                 font_weight: FontWeightHint::Bold,
@@ -1718,7 +1764,7 @@ impl LoginScreen {
                 RenderCommand::Text {
                     x: cx - 60.0,
                     y: cy - 20.0,
-                    text: user.display_name.clone(),
+                    text: user.shown_name().to_owned(),
                     font_size: 18.0,
                     color: p.on_wallpaper(),
                     font_weight: FontWeightHint::Bold,
@@ -1908,7 +1954,7 @@ impl LoginScreen {
                 RenderCommand::Text {
                     x: cx - 80.0,
                     y: cy,
-                    text: format!("Welcome, {}!", user.display_name),
+                    text: format!("Welcome, {}!", user.shown_name()),
                     font_size: 20.0,
                     color: p.on_wallpaper(),
                     font_weight: FontWeightHint::Bold,
@@ -4079,6 +4125,37 @@ mod tests {
     #[test]
     fn two_accounts_open_on_the_user_list() {
         assert_eq!(make_screen().phase, LoginPhase::UserSelect);
+    }
+
+    /// **An account that gives no display name is shown by its login name**
+    /// -- in the list, over the password field and in the welcome -- as
+    /// `shown_name` says and the rest of the desktop shows it. It was a blank
+    /// row, a blank name and "Welcome, !".
+    #[test]
+    fn an_account_with_no_display_name_is_shown_by_its_login_name() {
+        let p = Palette::from_settings(&appearance::AppearanceSettings::default());
+        let mut s = LoginScreen::new(
+            1920.0,
+            1080.0,
+            vec![
+                LoginUser::new(Some(1), "alice", "Alice"),
+                LoginUser::new(Some(2), "bob", ""),
+            ],
+        );
+        let drawn = |s: &LoginScreen| -> Vec<String> {
+            s.render(&p)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(drawn(&s).iter().any(|t| t == "bob"), "in the list");
+        s.select_user(1);
+        assert!(drawn(&s).iter().any(|t| t == "bob"), "over the field");
+        s.phase = LoginPhase::LoggingIn;
+        assert!(drawn(&s).iter().any(|t| t == "Welcome, bob!"));
     }
 
     /// A press at the middle of `rect`.

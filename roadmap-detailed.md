@@ -2742,7 +2742,11 @@ authors never wrote a single automation handler.
   would. And the tiling overlay -- its zones, each tiling the focused
   window as clicked, and its picker's layouts, chosen as the pointer
   chooses one -- and the list a shut down waits on: its programs, and
-  "... anyway" and Cancel. The toolkit's ribbon
+  "... anyway" and Cancel. And the login screen, the first a screen
+  reader meets (`desktop::login_screen::LoginPart`): its accounts, its
+  password field -- typed into, its text never shown -- Sign In, the
+  eye, the way back, what it says, and its bar's buttons and menus, each
+  pressed as clicked. The toolkit's ribbon
   (`guitk::ribbon::RibbonAccess`): its tabs, each group's controls --
   buttons, toggles, split buttons and their arrows, drop-downs, galleries --
   a folded group's button and panel, the Quick Access Toolbar and an open

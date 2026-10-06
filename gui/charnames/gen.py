@@ -43,6 +43,7 @@ import io
 import pathlib
 import re
 import sys
+import unicodedata
 import xml.etree.ElementTree as ET
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -106,14 +107,21 @@ CATEGORIES = [
 
 def rust_str(s):
     """`s` as a Rust string literal: printable characters as they are,
-    everything else escaped."""
+    everything else escaped -- and so is a character Unicode normalisation
+    would change (U+037E GREEK QUESTION MARK is U+003B in NFC), which an
+    editor or a tool could silently replace in a literal and which clippy's
+    unicode_not_nfc rightly flags. A string whose normal form differs as a
+    whole has every character past ASCII escaped."""
+    whole_changes = unicodedata.normalize("NFC", s) != s
     out = []
     for c in s:
         if c == "\\":
             out.append("\\\\")
         elif c == '"':
             out.append('\\"')
-        elif c.isprintable() and c != "­":
+        elif (c.isprintable() and c != "­"
+              and unicodedata.normalize("NFC", c) == c
+              and not (whole_changes and ord(c) > 0x7F)):
             out.append(c)
         else:
             out.append("\\u{%x}" % ord(c))

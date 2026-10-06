@@ -603,10 +603,18 @@ impl RichInput {
         self.begin_or_end_selection(shift);
         let text = self.doc.text();
         let after = text.get(self.cursor..).unwrap_or("");
-        let spaces = after.len().saturating_sub(after.trim_start_matches(char::is_whitespace).len());
+        let spaces = after
+            .len()
+            .saturating_sub(after.trim_start_matches(char::is_whitespace).len());
         let rest = after.get(spaces..).unwrap_or("");
-        let word = rest.len().saturating_sub(rest.trim_start_matches(|c: char| !c.is_whitespace()).len());
-        self.cursor = self.cursor.saturating_add(spaces).saturating_add(word).min(text.len());
+        let word = rest
+            .len()
+            .saturating_sub(rest.trim_start_matches(|c: char| !c.is_whitespace()).len());
+        self.cursor = self
+            .cursor
+            .saturating_add(spaces)
+            .saturating_add(word)
+            .min(text.len());
         self.moved();
     }
 

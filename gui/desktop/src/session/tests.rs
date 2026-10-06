@@ -7954,7 +7954,10 @@ fn a_notes_character_picker_is_drawn_and_its_pick_is_the_notes() {
         press_at(&desktop, popups, x, y);
         release_at(&desktop, popups, x, y);
         session.pump().expect("pump");
-        assert!(session.shell().char_picker_open(), "the row opened no picker");
+        assert!(
+            session.shell().char_picker_open(),
+            "the row opened no picker"
+        );
         let picker_commands = session
             .shell()
             .render_char_picker()
@@ -8000,7 +8003,10 @@ fn a_notes_character_picker_is_drawn_and_its_pick_is_the_notes() {
         desktop.borrow_mut().send_input(&events);
         session.pump().expect("pump");
 
-        assert!(!session.shell().char_picker_open(), "a pick left the picker up");
+        assert!(
+            !session.shell().char_picker_open(),
+            "a pick left the picker up"
+        );
         assert_eq!(
             session.shell().widgets.get(id).expect("placed").state_text,
             "\u{2615}",

@@ -85,7 +85,9 @@ fn choose_picker_row(shell: &mut DesktopShell) {
     let index = menu
         .items()
         .iter()
-        .position(|i| matches!(i, MenuItem::Action { label, .. } if label == charpicker::MENU_LABEL))
+        .position(
+            |i| matches!(i, MenuItem::Action { label, .. } if label == charpicker::MENU_LABEL),
+        )
         .expect("the menu offers the picker");
     let r = menu.item_rect(index).expect("the row is shown");
     let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
@@ -146,7 +148,11 @@ fn the_run_boxs_menu_opens_the_picker_and_a_pick_is_typed_into_the_line() {
     assert!(shell.run_dialog.is_visible(), "the picker closed the box");
 
     type_text(&mut shell, "U+00E9");
-    assert_eq!(shell.run_dialog.line(), "echo ", "a search key reached the line");
+    assert_eq!(
+        shell.run_dialog.line(),
+        "echo ",
+        "a search key reached the line"
+    );
     key(&mut shell, &pressed(Key::Enter));
     assert!(!shell.char_picker_open(), "a pick left the picker up");
     assert!(shell.render_char_picker().is_none());
@@ -166,10 +172,16 @@ fn ctrl_period_opens_the_picker_and_escape_takes_it_down() {
     assert!(shell.char_picker_open());
     let picker = shell.char_picker.as_ref().unwrap();
     let field = shell.run_dialog.field_rect();
-    assert!(picker.rect.y >= field.bottom() || picker.rect.bottom() <= field.y, "over the field");
+    assert!(
+        picker.rect.y >= field.bottom() || picker.rect.bottom() <= field.y,
+        "over the field"
+    );
     key(&mut shell, &pressed(Key::Escape));
     assert!(!shell.char_picker_open());
-    assert!(shell.run_dialog.is_visible(), "Escape closed the box under the picker");
+    assert!(
+        shell.run_dialog.is_visible(),
+        "Escape closed the box under the picker"
+    );
     assert_eq!(shell.run_dialog.line(), "ls");
 }
 
@@ -196,11 +208,21 @@ fn a_press_away_takes_the_picker_down() {
     let mut shell = run_box_with("ls");
     key(&mut shell, &ctrl_period());
     let r = shell.char_picker.as_ref().unwrap().rect;
-    let away = if r.x > 10.0 { (5.0, 5.0) } else { (1590.0, 990.0) };
+    let away = if r.x > 10.0 {
+        (5.0, 5.0)
+    } else {
+        (1590.0, 990.0)
+    };
     assert!(!r.contains(away.0, away.1));
-    assert_eq!(shell.handle_mouse(&click(away.0, away.1)), ShellAction::Consumed);
+    assert_eq!(
+        shell.handle_mouse(&click(away.0, away.1)),
+        ShellAction::Consumed
+    );
     assert!(!shell.char_picker_open());
-    assert!(shell.run_dialog.is_visible(), "the press closed the box too");
+    assert!(
+        shell.run_dialog.is_visible(),
+        "the press closed the box too"
+    );
     assert_eq!(shell.run_dialog.line(), "ls");
     // A move away is the picker's to ignore, and leaves it up.
     key(&mut shell, &ctrl_period());
@@ -229,7 +251,11 @@ fn a_note_takes_a_pick() {
         "tea \u{2615}"
     );
     assert!(shell.widgets_dirty, "the note's change was not saved");
-    assert_eq!(shell.widgets.writing_note(), Some(id), "the pick put the note down");
+    assert_eq!(
+        shell.widgets.writing_note(),
+        Some(id),
+        "the pick put the note down"
+    );
 }
 
 /// **A name being edited takes a pick, and keeps it when the rename ends.**
@@ -252,7 +278,11 @@ fn a_rename_takes_a_pick() {
     type_text(&mut shell, "U+2605");
     key(&mut shell, &pressed(Key::Enter));
     assert!(!shell.char_picker_open());
-    assert_eq!(shell.icons.renaming(), Some(icon), "the pick ended the rename");
+    assert_eq!(
+        shell.icons.renaming(),
+        Some(icon),
+        "the pick ended the rename"
+    );
     key(&mut shell, &pressed(Key::Enter));
     assert_eq!(
         shell.icons.get_icon(icon).expect("still there").label,
@@ -341,10 +371,16 @@ fn the_picker_goes_beside_its_field() {
     let screen = (1600.0, 1000.0);
     let size = (560.0, 460.0);
     let field = Rect::new(100.0, 100.0, 300.0, 28.0);
-    assert_eq!(beside(field, size, screen), Rect::new(100.0, 128.0, 560.0, 460.0));
+    assert_eq!(
+        beside(field, size, screen),
+        Rect::new(100.0, 128.0, 560.0, 460.0)
+    );
     // No room below: above.
     let low = Rect::new(100.0, 900.0, 300.0, 28.0);
-    assert_eq!(beside(low, size, screen), Rect::new(100.0, 440.0, 560.0, 460.0));
+    assert_eq!(
+        beside(low, size, screen),
+        Rect::new(100.0, 440.0, 560.0, 460.0)
+    );
     // Near the right edge: moved left onto the screen.
     let right = Rect::new(1500.0, 100.0, 90.0, 28.0);
     assert_eq!(beside(right, size, screen).x, 1040.0);

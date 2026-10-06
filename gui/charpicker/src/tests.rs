@@ -115,12 +115,17 @@ fn the_sidebar_lists_the_categories() {
     let characters = names.iter().position(|n| *n == "Characters").unwrap();
     assert_eq!(
         names[characters + 1..],
-        ["Symbols", "Math", "Arrows", "Currency", "Latin", "Greek", "Cyrillic"]
+        [
+            "Symbols", "Math", "Arrows", "Currency", "Latin", "Greek", "Cyrillic"
+        ]
     );
     // It opens at its top, Recent in sight, though the category chosen is
     // the third row.
     let frame = picker.frame(&Palette::for_mode(false), W, H);
-    assert!(frame.rect_of(|t| *t == Target::Category(0)).is_some(), "Recent is out of sight");
+    assert!(
+        frame.rect_of(|t| *t == Target::Category(0)).is_some(),
+        "Recent is out of sight"
+    );
     let mut picker = picker;
     key(&mut picker, Key::Tab);
     assert_eq!(picker.side_view.first_visible(), 0);
@@ -166,7 +171,11 @@ fn typing_searches_and_enter_picks_the_best_match() {
     assert_eq!(picker.search_text(), "");
     assert_eq!(picker.shown().next().as_deref(), Some("\u{1F600}"));
     assert_eq!(picker.cursor(), None);
-    assert_eq!(key(&mut picker, Key::Enter), None, "nothing under the cursor");
+    assert_eq!(
+        key(&mut picker, Key::Enter),
+        None,
+        "nothing under the cursor"
+    );
 }
 
 /// **A code point finds its character -- one with no name here too, which
@@ -248,7 +257,11 @@ fn the_arrows_move_through_the_grid() {
     key(&mut picker, Key::Left);
     assert_eq!(picker.cursor(), Some(0));
     key(&mut picker, Key::Left);
-    assert_eq!(picker.focus(), Part::Categories, "left from a row's first cell");
+    assert_eq!(
+        picker.focus(),
+        Part::Categories,
+        "left from a row's first cell"
+    );
     key(&mut picker, Key::Right);
     assert_eq!(picker.focus(), Part::Grid);
     let len = picker.shown().count();
@@ -323,16 +336,28 @@ fn clicks_pick_and_choose() {
     assert_eq!(picker.category().name(), "Flags");
     assert_eq!(picker.search_text(), "");
     assert_eq!(picker.focus(), Part::Categories);
-    assert_eq!(picker.shown().next().as_deref(), Some("\u{1F3C1}"), "the chequered flag");
+    assert_eq!(
+        picker.shown().next().as_deref(),
+        Some("\u{1F3C1}"),
+        "the chequered flag"
+    );
     // A category scrolled into view is chosen as well.
     let (x, y) = centre_of(&picker, Target::Sidebar);
-    mouse(&mut picker, x, y, MouseEventKind::Scroll { dx: 0.0, dy: -30.0 });
+    mouse(
+        &mut picker,
+        x,
+        y,
+        MouseEventKind::Scroll { dx: 0.0, dy: -30.0 },
+    );
     let arrows = row_of(&picker, Category::Characters("Arrows"));
     assert_eq!(click(&mut picker, Target::Category(arrows)), None);
     assert_eq!(picker.category(), Category::Characters("Arrows"));
     assert_eq!(picker.shown().next().as_deref(), Some("\u{2190}"));
     // A tone's swatch chooses it.
-    assert_eq!(click(&mut picker, Target::Tone(Some(SkinTone::Light))), None);
+    assert_eq!(
+        click(&mut picker, Target::Tone(Some(SkinTone::Light))),
+        None
+    );
     assert_eq!(picker.tone(), Some(SkinTone::Light));
     assert_eq!(click(&mut picker, Target::Tone(None)), None);
     assert_eq!(picker.tone(), None);
@@ -363,13 +388,19 @@ fn the_status_line_names_the_character() {
     let (x, y) = centre_of(&picker, Target::Cell(1));
     mouse(&mut picker, x, y, MouseEventKind::Move);
     let shown = texts(&picker);
-    assert!(shown.contains(&"grinning face with big eyes".to_string()), "{shown:?}");
+    assert!(
+        shown.contains(&"grinning face with big eyes".to_string()),
+        "{shown:?}"
+    );
     assert!(shown.contains(&"U+1F603".to_string()));
     // In a skin tone, the toned name and code points.
     let mut picker = CharPicker::new().with_tone(Some(SkinTone::Dark));
     type_text(&mut picker, "waving hand");
     let shown = texts(&picker);
-    assert!(shown.contains(&"waving hand: dark skin tone".to_string()), "{shown:?}");
+    assert!(
+        shown.contains(&"waving hand: dark skin tone".to_string()),
+        "{shown:?}"
+    );
     assert!(shown.contains(&"U+1F44B U+1F3FF".to_string()));
     // A character with no name says so.
     let mut picker = CharPicker::new();
@@ -402,7 +433,10 @@ fn recent_picks_are_remembered() {
     ]);
     assert_eq!(reopened.recent(), ["\u{1F600}"]);
     // No more than MAX_RECENT.
-    let many: Vec<String> = charnames::emoji().take(MAX_RECENT + 5).map(|e| e.text.to_string()).collect();
+    let many: Vec<String> = charnames::emoji()
+        .take(MAX_RECENT + 5)
+        .map(|e| e.text.to_string())
+        .collect();
     let mut picker = CharPicker::new().with_recent(many.clone());
     assert_eq!(picker.recent().len(), MAX_RECENT);
     assert_eq!(picker.recent(), &many[..MAX_RECENT]);
@@ -427,7 +461,11 @@ fn a_pick_in_recent_does_not_move_the_cells() {
     let mut picker = CharPicker::new().with_recent(recent);
     assert_eq!(click(&mut picker, Target::Cell(1)), picked("\u{E8}"));
     assert_eq!(picker.recent(), ["\u{E8}", "\u{E9}"]);
-    assert_eq!(picker.shown().collect::<Vec<_>>(), ["\u{E9}", "\u{E8}"], "until shown again");
+    assert_eq!(
+        picker.shown().collect::<Vec<_>>(),
+        ["\u{E9}", "\u{E8}"],
+        "until shown again"
+    );
 }
 
 /// **The wheel scrolls the list under the pointer, and the cursor stays.**
@@ -435,19 +473,37 @@ fn a_pick_in_recent_does_not_move_the_cells() {
 fn the_wheel_scrolls_the_list_under_it() {
     let mut picker = CharPicker::new();
     let (x, y) = centre_of(&picker, Target::Cell(0));
-    mouse(&mut picker, x, y, MouseEventKind::Scroll { dx: 0.0, dy: -3.0 });
+    mouse(
+        &mut picker,
+        x,
+        y,
+        MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+    );
     assert!(picker.first_row > 0);
     let scrolled = picker.first_row;
     // A key that does not move the cursor does not undo the scroll.
     key(&mut picker, Key::Tab);
     assert_eq!(picker.first_row, scrolled);
-    mouse(&mut picker, x, y, MouseEventKind::Scroll { dx: 0.0, dy: 30.0 });
+    mouse(
+        &mut picker,
+        x,
+        y,
+        MouseEventKind::Scroll { dx: 0.0, dy: 30.0 },
+    );
     assert_eq!(picker.first_row, 0);
     // The sidebar, under the pointer, scrolls itself and not the grid.
     let (sx, sy) = centre_of(&picker, Target::Category(row_of(&picker, Category::Recent)));
     let before = picker.side_view.first_visible();
-    mouse(&mut picker, sx, sy, MouseEventKind::Scroll { dx: 0.0, dy: -30.0 });
-    assert!(picker.side_view.first_visible() > before, "the sidebar is longer than its well");
+    mouse(
+        &mut picker,
+        sx,
+        sy,
+        MouseEventKind::Scroll { dx: 0.0, dy: -30.0 },
+    );
+    assert!(
+        picker.side_view.first_visible() > before,
+        "the sidebar is longer than its well"
+    );
     assert_eq!(picker.first_row, 0);
 }
 
@@ -459,7 +515,12 @@ fn the_grids_scrollbar_scrolls_it() {
     mouse(&mut picker, x, y, MouseEventKind::Press(MouseButton::Left));
     mouse(&mut picker, x, y + 100.0, MouseEventKind::Move);
     assert!(picker.first_row > 0);
-    mouse(&mut picker, x, y + 100.0, MouseEventKind::Release(MouseButton::Left));
+    mouse(
+        &mut picker,
+        x,
+        y + 100.0,
+        MouseEventKind::Release(MouseButton::Left),
+    );
     let dragged = picker.first_row;
     mouse(&mut picker, x, y + 200.0, MouseEventKind::Move);
     assert_eq!(picker.first_row, dragged, "released");
@@ -468,7 +529,12 @@ fn the_grids_scrollbar_scrolls_it() {
     let track = frame.rect_of(|t| *t == Target::Track(List::Grid)).unwrap();
     let thumb = frame.rect_of(|t| *t == Target::Thumb(List::Grid)).unwrap();
     let below = (thumb.bottom() + track.bottom()) / 2.0;
-    mouse(&mut picker, x, below, MouseEventKind::Press(MouseButton::Left));
+    mouse(
+        &mut picker,
+        x,
+        below,
+        MouseEventKind::Press(MouseButton::Left),
+    );
     assert!(picker.first_row > dragged);
 }
 
@@ -485,7 +551,10 @@ fn escape_cancels_and_tab_goes_round() {
     assert_eq!(picker.focus(), Part::Tones);
     for part in [Part::Tones, Part::Grid, Part::Categories, Part::Search] {
         picker.focus = part;
-        assert_eq!(key(&mut picker, Key::Escape), Some(CharPickerEvent::Cancelled));
+        assert_eq!(
+            key(&mut picker, Key::Escape),
+            Some(CharPickerEvent::Cancelled)
+        );
     }
     // A release is nothing.
     let release = KeyEvent {
@@ -509,9 +578,18 @@ fn every_cell_drawn_is_hit_where_it_is_drawn() {
             continue;
         };
         drawn += 1;
-        assert_eq!(frame.hit_test(r.x + r.w / 2.0, r.y + r.h / 2.0), Some(Target::Cell(i)));
-        assert!(r.x >= grid.x && r.right() <= grid.right() + 0.01, "{i}: {r:?}");
-        assert!(r.y >= grid.y && r.bottom() <= grid.bottom() + 0.01, "{i}: {r:?}");
+        assert_eq!(
+            frame.hit_test(r.x + r.w / 2.0, r.y + r.h / 2.0),
+            Some(Target::Cell(i))
+        );
+        assert!(
+            r.x >= grid.x && r.right() <= grid.right() + 0.01,
+            "{i}: {r:?}"
+        );
+        assert!(
+            r.y >= grid.y && r.bottom() <= grid.bottom() + 0.01,
+            "{i}: {r:?}"
+        );
     }
     let cells = Layout::new(W, H).cells();
     assert_eq!(drawn, cells.rows_shown * cells.columns);
@@ -521,10 +599,24 @@ fn every_cell_drawn_is_hit_where_it_is_drawn() {
 /// what fits and answers events without a panic.**
 #[test]
 fn a_picker_too_small_draws_what_fits() {
-    for (w, h) in [(0.0, 0.0), (40.0, 30.0), (200.0, 90.0), (-5.0, -5.0), (f32::NAN, 100.0)] {
+    for (w, h) in [
+        (0.0, 0.0),
+        (40.0, 30.0),
+        (200.0, 90.0),
+        (-5.0, -5.0),
+        (f32::NAN, 100.0),
+    ] {
         let mut picker = CharPicker::new();
         let _ = picker.render(&Palette::for_mode(false), w, h);
-        for k in [Key::Down, Key::End, Key::PageDown, Key::Up, Key::Left, Key::Tab, Key::Right] {
+        for k in [
+            Key::Down,
+            Key::End,
+            Key::PageDown,
+            Key::Up,
+            Key::Left,
+            Key::Tab,
+            Key::Right,
+        ] {
             let _ = picker.handle_key(&press(k), w, h);
         }
         let _ = picker.handle_mouse(

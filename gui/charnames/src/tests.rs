@@ -9,7 +9,8 @@ use super::*;
 
 /// Whether `text` holds a skin-tone modifier.
 fn toned(text: &str) -> bool {
-    text.chars().any(|c| SkinTone::ALL.iter().any(|t| t.modifier() == c))
+    text.chars()
+        .any(|c| SkinTone::ALL.iter().any(|t| t.modifier() == c))
 }
 
 /// **Every emoji is there once, untoned, in CLDR's order, with its name and
@@ -26,7 +27,10 @@ fn the_emoji_are_in_cldrs_order() {
     assert_eq!(groups()[last.group], "Flags");
     assert!(emoji_in(0).all(|e| e.group == 0));
     assert!(emoji_in(0).count() > 100);
-    assert!(all.iter().all(|e| !toned(e.text)), "no toned variant listed");
+    assert!(
+        all.iter().all(|e| !toned(e.text)),
+        "no toned variant listed"
+    );
     // Nor any emoji twice.
     let texts: std::collections::HashSet<&str> = all.iter().map(|e| e.text).collect();
     assert_eq!(texts.len(), all.len());
@@ -51,7 +55,9 @@ fn an_emoji_is_drawn_in_a_skin_tone() {
     let grin = emoji().next().unwrap().found();
     assert!(!grin.has_tones());
     assert_eq!(grin.in_tone(SkinTone::Dark), grin);
-    let euro = characters_in("Currency").find(|f| f.text == "\u{20AC}").unwrap();
+    let euro = characters_in("Currency")
+        .find(|f| f.text == "\u{20AC}")
+        .unwrap();
     assert!(!euro.has_tones());
     assert_eq!(euro.in_tone(SkinTone::Light), euro);
     // Many emoji come in tones, and every one of them in all five.
@@ -71,18 +77,29 @@ fn the_categories_hold_their_characters() {
     let names: Vec<&str> = categories().collect();
     assert_eq!(
         names,
-        ["Symbols", "Math", "Arrows", "Currency", "Latin", "Greek", "Cyrillic"]
+        [
+            "Symbols", "Math", "Arrows", "Currency", "Latin", "Greek", "Cyrillic"
+        ]
     );
     let arrows: Vec<Found> = characters_in("Arrows").collect();
-    assert!(arrows.iter().any(|f| f.text == "\u{2192}" && f.name == "RIGHTWARDS ARROW"));
-    let euro = characters_in("Currency").find(|f| f.text == "\u{20AC}").unwrap();
+    assert!(
+        arrows
+            .iter()
+            .any(|f| f.text == "\u{2192}" && f.name == "RIGHTWARDS ARROW")
+    );
+    let euro = characters_in("Currency")
+        .find(|f| f.text == "\u{20AC}")
+        .unwrap();
     assert_eq!(euro.name, "EURO SIGN");
     assert_eq!(characters_in("Nothing").count(), 0);
     // A line separator is in General Punctuation's block, and no picker
     // offers it.
     assert!(characters_in("Symbols").all(|f| f.text != "\u{2028}"));
     let latin: Vec<Found> = characters_in("Latin").collect();
-    assert!(latin.windows(2).all(|w| w[0].text < w[1].text), "by code point");
+    assert!(
+        latin.windows(2).all(|w| w[0].text < w[1].text),
+        "by code point"
+    );
 }
 
 /// **A character's name is its emoji name, else its Unicode name** -- an
@@ -121,7 +138,10 @@ fn a_code_point_is_read() {
 #[test]
 fn a_search_finds_by_words_code_points_and_characters() {
     let found = search("arrow right");
-    assert!(found.iter().any(|f| f.text == "\u{2192}"), "RIGHTWARDS ARROW");
+    assert!(
+        found.iter().any(|f| f.text == "\u{2192}"),
+        "RIGHTWARDS ARROW"
+    );
     assert!(search("RIGHT arrow").iter().any(|f| f.text == "\u{2192}"));
     assert!(search("shrug").iter().any(|f| f.name == "person shrugging"));
     let e = search("U+00E9");
@@ -130,7 +150,11 @@ fn a_search_finds_by_words_code_points_and_characters() {
     assert_eq!(e[0].name, "LATIN SMALL LETTER E WITH ACUTE");
     assert_eq!(search("u+1f600")[0].name, "grinning face");
     assert!(search("U+4E00").is_empty(), "no name for it here");
-    assert_eq!(search("\u{20AC}")[0].name, "EURO SIGN", "the character itself");
+    assert_eq!(
+        search("\u{20AC}")[0].name,
+        "EURO SIGN",
+        "the character itself"
+    );
     assert_eq!(
         search("\u{1F44B}\u{1F3FD}")[0].name,
         "waving hand: medium skin tone"
@@ -140,7 +164,11 @@ fn a_search_finds_by_words_code_points_and_characters() {
     assert!(search("zzzzqqq").is_empty());
     assert!(search("?!").is_empty(), "no words");
     // An apostrophe is no part of a word, whichever was typed.
-    assert!(search("one o'clock").iter().any(|f| f.name == "one o\u{2019}clock"));
+    assert!(
+        search("one o'clock")
+            .iter()
+            .any(|f| f.name == "one o\u{2019}clock")
+    );
 }
 
 /// **What a search finds comes best first**: a name that is the query, then
@@ -169,7 +197,11 @@ fn a_search_ranks_what_it_finds() {
             "{query}: a name match after a keyword-only one"
         );
     }
-    assert!(money.iter().any(|f| !words(f.name).any(|w| starts_with(w, "money"))));
+    assert!(
+        money
+            .iter()
+            .any(|f| !words(f.name).any(|w| starts_with(w, "money")))
+    );
     assert_eq!(search("flag united states")[0].text, "\u{1F1FA}\u{1F1F8}");
     // The smiling face once, as the emoji.
     let smiling = search("smiling face")

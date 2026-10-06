@@ -967,7 +967,9 @@ impl CharPicker {
                 self.hovered = None;
                 None
             }
-            MouseEventKind::Press(MouseButton::Left) => self.press(&frame, target, event.y, &layout),
+            MouseEventKind::Press(MouseButton::Left) => {
+                self.press(&frame, target, event.y, &layout)
+            }
             MouseEventKind::Release(MouseButton::Left) => {
                 self.drag = None;
                 None
@@ -1241,7 +1243,13 @@ impl CharPicker {
 
     /// A ground under a row or a cell: the selection's, the pointer's, or
     /// none.
-    fn draw_ground(palette: &Palette, frame: &mut Frame<Target>, rect: Rect, selected: bool, hovered: bool) {
+    fn draw_ground(
+        palette: &Palette,
+        frame: &mut Frame<Target>,
+        rect: Rect,
+        selected: bool,
+        hovered: bool,
+    ) {
         let color = if selected {
             palette.selection_fill()
         } else if hovered {
@@ -1300,7 +1308,13 @@ impl CharPicker {
             view.set_height(capacity, len);
         }
         let rows = view.visible_range(len);
-        self.draw_bar(palette, frame, rect, List::Categories, (len, capacity, rows.start));
+        self.draw_bar(
+            palette,
+            frame,
+            rect,
+            List::Categories,
+            (len, capacity, rows.start),
+        );
         let bar = if scrollbar::needed(len, capacity) {
             scaled(BAR_WIDTH).min(rect.w)
         } else {
@@ -1387,7 +1401,13 @@ impl CharPicker {
         }
         let rows = cells.rows(len);
         let first = self.first_row.min(rows.saturating_sub(cells.rows_shown));
-        self.draw_bar(palette, frame, rect, List::Grid, (rows, cells.rows_shown, first));
+        self.draw_bar(
+            palette,
+            frame,
+            rect,
+            List::Grid,
+            (rows, cells.rows_shown, first),
+        );
         let start = first.saturating_mul(cells.columns).min(len);
         let end = first
             .saturating_add(cells.rows_shown)
@@ -1419,7 +1439,13 @@ impl CharPicker {
     /// `glyph` at `size`, centred in `rect` and cut at it: a wide sequence
     /// drawn by a face with no ligature for it must not spill into the cell
     /// beside it.
-    fn draw_glyph(palette: &Palette, frame: &mut Frame<Target>, rect: Rect, glyph: &str, size: f32) {
+    fn draw_glyph(
+        palette: &Palette,
+        frame: &mut Frame<Target>,
+        rect: Rect,
+        glyph: &str,
+        size: f32,
+    ) {
         let width = text::measure(glyph, size, FontWeightHint::Regular);
         frame.clip(rect);
         frame.push(RenderCommand::Text {
@@ -1458,7 +1484,12 @@ impl CharPicker {
         let gap = scaled(GAP);
         let text_right = (layout.tones.x - gap).max(status.x);
         if let Some(cell) = self.subject() {
-            let glyph_box = Rect::new(status.x, status.y, status.h.min(text_right - status.x).max(0.0), status.h);
+            let glyph_box = Rect::new(
+                status.x,
+                status.y,
+                status.h.min(text_right - status.x).max(0.0),
+                status.h,
+            );
             let glyph = cell.text();
             Self::draw_glyph(palette, frame, glyph_box, &glyph, scaled(STATUS_GLYPH));
             let x = glyph_box.right() + scaled(ROW_PADDING);
@@ -1509,7 +1540,13 @@ impl CharPicker {
         for (slot, &tone) in TONES.iter().enumerate() {
             let at = Rect::new(rect.x + count_f32(slot) * w, rect.y, w, rect.h);
             let chosen = tone == self.tone;
-            Self::draw_ground(palette, frame, at, chosen, self.hovered == Some(Target::Tone(tone)));
+            Self::draw_ground(
+                palette,
+                frame,
+                at,
+                chosen,
+                self.hovered == Some(Target::Tone(tone)),
+            );
             if chosen && self.focus == Part::Tones {
                 frame.push(RenderCommand::StrokeRect {
                     x: at.x,

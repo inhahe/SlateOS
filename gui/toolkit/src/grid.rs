@@ -17,6 +17,10 @@
 //! Conceptually integrates with the drag-and-drop system (`dnd.rs`): when a drag
 //! threshold is exceeded, selected items can be exported as a `DataObject` via
 //! the `DragDropManager`.
+//!
+//! To automation and assistive tools the grid is a list of its items, each
+//! chosen as clicked and opened as double-clicked ([`GridPart`], in
+//! `accessible`).
 
 use core::num::NonZeroUsize;
 
@@ -28,6 +32,9 @@ use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 use crate::wheel;
+
+mod accessible;
+pub use accessible::GridPart;
 
 /// How many `cell`-wide columns, separated by `gap`, fit across `avail`
 /// pixels — never fewer than one.
@@ -396,7 +403,7 @@ impl TypeAhead {
 // =============================================================================
 
 /// Events emitted by the grid view to application code.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum GridEvent {
     /// Selection changed. Contains new set of selected item indices.
     SelectionChanged(Vec<usize>),

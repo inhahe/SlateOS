@@ -2746,10 +2746,11 @@ authors never wrote a single automation handler.
   menu's rows, each used as clicked. Its dock (`guitk::dock::DockAccess`):
   each group's tabs, the front one chosen and its close button, the front
   panel's contents for the application to fill, and each divider, where it
-  stands and dragged to where it is set. Not yet: the toolkit's icon grid,
-  radio group and text views (`codeview`, `textview`, `richinput`) -- none
-  of the first two has a program using it yet. There is no font picker yet
-  to show.*
+  stands and dragged to where it is set. Its icon grid
+  (`guitk::grid::GridPart`): every item, chosen as clicked and opened as
+  double-clicked, scrolled into view first. Not yet: the toolkit's radio
+  group, which no program uses yet, and its text views (`codeview`,
+  `textview`, `richinput`). There is no font picker yet to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

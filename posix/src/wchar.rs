@@ -29,7 +29,7 @@
 //! - `fputwc`, `fgetwc`, `putwc`, `getwc`, `putwchar`, `getwchar` — wide char I/O
 //! - `fputws`, `fgetws` — wide string I/O
 //! - `ungetwc` — push back a wide character, whatever its UTF-8 length
-//! - `wcsftime` — format date/time as wide string (delegates to narrow strftime)
+//! - `wcsftime` — format date/time as wide string (`crate::strftime`'s, re-exported)
 
 /// Wide character type (32-bit Unicode code point).
 pub type WcharT = i32;
@@ -3689,109 +3689,13 @@ pub unsafe extern "C" fn __fgetws_chk(
 // Wide strftime
 // ---------------------------------------------------------------------------
 
-/// Format a date/time as a wide string.
-///
-/// Converts the wide format string to a narrow (UTF-8) format, calls
-/// `strftime`, then widens the result.  This works correctly because
-/// `strftime` format specifiers are all ASCII, and on our UTF-8 locale
-/// the output of `strftime` is valid UTF-8.
-///
-/// Returns the number of wide characters written (excluding the null
-/// terminator), or 0 if the result doesn't fit in `maxsize` wide
-/// characters.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::indexing_slicing)]
-pub unsafe extern "C" fn wcsftime(
-    wcs: *mut WcharT,
-    maxsize: usize,
-    format: *const WcharT,
-    tm: *const crate::time::Tm,
-) -> usize {
-    const FMT_BUF_SIZE: usize = 256;
-    const OUT_BUF_SIZE: usize = 1024;
-
-    if wcs.is_null() || format.is_null() || tm.is_null() || maxsize == 0 {
-        return 0;
-    }
-
-    // Convert wide format to narrow.  strftime format specifiers are all
-    // ASCII (%Y, %m, %d, etc.) so this is a simple byte-truncation.
-    let mut fmt_buf = [0u8; FMT_BUF_SIZE];
-    let mut fi: usize = 0;
-    loop {
-        let wc = unsafe { *format.add(fi) };
-        if wc == 0 || fi >= FMT_BUF_SIZE.wrapping_sub(1) {
-            break;
-        }
-        // Truncate to byte — format specifiers are ASCII.
-        fmt_buf[fi] = (wc & 0x7F) as u8;
-        fi = fi.wrapping_add(1);
-    }
-    fmt_buf[fi] = 0;
-
-    // Call narrow strftime.  Use a buffer 4× maxsize since UTF-8 can
-    // use up to 4 bytes per character.
-    let mut out_buf = [0u8; OUT_BUF_SIZE];
-    let narrow_max = maxsize.wrapping_mul(4).min(OUT_BUF_SIZE);
-    let len =
-        unsafe { crate::time::strftime(out_buf.as_mut_ptr(), narrow_max, fmt_buf.as_ptr(), tm) };
-
-    if len == 0 {
-        // strftime failed or result doesn't fit.
-        unsafe {
-            *wcs = 0;
-        }
-        return 0;
-    }
-
-    // Widen the narrow output to wide characters.  strftime output
-    // on our UTF-8 locale is valid UTF-8 (month/day names are ASCII).
-    let mut wi: usize = 0;
-    let mut bi: usize = 0;
-    let limit = maxsize.wrapping_sub(1); // Leave room for null terminator.
-    while bi < len && wi < limit {
-        let b = out_buf[bi];
-        // Determine UTF-8 sequence length from lead byte.
-        let seq_len = if b < 0x80 {
-            1_usize
-        } else if b & 0xE0 == 0xC0 {
-            2
-        } else if b & 0xF0 == 0xE0 {
-            3
-        } else if b & 0xF8 == 0xF0 {
-            4
-        } else {
-            1
-        }; // Invalid lead → treat as single byte.
-
-        if bi.wrapping_add(seq_len) > len {
-            break; // Incomplete sequence at end.
-        }
-
-        if seq_len == 1 {
-            unsafe {
-                *wcs.add(wi) = WcharT::from(b);
-            }
-        } else if let Some(cp) = utf8_decode(&out_buf[bi..bi.wrapping_add(seq_len)], seq_len) {
-            unsafe {
-                *wcs.add(wi) = cp as WcharT;
-            }
-        } else {
-            // Invalid UTF-8 — emit replacement character.
-            unsafe {
-                *wcs.add(wi) = 0xFFFD;
-            }
-        }
-        bi = bi.wrapping_add(seq_len);
-        wi = wi.wrapping_add(1);
-    }
-
-    // Null-terminate.
-    unsafe {
-        *wcs.add(wi) = 0;
-    }
-    wi
-}
+// `wcsftime` and `wcsftime_l` are `crate::strftime`'s: the engine
+// `strftime` uses, instantiated for `wchar_t`, as glibc compiles its one
+// source twice. Until 2026-10-06 `wcsftime` here narrowed the format by
+// masking each unit to seven bits, so any character past ASCII in it came
+// out as another one, and an answer too long for the buffer came back cut
+// short rather than as 0.
+pub use crate::strftime::{wcsftime, wcsftime_l};
 
 // ---------------------------------------------------------------------------
 // POSIX 2008 locale-parameterised classification
@@ -3811,7 +3715,10 @@ pub unsafe extern "C" fn wcsftime(
 // together and why this comment names them as a set. (Fourteen until
 // 2026-09-28, when `wctype_l`, `iswctype_l`, `wctrans_l`, `towctrans_l`,
 // `wcscasecmp_l`, `wcsncasecmp_l` and `wcsftime_l` joined them: musl's headers
-// declare all seven, and a program calling one did not link.)
+// declare all seven, and a program calling one did not link. Since
+// 2026-10-06 `wcsftime_l` is `crate::strftime`'s, beside `strftime_l`, and
+// reads its names from `crate::langinfo` -- the place a locale would change
+// them.)
 //
 // Measured need: upstream CMake 4.4.3 links against our libc with exactly
 // twenty undefined symbols and these are fourteen of them — the single largest
@@ -3964,24 +3871,6 @@ pub unsafe extern "C" fn wcsncasecmp_l(
 ) -> i32 {
     // SAFETY: this function's contract.
     unsafe { wcsncasecmp(s1, s2, n) }
-}
-
-/// `wcsftime` in an explicit locale: the one locale's names and formats,
-/// which `crate::time::strftime_l` uses too.
-///
-/// # Safety
-///
-/// As for [`wcsftime`].
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wcsftime_l(
-    wcs: *mut WcharT,
-    maxsize: usize,
-    format: *const WcharT,
-    tm: *const crate::time::Tm,
-    _loc: crate::locale::LocaleT,
-) -> usize {
-    // SAFETY: this function's contract.
-    unsafe { wcsftime(wcs, maxsize, format, tm) }
 }
 
 // ---------------------------------------------------------------------------
@@ -6623,8 +6512,10 @@ mod tests {
 
     // -- wcsftime --
 
+    /// A NULL buffer is written nowhere and answers the length, as glibc's
+    /// does -- when the length and the NUL fit `maxsize`, and 0 when not.
     #[test]
-    fn test_wcsftime_null_wcs_returns_zero() {
+    fn test_wcsftime_null_wcs_counts() {
         let tm = crate::time::Tm {
             tm_sec: 0,
             tm_min: 0,
@@ -6639,6 +6530,8 @@ mod tests {
         };
         let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
         let ret = unsafe { wcsftime(core::ptr::null_mut(), 64, fmt.as_ptr(), &tm) };
+        assert_eq!(ret, 4);
+        let ret = unsafe { wcsftime(core::ptr::null_mut(), 4, fmt.as_ptr(), &tm) };
         assert_eq!(ret, 0);
     }
 

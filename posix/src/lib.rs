@@ -504,6 +504,7 @@ pub mod stdbit;
 pub mod stdio;
 pub mod stdio_mem;
 pub mod stdlib;
+pub mod strftime;
 pub mod string;
 pub mod strings;
 pub mod stropts;

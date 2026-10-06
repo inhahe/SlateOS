@@ -2,9 +2,9 @@
 //!
 //! Implements `sleep`, `nanosleep`, `usleep`, `clock_gettime`,
 //! `clock_getres`, `clock`, `gettimeofday`, `time`, `difftime`,
-//! `localtime`, `gmtime`, `mktime`, `asctime`, `ctime`, `strftime`,
-//! `strptime`, `timer_create`, `timer_settime`, `timer_gettime`,
-//! `timer_delete`, `timer_getoverrun`.
+//! `localtime`, `gmtime`, `mktime`, `asctime`, `ctime`, `strptime`, `timer_create`, `timer_settime`, `timer_gettime`,
+//! `timer_delete`, `timer_getoverrun`. `strftime` is [`crate::strftime`]'s,
+//! which `wcsftime` shares, and is re-exported here.
 //!
 //! ## Timezone
 //!
@@ -927,6 +927,16 @@ mod host_tz_globals {
     pub(super) fn get() -> Globals {
         GLOBALS.with(core::cell::Cell::get)
     }
+
+    /// `tzname[i]`, or null past 1.
+    pub(super) fn name(i: usize) -> *const u8 {
+        // A failed `try_with` means the thread is shutting down: no zone.
+        GLOBALS
+            .try_with(|g| g.get().0.get(i).copied())
+            .ok()
+            .flatten()
+            .unwrap_or(core::ptr::null())
+    }
 }
 
 /// `tzname`, `timezone` and `daylight` as a C program would read them:
@@ -934,6 +944,23 @@ mod host_tz_globals {
 #[cfg(test)]
 pub(crate) fn tz_globals_for_test() -> ([*const u8; 2], i64, i32) {
     host_tz_globals::get()
+}
+
+/// `tzname[i]` as a C program would read it -- this test thread's, on the
+/// host -- or null past 1: what `strftime`'s `%Z` falls back on.
+pub(crate) fn tzname_entry(i: usize) -> *const u8 {
+    #[cfg(target_os = "none")]
+    {
+        // SAFETY: a read of one pointer-sized element of the C-visible
+        // global, which POSIX leaves unsynchronised with `tzset`, as
+        // glibc's `strftime` reads it.
+        let names = unsafe { &*core::ptr::addr_of!(tzname) };
+        names.get(i).map_or(core::ptr::null(), |p| p.0)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_tz_globals::name(i)
+    }
 }
 
 /// Initialize timezone information from the `TZ` environment variable.
@@ -1093,7 +1120,7 @@ fn secs_to_local_tm(secs: TimeT, tm: &mut Tm) -> bool {
 /// calls the other by its exported name: a program may define `mktime`
 /// itself, and that changes what the program's calls reach and nothing
 /// else.
-fn mktime_ptr(tm: *mut Tm) -> TimeT {
+pub(crate) fn mktime_ptr(tm: *mut Tm) -> TimeT {
     if tm.is_null() {
         return -1;
     }
@@ -1340,340 +1367,9 @@ pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
     unsafe { asctime_r(tm, buf) }
 }
 
-/// Format time according to a format string.
-///
-/// Supports these POSIX and GNU extension conversions:
-///
-/// **Date components**: `%Y` (4-digit year), `%C` (century), `%y` (2-digit year),
-/// `%m` (month 01-12), `%d` (day 01-31), `%e` (day, space-padded),
-/// `%j` (day of year 001-366), `%w` (weekday 0-6, Sun=0),
-/// `%u` (weekday 1-7, Mon=1, ISO 8601),
-/// `%U` (week of year, Sunday start), `%W` (week of year, Monday start).
-///
-/// **Time components**: `%H` (hour 00-23), `%I` (hour 01-12),
-/// `%k` (hour 0-23, space-padded), `%l` (hour 1-12, space-padded),
-/// `%M` (minute), `%S` (second), `%p` (AM/PM), `%P` (am/pm, GNU).
-///
-/// **Names**: `%A`/`%a` (weekday), `%B`/`%b`/`%h` (month).
-///
-/// **Composites**: `%c` (date+time), `%D` (%m/%d/%y), `%F` (%Y-%m-%d),
-/// `%T` (%H:%M:%S), `%R` (%H:%M), `%r` (%I:%M:%S %p),
-/// `%x` (locale date), `%X` (locale time).
-///
-/// **Timezone**: `%z` (+0000, always UTC), `%Z` (UTC).
-///
-/// **GNU extensions**: `%s` (epoch seconds), `%P` (lowercase am/pm).
-///
-/// **Literal**: `%n` (newline), `%t` (tab), `%%` (percent).
-/// `strftime` in an explicit locale.
-///
-/// We have exactly one locale, so this is `strftime` and the handle is
-/// ignored. That is a larger claim than it is for the character-class wrappers
-/// and is worth stating: the month and day names `%A`/`%B` are what a locale
-/// would change, and in the C locale they are English. Anything that wanted
-/// translated names would need a real locale first, and would find this
-/// function unchanged rather than silently wrong.
-///
-/// # Safety
-///
-/// `buf`, `fmt` and `tm` must satisfy [`strftime`]'s contract.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strftime_l(
-    buf: *mut u8,
-    maxsize: usize,
-    fmt: *const u8,
-    tm: *const Tm,
-    _loc: crate::locale::LocaleT,
-) -> usize {
-    // SAFETY: forwarding this function's own contract.
-    unsafe { strftime(buf, maxsize, fmt, tm) }
-}
-
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::too_many_lines)]
-pub unsafe extern "C" fn strftime(
-    buf: *mut u8,
-    maxsize: usize,
-    fmt: *const u8,
-    tm: *const Tm,
-) -> usize {
-    if buf.is_null() || fmt.is_null() || tm.is_null() || maxsize == 0 {
-        return 0;
-    }
-
-    let t = unsafe { &*tm };
-    let mut pos: usize = 0;
-    let mut fpos: usize = 0;
-    let limit = maxsize.wrapping_sub(1); // Reserve space for null terminator.
-
-    loop {
-        let ch = unsafe { *fmt.add(fpos) };
-        if ch == 0 {
-            break;
-        }
-
-        if ch != b'%' {
-            if pos < limit {
-                unsafe {
-                    *buf.add(pos) = ch;
-                }
-            }
-            pos = pos.wrapping_add(1);
-            fpos = fpos.wrapping_add(1);
-            continue;
-        }
-
-        fpos = fpos.wrapping_add(1);
-        let spec = unsafe { *fmt.add(fpos) };
-        if spec == 0 {
-            break;
-        }
-        fpos = fpos.wrapping_add(1);
-
-        match spec {
-            // --- Date components ---
-            b'Y' => pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900)),
-            b'C' => {
-                pos = write_dec2(
-                    buf,
-                    limit,
-                    pos,
-                    t.tm_year.wrapping_add(1900).wrapping_div(100),
-                );
-            }
-            b'y' => {
-                pos = write_dec2(
-                    buf,
-                    limit,
-                    pos,
-                    t.tm_year.wrapping_add(1900).wrapping_rem(100),
-                );
-            }
-            b'm' => pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1)),
-            b'd' => pos = write_dec2(buf, limit, pos, t.tm_mday),
-            b'e' => pos = write_space_dec2(buf, limit, pos, t.tm_mday),
-            b'j' => pos = write_dec3(buf, limit, pos, t.tm_yday.wrapping_add(1)),
-            b'w' => pos = write_char(buf, limit, pos, b'0'.wrapping_add((t.tm_wday % 7) as u8)),
-            b'u' => {
-                // ISO 8601: Monday=1 .. Sunday=7.
-                let iso = if t.tm_wday == 0 { 7 } else { t.tm_wday };
-                pos = write_char(buf, limit, pos, b'0'.wrapping_add(iso as u8));
-            }
-            b'U' => {
-                // Week number, Sunday as first day (00-53).
-                #[allow(clippy::arithmetic_side_effects)]
-                let wn = (t.tm_yday.wrapping_add(7).wrapping_sub(t.tm_wday)) / 7;
-                pos = write_dec2(buf, limit, pos, wn);
-            }
-            b'W' => {
-                // Week number, Monday as first day (00-53).
-                let mon_wday = if t.tm_wday == 0 {
-                    6
-                } else {
-                    t.tm_wday.wrapping_sub(1)
-                };
-                #[allow(clippy::arithmetic_side_effects)]
-                let wn = (t.tm_yday.wrapping_add(7).wrapping_sub(mon_wday)) / 7;
-                pos = write_dec2(buf, limit, pos, wn);
-            }
-
-            // --- Time components ---
-            b'H' => pos = write_dec2(buf, limit, pos, t.tm_hour),
-            b'I' => {
-                let h12 = hour_12(t.tm_hour);
-                pos = write_dec2(buf, limit, pos, h12);
-            }
-            b'k' => pos = write_space_dec2(buf, limit, pos, t.tm_hour),
-            b'l' => pos = write_space_dec2(buf, limit, pos, hour_12(t.tm_hour)),
-            b'M' => pos = write_dec2(buf, limit, pos, t.tm_min),
-            b'S' => pos = write_dec2(buf, limit, pos, t.tm_sec),
-            b'p' => {
-                let label = if t.tm_hour < 12 { b"AM" } else { b"PM" };
-                pos = write_str(buf, limit, pos, label);
-            }
-            b'P' => {
-                // GNU extension: lowercase am/pm.
-                let label = if t.tm_hour < 12 { b"am" } else { b"pm" };
-                pos = write_str(buf, limit, pos, label);
-            }
-
-            // --- Name components ---
-            b'A' => pos = write_str(buf, limit, pos, wday_full(t.tm_wday)),
-            b'a' => pos = write_str(buf, limit, pos, wday_abbr(t.tm_wday)),
-            b'B' => pos = write_str(buf, limit, pos, mon_full(t.tm_mon)),
-            b'b' | b'h' => pos = write_str(buf, limit, pos, mon_abbr(t.tm_mon)),
-
-            // --- Composite specifiers ---
-            b'c' => {
-                // "Thu Jan  1 00:00:00 1970" (asctime format).
-                pos = write_str(buf, limit, pos, wday_abbr(t.tm_wday));
-                pos = write_char(buf, limit, pos, b' ');
-                pos = write_str(buf, limit, pos, mon_abbr(t.tm_mon));
-                pos = write_char(buf, limit, pos, b' ');
-                pos = write_space_dec2(buf, limit, pos, t.tm_mday);
-                pos = write_char(buf, limit, pos, b' ');
-                pos = write_dec2(buf, limit, pos, t.tm_hour);
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_min);
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_sec);
-                pos = write_char(buf, limit, pos, b' ');
-                pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900));
-            }
-            b'D' => {
-                // %m/%d/%y
-                pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1));
-                pos = write_char(buf, limit, pos, b'/');
-                pos = write_dec2(buf, limit, pos, t.tm_mday);
-                pos = write_char(buf, limit, pos, b'/');
-                pos = write_dec2(
-                    buf,
-                    limit,
-                    pos,
-                    t.tm_year.wrapping_add(1900).wrapping_rem(100),
-                );
-            }
-            b'F' => {
-                // %Y-%m-%d (ISO 8601 date).
-                pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900));
-                pos = write_char(buf, limit, pos, b'-');
-                pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1));
-                pos = write_char(buf, limit, pos, b'-');
-                pos = write_dec2(buf, limit, pos, t.tm_mday);
-            }
-            b'T' => {
-                // %H:%M:%S
-                pos = write_dec2(buf, limit, pos, t.tm_hour);
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_min);
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_sec);
-            }
-            b'R' => {
-                // %H:%M
-                pos = write_dec2(buf, limit, pos, t.tm_hour);
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_min);
-            }
-            b'r' => {
-                // %I:%M:%S %p (12-hour time with AM/PM).
-                pos = write_dec2(buf, limit, pos, hour_12(t.tm_hour));
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_min);
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_sec);
-                pos = write_char(buf, limit, pos, b' ');
-                let label = if t.tm_hour < 12 { b"AM" } else { b"PM" };
-                pos = write_str(buf, limit, pos, label);
-            }
-            b'x' => {
-                // Locale date (C locale: %m/%d/%y).
-                pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1));
-                pos = write_char(buf, limit, pos, b'/');
-                pos = write_dec2(buf, limit, pos, t.tm_mday);
-                pos = write_char(buf, limit, pos, b'/');
-                pos = write_dec2(
-                    buf,
-                    limit,
-                    pos,
-                    t.tm_year.wrapping_add(1900).wrapping_rem(100),
-                );
-            }
-            b'X' => {
-                // Locale time (C locale: %H:%M:%S).
-                pos = write_dec2(buf, limit, pos, t.tm_hour);
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_min);
-                pos = write_char(buf, limit, pos, b':');
-                pos = write_dec2(buf, limit, pos, t.tm_sec);
-            }
-
-            // --- Timezone ---
-            b'z' => {
-                // `±hhmm` from the `tm`'s own offset, so a `tm` produced by
-                // `gmtime` still renders `+0000` while one from `localtime`
-                // renders its zone. Reading the current zone here instead
-                // would misreport any `tm` the caller built by hand.
-                let off = t.tm_gmtoff;
-                let (sign, mag) = if off < 0 {
-                    (b'-', off.unsigned_abs())
-                } else {
-                    (b'+', off.unsigned_abs())
-                };
-                pos = write_char(buf, limit, pos, sign);
-                // `tm_gmtoff` is bounded by the ±24 h a TZ offset can express,
-                // so these casts cannot truncate.
-                pos = write_dec2(buf, limit, pos, (mag / 3600) as i32);
-                pos = write_dec2(buf, limit, pos, ((mag % 3600) / 60) as i32);
-            }
-            b'Z' => {
-                // The abbreviation the `tm` carries; a hand-built `tm` with a
-                // null `tm_zone` renders nothing, as glibc does.
-                if !t.tm_zone.is_null() {
-                    // SAFETY: `tm_zone` is either null (checked) or a pointer
-                    // into `tz`'s NUL-terminated process-lifetime name
-                    // storage, so `strlen` terminates within it.
-                    let len = unsafe { crate::string::strlen(t.tm_zone) };
-                    for i in 0..len {
-                        // SAFETY: `i < len`, the string's own length.
-                        pos = write_char(buf, limit, pos, unsafe { *t.tm_zone.add(i) });
-                    }
-                }
-            }
-
-            // --- ISO 8601 week date (%G, %g, %V) ---
-            b'V' => {
-                // ISO 8601 week number (01-53).
-                let (_, week) = iso_week_date(t);
-                pos = write_dec2(buf, limit, pos, week);
-            }
-            b'G' => {
-                // ISO 8601 week-based year (4 digits).
-                let (year, _) = iso_week_date(t);
-                pos = write_dec4(buf, limit, pos, year);
-            }
-            b'g' => {
-                // ISO 8601 week-based year, last 2 digits.
-                let (year, _) = iso_week_date(t);
-                pos = write_dec2(buf, limit, pos, year.wrapping_rem(100));
-            }
-
-            // --- GNU extension ---
-            b's' => {
-                // Seconds since epoch (GNU extension): `mktime` of a copy,
-                // the local time it names -- and so its -1 when the year
-                // overflows, as glibc prints it.
-                let mut tmp = unsafe { *tm };
-                let epoch = mktime(&raw mut tmp);
-                pos = write_i64(buf, limit, pos, epoch);
-            }
-
-            // --- Literal ---
-            b'n' => {
-                pos = write_char(buf, limit, pos, b'\n');
-            }
-            b't' => {
-                pos = write_char(buf, limit, pos, b'\t');
-            }
-            b'%' => {
-                pos = write_char(buf, limit, pos, b'%');
-            }
-            _ => {
-                // Unknown — pass through.
-                pos = write_char(buf, limit, pos, b'%');
-                pos = write_char(buf, limit, pos, spec);
-            }
-        }
-    }
-
-    // Null-terminate.
-    let term = if pos < maxsize { pos } else { limit };
-    unsafe {
-        *buf.add(term) = 0;
-    }
-
-    if pos > limit { 0 } else { pos }
-}
+// `strftime` and `strftime_l` are `crate::strftime`'s, with `wcsftime`:
+// one engine for both widths, as glibc's is one source compiled twice.
+pub use crate::strftime::{strftime, strftime_l};
 
 // ---------------------------------------------------------------------------
 // Time conversion helpers
@@ -1683,68 +1379,6 @@ pub unsafe extern "C" fn strftime(
 #[inline]
 fn is_leap(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
-/// Compute ISO 8601 week-based year and week number.
-///
-/// ISO 8601 defines:
-/// - Weeks start on Monday.
-/// - Week 01 is the week containing the first Thursday of the year
-///   (equivalently, the week containing January 4th).
-/// - The year associated with a week can differ from the calendar year
-///   for days near the boundary (e.g., Dec 31 can be in week 01 of
-///   the next year, and Jan 1-3 can be in week 52/53 of the previous year).
-///
-/// Returns `(iso_year, iso_week)` where `iso_week` is in 1..=53.
-#[allow(clippy::arithmetic_side_effects)]
-fn iso_week_date(tm: &Tm) -> (i32, i32) {
-    let year = tm.tm_year + 1900;
-
-    // ISO day of week: Monday=1..Sunday=7.
-    let iso_dow = if tm.tm_wday == 0 { 7 } else { tm.tm_wday };
-
-    // Day of year (0-based).
-    let yday = tm.tm_yday;
-
-    // The ordinal of the Monday of the ISO week containing this day.
-    // yday - iso_dow + 1 gives Monday of this week (since iso_dow is
-    // 1 for Monday).  Then we need the week number relative to the
-    // first Thursday.
-    //
-    // ISO week number formula: the week number is computed by finding
-    // how many Thursdays have occurred so far in the year.  A simpler
-    // way: compute the ordinal of the Thursday in the same ISO week,
-    // then W = (ordinal_of_thursday / 7) + 1.
-    let thursday_yday = yday + (4 - iso_dow); // Thursday of this week.
-
-    if thursday_yday < 0 {
-        // Thursday is in the previous year — this day belongs to the
-        // last week of the previous year.
-        let prev_year = year - 1;
-        let prev_dec31_days = if is_leap(prev_year) { 365 } else { 364 };
-        // Compute week number for Dec 31 of previous year.
-        // Use the number of days in that year.
-        let prev_year_days = if is_leap(prev_year) { 366 } else { 365 };
-        // The Thursday for the adjusted day in the previous year.
-        let adj_thursday = prev_dec31_days + thursday_yday + 1;
-        let week = (adj_thursday / 7) + 1;
-        // Clamp: ISO week is at most 53.
-        let week = if week > 53 { 53 } else { week };
-        let _ = prev_year_days; // Suppress unused warning.
-        return (prev_year, week);
-    }
-
-    let year_days = if is_leap(year) { 366 } else { 365 };
-
-    if thursday_yday >= year_days {
-        // Thursday is in the next year — this day belongs to week 01
-        // of the next year.
-        return (year + 1, 1);
-    }
-
-    // Normal case: week number in the current year.
-    let week = (thursday_yday / 7) + 1;
-    (year, week)
 }
 
 /// A broken-down time with every field in range, computed before anything
@@ -1979,127 +1613,6 @@ fn mon_full(mon: i32) -> &'static [u8] {
         11 => b"December",
         _ => b"???",
     }
-}
-
-// ---------------------------------------------------------------------------
-// strftime helpers
-// ---------------------------------------------------------------------------
-
-/// Write a single character to a buffer.
-fn write_char(buf: *mut u8, limit: usize, pos: usize, ch: u8) -> usize {
-    if pos < limit {
-        unsafe {
-            *buf.add(pos) = ch;
-        }
-    }
-    pos.wrapping_add(1)
-}
-
-/// Write a byte slice to a buffer.
-fn write_str(buf: *mut u8, limit: usize, mut pos: usize, data: &[u8]) -> usize {
-    for &byte in data {
-        if pos < limit {
-            unsafe {
-                *buf.add(pos) = byte;
-            }
-        }
-        pos = pos.wrapping_add(1);
-    }
-    pos
-}
-
-/// Write a 2-digit zero-padded decimal.
-fn write_dec2(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
-    let v = if val < 0 { 0 } else { val as u32 };
-    let d1 = b'0'.wrapping_add((v.wrapping_div(10) % 10) as u8);
-    let d0 = b'0'.wrapping_add((v % 10) as u8);
-    let p1 = write_char(buf, limit, pos, d1);
-    write_char(buf, limit, p1, d0)
-}
-
-/// Write a 3-digit zero-padded decimal.
-fn write_dec3(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
-    let v = if val < 0 { 0 } else { val as u32 };
-    let d2 = b'0'.wrapping_add((v.wrapping_div(100) % 10) as u8);
-    let d1 = b'0'.wrapping_add((v.wrapping_div(10) % 10) as u8);
-    let d0 = b'0'.wrapping_add((v % 10) as u8);
-    let p2 = write_char(buf, limit, pos, d2);
-    let p1 = write_char(buf, limit, p2, d1);
-    write_char(buf, limit, p1, d0)
-}
-
-/// Write a 2-digit space-padded decimal (e.g., " 5" for 5).
-fn write_space_dec2(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
-    let v = if val < 0 { 0 } else { val as u32 };
-    let tens = v.wrapping_div(10) % 10;
-    let ones = v % 10;
-    let d1 = if tens == 0 {
-        b' '
-    } else {
-        b'0'.wrapping_add(tens as u8)
-    };
-    let d0 = b'0'.wrapping_add(ones as u8);
-    let p1 = write_char(buf, limit, pos, d1);
-    write_char(buf, limit, p1, d0)
-}
-
-/// Convert 24-hour clock to 12-hour clock (1-12).
-fn hour_12(h24: i32) -> i32 {
-    let h = h24 % 12;
-    if h == 0 { 12 } else { h }
-}
-
-/// Write an `i64` value as decimal digits (no padding, handles negatives).
-fn write_i64(buf: *mut u8, limit: usize, mut pos: usize, val: i64) -> usize {
-    if val < 0 {
-        pos = write_char(buf, limit, pos, b'-');
-        // Avoid overflow on i64::MIN by using wrapping.
-        return write_u64(buf, limit, pos, (val.wrapping_neg()) as u64);
-    }
-    write_u64(buf, limit, pos, val as u64)
-}
-
-/// Write a `u64` value as decimal digits (no padding).
-fn write_u64(buf: *mut u8, limit: usize, pos: usize, val: u64) -> usize {
-    // Stack buffer for up to 20 digits (u64::MAX = ~1.8e19).
-    let mut digits = [0u8; 20];
-    let mut n = val;
-    let mut count: usize = 0;
-
-    if n == 0 {
-        return write_char(buf, limit, pos, b'0');
-    }
-
-    while n > 0 {
-        if let Some(slot) = digits.get_mut(count) {
-            *slot = b'0'.wrapping_add((n % 10) as u8);
-        }
-        count = count.wrapping_add(1);
-        n = n.wrapping_div(10);
-    }
-
-    // Write digits in reverse (most significant first).
-    let mut p = pos;
-    let mut i = count;
-    while i > 0 {
-        i = i.wrapping_sub(1);
-        let d = digits.get(i).copied().unwrap_or(b'0');
-        p = write_char(buf, limit, p, d);
-    }
-    p
-}
-
-/// Write a 4-digit zero-padded year.
-fn write_dec4(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
-    let v = if val < 0 { 0 } else { val as u32 };
-    let d3 = b'0'.wrapping_add((v.wrapping_div(1000) % 10) as u8);
-    let d2 = b'0'.wrapping_add((v.wrapping_div(100) % 10) as u8);
-    let d1 = b'0'.wrapping_add((v.wrapping_div(10) % 10) as u8);
-    let d0 = b'0'.wrapping_add((v % 10) as u8);
-    let p3 = write_char(buf, limit, pos, d3);
-    let p2 = write_char(buf, limit, p3, d2);
-    let p1 = write_char(buf, limit, p2, d1);
-    write_char(buf, limit, p1, d0)
 }
 
 // ---------------------------------------------------------------------------
@@ -4177,16 +3690,24 @@ mod tests {
 
     #[test]
     fn test_strftime_timezone() {
-        // `%z`/`%Z` render the zone recorded in the `Tm`, not the
-        // process's current zone, so a hand-built `Tm` with no zone
-        // renders a zero offset and — like glibc — an empty `%Z`.
+        // `%z` renders the offset recorded in the `Tm`, not the process's
+        // current zone's, so a hand-built `Tm` renders a zero one. `%Z` is
+        // `tm_zone`; when that is NULL, glibc's falls back on
+        // `tzname[tm_isdst]` -- UTC's here -- and renders nothing at all
+        // when `tm_isdst` is negative, `%z` neither. (Until 2026-10-06 this
+        // said glibc renders an empty `%Z`; its oracle says otherwise.)
+        let _tz = TzGuard::utc();
         let mut tm = zero_tm();
         assert_eq!(run_strftime(b"%z\0", &tm), b"+0000");
+        assert_eq!(run_strftime(b"%Z\0", &tm), b"UTC");
+        tm.tm_isdst = -1;
         assert_eq!(run_strftime(b"%Z\0", &tm), b"");
+        assert_eq!(run_strftime(b"%z\0", &tm), b"");
 
         // A `Tm` that went through a conversion carries a name.
-        tm.tm_zone = c"UTC".as_ptr().cast();
-        assert_eq!(run_strftime(b"%Z\0", &tm), b"UTC");
+        tm.tm_isdst = 0;
+        tm.tm_zone = c"EST".as_ptr().cast();
+        assert_eq!(run_strftime(b"%Z\0", &tm), b"EST");
     }
 
     #[test]
@@ -4363,9 +3884,7 @@ mod tests {
         tm.tm_mday = 1;
         tm.tm_wday = 4; // Thursday
         tm.tm_yday = 0;
-        let (year, week) = iso_week_date(&tm);
-        assert_eq!(year, 2015);
-        assert_eq!(week, 1);
+        assert_eq!(run_strftime(b"%G %V\0", &tm), b"2015 01");
     }
 
     #[test]
@@ -4377,9 +3896,7 @@ mod tests {
         tm.tm_mday = 29;
         tm.tm_wday = 1; // Monday
         tm.tm_yday = 362; // 0-indexed
-        let (year, week) = iso_week_date(&tm);
-        assert_eq!(year, 2015);
-        assert_eq!(week, 1);
+        assert_eq!(run_strftime(b"%G %V\0", &tm), b"2015 01");
     }
 
     #[test]
@@ -4391,9 +3908,7 @@ mod tests {
         tm.tm_mday = 1;
         tm.tm_wday = 5; // Friday
         tm.tm_yday = 0;
-        let (year, week) = iso_week_date(&tm);
-        assert_eq!(year, 2015);
-        assert_eq!(week, 53);
+        assert_eq!(run_strftime(b"%G %V\0", &tm), b"2015 53");
     }
 
     // -- mktime edge cases --
@@ -4713,12 +4228,18 @@ mod tests {
 
     #[test]
     fn test_hour_12_all_values() {
-        assert_eq!(hour_12(0), 12); // midnight
-        assert_eq!(hour_12(1), 1);
-        assert_eq!(hour_12(11), 11);
-        assert_eq!(hour_12(12), 12); // noon
-        assert_eq!(hour_12(13), 1);
-        assert_eq!(hour_12(23), 11);
+        let mut tm = zero_tm();
+        for (hour, twelve) in [
+            (0, b"12"),
+            (1, b"01"),
+            (11, b"11"),
+            (12, b"12"),
+            (13, b"01"),
+            (23, b"11"),
+        ] {
+            tm.tm_hour = hour;
+            assert_eq!(run_strftime(b"%I\0", &tm), twelve, "hour {hour}");
+        }
     }
 
     // -- CLOCKS_PER_SEC --
@@ -4877,9 +4398,7 @@ mod tests {
         tm.tm_year = 124;
         tm.tm_wday = 1; // Monday
         tm.tm_yday = 0;
-        let (iso_year, iso_week) = iso_week_date(&tm);
-        assert_eq!(iso_year, 2024);
-        assert_eq!(iso_week, 1);
+        assert_eq!(run_strftime(b"%G %V\0", &tm), b"2024 01");
     }
 
     #[test]
@@ -4890,9 +4409,7 @@ mod tests {
         tm.tm_year = 124;
         tm.tm_wday = 2; // Tuesday
         tm.tm_yday = 365;
-        let (iso_year, iso_week) = iso_week_date(&tm);
-        assert_eq!(iso_year, 2025);
-        assert_eq!(iso_week, 1);
+        assert_eq!(run_strftime(b"%G %V\0", &tm), b"2025 01");
     }
 
     #[test]
@@ -4903,9 +4420,7 @@ mod tests {
         tm.tm_year = 114;
         tm.tm_wday = 1; // Monday
         tm.tm_yday = 362;
-        let (iso_year, iso_week) = iso_week_date(&tm);
-        assert_eq!(iso_year, 2015);
-        assert_eq!(iso_week, 1);
+        assert_eq!(run_strftime(b"%G %V\0", &tm), b"2015 01");
     }
 
     #[test]
@@ -4917,9 +4432,7 @@ mod tests {
         tm.tm_year = 116;
         tm.tm_wday = 5; // Friday
         tm.tm_yday = 0;
-        let (iso_year, iso_week) = iso_week_date(&tm);
-        assert_eq!(iso_year, 2015);
-        assert_eq!(iso_week, 53);
+        assert_eq!(run_strftime(b"%G %V\0", &tm), b"2015 53");
     }
 
     #[test]
@@ -4929,10 +4442,7 @@ mod tests {
         tm.tm_year = 124;
         tm.tm_wday = 6; // Saturday
         tm.tm_yday = 166;
-        let (iso_year, iso_week) = iso_week_date(&tm);
-        assert_eq!(iso_year, 2024);
-        // Thursday of this ISO week: 166 + 4 - 6 = 164; 164/7 + 1 = 24.
-        assert_eq!(iso_week, 24);
+        assert_eq!(run_strftime(b"%G %V\0", &tm), b"2024 24");
     }
 
     // -- gmtime/mktime roundtrip for extended range --

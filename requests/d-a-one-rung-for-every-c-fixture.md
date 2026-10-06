@@ -27,9 +27,17 @@ separated by blanks; `#` to the end of a line is a comment:
     ctest-stdio      file     60
 
 - **name** -- the fixture: `/mnt/tests/<name>.elf`, and its `argv[0]`.
-- **grants** -- `-` for none, or `file` for one wildcard File capability,
-  `(ResourceType::File, 0, READ | WRITE | EXECUTE | METADATA)`: those two
-  cover every fixture so far (each request below says which).
+- **grants** -- `-` for none, or a comma-separated list of these kinds,
+  each at most once (each request below says which a fixture needs):
+  - `file` -- one wildcard File capability,
+    `(ResourceType::File, 0, READ | WRITE | EXECUTE | METADATA)`;
+  - `creds` -- `(ResourceType::Process, 0, SET_CREDENTIALS)`, the grant
+    `self_test_fastpy_setuid` gives: a fixture that sets its own uid, gid
+    or supplementary groups needs it (`SYS_PROCESS_SETGROUPS` checks it,
+    and the library's `CAP_SETUID`/`CAP_SETGID` are projected from it).
+    Added 2026-10-06 for `ctest-resuid` and `ctest-groups`.
+
+  So `file,creds` is both. The rootfs script refuses any other spelling.
 - **seconds** -- how long it may take, from spawn to Zombie: a time, not a
   count of yields, as several of the requests below ask.
 
@@ -92,7 +100,7 @@ will close them myself as each one goes on.
 | `ctest-pi-mutex` | -- (filed with priority-inheritance mutexes, 2026-10-06; §1177) | - | 60 |
 | `ctest-system` | -- (filed with `system()`, 2026-10-06); needs a `/bin/sh` in the root (`d-ab-the-booted-system-has-no-bin-sh.md`) | file | 60 |
 | `ctest-mmap-file` | -- (filed with file mappings, 2026-10-06; `d-a-a-native-program-cannot-map-a-file.md` is the kernel's half) | file | 30 |
-| `ctest-resuid` | -- (filed with `getresuid`, 2026-10-06); starts as root and drops to uid 1000 | - | 30 |
+| `ctest-resuid` | -- (filed with `getresuid`, 2026-10-06); starts as root and drops to uid 1000 | creds | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)

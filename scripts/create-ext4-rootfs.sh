@@ -2197,11 +2197,28 @@ if [ -f "$GENERIC_LIST" ]; then
             echo "[rootfs] ERROR: ctest-generic.list names $_name, which has no services/$_name/build.py"
             _bad=1
         fi
-        case "$_grant" in
-            -|file) ;;
-            *) echo "[rootfs] ERROR: ctest-generic.list: $_name's grant '$_grant' is neither - nor file"
-               _bad=1 ;;
-        esac
+        # `-`, or a comma list of the kinds the rung knows, each at most once.
+        if [ "$_grant" != "-" ]; then
+            _kinds=",$_grant,"
+            case "$_kinds" in
+                *,,*|*,-,*) _kinds_ok=0 ;;
+                *) _kinds_ok=1 ;;
+            esac
+            _rest="$_kinds"
+            for _kind in file creds; do
+                case "$_rest" in
+                    *",$_kind,"*",$_kind,"*) _kinds_ok=0 ;;
+                esac
+                _rest="${_rest//,$_kind,/,}"
+            done
+            if [ "$_rest" != "," ]; then
+                _kinds_ok=0
+            fi
+            if [ "$_kinds_ok" -ne 1 ]; then
+                echo "[rootfs] ERROR: ctest-generic.list: $_name's grant '$_grant' is not - or a comma list of file and creds, each once"
+                _bad=1
+            fi
+        fi
         _secs_ok=0
         case "$_secs" in
             *[!0-9]*) ;;

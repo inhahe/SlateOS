@@ -542,6 +542,16 @@ impl Default for QuickSettingsState {
     }
 }
 
+/// A quick-settings slider the pane cannot move: why, shown in its place,
+/// and whether the level beside its label is the device's own -- a level the
+/// device reported, which cannot be set from here -- or there is none to
+/// show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Fixed {
+    why: &'static str,
+    level_shown: bool,
+}
+
 impl QuickSettingsState {
     fn get(&self, setting: QuickSetting) -> bool {
         match setting {
@@ -586,9 +596,11 @@ pub struct NotificationPane {
     /// being dragged, where it was taken hold of, where the drag began -- and
     /// whether the pointer is where a press would take hold of a thumb.
     qs_sliders: [Slider; 2],
-    /// Why the volume cannot be changed -- shown in its slider's place --
-    /// while the sound card is out of reach (`crate::volume`).
-    volume_out_of_reach: Option<&'static str>,
+    /// The volume and brightness sliders the pane cannot move, in that
+    /// order: why, shown in the slider's place, while the sound card is out
+    /// of reach (`crate::volume`) or the screen's brightness cannot be set
+    /// (`crate::backlight`).
+    fixed: [Option<Fixed>; 2],
     /// Per-app notification settings.
     app_settings: Vec<AppNotifSettings>,
     /// Scroll offset in the notification list (pixels).
@@ -639,7 +651,7 @@ impl NotificationPane {
             ids: IdSeq::new(),
             quick_settings: QuickSettingsState::default(),
             qs_sliders: [Self::level_slider(), Self::level_slider()],
-            volume_out_of_reach: None,
+            fixed: [None, None],
             app_settings: Vec::new(),
             scroll_offset: 0.0,
             events: Vec::new(),
@@ -1249,16 +1261,48 @@ impl NotificationPane {
     }
 
     /// Say the volume cannot be changed, and why in a few words -- shown in
-    /// the slider's place, which takes no input meanwhile -- or, with `None`,
-    /// that it can (`crate::volume`).
+    /// the slider's place, which takes no input meanwhile, with no level
+    /// beside it -- or, with `None`, that it can (`crate::volume`).
     pub const fn set_volume_out_of_reach(&mut self, why: Option<&'static str>) {
-        self.volume_out_of_reach = why;
+        self.fixed[0] = match why {
+            Some(why) => Some(Fixed {
+                why,
+                level_shown: false,
+            }),
+            None => None,
+        };
     }
 
     /// Why the volume cannot be changed, while it cannot.
     #[must_use]
     pub const fn volume_out_of_reach(&self) -> Option<&'static str> {
-        self.volume_out_of_reach
+        match self.fixed[0] {
+            Some(fixed) => Some(fixed.why),
+            None => None,
+        }
+    }
+
+    /// The screen's brightness as the kernel reports it, which the pane
+    /// cannot change: `level` beside the label where the report gave one,
+    /// and `why` it cannot be changed in the slider's place, which takes no
+    /// input (`crate::backlight`).
+    pub const fn show_fixed_brightness(&mut self, level: Option<u8>, why: &'static str) {
+        if let Some(level) = level {
+            self.quick_settings.brightness = if level > 100 { 100 } else { level };
+        }
+        self.fixed[1] = Some(Fixed {
+            why,
+            level_shown: level.is_some(),
+        });
+    }
+
+    /// Why the brightness cannot be changed here, while it cannot.
+    #[must_use]
+    pub const fn brightness_fixed(&self) -> Option<&'static str> {
+        match self.fixed[1] {
+            Some(fixed) => Some(fixed.why),
+            None => None,
+        }
     }
 
     /// Get brightness (0..=100).
@@ -1344,9 +1388,9 @@ impl NotificationPane {
     /// lives, so there is nothing to preview separately from saving -- a drag
     /// changes the volume as it goes, and Escape puts it back.
     fn qs_slider_input(&mut self, slot: usize, input: impl FnOnce(&mut Slider) -> Response) {
-        // A volume that cannot be changed has no slider to take hold of: its
+        // A level that cannot be changed has no slider to take hold of: its
         // place says why instead.
-        if slot == 0 && self.volume_out_of_reach.is_some() {
+        if self.fixed.get(slot).is_some_and(Option::is_some) {
             return;
         }
         let level = self.qs_level(slot);
@@ -1826,16 +1870,12 @@ impl NotificationPane {
     ) {
         let value = self.qs_level(slot);
         let y = start_y + Self::qs_slider_top(slot);
-        let out_of_reach = if slot == 0 {
-            self.volume_out_of_reach
-        } else {
-            None
-        };
-        // Label + value -- no value for a volume that is not the card's.
+        let fixed = self.fixed.get(slot).copied().flatten();
+        // Label + value -- no value where the device gave none.
         cmds.push(RenderCommand::Text {
             x: PANE_PADDING,
             y: y + 8.0,
-            text: if out_of_reach.is_some() {
+            text: if fixed.is_some_and(|f| !f.level_shown) {
                 label.to_string()
             } else {
                 format!("{label}  {value}%")
@@ -1847,10 +1887,10 @@ impl NotificationPane {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // A volume the sound card cannot be asked for says why, where its
-        // slider would be: a slider there would move a level that changes
-        // nothing anyone hears.
-        if let Some(why) = out_of_reach {
+        // A level the pane cannot change says why, where its slider would
+        // be: a slider there would move a number that changes nothing anyone
+        // hears or sees.
+        if let Some(Fixed { why, .. }) = fixed {
             let track = Self::qs_slider_placement(slot, start_y).track;
             cmds.push(RenderCommand::Text {
                 x: track.x,

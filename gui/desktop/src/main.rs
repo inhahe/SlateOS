@@ -199,6 +199,10 @@ fn main() -> ExitCode {
     session
         .shell_mut()
         .attach_volume(desktop::volume::Output::open());
+    // And the brightness the kernel reports: shown, not yet settable.
+    session
+        .shell_mut()
+        .attach_backlight(desktop::backlight::Source::kernel());
 
     // Every window hears when a settings file changes (design-decisions
     // 1418). With no configuration directory there is nothing to watch, and

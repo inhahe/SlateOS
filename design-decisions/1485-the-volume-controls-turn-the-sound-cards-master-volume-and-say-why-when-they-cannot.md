@@ -11,7 +11,9 @@ another program made is what they show. On SlateOS today an ordinary
 program cannot reach the sound card yet -- lanes A and D are opening that
 door -- so the pane says "No sound card reachable" where the slider would
 be, and the volume keys say it on screen, instead of moving a number that
-changes nothing anyone hears.
+changes nothing anyone hears. The brightness slider beside it, which had
+the same fault and has no door yet at all, now shows the screen's real
+brightness and says it cannot be changed yet.
 
 **Where:** `gui/sound/src/mixer.rs` (`Master`, `Simulated`),
 `gui/sound/src/sys.rs` (the C library's `ioctl`, shared with the PCM
@@ -33,6 +35,22 @@ card. Waits on `requests/e-ad-no-application-can-reach-the-sound-device.md`
 | **A level set reads back as itself** | the card's steps rounded both ways | A card of 87 steps set to 50 holds 44, which is 51 of 100; a slider moved to 50 must not jump to 51. | The level and the value written are remembered. |
 | **A card with no master switch is muted by its volume** | no mute on such a card | Many cards -- HDMI's among them -- have none. | The level to go back to lives in the process that muted it. |
 | **No card unless the `desktop` binary attaches one** (`Output::Own`) | every shell opening the card | A test, a harness, a picture of a theme must not turn the volume of the machine running it -- as the shell's sounds are heard only from the binary (`allow_playback`). | The binary must attach it; it does, beside `allow_playback`. |
+
+### The brightness beside it
+
+The pane's brightness slider had the same fault -- a number the desktop
+showed, and nothing on the screen changed. The kernel reports each
+display's brightness (`/proc/brightness`, a `Displays:` row each) and can
+set it (`SYS_BRIGHTNESS_SET`, lane A,
+`requests/c-a-brightness-has-setters-and-no-door.md`), but only for a
+process holding the `SET_BRIGHTNESS` right, which nothing gives the
+desktop yet (`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`). So the
+row shows the first display's level as the kernel reports it, read as the
+pane opens, and says "Can't be changed yet" in the slider's place -- or
+"No brightness control reachable" with no report to read
+(`gui/desktop/src/backlight.rs`). A shell that asked for no screen keeps
+its own slider, as for the volume. Once the desktop holds the right,
+setting it goes in `backlight` and the slider comes back.
 
 ### What it does not do
 

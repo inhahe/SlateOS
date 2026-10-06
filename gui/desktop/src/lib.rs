@@ -84,6 +84,7 @@
 pub mod about;
 pub mod animations;
 pub mod autologin;
+pub mod backlight;
 pub mod bluetooth;
 pub mod calendar;
 mod char_picker;
@@ -2466,6 +2467,11 @@ pub struct DesktopShell {
     /// ([`attach_volume`](Self::attach_volume)) -- or the shell's own number
     /// where none was asked for (design-decisions §1485).
     volume: volume::Output,
+    /// Where the pane's brightness comes from: the kernel's report, once the
+    /// `desktop` binary attaches it ([`attach_backlight`](Self::attach_backlight)),
+    /// read as the pane opens and shown as a level the pane cannot change --
+    /// or the pane's own number where none was asked for.
+    backlight: backlight::Source,
     /// The notifications popping up as they arrive, beside the pane that
     /// holds them: [`notify`](Self::notify) files a notification in the pane
     /// and shows it here (design-decisions §1447). Placed against the screen
@@ -2982,6 +2988,7 @@ impl DesktopShell {
             // No card until the `desktop` binary attaches one: a test or a
             // harness that builds a shell must not turn the machine's volume.
             volume: volume::Output::Own,
+            backlight: backlight::Source::Own,
             toasts: toasts::ToastStack::new(),
             focus: focus_assist::FocusAssistManager::new(),
             events: calendar::EventStore::new(),
@@ -12566,9 +12573,28 @@ impl DesktopShell {
         // card of its own notification.
         self.toasts.clear();
         // The volume as the card has it now, which another program may have
-        // changed since the pane last showed it.
+        // changed since the pane last showed it -- and the screen's
+        // brightness, as the kernel reports it.
         self.read_volume();
+        self.read_brightness();
         self.notifications.show();
+    }
+
+    /// Take the pane's brightness from `source` -- the `desktop` binary
+    /// attaches the kernel's report ([`backlight::Source::kernel`]) -- and
+    /// show it now. A shell with none attached keeps the pane's own number,
+    /// as a test must (see [`backlight`]).
+    pub fn attach_backlight(&mut self, source: backlight::Source) {
+        self.backlight = source;
+        self.read_brightness();
+    }
+
+    /// Show the screen's brightness as the source reports it, and why the
+    /// pane cannot change it.
+    fn read_brightness(&mut self) {
+        if let Some((level, why)) = self.backlight.read() {
+            self.notifications.show_fixed_brightness(level, why);
+        }
     }
 
     /// Make the volume the pane, the volume keys and the overlay show the

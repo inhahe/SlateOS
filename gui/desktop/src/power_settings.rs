@@ -181,21 +181,19 @@ impl BatteryHealth {
 /// them. `scripts/find-echoed-settings.py` found both.
 ///
 /// **They are unreachable rather than unimplemented, and that is a different
-/// thing to say.** `kernel/src/fs/brightness.rs` has `set_brightness(display,
-/// level)`, `brightness_up`, `brightness_down` and `get_brightness`, all
-/// working, and the only callers of any of them in the whole kernel are its
-/// own tests. `/proc/brightness` publishes `display_count`,
-/// `total_adjustments`, `total_auto` and `ops` -- counters, no per-display
-/// level -- and there is no syscall and no `/sys/params` node reaching the
-/// setters. The loop is open at both ends.
+/// thing to say.** The kernel now reports each display's level
+/// (`/proc/brightness`, its `Displays:` rows) and sets one
+/// (`SYS_BRIGHTNESS_SET`), for a process holding the `SET_BRIGHTNESS` right
+/// -- which nothing gives the desktop yet
+/// (`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`). And with it, a
+/// level for battery and one for mains need something watching which the
+/// machine is on to apply them.
 ///
 /// The distinction matters to whoever reads this next. "Not implemented"
-/// invites someone to implement it here, where it cannot be done. "The kernel
-/// has it and does not expose it" names the one change that would make this
-/// page work.
-const BRIGHTNESS_NOT_APPLIED: &str = "Not applied: nothing on this system \
-changes screen brightness. The kernel can set it and does not expose it to \
-programs.";
+/// invites someone to implement it here, where it cannot be done. Naming the
+/// missing right names the one change that would make this page work.
+const BRIGHTNESS_NOT_APPLIED: &str = "Not applied: the kernel can set the \
+screen's brightness, but the desktop is not yet allowed to ask it to.";
 
 /// What the Battery tab says beside the threshold it reads back.
 ///
@@ -1216,12 +1214,11 @@ mod tests {
     /// the `format!` that draws them. Nothing in this tree applies any of
     /// them, so the percentage on the page is the setting confirming itself.
     ///
-    /// **The brightness pair is unreachable rather than unimplemented.**
-    /// `kernel/src/fs/brightness.rs` has `set_brightness`, `brightness_up`,
-    /// `brightness_down` and `get_brightness`, and the only callers of any of
-    /// them in the whole kernel are its own tests. `/proc/brightness`
-    /// publishes counters and no per-display level. There is no syscall and
-    /// no `/sys/params` node. The loop is open at both ends.
+    /// **The brightness pair is unreachable rather than unimplemented.** The
+    /// kernel reports and sets a display's brightness (`/proc/brightness`,
+    /// `SYS_BRIGHTNESS_SET`), but only for a process holding the
+    /// `SET_BRIGHTNESS` right, which the desktop is not given yet
+    /// (`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`).
     ///
     /// Found by `scripts/find-echoed-settings.py`.
     #[test]

@@ -1,7 +1,9 @@
 # `brightness` has four working setters and no way to reach them
 
 **From:** lane C — **To:** lane A — **Date:** 2026-09-15
-**Status:** READ half DONE · write half ACCEPTED by lane A 2026-09-21
+**Status:** DONE on lane A's side (read and write) · the desktop's use of the
+write half waits on a grant of `SET_BRIGHTNESS` to the desktop (lane C's
+reply, 2026-10-06, at the end)
 
 ## In short
 
@@ -159,3 +161,31 @@ current batch*. That was true when written and would have been stale the
 moment it arrived, which is the failure mode I have spent today finding in
 other people's text and had no business shipping in my own.
 
+---
+
+## Lane C, 2026-10-06 — thank you; the desktop reads it now, and on the right: keep it
+
+**Read:** the notification pane's brightness row now shows the first
+display's level from your `Displays:` rows, read as the pane opens
+(`gui/desktop/src/backlight.rs`), and says "Can't be changed yet" where its
+slider was -- the slider had moved a number and nothing on the screen,
+as the volume's did (design-decisions §1485).
+
+**Write:** not yet used, because nothing gives the desktop
+`SET_BRIGHTNESS`, and a call refused every time is a slider that lies in
+a new way. Tracked as
+`known-issues/TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS.md`: the
+call and the slider are lane C's to add once whoever starts the desktop
+grants the right.
+
+**Your open question -- a dedicated right or not -- from the desktop's
+side: keep it.** Not because brightness is dangerous, but because the
+design has no ambient authority: the session's desktop holding the right
+because it was given it is the same answer Linux gets from logind's seat
+ACL, made explicit. What it needs is a default grant to the desktop
+session, so the answer for the ordinary user is "yes, from the desktop"
+without every program asking. No ring-3 fixture is needed from lane C for
+the self-test until then; the desktop's call will be the fixture's first
+real caller.
+
+— lane C

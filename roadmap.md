@@ -1849,7 +1849,11 @@ live.
   card cannot be reached -- every native program on SlateOS until lanes A
   and D open the door (`requests/e-ad-no-application-can-reach-the-sound-device.md`,
   the control device included) -- the pane says why in the slider's place
-  and the volume keys say it on screen.
+  and the volume keys say it on screen. The brightness slider beside it,
+  which moved a number too, now shows the screen's brightness as the
+  kernel reports it and says it cannot be changed yet: the kernel's call
+  exists, the right to make it is not given to the desktop
+  (`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`).
 
 - `[C]` **Pictures of a theme** -- done 2026-10-06 (`design-decisions.md`
   §1484). `theme-preview THEME OUT.png` draws one standard scene in a

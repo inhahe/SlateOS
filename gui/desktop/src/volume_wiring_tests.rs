@@ -1,7 +1,8 @@
 //! The shell's volume controls on a sound card: the volume keys, the mute
 //! key and the pane's slider turn the card's master volume, from its level
 //! as it is now -- and say why they cannot when the card is out of reach,
-//! moving nothing (design-decisions §1485).
+//! moving nothing (design-decisions §1485). And the pane's brightness row,
+//! which shows the level the kernel reports and says it cannot be changed.
 
 #![cfg(test)]
 #![allow(
@@ -235,4 +236,91 @@ fn a_shell_with_no_card_keeps_its_own_number() {
     assert_eq!(s.notifications.volume(), level + 5);
     assert_eq!(s.volume_output().out_of_reach(), None);
     assert!(overlay_text(&s).iter().any(|t| t.starts_with("Volume")));
+}
+
+/// The brightness slider's track on the screen, as the open pane draws it:
+/// the second fill of a slider's thickness and length.
+fn brightness_track(s: &DesktopShell) -> Option<(f32, f32, f32, f32)> {
+    let mut dx = 0.0;
+    let mut seen = 0;
+    for c in s
+        .notifications
+        .render(&Palette::for_mode(false), 1920.0, 1080.0)
+    {
+        match c {
+            RenderCommand::PushTranslate { dx: by, .. } => dx += by,
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } if (width - 140.0).abs() < 0.5 && height <= 8.0 => {
+                seen += 1;
+                if seen == 2 {
+                    return Some((x + dx, y, width, height));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// **The pane's brightness is the screen's, as the kernel reports it, and
+/// says it cannot be changed**: the level beside the label, the reason in
+/// the slider's place, and a press there moves nothing.
+#[test]
+fn the_panes_brightness_is_the_screens_and_says_it_cannot_change() {
+    let dir = scratchdir::ScratchDir::new("pane-brightness");
+    let report = dir.path("brightness");
+    std::fs::write(
+        &report,
+        "display_count: 1\nDisplays:\n  0   Built-in display      35%  min   5%  [manual]\n",
+    )
+    .unwrap();
+    let mut s = shell();
+    let (x, y, w, h) = {
+        // Where the slider was before the report: the place a press is tried.
+        s.toggle_notifications();
+        let track = brightness_track(&s).expect("a slider before the report");
+        s.toggle_notifications();
+        track
+    };
+    s.attach_backlight(crate::backlight::Source::Report(report));
+    s.toggle_notifications();
+    let text = pane_text(&s);
+    assert!(text.iter().any(|t| t == "Brightness  35%"), "{text:?}");
+    assert!(text.iter().any(|t| t == "Can't be changed yet"), "{text:?}");
+    assert_eq!(brightness_track(&s), None, "no slider where it cannot move");
+    s.handle_mouse(&click(x + w - 1.0, y + h / 2.0));
+    assert_eq!(s.notifications.brightness(), 35);
+}
+
+/// **With no report, no level -- and why.**
+#[test]
+fn with_no_brightness_report_the_pane_says_so() {
+    let dir = scratchdir::ScratchDir::new("pane-no-brightness");
+    let mut s = shell();
+    s.attach_backlight(crate::backlight::Source::Report(dir.path("missing")));
+    s.toggle_notifications();
+    let text = pane_text(&s);
+    assert!(text.iter().any(|t| t == "Brightness"), "{text:?}");
+    assert!(
+        text.iter().any(|t| t == "No brightness control reachable"),
+        "{text:?}"
+    );
+    assert!(
+        !text.iter().any(|t| t.starts_with("Brightness  ")),
+        "{text:?}"
+    );
+}
+
+/// **A shell that asked for no screen keeps the pane's own slider.**
+#[test]
+fn a_shell_with_no_screen_keeps_its_brightness_slider() {
+    let mut s = shell();
+    s.toggle_notifications();
+    assert!(brightness_track(&s).is_some());
+    assert_eq!(s.notifications.brightness_fixed(), None);
 }

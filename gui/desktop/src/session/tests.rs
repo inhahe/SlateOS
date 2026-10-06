@@ -4493,6 +4493,27 @@ fn a_background_program_is_told_the_desktop() {
         "{:?}",
         script.told.borrow()
     );
+    // A press is the desktop's, not the pointer moving: not told.
+    let pointers = |told: &[Told]| {
+        told.iter()
+            .filter(|t| matches!(t, Told::Pointer { .. }))
+            .count()
+    };
+    let before = pointers(&script.told.borrow());
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        background,
+        guitk::event::Event::Mouse(guitk::event::MouseEvent {
+            x: 41.0,
+            y: 31.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }),
+    )]);
+    session.pump().expect("pump");
+    assert_eq!(
+        pointers(&script.told.borrow()),
+        before,
+        "a press is not told"
+    );
     session.resize_display(1280, 720).expect("resize");
     assert_eq!(
         script.told.borrow().last(),
@@ -4515,7 +4536,16 @@ fn a_background_program_pauses_behind_the_login_screen() {
     session.sync_wallpaper();
     session.paint_background().expect("paint");
     session.pump().expect("pump");
-    assert!(script.told.borrow().contains(&Told::Pause));
+    session.pump().expect("pump");
+    let count = |of: &Told| script.told.borrow().iter().filter(|t| *t == of).count();
+    assert_eq!(count(&Told::Pause), 1, "told once, not at every pump");
+    let themes = script
+        .told
+        .borrow()
+        .iter()
+        .filter(|t| matches!(t, Told::Theme { .. }))
+        .count();
+    assert_eq!(themes, 1, "the look told once while it stays the same");
     type_password(&desktop, &mut session, "password");
     session.pump().expect("pump");
     assert_eq!(script.told.borrow().last(), Some(&Told::Resume));

@@ -25,6 +25,7 @@ use std::ffi::OsString;
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 
@@ -113,16 +114,24 @@ impl Program {
         let stderr = child.stderr.take();
         let stdin = child.stdin.take();
         let shared = Arc::new(Mutex::new(Shared::default()));
+        // Ends -- its sender dropped -- when the thread keeping what the
+        // program says has read the last of it.
+        let (said_done, all_said) = mpsc::channel::<()>();
         if let Some(stderr) = stderr {
             let said = Arc::clone(&shared);
             std::thread::Builder::new()
                 .name("background-said".into())
-                .spawn(move || keep_said(stderr, &said))?;
+                .spawn(move || {
+                    keep_said(stderr, &said);
+                    drop(said_done);
+                })?;
+        } else {
+            drop(said_done);
         }
         let pictures = Arc::clone(&shared);
         std::thread::Builder::new()
             .name("background-pictures".into())
-            .spawn(move || read_pictures(stdout, &pictures, waker.as_ref()))?;
+            .spawn(move || read_pictures(stdout, &pictures, waker.as_ref(), Some(&all_said)))?;
         Ok(Self {
             child,
             stdin,
@@ -132,8 +141,15 @@ impl Program {
 }
 
 /// Read pictures from `stdout` into `shared` until they stop, waking `waker`
-/// after each and after the end.
-fn read_pictures(stdout: impl Read, shared: &Mutex<Shared>, waker: Option<&Waker>) {
+/// after each and after the end -- the end reported with the last of what
+/// the program said, once `all_said` ends (or half a second has passed: a
+/// program that closed its output and keeps talking is not waited for).
+fn read_pictures(
+    stdout: impl Read,
+    shared: &Mutex<Shared>,
+    waker: Option<&Waker>,
+    all_said: Option<&Receiver<()>>,
+) {
     let mut input = BufReader::with_capacity(1 << 20, stdout);
     let why = loop {
         match backdrop::read_frame(&mut input) {
@@ -152,9 +168,12 @@ fn read_pictures(stdout: impl Read, shared: &Mutex<Shared>, waker: Option<&Waker
         }
     };
     // What it said as it went, on standard error, is the reason a user can
-    // act on: wait a moment for the thread keeping it, which ends with the
-    // program.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // act on: wait for the thread keeping it to read the last of it -- it
+    // ends with the program -- but not for ever. Either answer, the channel
+    // ending or the time passing, means go on: nothing is ever sent on it.
+    if let Some(all_said) = all_said {
+        let _ = all_said.recv_timeout(std::time::Duration::from_millis(500));
+    }
     if let Ok(mut shared) = shared.lock() {
         let said = std::str::from_utf8(&shared.said)
             .map(|s| s.trim().to_owned())
@@ -315,7 +334,7 @@ pub(crate) mod tests {
         let wakes = Arc::new(Wakes::default());
         let waker = Waker::from(Arc::clone(&wakes));
         shared.lock().unwrap().said = b"  the file is gone \n".to_vec();
-        read_pictures(&stream[..], &shared, Some(&waker));
+        read_pictures(&stream[..], &shared, Some(&waker), None);
         let shared = shared.into_inner().unwrap();
         assert_eq!(shared.frame.map(|f| f.width), Some(2), "the newest");
         assert_eq!(
@@ -328,11 +347,37 @@ pub(crate) mod tests {
             "a wake for each picture, and one for the end"
         );
         let shared = Mutex::new(Shared::default());
-        read_pictures(&b"not pictures at all"[..], &shared, None);
+        read_pictures(&b"not pictures at all"[..], &shared, None, None);
         assert_eq!(
             shared.into_inner().unwrap().ended.as_deref(),
             Some("the background program stopped: it wrote something that is not a picture")
         );
+    }
+
+    /// **A program that is not there is not started; one that ends says why
+    /// in its own words**, and telling it more is no error.
+    #[test]
+    fn a_program_that_ends_says_why() {
+        use std::time::{Duration, Instant};
+        assert!(Program::start(Path::new("/no/such/background/program"), &[], None).is_err());
+        #[cfg(windows)]
+        let (shell, args) = ("cmd", ["/c", "echo the file is gone 1>&2"]);
+        #[cfg(not(windows))]
+        let (shell, args) = ("sh", ["-c", "echo the file is gone >&2"]);
+        let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+        let mut program = Program::start(Path::new(shell), &args, None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let ended = loop {
+            if let Some(why) = program.ended() {
+                break why;
+            }
+            assert!(Instant::now() < deadline, "its end was never reported");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(ended, "the background program ended: the file is gone");
+        assert!(program.take_frame().is_none());
+        program.tell(&Event::Pause);
+        program.tell(&Event::Resume);
     }
 
     /// **What a program says is kept to its end**, where the reason is.

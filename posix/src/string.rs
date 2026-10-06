@@ -1935,27 +1935,92 @@ pub extern "C" fn ffsll(i: i64) -> i32 {
     ffsl(i)
 }
 
+/// Where `strcasecmp` stops in the sixteen bytes at `a` and `b`: bit `i` set
+/// where the two differ once ASCII letters are folded to lower case, or
+/// agree on the terminator.  A byte is upper case when `byte - 'A'` is at
+/// most 25 as an unsigned number -- `pminub` and `pcmpeqb`, SSE2 having no
+/// unsigned compare -- and folds by gaining 0x20.  Then `strcmp`'s stops
+/// (`stops16`) over the folded bytes.
+///
+/// # Safety
+///
+/// `a` and `b` readable for sixteen bytes each.
+#[inline(always)]
+unsafe fn folded_stops16(a: *const u8, b: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable bytes; unaligned loads.
+    unsafe {
+        core::arch::asm!(
+            "movdqu {x}, xmmword ptr [{a}]",
+            "movdqu {y}, xmmword ptr [{b}]",
+            // `a`'s bytes, folded: 0x20 added where `x - 'A' <= 25`.
+            "movdqa {t}, {x}",
+            "psubb {t}, {upper_a}",
+            "movdqa {u}, {t}",
+            "pminub {u}, {letters}",
+            "pcmpeqb {u}, {t}",
+            "pand {u}, {case_bit}",
+            "por {x}, {u}",
+            // `b`'s, the same.
+            "movdqa {t}, {y}",
+            "psubb {t}, {upper_a}",
+            "movdqa {u}, {t}",
+            "pminub {u}, {letters}",
+            "pcmpeqb {u}, {t}",
+            "pand {u}, {case_bit}",
+            "por {y}, {u}",
+            // `stops16` over the folded bytes.
+            "pcmpeqb {y}, {x}",
+            "pminub {y}, {x}",
+            "pxor {t}, {t}",
+            "pcmpeqb {y}, {t}",
+            "pmovmskb {mask:e}, {y}",
+            a = in(reg) a,
+            b = in(reg) b,
+            upper_a = in(xmm_reg) splat(b'A'),
+            letters = in(xmm_reg) splat(25),
+            case_bit = in(xmm_reg) splat(0x20),
+            x = out(xmm_reg) _,
+            y = out(xmm_reg) _,
+            t = out(xmm_reg) _,
+            u = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// `a`'s byte less `b`'s, each folded to lower case: how the
+/// case-insensitive comparisons answer, as glibc's.
+///
+/// # Safety
+///
+/// `a` and `b` readable.
+#[inline(always)]
+unsafe fn folded_difference(a: *const u8, b: *const u8) -> i32 {
+    // SAFETY: the caller's bytes.
+    let (x, y) = unsafe { (a.read(), b.read()) };
+    i32::from(x.to_ascii_lowercase()).wrapping_sub(i32::from(y.to_ascii_lowercase()))
+}
+
 /// Compare two strings, case-insensitive.
+///
+/// ASCII letters compare as lower case; the answer is the difference of the
+/// first folded bytes that differ, as glibc's.  Sixteen bytes a step, as
+/// `strcmp`.
 ///
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcasecmp(s1: *const u8, s2: *const u8) -> i32 {
-    let mut i: usize = 0;
-    loop {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        let la = a.to_ascii_lowercase();
-        let lb = b.to_ascii_lowercase();
-        if la != lb || a == 0 {
-            return i32::from(la).wrapping_sub(i32::from(lb));
-        }
-        i = i.wrapping_add(1);
-    }
+    // SAFETY: as `strncasecmp`'s, with no bound.
+    unsafe { strncasecmp(s1, s2, usize::MAX) }
 }
 
-/// Compare at most `n` bytes of two strings, case-insensitive.
+/// Compare at most `n` bytes of two strings, case-insensitive, as
+/// `strcasecmp`.
 ///
 /// # Safety
 ///
@@ -1963,16 +2028,36 @@ pub unsafe extern "C" fn strcasecmp(s1: *const u8, s2: *const u8) -> i32 {
 /// null-terminated before `n`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
-    let mut i: usize = 0;
-    while i < n {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        let la = a.to_ascii_lowercase();
-        let lb = b.to_ascii_lowercase();
-        if la != lb || a == 0 {
-            return i32::from(la).wrapping_sub(i32::from(lb));
+    let mut i = 0usize;
+    // SAFETY: as `strncmp`'s: nothing is compared past the first
+    // difference, the first terminator or `n`, and a run of sixteen is read
+    // only where neither crosses a page, sharing one with its string's byte
+    // `i`, which is readable.
+    unsafe {
+        while i < n {
+            let (a, b) = (s1.wrapping_add(i), s2.wrapping_add(i));
+            if within_page(a) && within_page(b) {
+                let left = n.wrapping_sub(i);
+                let stops = folded_stops16(a, b);
+                if stops != 0 {
+                    let at = stops.trailing_zeros() as usize;
+                    if at >= left {
+                        return 0;
+                    }
+                    return folded_difference(a.add(at), b.add(at));
+                }
+                if left <= 16 {
+                    return 0;
+                }
+                i = i.wrapping_add(16);
+            } else {
+                let (x, y) = (a.read(), b.read());
+                if !x.eq_ignore_ascii_case(&y) || x == 0 {
+                    return folded_difference(a, b);
+                }
+                i = i.wrapping_add(1);
+            }
         }
-        i = i.wrapping_add(1);
     }
     0
 }
@@ -3474,6 +3559,87 @@ mod tests {
             }
         }
 
+        /// `strncasecmp` as a byte loop over terminated strings.
+        fn byte_strncasecmp(a: &[u8], b: &[u8], n: usize) -> i32 {
+            for (&x, &y) in a.iter().zip(b).take(n) {
+                let (lx, ly) = (x.to_ascii_lowercase(), y.to_ascii_lowercase());
+                if lx != ly || x == 0 {
+                    return i32::from(lx) - i32::from(ly);
+                }
+            }
+            0
+        }
+
+        #[test]
+        fn strcasecmp_and_strncasecmp_answer_as_byte_loops() {
+            use super::super::{strcasecmp, strncasecmp};
+            // Every pair of strings to two bytes over the bytes either side
+            // of each case's letters, and two high bytes, which C's locale
+            // does not fold.
+            let short = all_strings(b"@AZ[`az{\xc1\xe1", 2);
+            for x in &short {
+                for y in &short {
+                    let (x, y) = (terminated(x), terminated(y));
+                    for (ax, ay) in [(0, 0), (3, 14)] {
+                        let (bx, px) = place(&x, ax);
+                        let (by, py) = place(&y, ay);
+                        let (p, q) = (bx.as_ptr().wrapping_add(px), by.as_ptr().wrapping_add(py));
+                        // SAFETY: terminated strings.
+                        unsafe {
+                            assert_eq!(
+                                strcasecmp(p, q),
+                                byte_strncasecmp(&x, &y, usize::MAX),
+                                "{x:?} {y:?}"
+                            );
+                            for n in [0, 1, 2] {
+                                assert_eq!(
+                                    strncasecmp(p, q, n),
+                                    byte_strncasecmp(&x, &y, n),
+                                    "{x:?} {y:?}, n {n}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // The comparison pairs, one side's case changed along it -- which
+            // must make no difference.
+            for (a, b) in comparison_pairs() {
+                let changed: Vec<u8> = b
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &c)| match i % 3 {
+                        0 => c.to_ascii_uppercase(),
+                        1 => c.to_ascii_lowercase(),
+                        _ => c,
+                    })
+                    .collect();
+                for (x, y) in [(&a, &changed), (&changed, &a)] {
+                    let (x, y) = (terminated(x), terminated(y));
+                    for (ax, ay) in [(0, 0), (1, 0), (5, 11), (15, 15)] {
+                        let (bx, px) = place(&x, ax);
+                        let (by, py) = place(&y, ay);
+                        let (p, q) = (bx.as_ptr().wrapping_add(px), by.as_ptr().wrapping_add(py));
+                        // SAFETY: terminated strings.
+                        unsafe {
+                            assert_eq!(
+                                strcasecmp(p, q),
+                                byte_strncasecmp(&x, &y, usize::MAX),
+                                "{x:?} {y:?}"
+                            );
+                            for n in [1, 15, 16, 17, x.len() - 1, usize::MAX] {
+                                assert_eq!(
+                                    strncasecmp(p, q, n),
+                                    byte_strncasecmp(&x, &y, n),
+                                    "{x:?} {y:?}, n {n}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         /// A buffer of three pages' size and the offset in it of a page
         /// boundary with a page on either side.
         fn straddling() -> (Vec<u8>, usize) {
@@ -3512,6 +3678,16 @@ mod tests {
                                     "{what}, n {n}"
                                 );
                             }
+                            assert_eq!(
+                                super::super::strcasecmp(p, q),
+                                byte_strncasecmp(&x, &y, usize::MAX),
+                                "{what}: strcasecmp"
+                            );
+                            assert_eq!(
+                                super::super::strncasecmp(p, q, 30),
+                                byte_strncasecmp(&x, &y, 30),
+                                "{what}: strncasecmp"
+                            );
                         }
                     }
                 }
@@ -3944,6 +4120,8 @@ mod tests {
                         assert_eq!(offset(rawmemchr(p, 0), p), Some(len));
                         assert_eq!(strcmp(p, q), 0);
                         assert_eq!(strncmp(p, q, usize::MAX), 0);
+                        assert_eq!(super::super::super::strcasecmp(p, q), 0);
+                        assert_eq!(super::super::super::strncasecmp(p, q, usize::MAX), 0);
                         assert_eq!(strspn(p, every.as_ptr()), len);
                         assert_eq!(strcspn(p, b"q\0".as_ptr()), len);
                         assert_eq!(strcspn(p, b"q\xe9\0".as_ptr()), len);
@@ -3970,6 +4148,7 @@ mod tests {
                     unsafe {
                         assert_eq!(strnlen(p, n), n);
                         assert_eq!(strncmp(p, q, n), 0);
+                        assert_eq!(super::super::super::strncasecmp(p, q, n), 0);
                         assert!(memchr(p, c, n).is_null());
                         assert!(memrchr(p, c, n).is_null());
                         assert_eq!(memcmp(p, q, n), 0);

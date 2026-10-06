@@ -1,7 +1,22 @@
-## TD-C-A-WALLPAPER-REPLACED-UNDER-THE-SAME-NAME-IS-NOT-READ-AGAIN (lane C, 2026-10-05) — OPEN
+## TD-C-A-WALLPAPER-REPLACED-UNDER-THE-SAME-NAME-IS-NOT-READ-AGAIN (lane C, 2026-10-05) — FIXED 2026-10-06
 
-**Status:** OPEN — repaired on lane C's branch 2026-10-05 (`lane-c-wip`);
-closes when that change reaches main after a boot test. The session keeps
+**Status:** FIXED 2026-10-06 on lane C's branch, on main with lane C's next
+publish after its boot test. The repair below reached main with lane C's
+publish of 2026-10-06 (7897bb5b3); the part it left -- a picture replaced
+with nothing announcing it, noticed only at the next announcement -- is
+closed by the trigger named at the end arriving: the desktop's settings
+watcher now follows each picture the appearance settings show (the
+wallpaper, a schedule's, the login screen's) by its name in its folder, and
+announces it being saved over as a change to `appearance`, at which the
+session compares the stamps below (`settingswatch::Dependents`,
+`appearance::dependency_paths`, design-decisions §1483). Tests:
+`the_pictures_shown_are_followed_by_their_paths` (`gui/appearance`),
+`each_path_is_followed_whole_or_by_its_name`,
+`a_neighbour_of_a_followed_picture_does_not_count` and, where inotify
+exists, `a_followed_folder_is_announced_as_its_group_and_refollowed`
+(`gui/settingswatch`).
+
+**The repair of 2026-10-05:** the session keeps
 each picture's file stamp -- its length and when it was written -- beside
 the request (`wallpaper_stamp`, `login_image_stamp`), and asks again when
 it differs: `sync_wallpaper` for the desktop's fixed, scheduled or theme

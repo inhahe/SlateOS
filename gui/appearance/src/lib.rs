@@ -3245,13 +3245,62 @@ pub const CONFIG_NAME: &str = "appearance";
 /// settings without changing a byte of `appearance.yaml`.
 ///
 /// Use this rather than `config::Watcher::new(CONFIG_NAME)`, which reports an
-/// in-place edit of the theme as nothing at all (`known-issues.md`
+/// in-place edit of the theme as nothing at all (`known-issues-resolved/`
 /// `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`). It
 /// still only looks when asked: a process learns to look from a
-/// `SettingsChanged` announcement, as for any other change.
+/// `SettingsChanged` announcement, as for any other change -- which the
+/// desktop's settings watcher makes for a theme's folder changing too
+/// ([`dependency_paths`]).
 #[must_use]
 pub fn watcher() -> config::Watcher {
     config::Watcher::with_dependencies(CONFIG_NAME, dependencies)
+}
+
+/// What can change what the appearance settings mean without changing
+/// `appearance.yaml`: each themes directory -- a theme installed, removed,
+/// or standing in for another changes which file a chosen name reads -- the
+/// folder of every theme the settings choose for an axis read with them,
+/// with the folders of the wallpaper theme's recommended pictures; and the
+/// user's own pictures the settings show -- the wallpaper, each of a
+/// time-of-day schedule's, the login screen's -- each as itself, since the
+/// folder it is in may hold a great deal else.
+///
+/// What the desktop's settings watcher follows for this group
+/// (`settingswatch::Dependents`, which follows a folder whole and anything
+/// else by its name): a change there is announced as a change to
+/// `appearance`, and each process's [`watcher`] then compares what it reads
+/// -- and the desktop compares its pictures' stamps -- so a theme edited in
+/// place, by the `theme` program, a theme editor or a text editor, and a
+/// picture saved over under its own name, reach every window as a change of
+/// setting does. The list is asked again each time the group is announced,
+/// which is when it can change.
+#[must_use]
+pub fn dependency_paths() -> Vec<PathBuf> {
+    dependency_paths_in(&config::load(CONFIG_NAME), &themes::ThemeDirs::standard())
+}
+
+/// [`dependency_paths`] for the settings in `doc`, the themes in `dirs`.
+fn dependency_paths_in(doc: &Document, dirs: &themes::ThemeDirs) -> Vec<PathBuf> {
+    let mut paths = themes::dependency_folders(doc, dirs);
+    // The settings as every reader reads them: one decoding of a picture's
+    // path, the one the desktop shows it by.
+    let s = AppearanceSettings::read_from(doc);
+    let login = match &s.login_background {
+        LoginBackground::CustomImage(path) => Some(path.clone()),
+        _ => None,
+    };
+    let pictures = s
+        .wallpaper
+        .iter()
+        .cloned()
+        .chain(s.wallpaper_schedule.iter().map(|entry| entry.image.clone()))
+        .chain(login);
+    for picture in pictures {
+        if !paths.contains(&picture) {
+            paths.push(picture);
+        }
+    }
+    paths
 }
 
 /// What the settings read from `doc` depend on besides the document: the
@@ -4516,6 +4565,80 @@ mod tests {
                     .is_some()
             );
         });
+    }
+
+    /// What the desktop's settings watcher follows for this group is the
+    /// chosen theme's folder -- where an edit in place happens -- and the
+    /// themes directory it is in; after the theme is chosen away, no longer
+    /// its folder.
+    #[test]
+    fn the_folders_followed_are_the_chosen_themes() {
+        config::testing::with_scratch_config("watch-folders", |root| {
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let themes_dir = config::testing::scratch_data_dir(root).join("slateos/themes");
+            let nord = themes_dir.join("nord");
+            assert!(!dependency_paths().contains(&nord), "not chosen yet");
+
+            let mut file = AppearanceFile::load();
+            file.settings.color_theme = themes::ColorTheme::load(std::ffi::OsStr::new("nord"));
+            file.save().unwrap();
+            let followed = dependency_paths();
+            assert!(followed.contains(&nord), "{followed:?}");
+            assert!(followed.contains(&themes_dir), "{followed:?}");
+
+            file.settings.color_theme = themes::ColorTheme::built_in();
+            file.save().unwrap();
+            let followed = dependency_paths();
+            assert!(!followed.contains(&nord), "{followed:?}");
+            assert!(followed.contains(&themes_dir), "{followed:?}");
+        });
+    }
+
+    /// The user's own pictures the settings show are followed each as
+    /// itself -- the wallpaper, a schedule's, the login screen's -- whether
+    /// or not the picture is there yet: its folder is what is watched.
+    #[test]
+    fn the_pictures_shown_are_followed_by_their_paths() {
+        let scratch = scratchdir::ScratchDir::new("appearance-followed-pictures");
+        let system = scratch.dir().join("themes");
+        let dirs = themes::ThemeDirs {
+            user: None,
+            system: system.clone(),
+        };
+        let mut s = AppearanceSettings {
+            wallpaper: Some(PathBuf::from("/home/u/Pictures/a.png")),
+            login_background: LoginBackground::CustomImage(PathBuf::from("/home/u/login.jpg")),
+            ..AppearanceSettings::default()
+        };
+        s.wallpaper_schedule = vec![
+            ScheduledWallpaper {
+                from: TimeOfDay::from_minutes(7 * 60).unwrap(),
+                image: PathBuf::from("/home/u/Pictures/day.png"),
+            },
+            ScheduledWallpaper {
+                from: TimeOfDay::from_minutes(19 * 60).unwrap(),
+                // The fixed wallpaper again: listed once.
+                image: PathBuf::from("/home/u/Pictures/a.png"),
+            },
+        ];
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+        let followed = dependency_paths_in(&doc, &dirs);
+        assert_eq!(
+            followed,
+            [
+                // The themes directory, not made yet, by its name.
+                system.clone(),
+                PathBuf::from("/home/u/Pictures/a.png"),
+                PathBuf::from("/home/u/Pictures/day.png"),
+                PathBuf::from("/home/u/login.jpg"),
+            ]
+        );
+        // A login screen in a colour, and no wallpaper: nothing of the user's.
+        let plain = AppearanceSettings::default();
+        let mut doc = Document::new();
+        plain.write_into(&mut doc);
+        assert_eq!(dependency_paths_in(&doc, &dirs), [system]);
     }
 
     // ---- the widget style ----

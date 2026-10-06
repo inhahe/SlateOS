@@ -1,4 +1,21 @@
-## TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE (lane C, 2026-09-25) -- PARTLY FIXED the same day
+## TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE (lane C, 2026-09-25) -- FIXED 2026-10-06
+
+**Status:** FIXED 2026-10-06 on lane C's branch, on main with lane C's next
+publish after its boot test. The last open part -- that whatever edits a
+theme in place had to send `ReloadAppearance` itself -- is gone: the
+desktop's settings watcher now follows the chosen themes' folders and the
+themes directories (`settingswatch::Dependents`,
+`appearance::dependency_paths`) and announces any change there as a change
+to `appearance`, so a theme edited by the `theme` program, a theme editor or
+a text editor reaches every window, each of whose watchers already compares
+the theme's file (design-decisions §1483). Tests:
+`a_followed_folders_changes_are_its_groups` and, where inotify exists,
+`a_followed_folder_is_announced_as_its_group_and_refollowed`
+(`gui/settingswatch`); `the_folders_followed_are_the_chosen_themes` and
+`the_folders_followed_are_the_directories_and_the_chosen_themes`
+(`gui/appearance`). The trigger named below -- the first thing to write a
+theme file while it is chosen -- arrived the same day:
+`appearance::themes::authoring` and the `theme` program.
 
 **Lane F's part DONE 2026-10-01:** applications now watch through
 `appearance::watcher()` too (`gui/window/src/app.rs`, `ThemeWatch::new`; test

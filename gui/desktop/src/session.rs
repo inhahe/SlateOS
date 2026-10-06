@@ -1798,6 +1798,14 @@ impl<T: Transport> ShellSession<T> {
     /// time its program starts -- so a failure is said once, on the error
     /// stream, and the desktop goes on.
     ///
+    /// What the appearance settings name is followed with the folder
+    /// (`appearance::dependency_paths`): a theme edited in place -- by the
+    /// `theme` program, a theme editor, a text editor -- or a picture saved
+    /// over under its own name is announced as a change to `appearance`;
+    /// every window's appearance watcher then compares the theme's file as
+    /// well as the settings, and this session its pictures' stamps
+    /// (design-decisions §1483).
+    ///
     /// Started by the desktop's `main` and not by `start`, so that no test
     /// watches the folder of whoever runs it.
     pub fn watch_settings(&mut self, dir: PathBuf) {
@@ -1805,10 +1813,18 @@ impl<T: Transport> ShellSession<T> {
         // The loop's waker, so a report reaches a loop parked with nothing on
         // the wire; without one a report waits for the loop's next pass.
         let waker = self.events.waker().ok().flatten();
+        let dependents: Vec<settingswatch::Dependents> =
+            settingswatch::SettingsName::new(appearance::CONFIG_NAME.as_bytes())
+                .map(|name| settingswatch::Dependents {
+                    name,
+                    paths: appearance::dependency_paths,
+                })
+                .into_iter()
+                .collect();
         let started = std::thread::Builder::new()
             .name("desktop-settings-watch".into())
             .spawn(move || {
-                let outcome = settingswatch::run(&dir, |batch| {
+                let outcome = settingswatch::run(&dir, dependents, |batch| {
                     let delivered = reports.send(batch.to_vec()).is_ok();
                     if let Some(waker) = &waker {
                         waker.wake_by_ref();

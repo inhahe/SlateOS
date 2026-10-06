@@ -47,9 +47,11 @@
 //!
 //! # After a save
 //!
-//! Whatever saves a theme that is in use tells the desktop to look again --
-//! see `known-issues.md`
-//! `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`.
+//! Nothing more is needed for the desktop to show a theme saved while it is
+//! in use: the desktop's settings watcher follows the chosen themes' folders
+//! ([`crate::dependency_paths`]) and announces the change as one to the
+//! appearance settings, and every window's watcher compares the theme's file
+//! (design-decisions §1483).
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};

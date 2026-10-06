@@ -106,9 +106,12 @@
 //! frame: `Palette::from_settings` runs per frame and must not touch a file,
 //! which is why the colours travel already parsed.
 //!
-//! What is *not* noticed is a change to the theme's own file while the same
-//! theme stays chosen: the settings watchers watch `appearance.yaml`. See
-//! `known-issues.md` `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`.
+//! A change to the chosen theme's own file is noticed too, though
+//! `appearance.yaml` does not change: the desktop's settings watcher follows
+//! the chosen themes' folders and announces a change there as one to
+//! `appearance` ([`crate::dependency_paths`]), and each reader's watcher
+//! ([`crate::watcher`]) compares the theme's file as well as the settings
+//! (design-decisions §1483).
 //!
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
@@ -732,24 +735,8 @@ pub(crate) fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
 /// A theme chosen for several axes is one file, and is counted once.
 pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut seen: Vec<OsString> = Vec::new();
-    for id in [
-        crate::color_theme_name(doc),
-        crate::widget_theme_name(doc),
-        crate::animation_theme_name(doc),
-        crate::decoration_theme_name(doc),
-        crate::panel_theme_name(doc),
-        crate::wallpaper_theme_name(doc),
-        crate::font_theme_name(doc),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if seen.contains(&id) {
-            continue;
-        }
+    for id in chosen(doc) {
         let part = fingerprint_of(&id);
-        seen.push(id);
         if part.is_empty() {
             continue;
         }
@@ -791,6 +778,98 @@ fn fingerprint_of(id: &OsStr) -> Vec<u8> {
         Ok(bytes) => out.extend_from_slice(&bytes),
         Err(err) => out.extend_from_slice(format!("{err:?}").as_bytes()),
     }
+    out
+}
+
+/// The themes the settings in `doc` choose for the axes read with them --
+/// the colours, the widget style, the animation, the window frames, the
+/// taskbar panel, the wallpapers and the fonts -- each once, in that order.
+/// What the watcher's [`fingerprint`] reads, and so what
+/// [`dependency_folders`] follows: one list, so the two cannot disagree about
+/// which themes the settings depend on.
+fn chosen(doc: &Document) -> Vec<OsString> {
+    let mut ids: Vec<OsString> = Vec::new();
+    for id in [
+        crate::color_theme_name(doc),
+        crate::widget_theme_name(doc),
+        crate::animation_theme_name(doc),
+        crate::decoration_theme_name(doc),
+        crate::panel_theme_name(doc),
+        crate::wallpaper_theme_name(doc),
+        crate::font_theme_name(doc),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// How many folders above a themes directory not made yet may be missing
+/// too, and still be followed: `slateos` and `share` above
+/// `~/.local/share/slateos/themes`.
+const FOLLOWED_ABOVE: usize = 2;
+
+/// The folders whose changes can change what the settings in `doc` mean
+/// without changing the settings file -- see [`crate::dependency_paths`] --
+/// in `dirs`.
+///
+/// Each themes directory -- or, where it is not made yet, the first folder
+/// missing on the way to it, which a follower watches by its name in the
+/// folder above: so the first theme installed, which makes them, is seen,
+/// and nothing else in those busier folders is. And for each theme
+/// [`chosen`], its folder in each directory holding it (a user's copy can
+/// stand in for the system's), with the folders the wallpaper theme's
+/// recommended pictures are in. Each once.
+pub(crate) fn dependency_folders(doc: &Document, dirs: &ThemeDirs) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for (root, _) in dirs.roots() {
+        if let Some(path) = root
+            .ancestors()
+            .take(FOLLOWED_ABOVE.saturating_add(1))
+            .find(|path| path.is_dir() || path.parent().is_some_and(Path::is_dir))
+        {
+            out.push(path.to_path_buf());
+        }
+    }
+    let wallpaper = crate::wallpaper_theme_name(doc);
+    for id in chosen(doc) {
+        if id == OsStr::new(BUILT_IN) || !is_valid_id(&id) {
+            continue;
+        }
+        for (root, _) in dirs.roots() {
+            let dir = root.join(&id);
+            if !dir.is_dir() {
+                continue;
+            }
+            if wallpaper.as_ref() == Some(&id)
+                && let Ok(file) = read_theme_file(&dir.join(FILE_NAME))
+                && let Some(names) = file.wallpapers
+            {
+                for name in [names.dark, names.light].into_iter().flatten() {
+                    if let Some(folder) = confined(&dir, &name)
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .filter(|folder| folder.is_dir())
+                    {
+                        out.push(folder.to_path_buf());
+                    }
+                }
+            }
+            out.push(dir);
+        }
+    }
+    let mut seen: Vec<PathBuf> = Vec::new();
+    out.retain(|folder| {
+        let first = !seen.contains(folder);
+        if first {
+            seen.push(folder.clone());
+        }
+        first
+    });
     out
 }
 
@@ -2062,5 +2141,71 @@ colors:
             assert_eq!(dirs.user, Some(expected));
             assert_eq!(dirs.system, PathBuf::from(SYSTEM_DIR));
         });
+    }
+
+    // ---- what the settings watcher follows ----
+
+    /// **The folders followed are each themes directory and every chosen
+    /// theme's folder in each**, the wallpaper theme's picture folders with
+    /// them; a directory not made yet is followed as the first folder
+    /// missing on the way to it, and what no chosen axis reads -- the
+    /// built-in theme, an icon theme -- is not followed.
+    #[test]
+    fn the_folders_followed_are_the_directories_and_the_chosen_themes() {
+        let fx = Fixture::new("followed");
+        let dirs = fx.dirs();
+        let doc = Document::parse(
+            "theme:\n  colors: nord\n  wallpaper: nord\n  animation: aero\n  icons: lines\n",
+        );
+        // Nothing made yet: each directory, to be followed by its name.
+        assert_eq!(
+            dependency_folders(&doc, &dirs),
+            [dirs.user.clone().unwrap(), dirs.system.clone()]
+        );
+        // Two folders missing: the first of them.
+        let deeper = ThemeDirs {
+            user: Some(fx.scratch.dir().join("data/slateos/themes")),
+            system: dirs.system.clone(),
+        };
+        assert_eq!(
+            dependency_folders(&doc, &deeper),
+            [fx.scratch.dir().join("data"), dirs.system.clone()]
+        );
+
+        let user_nord = fx.install(
+            Origin::User,
+            "nord",
+            "wallpapers:\n  dark: pics/night.png\n  light: day.png\n",
+        );
+        fs::create_dir_all(user_nord.join("pics")).unwrap();
+        let system_nord = fx.install(Origin::System, "nord", "colors:\n  base: \"#000000\"\n");
+        fx.install(Origin::User, "lines", "");
+        assert_eq!(
+            dependency_folders(&doc, &dirs),
+            [
+                dirs.user.clone().unwrap(),
+                dirs.system.clone(),
+                user_nord.join("pics"),
+                user_nord.clone(),
+                system_nord,
+            ]
+        );
+
+        // Chosen for nothing that is read with the settings: only the
+        // directories.
+        let none = Document::parse("theme:\n  icons: nord\n");
+        assert_eq!(
+            dependency_folders(&none, &dirs),
+            [dirs.user.clone().unwrap(), dirs.system.clone()]
+        );
+        // With no user, the system's alone.
+        let nobody = ThemeDirs {
+            user: None,
+            system: dirs.system.clone(),
+        };
+        assert_eq!(
+            dependency_folders(&doc, &nobody),
+            [dirs.system.clone(), dirs.system.join("nord")]
+        );
     }
 }

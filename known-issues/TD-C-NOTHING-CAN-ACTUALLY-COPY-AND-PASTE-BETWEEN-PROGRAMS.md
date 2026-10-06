@@ -1,5 +1,20 @@
 ### TD-C-NOTHING-CAN-ACTUALLY-COPY-AND-PASTE-BETWEEN-PROGRAMS — 2026-08-26 — LANE C, OPEN
 
+**Update 2026-10-06 -- the shell's half is done; the programs' half is one
+ask to lane F.** The clipboard now travels through the window system for
+text: lane F's compositor holds it (`SetClipboard`/`GetClipboard`, only for
+the window with the keyboard), and the toolkit's clipboard -- which every
+field in a program shares -- is joined to it by two calls
+(`guitk::clipboard::take_outgoing`, `adopt_incoming`; `design-decisions.md`
+§1488). The desktop's session makes both for the shell's own fields, so a
+copy in the Run box pastes in any program that reads the system's clipboard
+and the reverse. Ordinary programs get it when `oswindow::app::drive` makes
+the same two calls, asked in
+`requests/c-f-carry-the-clipboard-over-the-compositor-connection.md`; the
+apps that keep a private `String` (below) are lane E's to move onto the
+toolkit's clipboard. Pictures and formats beside text wait on the system's
+clipboard carrying them. Which transport is to stay is still C-Q29's.
+
 **In short:** Copy and Paste do not cross between programs. Every window that
 has a Copy button — the colour picker, the text editor, the clipboard manager,
 the Run box — copies into a `String` field of its own, which no other program

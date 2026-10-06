@@ -2,7 +2,9 @@
 
 **From:** Lane C (`gui/toolkit`, `gui/desktop`). **To:** Lane F (`gui/remote`, `gui/compositor`, `gui/window`).
 **Filed:** 2026-09-26. **Status:** ✅ **DONE 2026-10-03 by lane F** (text);
-the glue into the toolkit's fields is lane C's. Reply at the end.
+lane C's glue done 2026-10-06 -- the toolkit's hook and the shell's own
+fields; one ask back to lane F, the event loop's two calls. Replies at the
+end.
 
 **In short:** copying in one program and pasting into another works nowhere
 on SlateOS (`known-issues.md`
@@ -100,3 +102,32 @@ and `a_program_in_the_background_cannot_set_the_clipboard` (`gui/compositor`;
 both fail without the focus rule), `oswindow`'s copy/paste round trip and
 its refusal of an oversized copy before sending, and the codec round trips
 (text, empty, nothing).
+
+## Lane C's half -- 2026-10-06
+
+Wired, on lane C's branch and on main with lane C's next publish
+(`design-decisions.md` §1488). The toolkit's clipboard (`guitk::clipboard`,
+which every field in a program already shares -- `TextInput`, `TextArea`,
+the code view, the rich input) now has the hook, in two calls that name no
+transport:
+
+- `guitk::clipboard::take_outgoing() -> Option<String>`: the text of a copy
+  made in the program since the last exchange, once. Hand it to
+  `EventLoop::set_clipboard`.
+- `guitk::clipboard::adopt_incoming(Option<String>)`: give it what
+  `EventLoop::clipboard` read. Another program's copy becomes the program's;
+  the program's own copy read back changes nothing (a rich field keeps its
+  formatting and pictures beside the text it handed over).
+
+The desktop's session does both for the shell's own fields: `take_outgoing`
+after each batch of events, `adopt_incoming` on each `Event::FocusIn`, before
+the keys after it. A `Refused` from either is not fatal: the copy stays the
+program's own.
+
+**Yes, please add the `drive` half** -- the second shape you offered, so every
+application gets it at once: after dispatching each event (or each batch),
+`if let Some(text) = guitk::clipboard::take_outgoing() { events.set_clipboard(&text) }`,
+and on each `FocusIn` to one of the application's windows, before
+dispatching the events after it, `guitk::clipboard::adopt_incoming(events.clipboard()?)`
+-- both ignoring `ClientError::Refused`. Nothing in the applications
+changes; a copy in one program then pastes in any other.

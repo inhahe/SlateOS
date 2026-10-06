@@ -6440,6 +6440,53 @@ fn a_session_with_a_password_still_locks() {
     );
 }
 
+/// **A copy made in the shell goes to the system's clipboard**, for another
+/// program to paste -- once, not again with every pump.
+#[test]
+fn a_copy_in_the_shell_goes_to_the_systems_clipboard() {
+    let (mut session, desktop, _turn) = session();
+    guitk::clipboard::set_text("from the shell");
+    session.pump().expect("pump");
+    assert_eq!(
+        desktop.borrow().clipboard.as_deref(),
+        Some("from the shell")
+    );
+    // Something else copied since, elsewhere: the shell does not put its old
+    // copy back over it.
+    desktop.borrow_mut().clipboard = Some("from elsewhere".to_string());
+    session.pump().expect("pump");
+    assert_eq!(
+        desktop.borrow().clipboard.as_deref(),
+        Some("from elsewhere"),
+        "handed over once"
+    );
+}
+
+/// **What another program copied is the shell's to paste once the shell has
+/// the keyboard** -- read as the keyboard arrives, before the keys after it.
+#[test]
+fn the_systems_clipboard_is_read_when_the_shell_gains_the_keyboard() {
+    let (mut session, desktop, _turn) = session();
+    guitk::clipboard::set_text("the shell's own");
+    session.pump().expect("pump");
+    desktop.borrow_mut().clipboard = Some("another program's".to_string());
+    assert_eq!(guitk::clipboard::text(), "the shell's own", "not read yet");
+    let window = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(window, guitk::event::Event::FocusIn)]);
+    session.pump().expect("pump");
+    assert_eq!(guitk::clipboard::text(), "another program's");
+    // Read back, the system's copy is not handed over again as the shell's.
+    desktop.borrow_mut().clipboard = Some("newer still".to_string());
+    session.pump().expect("pump");
+    assert_eq!(
+        desktop.borrow().clipboard.as_deref(),
+        Some("newer still"),
+        "what was read is not given back"
+    );
+}
+
 /// Bind Super+F12 to "Sleep the display", as a user would on the shortcut
 /// card, and press it through the compositor.
 fn press_sleep_display(desktop: &Desktop, session: &mut Session) {

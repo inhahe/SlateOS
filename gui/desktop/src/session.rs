@@ -2670,6 +2670,10 @@ impl<T: Transport> ShellSession<T> {
     fn finish_batch(&mut self) -> Result<bool, Error<T>> {
         let mut worked = false;
 
+        // A copy made in one of the shell's fields in this batch, handed to
+        // the system's clipboard, for another program to paste.
+        self.give_system_clipboard()?;
+
         // The start menu has just opened: a program installed since the last
         // read belongs in it. Before the paint below, so the menu opens with
         // it rather than a frame later.
@@ -3582,7 +3586,14 @@ impl<T: Transport> ShellSession<T> {
             // `reconcile_modifier_chords` does, because the wanted set is
             // derived from the setting rather than remembered separately.
             Event::FocusOut => self.focus_left_shell = true,
-            Event::FocusIn => self.focus_left_shell = false,
+            // The keyboard is the shell's: what another program copied
+            // while it had it is the system's clipboard now, and a paste in
+            // the shell's fields takes it. Read here, before the keys after
+            // it in this batch -- the Ctrl+V the click was for among them.
+            Event::FocusIn => {
+                self.focus_left_shell = false;
+                self.take_system_clipboard()?;
+            }
             Event::SettingsChanged {
                 group: SettingsGroup::Input,
             } => {
@@ -4331,6 +4342,41 @@ impl<T: Transport> ShellSession<T> {
             Err(other) => return Err(other),
         }
         Ok(())
+    }
+
+    /// Hand a copy made in the shell's fields since the last exchange to the
+    /// system's clipboard (`guitk::clipboard::take_outgoing`), so that
+    /// another program can paste it.
+    ///
+    /// A refusal is not the desktop's failure: the compositor refuses a
+    /// client none of whose windows has the keyboard -- a copy chosen from a
+    /// menu while another program kept it -- and a copy past the 4 MiB the
+    /// protocol carries. The copy stays the shell's own, for its own fields,
+    /// as every copy was before the system's clipboard existed.
+    fn give_system_clipboard(&mut self) -> Result<(), Error<T>> {
+        let Some(text) = guitk::clipboard::take_outgoing() else {
+            return Ok(());
+        };
+        match self.events.set_clipboard(&text) {
+            Ok(()) | Err(ConnectionError::Refused(_)) => Ok(()),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Read the system's clipboard as the shell gains the keyboard, and take
+    /// another program's copy as the shell's own
+    /// (`guitk::clipboard::adopt_incoming`). A refusal leaves the shell's
+    /// clipboard as it was, for the reason [`Self::give_system_clipboard`]
+    /// gives.
+    fn take_system_clipboard(&mut self) -> Result<(), Error<T>> {
+        match self.events.clipboard() {
+            Ok(text) => {
+                guitk::clipboard::adopt_incoming(text);
+                Ok(())
+            }
+            Err(ConnectionError::Refused(_)) => Ok(()),
+            Err(other) => Err(other),
+        }
     }
 
     /// Whether the displays have woken from the sleep the user put them in

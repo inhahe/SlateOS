@@ -2,6 +2,15 @@
 
 **Date:** 2026-09-14. **Lane:** C. **OPEN.**
 
+**2026-10-06: the toolkit's clipboard reaches the system's.** Through the
+window system, for text (`design-decisions.md` §1488): handed over after
+each copy, read when a window gets the keyboard. The shell does it now; a
+program's event loop will, on lane F's half of
+`requests/c-f-carry-the-clipboard-over-the-compositor-connection.md`. What
+stays open here is the fifteen private clipboards in `apps/` (lane E's to
+move onto `guitk::clipboard`) and the history service, which the window
+system would feed once a privileged reader can be told apart.
+
 **2026-09-30: inside one program, the toolkit's fields share one clipboard.**
 `guitk::clipboard` is the program's clipboard, and `TextInput`, `TextArea`
 and the code view (`CodeView`) cut, copy and paste through it, so text

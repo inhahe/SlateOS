@@ -17,15 +17,22 @@
 //! [`generation`], which every copy changes: the formatting is brought back
 //! only while what it was copied with is still what is here.
 //!
-//! **Only this program's.** Copying between programs needs the system's
-//! clipboard, which waits on how programs are to reach it
-//! (`open-questions.md` C-Q29, `known-issues.md`
-//! `TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO`; lane E has
-//! asked lane A for a pair of syscalls into the kernel's own clipboard,
-//! `requests/e-a-a-clipboard-door-for-applications.md`). When that is settled
-//! this is the one place to connect it: every field in the toolkit already
-//! copies and pastes through here, a picture going out as a PNG file
-//! ([`Picture::to_png`]) and coming in as any file `imagecodec` reads.
+//! **And the system's.** The program's clipboard is exchanged with the
+//! system's -- which another program's copy reaches -- by whoever holds the
+//! program's connection to it, in two moves that need nothing from the
+//! fields: after a copy here, [`take_outgoing`] gives the copy's text to hand
+//! over; when the program's window gains the keyboard, the system's text is
+//! read and given to [`adopt_incoming`], which makes it the program's copy if
+//! another program put it there. A copy can only be made in the window that
+//! has the keyboard, so nothing else can change the system's clipboard while
+//! this program has it, and reading it on each gain of the keyboard is all
+//! the reading there is. The desktop's session exchanges its own; a program's
+//! event loop exchanges a program's (`requests/c-f-carry-the-clipboard-over-the-compositor-connection.md`).
+//! Today the system's clipboard carries text: a picture copied here stays
+//! here, the copy's text -- empty for a picture alone -- going out as what
+//! another program pastes. (Which way programs reach the system's clipboard
+//! is `open-questions.md` C-Q29; this exchange is the same for any of its
+//! answers.)
 //!
 //! **Per thread, which for a program is the same thing.** A program's
 //! windows are driven from the one thread that runs its event loop, so that
@@ -47,6 +54,12 @@ struct Clip {
     /// How many copies there have been: what a field keeping more beside a
     /// copy checks it against.
     generation: u64,
+    /// The generation last exchanged with the system's clipboard -- given
+    /// to it, or taken from it: a copy made since is one to hand over.
+    exchanged_generation: u64,
+    /// The text last exchanged with the system's clipboard: what reading it
+    /// back must not take for another program's copy.
+    exchanged: Option<String>,
 }
 
 thread_local! {
@@ -55,6 +68,8 @@ thread_local! {
             text: String::new(),
             picture: None,
             generation: 0,
+            exchanged_generation: 0,
+            exchanged: None,
         })
     };
 }
@@ -127,6 +142,53 @@ pub fn generation() -> u64 {
     CLIP.with(|clip| clip.try_borrow().map_or(0, |c| c.generation))
 }
 
+/// The text of a copy made in this program since the clipboard was last
+/// exchanged with the system's, to hand over to it -- once: asked again with
+/// no copy between, `None`.
+///
+/// Empty for a picture copied alone, which the system's clipboard cannot
+/// carry yet: handing over nothing is what makes another program's paste
+/// find nothing, rather than the text copied before the picture.
+#[must_use]
+pub fn take_outgoing() -> Option<String> {
+    CLIP.with(|clip| {
+        let mut clip = clip.try_borrow_mut().ok()?;
+        if clip.generation == clip.exchanged_generation {
+            return None;
+        }
+        clip.exchanged_generation = clip.generation;
+        let text = clip.text.clone();
+        clip.exchanged = Some(text.clone());
+        Some(text)
+    })
+}
+
+/// The system's clipboard, read -- `None` where nothing has been copied
+/// there -- taken as this program's copy if another program put it there:
+/// a copy of its text, plain, as any other copy is.
+///
+/// What this program handed over itself, read back, changes nothing: its
+/// own copy stays as it was, with the formatting and the pictures a rich
+/// field keeps beside it.
+pub fn adopt_incoming(text: Option<String>) {
+    let Some(text) = text else {
+        return;
+    };
+    CLIP.with(|clip| {
+        let Ok(mut clip) = clip.try_borrow_mut() else {
+            return;
+        };
+        if clip.exchanged.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        clip.text = text.clone();
+        clip.picture = None;
+        clip.generation = clip.generation.wrapping_add(1);
+        clip.exchanged_generation = clip.generation;
+        clip.exchanged = Some(text);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -186,6 +248,41 @@ mod tests {
         assert_ne!(once, before);
         assert_ne!(twice, once, "the same text, copied again, is a new copy");
         assert_eq!(generation(), twice, "reading changes nothing");
+    }
+
+    /// **A copy made here is handed over once; a copy made elsewhere is
+    /// taken as this program's own**, and what was handed over, read back,
+    /// changes nothing.
+    #[test]
+    fn the_clipboard_is_exchanged_with_the_systems() {
+        set_text("mine");
+        assert_eq!(take_outgoing(), Some("mine".to_string()));
+        assert_eq!(take_outgoing(), None, "once");
+        let ours = generation();
+        adopt_incoming(Some("mine".to_string()));
+        assert_eq!(generation(), ours, "our own, read back: nothing new");
+        adopt_incoming(None);
+        assert_eq!(generation(), ours, "nothing copied anywhere: nothing new");
+        adopt_incoming(Some("theirs".to_string()));
+        assert_eq!(text(), "theirs");
+        assert_ne!(generation(), ours, "another program's copy is a new one");
+        assert_eq!(take_outgoing(), None, "not handed back");
+        let shot = picture_of_one_pixel();
+        set_picture(shot);
+        assert_eq!(
+            take_outgoing(),
+            Some(String::new()),
+            "a picture alone: nothing for another program to paste"
+        );
+        adopt_incoming(Some("theirs".to_string()));
+        assert!(
+            super::picture().is_none(),
+            "another program's copy, read after ours, takes the picture away"
+        );
+    }
+
+    fn picture_of_one_pixel() -> Picture {
+        picture()
     }
 
     /// **Another thread has a clipboard of its own**: a program's is its

@@ -244,7 +244,7 @@ impl Parameters {
     /// sub-frame a frame and one tick a second where none is given -- the
     /// tick rate not following the frame rate, as TTML would have it -- and
     /// 32 by 15 cells.
-    fn read(tt: &Element) -> Self {
+    fn read(tt: &Element<'_>) -> Self {
         let number = |name: &str| {
             tt.attribute(TTP, name)
                 .and_then(|v| v.trim().parse::<u32>().ok())
@@ -500,14 +500,14 @@ struct Specified {
 
 impl Specified {
     /// The styles `e`'s own `tts:` attributes give.
-    fn inline(e: &Element) -> Self {
+    fn inline(e: &Element<'_>) -> Self {
         let mut s = Self::default();
         for (name, value) in &e.attributes {
-            if name.namespace != TTS {
+            if *name.namespace != *TTS {
                 continue;
             }
             let value = value.trim();
-            match name.local.as_str() {
+            match name.local {
                 "color" => s.colour = colour(value),
                 "fontWeight" => {
                     s.bold = match value {
@@ -941,7 +941,7 @@ type Styles = HashMap<String, Specified>;
 /// Every `<style>` of the head's `<styling>`, by `xml:id`: its own styles
 /// over those it references -- those before it -- the last of those over
 /// the earlier. Of two with one identifier, the first.
-fn read_styles(head: &Element) -> Styles {
+fn read_styles(head: &Element<'_>) -> Styles {
     let mut out = Styles::new();
     // The first `<styling>`, as ttconv reads only it.
     for styling in head.elements().filter(|e| e.name.is(TT, "styling")).take(1) {
@@ -958,7 +958,7 @@ fn read_styles(head: &Element) -> Styles {
 
 /// An element's styles: its own `tts:` attributes over those its `style`
 /// attribute references, the last over the earlier.
-fn specified(e: &Element, styles: &Styles) -> Specified {
+fn specified(e: &Element<'_>, styles: &Styles) -> Specified {
     let mut s = Specified::inline(e);
     for referenced in e
         .attribute("", "style")
@@ -976,7 +976,7 @@ fn specified(e: &Element, styles: &Styles) -> Specified {
 /// Every `<region>` of the head's `<layout>`, in order: its place in the
 /// root container, and its styles -- its own, those it references, and
 /// those of `<style>` elements inside it.
-fn read_regions(head: &Element, styles: &Styles, params: &Parameters) -> Vec<Region> {
+fn read_regions(head: &Element<'_>, styles: &Styles, params: &Parameters) -> Vec<Region> {
     let mut out = Vec::new();
     // The first `<layout>`, as ttconv reads only it.
     for layout in head.elements().filter(|e| e.name.is(TT, "layout")).take(1) {
@@ -1029,15 +1029,15 @@ fn read_regions(head: &Element, styles: &Styles, params: &Parameters) -> Vec<Reg
     reason = "ttconv's process, step for step, is easier to hold to it whole"
 )]
 fn content(
-    e: &Element,
+    e: &Element<'_>,
     cx: &Context<'_>,
     parent: &Timing,
     preserve: bool,
 ) -> Option<(Content, Option<Ratio>)> {
-    let kind = if e.name.namespace != TT {
+    let kind = if *e.name.namespace != *TT {
         return None;
     } else {
-        match e.name.local.as_str() {
+        match e.name.local {
             "body" => Kind::Body,
             "div" => Kind::Div,
             "p" => Kind::P,
@@ -1078,7 +1078,7 @@ fn content(
             Node::Text(text) => {
                 if mixed && !timing.seq {
                     children.push(Content {
-                        kind: Kind::Text(text.clone()),
+                        kind: Kind::Text(text.as_ref().to_owned()),
                         id: String::new(),
                         region: None,
                         begin: None,
@@ -1100,7 +1100,7 @@ fn content(
                     Kind::P | Kind::Span => &["span", "br"][..],
                     _ => &[][..],
                 };
-                if child.name.namespace != TT || !allowed.contains(&child.name.local.as_str()) {
+                if *child.name.namespace != *TT || !allowed.contains(&child.name.local) {
                     continue;
                 }
                 let Some((c, desired_end)) = content(child, cx, &timing, preserve) else {

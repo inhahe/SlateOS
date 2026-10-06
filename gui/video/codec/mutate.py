@@ -141,6 +141,11 @@ XML_LAUGHS = "a_doctype_is_passed_over_and_its_entities_never_read"
 XML_REFUSED = "what_is_not_well_formed_is_refused"
 XML_DEEP = "elements_nest_only_so_deep"
 XML_SCOPE_ENDS = "a_declaration_is_in_scope_until_its_element_ends"
+XML_EXPAT_LINES = "line_endings_and_white_space_are_read_as_expat_reads_them"
+XML_EDGES = "what_is_well_formed_at_the_edges_is_read"
+XML_CHARS = "the_characters_xml_allows_are_expats"
+XML_ONE_NAMESPACE = "a_namespace_is_one_string_however_many_names_are_in_it"
+XML_BORROWED = "what_is_as_written_is_borrowed"
 # The TTML fixtures'.
 TTML_MP4 = "ttml_in_mp4"
 TTML_SPLIT = "ttml_in_samples_of_two_seconds_is_joined_again"
@@ -758,8 +763,8 @@ TTML = [
     ),
     (
         "an element not allowed where it is takes every one after it",
-        "                if child.name.namespace != TT || !allowed.contains(&child.name.local.as_str()) {\n                    continue;",
-        "                if child.name.namespace != TT || !allowed.contains(&child.name.local.as_str()) {\n                    break;",
+        "                if *child.name.namespace != *TT || !allowed.contains(&child.name.local) {\n                    continue;",
+        "                if *child.name.namespace != *TT || !allowed.contains(&child.name.local) {\n                    break;",
         [TT_NOT_ALLOWED],
     ),
     # Paragraph by paragraph.
@@ -1018,18 +1023,99 @@ CEA608 = [
 
 # What TTML needs of XML.
 XML = [
+    # What a run of the document reads as.
     (
         "line endings are kept as written",
-        '        normalized = text.replace("\\r\\n", "\\n").replace(\'\\r\', "\\n");',
-        "        normalized = text.to_owned();",
-        [XML_REFERENCES],
+        "        '\\r' => true,",
+        "        '\\r' => false,",
+        [XML_REFERENCES, XML_EXPAT_LINES, XML_BORROWED],
+    ),
+    (
+        "a tab or a line feed in a value is kept",
+        "        '\\n' | '\\t' => run == Run::Value,",
+        "        '\\n' | '\\t' => false,",
+        [XML_REFERENCES, XML_EXPAT_LINES, XML_BORROWED],
+    ),
+    (
+        "a carriage return in a value is a line feed",
+        "            out.push(if run == Run::Value { ' ' } else { '\\n' });",
+        "            out.push('\\n');",
+        [XML_EXPAT_LINES],
+    ),
+    (
+        "a reference in a CDATA section is read",
+        "        '&' => run != Run::Cdata,",
+        "        '&' => true,",
+        [XML_REFERENCES, XML_BORROWED],
+    ),
+    (
+        "what is as written is copied",
+        "        return Ok(Cow::Borrowed(s));",
+        "        return Ok(Cow::Owned(s.to_owned()));",
+        [XML_BORROWED],
     ),
     (
         "an ampersand's reference is another character",
-        "            \"amp\" => '&',",
-        "            \"amp\" => '+',",
+        "        \"amp\" => '&',",
+        "        \"amp\" => '+',",
         [XML_REFERENCES, TTML_SPLIT],
     ),
+    # The characters XML allows.
+    (
+        "a character XML does not allow is read",
+        "    if !text.chars().all(is_xml_char) {",
+        "    if false {",
+        [XML_REFUSED, XML_CHARS],
+    ),
+    (
+        "a reference to a character XML does not allow is read",
+        "                .filter(|&c| is_xml_char(c))",
+        "                .filter(|&c| c != '\\0')",
+        [XML_REFUSED, XML_CHARS],
+    ),
+    (
+        "a backspace is a character XML allows",
+        "'\\0'..='\\u{8}'",
+        "'\\0'..='\\u{7}'",
+        [XML_CHARS],
+    ),
+    (
+        "a tab is a character XML refuses",
+        "'\\0'..='\\u{8}'",
+        "'\\0'..='\\u{9}'",
+        [XML_CHARS, XML_REFERENCES, XML_EXPAT_LINES],
+    ),
+    (
+        "a form feed is a character XML allows",
+        "'\\u{b}' | '\\u{c}'",
+        "'\\u{b}'",
+        [XML_CHARS],
+    ),
+    (
+        "U+000E is a character XML allows",
+        "'\\u{e}'..='\\u{1f}'",
+        "'\\u{f}'..='\\u{1f}'",
+        [XML_CHARS],
+    ),
+    (
+        "U+001F is a character XML allows",
+        "'\\u{e}'..='\\u{1f}'",
+        "'\\u{e}'..='\\u{1e}'",
+        [XML_CHARS],
+    ),
+    (
+        "U+FFFE is a character XML allows",
+        "'\\u{fffe}' | '\\u{ffff}'",
+        "'\\u{ffff}'",
+        [XML_CHARS, XML_REFUSED],
+    ),
+    (
+        "U+FFFF is a character XML allows",
+        "'\\u{fffe}' | '\\u{ffff}'",
+        "'\\u{fffe}'",
+        [XML_CHARS, XML_REFUSED],
+    ),
+    # Elements, and a DOCTYPE.
     (
         "nesting goes one past the bound",
         "        if self.open.len() >= MAX_DEPTH {",
@@ -1042,18 +1128,32 @@ XML = [
         "                (None, '>') => {",
         [XML_LAUGHS],
     ),
+    # An element's attributes, each once.
     (
         "an attribute written twice is read",
-        "            if !written_names.insert(attribute) {",
-        "            if !written_names.insert(attribute) && false {",
+        "            .written\n            .windows(2)\n            .any(|w| matches!(w, [a, b] if a == b))",
+        "            .written\n            .windows(2)\n            .any(|w| matches!(w, [a, b] if a == b) && false)",
+        [XML_REFUSED],
+    ),
+    (
+        "attributes written are told apart unsorted",
+        "        self.written.sort_unstable();",
+        "",
         [XML_REFUSED],
     ),
     (
         "two attributes resolving alike are read",
-        "            if !names.insert(n.clone()) {",
-        "            if !names.insert(n.clone()) && false {",
+        "            .expanded\n            .windows(2)\n            .any(|w| matches!(w, [a, b] if a == b))",
+        "            .expanded\n            .windows(2)\n            .any(|w| matches!(w, [a, b] if a == b) && false)",
         [XML_REFUSED],
     ),
+    (
+        "attributes resolved are told apart unsorted",
+        "        self.expanded.sort_unstable();",
+        "",
+        [XML_REFUSED],
+    ),
+    # Namespaces: in scope, and each one string.
     (
         "a declaration stays in scope after its element",
         "                namespaces.pop();",
@@ -1069,8 +1169,57 @@ XML = [
     (
         "a prefix bound by nothing is in no namespace",
         "                None => return Err(XmlError::UnboundPrefix),",
-        "                None => String::new(),",
+        "                None => &self.none,",
         [XML_REFUSED, XML_SCOPE_ENDS],
+    ),
+    (
+        "each name its namespace's own copy",
+        "            namespace: Rc::clone(namespace),",
+        "            namespace: Rc::from(&**namespace),",
+        [XML_ONE_NAMESPACE, XML_REFUSED],
+    ),
+    (
+        "a namespace declared twice is two strings",
+        "        if let Some(known) = self.namespaces.get(uri) {\n            return Rc::clone(known);\n        }\n",
+        "",
+        [XML_ONE_NAMESPACE, XML_REFUSED],
+    ),
+    # The reserved prefixes and namespaces, and declarations' names.
+    (
+        "the xmlns prefix may be declared",
+        '        if prefix == "xmlns" {',
+        "        if false {",
+        [XML_REFUSED],
+    ),
+    (
+        "the xml prefix may be bound to another namespace",
+        "            if uri != XML_NAMESPACE {",
+        "            if false {",
+        [XML_REFUSED],
+    ),
+    (
+        "the xml prefix's own declaration is refused",
+        '        if prefix == "xml" {\n            if uri',
+        "        if false {\n            if uri",
+        [XML_EDGES, XML_REFUSED],
+    ),
+    (
+        "a prefix may be bound to a reserved namespace",
+        "        } else if uri == XML_NAMESPACE || uri == XMLNS_NAMESPACE {",
+        "        } else if false {",
+        [XML_REFUSED],
+    ),
+    (
+        "a prefix may be bound to no namespace",
+        "        } else if uri.is_empty() && !prefix.is_empty() {",
+        "        } else if false {",
+        [XML_REFUSED],
+    ),
+    (
+        "a declaration's prefix may be no name",
+        "        Some(prefix) if prefix.is_empty() || prefix.contains(':') => {",
+        "        Some(prefix) if false => {",
+        [XML_REFUSED],
     ),
 ]
 

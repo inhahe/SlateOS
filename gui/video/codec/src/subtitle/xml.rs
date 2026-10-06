@@ -3,26 +3,39 @@
 //! namespace (Namespaces in XML 1.0).
 //!
 //! A subtitle sample is a stranger's document, so this reader is strict
-//! where XML is -- a document that is not well-formed is refused whole --
-//! and bounded where XML is not: elements nest at most [`MAX_DEPTH`] deep,
-//! and no entity expands to more than a character. A DOCTYPE's declarations
-//! are passed over unread, and an entity other than XML's five and the
-//! character references is an error, so no document can make the reader
-//! expand one entity into many (the "billion laughs").
+//! where XML is -- a document that is not well-formed is refused whole, as
+//! expat (which ttconv reads through) refuses it -- and bounded where XML is
+//! not: elements nest at most [`MAX_DEPTH`] deep, and no entity expands to
+//! more than a character. A DOCTYPE's declarations are passed over unread,
+//! and an entity other than XML's five and the character references is an
+//! error, so no document can make the reader expand one entity into many
+//! (the "billion laughs").
 //!
 //! What it does not do, as TTML does not need it: other encodings than
 //! UTF-8, validation, default attributes from a DTD.
 //!
-//! What a document costs to read is its length: an element's attributes are
-//! told apart by a hash, not each against every other, and a prefix is
-//! resolved by a hash of the bindings in scope, not a walk of every
-//! declaration -- either of which a document of a hundred thousand
-//! attributes or declarations would make quadratic.
+//! What a document costs to read is its length, in time and in memory. The
+//! tree borrows from the document: a name, an attribute's value or a run of
+//! text is a slice of it, copied only where a reference or a line ending
+//! makes it other than as written. A namespace is one string, shared by
+//! every name in it -- each name its own copy, a namespace a megabyte long
+//! in a document of a hundred thousand elements would be a hundred
+//! gigabytes. An element's attributes are told apart by sorting their
+//! names, not each against every other, and a prefix is resolved by a hash
+//! of the bindings in scope, not a walk of every declaration -- either of
+//! which a document of a hundred thousand attributes or declarations would
+//! make quadratic.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 /// The namespace the `xml` prefix is bound to, always.
 pub(crate) const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+
+/// The namespace the `xmlns` prefix is bound to, always: no declaration may
+/// bind a prefix to it.
+const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 
 /// How deep elements may nest. TTML's documents are a handful deep -- `tt`,
 /// `body`, `div`, `p`, `span` -- and a document nesting more is made to
@@ -32,38 +45,39 @@ pub(crate) const MAX_DEPTH: usize = 64;
 /// A name as XML resolves it: its namespace (empty for none) and its local
 /// part.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Name {
-    pub namespace: String,
-    pub local: String,
+pub(crate) struct Name<'a> {
+    /// The one string the document's names in this namespace share.
+    pub namespace: Rc<str>,
+    pub local: &'a str,
 }
 
-impl Name {
+impl Name<'_> {
     /// Whether this is `local` in `namespace`.
     pub(crate) fn is(&self, namespace: &str, local: &str) -> bool {
-        self.namespace == namespace && self.local == local
+        *self.namespace == *namespace && self.local == local
     }
 }
 
 /// An element: its name, its attributes in the order written (the
 /// namespace declarations not among them), and what it holds.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Element {
-    pub name: Name,
-    pub attributes: Vec<(Name, String)>,
-    pub children: Vec<Node>,
+pub(crate) struct Element<'a> {
+    pub name: Name<'a>,
+    pub attributes: Vec<(Name<'a>, Cow<'a, str>)>,
+    pub children: Vec<Node<'a>>,
 }
 
-impl Element {
+impl<'a> Element<'a> {
     /// The value of the attribute named `local` in `namespace`.
     pub(crate) fn attribute(&self, namespace: &str, local: &str) -> Option<&str> {
         self.attributes
             .iter()
             .find(|(name, _)| name.is(namespace, local))
-            .map(|(_, value)| value.as_str())
+            .map(|(_, value)| &**value)
     }
 
     /// The elements it holds, in order.
-    pub(crate) fn elements(&self) -> impl Iterator<Item = &Element> {
+    pub(crate) fn elements(&self) -> impl Iterator<Item = &Element<'a>> {
         self.children.iter().filter_map(|n| match n {
             Node::Element(e) => Some(e),
             Node::Text(_) => None,
@@ -74,9 +88,9 @@ impl Element {
 /// What an element holds: elements, and text -- character data, CDATA
 /// sections and references, run together between elements.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Node {
-    Element(Element),
-    Text(String),
+pub(crate) enum Node<'a> {
+    Element(Element<'a>),
+    Text(Cow<'a, str>),
 }
 
 /// Why a document is refused.
@@ -87,7 +101,7 @@ pub(crate) enum XmlError {
     /// Not well-formed: what was wrong.
     Malformed(&'static str),
     /// An entity other than XML's five, or a character reference to no
-    /// character.
+    /// character XML allows.
     Reference,
     /// A prefix no namespace declaration in scope binds.
     UnboundPrefix,
@@ -95,54 +109,82 @@ pub(crate) enum XmlError {
     TooDeep,
 }
 
-/// `input` as an XML document: its root element.
+/// `input` as an XML document: its root element, borrowing from `input`.
 ///
 /// # Errors
 ///
 /// [`XmlError`] for a document not in UTF-8, not well-formed, using a
 /// prefix it does not bind, or nested too deep.
-pub(crate) fn parse(input: &[u8]) -> Result<Element, XmlError> {
+pub(crate) fn parse(input: &[u8]) -> Result<Element<'_>, XmlError> {
     let text = core::str::from_utf8(input).map_err(|_| XmlError::NotUtf8)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    // XML reads every line ending as a line feed.
-    let normalized;
-    let text = if text.contains('\r') {
-        normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        normalized.as_str()
-    } else {
-        text
-    };
+    // Anywhere -- in a comment too, as expat refuses it there.
+    if !text.chars().all(is_xml_char) {
+        return Err(XmlError::Malformed("a character XML does not allow"));
+    }
+    let none: Rc<str> = Rc::from("");
+    let xml: Rc<str> = Rc::from(XML_NAMESPACE);
     Parser {
         rest: text,
         open: Vec::new(),
         scopes: Vec::new(),
         bindings: HashMap::new(),
+        namespaces: HashSet::from([Rc::clone(&none), Rc::clone(&xml)]),
+        none,
+        xml,
         root: None,
+        raw: Vec::new(),
+        written: Vec::new(),
+        expanded: Vec::new(),
     }
     .document()
 }
 
 /// An element begun and not yet ended: its name as written, for its end
 /// tag, and the element so far.
-struct Open {
-    written: String,
-    element: Element,
+struct Open<'a> {
+    written: &'a str,
+    element: Element<'a>,
 }
 
 struct Parser<'a> {
     rest: &'a str,
     /// The elements begun and not yet ended, outermost first.
-    open: Vec<Open>,
+    open: Vec<Open<'a>>,
     /// The prefixes each open element declares, outermost first: the empty
     /// prefix the default namespace.
-    scopes: Vec<Vec<String>>,
+    scopes: Vec<Vec<&'a str>>,
     /// Each prefix's namespaces in scope, the innermost declaration's last.
-    bindings: HashMap<String, Vec<String>>,
-    root: Option<Element>,
+    bindings: HashMap<&'a str, Vec<Rc<str>>>,
+    /// Every namespace met, once each: a name's namespace is one of these,
+    /// so two names are in one namespace exactly when they share it.
+    namespaces: HashSet<Rc<str>>,
+    /// No namespace, and the `xml` prefix's: two of `namespaces`.
+    none: Rc<str>,
+    xml: Rc<str>,
+    root: Option<Element<'a>>,
+    /// The element being begun's attributes as written, their names sorted,
+    /// and their names resolved -- each namespace by its string's address
+    /// -- sorted: kept from element to element, so an element of a few
+    /// attributes allocates for none of them.
+    raw: Vec<(&'a str, Cow<'a, str>)>,
+    written: Vec<&'a str>,
+    expanded: Vec<(usize, &'a str)>,
 }
 
-impl Parser<'_> {
-    fn document(mut self) -> Result<Element, XmlError> {
+/// What a run of a document is: what XML reads in it differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Run {
+    /// Character data between markup.
+    Text,
+    /// A CDATA section's: no reference is read in it.
+    Cdata,
+    /// An attribute's value.
+    Value,
+}
+
+impl<'a> Parser<'a> {
+    fn document(mut self) -> Result<Element<'a>, XmlError> {
         loop {
             if self.rest.is_empty() {
                 break;
@@ -166,7 +208,7 @@ impl Parser<'_> {
                     .find("]]>")
                     .ok_or(XmlError::Malformed("a CDATA section not ended"))?;
                 let (data, tail) = after.split_at(end);
-                self.text(data.to_owned());
+                self.text(as_read(data, Run::Cdata)?);
                 self.rest = tail.get(3..).unwrap_or("");
             } else if let Some(after) = self.rest.strip_prefix("</") {
                 self.rest = after;
@@ -182,7 +224,7 @@ impl Parser<'_> {
                         return Err(XmlError::Malformed("text outside the root"));
                     }
                 } else {
-                    let value = references(chars)?;
+                    let value = as_read(chars, Run::Text)?;
                     self.text(value);
                 }
             }
@@ -224,7 +266,7 @@ impl Parser<'_> {
 
     /// Text into the element open innermost, run together with the text
     /// before it.
-    fn text(&mut self, value: String) {
+    fn text(&mut self, value: Cow<'a, str>) {
         if value.is_empty() {
             return;
         }
@@ -232,7 +274,7 @@ impl Parser<'_> {
             return;
         };
         if let Some(Node::Text(before)) = open.element.children.last_mut() {
-            before.push_str(&value);
+            before.to_mut().push_str(&value);
         } else {
             open.element.children.push(Node::Text(value));
         }
@@ -247,8 +289,8 @@ impl Parser<'_> {
         }
         let after = self.rest.get(1..).unwrap_or("");
         let (written, mut tail) = name(after)?;
-        let mut raw: Vec<(&str, String)> = Vec::new();
-        let mut written_names: HashSet<&str> = HashSet::new();
+        let mut raw = std::mem::take(&mut self.raw);
+        raw.clear();
         let empty = loop {
             let trimmed = tail.trim_start_matches(is_space);
             let spaced = trimmed.len() < tail.len();
@@ -283,53 +325,62 @@ impl Parser<'_> {
             if value.contains('<') {
                 return Err(XmlError::Malformed("a '<' in an attribute's value"));
             }
-            if !written_names.insert(attribute) {
-                return Err(XmlError::Malformed("an attribute given twice"));
-            }
-            // Attribute-value normalization: each white-space character a
-            // space, before references are read.
-            let value = references(&value.replace(['\t', '\n'], " "))?;
-            raw.push((attribute, value));
+            raw.push((attribute, as_read(value, Run::Value)?));
             tail = t.get(1..).unwrap_or("");
         };
         self.rest = tail;
+        // Each attribute written once: sorted, two written alike are side by
+        // side.
+        self.written.clear();
+        self.written
+            .extend(raw.iter().map(|&(attribute, _)| attribute));
+        self.written.sort_unstable();
+        if self
+            .written
+            .windows(2)
+            .any(|w| matches!(w, [a, b] if a == b))
+        {
+            return Err(XmlError::Malformed("an attribute given twice"));
+        }
         // The declarations first: they are in scope on the element itself.
         let mut declared = Vec::new();
-        let mut attributes = Vec::new();
-        for (attribute, value) in raw {
-            let prefix = if attribute == "xmlns" {
-                ""
-            } else if let Some(prefix) = attribute.strip_prefix("xmlns:") {
-                if value.is_empty() {
-                    return Err(XmlError::Malformed("a prefix bound to no namespace"));
-                }
-                prefix
-            } else {
-                attributes.push((attribute, value));
-                continue;
-            };
-            self.bindings
-                .entry(prefix.to_owned())
-                .or_default()
-                .push(value);
-            declared.push(prefix.to_owned());
+        for (attribute, value) in &raw {
+            if let Some(prefix) = declares(attribute)? {
+                self.declare(prefix, value)?;
+                declared.push(prefix);
+            }
         }
+        let declarations = declared.len();
         self.scopes.push(declared);
         let element_name = self.resolve(written, true)?;
-        let mut resolved: Vec<(Name, String)> = Vec::with_capacity(attributes.len());
-        let mut names: HashSet<Name> = HashSet::with_capacity(attributes.len());
-        for (attribute, value) in attributes {
-            let n = self.resolve(attribute, false)?;
-            if !names.insert(n.clone()) {
-                return Err(XmlError::Malformed("an attribute given twice"));
+        let mut attributes = Vec::with_capacity(raw.len().saturating_sub(declarations));
+        for (attribute, value) in raw.drain(..) {
+            if declares(attribute)?.is_none() {
+                attributes.push((self.resolve(attribute, false)?, value));
             }
-            resolved.push((n, value));
+        }
+        self.raw = raw;
+        // Each name resolved once: two written apart may resolve alike, a
+        // namespace's by two prefixes.
+        self.expanded.clear();
+        self.expanded.extend(
+            attributes
+                .iter()
+                .map(|(n, _)| (Rc::as_ptr(&n.namespace).cast::<u8>().addr(), n.local)),
+        );
+        self.expanded.sort_unstable();
+        if self
+            .expanded
+            .windows(2)
+            .any(|w| matches!(w, [a, b] if a == b))
+        {
+            return Err(XmlError::Malformed("an attribute given twice"));
         }
         self.open.push(Open {
-            written: written.to_owned(),
+            written,
             element: Element {
                 name: element_name,
-                attributes: resolved,
+                attributes,
                 children: Vec::new(),
             },
         });
@@ -337,6 +388,41 @@ impl Parser<'_> {
             self.close();
         }
         Ok(())
+    }
+
+    /// `prefix` bound to `uri` -- the empty prefix the default namespace --
+    /// as Namespaces in XML allows: never the `xmlns` prefix, the `xml`
+    /// prefix only to its own namespace, and no other prefix to either's.
+    fn declare(&mut self, prefix: &'a str, uri: &str) -> Result<(), XmlError> {
+        if prefix == "xmlns" {
+            return Err(XmlError::Malformed("the xmlns prefix declared"));
+        }
+        if prefix == "xml" {
+            if uri != XML_NAMESPACE {
+                return Err(XmlError::Malformed(
+                    "the xml prefix bound to another namespace",
+                ));
+            }
+        } else if uri == XML_NAMESPACE || uri == XMLNS_NAMESPACE {
+            return Err(XmlError::Malformed(
+                "a prefix bound to a reserved namespace",
+            ));
+        } else if uri.is_empty() && !prefix.is_empty() {
+            return Err(XmlError::Malformed("a prefix bound to no namespace"));
+        }
+        let namespace = self.intern(uri);
+        self.bindings.entry(prefix).or_default().push(namespace);
+        Ok(())
+    }
+
+    /// `uri` as the one string its namespace is.
+    fn intern(&mut self, uri: &str) -> Rc<str> {
+        if let Some(known) = self.namespaces.get(uri) {
+            return Rc::clone(known);
+        }
+        let new: Rc<str> = Rc::from(uri);
+        self.namespaces.insert(Rc::clone(&new));
+        new
     }
 
     fn end_tag(&mut self) -> Result<(), XmlError> {
@@ -358,10 +444,10 @@ impl Parser<'_> {
     /// declarations out of scope.
     fn close(&mut self) {
         for prefix in self.scopes.pop().unwrap_or_default() {
-            if let Some(namespaces) = self.bindings.get_mut(&prefix) {
+            if let Some(namespaces) = self.bindings.get_mut(prefix) {
                 namespaces.pop();
                 if namespaces.is_empty() {
-                    self.bindings.remove(&prefix);
+                    self.bindings.remove(prefix);
                 }
             }
         }
@@ -376,37 +462,61 @@ impl Parser<'_> {
 
     /// A name as written, resolved: an element's unprefixed name in the
     /// default namespace, an attribute's in none.
-    fn resolve(&self, written: &str, element: bool) -> Result<Name, XmlError> {
+    fn resolve(&self, written: &'a str, element: bool) -> Result<Name<'a>, XmlError> {
         let (prefix, local) = match written.split_once(':') {
             Some((p, l)) if !p.is_empty() && !l.is_empty() && !l.contains(':') => (p, l),
             Some(_) => return Err(XmlError::Malformed("a name of more than one prefix")),
             None => ("", written),
         };
         let namespace = if prefix == "xml" {
-            XML_NAMESPACE.to_owned()
+            &self.xml
         } else if prefix.is_empty() && !element {
-            String::new()
+            &self.none
         } else {
             match self
                 .bindings
                 .get(prefix)
                 .and_then(|namespaces| namespaces.last())
             {
-                Some(ns) => ns.clone(),
-                None if prefix.is_empty() => String::new(),
+                Some(namespace) => namespace,
+                None if prefix.is_empty() => &self.none,
                 None => return Err(XmlError::UnboundPrefix),
             }
         };
         Ok(Name {
-            namespace,
-            local: local.to_owned(),
+            namespace: Rc::clone(namespace),
+            local,
         })
+    }
+}
+
+/// What an attribute named `written` declares: `Some("")` the default
+/// namespace, `Some(prefix)` a prefix, `None` nothing.
+fn declares(written: &str) -> Result<Option<&str>, XmlError> {
+    if written == "xmlns" {
+        return Ok(Some(""));
+    }
+    match written.strip_prefix("xmlns:") {
+        Some(prefix) if prefix.is_empty() || prefix.contains(':') => {
+            Err(XmlError::Malformed("a declaration's prefix no name"))
+        }
+        declared => Ok(declared),
     }
 }
 
 /// XML's white space.
 fn is_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
+/// Whether XML allows `c` (XML 1.0's Char): a `char` is never a surrogate,
+/// so what is left out is the control characters but tab, line feed and
+/// carriage return, and U+FFFE and U+FFFF.
+fn is_xml_char(c: char) -> bool {
+    !matches!(
+        c,
+        '\0'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' | '\u{fffe}' | '\u{ffff}'
+    )
 }
 
 /// A name at the start of `s`, and what follows it.
@@ -425,49 +535,75 @@ fn name(s: &str) -> Result<(&str, &str), XmlError> {
     Ok((n, rest))
 }
 
-/// Character data with its references read: XML's five entities, and
-/// character references in decimal and hexadecimal.
-fn references(s: &str) -> Result<String, XmlError> {
-    if !s.contains('&') {
-        return Ok(s.to_owned());
+/// A run of the document as XML reads it: each line ending a line feed
+/// (XML 1.0 section 2.11); in an attribute's value, each white-space
+/// character then a space (section 3.3.3); and, but in a CDATA section,
+/// XML's five entities and the character references read. Borrowed from
+/// the document where that changes nothing -- most runs of most documents.
+fn as_read(s: &str, run: Run) -> Result<Cow<'_, str>, XmlError> {
+    let changed = move |c: char| match c {
+        '\r' => true,
+        '&' => run != Run::Cdata,
+        '\n' | '\t' => run == Run::Value,
+        _ => false,
+    };
+    if !s.contains(changed) {
+        return Ok(Cow::Borrowed(s));
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some(at) = rest.find('&') {
-        let (before, tail) = rest.split_at(at);
-        out.push_str(before);
-        let end = tail.find(';').ok_or(XmlError::Reference)?;
-        let entity = tail.get(1..end).ok_or(XmlError::Reference)?;
-        let c = match entity {
-            "lt" => '<',
-            "gt" => '>',
-            "amp" => '&',
-            "quot" => '"',
-            "apos" => '\'',
-            _ => {
-                let code = if let Some(hex) = entity
-                    .strip_prefix("#x")
-                    .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
-                {
-                    u32::from_str_radix(hex, 16).ok()
-                } else if let Some(dec) = entity
-                    .strip_prefix('#')
-                    .filter(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
-                {
-                    dec.parse::<u32>().ok()
-                } else {
-                    None
-                };
-                code.and_then(char::from_u32)
-                    .filter(|&c| c != '\0')
-                    .ok_or(XmlError::Reference)?
-            }
-        };
-        out.push(c);
-        rest = tail.get(end.saturating_add(1)..).unwrap_or("");
+    while let Some(at) = rest.find(changed) {
+        let (plain, tail) = rest.split_at(at);
+        out.push_str(plain);
+        if let Some(after) = tail.strip_prefix('&') {
+            let end = after.find(';').ok_or(XmlError::Reference)?;
+            let (entity, after) = after.split_at(end);
+            out.push(referenced(entity)?);
+            rest = after.get(1..).unwrap_or("");
+        } else if let Some(after) = tail.strip_prefix('\r') {
+            // A carriage return and the line feed after it are one line
+            // ending.
+            out.push(if run == Run::Value { ' ' } else { '\n' });
+            rest = after.strip_prefix('\n').unwrap_or(after);
+        } else {
+            // A line feed or a tab in an attribute's value: a byte.
+            out.push(' ');
+            rest = tail.get(1..).unwrap_or("");
+        }
     }
     out.push_str(rest);
-    Ok(out)
+    Ok(Cow::Owned(out))
+}
+
+/// The character a reference to `entity` -- what is between its `&` and its
+/// `;` -- stands for: one of XML's five entities, or a character reference,
+/// in decimal or hexadecimal, to a character XML allows.
+fn referenced(entity: &str) -> Result<char, XmlError> {
+    Ok(match entity {
+        "lt" => '<',
+        "gt" => '>',
+        "amp" => '&',
+        "quot" => '"',
+        "apos" => '\'',
+        _ => {
+            let code = if let Some(hex) = entity
+                .strip_prefix("#x")
+                .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
+            {
+                u32::from_str_radix(hex, 16).ok()
+            } else if let Some(dec) = entity
+                .strip_prefix('#')
+                .filter(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+            {
+                dec.parse::<u32>().ok()
+            } else {
+                None
+            };
+            code.and_then(char::from_u32)
+                .filter(|&c| is_xml_char(c))
+                .ok_or(XmlError::Reference)?
+        }
+    })
 }
 
 #[cfg(test)]
@@ -485,7 +621,7 @@ mod tests {
     const TT: &str = "http://www.w3.org/ns/ttml";
     const TTS: &str = "http://www.w3.org/ns/ttml#styling";
 
-    fn element(node: &Node) -> &Element {
+    fn element<'n, 'a>(node: &'n Node<'a>) -> &'n Element<'a> {
         match node {
             Node::Element(e) => e,
             Node::Text(t) => panic!("text {t:?}, not an element"),
@@ -530,24 +666,29 @@ mod tests {
         );
     }
 
+    /// Line endings and white space as expat reads them (answers taken from
+    /// Python's `xml.etree`): in text a line ending is a line feed, in a
+    /// value a space, as a tab and a line feed are; a reference to one is
+    /// the character itself.
+    #[test]
+    fn line_endings_and_white_space_are_read_as_expat_reads_them() {
+        let tt = parse(b"<a x='1&#13;&#10;2\r\n3\r4\t5\n6'>1\r\n2\r3&#13;4<![CDATA[\r\n5\r]]></a>")
+            .unwrap();
+        assert_eq!(tt.attribute("", "x"), Some("1\r\n2 3 4 5 6"));
+        assert_eq!(tt.children, [Node::Text("1\n2\n3\r4\n5\n".into())]);
+    }
+
     #[test]
     fn a_default_namespace_is_scoped_to_its_element() {
         let doc = parse(b"<a xmlns='urn:a'><b xmlns='urn:b'><c/></b><d/></a>").unwrap();
         let mut names = Vec::new();
         for e in doc.elements() {
-            names.push((e.name.namespace.clone(), e.name.local.clone()));
+            names.push((&*e.name.namespace, e.name.local));
             for inner in e.elements() {
-                names.push((inner.name.namespace.clone(), inner.name.local.clone()));
+                names.push((&*inner.name.namespace, inner.name.local));
             }
         }
-        assert_eq!(
-            names,
-            [
-                ("urn:b".to_owned(), "b".to_owned()),
-                ("urn:b".to_owned(), "c".to_owned()),
-                ("urn:a".to_owned(), "d".to_owned()),
-            ]
-        );
+        assert_eq!(names, [("urn:b", "b"), ("urn:b", "c"), ("urn:a", "d")]);
     }
 
     #[test]
@@ -558,6 +699,7 @@ mod tests {
         assert_eq!(fine.name.local, "tt");
     }
 
+    /// Each refused as expat refuses it (Python's `xml.etree` read each).
     #[test]
     fn what_is_not_well_formed_is_refused() {
         for (doc, why) in [
@@ -596,7 +738,24 @@ mod tests {
             (b"<a>&#0;</a>", XmlError::Reference),
             (b"<a>&#xD800;</a>", XmlError::Reference),
             (b"<a>& no end</a>", XmlError::Reference),
+            // A reference to a character XML does not allow.
+            (b"<a>&#1;</a>", XmlError::Reference),
+            (b"<a>&#xFFFE;</a>", XmlError::Reference),
+            (b"<a>&#x110000;</a>", XmlError::Reference),
             (b"<a>\xff</a>", XmlError::NotUtf8),
+            // A character XML does not allow, written: anywhere.
+            (
+                b"<a>x\x01y</a>",
+                XmlError::Malformed("a character XML does not allow"),
+            ),
+            (
+                b"<!-- \x01 --><a/>",
+                XmlError::Malformed("a character XML does not allow"),
+            ),
+            (
+                "<a>\u{ffff}</a>".as_bytes(),
+                XmlError::Malformed("a character XML does not allow"),
+            ),
             (
                 b"<a><!-- never ended</a>",
                 XmlError::Malformed("a comment not ended"),
@@ -610,8 +769,74 @@ mod tests {
                 b"<a xmlns:p='urn:x' xmlns:q='urn:x' p:k='1' q:k='2'/>",
                 XmlError::Malformed("an attribute given twice"),
             ),
+            // Each twice with another between, written or resolved.
+            (
+                b"<a xmlns:p='urn:x' y='1' xmlns:p='urn:y'/>",
+                XmlError::Malformed("an attribute given twice"),
+            ),
+            (
+                b"<a xmlns:p='urn:x' xmlns:q='urn:x' p:k='1' y='2' q:k='3'/>",
+                XmlError::Malformed("an attribute given twice"),
+            ),
+            // The reserved prefixes and namespaces.
+            (
+                b"<a xmlns:xml='urn:x'/>",
+                XmlError::Malformed("the xml prefix bound to another namespace"),
+            ),
+            (
+                b"<a xmlns:p='http://www.w3.org/XML/1998/namespace'/>",
+                XmlError::Malformed("a prefix bound to a reserved namespace"),
+            ),
+            (
+                b"<a xmlns='http://www.w3.org/2000/xmlns/'/>",
+                XmlError::Malformed("a prefix bound to a reserved namespace"),
+            ),
+            (
+                b"<a xmlns:xmlns='urn:x'/>",
+                XmlError::Malformed("the xmlns prefix declared"),
+            ),
+            (
+                b"<a xmlns:='urn:x'/>",
+                XmlError::Malformed("a declaration's prefix no name"),
+            ),
+            (
+                b"<a xmlns:p:q='urn:x'/>",
+                XmlError::Malformed("a declaration's prefix no name"),
+            ),
         ] {
             assert_eq!(parse(doc), Err(why), "{doc:?}");
+        }
+    }
+
+    /// What expat reads, read: the `xml` prefix declared as its own, the
+    /// default namespace undeclared, and references to the characters at
+    /// XML's edges.
+    #[test]
+    fn what_is_well_formed_at_the_edges_is_read() {
+        let a = parse(
+            b"<a xmlns:xml='http://www.w3.org/XML/1998/namespace' xml:lang='en' xmlns=''>&#x9;&#xA;&#xD;&#xFFFD;&#x10FFFF;</a>",
+        )
+        .unwrap();
+        assert_eq!(a.attribute(XML_NAMESPACE, "lang"), Some("en"));
+        assert!(a.name.is("", "a"));
+        assert_eq!(a.children, [Node::Text("\t\n\r\u{fffd}\u{10ffff}".into())]);
+    }
+
+    /// Which characters XML allows, as expat answers: Python's `xml.etree`
+    /// was given each of these written and referred to, and refused the
+    /// same ones either way -- `refused`, its answers written as ranges.
+    #[test]
+    fn the_characters_xml_allows_are_expats() {
+        let asked = (0u32..=0x20).chain([
+            0x7F, 0x80, 0x9F, 0xD7FF, 0xE000, 0xFFFD, 0xFFFE, 0xFFFF, 0x1_0000, 0x10_FFFF,
+        ]);
+        let refused = [0x0..=0x8, 0xB..=0xC, 0xE..=0x1F, 0xFFFE..=0xFFFF];
+        for c in asked {
+            let read = !refused.iter().any(|r| r.contains(&c));
+            let referred = format!("<a>&#x{c:X};</a>");
+            assert_eq!(parse(referred.as_bytes()).is_ok(), read, "{referred}");
+            let written = format!("<a>{}</a>", char::from_u32(c).unwrap());
+            assert_eq!(parse(written.as_bytes()).is_ok(), read, "U+{c:04X} written");
         }
     }
 
@@ -638,9 +863,9 @@ mod tests {
         let tt =
             parse(br#"<a xmlns:p="urn:outer"><b xmlns:p="urn:inner" p:x="1"/><c p:y="2"/></a>"#)
                 .unwrap();
-        let children: Vec<&Element> = tt.elements().collect();
-        assert_eq!(children[0].attributes[0].0.namespace, "urn:inner");
-        assert_eq!(children[1].attributes[0].0.namespace, "urn:outer");
+        let children: Vec<&Element<'_>> = tt.elements().collect();
+        assert_eq!(&*children[0].attributes[0].0.namespace, "urn:inner");
+        assert_eq!(&*children[1].attributes[0].0.namespace, "urn:outer");
         // Out of scope after the element declaring it.
         assert_eq!(
             parse(br#"<a><b xmlns:p="urn:x"/><c p:y="2"/></a>"#),
@@ -648,9 +873,60 @@ mod tests {
         );
     }
 
+    /// A namespace is one string, however many names are in it and however
+    /// many declarations bind it -- a reference in one read first: each name
+    /// its own copy, a namespace a megabyte long in a document of a hundred
+    /// thousand elements would be a hundred gigabytes.
+    #[test]
+    fn a_namespace_is_one_string_however_many_names_are_in_it() {
+        let tail = "x".repeat(1000);
+        let body = "<p q:a='1'/><r:p/>".repeat(1000);
+        let doc = format!(
+            "<d xmlns='urn:{tail}' xmlns:q='urn:{tail}' xmlns:r='urn:&#x78;{}'>{body}</d>",
+            &tail[1..]
+        );
+        let root = parse(doc.as_bytes()).unwrap();
+        let mut names = vec![&root.name];
+        for e in root.elements() {
+            names.push(&e.name);
+            names.extend(e.attributes.iter().map(|(n, _)| n));
+        }
+        assert_eq!(names.len(), 3001);
+        assert_eq!(*root.name.namespace, *format!("urn:{tail}"));
+        for n in names {
+            assert!(Rc::ptr_eq(&n.namespace, &root.name.namespace));
+        }
+    }
+
+    /// What is as written is not copied: a value or a run of text is a
+    /// slice of the document but where a reference, a line ending or (in a
+    /// value) white space makes it other.
+    #[test]
+    fn what_is_as_written_is_borrowed() {
+        let root = parse(
+            b"<a x='plain' y='a&amp;b' z='a\tb'>text<b/>a&lt;b<c/>a\r\nb<d/><![CDATA[c&amp;]]></a>",
+        )
+        .unwrap();
+        let values: Vec<bool> = root
+            .attributes
+            .iter()
+            .map(|(_, v)| matches!(v, Cow::Borrowed(_)))
+            .collect();
+        assert_eq!(values, [true, false, false]);
+        let texts: Vec<bool> = root
+            .children
+            .iter()
+            .filter_map(|n| match n {
+                Node::Text(t) => Some(matches!(t, Cow::Borrowed(_))),
+                Node::Element(_) => None,
+            })
+            .collect();
+        assert_eq!(texts, [true, false, false, true]);
+    }
+
     /// An element of a hundred thousand attributes, each in a namespace of
-    /// its own declared on it, is read in its length: each told from the
-    /// others, and each prefix resolved, by a hash.
+    /// its own declared on it, is read in its length: the attributes told
+    /// apart by sorting, and each prefix resolved by a hash.
     #[test]
     fn many_attributes_and_declarations_cost_their_length() {
         let n = 100_000;

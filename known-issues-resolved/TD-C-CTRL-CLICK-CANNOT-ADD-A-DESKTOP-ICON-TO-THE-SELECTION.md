@@ -1,7 +1,7 @@
 ## TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION
 
-**Status:** OPEN — 2026-09-25; closes when lane C's change of 2026-10-05
-reaches main after a boot test. Lane F's field came first (2026-10-03, input
+**Status:** FIXED 2026-10-05 — on main with lane C's publish of that day,
+after its boot test. Lane F's field came first (2026-10-03, input
 protocol 9): every pointer event carries the modifiers held, read as
 `oswindow::EventLoop::modifiers()` while handling it. Lane C's half, on
 `lane-c` since 2026-10-05 (830772608): `ShellSession::pointer` hands them to

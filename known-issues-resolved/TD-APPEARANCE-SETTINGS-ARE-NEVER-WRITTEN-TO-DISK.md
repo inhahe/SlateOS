@@ -1,7 +1,7 @@
 ## TD-APPEARANCE-SETTINGS-ARE-NEVER-WRITTEN-TO-DISK
 
-**Status:** OPEN -- repaired on lane C's branch 2026-10-05 (the last
-section); closes when that change reaches main after a boot test.
+**Status:** FIXED 2026-10-05 -- repaired on lane C's branch (the last
+section), on main with lane C's publish of that day, after its boot test.
 
 **What.** `gui/desktop/src/appearance_settings.rs` presents a full settings
 model — `FontSettings { ui_font, mono_font, ui_size, mono_size, hinting,

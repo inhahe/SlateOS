@@ -1,6 +1,9 @@
-## TD-C-BOLD-TEXT-IN-A-VARIABLE-FACE-IS-DRAWN-REGULAR (lane C, 2026-10-05) — OPEN
+## TD-C-BOLD-TEXT-IN-A-VARIABLE-FACE-IS-DRAWN-REGULAR (lane C, 2026-10-05) — FIXED
 
-**Status:** OPEN — the fix is lane F's (`gui/font/src/system.rs`), asked in
+**Status:** FIXED 2026-10-05 by lane F (801d9d8d2, on main and boot-tested
+with lane F's publish 05a998ca9): `FontCache::get` positions every face a
+font is built from at the weight asked for where it has a `wght` axis -- 700
+for bold, 400 for regular. Asked in
 `requests/c-f-bold-from-a-variable-face-is-drawn-regular.md`.
 
 **In short:** on SlateOS no text is drawn bold. Every family the image ships

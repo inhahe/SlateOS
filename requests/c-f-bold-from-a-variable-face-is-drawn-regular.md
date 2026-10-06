@@ -1,9 +1,9 @@
 # C -> F: bold text in a variable face is drawn at the face's default weight -- and every family on the image is variable
 
 **From:** Lane C (`gui/toolkit`: `text.rs`, `fontdb.rs`). **To:** Lane F
-(`gui/font`: `system.rs`). **Filed:** 2026-10-05. **Status:** FIXED on
-`lane-f` (801d9d8d2, lane F's notice of 2026-10-05); lane C closes this and
-`TD-C-BOLD-TEXT-IN-A-VARIABLE-FACE-IS-DRAWN-REGULAR` when it reaches main.
+(`gui/font`: `system.rs`). **Filed:** 2026-10-05. **Status:** DONE -- fixed by lane F
+in 801d9d8d2, on main since lane F's publish 05a998ca9 (boot-tested); the
+known issue is closed with it.
 Reply at the end.
 
 **In short:** on SlateOS, text the toolkit asks for in bold is drawn at

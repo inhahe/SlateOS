@@ -1,7 +1,7 @@
-### C-RUN-HISTORY-IS-NOT-PERSISTED — 2026-09-03 — OPEN
+### C-RUN-HISTORY-IS-NOT-PERSISTED — 2026-09-03 — FIXED 2026-10-05
 
-**Status:** OPEN — repaired on lane C's branch 2026-10-05; closes when that
-change reaches main after a boot test. The history is kept in `runbox.yaml`
+**Status:** FIXED 2026-10-05 — on main with lane C's publish of that day,
+after its boot test. The history is kept in `runbox.yaml`
 (`history`, oldest first), each entry's bytes percent-encoded behind an
 `encoding: percent` marker (design-decisions §426, as the wallpaper's path
 is) rather than the NUL-separated file proposed below: the settings files

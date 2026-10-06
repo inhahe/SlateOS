@@ -1,13 +1,17 @@
 //! Tests for a menu bar as tools see it: its titles, the open menu and the
-//! submenus open below it, each row pressed as clicked -- and a submenu row
-//! pressed one level up from the bottom of an open chain opening its own
-//! submenu there.
+//! submenus open below it, each row pressed as clicked, scrolled into a menu
+//! too short for it first -- and a submenu row pressed one level up from the
+//! bottom of an open chain opening its own submenu there, and one pressed
+//! while its submenu is open leaving it open.
 
+// `float_cmp`: a submenu's top is its row's, taken from the same strip by
+// the same sums, so the two are equal exactly or the submenu is misplaced.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::float_cmp
 )]
 
 use super::*;
@@ -91,6 +95,9 @@ fn a_menu_bar_shows_tools_its_menus() {
     assert_eq!(press(&mut bar, MenuBarPart::Title(0)), Ok(None));
     let file = node(&bar, &MenuBarPart::Title(0));
     assert_eq!(file.value, Some(Value::Chosen(true)));
+    let edit = node(&bar, &MenuBarPart::Title(1));
+    assert_eq!(edit.value, Some(Value::Chosen(false)));
+    assert!(edit.children.is_empty(), "only the open menu is shown");
     let menu = &file.children[0];
     assert_eq!(
         (menu.id.clone(), menu.role),
@@ -202,6 +209,11 @@ fn submenus_open_where_their_rows_are() {
     );
     let older = node(&bar, &MenuBarPart::Menu(vec![0, 1, 2]));
     assert_eq!(names(&older), ["c.txt"]);
+    assert_eq!(
+        older.bounds.y,
+        node(&bar, &MenuBarPart::SubMenu(vec![0, 1, 2])).bounds.y,
+        "it hangs beside its row"
+    );
     assert!(
         !bar.automation(800.0, 0.0)
             .walk()
@@ -212,4 +224,84 @@ fn submenus_open_where_their_rows_are() {
         press(&mut bar, MenuBarPart::Item(30)),
         Ok(Some(MenuBarEvent::ItemClicked(30)))
     );
+}
+
+/// Twenty rows, ids from `first`.
+fn rows(first: MenuItemId) -> Vec<MenuBarEntry> {
+    (first..)
+        .take(20)
+        .map(|id| action(id, &format!("Row {id}"), None, true))
+        .collect()
+}
+
+/// **A row scrolled out of a menu too tall for the screen is scrolled into
+/// it before it is pressed**, as the arrow keys bring it -- in a menu, and
+/// in a submenu, each by its own scroll.
+#[test]
+fn a_row_out_of_a_short_menu_is_scrolled_in_and_pressed() {
+    let mut bar = MenuBar::new(vec![
+        MenuBarItem {
+            label: "&File".to_owned(),
+            children: rows(100),
+        },
+        MenuBarItem {
+            label: "&Edit".to_owned(),
+            children: vec![submenu("More", rows(200))],
+        },
+    ]);
+    // A screen 200 high: neither list of twenty fits.
+    bar.viewport = (800.0, 200.0);
+
+    press(&mut bar, MenuBarPart::Title(0)).unwrap();
+    let menu = node(&bar, &MenuBarPart::Menu(vec![0]));
+    let last = node(&bar, &MenuBarPart::Item(119));
+    assert!(
+        last.bounds.y >= menu.bounds.bottom(),
+        "out of the menu: {:?} under {:?}",
+        last.bounds,
+        menu.bounds
+    );
+    assert_eq!(
+        press(&mut bar, MenuBarPart::Item(119)),
+        Ok(Some(MenuBarEvent::ItemClicked(119)))
+    );
+
+    press(&mut bar, MenuBarPart::Title(1)).unwrap();
+    press(&mut bar, MenuBarPart::SubMenu(vec![1, 0])).unwrap();
+    assert_eq!(
+        press(&mut bar, MenuBarPart::Item(219)),
+        Ok(Some(MenuBarEvent::ItemClicked(219)))
+    );
+}
+
+/// **A submenu's row pressed while its submenu is open leaves it open, with
+/// what is open below it**, as hovering the row does -- in the menu and
+/// deeper in the chain alike. A press in the menu opened it afresh, closing
+/// everything below, so the press that follows every hover undid it.
+#[test]
+fn an_open_submenus_row_pressed_again_leaves_it_open() {
+    let mut bar = MenuBar::new(vec![MenuBarItem {
+        label: "&File".to_owned(),
+        children: vec![submenu(
+            "Open Recent",
+            vec![submenu(
+                "More",
+                vec![submenu("Older", vec![action(1, "d.txt", None, true)])],
+            )],
+        )],
+    }]);
+    press(&mut bar, MenuBarPart::Title(0)).unwrap();
+    for path in [vec![0, 0], vec![0, 0, 0], vec![0, 0, 0, 0]] {
+        assert_eq!(press(&mut bar, MenuBarPart::SubMenu(path)), Ok(None));
+    }
+    let deepest = MenuBarPart::Menu(vec![0, 0, 0, 0]);
+    assert_eq!(names(&node(&bar, &deepest)), ["d.txt"]);
+    // More, in Open Recent; then Open Recent, in File.
+    for again in [vec![0, 0, 0], vec![0, 0]] {
+        assert_eq!(
+            press(&mut bar, MenuBarPart::SubMenu(again.clone())),
+            Ok(None)
+        );
+        assert_eq!(names(&node(&bar, &deepest)), ["d.txt"], "after {again:?}");
+    }
 }

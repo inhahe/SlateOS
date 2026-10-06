@@ -441,9 +441,6 @@ impl DropdownPanel {
         self.strip(entries).top(index)
     }
 
-    /// The offset that brings row `index` fully into view, moving as little as
-    /// possible. Unchanged for a row already visible, or one that does not
-    /// exist.
     /// How many rows the panel shows whole at its current scroll: its
     /// windowful, for Page Up and Page Down.
     fn rows_in_view(&self, entries: &[MenuBarEntry]) -> usize {
@@ -456,6 +453,9 @@ impl DropdownPanel {
             .count()
     }
 
+    /// The offset that brings row `index` fully into view, moving as little as
+    /// possible. Unchanged for a row already visible, or one that does not
+    /// exist.
     fn scroll_showing(&self, entries: &[MenuBarEntry], index: usize) -> f32 {
         let strip = self.strip(entries);
         let (Some(top), Some(height)) = (strip.top(index), strip.height(index)) else {
@@ -1130,7 +1130,19 @@ impl MenuBar {
             self.apply_activation(act);
             return;
         }
-        // Not activatable: if it is a submenu, open it instead.
+        // Not activatable: if it is a submenu, open it instead -- unless it is
+        // open already, which a press leaves as it is, as hovering the row
+        // does and as a press on a row deeper in the chain does
+        // (`click_in_submenu_chain`): the submenus open below it stay open.
+        // Opening it afresh closed them, so the press that every click on
+        // the row follows its hover with undid what the hover had kept.
+        if self
+            .open_submenu
+            .as_ref()
+            .is_some_and(|open| open.parent_index == item_idx)
+        {
+            return;
+        }
         if let Some(sub) = self.submenu_at(top_idx, item_idx) {
             self.open_submenu = Some(Box::new(sub));
         }

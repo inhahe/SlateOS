@@ -128,6 +128,12 @@ fn the_address_is_typed_over_and_confirmed() {
         .map(|n| (n.name.as_str(), n.description.as_deref()))
         .collect();
     assert_eq!(offered, [("share", Some("folder")), ("shells", None)]);
+    let highlighted: Vec<Option<Value>> = list.children.iter().map(|n| n.value.clone()).collect();
+    assert_eq!(
+        highlighted,
+        [Some(Value::Chosen(true)), Some(Value::Chosen(false))],
+        "the first offered is the one Tab takes"
+    );
     act(&mut bar, PathBarPart::Completion(0), Action::Choose).unwrap();
     let field = tree(&bar).children[0].clone();
     let Some(Value::Text(text)) = field.value else {
@@ -193,6 +199,22 @@ fn a_suggestion_out_of_sight_is_scrolled_in_and_chosen() {
         tenth.bounds.y >= list.bounds.bottom(),
         "below the list: {:?} under {:?}",
         tenth.bounds,
+        list.bounds
+    );
+
+    assert_eq!(
+        act(&mut bar, PathBarPart::Completion(12), Action::Choose),
+        Err(Refusal::NoSuchWidget),
+        "past the last"
+    );
+    let first = tree(&bar)
+        .walk()
+        .find(|n| n.id == PathBarPart::Completion(0))
+        .unwrap()
+        .bounds;
+    assert!(
+        first.y < list.bounds.bottom() && first.y >= list.bounds.y,
+        "a refusal leaves the list where it was: {first:?} in {:?}",
         list.bounds
     );
 

@@ -2403,6 +2403,11 @@ impl<T: Transport> ShellSession<T> {
             // it is up (`handle_mouse_inner`, `handle_hotkey_inner`), so it
             // is drawn over everything that could be open with it.
             self.shell.render_field_menu(),
+            // The character picker, over the field it types into, which
+            // stays open under it, and in the field menu's place: it is
+            // opened from that menu, which closes as it opens. It takes every
+            // press and key while it is up, as the menu does.
+            self.shell.render_char_picker(),
             // The card that says how to move the wallpaper, while it is
             // moved: nothing else is open then (`begin_wallpaper_move`
             // dismisses the popups), so its place here states that.

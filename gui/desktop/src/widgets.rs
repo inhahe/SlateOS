@@ -956,6 +956,16 @@ impl DesktopWidgetManager {
         self.note.as_ref().map(|note| note.id)
     }
 
+    /// Where the open note's writing area is on the screen, if a note is
+    /// open for writing: for what is put up beside it -- the character
+    /// picker, below it.
+    #[must_use]
+    pub(crate) fn writing_note_rect(&self) -> Option<crate::Rect> {
+        let w = self.get(self.writing_note()?)?;
+        let (x, y, width, height) = self.content_of(w);
+        Some(crate::Rect::new(x, y, width, height))
+    }
+
     /// A press on a note's writing area: open it for writing, if it is not
     /// already, and put the caret where the press landed. `clicks` is two for
     /// a double click, which selects the word. Answers whether the press was

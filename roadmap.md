@@ -1705,6 +1705,27 @@ live.
   `guitk::textinput::TextInput::edit_key`. What stays open is C-Q24 (how few
   shortcuts to ship) and the emoji/Unicode hotkey action.
 
+- `[C]` **One character picker: every emoji and the symbols a keyboard
+  lacks** -- done 2026-10-06 (`design.txt` line 711's emoji input;
+  `roadmap-detailed.md`'s "Unicode selection dialog ... so users learn one
+  dialog"; `design-decisions.md` §1481). `gui/charnames` holds every emoji of
+  Unicode 18.0 in CLDR's order with its keywords, and the symbols, maths,
+  arrows, currency signs and Latin, Greek and Cyrillic letters by name,
+  generated from Unicode's and CLDR's files (`gen.py`), with a ranked search
+  by name, keyword or code point; `gui/charpicker` is the dialog (categories,
+  grid, search, skin tones, recent picks). The shell's own text fields offer
+  it -- "Emoji & Symbols…" on a field's menu, Ctrl+. in the field -- and a
+  pick is typed into the field (`gui/desktop/src/char_picker.rs`). **Open:**
+  other programs' fields, the tray's emoji entry and the hotkey action above
+  wait on lane F letting the shell type into the focused window
+  (`requests/c-f-let-the-shell-type-into-the-focused-window.md`); characters
+  no face draws are offered as boxes
+  (`requests/c-f-ask-whether-a-character-can-be-drawn.md`); the recent picks
+  last only while the shell runs
+  (`known-issues/TD-C-THE-SHELLS-CHARACTER-PICKER-FORGETS-ITS-RECENT-PICKS-AT-LOGOUT.md`);
+  lane E's emoji picker could be this one
+  (`requests/c-e-the-emoji-picker-can-be-the-shared-character-picker.md`).
+
 - `[C]` **Desktop icons: snap to grid or place freely, as a user option** —
   done 2026-09-25 (`design.txt`: "two options for desktop icon placement:
   snap to grid, or place freely"). §3.4 below had ticked "free placement"

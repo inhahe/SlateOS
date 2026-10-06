@@ -7908,6 +7908,114 @@ fn a_notes_menu_is_drawn_and_the_typing_after_it_is_the_notes() {
     });
 }
 
+/// **The character picker a note's menu opens is put on the screen, takes
+/// the keys typed on its surface, and what it picks is the note's, saved as
+/// typing is.** The picker is on the popup surface, where the compositor
+/// leaves the keyboard after the click that chose the menu's row.
+#[test]
+fn a_notes_character_picker_is_drawn_and_its_pick_is_the_notes() {
+    settingsfile::testing::with_scratch_config("desktop-note-picker", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let (id, body) = {
+            let shell = session.shell_mut();
+            let _ = shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_NOTE);
+            let id = shell
+                .widgets
+                .all_widgets()
+                .iter()
+                .find(|w| matches!(w.kind, crate::widgets::WidgetKind::Notes))
+                .map(|w| w.id)
+                .expect("the menu placed a note");
+            let (x, y, w, h) = shell.widgets.content_rect(id).expect("placed");
+            (id, (x + w / 2.0, y + h / 2.0))
+        };
+        session.pump().expect("pump");
+        let popups = session.popups();
+
+        right_click_at(&desktop, session.background(), body.0, body.1);
+        session.pump().expect("pump");
+        let (x, y) = {
+            let (menu, _) = session
+                .shell()
+                .field_menu
+                .as_ref()
+                .expect("the note's menu is open");
+            let row = menu
+                .items()
+                .iter()
+                .position(|i| {
+                    matches!(i, guitk::menu::MenuItem::Action { label, .. }
+                        if label == charpicker::MENU_LABEL)
+                })
+                .expect("the menu offers the picker");
+            let r = menu.item_rect(row).expect("shown");
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        press_at(&desktop, popups, x, y);
+        release_at(&desktop, popups, x, y);
+        session.pump().expect("pump");
+        assert!(session.shell().char_picker_open(), "the row opened no picker");
+        let picker_commands = session
+            .shell()
+            .render_char_picker()
+            .expect("drawn")
+            .commands
+            .len();
+        let last_popup_frame = desktop
+            .borrow_mut()
+            .drawn()
+            .iter()
+            .rev()
+            .find(|(w, _)| *w == popups.window())
+            .map(|(_, n)| *n)
+            .expect("the popup surface was drawn");
+        assert!(
+            last_popup_frame >= picker_commands,
+            "the picker is not on the popup surface ({last_popup_frame} < {picker_commands})"
+        );
+
+        let mut events: Vec<InputEvent> = "hot beverage"
+            .chars()
+            .map(|c| {
+                InputEvent::new(
+                    popups.window(),
+                    guitk::event::Event::Key(KeyEvent {
+                        key: Key::A,
+                        pressed: true,
+                        modifiers: Modifiers::default(),
+                        text: c.to_string(),
+                    }),
+                )
+            })
+            .collect();
+        events.push(InputEvent::new(
+            popups.window(),
+            guitk::event::Event::Key(KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: String::new(),
+            }),
+        ));
+        desktop.borrow_mut().send_input(&events);
+        session.pump().expect("pump");
+
+        assert!(!session.shell().char_picker_open(), "a pick left the picker up");
+        assert_eq!(
+            session.shell().widgets.get(id).expect("placed").state_text,
+            "\u{2615}",
+            "the pick did not reach the note, or the search reached it too"
+        );
+        let saved = appearance::config::load(DesktopShell::WIDGETS_CONFIG_NAME);
+        let texts: Vec<String> = saved
+            .keys(&["widgets"])
+            .iter()
+            .filter_map(|k| saved.get_str(&["widgets", k, "text"]))
+            .collect();
+        assert_eq!(texts, ["\u{2615}"], "the note's pick is not on disk");
+    });
+}
+
 // ---- icons -----------------------------------------------------------------------
 
 /// The icon ids a tree names, with the side each is drawn at.

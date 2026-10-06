@@ -56,6 +56,10 @@ associations = { path = "../associations" }
 # rather than a typed crate like `appearance`. See src/idle_lock.rs.
 settingsfile = { path = "../settingsfile" }
 guitk = { path = "../toolkit" }
+# The character picker over the shell's own text fields -- "Emoji & Symbols"
+# on a field's menu, Ctrl+. in it (src/char_picker.rs): the one picker every
+# surface opens, with the emoji and character names it searches.
+charpicker = { path = "../charpicker" }
 # The shell's sounds -- a notification's chime, a screenshot's shutter --
 # decoded, converted and played (`event_sounds`).
 sound = { path = "../sound" }

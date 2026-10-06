@@ -254,6 +254,58 @@ fn sizes_and_percentages_are_laid_out() {
     assert_eq!(held.border_box_width(), 200.0);
 }
 
+/// **A fixed width is the room a box takes, as well as the box drawn** --
+/// in a row, and in a box that is as wide as what it holds: its padding and
+/// border are inside it, so what follows starts where it would after an
+/// unframed box of the same width.
+#[test]
+fn a_fixed_width_is_the_room_a_box_takes() {
+    // In a row; and in a column as wide as the box it holds, itself in a
+    // row, so nothing stretches it.
+    let laid_out = |style: &str, held: bool| {
+        let fixed = Widget::label("fixed").css(style);
+        let first = if held {
+            Widget::container()
+                .with_flex_direction(FlexDirection::Column)
+                .with_child(fixed)
+        } else {
+            fixed
+        };
+        let row = Widget::container()
+            .with_flex_direction(FlexDirection::Row)
+            .with_children(vec![first, Widget::label("next")]);
+        let tree = tree_of(vec![row]);
+        let row = &tree.root.children[0];
+        eprintln!(
+            "PROBE held={} first={:?} next.x={}",
+            held,
+            row.children[0].layout.border_box_width(),
+            row.children[1].layout.x
+        );
+        (
+            row.children[0].layout.border_box_width(),
+            row.children[1].layout.x,
+        )
+    };
+    for held in [false, true] {
+        let (plain, after_plain) = laid_out("width: 120px", held);
+        let (framed, after_framed) =
+            laid_out("width: 120px; padding: 0 10px; border: 2px solid red", held);
+        assert_eq!((plain, framed), (120.0, 120.0), "held: {held}");
+        assert_eq!(
+            after_framed, after_plain,
+            "held: {held}: the padding and border took room of their own"
+        );
+    }
+    // And the size a box is measured at -- what anything sizing itself to
+    // its content asks -- is that width, not that width and its frame.
+    let tree = tree_of(vec![
+        Widget::label("fixed").css("width: 120px; padding: 0 10px; border: 2px solid red"),
+    ]);
+    let fixed = &tree.root.children[0];
+    assert_eq!(fixed.border_box_size(tree.palette()).width, 120.0);
+}
+
 /// **A box's shadow is drawn under it, and a label's text shadow under its
 /// text** -- offset and in the shadow's colour.
 #[test]

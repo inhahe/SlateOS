@@ -97,7 +97,7 @@ mod reader;
 mod track;
 
 pub use demux::{Demuxer, Packet};
-pub use track::{Audio, Codec, Colour, Track, TrackKind, Video};
+pub use track::{Audio, Codec, Colour, ContentLight, Mastering, Track, TrackKind, Video};
 
 /// Whether a file whose first bytes are `head` is one FFmpeg would take for
 /// MP4 (or QuickTime, its parent): its probe (`mov_probe`) walks the boxes

@@ -217,7 +217,27 @@ fn look(t: &mp4::Track) -> String {
         .map_or([0; 4], |v| v.crop)
         .map(|n| n.to_string())
         .join(",");
-    format!("sar={sar} colour={colour} matrix={matrix} crop={crop}")
+    let light = match v.and_then(|v| v.content_light) {
+        Some(l) => format!("{},{}", l.max_cll, l.max_fall),
+        None => "none".to_owned(),
+    };
+    // FFmpeg's rationals, unreduced: each number over its box's scale.
+    let mastering = match v.and_then(|v| v.mastering) {
+        Some(m) => {
+            let chromaticities = m
+                .chromaticities
+                .map(|c| format!("{c}/{}", m.chromaticity_scale))
+                .join(",");
+            format!(
+                "{chromaticities};{}/{};{}/{}",
+                m.max_luminance, m.max_luminance_scale, m.min_luminance, m.min_luminance_scale
+            )
+        }
+        None => "none".to_owned(),
+    };
+    format!(
+        "sar={sar} colour={colour} matrix={matrix} crop={crop} light={light} mastering={mastering}"
+    )
 }
 
 /// ffprobe's flags: K a key frame, D discarded, C cut short.
@@ -642,6 +662,62 @@ fn packets_of_vpcc_short() {
 #[test]
 fn packets_of_vpcc_version_0() {
     demuxes_as_ffmpeg_does("vpcc_version_0.mp4");
+}
+
+// The light: the mastering display and the content light level, each from
+// its box or VP9's, the first of two standing; and the boxes FFmpeg refuses
+// the file for.
+
+#[test]
+fn packets_of_light_mdcv_clli() {
+    demuxes_as_ffmpeg_does("light_mdcv_clli.mp4");
+}
+
+#[test]
+fn packets_of_light_smdm_coll() {
+    demuxes_as_ffmpeg_does("light_smdm_coll.mp4");
+}
+
+#[test]
+fn packets_of_light_versions() {
+    demuxes_as_ffmpeg_does("light_versions.mp4");
+}
+
+#[test]
+fn packets_of_light_first_of_two() {
+    demuxes_as_ffmpeg_does("light_first_of_two.mp4");
+}
+
+/// A `SmDm` of 5 bytes: its numbers are read on from the boxes after it,
+/// as FFmpeg reads them, and those boxes then read as themselves.
+#[test]
+fn packets_of_light_overread() {
+    demuxes_as_ffmpeg_does("light_overread.mp4");
+}
+
+#[test]
+fn packets_of_light_mdcv_short() {
+    demuxes_as_ffmpeg_does("light_mdcv_short.mp4");
+}
+
+#[test]
+fn packets_of_light_clli_short() {
+    demuxes_as_ffmpeg_does("light_clli_short.mp4");
+}
+
+#[test]
+fn packets_of_light_smdm_empty() {
+    demuxes_as_ffmpeg_does("light_smdm_empty.mp4");
+}
+
+#[test]
+fn packets_of_light_coll_empty() {
+    demuxes_as_ffmpeg_does("light_coll_empty.mp4");
+}
+
+#[test]
+fn packets_of_light_outside_a_track() {
+    demuxes_as_ffmpeg_does("light_outside_a_track.mp4");
 }
 
 // Tables claiming more samples than the file has bytes for, or than FFmpeg

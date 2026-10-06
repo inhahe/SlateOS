@@ -1,0 +1,2 @@
+# light_mdcv_short.mp4: ffprobe refuses it (light_mdcv_short.mp4: Invalid data found when processing input) (generate_fixtures.py).
+refused

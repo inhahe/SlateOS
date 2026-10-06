@@ -5,7 +5,8 @@
 //! Supports action items, separators, submenus, check items, keyboard
 //! mnemonics (`&File` underlines **F**), and keyboard accelerator display.
 //!
-//! Uses the Catppuccin Mocha dark theme, consistent with `menu.rs`.
+//! Uses the Catppuccin Mocha dark theme, consistent with `menu.rs`. It shows
+//! tools its titles and its open menus' rows ([`MenuBarPart`]).
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -18,6 +19,9 @@ use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::Surface;
 use crate::text::scaled;
+
+mod accessible;
+pub use accessible::MenuBarPart;
 
 // ─── Re-export the shared item-id type from the context-menu module ────────
 
@@ -513,14 +517,8 @@ fn submenu_panel(
 enum SubmenuClickResult {
     /// Click was inside a submenu and an entry was activated.
     Activated(ActivatedEntry),
-    /// Click was inside a submenu but on a sub-submenu item (need to open it).
-    OpenChild {
-        idx: usize,
-        child_x: f32,
-        child_y: f32,
-        child_width: f32,
-    },
-    /// Click was inside a submenu but on a separator or non-actionable spot.
+    /// Click was inside a submenu and did what it does there -- opened a
+    /// submenu row's submenu, or nothing, on a separator or a greyed row.
     ConsumedNoAction,
     /// Click was not inside any submenu.
     Miss,
@@ -725,26 +723,6 @@ impl MenuBar {
                         return EventResult::Consumed;
                     }
                     SubmenuClickResult::ConsumedNoAction => {
-                        self.open_submenu = Some(sub);
-                        return EventResult::Consumed;
-                    }
-                    SubmenuClickResult::OpenChild {
-                        idx,
-                        child_x,
-                        child_y,
-                        child_width,
-                    } => {
-                        // Find the deepest submenu and attach the new child.
-                        let deepest = deepest_submenu_mut(&mut sub);
-                        deepest.child = Some(Box::new(OpenSubmenu {
-                            parent_index: idx,
-                            x: child_x,
-                            y: child_y,
-                            width: child_width,
-                            hover_index: None,
-                            scroll: 0.0,
-                            child: None,
-                        }));
                         self.open_submenu = Some(sub);
                         return EventResult::Consumed;
                     }
@@ -1342,17 +1320,32 @@ fn click_in_submenu_chain(
             if let Some(act) = try_activate_entry(&entries, idx) {
                 return SubmenuClickResult::Activated(act);
             }
-            // If it's a submenu, signal to open it.
+            // If it's a submenu, open it -- as this level's child, in place
+            // of whatever this level had open. It used to be handed back for
+            // the caller to hang off the *deepest* open level, so a submenu
+            // row pressed one level up from the bottom opened its submenu
+            // under the wrong panel, its entries resolved against a list
+            // that does not hold it.
             if let Some(MenuBarEntry::SubMenu { children: sc, .. }) = entries.get(idx) {
-                let child_width = calculate_dropdown_width(sc);
-                return SubmenuClickResult::OpenChild {
-                    idx,
-                    child_x: panel.child_origin(child_width, viewport),
-                    child_y: panel
-                        .row_top(&entries, idx)
-                        .unwrap_or_else(|| panel.viewport_top()),
-                    child_width,
-                };
+                if sub
+                    .child
+                    .as_ref()
+                    .is_none_or(|open| open.parent_index != idx)
+                {
+                    let child_width = calculate_dropdown_width(sc);
+                    sub.child = Some(Box::new(OpenSubmenu {
+                        parent_index: idx,
+                        x: panel.child_origin(child_width, viewport),
+                        y: panel
+                            .row_top(&entries, idx)
+                            .unwrap_or_else(|| panel.viewport_top()),
+                        width: child_width,
+                        hover_index: None,
+                        scroll: 0.0,
+                        child: None,
+                    }));
+                }
+                return SubmenuClickResult::ConsumedNoAction;
             }
         }
         return SubmenuClickResult::ConsumedNoAction;
@@ -1517,8 +1510,10 @@ fn deepest_with_entries<'a>(
     sub: &'a mut OpenSubmenu,
 ) -> (&'a mut OpenSubmenu, Vec<MenuBarEntry>) {
     let entries = resolve_submenu_entries(parent_entries, sub);
-    // Phrased as `match` for the same reason as `deepest_submenu_mut` below:
-    // the pre-polonius borrow checker rejects the `if let ... else` form.
+    // Phrased as `match` rather than `if let ... else` because the current
+    // borrow checker (pre-polonius) doesn't reason about the disjoint mutable
+    // borrow in the else arm. This form returns `sub` only in the `None` arm,
+    // where no prior borrow of `sub.child` is live.
     match sub.child {
         Some(ref mut child) => deepest_with_entries(&entries, child),
         None => (sub, entries),
@@ -1534,23 +1529,6 @@ fn deepest_with_entries_ref<'a>(
     match sub.child {
         Some(ref child) => deepest_with_entries_ref(&entries, child),
         None => (sub, entries),
-    }
-}
-
-/// Walk down to the deepest open submenu node (mutable).
-///
-/// Only for callers that want the *node* and not what it shows — attaching a
-/// freshly-built child, say. A caller that needs the node's entries must use
-/// [`deepest_with_entries`] instead, because entries cannot be resolved from
-/// the node alone.
-fn deepest_submenu_mut(sub: &mut OpenSubmenu) -> &mut OpenSubmenu {
-    // NOTE: Phrased as `match` rather than `if let ... else` because the
-    // current borrow checker (pre-polonius) doesn't reason about the disjoint
-    // mutable borrow in the else arm. This form returns `sub` only in the
-    // `None` arm, where no prior borrow of `sub.child` is live.
-    match sub.child {
-        Some(ref mut child) => deepest_submenu_mut(child),
-        None => sub,
     }
 }
 

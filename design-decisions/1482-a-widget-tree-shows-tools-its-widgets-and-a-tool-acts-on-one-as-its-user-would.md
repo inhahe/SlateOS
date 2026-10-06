@@ -26,6 +26,7 @@ Exposure*.
 | **An action goes through the widget as its user's would** -- the same signals, the same group rules, the same restyle after | setting fields directly | The program hears a tool's press as it hears a click; a disabled or hidden widget refuses as it refuses its user; a style on `:checked` follows. | A tool cannot do what the user cannot -- which is the point. |
 | **A text area's text set is one undoable edit** | replacing it as loading a document does | It is the user's text being changed for them, and Ctrl+Z takes it back as it would a paste. | -- |
 | **A node's box is the widget's border box in window coordinates, whole even where a scroll pane cuts it** | the visible part only | The box is where the widget is; whether it shows is the pane's to say. | A tool pressing the middle of a widget half-scrolled out of view may press beside it. |
+| **A component drawn outside the tree shows its parts through a trait, `Accessible`, naming each by its own hit-box target and answering its own event** | a second, tree-shaped model each component keeps | The target a component's frame already records for a part is the part's name; an action answers the event the component's host already handles from a click -- a pick -- so the host has nothing new to learn. The character picker is the first (`gui/charpicker/src/accessible.rs`), its boxes tested against its frame's. | Each component writes its own: the font picker, the file dialog, the colour picker and the shell's surfaces have yet to. |
 
 **Not done here, and why:**
 
@@ -34,11 +35,10 @@ Exposure*.
   `automation.ui_inspect` and `automation.ui_control`, is `libautomation`'s,
   which does not exist yet (lane B's `userspace/`). It needs only these
   three calls.
-- *Widgets drawn outside the tree* -- the font picker, the character picker,
-  the file dialog, which draw through `guitk::frame` -- are not in it. The
-  roadmap's "hook for custom-drawn widgets" is the next step: a component
-  that names its parts as nodes and acts on them, as the tree does for its
-  widgets.
+- *Most components drawn outside the tree.* The hook is there
+  (`Accessible`) and the character picker uses it; the font picker, the file
+  dialog, the colour picker and the shell's own surfaces -- the taskbar, the
+  start menu, the tray -- have still to name their parts.
 - *A field's label naming it.* Nothing yet says which label is a field's;
   until something does, a field is called by its placeholder or by
   `labelled`.

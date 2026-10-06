@@ -50,6 +50,14 @@
 //! A secret -- a password field's text -- is never in a node, whatever the
 //! tool's rights: the toolkit's secret field (`crate::secretinput`) is not a
 //! widget of the tree, and a node carries no value it could take from one.
+//!
+//! # Components drawn outside the tree
+//!
+//! A component that draws itself through [`crate::frame`] -- a picker, a
+//! dialog -- shows tools its parts by implementing [`Accessible`]: nodes
+//! named by its own hit-box targets, and actions that answer its own
+//! events, which its host acts on as it acts on a click. [`Query::find_in`]
+//! searches its nodes as [`WidgetTree::find`] searches a tree's.
 
 use super::{CheckState, SignalKind, Widget, WidgetId, WidgetKind, WidgetTree};
 use crate::frame::Rect;
@@ -82,6 +90,16 @@ pub enum Role {
     Slider,
     /// A picture.
     Image,
+    /// A dialog: a component's whole, its parts its children.
+    Dialog,
+    /// A list of items, one of which may be chosen.
+    List,
+    /// One item of a list.
+    ListItem,
+    /// A grid of cells.
+    Grid,
+    /// One cell of a grid.
+    GridCell,
 }
 
 impl Role {
@@ -119,6 +137,11 @@ impl Role {
             Self::ProgressBar => "progress bar",
             Self::Slider => "slider",
             Self::Image => "image",
+            Self::Dialog => "dialog",
+            Self::List => "list",
+            Self::ListItem => "list item",
+            Self::Grid => "grid",
+            Self::GridCell => "grid cell",
         }
     }
 }
@@ -150,11 +173,13 @@ pub enum Value {
     },
 }
 
-/// A widget, as a tool sees it -- see the module's "A node".
+/// A widget, as a tool sees it -- see the module's "A node" -- or a part of
+/// a component drawn outside the tree ([`Accessible`]), named by `Id`: a
+/// widget's [`WidgetId`], or the component's own name for its part.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Node {
+pub struct Node<Id = WidgetId> {
     /// Its id in this run of its program.
-    pub id: WidgetId,
+    pub id: Id,
     /// What it is.
     pub role: Role,
     /// What it is called.
@@ -177,12 +202,34 @@ pub struct Node {
     /// Its box in the window -- its border box, where it is drawn.
     pub bounds: Rect,
     /// What it holds, in order.
-    pub children: Vec<Node>,
+    pub children: Vec<Node<Id>>,
 }
 
-impl Node {
+impl<Id> Node<Id> {
+    /// A node with nothing but what it is, what it is called and where: no
+    /// key, description or value, enabled and shown, without the keyboard
+    /// and unable to take it, holding nothing -- for a component naming its
+    /// parts ([`Accessible`]) to fill in what else is so.
+    #[must_use]
+    pub fn new(id: Id, role: Role, name: impl Into<String>, bounds: Rect) -> Self {
+        Self {
+            id,
+            role,
+            name: name.into(),
+            key: None,
+            description: None,
+            value: None,
+            enabled: true,
+            shown: true,
+            focused: false,
+            focusable: false,
+            bounds,
+            children: Vec::new(),
+        }
+    }
+
     /// It and every node under it, depth first, in order.
-    pub fn walk(&self) -> impl Iterator<Item = &Node> {
+    pub fn walk(&self) -> impl Iterator<Item = &Self> {
         let mut stack = vec![self];
         std::iter::from_fn(move || {
             let node = stack.pop()?;
@@ -218,8 +265,9 @@ pub enum Action {
 }
 
 impl Action {
-    /// Its name, for a refusal's message.
-    const fn name(&self) -> &'static str {
+    /// Its name, as a refusal says it: "press", "set the text of".
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::Press => "press",
             Self::Toggle => "toggle",
@@ -282,8 +330,19 @@ pub struct Query {
 }
 
 impl Query {
+    /// The ids of every node under and including `tree` that fits, in
+    /// order: the search over a component's parts ([`Accessible`]), as
+    /// [`WidgetTree::find`] is over a tree's widgets.
+    #[must_use]
+    pub fn find_in<Id: Clone>(&self, tree: &Node<Id>) -> Vec<Id> {
+        tree.walk()
+            .filter(|node| self.fits(node))
+            .map(|node| node.id.clone())
+            .collect()
+    }
+
     /// Whether `node` fits.
-    fn fits(&self, node: &Node) -> bool {
+    fn fits<Id>(&self, node: &Node<Id>) -> bool {
         let same = |a: &str, b: &str| a.to_lowercase() == b.to_lowercase();
         self.role.is_none_or(|role| role == node.role)
             && self
@@ -299,6 +358,43 @@ impl Query {
                 _ => false,
             })
     }
+}
+
+/// A component drawn outside the widget tree -- through [`crate::frame`],
+/// as the font and character pickers are -- that shows tools its parts and
+/// acts on them as its user would, as a [`WidgetTree`] does its widgets.
+///
+/// `roadmap-detailed.md`'s "custom-drawn or canvas widgets can supply their
+/// own nodes via a toolkit hook so they aren't invisible to automation" is
+/// this. A part is named by `Part` -- the target its frame's hit boxes
+/// already name it by -- and an action on it answers the component's own
+/// event, the one its host acts on when the user clicks the same part.
+pub trait Accessible {
+    /// What names a part: the component's hit-box target.
+    type Part: Clone + PartialEq + std::fmt::Debug;
+    /// What the component says happened -- a pick, a choice kept.
+    type Event;
+
+    /// Its parts as nodes, the component drawn `width` by `height` in its
+    /// own space: a host that draws it elsewhere moves the boxes by where.
+    fn automation(&self, width: f32, height: f32) -> Node<Self::Part>;
+
+    /// Do `action` to `part`, the component drawn `width` by `height`, as
+    /// its user would; answers what the component says of it, for its host
+    /// to act on as it does the same from a click.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal`]: no such part, one its user could not reach or use, one
+    /// the action is not for, or a value that is no number. A refused
+    /// action changes nothing.
+    fn invoke(
+        &mut self,
+        part: &Self::Part,
+        action: Action,
+        width: f32,
+        height: f32,
+    ) -> Result<Option<Self::Event>, Refusal>;
 }
 
 impl Widget {
@@ -497,12 +593,8 @@ impl WidgetTree {
     /// Every widget tools can see that `query` fits, in the tree's order.
     #[must_use]
     pub fn find(&self, query: &Query) -> Vec<WidgetId> {
-        self.automation().map_or_else(Vec::new, |tree| {
-            tree.walk()
-                .filter(|node| query.fits(node))
-                .map(|node| node.id)
-                .collect()
-        })
+        self.automation()
+            .map_or_else(Vec::new, |tree| query.find_in(&tree))
     }
 
     /// Do `action` to the widget `id`, as its user would (the module's "As

@@ -67,6 +67,7 @@ use guitk::{field, grid, scroll_window, scrollbar, wheel};
 
 pub use charnames::SkinTone;
 
+mod accessible;
 pub mod remembered;
 pub use remembered::Remembered;
 
@@ -92,6 +93,9 @@ pub fn is_shortcut(key: &KeyEvent) -> bool {
 
 /// The dialog's title.
 const TITLE: &str = "Emoji & Symbols";
+
+/// What the search field says while it is empty -- and what tools call it.
+const SEARCH_HINT: &str = "Search by name, keyword or U+code";
 
 // The layout, in pixels at the default text size: each is drawn through
 // `text::scaled`, so a larger text size makes a larger picker.
@@ -292,6 +296,8 @@ pub enum Target {
     Grid,
     /// A cell, by its place among those shown.
     Cell(usize),
+    /// The skin tones' strip, between and round their swatches.
+    Tones,
     /// A skin tone's swatch: `None` is no tone.
     Tone(Option<SkinTone>),
     /// A list's scrollbar column, outside its thumb.
@@ -309,6 +315,13 @@ const TONES: [Option<SkinTone>; 6] = [
     Some(SkinTone::MediumDark),
     Some(SkinTone::Dark),
 ];
+
+/// The box of the tone swatch at `slot` of [`TONES`] in the strip `rect`:
+/// the one place that says, for drawing it and for telling tools where it is.
+fn tone_rect(rect: Rect, slot: usize) -> Rect {
+    let w = rect.w / count_f32(TONES.len());
+    Rect::new(rect.x + count_f32(slot) * w, rect.y, w, rect.h)
+}
 
 /// A scrollbar thumb held by the pointer: which list's, and how far below
 /// the thumb's top it was taken hold of.
@@ -1062,7 +1075,7 @@ impl CharPicker {
                 }
                 None
             }
-            Target::Picker | Target::Sidebar | Target::Grid => None,
+            Target::Picker | Target::Sidebar | Target::Grid | Target::Tones => None,
         }
     }
 
@@ -1186,7 +1199,7 @@ impl CharPicker {
             frame.push(RenderCommand::Text {
                 x: inner.x,
                 y: inner.y,
-                text: "Search by name, keyword or U+code".to_string(),
+                text: SEARCH_HINT.to_string(),
                 color: palette.ink(palette.subtext0),
                 font_size: size,
                 font_weight: FontWeightHint::Regular,
@@ -1302,16 +1315,55 @@ impl CharPicker {
         frame.hit(Target::Thumb(list), thumb);
     }
 
+    /// The sidebar's viewport as a well `rect` shows it: the one its drawing
+    /// and the boxes tools are told both read.
+    fn side_view_in(&self, rect: Rect) -> ListViewport {
+        let capacity = rows_in(rect.h, scaled(SIDE_ROW));
+        let mut view = self.side_view;
+        if view.height() != capacity {
+            view.set_height(capacity, self.side.len());
+        }
+        view
+    }
+
+    /// The box of the sidebar's row `row` in a well `rect` scrolled as
+    /// `view`: where it is drawn and hit, short of the scrollbar's column
+    /// where the list has one -- and above or below the well for a row
+    /// scrolled out of it, where tools are told it would be.
+    fn side_row_rect(&self, rect: Rect, view: &ListViewport, row: usize) -> Rect {
+        let row_h = scaled(SIDE_ROW);
+        let len = self.side.len();
+        let bar = if scrollbar::needed(len, rows_in(rect.h, row_h)) {
+            scaled(BAR_WIDTH).min(rect.w)
+        } else {
+            0.0
+        };
+        let first = view.visible_range(len).start;
+        Rect::new(
+            rect.x,
+            rect.y + (count_f32(row) - count_f32(first)) * row_h,
+            (rect.w - bar).max(0.0),
+            row_h,
+        )
+    }
+
+    /// The grid's first row on screen, for `cells`: the scroll, kept inside
+    /// the rows there are.
+    fn grid_first(&self, cells: &Cells) -> usize {
+        self.first_row.min(
+            cells
+                .rows(self.shown.len())
+                .saturating_sub(cells.rows_shown),
+        )
+    }
+
     fn draw_sidebar(&self, palette: &Palette, frame: &mut Frame<Target>, rect: Rect) {
         self.draw_well(palette, frame, rect, self.focus == Part::Categories);
         frame.hit(Target::Sidebar, rect);
         let row_h = scaled(SIDE_ROW);
         let len = self.side.len();
         let capacity = rows_in(rect.h, row_h);
-        let mut view = self.side_view;
-        if view.height() != capacity {
-            view.set_height(capacity, len);
-        }
+        let view = self.side_view_in(rect);
         let rows = view.visible_range(len);
         self.draw_bar(
             palette,
@@ -1320,25 +1372,15 @@ impl CharPicker {
             List::Categories,
             (len, capacity, rows.start),
         );
-        let bar = if scrollbar::needed(len, capacity) {
-            scaled(BAR_WIDTH).min(rect.w)
-        } else {
-            0.0
-        };
         let pad = scaled(ROW_PADDING);
         // While a search is shown, no category is: none is drawn chosen.
         let searching = !self.search.text().trim().is_empty();
         frame.clip(rect);
-        for (slot, i) in rows.enumerate() {
+        for i in rows {
             let Some(&row) = self.side.get(i) else {
                 continue;
             };
-            let at = Rect::new(
-                rect.x,
-                rect.y + count_f32(slot) * row_h,
-                (rect.w - bar).max(0.0),
-                row_h,
-            );
+            let at = self.side_row_rect(rect, &view, i);
             let (label, size, weight, color) = match row {
                 SideRow::Heading(name) => (
                     name,
@@ -1405,7 +1447,7 @@ impl CharPicker {
             return;
         }
         let rows = cells.rows(len);
-        let first = self.first_row.min(rows.saturating_sub(cells.rows_shown));
+        let first = self.grid_first(&cells);
         self.draw_bar(
             palette,
             frame,
@@ -1540,10 +1582,10 @@ impl CharPicker {
 
     /// The six skin tones, each a raised hand in that tone.
     fn draw_tones(&self, palette: &Palette, frame: &mut Frame<Target>, rect: Rect) {
-        let w = rect.w / count_f32(TONES.len());
+        frame.hit(Target::Tones, rect);
         let size = scaled(TONE_GLYPH);
         for (slot, &tone) in TONES.iter().enumerate() {
-            let at = Rect::new(rect.x + count_f32(slot) * w, rect.y, w, rect.h);
+            let at = tone_rect(rect, slot);
             let chosen = tone == self.tone;
             Self::draw_ground(
                 palette,

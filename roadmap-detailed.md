@@ -2686,8 +2686,10 @@ authors never wrote a single automation handler.
   invisible to automation. — *2026-10-06 (lane C): every widget of the
   toolkit's retained tree (`guitk::widget`) is a node unless its program says
   `hidden_from_automation` (`guitk::widget::automation`, `design-decisions.md`
-  §1482). Not yet: the components drawn outside the tree (`guitk::frame`'s --
-  the font, character and file pickers) and the hook for custom-drawn ones.*
+  §1482). The hook for custom-drawn ones is `guitk::widget::automation::Accessible`
+  -- a component names its parts by its own hit-box targets -- and the
+  character picker implements it. Not yet: the font picker, the file
+  dialog, the colour picker and the shell's surfaces.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

@@ -1312,7 +1312,7 @@ mod sys {
     /// `__progname`.
     pub(super) fn progname() -> *const u8 {
         // SAFETY: a plain read of the pointer the startup code set.
-        unsafe { core::ptr::addr_of!(crate::crt::__progname).read() }
+        unsafe { crate::crt::progname_slot().read() }
     }
 
     pub(super) fn alloc(len: usize) -> *mut u8 {

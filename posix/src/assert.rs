@@ -126,7 +126,7 @@ fn emit(
 fn progname<'a>() -> &'a [u8] {
     // SAFETY: a plain read of the pointer `__libc_start_main` set; it points
     // at a NUL-terminated name (or is NULL, `(null)`).
-    unsafe { text(core::ptr::addr_of!(crate::crt::__progname).read()) }
+    unsafe { text(crate::crt::progname_slot().read()) }
 }
 
 /// Called when a C `assert` fails: glibc's message for `assertion` at

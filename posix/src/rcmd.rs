@@ -452,9 +452,7 @@ mod sys {
         let out = crate::stdio::stderr_stream();
         crate::stdio::flockfile(out.cast());
         // SAFETY: a plain read of the pointer `__libc_start_main` set.
-        crate::error::put_cstr(out, unsafe {
-            core::ptr::addr_of!(crate::crt::__progname).read()
-        });
+        crate::error::put_cstr(out, unsafe { crate::crt::progname_slot().read() });
         crate::error::put(out, b": ");
         for part in msg {
             crate::error::put(out, part);

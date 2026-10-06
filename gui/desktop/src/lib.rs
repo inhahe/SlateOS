@@ -2501,7 +2501,7 @@ pub struct DesktopShell {
     /// `desktop` binary attaches it ([`attach_backlight`](Self::attach_backlight)),
     /// read as the pane opens and shown as a level the pane cannot change --
     /// or the pane's own number where none was asked for.
-    backlight: backlight::Source,
+    backlight: backlight::Backlight,
     /// The notifications popping up as they arrive, beside the pane that
     /// holds them: [`notify`](Self::notify) files a notification in the pane
     /// and shows it here (design-decisions §1447). Placed against the screen
@@ -3020,7 +3020,7 @@ impl DesktopShell {
             // No card until the `desktop` binary attaches one: a test or a
             // harness that builds a shell must not turn the machine's volume.
             volume: volume::Output::Own,
-            backlight: backlight::Source::Own,
+            backlight: backlight::Backlight::own(),
             toasts: toasts::ToastStack::new(),
             focus: focus_assist::FocusAssistManager::new(),
             events: calendar::EventStore::new(),
@@ -5631,8 +5631,10 @@ impl DesktopShell {
                 self.notification_pane_height(),
             );
             // A press or a drag on the volume slider moved the level: onto
-            // the card, as it goes. Nothing is written when it did not move.
+            // the card, as it goes -- and the brightness slider's onto the
+            // screen. Nothing is written when it did not move.
             self.write_volume();
+            self.write_brightness();
             // The events this produced are drained by `handle_mouse`, which
             // wraps this call and turns a clicked action into a `Launch`.
             return ShellAction::Consumed;
@@ -7774,8 +7776,10 @@ impl DesktopShell {
             // meaning for the key, because a press the overlay did not use is
             // not therefore the desktop's.
             let _ = self.notifications.handle_key_event(key);
-            // An arrow on the volume slider moved the level: onto the card.
+            // An arrow on a slider moved its level: onto the card, or the
+            // screen.
             self.write_volume();
+            self.write_brightness();
             return HotkeyOutcome::consumed();
         }
 
@@ -12818,20 +12822,36 @@ impl DesktopShell {
         self.notifications.show();
     }
 
-    /// Take the pane's brightness from `source` -- the `desktop` binary
-    /// attaches the kernel's report ([`backlight::Source::kernel`]) -- and
-    /// show it now. A shell with none attached keeps the pane's own number,
-    /// as a test must (see [`backlight`]).
-    pub fn attach_backlight(&mut self, source: backlight::Source) {
-        self.backlight = source;
+    /// Take the pane's brightness from `backlight` -- the `desktop` binary
+    /// attaches the kernel's ([`backlight::Backlight::kernel`]) -- and show
+    /// it now. A shell with none attached keeps the pane's own number, as a
+    /// test must (see [`backlight`]).
+    pub fn attach_backlight(&mut self, backlight: backlight::Backlight) {
+        self.backlight = backlight;
         self.read_brightness();
     }
 
-    /// Show the screen's brightness as the source reports it, and why the
-    /// pane cannot change it.
+    /// Show the screen's brightness as the kernel has it now: a slider that
+    /// sets it where the desktop may, else the level and why it cannot.
     fn read_brightness(&mut self) {
-        if let Some((level, why)) = self.backlight.read() {
-            self.notifications.show_fixed_brightness(level, why);
+        match self.backlight.read() {
+            backlight::Reading::Own => {}
+            backlight::Reading::Live(level) => self.notifications.show_screen_brightness(level),
+            backlight::Reading::Fixed(level, why) => {
+                self.notifications.show_fixed_brightness(level, why);
+            }
+        }
+    }
+
+    /// Put the pane's brightness on the screen, if the slider is the
+    /// screen's and it moved -- and say so if the kernel refused.
+    fn write_brightness(&mut self) {
+        if !self.backlight.is_live() {
+            return;
+        }
+        let level = self.notifications.brightness();
+        if let Err(why) = self.backlight.write(level) {
+            self.notifications.show_fixed_brightness(Some(level), why);
         }
     }
 

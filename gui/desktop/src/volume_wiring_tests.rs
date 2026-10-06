@@ -17,6 +17,8 @@ use guitk::palette::Palette;
 use guitk::render::RenderCommand;
 use sound::Errno;
 
+use crate::backlight::Backlight;
+use crate::backlight::tests::Recording;
 use crate::volume::Output;
 use crate::volume::tests::{Shared, card};
 use crate::{DesktopShell, Key, KeyEvent, Modifiers, click};
@@ -287,7 +289,10 @@ fn the_panes_brightness_is_the_screens_and_says_it_cannot_change() {
         s.toggle_notifications();
         track
     };
-    s.attach_backlight(crate::backlight::Source::Report(report));
+    // The kernel refuses the desktop: it holds no `SET_BRIGHTNESS`.
+    let refused = Recording::default();
+    *refused.refuse.borrow_mut() = Some(1);
+    s.attach_backlight(Backlight::with(report, Box::new(refused)));
     s.toggle_notifications();
     let text = pane_text(&s);
     assert!(text.iter().any(|t| t == "Brightness  35%"), "{text:?}");
@@ -297,12 +302,43 @@ fn the_panes_brightness_is_the_screens_and_says_it_cannot_change() {
     assert_eq!(s.notifications.brightness(), 35);
 }
 
+/// **Where the desktop may set the screen's brightness, the pane's slider
+/// is the screen's**: it shows the level and sets it as it moves.
+#[test]
+fn where_the_desktop_may_the_brightness_slider_sets_the_screen() {
+    let dir = scratchdir::ScratchDir::new("pane-brightness-live");
+    let report = dir.path("brightness");
+    std::fs::write(
+        &report,
+        "display_count: 1\nDisplays:\n  4   Panel                 35%  min   5%  [manual]\n",
+    )
+    .unwrap();
+    let mut s = shell();
+    let setter = Recording::default();
+    s.attach_backlight(Backlight::with(report, Box::new(setter.clone())));
+    s.toggle_notifications();
+    let text = pane_text(&s);
+    assert!(text.iter().any(|t| t == "Brightness  35%"), "{text:?}");
+    let (x, y, w, h) = brightness_track(&s).expect("the slider is there");
+    s.handle_mouse(&click(x + w - 1.0, y + h / 2.0));
+    let level = s.notifications.brightness();
+    assert_ne!(level, 35, "the press moved it");
+    assert_eq!(
+        setter.asked.borrow().last(),
+        Some(&(4, level)),
+        "onto the screen"
+    );
+}
+
 /// **With no report, no level -- and why.**
 #[test]
 fn with_no_brightness_report_the_pane_says_so() {
     let dir = scratchdir::ScratchDir::new("pane-no-brightness");
     let mut s = shell();
-    s.attach_backlight(crate::backlight::Source::Report(dir.path("missing")));
+    s.attach_backlight(Backlight::with(
+        dir.path("missing"),
+        Box::new(Recording::default()),
+    ));
     s.toggle_notifications();
     let text = pane_text(&s);
     assert!(text.iter().any(|t| t == "Brightness"), "{text:?}");

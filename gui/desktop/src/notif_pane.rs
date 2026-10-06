@@ -1346,6 +1346,13 @@ impl NotificationPane {
         });
     }
 
+    /// The screen's brightness as the kernel has it, which the pane's slider
+    /// now sets (`crate::backlight`): the level, and the slider back.
+    pub const fn show_screen_brightness(&mut self, level: u8) {
+        self.quick_settings.brightness = if level > 100 { 100 } else { level };
+        self.fixed[1] = None;
+    }
+
     /// Why the brightness cannot be changed here, while it cannot.
     #[must_use]
     pub const fn brightness_fixed(&self) -> Option<&'static str> {

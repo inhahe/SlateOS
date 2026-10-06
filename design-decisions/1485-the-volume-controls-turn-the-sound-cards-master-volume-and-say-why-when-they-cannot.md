@@ -44,13 +44,15 @@ display's brightness (`/proc/brightness`, a `Displays:` row each) and can
 set it (`SYS_BRIGHTNESS_SET`, lane A,
 `requests/c-a-brightness-has-setters-and-no-door.md`), but only for a
 process holding the `SET_BRIGHTNESS` right, which nothing gives the
-desktop yet (`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`). So the
-row shows the first display's level as the kernel reports it, read as the
-pane opens, and says "Can't be changed yet" in the slider's place -- or
-"No brightness control reachable" with no report to read
-(`gui/desktop/src/backlight.rs`). A shell that asked for no screen keeps
-its own slider, as for the volume. Once the desktop holds the right,
-setting it goes in `backlight` and the slider comes back.
+desktop yet (`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`). So as
+the pane opens, the first display's level is read and set to itself -- a
+setting no one sees, which answers whether the desktop may
+(`gui/desktop/src/backlight.rs`). Where it may, the slider is the
+screen's; where it may not, the row shows the level and says "Can't be
+changed yet" in the slider's place -- or "No brightness control reachable"
+with no report to read. A shell that asked for no screen keeps its own
+slider, as for the volume. The day the desktop is given the right, the
+slider comes back with no change to the desktop.
 
 ### The speaker in the tray
 

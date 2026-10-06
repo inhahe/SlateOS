@@ -1920,7 +1920,7 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 - [-] **Inheritance:** child widgets inherit parent font/color unless overridden. Style applied directly to widgets, no multi-source resolution. cm/mm use monitor EDID data for true physical sizes. — *2026-10-05: a child inherits the font (size, weight, family), colour, line height, alignment, text shadow, pointer shape and custom properties a style set on its parent -- only what CSS set, so a tree without CSS draws as it did (§1478). `cm`/`mm` are CSS's 96-to-the-inch until a program passes the display's size (`WidgetTree::set_pixels_per_mm`); a display's size reaching programs waits on `TD-C-PROGRAMS-DRAW-AT-ONE-SCALE-WHATEVER-THE-DISPLAYS-IS` (C-Q34).*
 
 #### Signals and Slots
-- [ ] Signal/slot mechanism (maps to Rust channels or callback registration)
+- [x] Signal/slot mechanism (maps to Rust channels or callback registration) — *2026-10-05 (`design-decisions.md` §1479): a widget tree's controls signal what their user did -- `Clicked`, `Toggled`, `Chosen`, `Edited`, `Submitted`, `Moved` (`guitk::widget::Signal`) -- and a program hears them by `WidgetTree::take_signals` after each event, on a channel (`connect_channel`), or through callbacks (`connect` to one widget or all, `disconnect`).*
 
 #### Core Widgets
 - [x] Buttons (text, graphic)

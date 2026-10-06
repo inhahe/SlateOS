@@ -31,8 +31,13 @@
 #[cfg(test)]
 mod css_tests;
 mod draw;
+mod signal;
+#[cfg(test)]
+mod signal_tests;
 #[cfg(test)]
 mod tree_tests;
+
+pub use signal::{MAX_QUEUED_SIGNALS, Signal, SignalKind, SlotId};
 
 use crate::color::Color;
 use crate::event::{Event, EventResult, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -141,6 +146,9 @@ pub struct Widget {
     /// is what a change is a change from, and before its first there is
     /// none -- a widget appears in its style, rather than moving into it.
     styled_before: bool,
+    /// What its user did that its tree has not yet gathered
+    /// ([`signal`]): emitted as it handles an event, taken by the tree after.
+    signals: Vec<SignalKind>,
 }
 
 /// A widget's own CSS, read: its block, and what in it was not.
@@ -385,6 +393,7 @@ impl Widget {
             font: None,
             transitions: None,
             styled_before: false,
+            signals: Vec::new(),
         }
     }
 
@@ -838,6 +847,17 @@ impl Widget {
     /// [`at_path`](Self::at_path), to change.
     fn at_path_mut(&mut self, path: &[usize]) -> Option<&mut Self> {
         path.iter().try_fold(self, |w, &i| w.children.get_mut(i))
+    }
+
+    /// Take what it and every widget in it signalled since last asked, as
+    /// [`Signal`]s, into `out` -- each widget's in the order it emitted
+    /// them, parents before children.
+    fn gather_signals(&mut self, out: &mut Vec<Signal>) {
+        let from = self.id;
+        out.extend(self.signals.drain(..).map(|kind| Signal { from, kind }));
+        for child in &mut self.children {
+            child.gather_signals(out);
+        }
     }
 
     /// Whether anything in it, or in any widget in it, is moving.
@@ -1920,12 +1940,19 @@ impl Widget {
             // A slider follows its drag wherever the pointer goes, and decides
             // itself what of the pointer is its; the wheel moves it only while
             // it has the keyboard, as its module asks.
-            WidgetKind::Slider { slider } => match mouse.kind {
-                MouseEventKind::Scroll { dy, .. } if focused && inside => {
-                    taken(slider.wheel(dy).is_taken())
+            WidgetKind::Slider { slider } => {
+                let before = slider.value();
+                let result = match mouse.kind {
+                    MouseEventKind::Scroll { dy, .. } if focused && inside => {
+                        taken(slider.wheel(dy).is_taken())
+                    }
+                    _ => taken(slider.handle_mouse(&placement, mouse).is_taken()),
+                };
+                if slider.value().to_bits() != before.to_bits() {
+                    self.signals.push(SignalKind::Moved(slider.value()));
                 }
-                _ => taken(slider.handle_mouse(&placement, mouse).is_taken()),
-            },
+                result
+            }
             // A text area selects while a press in it is held, wherever the
             // pointer goes; and scrolls under the wheel.
             WidgetKind::TextArea {
@@ -1955,6 +1982,15 @@ impl Widget {
                 }
                 _ => EventResult::Ignored,
             },
+            // A press on a button released off it is no click, and the
+            // button is let go of: it was left drawn pressed, and the next
+            // release over it -- after a press anywhere -- clicked it.
+            WidgetKind::Button { pressed, .. }
+                if !inside && matches!(mouse.kind, MouseEventKind::Release(_)) =>
+            {
+                *pressed = false;
+                EventResult::Ignored
+            }
             _ if !inside => EventResult::Ignored,
             // The wheel scrolls a scroll view, as far as it goes; a turn
             // that moves nothing is left for a scroll view round it.
@@ -1978,6 +2014,9 @@ impl Widget {
             // its group (`choose_radio`).
             WidgetKind::RadioButton { selected, .. } => {
                 if matches!(mouse.kind, MouseEventKind::Release(_)) {
+                    if !*selected {
+                        self.signals.push(SignalKind::Chosen);
+                    }
                     *selected = true;
                     EventResult::Consumed
                 } else {
@@ -2019,7 +2058,12 @@ impl Widget {
                     *pressed = true;
                     EventResult::Consumed
                 }
+                // Released over it after a press on it: a click. A press
+                // begun elsewhere and released here is not one.
                 MouseEventKind::Release(_) => {
+                    if *pressed {
+                        self.signals.push(SignalKind::Clicked);
+                    }
                     *pressed = false;
                     EventResult::Consumed
                 }
@@ -2028,6 +2072,7 @@ impl Widget {
             WidgetKind::Checkbox { checked, .. } => {
                 if matches!(&mouse.kind, MouseEventKind::Release(_)) {
                     *checked = checked.toggled();
+                    self.signals.push(SignalKind::Toggled(*checked));
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -2087,6 +2132,7 @@ impl Widget {
                             .next_in(value)
                             .unwrap_or_else(|| TextCursor::from(value.len()));
                     }
+                    self.signals.push(SignalKind::Edited);
                     return EventResult::Consumed;
                 }
                 match key.key {
@@ -2104,24 +2150,38 @@ impl Widget {
                         // character before it removes something the user never
                         // pointed at, which is the one editing mistake that
                         // cannot be seen happening.
-                        if !crate::textedit::delete_selection(value, cursor, selection_anchor) {
-                            if let Some(prev) = cursor.prev_in(value) {
-                                value.remove(prev.byte());
-                                *cursor = prev;
-                            }
+                        let mut edited =
+                            crate::textedit::delete_selection(value, cursor, selection_anchor);
+                        if !edited && let Some(prev) = cursor.prev_in(value) {
+                            value.remove(prev.byte());
+                            *cursor = prev;
+                            edited = true;
+                        }
+                        if edited {
+                            self.signals.push(SignalKind::Edited);
                         }
                         EventResult::Consumed
                     }
                     crate::event::Key::Delete => {
-                        if !crate::textedit::delete_selection(value, cursor, selection_anchor) {
-                            // Forward delete is the logical *next* character,
-                            // for the same reason Backspace is the logical
-                            // previous one, and `next_in` is what refuses to
-                            // hand back an offset inside one.
-                            if cursor.byte() < value.len() {
-                                value.remove(cursor.byte());
-                            }
+                        let mut edited =
+                            crate::textedit::delete_selection(value, cursor, selection_anchor);
+                        // Forward delete is the logical *next* character, for
+                        // the same reason Backspace is the logical previous
+                        // one, and `next_in` is what refuses to hand back an
+                        // offset inside one.
+                        if !edited && cursor.byte() < value.len() {
+                            value.remove(cursor.byte());
+                            edited = true;
                         }
+                        if edited {
+                            self.signals.push(SignalKind::Edited);
+                        }
+                        EventResult::Consumed
+                    }
+                    // Enter is a form's "done": the field says so, and what is
+                    // done about it is the program's.
+                    crate::event::Key::Enter => {
+                        self.signals.push(SignalKind::Submitted);
                         EventResult::Consumed
                     }
                     // The arrows step *visually* — one position left or right on
@@ -2205,9 +2265,15 @@ impl Widget {
             // focus onto a button that then had no way to be activated, which
             // is worse than not being in the tab order at all: the user would
             // see the focus land somewhere it could not act.
+            // Space or Enter clicks a focused button, as a press and release
+            // over it does. It used to toggle the button's pressed look and
+            // leave it there -- key releases are not seen here -- so a button
+            // worked from the keyboard stayed drawn pressed until the next
+            // Space, and nothing told its program it had been clicked.
             WidgetKind::Button { pressed, .. } => match key.key {
                 crate::event::Key::Space | crate::event::Key::Enter => {
-                    *pressed = !*pressed;
+                    *pressed = false;
+                    self.signals.push(SignalKind::Clicked);
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,
@@ -2215,6 +2281,7 @@ impl Widget {
             WidgetKind::Checkbox { checked, .. } => {
                 if key.key == crate::event::Key::Space {
                     *checked = checked.toggled();
+                    self.signals.push(SignalKind::Toggled(*checked));
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -2223,6 +2290,9 @@ impl Widget {
             // Space chooses a radio button, as a click does.
             WidgetKind::RadioButton { selected, .. } => {
                 if key.key == crate::event::Key::Space {
+                    if !*selected {
+                        self.signals.push(SignalKind::Chosen);
+                    }
                     *selected = true;
                     EventResult::Consumed
                 } else {
@@ -2230,18 +2300,25 @@ impl Widget {
                 }
             }
             WidgetKind::Slider { slider } => {
-                if slider.handle_key(key).is_taken() {
+                let before = slider.value();
+                let result = if slider.handle_key(key).is_taken() {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
+                };
+                if slider.value().to_bits() != before.to_bits() {
+                    self.signals.push(SignalKind::Moved(slider.value()));
                 }
+                result
             }
             // A text area's editing keys are its module's: typing, deleting,
             // the arrows and their selections, undo, the clipboard. What it
             // leaves -- Escape, Tab -- is the window's.
             WidgetKind::TextArea { area, .. } => match area.edit_key(key, &metrics) {
                 crate::textinput::KeyEdit::Unhandled => EventResult::Ignored,
-                crate::textinput::KeyEdit::Handled | crate::textinput::KeyEdit::Changed => {
+                crate::textinput::KeyEdit::Handled => EventResult::Consumed,
+                crate::textinput::KeyEdit::Changed => {
+                    self.signals.push(SignalKind::Edited);
                     EventResult::Consumed
                 }
             },
@@ -2284,6 +2361,15 @@ pub struct WidgetTree {
     /// Whether a transition was moving at the last layout
     /// ([`animating`](Self::animating)).
     animating: bool,
+    /// Signals not yet taken ([`take_signals`](Self::take_signals)), the
+    /// oldest first, at most [`MAX_QUEUED_SIGNALS`].
+    queued: std::collections::VecDeque<Signal>,
+    /// Callbacks connected to its signals ([`connect`](Self::connect)).
+    slots: Vec<signal::Slot>,
+    /// Channels its signals are sent on ([`connect_channel`](Self::connect_channel)).
+    channels: Vec<std::sync::mpsc::Sender<Signal>>,
+    /// The next callback's [`SlotId`].
+    next_slot: u64,
 }
 
 /// What a tree tells the time by, for its transitions.
@@ -2335,6 +2421,73 @@ impl WidgetTree {
             styled: false,
             clock: Clock::Real(std::time::Instant::now()),
             animating: false,
+            queued: std::collections::VecDeque::new(),
+            slots: Vec::new(),
+            channels: Vec::new(),
+            next_slot: 0,
+        }
+    }
+
+    /// What its widgets' users did since this was last asked -- clicks,
+    /// ticks, edits -- oldest first: the way to hear its signals for a
+    /// program that owns its state, after each event it hands the tree.
+    /// See [`Signal`].
+    pub fn take_signals(&mut self) -> Vec<Signal> {
+        self.queued.drain(..).collect()
+    }
+
+    /// Call `slot` with each signal `from` sends -- or every widget's, for
+    /// `None` -- as it is sent, until [`disconnect`](Self::disconnect).
+    /// Answers the connection's handle.
+    pub fn connect(
+        &mut self,
+        from: Option<WidgetId>,
+        slot: impl FnMut(&Signal) + 'static,
+    ) -> SlotId {
+        let id = SlotId(self.next_slot);
+        self.next_slot = self.next_slot.wrapping_add(1);
+        self.slots.push(signal::Slot {
+            id,
+            from,
+            call: Box::new(slot),
+        });
+        id
+    }
+
+    /// Stop calling the callback `slot` connected. Answers whether it was
+    /// connected.
+    pub fn disconnect(&mut self, slot: SlotId) -> bool {
+        let before = self.slots.len();
+        self.slots.retain(|s| s.id != slot);
+        self.slots.len() != before
+    }
+
+    /// Send each signal on `sender` as it is sent -- for a program whose
+    /// state lives on another thread. A channel whose receiver has gone is
+    /// let go of at its next signal.
+    pub fn connect_channel(&mut self, sender: std::sync::mpsc::Sender<Signal>) {
+        self.channels.push(sender);
+    }
+
+    /// Gather what its widgets signalled while handling an event, and hand
+    /// each signal to every way its program has asked to hear it: the queue
+    /// (its oldest dropped past [`MAX_QUEUED_SIGNALS`]), each channel, each
+    /// callback connected to its widget or to all.
+    fn send_signals(&mut self) {
+        let mut sent = Vec::new();
+        self.root.gather_signals(&mut sent);
+        for signal in sent {
+            // A channel whose receiver is gone has nowhere to send to.
+            self.channels.retain(|ch| ch.send(signal.clone()).is_ok());
+            for slot in &mut self.slots {
+                if slot.from.is_none_or(|from| from == signal.from) {
+                    (slot.call)(&signal);
+                }
+            }
+            if self.queued.len() >= MAX_QUEUED_SIGNALS {
+                self.queued.pop_front();
+            }
+            self.queued.push_back(signal);
         }
     }
 
@@ -2727,6 +2880,8 @@ impl WidgetTree {
             _ => self.root.handle_event(event),
         };
         self.restyle(before);
+        // What the user did, to its program -- once the tree has settled.
+        self.send_signals();
         result
     }
 
@@ -3437,14 +3592,23 @@ mod tests {
             "Space must tick the focused checkbox"
         );
 
+        let ticked = tree.take_signals();
         tree.handle_event(&Event::Key(pressed(crate::event::Key::Tab)));
         tree.handle_event(&Event::Key(pressed(crate::event::Key::Enter)));
-        assert!(
-            matches!(
-                tree.root.children[1].kind,
-                WidgetKind::Button { pressed: true, .. }
-            ),
-            "Enter must press the focused button"
+        assert_eq!(
+            tree.take_signals(),
+            [Signal {
+                from: tree.root.children[1].id,
+                kind: SignalKind::Clicked
+            }],
+            "Enter must click the focused button"
+        );
+        assert_eq!(
+            ticked,
+            [Signal {
+                from: tree.root.children[0].id,
+                kind: SignalKind::Toggled(CheckState::Checked)
+            }]
         );
         assert!(
             matches!(

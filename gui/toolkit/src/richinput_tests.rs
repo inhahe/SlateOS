@@ -864,6 +864,123 @@ fn a_dropped_picture_lands_where_it_was_dropped() {
     assert!(input.text().starts_with('Z'), "{}", input.text());
 }
 
+/// **A clipboard holding text and a picture pastes the text** -- the rule
+/// `design-decisions.md` §1486 chose, to revisit when the system's clipboard
+/// brings both.
+#[test]
+fn a_clipboard_of_text_and_a_picture_pastes_the_text() {
+    crate::clipboard::set("hello", Some(picture(4, 4)));
+    let mut input = RichInput::new();
+    input.paste();
+    assert_eq!(input.text(), "hello");
+    assert!(ids(&input).is_empty(), "no picture");
+}
+
+/// **A drop whose text is empty is a drop of its picture**: an empty string
+/// is no text to put in.
+#[test]
+fn a_drop_with_empty_text_drops_its_picture() {
+    let mut data = DataObject::with_text("");
+    data.set_data(DataFormat::ImagePng, picture(6, 6).to_png().unwrap());
+    let mut input = RichInput::with_doc(RichDoc::plain("ab", Format::default()));
+    assert!(input.drop_data(&data, 0.0, 2.0, &wide()));
+    assert_eq!(input.pictures().count(), 1, "{:?}", input.text());
+}
+
+/// A `width` by `height` BMP of one colour: 24 bits a pixel, rows bottom
+/// up, each padded to four bytes, as a Windows program writes one.
+fn bmp(width: u32, height: u32) -> Vec<u8> {
+    let row = (width * 3).div_ceil(4) * 4;
+    let size = row * height;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(14 + 40 + size).to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(14u32 + 40).to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&i32::try_from(width).unwrap().to_le_bytes());
+    out.extend_from_slice(&i32::try_from(height).unwrap().to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&2835u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    for _ in 0..height {
+        for _ in 0..width {
+            out.extend_from_slice(&[0x20, 0x40, 0x80]);
+        }
+        out.resize(out.len() + usize::try_from(row - width * 3).unwrap(), 0);
+    }
+    out
+}
+
+/// **A dropped BMP is read as a dropped PNG is.**
+#[test]
+fn a_dropped_bmp_is_read() {
+    let mut data = DataObject::new();
+    data.set_data(DataFormat::ImageBmp, bmp(3, 2));
+    let mut input = RichInput::with_doc(RichDoc::plain("ab", Format::default()));
+    assert!(input.drop_data(&data, 0.0, 2.0, &wide()));
+    let dropped = input.pictures().next().expect("the picture");
+    assert_eq!((dropped.width(), dropped.height()), (3, 2));
+}
+
+/// **A picture shorter than the text stands on the baseline**, its foot
+/// where the letters' is -- not hung from the line's top.
+#[test]
+fn a_short_picture_stands_on_the_baseline() {
+    let palette = Palette::for_mode(false);
+    let look = Look {
+        rect: (10.0, 20.0, 400.0, 200.0),
+        focused: false,
+        placeholder: "",
+    };
+    let p = picture(8, 3);
+    let mut input = ab_cd();
+    input.insert_picture(p.clone());
+    let lines = layout::lay_out(input.doc(), &m(400.0));
+    let line = &lines[0];
+    assert!(line.ascent > 3.0, "the text is taller: {}", line.ascent);
+    let mut tree = RenderTree::new();
+    input.draw(&mut tree, &palette, &look, &m(400.0));
+    let y = tree
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::Image { y, .. } => Some(*y),
+            _ => None,
+        })
+        .expect("the picture is drawn");
+    assert!((y - (20.0 + line.ascent - 3.0)).abs() < 0.01, "{y}");
+}
+
+/// **Off the edge of a right-to-left line, the arrows go on as the text
+/// does**: Left off its left edge -- its end -- goes on to the next line,
+/// and Right off its right edge -- its start -- back to the line before.
+#[test]
+fn off_a_right_to_left_lines_edge_the_arrows_go_as_the_text_does() {
+    let middle = format!("{SHALOM} ab {SHALOM}");
+    let text = format!("abc\n{middle}\nxyz");
+    let start = "abc\n".len();
+    let end = start + middle.len();
+    let mut input = RichInput::with_doc(RichDoc::plain(&text, Format::default()));
+    let lines = layout::lay_out(input.doc(), &wide());
+    let stops = layout::caret_stops(input.doc(), &lines[1], SIZE);
+    let leftmost = stops.iter().min_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+    let rightmost = stops.iter().max_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+    assert_eq!(leftmost.1, end, "a right-to-left line ends at its left");
+    assert_eq!(rightmost.1, start, "and starts at its right");
+    input.set_cursor(end);
+    input.step_on_screen(false, false, &wide());
+    assert_eq!(input.cursor(), end + 1, "Left: on, to the next line");
+    input.set_cursor(start);
+    input.step_on_screen(true, false, &wide());
+    assert_eq!(input.cursor(), start - 1, "Right: back, to the line before");
+}
+
 /// **A picture is drawn where its piece is, standing on the baseline, and
 /// a selected one is tinted over**; the window is given each picture the
 /// field shows.

@@ -317,6 +317,39 @@ fn a_line_breaks_either_side_of_a_picture() {
     assert_eq!(lines[1].start, 3, "the picture starts the next line");
 }
 
+/// **A word cut to the box keeps a picture that fills it to the edge, and
+/// cuts before one a pixel too wide** -- `fit_from`, which cuts a word wider
+/// than the box, on a stretch with a picture in it. A paragraph does not
+/// hand it one today, since a picture is a word of its own, so the cut's
+/// rule for pictures is held here.
+#[test]
+fn a_cut_keeps_a_picture_that_fills_the_box_exactly() {
+    let p = picture(30, 10);
+    let doc = around("aa", &p, "bb");
+    let end = doc.text().len();
+    assert_eq!(
+        fit_from(&doc, 0, end, &metrics(w("aa") + 30.0)),
+        5,
+        "after the picture"
+    );
+    assert_eq!(
+        fit_from(&doc, 0, end, &metrics(w("aa") + 29.0)),
+        2,
+        "before it"
+    );
+}
+
+/// **The tallest picture on a line sets its height, wherever it stands**:
+/// a tall picture before a short one is as tall as it is.
+#[test]
+fn the_tallest_picture_sets_the_line_wherever_it_stands() {
+    let mut doc = RichDoc::picture(picture(10, 40), Format::default());
+    doc.append(&RichDoc::picture(picture(10, 4), Format::default()));
+    let line = &lay_out(&doc, &metrics(1000.0))[0];
+    assert!(line.ascent >= 40.0, "{}", line.ascent);
+    assert!(line.height >= 40.0, "{}", line.height);
+}
+
 /// **A picture goes down a line by its own width, alone**: one too wide for
 /// what is left of the line goes to the next -- measured as wide as it is
 /// shown, not as the character that stands for it -- and straight after a

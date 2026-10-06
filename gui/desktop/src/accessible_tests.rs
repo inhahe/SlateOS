@@ -631,3 +631,115 @@ fn nothing_is_pressed_under_what_is_open_over_everything() {
         assert!(!shell.start_menu_open, "{what}: Start opened under it");
     }
 }
+
+/// The desktop's menu, opened with a right-click at `(x, y)`.
+fn desktop_menu_at(shell: &mut DesktopShell, x: f32, y: f32) {
+    shell.handle_mouse(&MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Press(MouseButton::Right),
+    });
+    assert!(shell.desktop_menu.is_visible(), "the desktop's menu opened");
+}
+
+/// The node in the shell's tree named `name`.
+fn named(shell: &DesktopShell, name: &str) -> Node<ShellPart> {
+    tree(shell)
+        .walk()
+        .find(|node| node.name == name)
+        .unwrap_or_else(|| panic!("nothing named {name:?}"))
+        .clone()
+}
+
+/// **The desktop's menu shows tools its rows, and a row is chosen as a
+/// click chooses it**: "View" opens its submenu, held by the row, with the
+/// menu staying open -- a click on it closed the whole menu -- and a check
+/// in it is toggled by choosing it, which closes the menu.
+#[test]
+fn the_desktops_menu_is_chosen_from_as_a_click_chooses() {
+    appearance::config::testing::with_scratch_config("acc-desktop-menu", |_root| {
+        let mut shell = shell();
+        desktop_menu_at(&mut shell, 400.0, 300.0);
+        let menu = node(&shell, ShellPart::Menu(ShellMenu::Desktop, MenuPart::Menu));
+        assert_eq!((menu.role, menu.name.as_str()), (Role::Menu, "Desktop"));
+        let view = named(&shell, "View");
+        assert_eq!(view.role, Role::MenuItem);
+        assert_eq!(press(&mut shell, view.id), Ok(None));
+        assert!(shell.desktop_menu.is_visible(), "the menu closed on View");
+        assert_eq!(named(&shell, "View").children.len(), 1, "its submenu");
+
+        let auto = named(&shell, "Auto arrange icons");
+        let was = auto.value.clone();
+        assert!(matches!(was, Some(Value::Check(_))), "{was:?}");
+        assert_eq!(
+            press(
+                &mut shell,
+                ShellPart::Menu(ShellMenu::Desktop, MenuPart::Menu)
+            ),
+            Err(Refusal::NotApplicable {
+                role: Role::Menu,
+                action: "press"
+            })
+        );
+        assert_eq!(shell.invoke(&auto.id, Action::Toggle, 0.0, 0.0), Ok(None));
+        assert!(!shell.desktop_menu.is_visible(), "chosen, the menu closes");
+        assert_eq!(
+            shell.invoke(&auto.id, Action::Toggle, 0.0, 0.0),
+            Err(Refusal::NoSuchWidget),
+            "the menu is closed"
+        );
+
+        desktop_menu_at(&mut shell, 400.0, 300.0);
+        let view = named(&shell, "View").id;
+        press(&mut shell, view).unwrap();
+        assert_ne!(
+            named(&shell, "Auto arrange icons").value,
+            was,
+            "the switch did not turn"
+        );
+        assert_eq!(
+            shell.invoke(&named(&shell, "View").id, Action::Toggle, 0.0, 0.0),
+            Err(Refusal::NotApplicable {
+                role: Role::MenuItem,
+                action: "toggle"
+            }),
+            "View is no check"
+        );
+    });
+}
+
+/// **A notification's menu, open over the pane, is the one a press
+/// reaches**, and its rows are chosen through it; the pane's parts under it
+/// are not.
+#[test]
+fn a_notifications_menu_is_chosen_from_over_the_pane() {
+    appearance::config::testing::with_scratch_config("acc-notif-menu", |_root| {
+        let mut shell = shell();
+        let chat = shell.notify(notif("Chat", "Lunch?"));
+        shell.toggle_notifications();
+        let (x, y) = node(&shell, ShellPart::Pane(PanePart::Card(chat)))
+            .bounds
+            .centre();
+        shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        let menu = node(
+            &shell,
+            ShellPart::Menu(ShellMenu::Notification, MenuPart::Menu),
+        );
+        let rows: Vec<&str> = menu.children.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(
+            rows,
+            ["Turn off notifications from Chat", "Notification settings"]
+        );
+        assert_eq!(
+            press(&mut shell, menu.children[1].id),
+            Ok(Some(ShellAction::Launch(crate::launcher::settings_page(
+                crate::launcher::NOTIFICATIONS_PAGE
+            ))))
+        );
+        assert!(shell.notification_menu.is_none());
+    });
+}

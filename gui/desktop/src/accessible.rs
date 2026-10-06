@@ -16,7 +16,10 @@
 //! its box above or below it -- the places and the power button and its
 //! caret; while the power choices are open, they; while the volume flyout
 //! is open, its level, its mute switch and "Audio settings…"; while the
-//! notification pane is open, its parts (`notif_pane::accessible`).
+//! notification pane is open, its parts (`notif_pane::accessible`); and
+//! every menu open over everything -- the desktop's, a notification's, a
+//! tile's, a field's -- with its rows, and the submenu a row opened
+//! (`guitk::menu::MenuPart`), a row chosen as a click chooses it.
 //!
 //! # As the user would
 //!
@@ -33,6 +36,7 @@
 //! pressed. The search's text, the volume's level, its mute and the
 //! brightness are set as typing and the controls set them.
 
+use guitk::menu::{ContextMenu, MenuPart};
 use guitk::widget::CheckState;
 use guitk::widget::automation::{Accessible, Action, Node, Refusal, Role, Value};
 
@@ -74,6 +78,51 @@ pub enum ShellPart {
     Control(Hit),
     /// A part of the notification pane, while it is open.
     Pane(PanePart),
+    /// A part of a menu the shell has open over everything.
+    Menu(ShellMenu, MenuPart),
+}
+
+/// A menu the shell opens over everything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellMenu {
+    /// A text field's, offering what its keys do: over the Run box, the
+    /// start menu's search, a rename or a note.
+    Field,
+    /// The desktop's, or a desktop icon's.
+    Desktop,
+    /// A notification's.
+    Notification,
+    /// The taskbar's.
+    Taskbar,
+    /// A taskbar tile's: a pinned program's, or a window's.
+    Tile,
+    /// The tray's hidden icons.
+    HiddenIcons,
+}
+
+impl ShellMenu {
+    /// Every menu, in the order a press reaches them (`handle_mouse_inner`):
+    /// the first open one takes it.
+    const IN_PRESS_ORDER: [Self; 6] = [
+        Self::Field,
+        Self::Desktop,
+        Self::Notification,
+        Self::Taskbar,
+        Self::Tile,
+        Self::HiddenIcons,
+    ];
+
+    /// What tools call it.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Field => "Text",
+            Self::Desktop => "Desktop",
+            Self::Notification => "Notification",
+            Self::Taskbar => "Taskbar",
+            Self::Tile => "Taskbar button",
+            Self::HiddenIcons => "Hidden icons",
+        }
+    }
 }
 
 /// An action's answer as a tool hears it: nothing for the host, or what the
@@ -493,6 +542,84 @@ impl DesktopShell {
         menu
     }
 
+    /// The menu `which`, while it is open.
+    fn open_menu(&self, which: ShellMenu) -> Option<&ContextMenu> {
+        match which {
+            ShellMenu::Field => self.field_menu.as_ref().map(|(menu, _)| menu),
+            ShellMenu::Desktop => Some(&self.desktop_menu),
+            ShellMenu::Notification => self.notification_menu.as_ref().map(|(menu, _)| menu),
+            ShellMenu::Taskbar => self.taskbar_menu.as_ref(),
+            ShellMenu::Tile => self.pin_menu.as_ref().map(|(menu, _)| menu),
+            ShellMenu::HiddenIcons => self.tray_overflow_menu.as_ref().map(|(menu, _)| menu),
+        }
+        .filter(|menu| menu.is_visible())
+    }
+
+    /// The menu `which`, while it is open, to scroll a row of it into view.
+    fn open_menu_mut(&mut self, which: ShellMenu) -> Option<&mut ContextMenu> {
+        match which {
+            ShellMenu::Field => self.field_menu.as_mut().map(|(menu, _)| menu),
+            ShellMenu::Desktop => Some(&mut self.desktop_menu),
+            ShellMenu::Notification => self.notification_menu.as_mut().map(|(menu, _)| menu),
+            ShellMenu::Taskbar => self.taskbar_menu.as_mut(),
+            ShellMenu::Tile => self.pin_menu.as_mut().map(|(menu, _)| menu),
+            ShellMenu::HiddenIcons => self.tray_overflow_menu.as_mut().map(|(menu, _)| menu),
+        }
+        .filter(|menu| menu.is_visible())
+    }
+
+    /// The menu a press would reach, of those open: the first in the order
+    /// `handle_mouse_inner` asks them -- `None` where none is open, or where
+    /// something it asks first would take the press: the character picker,
+    /// the wallpaper being moved, a widget being dragged.
+    fn menu_on_top(&self) -> Option<ShellMenu> {
+        let first = ShellMenu::IN_PRESS_ORDER
+            .into_iter()
+            .find(|&which| self.open_menu(which).is_some())?;
+        let gesture = self.wallpaper_move.is_some() || self.widget_drag.is_some();
+        (self.char_picker.is_none() && (first == ShellMenu::Field || !gesture)).then_some(first)
+    }
+
+    /// Do `action` to `part` of the open menu `which`, as the user would: a
+    /// row clicked at its middle -- scrolled into the menu first, if it was
+    /// out of it -- through the shell's own press, so the shell acts on the
+    /// row as it does on a click. A check is toggled by choosing it.
+    fn invoke_menu(
+        &mut self,
+        which: ShellMenu,
+        part: MenuPart,
+        action: &Action,
+    ) -> Result<Option<ShellAction>, Refusal> {
+        let menu = self.open_menu(which).ok_or(Refusal::NoSuchWidget)?;
+        let (role, value) = menu
+            .automation(0.0, 0.0)
+            .walk()
+            .find(|node| node.id == part)
+            .map(|node| (node.role, node.value.clone()))
+            .ok_or(Refusal::NoSuchWidget)?;
+        let row = match (part, action) {
+            (MenuPart::Item(id), Action::Press) => Some(id),
+            (MenuPart::Item(id), Action::Toggle) if matches!(value, Some(Value::Check(_))) => {
+                Some(id)
+            }
+            _ => None,
+        };
+        let Some(id) = row else {
+            return Err(Refusal::NotApplicable {
+                role,
+                action: action.name(),
+            });
+        };
+        if self.menu_on_top() != Some(which) {
+            return Err(Refusal::Hidden);
+        }
+        let (x, y) = self
+            .open_menu_mut(which)
+            .ok_or(Refusal::NoSuchWidget)?
+            .press_point(id)?;
+        Ok(self.click_at(x, y))
+    }
+
     /// Do `action` to `part` of the open notification pane, as the user
     /// would: a level set as its slider sets it, anything else pressed.
     fn invoke_pane(
@@ -652,6 +779,17 @@ impl Accessible for DesktopShell {
                     .map(&ShellPart::Pane),
             );
         }
+        // The menus last, as they are drawn over everything else -- the one
+        // a press reaches first last of all.
+        for which in ShellMenu::IN_PRESS_ORDER.into_iter().rev() {
+            if let Some(menu) = self.open_menu(which) {
+                let mut node = menu
+                    .automation(width, height)
+                    .map(&|part| ShellPart::Menu(which, part));
+                which.name().clone_into(&mut node.name);
+                root.children.push(node);
+            }
+        }
         root
     }
 
@@ -754,6 +892,7 @@ impl Accessible for DesktopShell {
             }
             (ShellPart::AudioSettings, _) => Err(not_for(Role::Button)),
             (ShellPart::Pane(part), action) => self.invoke_pane(part, action),
+            (ShellPart::Menu(which, part), action) => self.invoke_menu(which, part, &action),
             (ShellPart::StartList | ShellPart::PowerMenu, _) => Err(not_for(Role::List)),
             (ShellPart::StartMenu, _) => Err(not_for(Role::Dialog)),
             (ShellPart::Desktop | ShellPart::Taskbar | ShellPart::Volume, _) => {

@@ -3608,8 +3608,10 @@ mod tests {
         assert_eq!(pane.app_card_at(APP_HEADING_HEIGHT), Some(0));
     }
 
-    /// No event at all.
-    const NOTHING: [NotifPaneEvent; 0] = [];
+    /// No event at all: what a press on nothing says.
+    fn nothing() -> Vec<NotifPaneEvent> {
+        Vec::new()
+    }
 
     /// Where the pane draws `text`, in its own coordinates -- its `y` the
     /// screen's.
@@ -3694,7 +3696,7 @@ mod tests {
             let below = y - FULL_SETTINGS_TEXT_DY + FULL_SETTINGS_ROW + 0.5;
             assert_eq!(
                 press_pane(&mut pane, x + 2.0, below),
-                NOTHING,
+                nothing(),
                 "{programs} programs: below the row"
             );
         }
@@ -3708,7 +3710,7 @@ mod tests {
         let row = pane.full_settings_rect();
         let y = NotificationPane::list_start_y() + row.y + row.h / 2.0;
         assert!(y > TEST_SCREEN_H, "the fixture's row is below the pane");
-        assert_eq!(press_pane(&mut pane, row.x + 10.0, y), NOTHING);
+        assert_eq!(press_pane(&mut pane, row.x + 10.0, y), nothing());
     }
 
     /// **Each link in the header takes a press where it is drawn, and the
@@ -3730,28 +3732,28 @@ mod tests {
         let (sx, sy) = drawn_at(&pane, "Settings");
         let (cx, cy) = drawn_at(&pane, "Clear all");
         let between = (sx + HeaderLink::Settings.span().1 + cx) / 2.0;
-        assert_eq!(press_pane(&mut pane, between, sy + 2.0), NOTHING);
+        assert_eq!(press_pane(&mut pane, between, sy + 2.0), nothing());
         assert!(!pane.show_settings, "the space between opened Settings");
         // The header's whole height is a link's, down to the quick settings.
         assert_eq!(
             press_pane(&mut pane, sx + 2.0, NotificationPane::qs_start_y() - 0.5),
-            NOTHING
+            nothing()
         );
         assert!(pane.show_settings, "the foot of the header is the link's");
         pane.show_programs(false);
         press_key(&mut pane, Key::End);
 
-        assert_eq!(press_pane(&mut pane, sx + 2.0, sy + 2.0), NOTHING);
+        assert_eq!(press_pane(&mut pane, sx + 2.0, sy + 2.0), nothing());
         assert!(pane.show_settings, "Settings shows the programs");
         assert_eq!(pane.scroll_offset, 0.0, "from their top");
         // Where "Settings" was, nothing now: "Back" is the one link.
-        assert_eq!(press_pane(&mut pane, sx + 2.0, sy + 2.0), NOTHING);
+        assert_eq!(press_pane(&mut pane, sx + 2.0, sy + 2.0), nothing());
         assert!(pane.show_settings);
 
         press_key(&mut pane, Key::End);
         assert!(pane.scroll_offset > 0.0, "the programs scroll");
         let (bx, by) = drawn_at(&pane, "Back");
-        assert_eq!(press_pane(&mut pane, bx + 2.0, by + 2.0), NOTHING);
+        assert_eq!(press_pane(&mut pane, bx + 2.0, by + 2.0), nothing());
         assert!(!pane.show_settings, "Back shows the notifications");
         assert_eq!(pane.scroll_offset, 0.0, "from their top");
 

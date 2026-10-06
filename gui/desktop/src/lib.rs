@@ -5341,8 +5341,8 @@ impl DesktopShell {
                     return ShellAction::Consumed;
                 }
                 MouseEventKind::Press(_) => {
-                    match self.desktop_menu.handle_click(event.x, event.y) {
-                        Some(id) => {
+                    match self.desktop_menu.click(event.x, event.y) {
+                        guitk::menu::MenuClick::Chosen(id) => {
                             self.desktop_menu.hide();
                             // An icon's Open starts a program; every other
                             // item has already done its work.
@@ -5352,12 +5352,16 @@ impl DesktopShell {
                                 return action;
                             }
                         }
+                        // A row that opens a submenu -- "View", "Open
+                        // with" -- opened it, and the menu stays, as it
+                        // does for the pointer resting there. This answered
+                        // nothing once, as a miss does, and the menu closed.
+                        guitk::menu::MenuClick::Opened => {}
                         // A press that named no item: on the panel's own
-                        // padding, or outside it. `handle_click` cannot tell
-                        // the caller which, and closing on both is the
+                        // padding, or outside it. Closing on both is the
                         // behaviour every menu has -- a click into the gap
                         // between two rows is a miss, not a hold.
-                        None => self.desktop_menu.hide(),
+                        guitk::menu::MenuClick::Missed => self.desktop_menu.hide(),
                     }
                     return ShellAction::Consumed;
                 }

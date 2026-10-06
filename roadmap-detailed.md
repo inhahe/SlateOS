@@ -2703,11 +2703,14 @@ authors never wrote a single automation handler.
   row of its list, its places, the power button and caret), the power
   choices, the volume flyout and the notification pane
   (`desktop::notif_pane::PanePart`: its links, its switches and levels,
-  each notification with its cross, and each program's switch); a part
+  each notification with its cross, and each program's switch) and every
+  menu open over everything (`desktop::accessible::ShellMenu`); a part
   pressed is the shell's own click on it, and one the click would not
-  reach is refused (`design-decisions.md` §1491). Not yet: the font
-  picker, and the shell's other surfaces -- the calendar, Alt+Tab, the
-  menus.*
+  reach is refused (`design-decisions.md` §1491). The toolkit's context
+  menu shows tools its rows itself (`guitk::menu::MenuPart`: each row's
+  label, its keys or why it is greyed, its tick, and the submenu it
+  opened), so any program's menus are seen. Not yet: the font picker, and
+  the shell's other surfaces -- the calendar, Alt+Tab.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

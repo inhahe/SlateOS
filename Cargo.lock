@@ -497,6 +497,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "charnames"
+version = "0.1.0"
+
+[[package]]
+name = "charpicker"
+version = "0.1.0"
+dependencies = [
+ "charnames",
+ "guitk",
+]
+
+[[package]]
 name = "charwidth"
 version = "0.1.0"
 
@@ -877,6 +889,7 @@ dependencies = [
  "appearance",
  "associations",
  "authlib",
+ "charpicker",
  "datetimesettings",
  "daywindow",
  "desktopentry",

@@ -22,6 +22,7 @@ struct fstab	fstab.h	48	fs_spec=0,fs_file=8,fs_vfstype=16,fs_mntops=24,fs_type=3
 struct gaicb	netdb.h	56	ar_name=0,ar_service=8,ar_request=16,ar_result=24,__return=32,__glibc_reserved=36
 struct mallinfo	malloc.h	40	arena=0,ordblks=4,smblks=8,hblks=12,hblkhd=16,usmblks=20,fsmblks=24,uordblks=28,fordblks=32,keepcost=36
 struct mallinfo2	malloc.h	80	arena=0,ordblks=8,smblks=16,hblks=24,hblkhd=32,usmblks=40,fsmblks=48,uordblks=56,fordblks=64,keepcost=72
+struct mount_attr	sys/mount.h	32	attr_set=0,attr_clr=8,propagation=16,userns_fd=24
 struct ntptimeval	sys/timex.h	72	time=0,maxerror=16,esterror=24,tai=32,__glibc_reserved1=40,__glibc_reserved2=48,__glibc_reserved3=56,__glibc_reserved4=64
 struct obstack	obstack.h	88	chunk_size=0,chunk=8,object_base=16,next_free=24,chunk_limit=32,temp=40,alignment_mask=48,chunkfun=56,freefun=64,extra_arg=72
 struct printf_info	printf.h	20	prec=0,width=4,spec=8,user=14,pad=16

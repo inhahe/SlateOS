@@ -948,6 +948,17 @@ pub(crate) fn abi_asserts() -> String {
         sg_adm,
         sg_mem
     );
+    abi!(
+        out,
+        hdrs,
+        crate::sys_mount::MountAttr,
+        "struct mount_attr",
+        "sys/mount.h",
+        attr_set,
+        attr_clr,
+        propagation,
+        userns_fd
+    );
     // Its thirteen one-bit fields are `bits` here, which C cannot take the
     // offset of; the size, and `user` after them, place them.
     abi!(

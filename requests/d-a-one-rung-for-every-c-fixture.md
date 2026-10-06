@@ -90,6 +90,7 @@ will close them myself as each one goes on.
 | `ctest-sigpipe` | -- (filed with SIGPIPE, 2026-10-06; design-decisions §1176) | - | 30 |
 | `ctest-rusage` | -- (filed with `getrusage`, 2026-10-06) | - | 60 |
 | `ctest-pi-mutex` | -- (filed with priority-inheritance mutexes, 2026-10-06; §1177) | - | 60 |
+| `ctest-system` | -- (filed with `system()`, 2026-10-06); needs a `/bin/sh` in the root (`d-ab-the-booted-system-has-no-bin-sh.md`) | file | 60 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)

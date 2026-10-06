@@ -151,7 +151,7 @@ pub const SIG_SETMASK: i32 = 2;
 // ---------------------------------------------------------------------------
 
 /// Default sigaction (SIG_DFL, no flags, empty mask).
-const DEFAULT_SIGACTION: Sigaction = Sigaction {
+pub(crate) const DEFAULT_SIGACTION: Sigaction = Sigaction {
     sa_handler: SIG_DFL,
     sa_flags: 0,
     sa_restorer: 0,

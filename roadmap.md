@@ -2974,6 +2974,13 @@ D's to act on once answered).
   The ring-3 check is `services/ctest-pi-mutex`; it times a holder against
   medium-priority threads. Priority ceilings (`PTHREAD_PRIO_PROTECT`) and
   robust mutexes are still `ENOTSUP`.
+  **`system()` is glibc's -- 2026-10-06 (lane D).** It ran its shell with no
+  environment -- no `PATH`, no `HOME` -- the bug the `exec` family had until
+  2026-09-24. It now passes the caller's environment and `--`, and handles
+  signals as POSIX requires: `SIGINT` and `SIGQUIT` ignored and `SIGCHLD`
+  blocked while it waits, and the shell given its defaults and the old mask
+  (`known-issues-resolved/D-SYSTEM-RAN-ITS-SHELL-WITH-NO-ENVIRONMENT.md`).
+  The ring-3 check is `services/ctest-system`.
 
 - `[x]` `[D]` **The image carries fonts -- 2026-09-26**, lane D's half of
   `requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`.

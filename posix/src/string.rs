@@ -1549,62 +1549,43 @@ pub unsafe extern "C" fn strtok(s: *mut u8, delim: *const u8) -> *mut u8 {
     } else {
         s
     };
-
-    // Skip leading delimiters.
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *start.add(i) };
-        if c == 0 {
-            // All delimiters, no token.
-            unsafe {
-                core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut());
-            }
-            return core::ptr::null_mut();
-        }
-        if !unsafe { is_delim(c, delim) } {
-            break;
-        }
-        i = i.wrapping_add(1);
+    // SAFETY: `start` is the caller's string, or where the last call left
+    // off in it; `delim` is the caller's.
+    let (token, next) = unsafe { next_token(start, delim) };
+    unsafe {
+        core::ptr::addr_of_mut!(SAVED).write(next);
     }
-
-    let token = unsafe { start.add(i) };
-
-    // Find end of token.
-    let mut k: usize = 0;
-    loop {
-        let c = unsafe { *token.add(k) };
-        if c == 0 {
-            unsafe {
-                core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut());
-            }
-            return token;
-        }
-        if unsafe { is_delim(c, delim) } {
-            unsafe {
-                *token.add(k) = 0;
-            }
-            unsafe {
-                core::ptr::addr_of_mut!(SAVED).write(token.add(k.wrapping_add(1)));
-            }
-            return token;
-        }
-        k = k.wrapping_add(1);
-    }
+    token
 }
 
-/// Check if a byte is in the delimiter set.
-#[inline]
-unsafe fn is_delim(c: u8, delim: *const u8) -> bool {
-    let mut j: usize = 0;
-    loop {
-        let d = unsafe { *delim.add(j) };
-        if d == 0 {
-            return false;
+/// The next token of the writable C string at `start`, as `strtok` and
+/// `strtok_r` take one: past the bytes in `delim`, up to the next such
+/// byte -- which becomes the token's terminator -- or the string's end.
+/// Returns the token (null when only delimiters were left) and where the
+/// next search starts (null when the string is used up).
+///
+/// `strspn` and `strcspn`'s set lookups: the loops these replaced walked
+/// `delim` once for every byte of the string.
+///
+/// # Safety
+///
+/// `start` is a writable C string and `delim` a readable one.
+#[inline(always)]
+unsafe fn next_token(start: *mut u8, delim: *const u8) -> (*mut u8, *mut u8) {
+    // SAFETY: the caller's strings.  Each span ends at a byte of `start`,
+    // its terminator at the latest, which is where the token's end is
+    // written.
+    unsafe {
+        let token = start.add(strspn(start, delim));
+        if token.read() == 0 {
+            return (core::ptr::null_mut(), core::ptr::null_mut());
         }
-        if c == d {
-            return true;
+        let end = token.add(span_outside(token, delim));
+        if end.read() == 0 {
+            return (token, core::ptr::null_mut());
         }
-        j = j.wrapping_add(1);
+        end.write(0);
+        (token, end.add(1))
     }
 }
 
@@ -2107,41 +2088,20 @@ pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut
     if s.is_null() {
         return core::ptr::null_mut();
     }
-
-    let begin = s;
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *s.add(i) };
-        if c == 0 {
-            // Reached end of string — no more tokens.
-            unsafe {
-                *stringp = core::ptr::null_mut();
-            }
-            return begin;
+    // SAFETY: `s` is the caller's writable string and `delim` its set; the
+    // span ends at a byte of `s`, its terminator at the latest.
+    unsafe {
+        let end = s.add(span_outside(s, delim));
+        if end.read() == 0 {
+            // The last token: nothing follows it.
+            *stringp = core::ptr::null_mut();
+        } else {
+            // The delimiter becomes the token's terminator.
+            end.write(0);
+            *stringp = end.add(1);
         }
-
-        // Check if c is a delimiter.
-        let mut j: usize = 0;
-        loop {
-            let d = unsafe { *delim.add(j) };
-            if d == 0 {
-                break;
-            }
-            if c == d {
-                // Replace delimiter with null and advance past it.
-                unsafe {
-                    *s.add(i) = 0;
-                }
-                unsafe {
-                    *stringp = s.add(i.wrapping_add(1));
-                }
-                return begin;
-            }
-            j = j.wrapping_add(1);
-        }
-
-        i = i.wrapping_add(1);
     }
+    s
 }
 
 /// Own archive member — gnulib replaces `strverscmp`. See the module header.
@@ -2313,45 +2273,12 @@ pub unsafe extern "C" fn strtok_r(s: *mut u8, delim: *const u8, saveptr: *mut *m
     } else {
         s
     };
-
-    // Skip leading delimiters.
-    let mut i: usize = 0;
-    loop {
-        let c = unsafe { *start.add(i) };
-        if c == 0 {
-            unsafe {
-                *saveptr = core::ptr::null_mut();
-            }
-            return core::ptr::null_mut();
-        }
-        if !unsafe { is_delim(c, delim) } {
-            break;
-        }
-        i = i.wrapping_add(1);
-    }
-
-    let token = unsafe { start.add(i) };
-
-    // Find end of token.
-    let mut k: usize = 0;
-    loop {
-        let c = unsafe { *token.add(k) };
-        if c == 0 {
-            unsafe {
-                *saveptr = core::ptr::null_mut();
-            }
-            return token;
-        }
-        if unsafe { is_delim(c, delim) } {
-            unsafe {
-                *token.add(k) = 0;
-            }
-            unsafe {
-                *saveptr = token.add(k.wrapping_add(1));
-            }
-            return token;
-        }
-        k = k.wrapping_add(1);
+    // SAFETY: `start` is the caller's string, or where the last call left
+    // off in it; `delim` is the caller's, and `saveptr` writable.
+    unsafe {
+        let (token, next) = next_token(start, delim);
+        *saveptr = next;
+        token
     }
 }
 
@@ -3798,6 +3725,58 @@ mod tests {
                             "strpbrk {what}"
                         );
                     }
+                }
+            }
+        }
+
+        /// `strtok_r` and `strsep` over every string of up to six bytes from
+        /// letters and two delimiters, for several sets, against Rust's
+        /// `split`: `strtok_r` drops the empty fields, `strsep` keeps them.
+        #[test]
+        fn strtok_r_and_strsep_split_as_split_does() {
+            use super::super::{strsep, strtok_r};
+            let sets: [&[u8]; 5] = [b"", b",", b",;", b"a", b";,a\xff"];
+            for s in all_strings(b"ab,;\xff", 6) {
+                for set in sets {
+                    let delim = terminated(set);
+                    let fields: Vec<&[u8]> = s.split(|b| set.contains(b)).collect();
+                    let what = format!("{s:?} on {set:?}");
+
+                    let mut buf = terminated(&s);
+                    let mut save = core::ptr::null_mut();
+                    let mut tokens = Vec::new();
+                    let mut from = buf.as_mut_ptr();
+                    loop {
+                        // SAFETY: a writable terminated string, then null
+                        // with the save pointer, as strtok_r is called.
+                        let t = unsafe { strtok_r(from, delim.as_ptr(), &raw mut save) };
+                        if t.is_null() {
+                            break;
+                        }
+                        // SAFETY: a token is a terminated string in `buf`.
+                        let len = unsafe { strlen(t) };
+                        tokens.push(unsafe { core::slice::from_raw_parts(t, len) }.to_vec());
+                        from = core::ptr::null_mut();
+                    }
+                    let want: Vec<&[u8]> =
+                        fields.iter().copied().filter(|f| !f.is_empty()).collect();
+                    assert_eq!(tokens, want, "strtok_r {what}");
+
+                    let mut buf = terminated(&s);
+                    let mut rest = buf.as_mut_ptr();
+                    let mut got = Vec::new();
+                    loop {
+                        // SAFETY: `rest` is null or a writable terminated
+                        // string in `buf`.
+                        let t = unsafe { strsep(&raw mut rest, delim.as_ptr()) };
+                        if t.is_null() {
+                            break;
+                        }
+                        // SAFETY: as above.
+                        let len = unsafe { strlen(t) };
+                        got.push(unsafe { core::slice::from_raw_parts(t, len) }.to_vec());
+                    }
+                    assert_eq!(got, fields, "strsep {what}");
                 }
             }
         }

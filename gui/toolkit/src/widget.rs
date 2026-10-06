@@ -1359,6 +1359,17 @@ impl Widget {
         let outer = constraint.constrain(self.border_box_size(p));
         self.layout.width = (outer.width - frame_h).max(0.0);
         self.layout.height = (outer.height - frame_v).max(0.0);
+        // Its corners' radii that are percentages of its own box, now that
+        // it has one -- `border-radius: 50%` a circle.
+        if let Some(c) = self.computed.as_deref_mut()
+            && c.lengths.radii_wait()
+        {
+            let lengths = c.lengths;
+            lengths.apply_radii(&mut c.style, outer.width, outer.height);
+            if let Some(t) = self.transitions.as_deref_mut() {
+                t.settle_radii(&mut c.style, &c.transition, &lengths);
+            }
+        }
         self.layout.padding = self.look().padding;
         self.layout.margin = self.look().margin;
         self.layout.border_widths = self.border_edges();

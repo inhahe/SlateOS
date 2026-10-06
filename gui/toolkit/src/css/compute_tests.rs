@@ -398,6 +398,26 @@ fn a_position_and_its_insets_are_computed() {
     assert_eq!(top("z-index: auto").style.z_index, 0);
 }
 
+/// **A radius that is a percentage is of the box's shorter side**, settled
+/// once the box is laid out: round corners only, so a square at half is a
+/// circle and a wider box a pill.
+#[test]
+fn a_percentage_radius_is_of_the_shorter_side() {
+    let c = top("border-radius: 50% 4px");
+    assert_eq!(c.style.border_radius.top_left, 0.0, "not yet");
+    assert_eq!(c.style.border_radius.top_right, 4.0, "a length is final");
+    assert!(
+        c.lengths.radii_wait() && !c.lengths.waits(),
+        "on itself, not its container"
+    );
+    let mut settled = c.style.clone();
+    c.lengths.apply_radii(&mut settled, 200.0, 40.0);
+    assert_eq!(settled.border_radius.top_left, 20.0, "half of 40");
+    assert_eq!(settled.border_radius.bottom_right, 20.0);
+    assert_eq!(settled.border_radius.top_right, 4.0);
+    assert!(!top("border-radius: 4px").lengths.radii_wait());
+}
+
 /// **A style's transitions are its `transition` lists**, a shorthand's
 /// leaving out what it does not say; none given is CSS's `all 0s`, which
 /// moves nothing; `inherit` is the parent's.

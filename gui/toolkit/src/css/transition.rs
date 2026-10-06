@@ -403,6 +403,12 @@ impl Animated {
                     .flatten()
                     .flatten(),
             ),
+            // Of the box's own size, settled where it is laid out
+            // ([`Transitions::settle_radii`]).
+            Self::Radius(c) => lengths
+                .radius
+                .get(super::compute::corner_index(c))
+                .is_some_and(Option::is_some),
             _ => false,
         }
     }
@@ -778,6 +784,23 @@ impl Transitions {
         let target = shown.clone();
         for what in Animated::all().filter(|a| a.set_in(lengths)) {
             self.take_up(what, &target, shown, spec);
+        }
+    }
+
+    /// Take up the corners' radii that are percentages of the box's own
+    /// size, now that it is laid out and [`BoxLengths::apply_radii`] has
+    /// settled them into `shown`, as [`settle`](Self::settle) takes up a
+    /// container's percentages.
+    pub fn settle_radii(&mut self, shown: &mut Style, spec: &TransitionSpec, lengths: &BoxLengths) {
+        let target = shown.clone();
+        for corner in Corner::ALL {
+            if lengths
+                .radius
+                .get(super::compute::corner_index(corner))
+                .is_some_and(Option::is_some)
+            {
+                self.take_up(Animated::Radius(corner), &target, shown, spec);
+            }
         }
     }
 

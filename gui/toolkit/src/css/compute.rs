@@ -127,11 +127,42 @@ pub struct BoxLengths {
     pub padding: [Option<Length>; 4],
     /// Each side's inset (`top` ...), top first: `Some(None)` is `auto`.
     pub inset: [Option<Option<Length>>; 4],
+    /// Each corner's radius, from the top left clockwise, where it is a
+    /// percentage -- of the box's own size, known once the box is laid out
+    /// ([`apply_radii`](Self::apply_radii)).
+    pub radius: [Option<Length>; 4],
     /// What the units were worth where the style was computed.
     pub units: Option<Units>,
 }
 
 impl BoxLengths {
+    /// Whether any corner's radius waits on the box's own size.
+    #[must_use]
+    pub fn radii_wait(&self) -> bool {
+        self.radius.iter().any(Option::is_some)
+    }
+
+    /// Settle the radii that are percentages into `style`, now that the
+    /// box's border box is `width` by `height`. A corner is drawn round --
+    /// never elliptical -- so a percentage is of the shorter side: a square
+    /// at `50%` is a circle, and a wider box a pill.
+    pub fn apply_radii(&self, style: &mut Style, width: f32, height: f32) {
+        let Some(units) = self.units else {
+            return;
+        };
+        let shorter = width.min(height);
+        let of = if shorter.is_finite() {
+            shorter.max(0.0)
+        } else {
+            0.0
+        };
+        for (corner, radius) in Corner::ALL.iter().zip(&self.radius) {
+            if let Some(l) = radius {
+                *radius_mut(style, *corner) = l.resolve(&units, of).max(0.0);
+            }
+        }
+    }
+
     /// Whether any length waits on its container.
     #[must_use]
     pub fn waits(&self) -> bool {
@@ -820,8 +851,9 @@ impl<'s> Computing<'s, '_> {
                     border_mut(&mut self.style, side).width = 3.0;
                 }
                 (Property::BorderRadius(corner), Value::Length(l)) => {
-                    // A percentage is of the box itself, which the radius
-                    // does not move: taken of nought here.
+                    // A percentage is of the box itself, known once it is
+                    // laid out: its part is nought here, and the whole is
+                    // settled then (`BoxLengths::apply_radii`).
                     *radius_mut(&mut self.style, corner) = l.resolve(units, 0.0).max(0.0);
                 }
                 (Property::BorderRadius(corner), Value::Inherit) => {
@@ -911,6 +943,14 @@ impl<'s> Computing<'s, '_> {
                         *slot = Some(own(Some(edge), Some(0.0)).unwrap_or_default());
                     }
                 }
+                Property::BorderRadius(corner) => {
+                    if let Value::Length(l) = value
+                        && l.has_percent()
+                        && let Some(slot) = lengths.radius.get_mut(corner_index(corner))
+                    {
+                        *slot = Some(*l);
+                    }
+                }
                 Property::Inset(side) => {
                     let parents = match side {
                         Side::Top => parent.inset.top,
@@ -954,6 +994,17 @@ const fn side_index(side: Side) -> usize {
         Side::Right => 1,
         Side::Bottom => 2,
         Side::Left => 3,
+    }
+}
+
+/// `corner`'s place in a box's per-corner lists: from the top left,
+/// clockwise.
+pub(super) const fn corner_index(corner: Corner) -> usize {
+    match corner {
+        Corner::TopLeft => 0,
+        Corner::TopRight => 1,
+        Corner::BottomRight => 2,
+        Corner::BottomLeft => 3,
     }
 }
 

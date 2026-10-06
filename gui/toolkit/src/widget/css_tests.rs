@@ -750,3 +750,22 @@ fn a_fixed_widget_is_placed_in_the_window_over_everything() {
     pressed_at(&mut tree, 150.0, 50.0);
     assert!(is_pressed(&tree, 0));
 }
+
+/// **`border-radius: 50%` draws a circle**: the radius is half the box's
+/// side, once it is laid out -- and drawn so.
+#[test]
+fn a_half_radius_draws_a_circle() {
+    let tree = tree_of(vec![Widget::container().css(
+        "width: 40px; height: 40px; background-color: red; border-radius: 50%",
+    )]);
+    assert_eq!(tree.root.children[0].look().border_radius.top_left, 20.0);
+    let drawn = tree.render().commands.iter().find_map(|c| match c {
+        RenderCommand::FillRect {
+            color,
+            corner_radii,
+            ..
+        } if *color == RED => Some(corner_radii.bottom_right),
+        _ => None,
+    });
+    assert_eq!(drawn, Some(20.0));
+}

@@ -1474,11 +1474,13 @@ fn vectored(
     }
     // The durability the caller asked for, once the bytes are written.  A
     // failed sync replaces the byte count: the caller asked for stable
-    // storage and did not get it.
+    // storage and did not get it.  Only a file has storage to make stable:
+    // Linux takes the flags on a pipe, a socket or a terminal and ignores
+    // them there, where `fsync` itself would answer EINVAL.
     let rc = match plan.sync {
-        PostWriteSync::None => 0,
-        PostWriteSync::Data => fdatasync(fd),
-        PostWriteSync::Full => fsync(fd),
+        PostWriteSync::Data if entry.kind == HandleKind::File => fdatasync(fd),
+        PostWriteSync::Full if entry.kind == HandleKind::File => fsync(fd),
+        PostWriteSync::None | PostWriteSync::Data | PostWriteSync::Full => 0,
     };
     if rc < 0 {
         return -1;
@@ -2703,7 +2705,13 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
 
 /// Synchronize file data to storage.
 ///
-/// Only meaningful for File handles.  Returns 0 for pipes/console.
+/// A file: the kernel's sync, which is the whole file system's
+/// (`SYS_FS_SYNC`) -- more than was asked, which is never wrong for a sync.
+/// Anything else -- a pipe, a socket, a terminal, an eventfd -- has no
+/// storage to synchronize, and Linux answers `EINVAL` (`vfs_fsync_range`:
+/// no `fsync` operation); this answered 0 until 2026-10-06, so `dd
+/// conv=fsync` into a pipe reported nothing where Linux's reports the
+/// failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fsync(fd: Fd) -> i32 {
     let Some(entry) = lookup_fd(fd) else {
@@ -2730,7 +2738,10 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         | HandleKind::Inotify
         | HandleKind::UnixStream
         | HandleKind::PtyMaster
-        | HandleKind::PtySlave => 0,
+        | HandleKind::PtySlave => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
     }
 }
 
@@ -7405,8 +7416,15 @@ pub extern "C" fn sync_file_range(fd: Fd, offset: i64, nbytes: i64, flags: u32) 
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    if fdtable::get_fd(fd).is_none() {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    // `sync_file_range` (fs/sync.c) takes a regular file, a block device, a
+    // directory or a link, and answers anything else -- a pipe, a socket --
+    // ESPIPE, before `fsync` would have said EINVAL.
+    if entry.kind != HandleKind::File {
+        errno::set_errno(errno::ESPIPE);
         return -1;
     }
     // Delegate to fsync — we don't have fine-grained range sync.
@@ -11170,6 +11188,37 @@ mod tests {
         let result = fsync(9999);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// What has no storage -- a pipe, a socket, a terminal, an eventfd -- has
+    /// nothing to sync: `fsync` and `fdatasync` answer EINVAL, as Linux's
+    /// `vfs_fsync_range` does with no `fsync` operation, and
+    /// `sync_file_range` answers ESPIPE first. All three answered 0 until
+    /// 2026-10-06 (`sync_file_range` by way of `fsync`).
+    #[test]
+    fn what_has_no_storage_has_nothing_to_sync() {
+        for kind in [
+            HandleKind::Pipe,
+            HandleKind::Console,
+            HandleKind::TcpStream,
+            HandleKind::UdpSocket,
+            HandleKind::Eventfd,
+            HandleKind::UnixStream,
+            HandleKind::PtySlave,
+        ] {
+            let fd = fdtable::alloc_fd_with_flags(kind, 0x5359, crate::fcntl::O_RDWR)
+                .expect("fd table full");
+            crate::errno::set_errno(0);
+            assert_eq!(fsync(fd), -1, "{kind:?}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "{kind:?}");
+            crate::errno::set_errno(0);
+            assert_eq!(fdatasync(fd), -1, "{kind:?}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "{kind:?}");
+            crate::errno::set_errno(0);
+            assert_eq!(sync_file_range(fd, 0, 0, 0), -1, "{kind:?}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE, "{kind:?}");
+            assert!(fdtable::close_fd(fd).is_some());
+        }
     }
 
     #[test]

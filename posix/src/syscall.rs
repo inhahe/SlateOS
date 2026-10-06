@@ -1223,11 +1223,15 @@ pub fn syscall0(nr: u64) -> i64 {
     #[cfg(not(target_os = "none"))]
     {
         // Host-side intercepts: the clock syscalls are routed to
-        // std::time so time-dependent code paths work in unit tests.
-        // Everything else returns the ENOSYS sentinel.
+        // std::time so time-dependent code paths work in unit tests, and
+        // a sync succeeds -- the host build has no SlateOS file system, so
+        // there is nothing to flush, and a sync of nothing is done (Linux's
+        // `sync` cannot fail either). Everything else returns the ENOSYS
+        // sentinel.
         match nr {
             SYS_CLOCK_MONOTONIC => host_clock::monotonic_ns(),
             SYS_CLOCK_REALTIME => host_clock::realtime_ns(),
+            SYS_FS_SYNC => 0,
             _ => HOST_ENOSYS,
         }
     }

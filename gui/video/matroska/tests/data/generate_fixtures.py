@@ -33,6 +33,15 @@ and mirrors the picture, and the spherical kinds -- each answered with the
 display matrix ffprobe shows for it, `none`, or `refused` where FFmpeg will
 not open the file. `tests/projection.rs` holds the crate to them.
 
+And the **colours** (`colour_*.mkv`, answered together in `colours.txt`): a
+video track's `Colour` -- its transfer, and the HDR metadata FFmpeg takes of
+it, the content light level and the mastering display, by FFmpeg's rules
+(`mkv_parse_video_color`): all eight chromaticities above 0 or none, a
+black given, at least 0 and below the peak or no luminance, MaxCLL and
+MaxFALL both or neither, the first `Colour` of two, and a second
+`MasteringMetadata` read over the first set back to 0. Each answered with
+what ffprobe says of the stream. `tests/colour.rs` holds the crate to them.
+
 The answers were made with the ffmpeg and ffprobe of gyan.dev's full build
 of 2026-03-09 (git 9b7439c31b). Run from this directory:
 
@@ -1419,6 +1428,114 @@ def projections():
     }
 
 
+# --- colours -----------------------------------------------------------------
+
+
+def single(id_hex, v):
+    return el(id_hex, struct.pack(">f", v))
+
+
+def mastering(xy=None, peak=None, black=None, number=double):
+    """A MasteringMetadata: the eight chromaticities (red x and y, green,
+    blue, the white point -- None for any to leave out), the peak and the
+    black, each a float of `number`'s width (or raw bytes, given as such)."""
+    body = b""
+    for id_hex, v in zip(("55D1", "55D2", "55D3", "55D4", "55D5", "55D6", "55D7", "55D8"),
+                         xy or [None] * 8):
+        if v is not None:
+            body += number(id_hex, v)
+    for id_hex, v in (("55D9", peak), ("55DA", black)):
+        if isinstance(v, bytes):
+            body += el(id_hex, v)
+        elif v is not None:
+            body += number(id_hex, v)
+    return el("55D0", body)
+
+
+def colour(matrix=None, range_=None, transfer=None, primaries=None, cll=None, fall=None,
+           masterings=()):
+    body = b""
+    for id_hex, v in (("55B1", matrix), ("55B9", range_), ("55BA", transfer), ("55BB", primaries),
+                      ("55BC", cll), ("55BD", fall)):
+        if v is not None:
+            body += uint(id_hex, v)
+    return el("55B0", body + b"".join(masterings))
+
+
+def coloured(*colours):
+    """A file of one video track whose Video element holds `colours`, and a
+    frame."""
+    video = el("E0", uint("B0", 16) + uint("BA", 16) + b"".join(colours))
+    track = el("AE", uint("D7", 1) + uint("73C5", 1) + uint("83", 1) + string("86", "V_SNOW") + video)
+    return EBML_HEADER + el("18538067", INFO + el("1654AE6B", track)
+                            + cluster(0, simple(1, 0, 0x80, frame(1, 16))))
+
+
+# HDR10's mastering display: BT.2020's primaries, D65.
+HDR10_XY = [0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290]
+
+
+def colours():
+    """name -> bytes, each a Colour FFmpeg takes all, some or none of."""
+    nan = struct.unpack(">d", bytes.fromhex("7ff8000000000000"))[0]
+    hdr10 = mastering(HDR10_XY, 1000.0, 0.0001)
+    return {
+        # All of it, in doubles and in singles; HLG, which says no light.
+        "colour_hdr10.mkv": coloured(colour(9, 1, 16, 9, 1000, 400, [hdr10])),
+        "colour_singles.mkv": coloured(colour(9, 1, 16, 9, 1000, 400,
+                                              [mastering(HDR10_XY, 1000.0, 0.0001, single)])),
+        "colour_hlg.mkv": coloured(colour(9, 1, 18, 9)),
+        # A luminance without primaries; a peak without a black (none); a
+        # black of no bytes (0, said); a black not below the peak, and one
+        # below 0 (none).
+        "colour_luminance_only.mkv": coloured(colour(transfer=16, masterings=[mastering(peak=600.0, black=0.05)])),
+        "colour_no_black.mkv": coloured(colour(transfer=16, masterings=[mastering(HDR10_XY, peak=1000.0)])),
+        "colour_black_empty.mkv": coloured(colour(transfer=16, masterings=[mastering(peak=1000.0, black=b"")])),
+        "colour_black_not_below.mkv": coloured(colour(transfer=16, masterings=[mastering(peak=0.5, black=0.5)])),
+        "colour_black_negative.mkv": coloured(colour(transfer=16, masterings=[mastering(peak=1000.0, black=-1.0)])),
+        # Primaries one short, or one not a number: the luminance alone.
+        "colour_white_y_missing.mkv": coloured(colour(transfer=16, masterings=[
+            mastering(HDR10_XY[:7] + [None], 1000.0, 0.0001)])),
+        "colour_red_nan.mkv": coloured(colour(transfer=16, masterings=[
+            mastering([nan] + HDR10_XY[1:], 1000.0, 0.0001)])),
+        # MaxCLL alone, or with a MaxFALL of 0: no light.
+        "colour_cll_alone.mkv": coloured(colour(transfer=16, cll=1000)),
+        "colour_fall_zero.mkv": coloured(colour(transfer=16, cll=1000, fall=0)),
+        # Two MasteringMetadata: FFmpeg sets its one record back to 0 for
+        # each, so the last is the track's -- but counts a black given in
+        # any, so a peak in the last stands with a black of 0.
+        "colour_two_masterings.mkv": coloured(colour(transfer=16, masterings=[
+            mastering(HDR10_XY), mastering(peak=4000.0, black=0.005)])),
+        "colour_black_in_the_first.mkv": coloured(colour(transfer=16, masterings=[
+            mastering(HDR10_XY, 1000.0, 0.0001), mastering(peak=600.0)])),
+        # Two Colour elements: the first is the track's.
+        "colour_twice.mkv": coloured(colour(9, 1, 16, 9, 1000, 400), colour(1, 2, 18, 1, 50, 20)),
+        # A reserved transfer, which FFmpeg leaves unsaid.
+        "colour_transfer_reserved.mkv": coloured(colour(transfer=3)),
+    }
+
+
+def colour_answer(name):
+    """What ffprobe says of the file's stream: its transfer's name, and its
+    content light level and mastering display (rationals), or `none`."""
+    r = subprocess.run([FFPROBE, "-v", "error", "-show_streams", "-show_entries",
+                        "stream=color_transfer:stream_side_data", "-of", "json", name],
+                       capture_output=True, text=True, encoding="utf-8", check=True)
+    st = json.loads(r.stdout)["streams"][0]
+    light, chroma, lum = "none", "none", "none"
+    for sd in st.get("side_data_list", []):
+        if sd["side_data_type"] == "Content light level metadata":
+            light = f"{sd['max_content']},{sd['max_average']}"
+        elif sd["side_data_type"] == "Mastering display metadata":
+            if "red_x" in sd:
+                chroma = ",".join(sd[k] for k in ("red_x", "red_y", "green_x", "green_y", "blue_x",
+                                                  "blue_y", "white_point_x", "white_point_y"))
+            if "max_luminance" in sd:
+                lum = f"{sd['max_luminance']},{sd['min_luminance']}"
+    return (f"transfer={st.get('color_transfer', 'unknown')} light={light} "
+            f"chromaticities={chroma} luminance={lum}")
+
+
 def projection_answer(name):
     """The display matrix ffprobe shows for the file's first stream, nine
     numbers; `none`; or `refused`."""
@@ -1443,6 +1560,14 @@ def main():
             f.write(data)
         lines.append(f"{name} {projection_answer(name)}")
     with open("projections.txt", "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    lines = ["# Each colour_*.mkv: what ffprobe says of its stream's transfer, content light",
+             "# level and mastering display (generate_fixtures.py)."]
+    for name, data in sorted(colours().items()):
+        with open(name, "wb") as f:
+            f.write(data)
+        lines.append(f"{name} {colour_answer(name)}")
+    with open("colours.txt", "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
     files = {**made_by_ffmpeg(), **synthetic(), **e_cue_layouts()}
     for name, data in sorted(files.items()):

@@ -1,0 +1,18 @@
+# Each colour_*.mkv: what ffprobe says of its stream's transfer, content light
+# level and mastering display (generate_fixtures.py).
+colour_black_empty.mkv transfer=smpte2084 light=none chromaticities=none luminance=1000/1,0/1
+colour_black_in_the_first.mkv transfer=smpte2084 light=none chromaticities=none luminance=600/1,0/1
+colour_black_negative.mkv transfer=smpte2084 light=none chromaticities=none luminance=none
+colour_black_not_below.mkv transfer=smpte2084 light=none chromaticities=none luminance=none
+colour_cll_alone.mkv transfer=smpte2084 light=none chromaticities=none luminance=none
+colour_fall_zero.mkv transfer=smpte2084 light=none chromaticities=none luminance=none
+colour_hdr10.mkv transfer=smpte2084 light=1000,400 chromaticities=177/250,73/250,17/100,797/1000,131/1000,23/500,3127/10000,329/1000 luminance=1000/1,1/10000
+colour_hlg.mkv transfer=arib-std-b67 light=none chromaticities=none luminance=none
+colour_luminance_only.mkv transfer=smpte2084 light=none chromaticities=none luminance=600/1,1/20
+colour_no_black.mkv transfer=smpte2084 light=none chromaticities=177/250,73/250,17/100,797/1000,131/1000,23/500,3127/10000,329/1000 luminance=none
+colour_red_nan.mkv transfer=smpte2084 light=none chromaticities=none luminance=1000/1,1/10000
+colour_singles.mkv transfer=smpte2084 light=1000,400 chromaticities=11878269/16777216,4898947/16777216,11408507/67108864,13371441/16777216,8791261/67108864,12348031/268435456,10492471/33554432,689963/2097152 luminance=1000/1,209800/2098000053
+colour_transfer_reserved.mkv transfer=unknown light=none chromaticities=none luminance=none
+colour_twice.mkv transfer=smpte2084 light=1000,400 chromaticities=none luminance=none
+colour_two_masterings.mkv transfer=smpte2084 light=none chromaticities=none luminance=4000/1,1/200
+colour_white_y_missing.mkv transfer=smpte2084 light=none chromaticities=none luminance=1000/1,1/10000

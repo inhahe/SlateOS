@@ -178,11 +178,13 @@ pub struct Projection {
     pub roll: f64,
 }
 
-/// A video track's colour: `Colour`, as far as converting its pictures to
-/// RGB needs it, numbered as ITU-T H.273 numbers it. (Its other elements --
-/// the transfer function, chroma siting, bits per channel -- are read and
-/// checked, but no conversion here obeys them, so they are not kept.)
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A video track's colour: `Colour`, as far as showing its pictures needs
+/// it -- the H.273 numbers that convert them to RGB and say what their light
+/// is, and the HDR metadata that says how bright it gets -- read as FFmpeg
+/// reads it (`mkv_parse_video_color`). (Its other elements -- chroma siting,
+/// bits per channel, subsampling -- are read and checked, but nothing here
+/// obeys them, so they are not kept.)
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Colour {
     /// `MatrixCoefficients`: 2, unspecified, unless the file says.
     pub matrix_coefficients: u64,
@@ -190,6 +192,53 @@ pub struct Colour {
     pub range: u64,
     /// `Primaries`: 2, unspecified, unless the file says.
     pub primaries: u64,
+    /// `TransferCharacteristics`: 2, unspecified, unless the file says.
+    pub transfer_characteristics: u64,
+    /// `MaxCLL` and `MaxFALL`, where the file gives both and neither is 0:
+    /// FFmpeg takes the content light level only then.
+    pub content_light: Option<ContentLight>,
+    /// `MasteringMetadata`, as far as FFmpeg takes it: `None` where it takes
+    /// neither the primaries nor the luminance.
+    pub mastering: Option<Mastering>,
+}
+
+/// A track's content light level (CTA-861.3): how bright its content gets,
+/// in cd/m2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentLight {
+    /// `MaxCLL`: the brightest pixel's light.
+    pub max_cll: u64,
+    /// `MaxFALL`: the brightest frame's average light.
+    pub max_fall: u64,
+}
+
+/// The display a track was mastered on (SMPTE ST 2086): `MasteringMetadata`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mastering {
+    /// Its primaries and white point, where the file gives all eight
+    /// coordinates and every one is above 0.
+    pub chromaticities: Option<Chromaticities>,
+    /// Its peak and black (`LuminanceMax`, `LuminanceMin`), in cd/m2, where
+    /// the file gives the black, the black is at least 0, and the peak is
+    /// above it.
+    pub luminance: Option<Luminance>,
+}
+
+/// CIE 1931 x and y of a display's red, green and blue primaries and of its
+/// white point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chromaticities {
+    pub red: [f64; 2],
+    pub green: [f64; 2],
+    pub blue: [f64; 2],
+    pub white: [f64; 2],
+}
+
+/// A display's peak and black, in cd/m2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Luminance {
+    pub max: f64,
+    pub min: f64,
 }
 
 /// An audio track's sound: `Audio`.
@@ -634,7 +683,12 @@ fn read_video<R: Read + Seek>(
             }
             ids::STEREO_MODE => v.stereo_mode = r.uint(c.size, STEREO_MODE_NONE)?,
             ids::ALPHA_MODE => v.alpha_mode = r.uint(c.size, 0)?,
-            ids::COLOUR => v.colour = Some(read_colour(r, c)?),
+            ids::COLOUR => {
+                // FFmpeg keeps every `Colour` as a list, each read on its
+                // own, and goes by the first.
+                let colour = read_colour(r, c)?;
+                v.colour.get_or_insert(colour);
+            }
             ids::PROJECTION => {
                 let (p, why) = read_projection(r, c)?;
                 v.projection = Some(p);
@@ -701,34 +755,126 @@ fn read_projection<R: Read + Seek>(
 }
 
 fn read_colour<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<Colour, Error> {
-    // H.273's "unspecified" (2) for the two code points; 0 for the range.
+    // H.273's "unspecified" (2) for the three code points; 0 for the range,
+    // and for MaxCLL and MaxFALL (FFmpeg's defaults).
     let mut c = Colour {
         matrix_coefficients: 2,
         range: 0,
         primaries: 2,
+        transfer_characteristics: 2,
+        content_light: None,
+        mastering: None,
     };
+    let (mut max_cll, mut max_fall) = (0, 0);
+    let mut mastering = RawMastering::default();
     r.children(parent, |r, e| {
         match e.id {
             ids::MATRIX_COEFFICIENTS => c.matrix_coefficients = r.uint(e.size, 2)?,
             ids::RANGE => c.range = r.uint(e.size, 0)?,
             ids::PRIMARIES => c.primaries = r.uint(e.size, 2)?,
-            // Read as FFmpeg reads them, and kept by nothing: the conversion to
-            // RGB takes no account of chroma siting or of the transfer
-            // function (no colour management, no tone mapping), and the
-            // decoder says the depth and subsampling itself.
+            ids::TRANSFER_CHARACTERISTICS => c.transfer_characteristics = r.uint(e.size, 2)?,
+            ids::MAX_CLL => max_cll = r.uint(e.size, 0)?,
+            ids::MAX_FALL => max_fall = r.uint(e.size, 0)?,
+            ids::MASTERING_METADATA => read_mastering(r, e, &mut mastering)?,
+            // Read as FFmpeg reads them, and kept by nothing: nothing here
+            // takes account of chroma siting, and the decoder says the depth
+            // and subsampling itself.
             ids::BITS_PER_CHANNEL
             | ids::CHROMA_SUBSAMPLING_HORZ
             | ids::CHROMA_SUBSAMPLING_VERT
             | ids::CHROMA_SITING_HORZ
-            | ids::CHROMA_SITING_VERT
-            | ids::TRANSFER_CHARACTERISTICS => {
+            | ids::CHROMA_SITING_VERT => {
                 r.uint(e.size, 0)?;
             }
             _ => {}
         }
         Ok(())
     })?;
+    // FFmpeg takes the content light level only when both are said and
+    // neither is 0.
+    if max_cll != 0 && max_fall != 0 {
+        c.content_light = Some(ContentLight { max_cll, max_fall });
+    }
+    c.mastering = mastering.taken();
     Ok(c)
+}
+
+/// `MasteringMetadata`'s numbers as FFmpeg holds them: one record, which
+/// each `MasteringMetadata` sets back to its defaults (every number 0) before
+/// reading itself into it -- so the last one is the track's -- except that
+/// whether a `LuminanceMin` was ever given is counted across them all.
+#[derive(Default)]
+struct RawMastering {
+    /// Red x and y, green's, blue's, then the white point's; 0 where not
+    /// given.
+    xy: [f64; 8],
+    /// `LuminanceMax`, 0 where not given.
+    max: f64,
+    /// `LuminanceMin`, 0 where not given.
+    min: f64,
+    /// Whether any `MasteringMetadata` gave a `LuminanceMin`.
+    min_said: bool,
+}
+
+impl RawMastering {
+    /// What FFmpeg takes of it: the eight chromaticities where every one is
+    /// above 0 (a NaN is not), and the luminance where a black was given,
+    /// is at least 0, and is below the peak; `None` where neither.
+    fn taken(&self) -> Option<Mastering> {
+        let [rx, ry, gx, gy, bx, by, wx, wy] = self.xy;
+        let chromaticities = self.xy.iter().all(|&v| v > 0.0).then_some(Chromaticities {
+            red: [rx, ry],
+            green: [gx, gy],
+            blue: [bx, by],
+            white: [wx, wy],
+        });
+        let (max, min) = (self.max, self.min);
+        let luminance =
+            (self.min_said && min >= 0.0 && max > min).then_some(Luminance { max, min });
+        (chromaticities.is_some() || luminance.is_some()).then_some(Mastering {
+            chromaticities,
+            luminance,
+        })
+    }
+}
+
+/// `MasteringMetadata`'s chromaticities, in [`RawMastering::xy`]'s order.
+const CHROMATICITIES: [Id; 8] = [
+    ids::PRIMARY_R_CHROMATICITY_X,
+    ids::PRIMARY_R_CHROMATICITY_Y,
+    ids::PRIMARY_G_CHROMATICITY_X,
+    ids::PRIMARY_G_CHROMATICITY_Y,
+    ids::PRIMARY_B_CHROMATICITY_X,
+    ids::PRIMARY_B_CHROMATICITY_Y,
+    ids::WHITE_POINT_CHROMATICITY_X,
+    ids::WHITE_POINT_CHROMATICITY_Y,
+];
+
+/// One `MasteringMetadata`, read into `into` after setting it back to its
+/// defaults, as FFmpeg's `ebml_parse_nest` does.
+fn read_mastering<R: Read + Seek>(
+    r: &mut Reader<R>,
+    parent: &Header,
+    into: &mut RawMastering,
+) -> Result<(), Error> {
+    into.xy = [0.0; 8];
+    into.max = 0.0;
+    into.min = 0.0;
+    r.children(parent, |r, e| {
+        let slot = CHROMATICITIES
+            .iter()
+            .position(|&id| id == e.id)
+            .and_then(|i| into.xy.get_mut(i));
+        if let Some(slot) = slot {
+            *slot = r.float(e.size, 0.0)?;
+        } else if e.id == ids::LUMINANCE_MAX {
+            into.max = r.float(e.size, 0.0)?;
+        } else if e.id == ids::LUMINANCE_MIN {
+            into.min = r.float(e.size, 0.0)?;
+            into.min_said = true;
+        }
+        Ok(())
+    })
 }
 
 fn read_audio<R: Read + Seek>(r: &mut Reader<R>, parent: &Header) -> Result<Audio, Error> {

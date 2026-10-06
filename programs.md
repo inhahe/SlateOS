@@ -13,7 +13,7 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**464 programs; 306 on the image, 6 carried inside the kernel.**
+**465 programs; 306 on the image, 6 carried inside the kernel.**
 
 ## Userland utilities and services (`userspace/`, lane B) -- 297
 
@@ -480,11 +480,12 @@ two disagree.
 | `notifications` | Notification Daemon |  |  |  |
 | `themecheck` | Check a theme's folder before it is installed or shared. |  | `appearance` |  |
 
-## System services (`services/`, lane D) -- 7
+## System services (`services/`, lane D) -- 8
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
 | `backupd` | `backupd`'s loop: the clock, the user database, each run's identity and output. |  |  |  |
+| `dyndns` | Keeps dynamic-DNS hostnames pointed at this network's address. |  |  |  |
 | `hello` | Hello world — a minimal userspace program. | in the kernel |  |  |
 | `httpget` | A minimal **Linux-ABI** ring-3 HTTP client. | in the kernel |  |  |
 | `init` | Userspace init process — the first process spawned by the kernel. | in the kernel |  |  |

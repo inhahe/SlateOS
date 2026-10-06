@@ -1,0 +1,17 @@
+[package]
+name = "dyndnsproviders"
+version = "0.1.0"
+edition = "2024"
+description = "What each dynamic-DNS provider is -- its fields, its requests, what its answers mean -- for the dyndns service and Settings alike"
+
+# One definition of what "noip" means, linked by the service that talks to the
+# providers (services/dyndns) and by Settings' Dynamic DNS page, which asks the
+# user for their fields (lane E's
+# requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md). No
+# I/O of its own: requests go out through an `Exchange` the caller supplies, so
+# the tests replay the providers' answers without a network.
+
+[lints]
+workspace = true
+
+[dependencies]

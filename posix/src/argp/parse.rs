@@ -170,10 +170,10 @@ callback! {
                 // SAFETY: the parse's state; `arg` is the option's argument, a C
                 // string in the program's argv; the two names are plain words.
                 unsafe {
-                    (&raw mut crate::crt::__progname_full).write(arg.cast_const());
+                    crate::crt::progname_full_slot().write(arg.cast_const());
                     let short = base_name(arg);
                     (*state).name = short;
-                    (&raw mut crate::crt::__progname).write(short.cast_const());
+                    crate::crt::progname_slot().write(short.cast_const());
                     if (*state).flags & (ARGP_PARSE_ARGV0 | ARGP_NO_ERRS) == ARGP_PARSE_ARGV0 {
                         // What getopt's messages say too.
                         *(*state).argv = arg;

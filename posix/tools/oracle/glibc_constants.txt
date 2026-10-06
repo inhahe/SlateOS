@@ -79,6 +79,41 @@ ARCH_GET_UNTAG_MASK	kernel	16385	32	asm/prctl.h
 ARCH_SET_CPUID	kernel	4114	32	asm/prctl.h
 ARCH_SET_FS	kernel	4098	32	asm/prctl.h
 ARCH_SET_GS	kernel	4097	32	asm/prctl.h
+ARGP_ERR_UNKNOWN	libc	7	32	argp.h
+ARGP_HELP_BUG_ADDR	libc	64	32	argp.h
+ARGP_HELP_EXIT_ERR	libc	256	32	argp.h
+ARGP_HELP_EXIT_OK	libc	512	32	argp.h
+ARGP_HELP_LONG	libc	8	32	argp.h
+ARGP_HELP_LONG_ONLY	libc	128	32	argp.h
+ARGP_HELP_POST_DOC	libc	32	32	argp.h
+ARGP_HELP_PRE_DOC	libc	16	32	argp.h
+ARGP_HELP_SEE	libc	4	32	argp.h
+ARGP_HELP_SHORT_USAGE	libc	2	32	argp.h
+ARGP_HELP_STD_ERR	libc	260	32	argp.h
+ARGP_HELP_STD_HELP	libc	634	32	argp.h
+ARGP_HELP_STD_USAGE	libc	262	32	argp.h
+ARGP_HELP_USAGE	libc	1	32	argp.h
+ARGP_IN_ORDER	libc	8	32	argp.h
+ARGP_KEY_ARG	libc	0	32	argp.h
+ARGP_KEY_ARGS	libc	16777222	32	argp.h
+ARGP_KEY_END	libc	16777217	32	argp.h
+ARGP_KEY_ERROR	libc	16777221	32	argp.h
+ARGP_KEY_FINI	libc	16777223	32	argp.h
+ARGP_KEY_HELP_ARGS_DOC	libc	33554438	32	argp.h
+ARGP_KEY_HELP_DUP_ARGS_NOTE	libc	33554437	32	argp.h
+ARGP_KEY_HELP_EXTRA	libc	33554436	32	argp.h
+ARGP_KEY_HELP_HEADER	libc	33554435	32	argp.h
+ARGP_KEY_HELP_POST_DOC	libc	33554434	32	argp.h
+ARGP_KEY_HELP_PRE_DOC	libc	33554433	32	argp.h
+ARGP_KEY_INIT	libc	16777219	32	argp.h
+ARGP_KEY_NO_ARGS	libc	16777218	32	argp.h
+ARGP_KEY_SUCCESS	libc	16777220	32	argp.h
+ARGP_LONG_ONLY	libc	64	32	argp.h
+ARGP_NO_ARGS	libc	4	32	argp.h
+ARGP_NO_ERRS	libc	2	32	argp.h
+ARGP_NO_EXIT	libc	32	32	argp.h
+ARGP_NO_HELP	libc	16	32	argp.h
+ARGP_PARSE_ARGV0	libc	1	32	argp.h
 ARG_MAX	kernel	131072	32	linux/aio_abi.h
 ARPHRD_ETHER	libc	1	32	net/if_arp.h
 ARPHRD_LOOPBACK	libc	772	32	net/if_arp.h
@@ -492,13 +527,18 @@ EAFNOSUPPORT	libc	97	32	argp.h
 EAGAIN	libc	11	32	argp.h
 EAI_ADDRFAMILY	libc	-9	32	netdb.h
 EAI_AGAIN	libc	-3	32	netdb.h
+EAI_ALLDONE	libc	-103	32	netdb.h
 EAI_BADFLAGS	libc	-1	32	netdb.h
+EAI_CANCELED	libc	-101	32	netdb.h
 EAI_FAIL	libc	-4	32	netdb.h
 EAI_FAMILY	libc	-6	32	netdb.h
 EAI_IDN_ENCODE	libc	-105	32	netdb.h
+EAI_INPROGRESS	libc	-100	32	netdb.h
+EAI_INTR	libc	-104	32	netdb.h
 EAI_MEMORY	libc	-10	32	netdb.h
 EAI_NODATA	libc	-5	32	netdb.h
 EAI_NONAME	libc	-2	32	netdb.h
+EAI_NOTCANCELED	libc	-102	32	netdb.h
 EAI_OVERFLOW	libc	-12	32	netdb.h
 EAI_SERVICE	libc	-8	32	netdb.h
 EAI_SOCKTYPE	libc	-7	32	netdb.h
@@ -753,9 +793,24 @@ FP_NAN	libc	0	32	math.h
 FP_NORMAL	libc	4	32	math.h
 FP_SUBNORMAL	libc	3	32	math.h
 FP_ZERO	libc	2	32	math.h
+FSCONFIG_CMD_CREATE	libc	6	32	sys/mount.h
+FSCONFIG_CMD_CREATE_EXCL	libc	8	32	sys/mount.h
+FSCONFIG_CMD_RECONFIGURE	libc	7	32	sys/mount.h
+FSCONFIG_SET_BINARY	libc	2	32	sys/mount.h
+FSCONFIG_SET_FD	libc	5	32	sys/mount.h
+FSCONFIG_SET_FLAG	libc	0	32	sys/mount.h
+FSCONFIG_SET_PATH	libc	3	32	sys/mount.h
+FSCONFIG_SET_PATH_EMPTY	libc	4	32	sys/mount.h
+FSCONFIG_SET_STRING	libc	1	32	sys/mount.h
 FSETLOCKING_BYCALLER	libc	2	32	stdio_ext.h
 FSETLOCKING_INTERNAL	libc	1	32	stdio_ext.h
 FSETLOCKING_QUERY	libc	0	32	stdio_ext.h
+FSMOUNT_CLOEXEC	libc	1	32	sys/mount.h
+FSOPEN_CLOEXEC	libc	1	32	sys/mount.h
+FSPICK_CLOEXEC	libc	1	32	sys/mount.h
+FSPICK_EMPTY_PATH	libc	8	32	sys/mount.h
+FSPICK_NO_AUTOMOUNT	libc	4	32	sys/mount.h
+FSPICK_SYMLINK_NOFOLLOW	libc	2	32	sys/mount.h
 FS_WATCH_EVENT_SIZE	-
 FTS_AGAIN	libc	1	32	fts.h
 FTS_COMFOLLOW	libc	1	32	fts.h
@@ -840,6 +895,8 @@ F_TLOCK	libc	2	32	arpa/nameser.h
 F_ULOCK	libc	0	32	arpa/nameser.h
 F_UNLCK	libc	2	32	fcntl.h
 F_WRLCK	libc	1	32	fcntl.h
+GAI_NOWAIT	libc	1	32	netdb.h
+GAI_WAIT	libc	0	32	netdb.h
 GETALL	libc	13	32	sys/sem.h
 GETNCNT	libc	14	32	sys/sem.h
 GETPID	libc	11	32	sys/sem.h
@@ -1233,12 +1290,16 @@ LOGIN_NAME_MAX	libc	256	32	argp.h
 LOGIN_PROCESS	libc	6	32	lastlog.h
 LOG_ALERT	libc	1	32	sys/syslog.h
 LOG_AUTH	libc	32	32	sys/syslog.h
+LOG_AUTHPRIV	libc	80	32	sys/syslog.h
+LOG_CONS	libc	2	32	sys/syslog.h
 LOG_CRIT	libc	2	32	sys/syslog.h
 LOG_CRON	libc	72	32	sys/syslog.h
 LOG_DAEMON	libc	24	32	sys/syslog.h
 LOG_DEBUG	libc	7	32	sys/syslog.h
 LOG_EMERG	libc	0	32	sys/syslog.h
 LOG_ERR	libc	3	32	sys/syslog.h
+LOG_FACMASK	libc	1016	32	sys/syslog.h
+LOG_FTP	libc	88	32	sys/syslog.h
 LOG_INFO	libc	6	32	sys/syslog.h
 LOG_KERN	libc	0	32	sys/syslog.h
 LOG_LOCAL0	libc	128	32	sys/syslog.h
@@ -1253,9 +1314,13 @@ LOG_LPR	libc	48	32	sys/syslog.h
 LOG_MAIL	libc	16	32	sys/syslog.h
 LOG_NDELAY	libc	8	32	sys/syslog.h
 LOG_NEWS	libc	56	32	sys/syslog.h
+LOG_NFACILITIES	libc	24	32	sys/syslog.h
 LOG_NOTICE	libc	5	32	sys/syslog.h
+LOG_NOWAIT	libc	16	32	sys/syslog.h
+LOG_ODELAY	libc	4	32	sys/syslog.h
 LOG_PERROR	libc	32	32	sys/syslog.h
 LOG_PID	libc	1	32	sys/syslog.h
+LOG_PRIMASK	libc	7	32	sys/syslog.h
 LOG_SYSLOG	libc	40	32	sys/syslog.h
 LOG_USER	libc	8	32	sys/syslog.h
 LOG_UUCP	libc	64	32	sys/syslog.h
@@ -1302,6 +1367,11 @@ MAX_PAIRS	-
 MAX_TICK	-
 MAX_TIMERFD_INSTANCES	-
 MB_CUR_MAX	-
+MCHECK_DISABLED	libc	-1	32	mcheck.h
+MCHECK_FREE	libc	1	32	mcheck.h
+MCHECK_HEAD	libc	2	32	mcheck.h
+MCHECK_OK	libc	0	32	mcheck.h
+MCHECK_TAIL	libc	3	32	mcheck.h
 MCL_CURRENT	libc	1	32	sys/mman.h
 MCL_FUTURE	libc	2	32	sys/mman.h
 MCL_ONFAULT	libc	4	32	sys/mman.h
@@ -1389,7 +1459,27 @@ MON_8	libc	131105	32	langinfo.h
 MON_9	libc	131106	32	langinfo.h
 MORECTL	-
 MOREDATA	-
+MOUNT_ATTR_IDMAP	libc	1048576	32	sys/mount.h
+MOUNT_ATTR_NOATIME	libc	16	32	sys/mount.h
+MOUNT_ATTR_NODEV	libc	4	32	sys/mount.h
+MOUNT_ATTR_NODIRATIME	libc	128	32	sys/mount.h
+MOUNT_ATTR_NOEXEC	libc	8	32	sys/mount.h
+MOUNT_ATTR_NOSUID	libc	2	32	sys/mount.h
+MOUNT_ATTR_NOSYMFOLLOW	libc	2097152	32	sys/mount.h
+MOUNT_ATTR_RDONLY	libc	1	32	sys/mount.h
+MOUNT_ATTR_RELATIME	libc	0	32	sys/mount.h
+MOUNT_ATTR_SIZE_VER0	libc	32	32	sys/mount.h
+MOUNT_ATTR_STRICTATIME	libc	32	32	sys/mount.h
+MOUNT_ATTR__ATIME	libc	112	32	sys/mount.h
 MOUNT_PATH_MAX	-
+MOVE_MOUNT_BENEATH	libc	512	32	sys/mount.h
+MOVE_MOUNT_F_AUTOMOUNTS	libc	2	32	sys/mount.h
+MOVE_MOUNT_F_EMPTY_PATH	libc	4	32	sys/mount.h
+MOVE_MOUNT_F_SYMLINKS	libc	1	32	sys/mount.h
+MOVE_MOUNT_SET_GROUP	libc	256	32	sys/mount.h
+MOVE_MOUNT_T_AUTOMOUNTS	libc	32	32	sys/mount.h
+MOVE_MOUNT_T_EMPTY_PATH	libc	64	32	sys/mount.h
+MOVE_MOUNT_T_SYMLINKS	libc	16	32	sys/mount.h
 MQ_PRIO_MAX	libc	32768	32	argp.h
 MREMAP_DONTUNMAP	libc	4	32	sys/mman.h
 MREMAP_FIXED	libc	2	32	sys/mman.h
@@ -1453,6 +1543,15 @@ MTX_PLAIN	-
 MTX_RECURSIVE	-
 MTX_TIMED	-
 MUXID_ALL	-
+M_ARENA_MAX	libc	-8	32	malloc.h
+M_ARENA_TEST	libc	-7	32	malloc.h
+M_CHECK_ACTION	libc	-5	32	malloc.h
+M_MMAP_MAX	libc	-4	32	malloc.h
+M_MMAP_THRESHOLD	libc	-3	32	malloc.h
+M_MXFAST	libc	1	32	malloc.h
+M_PERTURB	libc	-6	32	malloc.h
+M_TOP_PAD	libc	-2	32	malloc.h
+M_TRIM_THRESHOLD	libc	-1	32	malloc.h
 NAMESPACE	-
 NAME_MAX	libc	255	32	argp.h
 NAME_TO_HANDLE_AT_FLAGS_VALID	-
@@ -1503,8 +1602,15 @@ N_TTY	libc	0	32	net/if_ppp.h
 N_X25	libc	6	32	net/if_ppp.h
 OLD_TIME	libc	4	32	lastlog.h
 ONLCR	libc	4	32	pty.h
+OPEN_TREE_CLOEXEC	libc	524288	32	sys/mount.h
+OPEN_TREE_CLONE	libc	1	32	sys/mount.h
 OPOST	libc	1	32	pty.h
 OPTIONAL_ARGUMENT	-
+OPTION_ALIAS	libc	4	32	argp.h
+OPTION_ARG_OPTIONAL	libc	1	32	argp.h
+OPTION_DOC	libc	8	32	argp.h
+OPTION_HIDDEN	libc	2	32	argp.h
+OPTION_NO_USAGE	libc	16	32	argp.h
 O_ACCMODE	libc	3	32	fcntl.h
 O_APPEND	libc	1024	32	fcntl.h
 O_CLOEXEC	libc	524288	32	fcntl.h
@@ -1534,6 +1640,21 @@ PAGE_SHIFT	libc	12	32	proc_service.h
 PAGE_SIZE	libc	4096	64	proc_service.h
 PARENB	libc	256	32	pty.h
 PATH_MAX	libc	4096	32	argp.h
+PA_CHAR	libc	1	32	printf.h
+PA_DOUBLE	libc	7	32	printf.h
+PA_FLAG_LONG	libc	512	32	printf.h
+PA_FLAG_LONG_DOUBLE	libc	256	32	printf.h
+PA_FLAG_LONG_LONG	libc	256	32	printf.h
+PA_FLAG_MASK	libc	65280	32	printf.h
+PA_FLAG_PTR	libc	2048	32	printf.h
+PA_FLAG_SHORT	libc	1024	32	printf.h
+PA_FLOAT	libc	6	32	printf.h
+PA_INT	libc	0	32	printf.h
+PA_LAST	libc	8	32	printf.h
+PA_POINTER	libc	5	32	printf.h
+PA_STRING	libc	3	32	printf.h
+PA_WCHAR	libc	2	32	printf.h
+PA_WSTRING	libc	4	32	printf.h
 PDP_ENDIAN	libc	3412	32	aio.h
 PERF_ATTR_FLAG_COMM	-
 PERF_ATTR_FLAG_DISABLED	-
@@ -1601,6 +1722,8 @@ PIPE	-
 PIPE2_O_DIRECT	-
 PIPE2_VALID_FLAGS	-
 PIPE_BUF	libc	4096	32	argp.h
+PKEY_DISABLE_ACCESS	libc	1	32	sys/mman.h
+PKEY_DISABLE_WRITE	libc	2	32	sys/mman.h
 PM_STR	libc	131111	32	langinfo.h
 POLLERR	libc	8	32	poll.h
 POLLHUP	libc	16	32	poll.h
@@ -1627,6 +1750,7 @@ POSIX_MADV_RANDOM	libc	1	32	sys/mman.h
 POSIX_MADV_SEQUENTIAL	libc	2	32	sys/mman.h
 POSIX_MADV_WILLNEED	libc	3	32	sys/mman.h
 POSIX_SPAWN_RESETIDS	libc	1	32	spawn.h
+POSIX_SPAWN_SETCGROUP	libc	256	32	spawn.h
 POSIX_SPAWN_SETPGROUP	libc	2	32	spawn.h
 POSIX_SPAWN_SETSCHEDPARAM	libc	16	32	spawn.h
 POSIX_SPAWN_SETSCHEDULER	libc	32	32	spawn.h
@@ -1644,6 +1768,9 @@ PRJQUOTA	libc	2	32	sys/quota.h
 PROCESS	-
 PROCESS_VM_SSIZE_MAX	-
 PROCESS_VM_UIO_MAXIOV	-
+PROF_FAST	libc	2	32	sys/profil.h
+PROF_UINT	libc	1	32	sys/profil.h
+PROF_USHORT	libc	0	32	sys/profil.h
 PROT_EXEC	libc	4	32	sys/mman.h
 PROT_GROWSDOWN	libc	16777216	32	sys/mman.h
 PROT_GROWSUP	libc	33554432	32	sys/mman.h
@@ -1702,6 +1829,10 @@ PTHREAD_PRIO_NONE	libc	0	32	pthread.h
 PTHREAD_PRIO_PROTECT	libc	2	32	pthread.h
 PTHREAD_PROCESS_PRIVATE	libc	0	32	pthread.h
 PTHREAD_PROCESS_SHARED	libc	1	32	pthread.h
+PTHREAD_RWLOCK_DEFAULT_NP	libc	0	32	pthread.h
+PTHREAD_RWLOCK_PREFER_READER_NP	libc	0	32	pthread.h
+PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP	libc	2	32	pthread.h
+PTHREAD_RWLOCK_PREFER_WRITER_NP	libc	1	32	pthread.h
 PTHREAD_SCOPE_PROCESS	libc	1	32	pthread.h
 PTHREAD_SCOPE_SYSTEM	libc	0	32	pthread.h
 PTHREAD_STACK_MIN	-
@@ -1753,24 +1884,33 @@ Q_SETQUOTA	libc	8388616	32	sys/quota.h
 Q_SYNC	libc	8388609	32	sys/quota.h
 RADIXCHAR	libc	65536	32	langinfo.h
 READ	-
+REGS_FIXED	libc	2	32	re_comp.h
+REGS_REALLOCATE	libc	1	32	re_comp.h
+REGS_UNALLOCATED	libc	0	32	re_comp.h
 REG_BADBR	libc	10	32	re_comp.h
 REG_BADPAT	libc	2	32	re_comp.h
+REG_BADRPT	libc	13	32	re_comp.h
 REG_CR2	libc	22	32	arpa/nameser.h
 REG_CSGSFS	libc	18	32	arpa/nameser.h
 REG_EBRACE	libc	9	32	re_comp.h
 REG_EBRACK	libc	7	32	re_comp.h
 REG_ECOLLATE	libc	3	32	re_comp.h
 REG_ECTYPE	libc	4	32	re_comp.h
+REG_EEND	libc	14	32	re_comp.h
 REG_EESCAPE	libc	5	32	re_comp.h
 REG_EFL	libc	17	32	arpa/nameser.h
+REG_ENOSYS	libc	-1	32	re_comp.h
 REG_EPAREN	libc	8	32	re_comp.h
 REG_ERANGE	libc	11	32	re_comp.h
+REG_ERPAREN	libc	16	32	re_comp.h
 REG_ERR	libc	19	32	arpa/nameser.h
+REG_ESIZE	libc	15	32	re_comp.h
 REG_ESPACE	libc	12	32	re_comp.h
 REG_ESUBREG	libc	6	32	re_comp.h
 REG_EXTENDED	libc	1	32	re_comp.h
 REG_ICASE	libc	2	32	re_comp.h
 REG_NEWLINE	libc	4	32	re_comp.h
+REG_NOERROR	libc	0	32	re_comp.h
 REG_NOMATCH	libc	1	32	re_comp.h
 REG_NOSUB	libc	8	32	re_comp.h
 REG_NOTBOL	libc	1	32	re_comp.h
@@ -1793,6 +1933,7 @@ REG_RDX	libc	12	32	arpa/nameser.h
 REG_RIP	libc	16	32	arpa/nameser.h
 REG_RSI	libc	9	32	arpa/nameser.h
 REG_RSP	libc	15	32	arpa/nameser.h
+REG_STARTEND	libc	4	32	re_comp.h
 REG_TRAPNO	libc	20	32	arpa/nameser.h
 RENAME_EXCHANGE	libc	2	32	argp.h
 RENAME_NOREPLACE	libc	1	32	argp.h
@@ -1814,6 +1955,7 @@ RES_INIT	libc	1	32	resolv.h
 RES_MAXNDOTS	libc	15	32	resolv.h
 RES_MAXRETRANS	libc	30	32	resolv.h
 RES_MAXRETRY	libc	5	32	resolv.h
+RES_NOALIASES	libc	4096	32	resolv.h
 RES_NOIP6DOTINT	-
 RES_NOTLDQUERY	libc	16777216	32	resolv.h
 RES_RECURSE	libc	64	32	resolv.h
@@ -1821,6 +1963,46 @@ RES_ROTATE	libc	16384	32	resolv.h
 RES_TIMEOUT	libc	5	32	resolv.h
 RES_TRUSTAD	libc	67108864	32	resolv.h
 RES_USEVC	libc	8	32	resolv.h
+RE_BACKSLASH_ESCAPE_IN_LISTS	libc	1	64	re_comp.h
+RE_BK_PLUS_QM	libc	2	64	re_comp.h
+RE_CARET_ANCHORS_HERE	libc	8388608	64	re_comp.h
+RE_CHAR_CLASSES	libc	4	64	re_comp.h
+RE_CONTEXT_INDEP_ANCHORS	libc	8	64	re_comp.h
+RE_CONTEXT_INDEP_OPS	libc	16	64	re_comp.h
+RE_CONTEXT_INVALID_DUP	libc	16777216	64	re_comp.h
+RE_CONTEXT_INVALID_OPS	libc	32	64	re_comp.h
+RE_DEBUG	libc	1048576	64	re_comp.h
+RE_DOT_NEWLINE	libc	64	64	re_comp.h
+RE_DOT_NOT_NULL	libc	128	64	re_comp.h
+RE_HAT_LISTS_NOT_NEWLINE	libc	256	64	re_comp.h
+RE_ICASE	libc	4194304	64	re_comp.h
+RE_INTERVALS	libc	512	64	re_comp.h
+RE_INVALID_INTERVAL_ORD	libc	2097152	64	re_comp.h
+RE_LIMITED_OPS	libc	1024	64	re_comp.h
+RE_NEWLINE_ALT	libc	2048	64	re_comp.h
+RE_NO_BK_BRACES	libc	4096	64	re_comp.h
+RE_NO_BK_PARENS	libc	8192	64	re_comp.h
+RE_NO_BK_REFS	libc	16384	64	re_comp.h
+RE_NO_BK_VBAR	libc	32768	64	re_comp.h
+RE_NO_EMPTY_RANGES	libc	65536	64	re_comp.h
+RE_NO_GNU_OPS	libc	524288	64	re_comp.h
+RE_NO_POSIX_BACKTRACKING	libc	262144	64	re_comp.h
+RE_NO_SUB	libc	33554432	64	re_comp.h
+RE_NREGS	libc	30	32	re_comp.h
+RE_SYNTAX_AWK	libc	778445	64	re_comp.h
+RE_SYNTAX_ED	libc	16843462	64	re_comp.h
+RE_SYNTAX_EGREP	libc	2341468	64	re_comp.h
+RE_SYNTAX_EMACS	libc	0	32	re_comp.h
+RE_SYNTAX_GNU_AWK	libc	2339405	64	re_comp.h
+RE_SYNTAX_GREP	libc	68166	64	re_comp.h
+RE_SYNTAX_POSIX_AWK	libc	2863869	64	re_comp.h
+RE_SYNTAX_POSIX_BASIC	libc	16843462	64	re_comp.h
+RE_SYNTAX_POSIX_EGREP	libc	2341468	64	re_comp.h
+RE_SYNTAX_POSIX_EXTENDED	libc	242428	64	re_comp.h
+RE_SYNTAX_POSIX_MINIMAL_BASIC	libc	67268	64	re_comp.h
+RE_SYNTAX_POSIX_MINIMAL_EXTENDED	libc	258796	64	re_comp.h
+RE_SYNTAX_SED	libc	16843462	64	re_comp.h
+RE_UNMATCHED_RIGHT_PAREN_ORD	libc	131072	64	re_comp.h
 RLIMIT_AS	libc	9	32	sys/resource.h
 RLIMIT_CORE	libc	4	32	sys/resource.h
 RLIMIT_CPU	libc	0	32	sys/resource.h
@@ -2009,6 +2191,14 @@ SIGXFSZ	libc	25	32	arpa/nameser.h
 SIG_BLOCK	libc	0	32	arpa/nameser.h
 SIG_SETMASK	libc	2	32	arpa/nameser.h
 SIG_UNBLOCK	libc	1	32	arpa/nameser.h
+SI_ASYNCIO	libc	-4	32	arpa/nameser.h
+SI_KERNEL	libc	128	32	arpa/nameser.h
+SI_MESGQ	libc	-3	32	arpa/nameser.h
+SI_QUEUE	libc	-1	32	arpa/nameser.h
+SI_SIGIO	libc	-5	32	arpa/nameser.h
+SI_TIMER	libc	-2	32	arpa/nameser.h
+SI_TKILL	libc	-6	32	arpa/nameser.h
+SI_USER	libc	0	32	arpa/nameser.h
 SNDPIPE	-
 SNDZERO	-
 SOCK_CLOEXEC	libc	524288	32	arpa/inet.h
@@ -2185,6 +2375,7 @@ SYS_FS_WRITE	-
 SYS_FS_WRITE_FILE	-
 SYS_FUTEX	-
 SYS_FUTEX_LOCK_PI	-
+SYS_FUTEX_LOCK_PI_TIMEOUT	-
 SYS_FUTEX_UNLOCK_PI	-
 SYS_FUTEX_WAIT	-
 SYS_FUTEX_WAIT_TIMEOUT	-
@@ -2247,6 +2438,7 @@ SYS_PROCESS_GET_CWD	-
 SYS_PROCESS_GET_INITIAL_FDS	-
 SYS_PROCESS_GET_NICE	-
 SYS_PROCESS_GET_PGID	-
+SYS_PROCESS_GET_RUSAGE	-
 SYS_PROCESS_GET_SID	-
 SYS_PROCESS_ID	-
 SYS_PROCESS_IS_READY	-
@@ -2474,6 +2666,8 @@ TRUE	kernel	1	32	linux/agpgart.h
 TRY_AGAIN	libc	2	32	netdb.h
 TSD_BLOCKS	-
 TTY_NAME_MAX	libc	32	32	argp.h
+TTY_ON	libc	1	32	ttyent.h
+TTY_SECURE	libc	2	32	ttyent.h
 T_A	libc	1	32	arpa/nameser.h
 T_AAAA	libc	28	32	arpa/nameser.h
 T_ANY	libc	255	32	arpa/nameser.h
@@ -2582,6 +2776,7 @@ WRDE_APPEND	libc	2	32	wordexp.h
 WRDE_BADCHAR	libc	2	32	wordexp.h
 WRDE_BADVAL	libc	3	32	wordexp.h
 WRDE_CMDSUB	libc	4	32	wordexp.h
+WRDE_DOOFFS	libc	1	32	wordexp.h
 WRDE_NOCMD	libc	4	32	wordexp.h
 WRDE_NOSPACE	libc	1	32	wordexp.h
 WRDE_REUSE	libc	8	32	wordexp.h
@@ -2648,6 +2843,7 @@ _POSIX_SAVED_IDS	libc	1	32	arpa/nameser.h
 _POSIX_THREADS	libc	200809	64	arpa/nameser.h
 _POSIX_TIMERS	libc	200809	64	arpa/nameser.h
 _POSIX_VERSION	libc	200809	64	arpa/nameser.h
+_RE_SYNTAX_POSIX_COMMON	libc	66244	64	re_comp.h
 _SC_2_C_BIND	libc	47	32	arpa/nameser.h
 _SC_2_VERSION	libc	46	32	arpa/nameser.h
 _SC_ARG_MAX	libc	0	32	arpa/nameser.h

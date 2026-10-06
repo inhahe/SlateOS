@@ -86,9 +86,21 @@ will close them myself as each one goes on.
 | `ctest-stdio` | `d-a-run-the-ctest-stdio-fixture.md` | file | 60 |
 | `ctest-sysvipc` | `d-a-run-the-ctest-sysvipc-fixture.md` | - | 30 |
 | `ctest-ucontext` | `d-a-run-ctest-ucontext.md` | - | 30 |
+| `ctest-llvm-tools` | -- (filed with the LLVM tools, 2026-10-05, for `b-d-fastpy-on-slateos-needs-llvm-tools.md`) | file | 600 |
+| `ctest-sigpipe` | -- (filed with SIGPIPE, 2026-10-06; design-decisions §1176) | - | 30 |
+| `ctest-rusage` | -- (filed with `getrusage`, 2026-10-06) | - | 60 |
+| `ctest-pi-mutex` | -- (filed with priority-inheritance mutexes, 2026-10-06; §1177) | - | 60 |
+| `ctest-system` | -- (filed with `system()`, 2026-10-06); needs a `/bin/sh` in the root (`d-ab-the-booted-system-has-no-bin-sh.md`) | file | 60 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
+
+The last four rows were added on 2026-10-06, which makes sixteen fixtures
+waiting where the summary above says eleven. `ctest-llvm-tools` runs LLVM's
+three tools from the image, each bounded at 60 s, hence its 600.
+`ctest-pi-mutex` sets its threads' scheduler priorities itself
+(`SYS_THREAD_SET_PRIORITY`, its own threads only) and keeps every CPU busy
+twice, for about half a second each time and five seconds at the most.
 
 The fixture this request is filed with, `ctest-obstack`
 (`services/ctest-obstack/`): GNU obstacks, design-decisions.md §1162. It

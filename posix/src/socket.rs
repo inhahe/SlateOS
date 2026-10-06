@@ -215,7 +215,8 @@ pub const MSG_EOR: i32 = 0x80;
 pub const MSG_WAITALL: i32 = 0x100;
 /// More data coming (cork the send).
 pub const MSG_MORE: i32 = 0x8000;
-/// Don't send SIGPIPE (ignored — no signals).
+/// A send to a broken stream connection fails with `EPIPE` alone, without
+/// the `SIGPIPE` it otherwise raises ([`crate::signal::broken_pipe`]).
 pub const MSG_NOSIGNAL: i32 = 0x4000;
 /// Set close-on-exec for received fds (recvmsg).
 pub const MSG_CMSG_CLOEXEC: i32 = 0x4000_0000;
@@ -365,6 +366,11 @@ pub struct SockaddrStorage {
     /// Padding (implementation detail — do not access directly).
     __ss_padding: [u8; 126],
 }
+
+/// The longest address a call takes: `sizeof(struct sockaddr_storage)`,
+/// beyond which Linux's `move_addr_to_kernel` answers `EINVAL`.
+#[allow(clippy::cast_possible_truncation)] // 128 fits
+const SOCKADDR_STORAGE_LEN: SocklenT = core::mem::size_of::<SockaddrStorage>() as SocklenT;
 
 /// IPv6 "any" address (all zeros).
 pub const IN6ADDR_ANY_INIT: In6Addr = In6Addr { s6_addr: [0; 16] };
@@ -1538,16 +1544,17 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
         return 0;
     }
 
-    // MSG_NOSIGNAL (0x4000) is a no-op — we have no SIGPIPE.
+    // MSG_NOSIGNAL (0x4000): a broken connection is EPIPE without SIGPIPE.
     // MSG_DONTWAIT (0x40) — non-blocking hint (also triggered by O_NONBLOCK).
-    let _ = flags; // Accepted flags: MSG_NOSIGNAL, MSG_DONTWAIT.
+    let nosignal = wants_no_signal(flags);
 
     match entry.kind {
+        // Never connected, or listening: Linux's `tcp_sendmsg` answers EPIPE
+        // -- with SIGPIPE unless MSG_NOSIGNAL -- from any state but a
+        // connection's (measured on 6.6). These were ENOTCONN and ENOTSOCK.
+        HandleKind::TcpStream if entry.handle == 0 => crate::signal::broken_pipe(nosignal),
+        HandleKind::TcpListener => crate::signal::broken_pipe(nosignal),
         HandleKind::TcpStream => {
-            if entry.handle == 0 {
-                errno::set_errno(errno::ENOTCONN);
-                return -1;
-            }
             // MSG_DONTWAIT (0x40) or O_NONBLOCK → non-blocking mode.
             let is_nb = (flags & MSG_DONTWAIT) != 0
                 || fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
@@ -1556,35 +1563,14 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
                 // semantics.  Linux's blocking send() loops until ALL
                 // bytes are accepted.  Programs depend on this.
                 let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return tcp_send_wait(entry.handle, buf, len, timeout_ms, mark);
+                return tcp_send_wait(entry.handle, buf, len, timeout_ms, mark, nosignal);
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
             if ret >= 0 {
                 return ret as isize;
             }
-            // ChannelClosed from send covers two distinct POSIX errors:
-            // - EPIPE: local write side shut down (SHUT_WR sent FIN), or
-            //          peer cleanly closed (FIN received).
-            // - ECONNRESET: peer sent RST (abortive close).
-            // Distinguish by checking last_error: RST sets TCP_ERR_RESET,
-            // while graceful shutdown / local SHUT_WR leaves it at NONE.
-            let posix_err = translate_net_error(ret);
-            if posix_err == errno::ECONNRESET {
-                let last =
-                    crate::syscall::syscall1(crate::syscall::SYS_TCP_LAST_ERROR, entry.handle)
-                        as u8;
-                if last == 2 {
-                    // TCP_ERR_RESET — genuine connection reset.
-                    errno::set_errno(errno::ECONNRESET);
-                } else {
-                    // Local shutdown or graceful close — EPIPE per POSIX.
-                    errno::set_errno(errno::EPIPE);
-                }
-            } else {
-                errno::set_errno(posix_err);
-            }
-            -1
+            tcp_send_failed(entry.handle, ret, nosignal)
         }
         HandleKind::UdpSocket => {
             // send() on UDP requires a prior connect() to set the peer.
@@ -1660,9 +1646,9 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
                 syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, len as u64)
             };
             if ret == errno::native::CHANNEL_CLOSED {
-                // Peer's read side gone — POSIX EPIPE (no SIGPIPE here).
-                errno::set_errno(errno::EPIPE);
-                return -1;
+                // Peer's read side gone: EPIPE, and SIGPIPE unless
+                // MSG_NOSIGNAL, as Linux's `unix_stream_sendmsg` answers.
+                return crate::signal::broken_pipe(nosignal);
             }
             // translate() sets errno and returns -1 for negative codes,
             // or passes through the byte count for ret >= 0.
@@ -1845,6 +1831,12 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
             // translate() sets errno and returns -1 for negative codes,
             // or passes through the byte count (0 = EOF) for ret >= 0.
             errno::translate(ret) as isize
+        }
+        HandleKind::TcpListener => {
+            // A listener carries no data: Linux's `tcp_recvmsg` answers
+            // ENOTCONN for TCP_LISTEN (measured on 6.6). This was ENOTSOCK.
+            errno::set_errno(errno::ENOTCONN);
+            -1
         }
         _ => {
             errno::set_errno(errno::ENOTSOCK);
@@ -2071,12 +2063,49 @@ fn tcp_recv_waitall(
 /// indefinitely.
 ///
 /// Returns bytes sent or -1 (with errno set).
+/// What a TCP send reports when the stack refused it with `ret` (negative,
+/// and not "would block"). Returns -1.
+///
+/// The stack answers `ChannelClosed` both after the peer's reset and after
+/// an orderly close -- the peer's FIN or our own `shutdown(SHUT_WR)` -- and
+/// `SYS_TCP_LAST_ERROR` tells them apart: a reset is `ECONNRESET`; a close,
+/// like the stack's `BrokenPipe`, is `EPIPE`, which Linux's `sk_stream_error`
+/// answers with `SIGPIPE` first unless the send had `MSG_NOSIGNAL`
+/// ([`crate::signal::broken_pipe`]). A reset sends no signal there either: the
+/// socket's pending error replaces the `EPIPE` before the signal is decided.
+pub(crate) fn tcp_send_failed(handle: u64, ret: i64, nosignal: bool) -> isize {
+    let mut err = translate_net_error(ret);
+    if err == errno::ECONNRESET {
+        // Truncation keeps the code's low byte, the stack's whole range.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let last = crate::syscall::syscall1(crate::syscall::SYS_TCP_LAST_ERROR, handle) as u8;
+        if last != TCP_ERR_RESET {
+            err = errno::EPIPE;
+        }
+    }
+    if err == errno::EPIPE {
+        return crate::signal::broken_pipe(nosignal);
+    }
+    errno::set_errno(err);
+    -1
+}
+
+/// `SYS_TCP_LAST_ERROR`'s answer after the peer reset the connection.
+const TCP_ERR_RESET: u8 = 2;
+
+/// Whether a send's `flags` hold `MSG_NOSIGNAL`: no `SIGPIPE` for a broken
+/// connection, `EPIPE` alone.
+fn wants_no_signal(flags: i32) -> bool {
+    flags & MSG_NOSIGNAL != 0
+}
+
 pub(crate) fn tcp_send_wait(
     handle: u64,
     buf: *const u8,
     len: usize,
     timeout_ms: u64,
     mark: Mark,
+    nosignal: bool,
 ) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
@@ -2110,24 +2139,13 @@ pub(crate) fn tcp_send_wait(
         // Negative: check if it's just WouldBlock (window still closed).
         let err = translate_net_error(ret);
         if err != errno::EAGAIN && err != errno::EWOULDBLOCK {
-            // Real error — distinguish RST (ECONNRESET) from local
-            // shutdown/graceful close (EPIPE).
             if sent > 0 {
-                // Partial data already accepted — return that count.
+                // Partial data already accepted — return that count, and
+                // no signal: Linux's `tcp_sendmsg` leaves for `out` with
+                // what it copied before `sk_stream_error` is reached.
                 break;
             }
-            if err == errno::ECONNRESET {
-                let last =
-                    crate::syscall::syscall1(crate::syscall::SYS_TCP_LAST_ERROR, handle) as u8;
-                errno::set_errno(if last == 2 {
-                    errno::ECONNRESET
-                } else {
-                    errno::EPIPE
-                });
-            } else {
-                errno::set_errno(err);
-            }
-            return -1;
+            return tcp_send_failed(handle, ret, nosignal);
         }
         // Still can't send — check timeout before sleeping.
         if deadline != u64::MAX {
@@ -2191,43 +2209,57 @@ pub unsafe extern "C" fn sendto(
         return -1;
     };
 
-    // MSG_NOSIGNAL (0x4000) is a no-op — we have no SIGPIPE.
-    let _ = flags;
+    // MSG_NOSIGNAL (0x4000): a broken connection is EPIPE without SIGPIPE.
+    let nosignal = wants_no_signal(flags);
+
+    // Never connected, or listening: EPIPE, with SIGPIPE unless
+    // MSG_NOSIGNAL, as `send` answers (a destination does not change it:
+    // TCP's `sendmsg` ignores one). These were ENOTCONN and ENOTSOCK.
+    if (entry.kind == HandleKind::TcpStream && entry.handle == 0)
+        || entry.kind == HandleKind::TcpListener
+    {
+        return crate::signal::broken_pipe(nosignal);
+    }
 
     // TCP sendto: works like send() — destination addr is ignored
     // (connection-oriented protocol already knows the peer).
     if entry.kind == HandleKind::TcpStream {
-        if entry.handle == 0 {
-            errno::set_errno(errno::ENOTCONN);
-            return -1;
-        }
         let is_nb = (flags & MSG_DONTWAIT) != 0
             || fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
         if !is_nb {
             // Blocking socket: use tcp_send_wait for full-write
             // semantics (same as send()).
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-            return tcp_send_wait(entry.handle, buf, len, timeout_ms, mark);
+            return tcp_send_wait(entry.handle, buf, len, timeout_ms, mark, nosignal);
         }
         // Non-blocking: try once.
         let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
         if ret >= 0 {
             return ret as isize;
         }
-        let posix_err = translate_net_error(ret);
-        // Distinguish RST (ECONNRESET) from local shutdown (EPIPE).
-        if posix_err == errno::ECONNRESET {
-            let last =
-                crate::syscall::syscall1(crate::syscall::SYS_TCP_LAST_ERROR, entry.handle) as u8;
-            errno::set_errno(if last == 2 {
-                errno::ECONNRESET
-            } else {
-                errno::EPIPE
-            });
-        } else {
-            errno::set_errno(posix_err);
+        return tcp_send_failed(entry.handle, ret, nosignal);
+    }
+
+    // A connected stream socket of the local kind is sent to as `send`
+    // sends; naming a destination for it is `EISCONN`, as Linux's
+    // `unix_stream_sendmsg` answers a `msg_namelen` on an established
+    // socket. (Every UnixStream here is connected: they are made in pairs.)
+    // `__sys_sendto` takes the address only when there is one, and refuses
+    // one longer than a `sockaddr_storage` first; a NULL address, or a zero
+    // length, is no address.
+    if entry.kind == HandleKind::UnixStream {
+        if !dest_addr.is_null() {
+            if addrlen > SOCKADDR_STORAGE_LEN {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            if addrlen != 0 {
+                errno::set_errno(errno::EISCONN);
+                return -1;
+            }
         }
-        return -1;
+        // SAFETY: the caller's contract for `buf` and `len` is `send`'s.
+        return unsafe { send(fd, buf, len, flags) };
     }
 
     if entry.kind != HandleKind::UdpSocket {
@@ -2547,6 +2579,27 @@ pub unsafe extern "C" fn recvfrom(
             }
 
             ret as isize
+        }
+
+        HandleKind::TcpListener => {
+            // A listener carries no data: ENOTCONN, as `recv` (measured on
+            // 6.6). This was ENOTSOCK.
+            errno::set_errno(errno::ENOTCONN);
+            -1
+        }
+
+        HandleKind::UnixStream => {
+            // A stream socket of the local kind receives as `recv` does; its
+            // peer here is a socketpair's, which has no address, so the
+            // length written back is 0 -- `__sys_recvfrom` starts the name
+            // empty and `unix_copy_addr` leaves it so. This was ENOTSOCK.
+            // SAFETY: the caller's contract for `buf` and `len` is `recv`'s.
+            let got = unsafe { recv(fd, buf, len, flags) };
+            if got >= 0 && !src_addr.is_null() && !addrlen.is_null() {
+                // SAFETY: the caller passed `addrlen` for writing.
+                unsafe { *addrlen = 0 };
+            }
+            got
         }
 
         _ => {
@@ -5042,6 +5095,162 @@ pub unsafe extern "C" fn recvmmsg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `sendto` on a connected local stream socket sends as `send` does,
+    /// refusing a destination with `EISCONN` -- and one longer than a
+    /// `sockaddr_storage` with `EINVAL` first -- as Linux's
+    /// `move_addr_to_kernel` and `unix_stream_sendmsg` answer. A NULL
+    /// destination, or a zero length, is none. (It was `ENOTSOCK` whatever
+    /// was given.)
+    #[test]
+    fn sendto_on_a_local_stream_socket_is_send() {
+        let fd = fdtable::alloc_fd(HandleKind::UnixStream, 0x1234).expect("fd table full");
+        let byte = [7u8];
+        let raw = [0u8; 16];
+        let dest = raw.as_ptr().cast::<Sockaddr>();
+        let send_to = |dest: *const Sockaddr, len: SocklenT| {
+            errno::set_errno(0);
+            // SAFETY: a one-byte buffer, and a 16-byte destination or none.
+            let r = unsafe { sendto(fd, byte.as_ptr(), 1, 0, dest, len) };
+            (r, errno::get_errno())
+        };
+        assert_eq!(send_to(dest, 16), (-1, errno::EISCONN));
+        assert_eq!(send_to(dest, SOCKADDR_STORAGE_LEN + 1), (-1, errno::EINVAL));
+        // No destination: `send`'s path, which on the host reaches a kernel
+        // that is not there.
+        for (d, len) in [(core::ptr::null(), 0), (core::ptr::null(), 16), (dest, 0)] {
+            let (r, e) = send_to(d, len);
+            assert_eq!(r, -1);
+            assert!(
+                ![errno::ENOTSOCK, errno::EISCONN, errno::EINVAL].contains(&e),
+                "{e}: sendto went where send goes"
+            );
+        }
+        let _ = fdtable::close_fd(fd);
+    }
+
+    std::thread_local! {
+        static SIGPIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    }
+
+    extern "C" fn count_sigpipe(_sig: i32) {
+        SIGPIPES.with(|p| p.set(p.get() + 1));
+    }
+
+    /// The `SIGPIPE`s this thread has had since the last call.
+    fn sigpipes() -> u32 {
+        SIGPIPES.with(|p| p.replace(0))
+    }
+
+    /// A TCP socket never connected, or listening, is no connection: sending
+    /// is EPIPE with `SIGPIPE` (none for `MSG_NOSIGNAL`), and receiving from
+    /// a listener ENOTCONN -- what Linux 6.6 answers (measured), where these
+    /// were ENOTCONN, ENOTSOCK and ENOTSOCK.
+    #[test]
+    fn a_tcp_socket_with_no_connection_answers_as_linuxs() {
+        use crate::signal::{SIGPIPE, SighandlerT, signal};
+        let old = signal(SIGPIPE, count_sigpipe as *const () as SighandlerT);
+        let _ = sigpipes();
+        let fresh = fdtable::alloc_fd(HandleKind::TcpStream, 0).expect("fd table full");
+        let listener = fdtable::alloc_fd(HandleKind::TcpListener, 0x77).expect("fd table full");
+        let byte = [7u8];
+        let mut into = [0u8; 4];
+        for fd in [fresh, listener] {
+            errno::set_errno(0);
+            // SAFETY: a one-byte buffer.
+            assert_eq!(unsafe { send(fd, byte.as_ptr(), 1, 0) }, -1);
+            assert_eq!(
+                (errno::get_errno(), sigpipes()),
+                (errno::EPIPE, 1),
+                "send on {fd}"
+            );
+            // SAFETY: as above; no destination.
+            assert_eq!(
+                unsafe { sendto(fd, byte.as_ptr(), 1, 0, core::ptr::null(), 0) },
+                -1
+            );
+            assert_eq!(
+                (errno::get_errno(), sigpipes()),
+                (errno::EPIPE, 1),
+                "sendto on {fd}"
+            );
+            // SAFETY: as above.
+            assert_eq!(unsafe { send(fd, byte.as_ptr(), 1, MSG_NOSIGNAL) }, -1);
+            assert_eq!(
+                (errno::get_errno(), sigpipes()),
+                (errno::EPIPE, 0),
+                "MSG_NOSIGNAL on {fd}"
+            );
+            assert_eq!(crate::file::write(fd, byte.as_ptr(), 1), -1);
+            assert_eq!(
+                (errno::get_errno(), sigpipes()),
+                (errno::EPIPE, 1),
+                "write on {fd}"
+            );
+        }
+        // SAFETY: a four-byte buffer, and no source wanted.
+        assert_eq!(unsafe { recv(listener, into.as_mut_ptr(), 4, 0) }, -1);
+        assert_eq!(errno::get_errno(), errno::ENOTCONN);
+        assert_eq!(
+            // SAFETY: as above.
+            unsafe {
+                recvfrom(
+                    listener,
+                    into.as_mut_ptr(),
+                    4,
+                    0,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            },
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::ENOTCONN);
+        assert_eq!(crate::file::read(listener, into.as_mut_ptr(), 4), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTCONN);
+        assert_eq!(crate::file::read(fresh, into.as_mut_ptr(), 4), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ENOTCONN,
+            "a socket never connected reads ENOTCONN"
+        );
+        let _ = fdtable::close_fd(fresh);
+        let _ = fdtable::close_fd(listener);
+        signal(SIGPIPE, old);
+    }
+
+    /// `recvfrom` on a local stream socket receives as `recv` does (it was
+    /// ENOTSOCK); on the host there is no kernel behind the receive.
+    #[test]
+    fn recvfrom_on_a_local_stream_socket_is_recv() {
+        let fd = fdtable::alloc_fd(HandleKind::UnixStream, 0x1234).expect("fd table full");
+        let mut into = [0u8; 4];
+        errno::set_errno(0);
+        // SAFETY: a four-byte buffer; no source wanted.
+        let r = unsafe {
+            recvfrom(
+                fd,
+                into.as_mut_ptr(),
+                4,
+                0,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(r, -1);
+        assert_ne!(errno::get_errno(), errno::ENOTSOCK);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    /// `MSG_NOSIGNAL` is what keeps a send to a broken connection from
+    /// raising `SIGPIPE`.
+    #[test]
+    fn msg_nosignal_is_read_from_the_flags() {
+        assert!(wants_no_signal(MSG_NOSIGNAL));
+        assert!(wants_no_signal(MSG_NOSIGNAL | MSG_DONTWAIT));
+        assert!(!wants_no_signal(MSG_DONTWAIT));
+        assert!(!wants_no_signal(0));
+    }
 
     // -- The IPv6 address constants --
 

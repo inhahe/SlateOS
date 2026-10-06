@@ -1,4 +1,6 @@
-### TD-POSIX-SCANF-GLIBC-DIGITLESS-HEX. `scanf` reports a matching failure where glibc converts a digit-less `0x.` to zero — ACCEPTED DIVERGENCE 2026-07-30
+### TD-POSIX-SCANF-GLIBC-DIGITLESS-HEX. `scanf` reports a matching failure where glibc converts a digit-less `0x.` to zero — FIXED 2026-09-27
+
+**Status:** FIXED 2026-09-27 -- `scanf` became glibc's own engine, ported (`posix/src/scanf.rs`, `fb1415b42`), and with it reads both inputs below as glibc does: `0x.` is collected and `strtod` converts its `0`, and a `nan(...)` payload is left unread. This entry was not updated then; both cases are pinned by `glibc_consumes_what_it_looked_at` since 2026-10-06. What follows is the divergence as it was, accepted on 2026-07-30 and no longer this library's behaviour.
 
 **Where:** `posix/src/scanf.rs::scan_hex_float_digits`.
 

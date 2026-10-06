@@ -365,6 +365,50 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         return -1;
     }
 
+    // The kinds whose reading is this library's answer as their Linux files
+    // do, a zero count and a NULL buffer included -- measured on 6.6 call by
+    // call. On x86-64 `access_ok` admits NULL (design-decisions §1107), so
+    // Linux faults only where it copies: an eventfd, a timerfd, an inotify
+    // queue check the count and their own state first, and a socket with no
+    // connection never reaches a copy at all.
+    match entry.kind {
+        HandleKind::Eventfd => return read_eventfd(fd, entry.handle, buf, count),
+        HandleKind::Timerfd => return read_timerfd(fd, entry.handle, buf, count, mark),
+        HandleKind::Inotify => return read_inotify(fd, entry.handle, buf, count, mark),
+        HandleKind::Epoll => {
+            // An epoll file has no read: EINVAL whatever the count or buffer
+            // (`vfs_read`'s FMODE_CAN_READ, ahead of `access_ok`).
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        HandleKind::TcpListener => {
+            // A listener carries no data. `sock_read_iter` answers a zero
+            // count with 0 before anything else; otherwise `tcp_recvmsg`
+            // answers ENOTCONN for TCP_LISTEN before touching the buffer.
+            // (This was EINVAL, and EFAULT for a NULL buffer.)
+            if count == 0 {
+                return 0;
+            }
+            errno::set_errno(errno::ENOTCONN);
+            return -1;
+        }
+        HandleKind::TcpStream if entry.handle == 0 => {
+            // Never connected: as a listener -- `tcp_recvmsg` finds
+            // TCP_CLOSE and answers ENOTCONN, a zero count 0.
+            if count == 0 {
+                return 0;
+            }
+            errno::set_errno(errno::ENOTCONN);
+            return -1;
+        }
+        _ => {}
+    }
+
+    // The kernel's kinds. A NULL buffer is refused here, where `access_ok`
+    // would sit, not at the copy, which is not Linux's answer at the end of
+    // a file (0), on an empty non-blocking pipe (EAGAIN) or for a directory
+    // (EISDIR): the kernel refuses NULL before it looks
+    // (`requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`).
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -428,10 +472,6 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             })
         }
         HandleKind::TcpStream => {
-            if entry.handle == 0 {
-                errno::set_errno(errno::ENOTCONN);
-                return -1;
-            }
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
 
@@ -464,107 +504,15 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // source address is simply discarded (use recvfrom() to get it).
             return unsafe { crate::socket::recv(fd, buf, count, 0) } as SsizeT;
         }
-        HandleKind::TcpListener => {
-            // Listeners are not readable via read(); use accept().
-            errno::set_errno(errno::EINVAL);
+        HandleKind::TcpListener
+        | HandleKind::Epoll
+        | HandleKind::Timerfd
+        | HandleKind::Eventfd
+        | HandleKind::Inotify => {
+            // Answered before the buffer was looked at, above; here only so
+            // that this match stays exhaustive.
+            errno::set_errno(errno::EBADF);
             return -1;
-        }
-        HandleKind::Epoll => {
-            // Linux: read/write on an epoll fd returns EINVAL.
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        HandleKind::Timerfd => {
-            // Linux timerfd read: writes 8 bytes containing the number
-            // of expirations since the last read (or settime), as a
-            // host-endian u64.  If no expirations have occurred:
-            //   - O_NONBLOCK (or TFD_NONBLOCK): return EAGAIN.
-            //   - Otherwise: sleep 10ms and retry.
-            if count < 8 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let is_nb = fd_nb || crate::epoll::timerfd_is_nonblock(entry.handle);
-            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
-            let dst = unsafe { core::slice::from_raw_parts_mut(buf, 8) };
-            loop {
-                match crate::epoll::timerfd_read(entry.handle, dst) {
-                    Ok(0) => {
-                        if is_nb {
-                            errno::set_errno(errno::EAGAIN);
-                            return -1;
-                        }
-                        // Block: sleep 10ms and retry.  Matches the rest
-                        // of our readiness polling.
-                        if mark.interrupted(Restart::IfAsked) {
-                            errno::set_errno(errno::EINTR);
-                            return -1;
-                        }
-                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
-                    }
-                    Ok(n) => return n as SsizeT,
-                    Err(e) => {
-                        errno::set_errno(e);
-                        return -1;
-                    }
-                }
-            }
-        }
-        HandleKind::Eventfd => {
-            // Linux semantics: read on an eventfd requires an 8-byte
-            // buffer.  On success, the kernel counter is written into
-            // the buffer (host endian) and read() returns 8.  Buffers
-            // smaller than 8 bytes fail with EINVAL.
-            if count < 8 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let r = crate::epoll::eventfd_kernel_read(entry.handle, is_nb);
-            if r < 0 {
-                return errno::translate(r) as SsizeT;
-            }
-            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
-            // We write 8 bytes representing the u64 counter value in host
-            // endianness, matching Linux eventfd semantics.
-            unsafe {
-                let val = r as u64;
-                core::ptr::write_unaligned(buf.cast::<u64>(), val);
-            }
-            return 8;
-        }
-        HandleKind::Inotify => {
-            // inotify read: drains queued events in Linux's packed
-            // `struct inotify_event` format.  If the buffer is too
-            // small for the next event, EINVAL.  If the queue is empty:
-            //   - O_NONBLOCK (or IN_NONBLOCK): EAGAIN.
-            //   - Otherwise: sleep 10ms and retry (matches poll/timerfd
-            //     pattern).
-            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let is_nb = fd_nb || crate::epoll::inotify_is_nonblock(entry.handle);
-            // SAFETY: `buf` is valid for `count` bytes (checked above).
-            let dst = unsafe { core::slice::from_raw_parts_mut(buf, count) };
-            loop {
-                match crate::epoll::inotify_read(entry.handle, dst) {
-                    Ok(0) => {
-                        if is_nb {
-                            errno::set_errno(errno::EAGAIN);
-                            return -1;
-                        }
-                        if mark.interrupted(Restart::IfAsked) {
-                            errno::set_errno(errno::EINTR);
-                            return -1;
-                        }
-                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
-                    }
-                    Ok(n) => return n as SsizeT,
-                    Err(e) => {
-                        errno::set_errno(e);
-                        return -1;
-                    }
-                }
-            }
         }
         HandleKind::PtyMaster => {
             // What the program on the slave end printed, already through
@@ -634,6 +582,162 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
     errno::translate(ret) as SsizeT
 }
 
+/// The longest record an inotify read gives: its 16-byte header and the
+/// longest name, with its NUL, rounded up to 16.
+const INOTIFY_MAX_RECORD: usize = 16 + crate::epoll::INOTIFY_NAME_MAX.next_multiple_of(16);
+
+/// Whether `fd`'s descriptor was opened, or since set, `O_NONBLOCK`.
+fn fd_nonblocking(fd: Fd) -> bool {
+    fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0
+}
+
+/// `read` of an eventfd, in Linux's order (`eventfd_read`): a count under 8
+/// is EINVAL, whatever the buffer; an empty counter is EAGAIN without
+/// blocking, else waited for; then the counter is taken, and only then
+/// copied -- so a NULL buffer is EFAULT with the count gone, as on Linux
+/// (measured on 6.6).
+fn read_eventfd(fd: Fd, handle: u64, buf: *mut u8, count: SizeT) -> SsizeT {
+    if count < 8 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let r = crate::epoll::eventfd_kernel_read(handle, fd_nonblocking(fd));
+    if r < 0 {
+        return errno::translate(r) as SsizeT;
+    }
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: `buf` is the caller's, valid for `count >= 8` bytes and not
+    // NULL (checked above); the counter is written as a host-endian u64.
+    unsafe { core::ptr::write_unaligned(buf.cast::<u64>(), r as u64) };
+    8
+}
+
+/// `read` of a timerfd, in Linux's order (`timerfd_read`): a count under 8
+/// is EINVAL; no expiry yet is EAGAIN without blocking, else waited for;
+/// the expiries are taken, then copied -- a NULL buffer faulting after
+/// them, as `put_user` does on Linux (measured on 6.6).
+fn read_timerfd(fd: Fd, handle: u64, buf: *mut u8, count: SizeT, mark: Mark) -> SsizeT {
+    if count < 8 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let is_nb = fd_nonblocking(fd) || crate::epoll::timerfd_is_nonblock(handle);
+    let mut ticks = [0u8; 8];
+    loop {
+        match crate::epoll::timerfd_read(handle, &mut ticks) {
+            Ok(0) => {
+                if is_nb {
+                    errno::set_errno(errno::EAGAIN);
+                    return -1;
+                }
+                // Block: sleep 10ms and retry.  Matches the rest of our
+                // readiness polling.
+                if mark.interrupted(Restart::IfAsked) {
+                    errno::set_errno(errno::EINTR);
+                    return -1;
+                }
+                crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
+            }
+            Ok(n) => {
+                if buf.is_null() {
+                    errno::set_errno(errno::EFAULT);
+                    return -1;
+                }
+                let n = n.min(ticks.len());
+                // SAFETY: `buf` is the caller's, valid for `count >= 8 >= n`
+                // bytes and not NULL; `ticks` is a distinct local.
+                unsafe { core::ptr::copy_nonoverlapping(ticks.as_ptr(), buf, n) };
+                return n as SsizeT;
+            }
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        }
+    }
+}
+
+/// `read` of an inotify queue, in Linux's order (`inotify_read`): an empty
+/// queue is EAGAIN without blocking, else waited for -- a zero count too;
+/// a next event too long for the count is EINVAL; events are copied while
+/// they fit. With a NULL buffer the next event is taken and its copy
+/// faults: EFAULT, that one event gone, as on Linux (measured on 6.6).
+fn read_inotify(fd: Fd, handle: u64, buf: *mut u8, count: SizeT, mark: Mark) -> SsizeT {
+    let is_nb = fd_nonblocking(fd) || crate::epoll::inotify_is_nonblock(handle);
+    loop {
+        let got = if buf.is_null() {
+            match crate::epoll::inotify_next_record_size(handle) {
+                Ok(None) => Ok(0),
+                Ok(Some(size)) if size > count => Err(errno::EINVAL),
+                Ok(Some(size)) => {
+                    let mut record = [0u8; INOTIFY_MAX_RECORD];
+                    let take = record
+                        .get_mut(..size.min(INOTIFY_MAX_RECORD))
+                        .unwrap_or(&mut []);
+                    match crate::epoll::inotify_read(handle, take) {
+                        // Drained between the look and the take.
+                        Ok(0) => Ok(0),
+                        Ok(_) => Err(errno::EFAULT),
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            // SAFETY: `buf` is the caller's, valid for `count` bytes, and
+            // not NULL (an empty slice at a zero count).
+            let dst = unsafe { core::slice::from_raw_parts_mut(buf, count) };
+            crate::epoll::inotify_read(handle, dst)
+        };
+        match got {
+            Ok(0) => {
+                if is_nb {
+                    errno::set_errno(errno::EAGAIN);
+                    return -1;
+                }
+                if mark.interrupted(Restart::IfAsked) {
+                    errno::set_errno(errno::EINTR);
+                    return -1;
+                }
+                crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
+            }
+            Ok(n) => return n as SsizeT,
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        }
+    }
+}
+
+/// `write` of an eventfd, in Linux's order (`eventfd_write`): a count under
+/// 8 is EINVAL whatever the buffer, a NULL buffer EFAULT, the value
+/// `u64::MAX` EINVAL; then the counter is added to (measured on 6.6).
+fn write_eventfd(handle: u64, buf: *const u8, count: SizeT) -> SsizeT {
+    if count < 8 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: `buf` is the caller's, valid for `count >= 8` bytes, not NULL.
+    let val = unsafe { core::ptr::read_unaligned(buf.cast::<u64>()) };
+    if val == u64::MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let r = crate::epoll::eventfd_kernel_write(handle, val);
+    if r < 0 {
+        return errno::translate(r) as SsizeT;
+    }
+    8
+}
+
 /// Write to a file descriptor.
 ///
 /// Dispatches to the correct kernel write syscall based on handle type:
@@ -656,6 +760,42 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         return -1;
     }
 
+    // The kinds whose writing is this library's answer as their Linux files
+    // do, a zero count and a NULL buffer included (measured on 6.6; see
+    // `read`).
+    match entry.kind {
+        HandleKind::Eventfd => return write_eventfd(entry.handle, buf, count),
+        HandleKind::Timerfd | HandleKind::Epoll => {
+            // No write: EINVAL whatever the count or buffer (`vfs_write`'s
+            // FMODE_CAN_WRITE, ahead of `access_ok`).
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        HandleKind::Inotify => {
+            // Opened read-only by `inotify_init`: EBADF whatever the count
+            // or buffer (`vfs_write`'s FMODE_WRITE comes first).
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+        HandleKind::TcpListener => {
+            // A listener is not connected: EPIPE with SIGPIPE, a zero count
+            // too -- `sock_write_iter` has no zero-length shortcut, and
+            // `tcp_sendmsg` answers from the socket's state (measured on
+            // 6.6). This was EINVAL, and 0 for a zero count.
+            return crate::signal::broken_pipe(false);
+        }
+        HandleKind::TcpStream if entry.handle == 0 => {
+            // Never connected: as a listener -- `tcp_sendmsg` waits for a
+            // connection only from SYN_SENT or SYN_RECV, and answers EPIPE,
+            // with SIGPIPE, from any other state (measured on 6.6). `read`
+            // of the same socket is ENOTCONN.
+            return crate::signal::broken_pipe(false);
+        }
+        _ => {}
+    }
+
+    // The kernel's kinds: a NULL buffer refused where `access_ok` would sit
+    // (see `read`).
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -696,9 +836,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 })
             };
             if ret == errno::native::CHANNEL_CLOSED {
-                // Reader has closed — POSIX mandates EPIPE (not ECONNRESET).
-                errno::set_errno(errno::EPIPE);
-                return -1;
+                // Reader has closed: `SIGPIPE`, then EPIPE (not ECONNRESET),
+                // as Linux's `pipe_write` answers.
+                return crate::signal::broken_pipe(false);
             }
             ret
         }
@@ -718,20 +858,15 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 })
             };
             if ret == errno::native::CHANNEL_CLOSED {
-                // Peer's read side is gone — POSIX mandates EPIPE.  The
-                // kernel does not raise SIGPIPE (we have no signals), so a
-                // write to a broken stream socket simply fails with EPIPE.
-                errno::set_errno(errno::EPIPE);
-                return -1;
+                // Peer's read side is gone: `SIGPIPE`, then EPIPE, as
+                // Linux's `unix_stream_sendmsg` answers a `write` (which
+                // never carries `MSG_NOSIGNAL`).
+                return crate::signal::broken_pipe(false);
             }
             ret
         }
         HandleKind::Console => syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64),
         HandleKind::TcpStream => {
-            if entry.handle == 0 {
-                errno::set_errno(errno::ENOTCONN);
-                return -1;
-            }
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             if !is_nb {
                 // Blocking socket: use tcp_send_wait for full-write
@@ -739,25 +874,23 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // bytes are accepted; programs depend on this (same
                 // behavior as send() on a blocking socket).
                 let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms, mark);
+                return crate::socket::tcp_send_wait(
+                    entry.handle,
+                    buf,
+                    count,
+                    timeout_ms,
+                    mark,
+                    false,
+                );
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
             if ret >= 0 {
                 return ret as SsizeT;
             }
-            // ChannelClosed (-300) needs EPIPE/ECONNRESET distinction:
-            // RST from peer → ECONNRESET; local shutdown/graceful close → EPIPE.
-            if ret == errno::native::CHANNEL_CLOSED {
-                let last = syscall1(crate::syscall::SYS_TCP_LAST_ERROR, entry.handle) as u8;
-                errno::set_errno(if last == 2 {
-                    errno::ECONNRESET
-                } else {
-                    errno::EPIPE
-                });
-                return -1;
-            }
-            return errno::translate(ret) as SsizeT;
+            // A reset is ECONNRESET; an orderly close EPIPE, with SIGPIPE: a
+            // `write` never carries MSG_NOSIGNAL.
+            return crate::socket::tcp_send_failed(entry.handle, ret, false);
         }
         HandleKind::UdpSocket => {
             // POSIX: write() on a connected UDP socket behaves like send().
@@ -769,50 +902,15 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             }
             return unsafe { crate::socket::send(fd, buf, count, 0) } as SsizeT;
         }
-        HandleKind::TcpListener => {
-            // Listeners are not writable via write(); use accept().
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        HandleKind::Epoll => {
-            // Linux: read/write on an epoll fd returns EINVAL.
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        HandleKind::Timerfd => {
-            // Linux: write on a timerfd returns EINVAL.
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        HandleKind::Inotify => {
-            // Linux: write on an inotify fd returns EBADF (it's
-            // read-only by design).  We use EBADF to match Linux —
-            // EINVAL is the more common dispatch error but inotify is
-            // specifically EBADF per man inotify(7).
+        HandleKind::TcpListener
+        | HandleKind::Epoll
+        | HandleKind::Timerfd
+        | HandleKind::Inotify
+        | HandleKind::Eventfd => {
+            // Answered before the buffer was looked at, above; here only so
+            // that this match stays exhaustive.
             errno::set_errno(errno::EBADF);
             return -1;
-        }
-        HandleKind::Eventfd => {
-            // Linux semantics: write on an eventfd requires an 8-byte
-            // buffer.  The bytes are interpreted as a host-endian u64
-            // delta added to the counter.  Writing 0xFFFF_FFFF_FFFF_FFFF
-            // (u64::MAX) is invalid (Linux EINVAL); writing 0 is a no-op
-            // but still legal.
-            if count < 8 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
-            let val = unsafe { core::ptr::read_unaligned(buf.cast::<u64>()) };
-            if val == u64::MAX {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            let r = crate::epoll::eventfd_kernel_write(entry.handle, val);
-            if r < 0 {
-                return errno::translate(r) as SsizeT;
-            }
-            return 8;
         }
         HandleKind::PtyMaster => {
             // Writing to the master delivers keystrokes into the slave's
@@ -866,6 +964,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // (`design-decisions.md` §259), and it is deliberate on both
                 // sides: bytes nobody can ever read are worth refusing
                 // early, bytes already printed are worth delivering late.
+                //
+                // No `SIGPIPE` with it: Linux sends none for a terminal --
+                // only pipes and stream sockets raise it.
                 errno::set_errno(errno::EPIPE);
                 return -1;
             }
@@ -5716,9 +5817,21 @@ fn tee_transfer_over<P: TeePipes>(pipes: &mut P, len: usize, nonblock: bool) -> 
             // `to_write <= chunk <= buf.len()`: `peek` returns at most what
             // it was given room for.
             let nw = pipes.write(buf.get(written..to_write).unwrap_or(&[]), nonblock);
+            if nw == errno::native::CHANNEL_CLOSED {
+                // The destination's readers are gone. Linux's `link_pipe`
+                // sends `SIGPIPE` whether or not anything was duplicated, and
+                // answers EPIPE only when nothing was -- a short transfer
+                // otherwise. (This was translated as a closed channel, which
+                // is not EPIPE, and sent no signal.)
+                if total > 0 || written > 0 {
+                    crate::signal::raise_sigpipe();
+                    return total.saturating_add(written) as isize;
+                }
+                return crate::signal::broken_pipe(false);
+            }
             if nw < 0 {
                 // Destination error.  If we've made progress, return it so the
-                // caller sees a short transfer (Linux behaviour on EAGAIN/EPIPE
+                // caller sees a short transfer (Linux behaviour on EAGAIN
                 // mid-tee).  Otherwise surface the error.
                 if total > 0 || written > 0 {
                     return total.saturating_add(written) as isize;
@@ -8771,6 +8884,221 @@ mod tests {
             src[..4096],
             "the reported bytes must be the right ones"
         );
+    }
+
+    /// A destination pipe whose readers are gone: Linux's `link_pipe` sends
+    /// `SIGPIPE` either way, and answers `EPIPE` when nothing was duplicated,
+    /// the count when something was. (It was a closed channel's errno, and
+    /// no signal.)
+    #[test]
+    fn tee_into_a_pipe_with_no_reader_raises_sigpipe() {
+        struct ReaderGone {
+            inner: FakePipes,
+            /// Writes accepted before the reader goes.
+            accepted: usize,
+        }
+        impl TeePipes for ReaderGone {
+            fn peek(&mut self, offset: u64, buf: &mut [u8]) -> i64 {
+                self.inner.peek(offset, buf)
+            }
+            fn write(&mut self, buf: &[u8], nb: bool) -> i64 {
+                if self.inner.writes >= self.accepted {
+                    self.inner.writes += 1;
+                    return errno::native::CHANNEL_CLOSED;
+                }
+                self.inner.write(buf, nb)
+            }
+            fn wait_readable(&mut self) -> i64 {
+                self.inner.wait_readable()
+            }
+        }
+        std::thread_local! {
+            static PIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+        }
+        // `replace`, not `set`: scripts/raced-globals.py matches a call by its
+        // name, and `set` here is also the umask model's writer.
+        extern "C" fn count_sigpipe(_sig: i32) {
+            PIPES.with(|p| p.replace(p.get() + 1));
+        }
+        use crate::signal::{SIGPIPE, SighandlerT, signal};
+        let old = signal(SIGPIPE, count_sigpipe as *const () as SighandlerT);
+
+        let mut p = ReaderGone {
+            inner: FakePipes::with_source(b"hello"),
+            accepted: 0,
+        };
+        errno::set_errno(0);
+        assert_eq!(tee_transfer_over(&mut p, 5, false), -1);
+        assert_eq!(errno::get_errno(), errno::EPIPE);
+        assert_eq!(PIPES.with(core::cell::Cell::get), 1);
+
+        // One chunk across, then the reader goes: the chunk is the answer,
+        // and the signal is sent all the same.
+        let src: Vec<u8> = (0..5_000u32).map(|i| (i % 251) as u8).collect();
+        let mut p = ReaderGone {
+            inner: FakePipes::with_source(&src),
+            accepted: 1,
+        };
+        errno::set_errno(0);
+        assert_eq!(tee_transfer_over(&mut p, src.len(), false), 4096);
+        assert_eq!(errno::get_errno(), 0);
+        assert_eq!(PIPES.with(core::cell::Cell::get), 2);
+
+        signal(SIGPIPE, old);
+    }
+
+    /// The kinds this library reads and writes itself answer a zero count
+    /// and a NULL buffer as Linux 6.6 does (measured): their own checks
+    /// first, the copy -- and so the fault -- last.
+    #[test]
+    fn eventfd_epoll_and_unconnected_sockets_answer_count_and_null_as_linux() {
+        std::thread_local! {
+            static PIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+        }
+        // `replace`, not `set`: scripts/raced-globals.py matches a call by its
+        // name, and `set` here is also the umask model's writer.
+        extern "C" fn count_sigpipe(_sig: i32) {
+            PIPES.with(|p| p.replace(p.get() + 1));
+        }
+        use crate::signal::{SIGPIPE, SighandlerT, signal};
+        let old = signal(SIGPIPE, count_sigpipe as *const () as SighandlerT);
+        let mut b = [0u8; 16];
+        let rd = |fd: Fd, buf: *mut u8, n: usize| {
+            errno::set_errno(0);
+            (read(fd, buf, n), errno::get_errno())
+        };
+        let wr = |fd: Fd, buf: *const u8, n: usize| {
+            errno::set_errno(0);
+            (write(fd, buf, n), errno::get_errno())
+        };
+        let null = core::ptr::null_mut::<u8>();
+
+        // eventfd: the count is checked first, then the buffer for a write.
+        let ev = fdtable::alloc_fd(HandleKind::Eventfd, 0x99).expect("fd table full");
+        assert_eq!(rd(ev, null, 4), (-1, errno::EINVAL));
+        assert_eq!(rd(ev, b.as_mut_ptr(), 0), (-1, errno::EINVAL));
+        assert_eq!(rd(ev, null, 0), (-1, errno::EINVAL));
+        assert_eq!(wr(ev, null, 4), (-1, errno::EINVAL));
+        assert_eq!(wr(ev, b.as_ptr(), 0), (-1, errno::EINVAL));
+        assert_eq!(wr(ev, null, 8), (-1, errno::EFAULT));
+        let _ = fdtable::close_fd(ev);
+
+        // epoll: no read and no write, whatever the count or buffer.
+        let ep = fdtable::alloc_fd(HandleKind::Epoll, 0x98).expect("fd table full");
+        for (r, w) in [
+            (rd(ep, null, 1), wr(ep, null, 1)),
+            (rd(ep, b.as_mut_ptr(), 0), wr(ep, b.as_ptr(), 0)),
+        ] {
+            assert_eq!((r, w), ((-1, errno::EINVAL), (-1, errno::EINVAL)));
+        }
+        let _ = fdtable::close_fd(ep);
+
+        // inotify: opened read-only, so any write is EBADF.
+        let ino = fdtable::alloc_fd(HandleKind::Inotify, 0x97).expect("fd table full");
+        assert_eq!(wr(ino, null, 1), (-1, errno::EBADF));
+        assert_eq!(wr(ino, b.as_ptr(), 0), (-1, errno::EBADF));
+        let _ = fdtable::close_fd(ino);
+
+        // A listener, and a TCP socket never connected: a zero-count read is
+        // 0, any other read ENOTCONN, and any write -- a zero count too --
+        // EPIPE with SIGPIPE.
+        let l = fdtable::alloc_fd(HandleKind::TcpListener, 0x77).expect("fd table full");
+        let t = fdtable::alloc_fd(HandleKind::TcpStream, 0).expect("fd table full");
+        for fd in [l, t] {
+            assert_eq!(rd(fd, b.as_mut_ptr(), 0), (0, 0), "{fd}");
+            assert_eq!(rd(fd, null, 1), (-1, errno::ENOTCONN), "{fd}");
+            PIPES.with(|p| p.replace(0));
+            assert_eq!(wr(fd, b.as_ptr(), 0), (-1, errno::EPIPE), "{fd}");
+            assert_eq!(wr(fd, null, 1), (-1, errno::EPIPE), "{fd}");
+            assert_eq!(PIPES.with(core::cell::Cell::get), 2, "{fd}");
+        }
+        let _ = fdtable::close_fd(l);
+        let _ = fdtable::close_fd(t);
+        signal(SIGPIPE, old);
+    }
+
+    /// A timerfd: a count under 8 is EINVAL; no expiry, non-blocking,
+    /// EAGAIN -- a NULL buffer too; an expiry is taken and then faults on a
+    /// NULL buffer, so the next read finds none (Linux 6.6, measured).
+    #[test]
+    fn a_timerfd_read_checks_the_count_then_faults_after_taking_the_ticks() {
+        use crate::epoll::{Itimerspec, TFD_NONBLOCK, timerfd_create, timerfd_settime};
+        let fd = timerfd_create(1, TFD_NONBLOCK);
+        assert!(fd >= 0);
+        let mut b = [0u8; 8];
+        let null = core::ptr::null_mut::<u8>();
+        let rd = |buf: *mut u8, n: usize| {
+            errno::set_errno(0);
+            (read(fd, buf, n), errno::get_errno())
+        };
+        assert_eq!(rd(null, 4), (-1, errno::EINVAL));
+        assert_eq!(rd(b.as_mut_ptr(), 0), (-1, errno::EINVAL));
+        assert_eq!(
+            rd(null, 8),
+            (-1, errno::EAGAIN),
+            "nothing to take, so nothing to fault on"
+        );
+        // Armed to expire at once: one tick.
+        let soon = Itimerspec {
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 1,
+            },
+        };
+        // SAFETY: a valid itimerspec; the old value is not wanted.
+        assert_eq!(
+            unsafe { timerfd_settime(fd, 0, &soon, core::ptr::null_mut()) },
+            0
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(rd(null, 8), (-1, errno::EFAULT));
+        assert_eq!(
+            rd(b.as_mut_ptr(), 8),
+            (-1, errno::EAGAIN),
+            "the tick was taken"
+        );
+        close(fd);
+    }
+
+    /// An inotify queue: empty and non-blocking is EAGAIN, a zero count
+    /// too; an event too long for the count is EINVAL; a NULL buffer takes
+    /// the one next event and faults (Linux 6.6, measured).
+    #[test]
+    fn an_inotify_read_answers_count_and_null_as_linux() {
+        use crate::epoll::{IN_CREATE, IN_NONBLOCK, inotify_init1, inotify_push_test_event};
+        let fd = inotify_init1(IN_NONBLOCK);
+        assert!(fd >= 0, "inotify_init1: {}", errno::get_errno());
+        let handle = fdtable::get_fd(fd).expect("the descriptor").handle;
+        let mut b = [0u8; 64];
+        let null = core::ptr::null_mut::<u8>();
+        let rd = |buf: *mut u8, n: usize| {
+            errno::set_errno(0);
+            (read(fd, buf, n), errno::get_errno())
+        };
+        assert_eq!(rd(null, 64), (-1, errno::EAGAIN));
+        assert_eq!(rd(b.as_mut_ptr(), 0), (-1, errno::EAGAIN));
+        inotify_push_test_event(handle, 1, IN_CREATE, b"a");
+        inotify_push_test_event(handle, 1, IN_CREATE, b"b");
+        assert_eq!(
+            rd(b.as_mut_ptr(), 0),
+            (-1, errno::EINVAL),
+            "an event is queued, and does not fit"
+        );
+        assert_eq!(
+            rd(null, 16),
+            (-1, errno::EINVAL),
+            "a 32-byte record does not fit 16"
+        );
+        assert_eq!(rd(null, 64), (-1, errno::EFAULT));
+        // One event was taken, the other is still there.
+        assert_eq!(rd(b.as_mut_ptr(), 64), (32, 0));
+        assert_eq!(b.get(16), Some(&b'b'));
+        assert_eq!(rd(b.as_mut_ptr(), 64), (-1, errno::EAGAIN));
+        close(fd);
     }
 
     #[test]

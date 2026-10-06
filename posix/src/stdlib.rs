@@ -1686,21 +1686,75 @@ pub use gnu_mkdtemp::mkdtemp;
 // system — execute a shell command
 // ---------------------------------------------------------------------------
 
+crate::perprocess::process_global! {
+    /// What `system` saved of `SIGINT`'s and `SIGQUIT`'s dispositions, and
+    /// how many calls are running, under [`system_lock_ptr`].
+    fn system_save_ptr() -> SystemSave = SystemSave {
+        users: 0,
+        intr: crate::signal::DEFAULT_SIGACTION,
+        quit: crate::signal::DEFAULT_SIGACTION,
+    };
+
+    /// The low-level lock over [`system_save_ptr`].
+    fn system_lock_ptr() -> core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+}
+
+/// `SIGINT`'s and `SIGQUIT`'s dispositions as the first of the `system`
+/// calls running found them, which the last puts back.
+struct SystemSave {
+    /// `system` calls running.
+    users: u32,
+    /// `SIGINT`'s action before the first.
+    intr: crate::signal::Sigaction,
+    /// `SIGQUIT`'s action before the first.
+    quit: crate::signal::Sigaction,
+}
+
+/// Run `f` on the saved dispositions, under their lock.
+fn with_system_save<R>(f: impl FnOnce(&mut SystemSave) -> R) -> R {
+    // SAFETY: this process's lock, an atomic.
+    let lock = unsafe { &*system_lock_ptr() };
+    crate::lowlevellock::lll_lock(lock);
+    // SAFETY: this process's record, which only this lock's holder touches.
+    let r = f(unsafe { &mut *system_save_ptr() });
+    crate::lowlevellock::lll_unlock(lock);
+    r
+}
+
 /// Execute a command using the system shell.
 ///
 /// If `command` is NULL, returns whether a shell is available (1 = yes,
-/// 0 = no).  Otherwise, spawns `/bin/sh -c "command"` via `posix_spawnp`
-/// and waits for completion, returning the child's wait status.
+/// 0 = no).  Otherwise runs `/bin/sh -c -- command` and waits for it: glibc's
+/// `do_system` (`stdlib/system.c`).
 ///
-/// Returns -1 on spawn failure (errno set), 127 if the shell could not
-/// be executed (matches POSIX convention), or the child's wait status
-/// on success.
+/// - The shell gets the caller's environment.  Until 2026-10-06 it got none:
+///   the call passed a NULL `envp`, which the kernel stores as "no
+///   environment", so a command ran without `PATH`, `HOME` or anything its
+///   caller had set -- the bug `execl` and its kin had until 2026-09-24.
+/// - `--` before the command, so one that begins with `-` is not an option
+///   to the shell.
+/// - While it waits, the caller ignores `SIGINT` and `SIGQUIT` and blocks
+///   `SIGCHLD`, as POSIX requires: a `^C` meant for the command does not end
+///   the program waiting for it, and a `SIGCHLD` handler cannot reap the
+///   shell first.  The shell gets `SIGINT` and `SIGQUIT` at their defaults --
+///   unless the caller had ignored them itself -- and the mask the caller had
+///   before `SIGCHLD` was blocked (`POSIX_SPAWN_SETSIGDEF`,
+///   `POSIX_SPAWN_SETSIGMASK`).  Threads calling `system` at once share one
+///   save: the first ignores the two signals and the last restores them.
+///   Until 2026-10-06 none of this was done.
+///
+/// Returns the shell's wait status; if the shell could not be started, the
+/// status of one that exited with 127, as POSIX has it, with `errno` the
+/// reason; -1 if it could not be waited for.
 ///
 /// # Safety
 ///
 /// `command` must be a valid null-terminated string (or NULL).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn system(command: *const u8) -> i32 {
+    use crate::signal::{SIG_BLOCK, SIG_IGN, SIG_SETMASK, SIGCHLD, SIGINT, SIGQUIT, Sigaction};
+    use crate::signal::{SigsetT, sigaction, sigaddset, sigprocmask};
+
     if command.is_null() {
         // POSIX: return non-zero if a command processor is available.
         // Try to stat /bin/sh to check.
@@ -1710,40 +1764,110 @@ pub extern "C" fn system(command: *const u8) -> i32 {
         return i32::from(ret == 0);
     }
 
-    // Build argv: ["sh", "-c", command, NULL].
-    // POSIX: system() must use /bin/sh directly, NOT search PATH.
-    // Searching PATH is a security vulnerability: a malicious PATH
-    // entry could redirect "sh" to an attacker-controlled binary.
-    let sh_path: *const u8 = c"/bin/sh".as_ptr().cast::<u8>();
-    let sh_name: *const u8 = c"sh".as_ptr().cast::<u8>();
-    let dash_c: *const u8 = c"-c".as_ptr().cast::<u8>();
-    let argv: [*const u8; 4] = [sh_name, dash_c, command, core::ptr::null()];
+    // The first call saves SIGINT's and SIGQUIT's actions and ignores both.
+    let ignore = Sigaction {
+        sa_handler: SIG_IGN,
+        ..crate::signal::DEFAULT_SIGACTION
+    };
+    let (intr, quit) = with_system_save(|save| {
+        if save.users == 0 {
+            // Neither can fail: a valid signal, a valid action, a local.
+            // SAFETY: valid actions and out-pointers.
+            unsafe {
+                let _ = sigaction(SIGINT, &raw const ignore, &raw mut save.intr);
+                let _ = sigaction(SIGQUIT, &raw const ignore, &raw mut save.quit);
+            }
+        }
+        save.users = save.users.saturating_add(1);
+        (save.intr.sa_handler, save.quit.sa_handler)
+    });
 
-    let mut pid: crate::types::PidT = 0;
+    // Block SIGCHLD; the old mask is the shell's.
+    let mut chld = SigsetT::EMPTY;
+    let mut old_mask = SigsetT::EMPTY;
+    // SAFETY: locals.  `sigaddset` with a valid signal and `sigprocmask` with
+    // SIG_BLOCK and valid sets cannot fail.
+    unsafe {
+        let _ = sigaddset(&raw mut chld, SIGCHLD);
+        let _ = sigprocmask(SIG_BLOCK, &raw const chld, &raw mut old_mask);
+    }
 
-    // Use posix_spawn (not posix_spawnp) to avoid PATH search.
-    let ret = crate::spawn::posix_spawn(
-        &raw mut pid,
-        sh_path,
-        core::ptr::null(), // file_actions
-        core::ptr::null(), // attrp
-        argv.as_ptr(),
-        core::ptr::null(), // envp (inherit)
+    // SIGINT and SIGQUIT at their defaults in the shell, unless the caller
+    // ignored them itself.
+    let mut reset = SigsetT::EMPTY;
+    // SAFETY: a local; valid signals.
+    unsafe {
+        if intr != SIG_IGN {
+            let _ = sigaddset(&raw mut reset, SIGINT);
+        }
+        if quit != SIG_IGN {
+            let _ = sigaddset(&raw mut reset, SIGQUIT);
+        }
+    }
+    // SAFETY: an all-zero attribute object is what `init` makes.
+    let mut attr = unsafe { core::mem::zeroed::<crate::spawn::PosixSpawnattrT>() };
+    // None of these can fail on a valid, local object with valid values.
+    let _ = crate::spawn::posix_spawnattr_init(&raw mut attr);
+    let _ = crate::spawn::posix_spawnattr_setsigmask(&raw mut attr, &raw const old_mask);
+    let _ = crate::spawn::posix_spawnattr_setsigdefault(&raw mut attr, &raw const reset);
+    let _ = crate::spawn::posix_spawnattr_setflags(
+        &raw mut attr,
+        crate::spawn::POSIX_SPAWN_SETSIGDEF | crate::spawn::POSIX_SPAWN_SETSIGMASK,
     );
 
-    if ret != 0 {
-        // posix_spawnp failed (errno already set by spawnp).
-        // POSIX says return as if the shell exited with status 127.
-        return 127_i32.wrapping_shl(8); // Encode as wait status: exit 127.
-    }
+    // POSIX: /bin/sh itself, never a search of PATH -- a hostile PATH entry
+    // could hand the command to a shell of its choosing.
+    let argv: [*const u8; 5] = [
+        c"sh".as_ptr().cast(),
+        c"-c".as_ptr().cast(),
+        c"--".as_ptr().cast(),
+        command,
+        core::ptr::null(),
+    ];
+    let mut pid: crate::types::PidT = 0;
+    let spawned = crate::spawn::posix_spawn(
+        &raw mut pid,
+        c"/bin/sh".as_ptr().cast(),
+        core::ptr::null(),
+        &raw const attr,
+        argv.as_ptr(),
+        crate::environ::current_environ(),
+    );
+    let _ = crate::spawn::posix_spawnattr_destroy(&raw mut attr);
 
-    // Wait for the child.
-    let mut status: i32 = 0;
-    let waited = crate::process::waitpid(pid, &raw mut status, 0);
-    if waited < 0 {
-        return -1;
-    }
+    let status = if spawned == 0 {
+        let mut status: i32 = 0;
+        loop {
+            let waited = crate::process::waitpid(pid, &raw mut status, 0);
+            if waited == pid {
+                break status;
+            }
+            if waited < 0 && crate::errno::get_errno() == crate::errno::EINTR {
+                continue;
+            }
+            break -1;
+        }
+    } else {
+        // An exit status of 127, as a wait status.
+        127_i32.wrapping_shl(8)
+    };
 
+    // The last call puts SIGINT and SIGQUIT back.
+    with_system_save(|save| {
+        save.users = save.users.saturating_sub(1);
+        if save.users == 0 {
+            // SAFETY: the actions saved above.
+            unsafe {
+                let _ = sigaction(SIGINT, &raw const save.intr, core::ptr::null_mut());
+                let _ = sigaction(SIGQUIT, &raw const save.quit, core::ptr::null_mut());
+            }
+        }
+    });
+    // Cannot fail: SIG_SETMASK and the mask saved above.
+    let _ = sigprocmask(SIG_SETMASK, &raw const old_mask, core::ptr::null_mut());
+    if spawned != 0 {
+        crate::errno::set_errno(spawned);
+    }
     status
 }
 
@@ -5649,6 +5773,92 @@ mod tests {
         let ret = system(core::ptr::null());
         // Result is either 0 (no shell) or non-zero (shell available).
         let _ = ret;
+    }
+
+    extern "C" fn on_int(_: i32) {}
+
+    /// Whatever happens to the shell, the caller gets back `SIGINT`'s and
+    /// `SIGQUIT`'s actions and its mask as they were.  On the host no
+    /// program can start, so this is the failed spawn's path: an exit of
+    /// 127 as a wait status, with `errno` the spawn's reason.
+    #[test]
+    fn test_system_restores_what_it_changed() {
+        use crate::signal::{
+            SIG_BLOCK, SIG_IGN, SIG_SETMASK, SIGCHLD, SIGINT, SIGQUIT, SIGUSR1, Sigaction, SigsetT,
+            sigaction, sigaddset, sigismember, sigprocmask,
+        };
+        let handler = on_int as *const () as usize;
+        let mine = Sigaction {
+            sa_handler: handler,
+            ..crate::signal::DEFAULT_SIGACTION
+        };
+        let ign = Sigaction {
+            sa_handler: SIG_IGN,
+            ..crate::signal::DEFAULT_SIGACTION
+        };
+        let mut usr1 = SigsetT::EMPTY;
+        let mut before = SigsetT::EMPTY;
+        // SAFETY: valid actions and locals.
+        unsafe {
+            assert_eq!(sigaction(SIGINT, &raw const mine, core::ptr::null_mut()), 0);
+            assert_eq!(sigaction(SIGQUIT, &raw const ign, core::ptr::null_mut()), 0);
+            assert_eq!(sigaddset(&raw mut usr1, SIGUSR1), 0);
+        }
+        assert_eq!(sigprocmask(SIG_BLOCK, &raw const usr1, &raw mut before), 0);
+
+        crate::errno::set_errno(0);
+        let status = system(c"exit 3".as_ptr().cast());
+        assert_eq!(status, 127 << 8, "the shell could not start here");
+        assert_ne!(crate::errno::get_errno(), 0, "and errno says why");
+
+        let mut now = crate::signal::DEFAULT_SIGACTION;
+        // SAFETY: an enquiry into a local.
+        assert_eq!(
+            unsafe { sigaction(SIGINT, core::ptr::null(), &raw mut now) },
+            0
+        );
+        assert_eq!(now.sa_handler, handler, "SIGINT's handler is back");
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { sigaction(SIGQUIT, core::ptr::null(), &raw mut now) },
+            0
+        );
+        assert_eq!(now.sa_handler, SIG_IGN, "SIGQUIT stays ignored");
+        let mut mask = SigsetT::EMPTY;
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut mask),
+            0
+        );
+        // SAFETY: a local.
+        unsafe {
+            assert_eq!(
+                sigismember(&raw const mask, SIGUSR1),
+                1,
+                "the caller's own block kept"
+            );
+            assert_eq!(
+                sigismember(&raw const mask, SIGCHLD),
+                0,
+                "SIGCHLD unblocked again"
+            );
+        }
+        assert_eq!(
+            with_system_save(|save| save.users),
+            0,
+            "no call left running"
+        );
+
+        // Put back what this test changed.
+        let dfl = crate::signal::DEFAULT_SIGACTION;
+        // SAFETY: valid actions.
+        unsafe {
+            assert_eq!(sigaction(SIGINT, &raw const dfl, core::ptr::null_mut()), 0);
+            assert_eq!(sigaction(SIGQUIT, &raw const dfl, core::ptr::null_mut()), 0);
+        }
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const before, core::ptr::null_mut()),
+            0
+        );
     }
 
     // -----------------------------------------------------------------------

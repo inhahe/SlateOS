@@ -478,6 +478,7 @@ pub mod pty;
 pub mod ptytab;
 pub mod pwd;
 pub mod random;
+pub mod rcmd;
 pub mod regex;
 pub(crate) mod rem_pio2_large;
 pub mod res_debug;

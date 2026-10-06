@@ -260,6 +260,12 @@ TYPE_OVERRIDES: dict[str, tuple[str, str, str]] = {
         "glibc's pthread_t is `unsigned long`, musl's `struct __pthread *`: a thread's "
         "8-byte handle either way",
     ),
+    "pthread_sigqueue": (
+        "int (unsigned long, int, union sigval)",
+        "int (pthread_t, int, union sigval)",
+        "as pthread_clockjoin_np's: glibc's pthread_t is `unsigned long`, musl's "
+        "`struct __pthread *`",
+    ),
     # And the GNU regex calls, whose regoff_t is wider on purpose: POSIX's,
     # as wide as ssize_t, where glibc's default is an int -- glibc's own
     # <regex.h> with _REGEX_LARGE_OFFSETS (design-decisions 1161).

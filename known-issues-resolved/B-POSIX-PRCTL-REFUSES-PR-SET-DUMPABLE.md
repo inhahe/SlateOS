@@ -1,6 +1,6 @@
 ## B-POSIX-PRCTL-REFUSES-PR-SET-DUMPABLE (lane B, 2026-10-02; the fix is lane D's)
 
-**Status:** OPEN -- lane D's to fix; asked in `requests/b-d-two-calls-gnu-timeout-makes-are-not-native-yet.md`.
+**Status:** FIXED 2026-10-05 by lane D -- `prctl` takes `PR_SET_DUMPABLE` and `PR_GET_DUMPABLE` over a flag this library keeps (`posix/src/unistd.rs`, `dumpable`), 1 from the start and again after `exec`, as Linux's is; the kernel's own copy needs a native call, asked in `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`. The reply is in `requests/b-d-two-calls-gnu-timeout-makes-are-not-native-yet.md`; on main since `a0b0df297`. This entry was not updated with it.
 
 **In short:** when a command run under `timeout` on SlateOS is killed by a
 signal that was not the time limit, `timeout` prints

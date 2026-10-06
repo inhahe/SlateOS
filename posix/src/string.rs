@@ -1671,12 +1671,15 @@ unsafe fn span_outside(s: *const u8, reject: *const u8) -> usize {
         return (unsafe { byte_or_nul(s, first) } as usize).wrapping_sub(s as usize);
     }
     // SAFETY: the caller's set string.
-    if let Some(set) = unsafe { SmallSet::of(reject) } {
+    if let Some(len) = unsafe { small_set_size(reject) } {
+        let mut storage = core::mem::MaybeUninit::uninit();
+        // SAFETY: `len` bytes of the caller's set string, at most sixteen.
+        let set = unsafe { small_set(&mut storage, reject, len) };
         let stop16 = |block: *const u8| {
             // SAFETY: `scan_aligned` passes an aligned block that holds a
             // readable byte.
             let bytes = unsafe { load_block(block) };
-            set.members(bytes) | zero_bytes(bytes)
+            members(set, bytes) | zero_bytes(bytes)
         };
         let stop64 = move |chunk: *const u8| four_blocks(chunk, stop16);
         // SAFETY: the caller's string; its terminator is a stop.
@@ -1696,54 +1699,67 @@ unsafe fn span_outside(s: *const u8, reject: *const u8) -> usize {
     }
 }
 
-/// A set of at most sixteen bytes, as vectors a block of a string is
-/// compared with: `strspn`'s and `strcspn`'s sets are almost always this
-/// small -- whitespace, a few separators, the digits.  Sixteen bytes of the
-/// string are tested a step, one `pcmpeqb` and `por` a member, where the
-/// bit set looks a byte up at a time.  A byte may be listed twice; it is
-/// then simply compared twice.
-struct SmallSet {
-    bytes: [__m128i; 16],
-    len: usize,
+// A SMALL SET: at most sixteen bytes, each broadcast to a vector that a
+// block of the string is compared with.  `strspn`'s and `strcspn`'s sets are
+// almost always this small -- whitespace, a few separators, the digits -- so
+// sixteen bytes of the string are tested a step, one `pcmpeqb` and `por` a
+// member, where the bit set looks a byte up at a time.  A byte listed twice
+// is simply compared twice.  The vectors are a plain array the caller keeps
+// in a local: kept in a struct, LLVM built the array and then copied it in,
+// a 256-byte `memcpy` on every call, and returned in an `Option`, zeroed it
+// first as well.
+
+/// How many bytes the C string `set` has, if at most sixteen: whether it is
+/// a small set.
+///
+/// # Safety
+///
+/// `set` is a readable C string.
+#[inline(always)]
+unsafe fn small_set_size(set: *const u8) -> Option<usize> {
+    // SAFETY: the caller's string, read to its terminator or 17 bytes.
+    let len = unsafe { length_within(set, 17) };
+    (len <= 16).then_some(len)
 }
 
-impl SmallSet {
-    /// The bytes of the C string `set`, if it has at most sixteen.
-    ///
-    /// # Safety
-    ///
-    /// `set` is a readable C string.
-    #[inline(always)]
-    unsafe fn of(set: *const u8) -> Option<Self> {
-        let mut bytes = [splat(0); 16];
-        let mut len = 0usize;
-        while len < 16 {
-            // SAFETY: up to the terminator, which returns.
-            let byte = unsafe { set.add(len).read() };
-            if byte == 0 {
-                return Some(Self { bytes, len });
-            }
-            if let Some(slot) = bytes.get_mut(len) {
-                *slot = splat(byte);
-            }
-            len = len.wrapping_add(1);
-        }
-        // SAFETY: the sixteen bytes before it were not the terminator.
-        (unsafe { set.add(16).read() } == 0).then_some(Self { bytes, len })
+/// The first `len` bytes of `set` (at most sixteen), each broadcast to a
+/// vector, written into `storage` where the caller keeps it: the small set,
+/// as a slice of it.  Only the vectors used are written, and nothing is
+/// moved -- `core::array::from_fn` built the array elsewhere and copied it
+/// in, 256 bytes a call.
+///
+/// # Safety
+///
+/// `set` readable for `len` bytes.
+#[inline(always)]
+unsafe fn small_set(
+    storage: &mut core::mem::MaybeUninit<[__m128i; 16]>,
+    set: *const u8,
+    len: usize,
+) -> &[__m128i] {
+    let base = storage.as_mut_ptr().cast::<__m128i>();
+    let len = len.min(16);
+    for i in 0..len {
+        // SAFETY: `i < len <= 16`, within `storage`; the caller's bytes.
+        unsafe { base.add(i).write(splat(set.add(i).read())) };
     }
+    // SAFETY: the first `len` vectors are written, and `storage` outlives
+    // the slice.
+    unsafe { core::slice::from_raw_parts(base, len) }
+}
 
-    /// The bytes of `block` that are members, as a 16-bit mask.
-    #[inline(always)]
-    fn members(&self, block: __m128i) -> u32 {
-        use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_movemask_epi8, _mm_or_si128};
-        let mut any = splat(0);
-        for byte in self.bytes.iter().take(self.len) {
-            // SAFETY: register arithmetic; SSE2 is in the target.
-            any = unsafe { _mm_or_si128(any, _mm_cmpeq_epi8(block, *byte)) };
-        }
-        // SAFETY: as above.  pmovmskb's 16 bits: never negative.
-        unsafe { _mm_movemask_epi8(any) as u32 }
+/// The bytes of `block` that are in `set` (its members, broadcast), as a
+/// 16-bit mask.
+#[inline(always)]
+fn members(set: &[__m128i], block: __m128i) -> u32 {
+    use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_movemask_epi8, _mm_or_si128};
+    let mut any = splat(0);
+    for byte in set {
+        // SAFETY: register arithmetic; SSE2 is in the target.
+        any = unsafe { _mm_or_si128(any, _mm_cmpeq_epi8(block, *byte)) };
     }
+    // SAFETY: as above.  pmovmskb's 16 bits: never negative.
+    unsafe { _mm_movemask_epi8(any) as u32 }
 }
 
 /// The sixteen bytes of the 16-byte-aligned block at `block`, in a vector.
@@ -1794,7 +1810,7 @@ fn four_blocks(chunk: *const u8, stop16: impl Fn(*const u8) -> u32) -> u32 {
 /// Compute the length of the initial segment of `s` consisting
 /// entirely of bytes in `accept`.
 ///
-/// Sixteen bytes a step against a set of up to sixteen ([`SmallSet`]);
+/// Sixteen bytes a step against a set of up to sixteen (a small set);
 /// a byte a step, looked up in a 256-bit set, against a larger one.
 ///
 /// # Safety
@@ -1807,11 +1823,14 @@ pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> SizeT {
         return 0;
     }
     // SAFETY: the caller's set string.
-    if let Some(set) = unsafe { SmallSet::of(accept) } {
+    if let Some(len) = unsafe { small_set_size(accept) } {
+        let mut storage = core::mem::MaybeUninit::uninit();
+        // SAFETY: `len` bytes of the caller's set string, at most sixteen.
+        let set = unsafe { small_set(&mut storage, accept, len) };
         let stop16 = |block: *const u8| {
             // SAFETY: `scan_aligned` passes an aligned block that holds a
             // readable byte.
-            !set.members(unsafe { load_block(block) }) & 0xFFFF
+            !members(set, unsafe { load_block(block) }) & 0xFFFF
         };
         let stop64 = move |chunk: *const u8| four_blocks(chunk, stop16);
         // SAFETY: the caller's string.  The set never holds the terminator,
@@ -4509,7 +4528,7 @@ mod tests {
                         assert_eq!(strncpy(d, p, len + 1), d);
                         assert_eq!(core::slice::from_raw_parts(d, len + 1), &s[..]);
                     }
-                    // A small set's sixteen-a-step scan (`SmallSet`), over a
+                    // A small set's sixteen-a-step scan, over a
                     // string of its members to the page's last byte.
                     let members = terminated(&vec![b'a'; len]);
                     let m = g.at_end(&members);

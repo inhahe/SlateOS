@@ -346,6 +346,12 @@ mod abi_layout;
 #[cfg(test)]
 mod accounts_oracle;
 
+// Pages that fault, against which the string and wide-string scanners'
+// tests set their strings (`string.rs`, `wchar.rs`). Test-only, on the hosts
+// the tests run on.
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod guard_pages;
+
 pub mod aio;
 pub mod aliases;
 pub mod alloca;

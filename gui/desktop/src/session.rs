@@ -4212,7 +4212,7 @@ impl<T: Transport> ShellSession<T> {
                     self.request(request)?;
                 }
             }
-            ShellAction::LogOut => self.log_out(),
+            ShellAction::LogOut => self.log_out()?,
         }
         Ok(())
     }
@@ -4224,7 +4224,19 @@ impl<T: Transport> ShellSession<T> {
     /// A machine with nobody to sign in as has no login screen to return to,
     /// and so nowhere to log out to; the press does nothing rather than leave
     /// a screen nothing can unlock (`design-decisions.md` §824).
-    fn log_out(&mut self) {
+    ///
+    /// What the one leaving copied is not left for the next to paste: the
+    /// shell's clipboard is emptied, and the system's with it -- the
+    /// greeter's own fields paste, and so does every program the next
+    /// session starts. Handed over as an empty copy while the shell has the
+    /// keyboard, as it does when its power menu was used; a refusal (another
+    /// program had it) leaves the system's as it was, as any refused copy
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// As [`EventLoop::set_clipboard`], but for a refusal.
+    fn log_out(&mut self) -> Result<(), Error<T>> {
         // The screen's size now, not at start: the display may have changed
         // resolution since, and the shell follows it.
         self.login = Self::greeter(
@@ -4241,8 +4253,11 @@ impl<T: Transport> ShellSession<T> {
             self.sync_login_background();
             // In the settings of the one leaving, the only ones there are.
             self.sound_event("desktop-logout");
+            guitk::clipboard::set_text("");
+            self.give_system_clipboard()?;
         }
         self.dirty = true;
+        Ok(())
     }
 
     /// Sound the shell's event `name` as the user's appearance settings say

@@ -7922,6 +7922,30 @@ fn signing_in_names_the_user_and_logging_out_forgets_them() {
     assert_eq!(session.shell().user_name(), "");
 }
 
+/// **What the one leaving copied is not left for the next to paste**: log
+/// out empties the shell's clipboard and the system's.
+#[test]
+fn logging_out_empties_the_clipboard() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(session.login().is_none());
+    guitk::clipboard::set_text("a secret Alice copied");
+    session.pump().expect("pump");
+    assert_eq!(
+        desktop.borrow().clipboard.as_deref(),
+        Some("a secret Alice copied")
+    );
+
+    session.act(crate::ShellAction::LogOut).expect("log out");
+    assert!(session.login().is_some());
+    assert_eq!(guitk::clipboard::text(), "", "the shell's own");
+    assert_eq!(
+        desktop.borrow().clipboard.as_deref(),
+        Some(""),
+        "and the system's"
+    );
+}
+
 // ---- the desktop's notes ---------------------------------------------------------
 
 /// **A note is written in through the desktop's own surface, and is on disk as

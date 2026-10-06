@@ -570,7 +570,7 @@ pub fn x_of(doc: &RichDoc, line: &Line, at: usize, base: f32) -> f32 {
 
 /// How far across its line `at` is: after the character before it
 /// (`upstream`) or before the character after it -- the same place but
-/// where the writing direction changes (see [`piece_at`]).
+/// where the writing direction changes (see `piece_at`).
 #[must_use]
 pub fn x_at(doc: &RichDoc, line: &Line, at: usize, upstream: bool, base: f32) -> f32 {
     match piece_at(line, at, upstream) {

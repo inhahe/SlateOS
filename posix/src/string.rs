@@ -1639,17 +1639,34 @@ impl ByteSet {
 /// `s` and `reject` are readable C strings.
 #[inline(always)]
 unsafe fn span_outside(s: *const u8, reject: *const u8) -> usize {
+    // SAFETY: the caller's set string, read to its terminator at most.
+    let first = unsafe { reject.read() };
+    if first == 0 {
+        // SAFETY: the caller's string.
+        return unsafe { strlen(s) };
+    }
+    // SAFETY: the byte after one that was not the terminator.
+    if unsafe { reject.add(1).read() } == 0 {
+        // One byte, the commonest case: `strchrnul`'s scan.
+        // SAFETY: the caller's string.
+        return (unsafe { byte_or_nul(s, first) } as usize).wrapping_sub(s as usize);
+    }
+    // SAFETY: the caller's set string.
+    if let Some(set) = unsafe { SmallSet::of(reject) } {
+        let stop16 = |block: *const u8| {
+            // SAFETY: `scan_aligned` passes an aligned block that holds a
+            // readable byte.
+            let bytes = unsafe { load_block(block) };
+            set.members(bytes) | zero_bytes(bytes)
+        };
+        let stop64 = move |chunk: *const u8| four_blocks(chunk, stop16);
+        // SAFETY: the caller's string; its terminator is a stop.
+        let end = unsafe { scan_aligned(s, stop16, stop64) };
+        return (end as usize).wrapping_sub(s as usize);
+    }
     // SAFETY: the caller's strings.  The set holds the terminator, so the
     // loop stops at `s`'s at the latest.
     unsafe {
-        let first = reject.read();
-        if first == 0 {
-            return strlen(s);
-        }
-        if reject.add(1).read() == 0 {
-            // One byte, the commonest case: `strchrnul`'s scan.
-            return (byte_or_nul(s, first) as usize).wrapping_sub(s as usize);
-        }
         let mut set = ByteSet::of(reject);
         set.insert(0);
         let mut i = 0usize;
@@ -1660,29 +1677,133 @@ unsafe fn span_outside(s: *const u8, reject: *const u8) -> usize {
     }
 }
 
+/// A set of at most sixteen bytes, as vectors a block of a string is
+/// compared with: `strspn`'s and `strcspn`'s sets are almost always this
+/// small -- whitespace, a few separators, the digits.  Sixteen bytes of the
+/// string are tested a step, one `pcmpeqb` and `por` a member, where the
+/// bit set looks a byte up at a time.  A byte may be listed twice; it is
+/// then simply compared twice.
+struct SmallSet {
+    bytes: [__m128i; 16],
+    len: usize,
+}
+
+impl SmallSet {
+    /// The bytes of the C string `set`, if it has at most sixteen.
+    ///
+    /// # Safety
+    ///
+    /// `set` is a readable C string.
+    #[inline(always)]
+    unsafe fn of(set: *const u8) -> Option<Self> {
+        let mut bytes = [splat(0); 16];
+        let mut len = 0usize;
+        while len < 16 {
+            // SAFETY: up to the terminator, which returns.
+            let byte = unsafe { set.add(len).read() };
+            if byte == 0 {
+                return Some(Self { bytes, len });
+            }
+            if let Some(slot) = bytes.get_mut(len) {
+                *slot = splat(byte);
+            }
+            len = len.wrapping_add(1);
+        }
+        // SAFETY: the sixteen bytes before it were not the terminator.
+        (unsafe { set.add(16).read() } == 0).then_some(Self { bytes, len })
+    }
+
+    /// The bytes of `block` that are members, as a 16-bit mask.
+    #[inline(always)]
+    fn members(&self, block: __m128i) -> u32 {
+        use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_movemask_epi8, _mm_or_si128};
+        let mut any = splat(0);
+        for byte in self.bytes.iter().take(self.len) {
+            // SAFETY: register arithmetic; SSE2 is in the target.
+            any = unsafe { _mm_or_si128(any, _mm_cmpeq_epi8(block, *byte)) };
+        }
+        // SAFETY: as above.  pmovmskb's 16 bits: never negative.
+        unsafe { _mm_movemask_epi8(any) as u32 }
+    }
+}
+
+/// The sixteen bytes of the 16-byte-aligned block at `block`, in a vector.
+///
+/// Assembly, as the scanners' loads are: past a string's terminator, they
+/// leave the object as Rust sees it.
+///
+/// # Safety
+///
+/// `block` is 16-byte aligned and holds a readable byte.
+#[inline(always)]
+unsafe fn load_block(block: *const u8) -> __m128i {
+    let bytes: __m128i;
+    // SAFETY: the caller's readable, aligned block.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {bytes}, xmmword ptr [{block}]",
+            block = in(reg) block,
+            bytes = out(xmm_reg) bytes,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    bytes
+}
+
+/// The zero bytes of `block`, as a 16-bit mask.
+#[inline(always)]
+fn zero_bytes(block: __m128i) -> u32 {
+    use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_movemask_epi8};
+    // SAFETY: register arithmetic; SSE2 is in the target.  pmovmskb's 16
+    // bits: never negative.
+    unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(block, splat(0))) as u32 }
+}
+
+/// `scan_aligned`'s 64-byte test made of four 16-byte ones: nonzero when
+/// any of the chunk's blocks holds a stop.  For `stop16`s with no cheaper
+/// 64-byte form; `scan_aligned` gives it only chunks whose blocks it may
+/// read.
+#[inline(always)]
+fn four_blocks(chunk: *const u8, stop16: impl Fn(*const u8) -> u32) -> u32 {
+    stop16(chunk)
+        | stop16(chunk.wrapping_add(16))
+        | stop16(chunk.wrapping_add(32))
+        | stop16(chunk.wrapping_add(48))
+}
+
 /// Compute the length of the initial segment of `s` consisting
 /// entirely of bytes in `accept`.
 ///
-/// Each byte is looked up in a 256-bit set of `accept`'s bytes.
+/// Sixteen bytes a step against a set of up to sixteen ([`SmallSet`]);
+/// a byte a step, looked up in a 256-bit set, against a larger one.
 ///
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> SizeT {
-    // SAFETY: the caller's strings.  Neither the one byte nor the set is
-    // the terminator, so each loop stops at `s`'s at the latest.
+    // SAFETY: the caller's set string.
+    if unsafe { accept.read() } == 0 {
+        return 0;
+    }
+    // SAFETY: the caller's set string.
+    if let Some(set) = unsafe { SmallSet::of(accept) } {
+        let stop16 = |block: *const u8| {
+            // SAFETY: `scan_aligned` passes an aligned block that holds a
+            // readable byte.
+            !set.members(unsafe { load_block(block) }) & 0xFFFF
+        };
+        let stop64 = move |chunk: *const u8| four_blocks(chunk, stop16);
+        // SAFETY: the caller's string.  The set never holds the terminator,
+        // so it is a stop.
+        let end = unsafe { scan_aligned(s, stop16, stop64) };
+        return (end as usize).wrapping_sub(s as usize);
+    }
+    // SAFETY: the caller's strings.  The set never holds the terminator, so
+    // the loop stops at `s`'s at the latest.
     unsafe {
-        let first = accept.read();
-        let mut i = 0usize;
-        if first != 0 && accept.add(1).read() == 0 {
-            // One byte, the commonest case: no set to build.
-            while s.add(i).read() == first {
-                i = i.wrapping_add(1);
-            }
-            return i;
-        }
         let set = ByteSet::of(accept);
+        let mut i = 0usize;
         while set.contains(s.add(i).read()) {
             i = i.wrapping_add(1);
         }
@@ -4366,6 +4487,15 @@ mod tests {
                         assert_eq!(strcat(d, p), d);
                         assert_eq!(strncpy(d, p, len + 1), d);
                         assert_eq!(core::slice::from_raw_parts(d, len + 1), &s[..]);
+                    }
+                    // A small set's sixteen-a-step scan (`SmallSet`), over a
+                    // string of its members to the page's last byte.
+                    let members = terminated(&vec![b'a'; len]);
+                    let m = g.at_end(&members);
+                    // SAFETY: a terminated string ending at its page's end.
+                    unsafe {
+                        assert_eq!(strspn(m, b"ab\0".as_ptr()), len);
+                        assert_eq!(strcspn(m, b"xyz\0".as_ptr()), len);
                     }
                 }
                 // Runs with no terminator, ending at the page's end.

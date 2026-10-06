@@ -324,47 +324,69 @@ fn a_tab_is_brought_to_the_front() {
 #[test]
 fn a_folded_group_opens_as_a_panel() {
     let mut ribbon = ribbon();
-    // The widest ribbon in which Clipboard -- the last to fold -- is folded.
-    let mut width = 900.0;
+    // The widest ribbon in which Styles -- the first to fold -- is folded,
+    // and Clipboard, the last, is not.
+    let mut width = 2000.0;
     while width > 100.0
         && !access(&mut ribbon, width)
             .automation(0.0, 0.0)
             .walk()
-            .any(|n| n.id == RibbonPart::Folded(0))
+            .any(|n| n.id == RibbonPart::Folded(2))
     {
         width -= 10.0;
     }
     let mut tool = access(&mut ribbon, width);
-    let folded = node(&tool, RibbonPart::Folded(0));
+    let folded = node(&tool, RibbonPart::Folded(2));
     assert_eq!(
         (folded.name.as_str(), folded.description.as_deref()),
-        ("Clipboard", Some("folded"))
+        ("Styles", Some("folded"))
+    );
+    assert!(
+        tool.automation(0.0, 0.0)
+            .walk()
+            .any(|n| n.id == RibbonPart::Group(0)),
+        "the premise: Clipboard is not folded"
     );
     assert_eq!(act(&mut tool, folded.id, Action::Press), Ok(None));
     assert!(tool.ribbon.panel_open());
     let panel = node(&tool, RibbonPart::Panel);
     assert!(
-        panel.walk().any(|n| n.id == RibbonPart::Command(CUT)),
-        "Cut, in the panel"
+        panel.walk().any(|n| n.id == RibbonPart::Choice(STYLES, 0)),
+        "the gallery, in the panel"
     );
-    let inside = node(&tool, RibbonPart::Command(CUT));
-    let outside = tool
-        .automation(0.0, 0.0)
+    assert_eq!(
+        act(&mut tool, RibbonPart::Command(CUT), Action::Press),
+        Err(Refusal::Hidden),
+        "outside the open panel"
+    );
+    assert!(tool.ribbon.panel_open(), "refused, the panel stays");
+    assert_eq!(
+        act(&mut tool, RibbonPart::Choice(STYLES, 0), Action::Choose),
+        Ok(Some(RibbonEvent::Chose {
+            id: STYLES,
+            index: 0
+        }))
+    );
+}
+
+/// **A gallery's chosen choice is said chosen**, and the others not.
+#[test]
+fn a_gallerys_choice_is_said_chosen() {
+    let mut ribbon = ribbon();
+    ribbon.set_selected(STYLES, Some(1));
+    let tool = access(&mut ribbon, 2000.0);
+    let chosen: Vec<Option<Value>> = node(&tool, RibbonPart::Command(STYLES))
         .children
         .iter()
-        .filter(|n| matches!(n.id, RibbonPart::Group(_)))
-        .flat_map(|g| g.walk())
-        .find(|n| matches!(n.id, RibbonPart::Command(_)) && n.enabled)
-        .map(|n| n.id);
-    if let Some(outside) = outside {
-        assert_eq!(
-            act(&mut tool, outside, Action::Press),
-            Err(Refusal::Hidden),
-            "outside the open panel"
-        );
-    }
+        .filter(|n| matches!(n.id, RibbonPart::Choice(..)))
+        .map(|n| n.value.clone())
+        .collect();
     assert_eq!(
-        act(&mut tool, inside.id, Action::Press),
-        Ok(Some(RibbonEvent::Command(CUT)))
+        chosen,
+        [
+            Some(Value::Chosen(false)),
+            Some(Value::Chosen(true)),
+            Some(Value::Chosen(false))
+        ]
     );
 }

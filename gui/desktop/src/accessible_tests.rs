@@ -1285,3 +1285,56 @@ fn the_list_a_shut_down_waits_on_is_answered_by_its_buttons() {
     assert!(matches!(went, Ok(Some(ShellAction::Launch(_)))), "{went:?}");
     assert!(anyway.ending.is_none());
 }
+
+/// **A zone whose middle lies under the open layout picker is refused**: a
+/// click there would choose a layout, not tile the window. Several layouts
+/// put a zone's middle under the picker; the first is enough.
+#[test]
+fn a_zone_under_the_open_picker_is_not_pressed() {
+    let mut shell = two_windows();
+    assert!(shell.toggle_zone_overlay(), "the premise: it opens");
+    let covered = SnapLayoutPreset::all().iter().find_map(|&preset| {
+        shell.snap.set_layout(preset);
+        shell.snap.show_picker();
+        shell.snap.layout().zones.iter().find_map(|zone| {
+            let (x, y) = (zone.x + zone.width / 2.0, zone.y + zone.height / 2.0);
+            shell.snap.picker_hit(x, y).then_some(zone.id)
+        })
+    });
+    let zone = covered.expect("the premise: a zone's middle under the picker");
+    assert_eq!(
+        press(&mut shell, ShellPart::Control(Hit::SnapZone(zone))),
+        Err(Refusal::Hidden)
+    );
+    assert!(shell.snap.is_overlay_visible(), "nothing chosen");
+}
+
+/// **The list a shut down waits on is not pressed under what the shell asks
+/// for a press first**: the overview, and the notification pane's scrim.
+#[test]
+fn the_shut_down_list_is_not_pressed_under_the_overview_or_the_pane() {
+    let listing = || {
+        let mut shell = two_windows();
+        let _asked = shell.choose_power(crate::power::PowerChoice::ShutDown);
+        shell.osd_clock_ms = shell.osd_clock_ms.saturating_add(crate::ENDING_GRACE_MS);
+        assert!(shell.tick_ending(), "the premise: the list goes up");
+        shell
+    };
+    let mut overview = listing();
+    overview
+        .overview
+        .show(crate::overview::OverviewMode::AllWindows);
+    assert_eq!(
+        press(&mut overview, ShellPart::Control(Hit::EndingCancel)),
+        Err(Refusal::Hidden),
+        "under the overview"
+    );
+    let mut pane = listing();
+    pane.toggle_notifications();
+    assert_eq!(
+        press(&mut pane, ShellPart::Control(Hit::EndingCancel)),
+        Err(Refusal::Hidden),
+        "under the pane's scrim"
+    );
+    assert!(pane.ending_listing(), "still waiting");
+}

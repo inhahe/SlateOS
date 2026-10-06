@@ -2691,8 +2691,11 @@ authors never wrote a single automation handler.
   character picker implements it. The colour dialog since 2026-10-06
   (`guitk::colorpicker::ColorPart`): its square's two axes, the hue and
   opacity bars, the hex field, the eyedropper, the tabs and their
-  sliders, the presets, the recent colours, OK and Cancel. Not yet: the
-  font picker, the file dialog and the shell's surfaces.*
+  sliders, the presets, the recent colours, OK and Cancel. And the file
+  dialog (`guitk::dialog::DialogTarget`): Back, Forward and Up, the
+  address, the places, the headings that sort, the files -- each with
+  what it is -- the name of a Save dialog, its button and Cancel. Not
+  yet: the font picker and the shell's surfaces.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

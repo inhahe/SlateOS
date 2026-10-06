@@ -216,6 +216,9 @@ pub enum DialogTarget {
     /// and is recorded after the list's rows, so a click on a completion
     /// reaches the bar rather than the file drawn under it.
     AddressCompletions,
+    /// The sidebar where no place is: what a press there reaches -- nothing
+    /// that acts -- and what tools call the list of places.
+    Places,
     /// A quick-access shortcut in the sidebar, by position in the sidebar list.
     Shortcut(usize),
     /// A column header in the file list, which sorts by that column.
@@ -1619,6 +1622,13 @@ impl FileDialog {
         // part that matters here — so that a shortcut scrolled out of sight
         // cannot still be clicked. `Frame::hit` trims to the clip in force.
         frame.clip(Rect::new(0.0, top, scaled(SIDEBAR_WIDTH), height));
+        // The sidebar itself, under its places: a press where no place is
+        // does nothing, as on the dialog's background, and a tool names the
+        // places' list by it.
+        frame.hit(
+            DialogTarget::Places,
+            Rect::new(0.0, top, scaled(SIDEBAR_WIDTH), height),
+        );
         let mut y = top + scaled(PADDING);
         for (index, qa) in self.quick_access.iter().enumerate() {
             frame.push(RenderCommand::Text {
@@ -4336,6 +4346,7 @@ mod tests {
             DialogTarget::Forward,
             DialogTarget::Up,
             DialogTarget::AddressBar,
+            DialogTarget::Places,
             DialogTarget::Shortcut(0),
             DialogTarget::Header(SortColumn::Name),
             DialogTarget::Header(SortColumn::Size),

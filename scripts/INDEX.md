@@ -128,6 +128,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-text-ink.py` | Refuse an accent-family colour that reaches a text site without `ink()`. |
 | `scripts/check-text-mode-writes.py` | Refuse any text-mode write under `scripts/` that does not pass `newline=`. |
 | `scripts/check-tick-wiring.py` | Find apps that keep time but never receive the clock. |
+| `scripts/check-undeclared-modules.py` | Refuse a `.rs` file under a crate's `src/` that no `mod` declares. |
 | `scripts/check-unreachable-mutators.py` | Find accounting-module mutators that nothing outside their own module calls. |
 | `scripts/check-untested-crates.py` | Refuse a NEW crate that ships with no tests at all. |
 | `scripts/check-unused-exports.py` | Report library exports that no other crate names. |
@@ -510,4 +511,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_500 scripts._
+_501 scripts._

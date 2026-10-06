@@ -184,6 +184,10 @@
 #      thousands of lines is not a gate. (Lane B wrote it as 51 on its own
 #      branch on 2026-09-16; main's 51 came first, and the merge of
 #      2026-10-01 numbered this one after it.)
+#  53. Refuse a `.rs` file under a crate's `src/` that no `mod` declares.
+#      Cargo compiles what a crate's roots declare and nothing else, so such
+#      a file is built, tested, linted and formatted by nothing, without a
+#      word -- the file dialog's automation sat that way, called done.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -5777,15 +5781,6 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# The gate tally, printed here because here is after every gate.  See the note
-# where it used to live, above gate 19's history.
-# ---------------------------------------------------------------------------
-n_ran=0
-n_skipped=0
-for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
-for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
-
-# ---------------------------------------------------------------------------
 # Gate 48 -- accent-family text drawn without `ink()`.
 #
 # check-text-ink.py, which boot-test.sh already runs.  This adds it here for
@@ -6098,6 +6093,86 @@ To push anyway:
 EOF
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# Gate 53 -- undeclared modules.  A `.rs` file no `mod` declares.
+#
+# `check-undeclared-modules.py`.  Cargo compiles what a crate's roots declare
+# and nothing else; a file under `src/` that no `mod` line names is not an
+# error and not a warning -- rustc never opens it, so `cargo test`, `clippy`
+# and `rustfmt` never do either, and in review it reads exactly like code.
+#
+# WHAT IT CATCHES.  On 2026-10-06 lane C's file-dialog automation --
+# gui/toolkit/src/dialog/accessible.rs and its test file -- was committed,
+# called done in roadmap-detailed.md, and compiled by nothing for hours,
+# because dialog.rs never said `mod accessible;`.  No gate here could see it:
+# `scan-orphan-modules.py` judges a module by whether anything names its
+# public items, and a file whose whole content is an `impl` has none.  Found
+# only when the shell tried to call it.
+#
+# COST.  About 20 s over the whole tree, cold; one walk and a regex pass per
+# file.  Scoped to pushes that touch a `.rs` file, a manifest (whose `path =`
+# entries are roots) or the checker itself.
+#
+# The self-test runs first, as the gates before it do: a detector whose
+# tokenizer has lost its place in a string declares everything after it and
+# reports a clean tree.  It carries fifteen cases, among them the string
+# continued across a line that did exactly that while it was being written.
+# ---------------------------------------------------------------------------
+
+undecl="${repo_root:-.}/scripts/check-undeclared-modules.py"
+skip_undecl=0
+# Bypass: ALLOW_UNDECLARED_MODULES=1 git push origin <branch>
+if [ "${ALLOW_UNDECLARED_MODULES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNDECLARED_MODULES=1 set - skipping the undeclared-module gate." >&2
+    skip_undecl=1
+fi
+[ -n "$py" ] || skip_undecl=1
+[ -f "$undecl" ] || skip_undecl=1
+touches '*.rs' '*Cargo.toml' scripts/check-undeclared-modules.py || skip_undecl=1
+# No `pushed_shas` guard: one run over the worktree, as gates 50 and 51 do.
+note_gate undeclared-modules "$skip_undecl"
+
+undecl_failed=0
+if [ "$skip_undecl" != "1" ]; then
+    if ! run_checker undeclared-modules-selftest "$py" "$undecl" --self-test; then
+        echo "pre-push: check-undeclared-modules.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        undecl_failed=1
+    elif ! run_checker undeclared-modules "$py" "$undecl"; then
+        undecl_failed=1
+    fi
+fi
+if [ "$undecl_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a source file is compiled by nothing.
+
+The file is named above.  No \`mod\` line in its crate names it, so cargo never
+opens it: its tests never run, clippy never reads it, and nothing says so.
+Either declare it where it belongs -- \`mod name;\` in its parent, or a
+\`#[path = "..."]\` on one -- or delete it.  A file left out on purpose is
+pinned in the checker's PINNED with why; a pin that excuses nothing (the
+file is declared now, or gone) is refused too.
+
+    python scripts/check-undeclared-modules.py
+
+To push anyway:
+    ALLOW_UNDECLARED_MODULES=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# The gate tally, counted here because here is after every gate.  See the note
+# where it used to live, above gate 19's history.  It was counted above gate
+# 48 until 2026-10-06, with the printing left down here -- so gates 48 to 51
+# ran and were left out of the count, each added below the line that said it
+# was after them all.
+# ---------------------------------------------------------------------------
+n_ran=0
+n_skipped=0
+for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
+for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
 
 echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
 [ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2

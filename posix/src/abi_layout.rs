@@ -948,6 +948,20 @@ pub(crate) fn abi_asserts() -> String {
         sg_adm,
         sg_mem
     );
+    // Its thirteen one-bit fields are `bits` here, which C cannot take the
+    // offset of; the size, and `user` after them, place them.
+    abi!(
+        out,
+        hdrs,
+        crate::printf_h::PrintfInfo,
+        "struct printf_info",
+        "printf.h",
+        prec,
+        width,
+        spec,
+        user,
+        pad
+    );
     abi!(
         out,
         hdrs,

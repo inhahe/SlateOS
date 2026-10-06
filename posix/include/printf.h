@@ -1,7 +1,8 @@
 /*
  * SlateOS: <printf.h>, which musl does not have -- glibc's window onto its
- * printf engine: the argument types a format takes, parse_printf_format
- * (posix/src/printf_h.rs).
+ * printf engine: the argument types a format takes (parse_printf_format),
+ * and conversions, modifiers and types a program registers itself, with
+ * printf_size to register (posix/src/printf_h.rs).
  */
 
 #ifndef _SLATEOS_OVERLAY_WARNINGS
@@ -49,6 +50,14 @@ typedef int printf_arginfo_function(const struct printf_info *__info, size_t __n
                                     int *__argtypes);
 typedef void printf_va_arg_function(void *__mem, va_list *__ap);
 
+int register_printf_specifier(int __spec, printf_function __func,
+                              printf_arginfo_size_function __arginfo);
+int register_printf_function(int __spec, printf_function __func,
+                             printf_arginfo_function __arginfo)
+    __attribute__((__deprecated__));
+int register_printf_modifier(const wchar_t *__str);
+int register_printf_type(printf_va_arg_function __fct);
+
 size_t parse_printf_format(const char *__restrict __fmt, size_t __n,
                            int *__restrict __argtypes);
 
@@ -70,6 +79,11 @@ enum {
 #define PA_FLAG_LONG (1 << 9)
 #define PA_FLAG_SHORT (1 << 10)
 #define PA_FLAG_PTR (1 << 11)
+
+int printf_size(FILE *__restrict __fp, const struct printf_info *__info,
+                const void *const *__restrict __args);
+int printf_size_info(const struct printf_info *__restrict __info, size_t __n,
+                     int *__restrict __argtypes);
 
 #ifdef __cplusplus
 }

@@ -657,6 +657,46 @@ pub(crate) struct Args<'a> {
     va: Option<&'a mut VaList>,
     /// Set for a format with positional arguments.
     positional: Option<PositionalReader<'a>>,
+    /// Set for a format read with registered conversions in effect: its
+    /// arguments, already read ([`format_registered`]).
+    values: Option<ValuesReader<'a>>,
+}
+
+/// One argument of a format read with registered conversions in effect,
+/// as glibc's `union printf_arg` holds it -- 16 bytes, aligned to 16, the
+/// value at its start -- and as a registered handler is given a pointer
+/// to it: `*(const int *) args[0]` reads an `int`, and a registered
+/// type's is a pointer to its memory (`*(void **) args[0]`).
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub(crate) union ArgValue {
+    /// `int`, `wint_t`: the low four bytes.
+    int: i32,
+    /// `long`, `long long`, a pointer: the low eight.
+    word: u64,
+    double: f64,
+    long_double: crate::x87::LongDouble,
+    bytes: [u8; 16],
+}
+
+impl ArgValue {
+    const ZERO: Self = Self { bytes: [0; 16] };
+}
+
+/// The arguments of a format read with registered conversions in effect,
+/// read once and in order, by type: the one a fetch takes is the one
+/// [`Args::select`] named.
+struct ValuesReader<'a> {
+    values: &'a [ArgValue],
+    cursor: Option<usize>,
+}
+
+impl ValuesReader<'_> {
+    /// The argument selected, by position, or none.
+    fn take(&mut self) -> Option<ArgValue> {
+        let p = self.cursor.take()?;
+        self.values.get(p.checked_sub(1)?).copied()
+    }
 }
 
 impl<'a> Args<'a> {
@@ -672,6 +712,7 @@ impl<'a> Args<'a> {
         Self {
             va,
             positional: None,
+            values: None,
         }
     }
 
@@ -688,6 +729,7 @@ impl<'a> Args<'a> {
             Self {
                 va: Some(unsafe { &mut *va }),
                 positional: None,
+                values: None,
             }
         }
     }
@@ -697,6 +739,7 @@ impl<'a> Args<'a> {
         Self {
             va: None,
             positional: None,
+            values: None,
         }
     }
 
@@ -707,6 +750,9 @@ impl<'a> Args<'a> {
         if let Some(r) = self.positional.as_mut() {
             r.cursor = position;
         }
+        if let Some(v) = self.values.as_mut() {
+            v.cursor = position;
+        }
     }
 
     /// Next integer/pointer argument: its whole 8-byte slot.
@@ -716,6 +762,11 @@ impl<'a> Args<'a> {
     /// destination pointer. A narrower integer is the slot's low bits, which
     /// the caller takes ([`signed_arg`], [`unsigned_arg`]).
     pub(crate) fn int(&mut self) -> u64 {
+        if let Some(v) = self.values.as_mut() {
+            // SAFETY: every bit pattern of the union's first eight bytes is
+            // a `u64`; an `int` stored there has its high half zero.
+            return v.take().map_or(0, |a| unsafe { a.word });
+        }
         if let Some(r) = self.positional.as_mut() {
             let n = r.take();
             return r.table.int(n);
@@ -729,6 +780,10 @@ impl<'a> Args<'a> {
 
     /// Next `double` argument, as raw bits.
     fn double(&mut self) -> u64 {
+        if let Some(v) = self.values.as_mut() {
+            // SAFETY: as in `int`: any eight bytes are a `u64`.
+            return v.take().map_or(0, |a| unsafe { a.word });
+        }
         if let Some(r) = self.positional.as_mut() {
             let n = r.take();
             return r.table.double(n);
@@ -742,6 +797,14 @@ impl<'a> Args<'a> {
 
     /// Next `long double` argument.
     fn long_double(&mut self) -> crate::x87::LongDouble {
+        if let Some(v) = self.values.as_mut() {
+            // SAFETY: `LongDouble` is plain integers, any bytes a value.
+            return v
+                .take()
+                .map_or(crate::x87::LongDouble::from_bits(0, 0), |a| unsafe {
+                    a.long_double
+                });
+        }
         if let Some(r) = self.positional.as_mut() {
             let n = r.take();
             return r.table.long_double(n);
@@ -1590,6 +1653,7 @@ pub(crate) enum Count {
 /// One conversion's specification as written, before any argument is
 /// read: what [`parse_spec`] produces, and what a format with positional
 /// arguments is scanned for ([`Positional::scan`]).
+#[derive(Clone, Copy)]
 pub(crate) struct RawSpec {
     /// `n$`: the argument the conversion formats, by position.
     pub(crate) position: Option<usize>,
@@ -1601,6 +1665,9 @@ pub(crate) struct RawSpec {
     /// after a `*`, `$` or not -- is past [`INT_MAX`]: the call fails,
     /// `EOVERFLOW`, as glibc's `read_int` makes it fail.
     pub(crate) overflow: bool,
+    /// The bit of the modifier registered with `register_printf_modifier`
+    /// the specification has in place of a length, or 0 (`<printf.h>`).
+    pub(crate) user: u16,
 }
 
 /// C's `INT_MAX`: the largest position, width or precision a format may
@@ -1725,8 +1792,22 @@ pub(crate) fn parse_spec(fmt: *const u8, fpos: &mut usize) -> RawSpec {
         None
     };
 
-    // SAFETY: as for `at`.
-    let length = unsafe { parse_length(fmt, fpos) };
+    // A modifier a program registered (`<printf.h>`), where the format has
+    // one, is read in place of a built-in length, as glibc's parser reads it.
+    let mut user = 0u16;
+    let registered = if crate::printf_h::modifiers_registered() {
+        crate::printf_h::match_modifier(fmt, *fpos)
+    } else {
+        None
+    };
+    let length = if let Some((bit, len)) = registered {
+        user = bit;
+        *fpos = fpos.wrapping_add(len);
+        Length::Int
+    } else {
+        // SAFETY: as for `at`.
+        unsafe { parse_length(fmt, fpos) }
+    };
 
     RawSpec {
         position,
@@ -1735,6 +1816,7 @@ pub(crate) fn parse_spec(fmt: *const u8, fpos: &mut usize) -> RawSpec {
         precision,
         length,
         overflow,
+        user,
     }
 }
 
@@ -2189,6 +2271,11 @@ fn format_into(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
     if fmt.is_null() {
         return -1;
     }
+    // Once a program has registered a conversion, a modifier or a type
+    // (`<printf.h>`), every format is read as glibc's then reads every one.
+    if crate::printf_h::any_registered() {
+        return format_registered(dst, fmt, args);
+    }
     // A format that names its arguments by position is scanned whole before
     // anything is written, and reads them through the table that makes.
     let start = args.va.as_deref().copied();
@@ -2206,10 +2293,717 @@ fn format_into(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
                     cursor: None,
                     posn: 0,
                 }),
+                values: None,
             };
             format_specs(dst, fmt, &mut positional)
         }
         Ok(None) => format_specs(dst, fmt, args),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registered conversions (`<printf.h>`): glibc's positional pass
+// ---------------------------------------------------------------------------
+
+/// A `malloc`'d array of `T`s, freed when dropped: what [`format_registered`]
+/// keeps a format's specifications and arguments in, their count known only
+/// once the format is read. `malloc`'s 16-byte alignment is enough for
+/// every `T` it is used with ([`ArgValue`] the most).
+struct Scratch<T: Copy> {
+    ptr: *mut T,
+    len: usize,
+}
+
+impl<T: Copy> Scratch<T> {
+    /// `len` copies of `fill`, or `None` without the memory (`errno`
+    /// `ENOMEM`).
+    fn filled(len: usize, fill: T) -> Option<Self> {
+        let Some(bytes) = len.checked_mul(core::mem::size_of::<T>()) else {
+            crate::errno::set_errno(crate::errno::ENOMEM);
+            return None;
+        };
+        let ptr = crate::malloc::malloc(bytes.max(1)).cast::<T>();
+        if ptr.is_null() {
+            crate::errno::set_errno(crate::errno::ENOMEM);
+            return None;
+        }
+        for i in 0..len {
+            // SAFETY: `ptr` has room for `len` `T`s, aligned (see above).
+            unsafe { ptr.add(i).write(fill) };
+        }
+        Some(Self { ptr, len })
+    }
+
+    fn as_slice(&self) -> &[T] {
+        // SAFETY: `len` initialised `T`s at `ptr`, owned by `self`.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        // SAFETY: as in `as_slice`, borrowed mutably through `self`.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl<T: Copy> Drop for Scratch<T> {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` came from `malloc` and is freed once.
+        unsafe { crate::malloc::free(self.ptr.cast()) };
+    }
+}
+
+/// One specification of a format read with registered conversions in
+/// effect -- glibc's `struct printf_spec`: where it is, as written, and its
+/// arguments' places and the first one's type ([`crate::printf_h::spec_args`]).
+#[derive(Clone, Copy)]
+struct RegSpec {
+    /// The specification's `%`, and its conversion character (or the NUL).
+    pct: usize,
+    conv_at: usize,
+    raw: RawSpec,
+    conv: u8,
+    info: crate::printf_h::PrintfInfo,
+    width_arg: Option<usize>,
+    prec_arg: Option<usize>,
+    ndata: usize,
+    data_arg: usize,
+    data_type: i32,
+    size: i32,
+}
+
+impl RegSpec {
+    const EMPTY: Self = Self {
+        pct: 0,
+        conv_at: 0,
+        raw: RawSpec {
+            position: None,
+            flags: FormatFlags::new(),
+            width: Count::Given(0),
+            precision: None,
+            length: Length::Int,
+            overflow: false,
+            user: 0,
+        },
+        conv: 0,
+        info: crate::printf_h::PrintfInfo {
+            prec: -1,
+            width: 0,
+            spec: 0,
+            bits: 0,
+            user: 0,
+            pad: 0x20,
+        },
+        width_arg: None,
+        prec_arg: None,
+        ndata: 0,
+        data_arg: 0,
+        data_type: 0,
+        size: -1,
+    };
+}
+
+/// [`format_into`] once a conversion, a modifier or a type is registered
+/// (`<printf.h>`): glibc's `printf_positional`, which glibc then takes for
+/// every format.
+///
+/// Every specification is read and its arguments typed first -- by the
+/// arginfo function registered for its conversion, or as the built-in
+/// conversions type them. Then every argument is read, in order, by its
+/// type, a registered type by its registered reader ([`read_arg`]). Then
+/// each specification is formatted: by the handler registered for its
+/// conversion, which writes to a stream that writes here
+/// ([`call_handler`]), or -- with none, or one that answers -2 -- as the
+/// engine formats it, from the arguments read. It is glibc's positional
+/// pass throughout, so a format cut short is written back (`abc%` is
+/// `abc%`), and a `w` with no width C23 allows fails the call before
+/// anything is written.
+fn format_registered(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
+    use crate::printf_h::PA_INT;
+    // Every specification begins with a `%`: their count bounds the
+    // specifications'.
+    let mut percents = 0usize;
+    let mut len = 0usize;
+    loop {
+        // SAFETY: `fmt` is NUL-terminated (the callers' contract); this
+        // stops at the NUL.
+        match unsafe { *fmt.add(len) } {
+            0 => break,
+            b'%' => percents = percents.saturating_add(1),
+            _ => {}
+        }
+        len = len.saturating_add(1);
+    }
+    let Some(mut specs) = Scratch::filled(percents, RegSpec::EMPTY) else {
+        dst.failed = true;
+        return -1;
+    };
+    let wide = dst.kind != OutKind::Bytes;
+
+    // 1. Every specification, and the places and types of its arguments.
+    let mut nspecs = 0usize;
+    let mut posn = 0usize;
+    let mut max_ref = 0usize;
+    let mut fpos = 0usize;
+    while fpos < len {
+        // SAFETY: `fpos < len`, before the NUL.
+        if unsafe { *fmt.add(fpos) } != b'%' {
+            fpos = fpos.saturating_add(1);
+            continue;
+        }
+        let pct = fpos;
+        fpos = fpos.saturating_add(1);
+        let raw = parse_spec(fmt, &mut fpos);
+        // SAFETY: `parse_spec` stopped at the conversion, or at the NUL.
+        let conv = unsafe { *fmt.add(fpos) };
+        if raw.length == Length::Invalid {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            dst.failed = true;
+            return -1;
+        }
+        let a = crate::printf_h::spec_args(&raw, conv, wide, &mut posn, &mut max_ref);
+        let Some(slot) = specs.as_mut_slice().get_mut(nspecs) else {
+            break;
+        };
+        *slot = RegSpec {
+            pct,
+            conv_at: fpos,
+            raw,
+            conv,
+            info: a.info,
+            width_arg: a.width_arg,
+            prec_arg: a.prec_arg,
+            ndata: a.ndata,
+            data_arg: a.data_arg,
+            data_type: a.data_type,
+            size: a.size,
+        };
+        nspecs = nspecs.saturating_add(1);
+        if conv == 0 {
+            break;
+        }
+        fpos = fpos.saturating_add(1);
+    }
+    let read = specs.as_slice().get(..nspecs).unwrap_or_default();
+
+    // How many arguments: glibc's count -- and, past it, every one a
+    // specification takes, which glibc's own array would overrun for a
+    // numbered conversion taking several.
+    let mut nargs = posn.max(max_ref);
+    for s in read {
+        let ends = [
+            s.width_arg.map(|w| w.saturating_add(1)),
+            s.prec_arg.map(|p| p.saturating_add(1)),
+            (s.ndata > 0).then(|| s.data_arg.saturating_add(s.ndata)),
+        ];
+        for end in ends.into_iter().flatten() {
+            nargs = nargs.max(end);
+        }
+    }
+
+    // 2. Every argument's type -- a gap's is an `int`, as glibc reads one --
+    // then its value, read in order.
+    let (Some(mut types), Some(mut sizes)) =
+        (Scratch::filled(nargs, PA_INT), Scratch::filled(nargs, 0i32))
+    else {
+        dst.failed = true;
+        return -1;
+    };
+    for s in read {
+        let t = types.as_mut_slice();
+        for i in [s.width_arg, s.prec_arg].into_iter().flatten() {
+            if let Some(slot) = t.get_mut(i) {
+                *slot = PA_INT;
+            }
+        }
+        match s.ndata {
+            0 => {}
+            1 => {
+                if let Some(slot) = t.get_mut(s.data_arg) {
+                    *slot = s.data_type;
+                }
+                if let Some(slot) = sizes.as_mut_slice().get_mut(s.data_arg) {
+                    *slot = s.size;
+                }
+            }
+            // More than one: the arginfo function types them all, asked
+            // again with room for them, as glibc asks it.
+            n => {
+                if s.data_arg.saturating_add(n) <= nargs {
+                    // SAFETY: `data_arg + n <= nargs`, the arrays' length.
+                    let (at, size_at) = unsafe {
+                        (
+                            types.as_mut_slice().as_mut_ptr().add(s.data_arg),
+                            sizes.as_mut_slice().as_mut_ptr().add(s.data_arg),
+                        )
+                    };
+                    let _ = crate::printf_h::arginfo(s.conv, &s.info, n, at, size_at);
+                }
+            }
+        }
+    }
+    // A registered type's memory: one block, 16-byte units, at least one
+    // for each, so that every reader is given memory of its own.
+    let mut user_units = 0usize;
+    for (&ty, &size) in types.as_slice().iter().zip(sizes.as_slice()) {
+        if !reads_builtin(ty) && crate::printf_h::va_arg_reader(ty).is_some() {
+            user_units = user_units.saturating_add(units_for(size));
+        }
+    }
+    let (Some(mut user), Some(mut values)) = (
+        Scratch::filled(user_units, ArgValue::ZERO),
+        Scratch::filled(nargs, ArgValue::ZERO),
+    ) else {
+        dst.failed = true;
+        return -1;
+    };
+    let mut user_at = 0usize;
+    for k in 0..nargs {
+        let ty = types.as_slice().get(k).copied().unwrap_or(PA_INT);
+        let size = sizes.as_slice().get(k).copied().unwrap_or(0);
+        let v = read_arg(args, ty, size, &mut user, &mut user_at);
+        if let Some(slot) = values.as_mut_slice().get_mut(k) {
+            *slot = v;
+        }
+    }
+
+    // 3. Each specification, formatted.
+    let values = values.as_slice();
+    let mut from_values = Args {
+        va: None,
+        positional: None,
+        values: Some(ValuesReader {
+            values,
+            cursor: None,
+        }),
+    };
+    let int_at = |i: usize| -> i32 {
+        // SAFETY: an `int`'s four bytes, or zeros.
+        values.get(i).map_or(0, |v| unsafe { v.int })
+    };
+    let mut text_from = 0usize;
+    for s in read {
+        // SAFETY: `text_from <= s.pct < len`: the format's own bytes.
+        emit_bytes(dst, unsafe {
+            core::slice::from_raw_parts(fmt.add(text_from), s.pct.saturating_sub(text_from))
+        });
+        if dst.failed {
+            break;
+        }
+        if s.raw.overflow {
+            crate::errno::set_errno(crate::errno::EOVERFLOW);
+            dst.failed = true;
+            break;
+        }
+        // The `*`s, as the arguments say: a negative width is `-` and its
+        // magnitude, a negative precision none.
+        let mut flags = s.raw.flags;
+        let mut info = s.info;
+        let width = match (s.width_arg, s.raw.width) {
+            (Some(w), _) => {
+                let v = int_at(w);
+                if v < 0 {
+                    flags.left_align = true;
+                    info.bits |= crate::printf_h::PrintfInfo::LEFT;
+                }
+                // glibc's `width *= -1`, INT_MIN staying itself.
+                info.width = v.wrapping_abs();
+                usize::try_from(v.unsigned_abs()).unwrap_or(usize::MAX)
+            }
+            (None, Count::Given(w)) => w,
+            (None, Count::Star(_)) => 0,
+        };
+        let precision = match (s.prec_arg, s.raw.precision) {
+            (Some(p), _) => {
+                let v = int_at(p);
+                info.prec = if v < 0 { -1 } else { v };
+                usize::try_from(v).ok()
+            }
+            (None, Some(Count::Given(p))) => Some(p),
+            (None, _) => None,
+        };
+        let spec = FormatSpec {
+            flags,
+            width,
+            precision,
+            length: s.raw.length,
+            position: (s.ndata > 0).then(|| s.data_arg.saturating_add(1)),
+        };
+        if s.conv == 0 {
+            // The positional pass writes a specification cut short back.
+            format_unknown(dst, &spec, 0);
+            text_from = s.conv_at;
+            break;
+        }
+        let mut builtin = true;
+        if let Some(h) = crate::printf_h::handler(s.conv) {
+            let done = call_handler(dst, h, &info, values, s.data_arg, s.ndata);
+            if done != -2 {
+                builtin = false;
+                if done < 0 {
+                    // The handler has set `errno`, as glibc's contract asks.
+                    dst.failed = true;
+                }
+            }
+        }
+        if builtin {
+            dispatch_spec(dst, fmt, s.conv_at, &spec, &mut from_values);
+        }
+        text_from = s.conv_at.saturating_add(1);
+        if dst.failed {
+            break;
+        }
+    }
+    if !dst.failed {
+        // SAFETY: `text_from <= len`: the format's own bytes, to its end.
+        emit_bytes(dst, unsafe {
+            core::slice::from_raw_parts(fmt.add(text_from), len.saturating_sub(text_from))
+        });
+    }
+    i32::try_from(dst.pos).unwrap_or_else(|_| {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        -1
+    })
+}
+
+/// 16-byte units for a registered type's `size` bytes: at least one.
+fn units_for(size: i32) -> usize {
+    usize::try_from(size).unwrap_or(0).div_ceil(16).max(1)
+}
+
+/// Whether [`read_arg`] reads type `ty` itself, as one of glibc's own.
+const fn reads_builtin(ty: i32) -> bool {
+    use crate::printf_h::{
+        PA_CHAR, PA_DOUBLE, PA_FLAG_LONG, PA_FLAG_LONG_DOUBLE, PA_FLAG_LONG_LONG, PA_FLAG_PTR,
+        PA_FLAG_SHORT, PA_FLOAT, PA_INT, PA_POINTER, PA_STRING, PA_WCHAR, PA_WSTRING,
+    };
+    matches!(
+        ty,
+        PA_WCHAR | PA_CHAR | PA_INT | PA_FLOAT | PA_DOUBLE | PA_STRING | PA_WSTRING | PA_POINTER
+    ) || ty == PA_INT | PA_FLAG_SHORT
+        || ty == PA_INT | PA_FLAG_LONG
+        || ty == PA_INT | PA_FLAG_LONG_LONG
+        || ty == PA_DOUBLE | PA_FLAG_LONG_DOUBLE
+        || ty & PA_FLAG_PTR != 0
+}
+
+/// One argument of type `ty`, read from `args` as glibc's
+/// `printf_positional` reads it: an `int` -- and what C promotes to one, a
+/// `char`, a `short`, a `wint_t` -- its four bytes; a `long`, a `long long`
+/// and every pointer eight; a `double` (and a promoted `float`); a `long
+/// double`; a registered type by its reader, into memory of `user`'s -- at
+/// least `size` bytes -- the value then a pointer to it. A type nothing
+/// reads is zero, and the `va_list` is left where it is, as glibc leaves it.
+fn read_arg(
+    args: &mut Args,
+    ty: i32,
+    size: i32,
+    user: &mut Scratch<ArgValue>,
+    user_at: &mut usize,
+) -> ArgValue {
+    use crate::printf_h::{
+        PA_CHAR, PA_DOUBLE, PA_FLAG_LONG, PA_FLAG_LONG_DOUBLE, PA_FLAG_LONG_LONG, PA_FLAG_PTR,
+        PA_FLAG_SHORT, PA_FLOAT, PA_INT, PA_POINTER, PA_STRING, PA_WCHAR, PA_WSTRING,
+    };
+    let mut v = ArgValue::ZERO;
+    let Some(va) = args.va.as_deref_mut() else {
+        return v;
+    };
+    // SAFETY: each read takes the argument the format says comes next, of
+    // the type it says -- the `va_list` contract `Args::new` carries.
+    unsafe {
+        if matches!(ty, PA_WCHAR | PA_CHAR | PA_INT) || ty == PA_INT | PA_FLAG_SHORT {
+            // The truncation is the conversion: an `int` is the slot's low
+            // half.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            {
+                v.int = va_arg_int(va) as u32 as i32;
+            }
+        } else if ty == PA_INT | PA_FLAG_LONG
+            || ty == PA_INT | PA_FLAG_LONG_LONG
+            || matches!(ty, PA_STRING | PA_WSTRING | PA_POINTER)
+            || ty & PA_FLAG_PTR != 0
+        {
+            v.word = va_arg_int(va);
+        } else if matches!(ty, PA_FLOAT | PA_DOUBLE) {
+            v.word = va_arg_double(va);
+        } else if ty == PA_DOUBLE | PA_FLAG_LONG_DOUBLE {
+            v.long_double = va_arg_long_double(va);
+        } else if let Some(reader) = crate::printf_h::va_arg_reader(ty) {
+            let units = units_for(size);
+            let end = user_at.saturating_add(units);
+            if let Some(mem) = user.as_mut_slice().get_mut(*user_at..end) {
+                let mem = mem.as_mut_ptr().cast::<core::ffi::c_void>();
+                reader(mem, va);
+                v.word = mem as u64;
+            }
+            *user_at = end;
+        }
+    }
+    v
+}
+
+/// Call the registered handler `h` for one specification -- `info`, and
+/// its arguments `values[from..from + n]` -- as glibc's `function_invoke`
+/// calls one: with pointers to the arguments, and a stream that writes
+/// here, wide for the wide family, closed after, which writes out what it
+/// holds. The handler's answer, or -1 when the stream could not be made or
+/// its writes failed.
+fn call_handler(
+    dst: &mut FmtOutput,
+    h: crate::printf_h::PrintfFunction,
+    info: &crate::printf_h::PrintfInfo,
+    values: &[ArgValue],
+    from: usize,
+    n: usize,
+) -> i32 {
+    let Some(mut ptrs) = Scratch::filled(n, core::ptr::null::<core::ffi::c_void>()) else {
+        return -1;
+    };
+    for (k, slot) in ptrs.as_mut_slice().iter_mut().enumerate() {
+        *slot = values
+            .get(from.saturating_add(k))
+            .map_or(core::ptr::null(), |v| core::ptr::from_ref(v).cast());
+    }
+    let wide = dst.kind != OutKind::Bytes;
+    let io = crate::stdio::CookieIoFunctions {
+        read: None,
+        write: Some(write_to_output),
+        seek: None,
+        close: None,
+    };
+    // From here until the stream is closed `dst` is reached only through
+    // this pointer, by the stream's writes.
+    let cookie: *mut FmtOutput = dst;
+    // SAFETY: "w" is a mode, and the cookie is `dst`, live until the stream
+    // is closed below.
+    let fp = unsafe { crate::stdio::fopencookie(cookie.cast(), b"w\0".as_ptr(), io) };
+    if fp.is_null() {
+        return -1;
+    }
+    if wide {
+        crate::stdio::fwide(fp, 1);
+    }
+    // SAFETY: `h` is the handler the program registered for this
+    // conversion, called as its contract says: a stream, the
+    // specification, and `n` pointers to its arguments.
+    let done = unsafe { h(fp, info, ptrs.as_slice().as_ptr()) };
+    if crate::stdio::fclose(fp) != 0 {
+        return -1;
+    }
+    done
+}
+
+/// A handler stream's write: the bytes, emitted to the [`FmtOutput`] its
+/// cookie is.
+unsafe extern "C" fn write_to_output(
+    cookie: *mut core::ffi::c_void,
+    buf: *const u8,
+    size: usize,
+) -> isize {
+    // SAFETY: the cookie is the `FmtOutput` `call_handler` made the stream
+    // for, live, and reached by nothing else while the stream is open; `buf`
+    // holds `size` bytes (the stream's contract).
+    let dst = unsafe { &mut *cookie.cast::<FmtOutput>() };
+    // SAFETY: as above.
+    emit_bytes(dst, unsafe { core::slice::from_raw_parts(buf, size) });
+    if dst.failed {
+        -1
+    } else {
+        isize::try_from(size).unwrap_or(isize::MAX)
+    }
+}
+
+/// What [`crate::printf_h::printf_size`] writes: the value divided down, or
+/// `nan`, or `inf` and whether it is negative.
+pub(crate) enum SizeValue {
+    Finite(FloatArg),
+    Nan,
+    Inf(bool),
+}
+
+/// `printf_size`'s value, read and divided: by 1000 (`upper`) or 1024,
+/// while it is at least that and a unit is left (eight), in its own type --
+/// glibc divides a `long double` as one. The result, and how many
+/// divisions: the unit's index.
+///
+/// # Safety
+///
+/// `value` points to a `long double` if `long`, else to a `double`.
+pub(crate) unsafe fn size_scale(
+    value: *const core::ffi::c_void,
+    long: bool,
+    upper: bool,
+) -> (SizeValue, usize) {
+    const UNITS: usize = 8;
+    let divisor = if upper { 1000.0 } else { 1024.0 };
+    let mut tag = 0usize;
+    if long {
+        // SAFETY: the caller's contract.
+        let mut x = unsafe { value.cast::<crate::x87::LongDouble>().read_unaligned() };
+        if x.is_nan() {
+            return (SizeValue::Nan, 0);
+        }
+        if x.is_infinite() {
+            return (SizeValue::Inf(x.is_sign_negative()), 0);
+        }
+        let d = crate::x87::LongDouble::from_f64(divisor);
+        while x >= d && tag < UNITS {
+            // Floating division of a finite value by 1000 or 1024: it can
+            // neither trap nor overflow, and rounds as glibc's does.
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                x = x / d;
+            }
+            tag = tag.saturating_add(1);
+        }
+        (SizeValue::Finite(FloatArg::Long(x)), tag)
+    } else {
+        // SAFETY: the caller's contract.
+        let mut x = unsafe { value.cast::<f64>().read_unaligned() };
+        if x.is_nan() {
+            return (SizeValue::Nan, 0);
+        }
+        if x.is_infinite() {
+            return (SizeValue::Inf(x.is_sign_negative()), 0);
+        }
+        while x >= divisor && tag < UNITS {
+            x /= divisor;
+            tag = tag.saturating_add(1);
+        }
+        (SizeValue::Finite(FloatArg::Double(x)), tag)
+    }
+}
+
+/// Write `value` and `unit` to `fp` as glibc's `printf_size` does, by
+/// `info`: a special as `nan` or `inf` padded to the larger of the width and
+/// the precision; a number as `%f` with precision 3 unless one is given,
+/// then the unit's letter -- with `-`, the unit before the padding. The
+/// count written, or -1.
+///
+/// # Safety
+///
+/// `fp` must be a stream.
+pub(crate) unsafe fn printf_size_write(
+    fp: *mut u8,
+    info: &crate::printf_h::PrintfInfo,
+    value: SizeValue,
+    unit: u8,
+) -> i32 {
+    use crate::printf_h::PrintfInfo;
+    let has = |bit: u16| info.bits & bit != 0;
+    let left = has(PrintfInfo::LEFT);
+    let mut out = SizeOut { fp, done: 0 };
+    match value {
+        SizeValue::Nan | SizeValue::Inf(_) => {
+            let negative = matches!(value, SizeValue::Inf(true));
+            let text: &[u8] = if matches!(value, SizeValue::Nan) {
+                b"nan"
+            } else {
+                b"inf"
+            };
+            let mut width = info.prec.max(info.width);
+            let sign: Option<&[u8]> = if negative {
+                Some(b"-")
+            } else if has(PrintfInfo::SHOWSIGN) {
+                Some(b"+")
+            } else if has(PrintfInfo::SPACE) {
+                Some(b" ")
+            } else {
+                None
+            };
+            if sign.is_some() {
+                width = width.saturating_sub(1);
+            }
+            width = width.saturating_sub(3);
+            let ok = (left || out.pad(width))
+                && sign.is_none_or(|s| out.put(s))
+                && out.put(text)
+                && (!left || out.pad(width));
+            if ok { out.done } else { -1 }
+        }
+        SizeValue::Finite(arg) => {
+            let prec = usize::try_from(info.prec).unwrap_or(3);
+            let flags = FormatFlags {
+                left_align: left,
+                zero_pad: info.pad == 0x30,
+                force_sign: has(PrintfInfo::SHOWSIGN),
+                space_sign: has(PrintfInfo::SPACE),
+                alt_form: has(PrintfInfo::ALT),
+                group: has(PrintfInfo::GROUP),
+                i18n: has(PrintfInfo::I18N),
+            };
+            // With `-`, the unit goes before the padding: the number is
+            // written without the width, and the padding after the unit.
+            let unit_first = left && info.pad == 0x20;
+            let width = if unit_first {
+                0
+            } else {
+                usize::try_from(info.width.saturating_sub(1)).unwrap_or(0)
+            };
+            let n = fprint_f(fp, arg, &flags, width, prec);
+            if n <= 0 {
+                return n;
+            }
+            out.done = n;
+            if !out.put(&[unit]) {
+                return -1;
+            }
+            if unit_first && info.width > out.done {
+                let short = info.width.saturating_sub(out.done);
+                if !out.pad(short) {
+                    return -1;
+                }
+            }
+            out.done
+        }
+    }
+}
+
+/// [`printf_size_write`]'s writes to its stream, counted.
+struct SizeOut {
+    fp: *mut u8,
+    done: i32,
+}
+
+impl SizeOut {
+    /// Write `bytes`; `false` if the stream took fewer.
+    fn put(&mut self, bytes: &[u8]) -> bool {
+        let r = crate::stdio::write_stream(self.fp, bytes.as_ptr(), bytes.len());
+        let whole = usize::try_from(r).is_ok_and(|r| r == bytes.len());
+        if whole {
+            self.done = self
+                .done
+                .saturating_add(i32::try_from(bytes.len()).unwrap_or(i32::MAX));
+        }
+        whole
+    }
+
+    /// Write `n` spaces (none for `n` of 0 or less).
+    fn pad(&mut self, n: i32) -> bool {
+        let mut left = usize::try_from(n).unwrap_or(0);
+        while left > 0 {
+            let chunk = left.min(16);
+            if !self.put(b"                ".get(..chunk).unwrap_or_default()) {
+                return false;
+            }
+            left = left.saturating_sub(chunk);
+        }
+        true
+    }
+}
+
+/// `%f` of `arg` by `flags`, `width` and `prec`, to `fp`: what
+/// `printf_size` writes its number with, as glibc's calls `__printf_fp`.
+/// The count written, or -1.
+fn fprint_f(fp: *mut u8, arg: FloatArg, flags: &FormatFlags, width: usize, prec: usize) -> i32 {
+    let mut buf = [0u8; 256];
+    let mut dst = FmtOutput::streaming(buf.as_mut_ptr(), buf.len(), Sink::Stream(fp));
+    format_float_fixed(&mut dst, arg, false, flags, width, prec);
+    dst.drain();
+    if dst.failed {
+        -1
+    } else {
+        i32::try_from(dst.pos).unwrap_or(-1)
     }
 }
 
@@ -2283,6 +3077,7 @@ fn format_specs(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
 // Printf flags are inherently boolean — each is an independent on/off switch
 // matching the C standard's format flag characters (-, 0, +, space, #).
 #[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy)]
 pub(crate) struct FormatFlags {
     pub(crate) left_align: bool,
     pub(crate) zero_pad: bool,

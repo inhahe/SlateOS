@@ -236,8 +236,14 @@ TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t", "utmp": "utm
 # compiler's own record, and a probe that names `struct __va_list_tag`
 # declares a new, incomplete struct of that name instead, which no `va_list`
 # is compatible with. (<stdio.h>'s obstack_vprintf was the overlay's first
-# declaration with one, 2026-09-30.)
-TYPE_PHRASES = {"union pthread_attr_t": "pthread_attr_t", "struct __va_list_tag *": "va_list"}
+# declaration with one, 2026-09-30.) A pointer to one -- `va_list *`, which
+# clang writes `struct __va_list_tag (*)[1]` -- is said as `va_list *`, for
+# the same reason (<printf.h>'s printf_va_arg_function, 2026-10-05).
+TYPE_PHRASES = {
+    "union pthread_attr_t": "pthread_attr_t",
+    "struct __va_list_tag *": "va_list",
+    "struct __va_list_tag (*)[1]": "va_list *",
+}
 
 # name -> (glibc's type as the reference has it, the overlay's in musl's
 # names, why they differ): where the two libraries' typedefs are of different

@@ -187,9 +187,13 @@
 #  53. Refuse a `programs.md` that is not what `scripts/program-catalogue.py`
 #      writes now: one row a program, from its first doc line, its crate and
 #      the image (design-decisions 1053). The boot test's tooling suite
-#      refuses the same (`test-program-catalogue.py`) about an hour in,
-#      after the pipeline; lane C lost a boot to it on 2026-10-05 and lane D
-#      one on 2026-10-06, each over one program's changed description.
+#      refuses the same about an hour in, after the pipeline; lane C lost a
+#      boot to it on 2026-10-05 and lane D one on 2026-10-06, each over one
+#      program's changed description. It runs that suite's own check,
+#      `test-program-catalogue.py`, whose bare run is the check -- not the
+#      generator, whose bare run writes the file and so could refuse nothing
+#      (`check-gates-can-refuse.py` stopped lane D's next boot on exactly
+#      that).
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -6118,12 +6122,20 @@ fi
 # description.  Gates 48-50 are here for the same reason: a boot-only check is
 # paid for by whoever boots, an hour late.
 #
-# COST.  About 2.7 s for the check and 0.7 s for the generator's self-test.
-# It runs on every push, for gate 18's reason: what feeds the catalogue is a
-# doc line in any program anywhere in the tree, which `touches` cannot narrow
-# usefully.  Like the others it reads the working tree.
+# WHICH SCRIPT.  The boot suite's `test-program-catalogue.py`, which runs the
+# generator's self-test and then the check, and whose bare run is that check.
+# It was `program-catalogue.py --selftest` and then `--check` until the boot
+# of 2026-10-06 refused to build over it: a gate is run bare by
+# `check-gates-can-refuse.py` and `pre-boot.py`, and the generator's bare run
+# writes `programs.md` and cannot fail -- a gate that, run as they run it,
+# could refuse nothing.
+#
+# COST.  About 3.5 s.  It runs on every push, for gate 18's reason: what
+# feeds the catalogue is a doc line in any program anywhere in the tree,
+# which `touches` cannot narrow usefully.  Like the others it reads the
+# working tree.
 # ---------------------------------------------------------------------------
-progcat="${repo_root:-.}/scripts/program-catalogue.py"
+progcat="${repo_root:-.}/scripts/test-program-catalogue.py"
 skip_progcat=0
 # Bypass: ALLOW_STALE_PROGRAMS_MD=1 git push origin <branch>
 if [ "${ALLOW_STALE_PROGRAMS_MD:-0}" = "1" ]; then
@@ -6136,10 +6148,8 @@ note_gate program-catalogue "$skip_progcat"
 
 progcat_failed=0
 if [ "$skip_progcat" != "1" ]; then
-    if ! run_checker program-catalogue-selftest "$py" "$progcat" --selftest; then
-        echo "pre-push: program-catalogue.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
-        progcat_failed=1
-    elif ! run_checker program-catalogue "$py" "$progcat" --check; then
+    # Its first check is the generator's self-test, reported as that.
+    if ! run_checker program-catalogue "$py" "$progcat"; then
         progcat_failed=1
     fi
 fi

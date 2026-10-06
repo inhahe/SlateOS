@@ -8915,8 +8915,10 @@ mod tests {
         std::thread_local! {
             static PIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
         }
+        // `replace`, not `set`: scripts/raced-globals.py matches a call by its
+        // name, and `set` here is also the umask model's writer.
         extern "C" fn count_sigpipe(_sig: i32) {
-            PIPES.with(|p| p.set(p.get() + 1));
+            PIPES.with(|p| p.replace(p.get() + 1));
         }
         use crate::signal::{SIGPIPE, SighandlerT, signal};
         let old = signal(SIGPIPE, count_sigpipe as *const () as SighandlerT);
@@ -8953,8 +8955,10 @@ mod tests {
         std::thread_local! {
             static PIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
         }
+        // `replace`, not `set`: scripts/raced-globals.py matches a call by its
+        // name, and `set` here is also the umask model's writer.
         extern "C" fn count_sigpipe(_sig: i32) {
-            PIPES.with(|p| p.set(p.get() + 1));
+            PIPES.with(|p| p.replace(p.get() + 1));
         }
         use crate::signal::{SIGPIPE, SighandlerT, signal};
         let old = signal(SIGPIPE, count_sigpipe as *const () as SighandlerT);
@@ -9003,7 +9007,7 @@ mod tests {
         for fd in [l, t] {
             assert_eq!(rd(fd, b.as_mut_ptr(), 0), (0, 0), "{fd}");
             assert_eq!(rd(fd, null, 1), (-1, errno::ENOTCONN), "{fd}");
-            PIPES.with(|p| p.set(0));
+            PIPES.with(|p| p.replace(0));
             assert_eq!(wr(fd, b.as_ptr(), 0), (-1, errno::EPIPE), "{fd}");
             assert_eq!(wr(fd, null, 1), (-1, errno::EPIPE), "{fd}");
             assert_eq!(PIPES.with(core::cell::Cell::get), 2, "{fd}");

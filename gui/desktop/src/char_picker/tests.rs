@@ -383,11 +383,16 @@ fn the_picker_goes_beside_its_field() {
     );
     // Near the right edge: moved left onto the screen.
     let right = Rect::new(1500.0, 100.0, 90.0, 28.0);
-    assert_eq!(beside(right, size, screen).x, 1040.0);
+    assert_eq!(
+        beside(right, size, screen),
+        Rect::new(1040.0, 128.0, 560.0, 460.0)
+    );
     // Room neither below nor above: at the bottom of the screen.
     let tall = Rect::new(0.0, 300.0, 300.0, 400.0);
-    let placed = beside(tall, size, screen);
-    assert_eq!(placed.bottom(), 1000.0);
+    assert_eq!(
+        beside(tall, size, screen),
+        Rect::new(0.0, 540.0, 560.0, 460.0)
+    );
     // Larger than the screen: the screen, from its corner.
     let placed = beside(field, size, (400.0, 300.0));
     assert_eq!(placed, Rect::new(0.0, 0.0, 400.0, 300.0));

@@ -69,6 +69,10 @@ fn click(picker: &mut CharPicker, target: Target) -> Option<CharPickerEvent> {
     mouse(picker, x, y, MouseEventKind::Press(MouseButton::Left))
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "compared as it is with what the handlers answer, an Option"
+)]
 fn picked(text: &str) -> Option<CharPickerEvent> {
     Some(CharPickerEvent::Picked(text.to_string()))
 }
@@ -547,7 +551,7 @@ fn the_grids_scrollbar_scrolls_it() {
     let frame = picker.frame(&Palette::for_mode(false), W, H);
     let track = frame.rect_of(|t| *t == Target::Track(List::Grid)).unwrap();
     let thumb = frame.rect_of(|t| *t == Target::Thumb(List::Grid)).unwrap();
-    let below = (thumb.bottom() + track.bottom()) / 2.0;
+    let below = f32::midpoint(thumb.bottom(), track.bottom());
     mouse(
         &mut picker,
         x,

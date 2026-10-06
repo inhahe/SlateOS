@@ -502,6 +502,16 @@ impl RichInput {
         }
     }
 
+    /// Paste the clipboard's text alone, in the format at the caret, though
+    /// it holds formatting this program copied: what a user asks for with
+    /// Ctrl+Shift+V when the copy's look should not come with it.
+    pub fn paste_plain(&mut self) {
+        let text = crate::clipboard::text();
+        if !text.is_empty() {
+            self.insert_str(&text);
+        }
+    }
+
     /// Undo the last step. Answers whether there was one.
     pub fn undo(&mut self) -> bool {
         let Some(edit) = self.history.undo() else {
@@ -709,7 +719,8 @@ impl RichInput {
     /// Ctrl, the document's), Shift's
     /// selections, Ctrl+A, the switches (Ctrl+B, Ctrl+I, Ctrl+U), undo and
     /// redo (Ctrl+Z; Ctrl+Y or Ctrl+Shift+Z) and the clipboard (Ctrl+C,
-    /// Ctrl+X, Ctrl+V). What is left -- Escape, Tab -- is the window's.
+    /// Ctrl+X, Ctrl+V; Ctrl+Shift+V for its text alone). What is left --
+    /// Escape, Tab -- is the window's.
     pub fn handle_key(&mut self, key: &KeyEvent, m: &Metrics) -> KeyEdit {
         if !key.pressed {
             return KeyEdit::Unhandled;
@@ -733,6 +744,7 @@ impl RichInput {
                 }
                 Key::C => self.copy(),
                 Key::X => self.cut(),
+                Key::V if shift => self.paste_plain(),
                 Key::V => self.paste(),
                 Key::Home => self.doc_start(shift),
                 Key::End => self.doc_end(shift),

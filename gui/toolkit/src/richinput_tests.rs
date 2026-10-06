@@ -177,6 +177,36 @@ fn a_rich_copy_pastes_rich_and_other_text_plain() {
     assert!(other.doc().format_at(0).bold, "at the start, the first's");
 }
 
+/// **Ctrl+Shift+V pastes a formatted copy's text alone**, in the format at
+/// the caret; Ctrl+V still brings the formatting.
+#[test]
+fn ctrl_shift_v_pastes_the_text_alone() {
+    let mut input = RichInput::with_doc(RichDoc::plain("ab", Format::default()));
+    input.select_all();
+    input.toggle(Toggle::Bold);
+    input.copy();
+    let mut other = RichInput::with_doc(RichDoc::plain("x", Format::default()));
+    other.doc_end(false);
+    assert_eq!(
+        other.handle_key(&key(Key::V, true, true), &wide()),
+        KeyEdit::Changed
+    );
+    assert_eq!(other.text(), "xab");
+    assert_eq!(bold_runs(&other), [(0, 3, false)], "plain, as the x before");
+    other.handle_key(&key(Key::V, true, false), &wide());
+    assert_eq!(
+        bold_runs(&other),
+        [(0, 3, false), (3, 5, true)],
+        "Ctrl+V: as copied"
+    );
+    crate::clipboard::set_text("");
+    assert_eq!(
+        other.handle_key(&key(Key::V, true, true), &wide()),
+        KeyEdit::Handled,
+        "nothing to paste"
+    );
+}
+
 /// **The keys: Ctrl+B switches, Enter breaks the line, Shift and an arrow
 /// select, Ctrl+Z undoes** -- each answered as a change or not.
 #[test]

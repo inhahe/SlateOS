@@ -66,6 +66,9 @@ use tzrules::Tz;
 // both claiming the pixel on it.
 use crate::Rect;
 
+mod accessible;
+pub use accessible::CalendarPart;
+
 // The eight `Color` constants that used to live here are gone; every colour
 // below is a role read from the [`Palette`] the renderer is handed. See
 // known-issues.md

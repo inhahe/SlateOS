@@ -743,3 +743,58 @@ fn a_notifications_menu_is_chosen_from_over_the_pane() {
         assert!(shell.notification_menu.is_none());
     });
 }
+
+/// **The clock opens the calendar, and its controls are pressed as they
+/// are clicked**: the next month shown, a day chosen -- and chosen again,
+/// left chosen, where a click would have cleared it -- and "Today" back.
+#[test]
+fn the_calendar_is_used_as_the_user_uses_it() {
+    appearance::config::testing::with_scratch_config("acc-calendar", |_root| {
+        let mut shell = shell();
+        let control = |hit: CalendarHit| ShellPart::Control(Hit::CalendarControl(hit));
+        press(&mut shell, ShellPart::Control(Hit::Clock)).unwrap();
+        assert!(shell.calendar.visible);
+        let popup = node(&shell, ShellPart::Calendar(CalendarPart::Popup));
+        assert_eq!(
+            (popup.role, popup.name.as_str()),
+            (Role::Dialog, "Calendar")
+        );
+        let month = shell.calendar.view_month;
+        assert_eq!(press(&mut shell, control(CalendarHit::NextPage)), Ok(None));
+        assert_ne!(shell.calendar.view_month, month, "the next month");
+
+        let index = shell
+            .calendar
+            .generate_grid()
+            .iter()
+            .position(|cell| cell.current_month && cell.day == 15)
+            .unwrap();
+        let day = control(CalendarHit::Day(index));
+        assert_eq!(node(&shell, day).role, Role::GridCell);
+        for _ in 0..2 {
+            assert_eq!(shell.invoke(&day, Action::Choose, 0.0, 0.0), Ok(None));
+            assert_eq!(node(&shell, day).value, Some(Value::Chosen(true)));
+        }
+        assert_eq!(
+            shell.invoke(&day, Action::SetText("x".to_owned()), 0.0, 0.0),
+            Err(Refusal::NotApplicable {
+                role: Role::GridCell,
+                action: "set the text of"
+            })
+        );
+        assert_eq!(
+            press(&mut shell, ShellPart::Calendar(CalendarPart::Grid)),
+            Err(Refusal::NotApplicable {
+                role: Role::Grid,
+                action: "press"
+            })
+        );
+        assert_eq!(press(&mut shell, control(CalendarHit::Today)), Ok(None));
+        assert_eq!(shell.calendar.view_month, month, "back to today's month");
+        assert_eq!(
+            press(&mut shell, control(CalendarHit::Today)),
+            Err(Refusal::NoSuchWidget),
+            "no Today on today's month"
+        );
+    });
+}

@@ -2701,7 +2701,10 @@ authors never wrote a single automation handler.
   pinned program and window, the tray's icons, the speaker, the bell, the
   clock, Show desktop -- and, while open, the start menu (its search, every
   row of its list, its places, the power button and caret), the power
-  choices, the volume flyout and the notification pane
+  choices, the volume flyout, the calendar (`desktop::calendar::CalendarPart`:
+  its arrows, its title, "Today", each day by its date -- today, its
+  events, another month's -- or each month, and the chosen day's events),
+  the notification pane
   (`desktop::notif_pane::PanePart`: its links, its switches and levels,
   each notification with its cross, and each program's switch) and every
   menu open over everything (`desktop::accessible::ShellMenu`); a part
@@ -2710,7 +2713,7 @@ authors never wrote a single automation handler.
   menu shows tools its rows itself (`guitk::menu::MenuPart`: each row's
   label, its keys or why it is greyed, its tick, and the submenu it
   opened), so any program's menus are seen. Not yet: the font picker, and
-  the shell's other surfaces -- the calendar, Alt+Tab.*
+  the shell's window switcher (Alt+Tab).*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

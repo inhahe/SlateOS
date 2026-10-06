@@ -16,6 +16,8 @@
 //! its box above or below it -- the places and the power button and its
 //! caret; while the power choices are open, they; while the volume flyout
 //! is open, its level, its mute switch and "Audio settings…"; while the
+//! calendar is open, its arrows, its title, "Today", its days or months and
+//! the chosen day's events (`calendar::accessible`); while the
 //! notification pane is open, its parts (`notif_pane::accessible`); and
 //! every menu open over everything -- the desktop's, a notification's, a
 //! tile's, a field's -- with its rows, and the submenu a row opened
@@ -40,6 +42,7 @@ use guitk::menu::{ContextMenu, MenuPart};
 use guitk::widget::CheckState;
 use guitk::widget::automation::{Accessible, Action, Node, Refusal, Role, Value};
 
+use crate::calendar::{CalendarHit, CalendarPart, CalendarViewMode};
 use crate::notif_pane::PanePart;
 use crate::{
     DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, Rect, ShellAction, StartRow,
@@ -80,6 +83,11 @@ pub enum ShellPart {
     Pane(PanePart),
     /// A part of a menu the shell has open over everything.
     Menu(ShellMenu, MenuPart),
+    /// A part of the calendar popup, while it is open, that is no control:
+    /// the popup, its grid, the card of a day's events and the events on it.
+    /// Its controls -- the arrows, the title, "Today", a day, a month -- are
+    /// [`Control`](Self::Control)s, pressed as clicked.
+    Calendar(CalendarPart),
 }
 
 /// A menu the shell opens over everything.
@@ -222,8 +230,38 @@ impl DesktopShell {
             Hit::PowerMenuEntry(row) if self.power_menu_open => {
                 (row < self.power_menu_visible_rows()).then(|| self.power_menu_row_rect(row))
             }
+            Hit::CalendarControl(control) => {
+                let (x, y) = self.calendar_origin();
+                self.calendar
+                    .control_rect(control, x, y, self.calendar_scale())
+            }
             _ => None,
         }
+    }
+
+    /// Whether the day in cell `index` of the month the calendar shows is
+    /// the one chosen.
+    fn calendar_day_chosen(&self, index: usize) -> bool {
+        self.calendar.mode == CalendarViewMode::Month
+            && self
+                .calendar
+                .generate_grid()
+                .get(index)
+                .is_some_and(|cell| {
+                    self.calendar.selected_date == Some((cell.year, cell.month, cell.day))
+                })
+    }
+
+    /// The open calendar popup: its controls named as the shell's own, its
+    /// other parts as the calendar's.
+    fn calendar_node(&self) -> Node<ShellPart> {
+        let (x, y) = self.calendar_origin();
+        self.calendar
+            .automation(x, y, self.calendar_scale(), &self.events)
+            .map(&|part| match part {
+                CalendarPart::Control(control) => ShellPart::Control(Hit::CalendarControl(control)),
+                other => ShellPart::Calendar(other),
+            })
     }
 
     /// Where row `index` of the start menu's list is: its row on screen, or
@@ -772,6 +810,9 @@ impl Accessible for DesktopShell {
         if self.volume_flyout.is_visible() {
             root.children.push(self.volume_node());
         }
+        if self.calendar.visible {
+            root.children.push(self.calendar_node());
+        }
         if self.notifications.pane_state().is_visible() {
             root.children.push(
                 self.notifications
@@ -822,11 +863,41 @@ impl Accessible for DesktopShell {
                 }
                 self.click_part(hit)
             }
+            // A day already chosen stays chosen: a click on it would clear it,
+            // and choosing is not clearing.
+            (ShellPart::Control(Hit::CalendarControl(CalendarHit::Day(index))), Action::Choose)
+                if self.calendar.visible && self.calendar_day_chosen(index) =>
+            {
+                if self.takes_every_press() {
+                    Err(Refusal::Hidden)
+                } else {
+                    Ok(None)
+                }
+            }
             (ShellPart::Control(hit @ Hit::PowerMenuEntry(_)), Action::Press | Action::Choose)
+            | (
+                ShellPart::Control(
+                    hit @ Hit::CalendarControl(CalendarHit::Day(_) | CalendarHit::Month(_)),
+                ),
+                Action::Choose,
+            )
             | (ShellPart::Control(hit), Action::Press) => self.click_part(hit),
             (ShellPart::Control(Hit::PowerMenuEntry(_)), _) => Err(not_for(Role::ListItem)),
             (ShellPart::Control(Hit::StartMenuEntry(_)), _) => Err(not_for(Role::ListItem)),
+            (
+                ShellPart::Control(Hit::CalendarControl(
+                    CalendarHit::Day(_) | CalendarHit::Month(_),
+                )),
+                _,
+            ) => Err(not_for(Role::GridCell)),
             (ShellPart::Control(_), _) => Err(not_for(Role::Button)),
+            (ShellPart::Calendar(part), _) => Err(not_for(match part {
+                CalendarPart::Popup => Role::Dialog,
+                CalendarPart::Grid => Role::Grid,
+                CalendarPart::Events => Role::List,
+                CalendarPart::Event(_) => Role::ListItem,
+                CalendarPart::Control(_) => Role::Button,
+            })),
             (ShellPart::StartSearch, Action::SetText(text)) => {
                 if !self.start_menu_open {
                     return Err(Refusal::NoSuchWidget);

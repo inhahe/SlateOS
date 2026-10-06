@@ -32,6 +32,12 @@ that encoder never writes -- a styled default, justification, colours,
 fonts, style runs out of order. ffmpeg's SRT of each is the answer, as for
 the rest.
 
+MP4's WebVTT (`wvtt`), which ffmpeg does not read: `webvtt_mp4.mp4` and
+`webvtt_overlap*.mp4` are GPAC's MP4Box's, the format's reference
+implementation, from the same `.vtt` as a WebM fixture, whose answer is
+theirs -- a cue cut into samples wherever another begins or ends, which
+the reader joins again, plain, overlapping and in fragments.
+
 Blu-ray's PGS, pictures of text, which ffmpeg cannot write: `pgs*.mkv` are
 written here segment by segment (`PgsSet`, `make_pgs`) and muxed by
 mkvmerge. Their answer, NAME.states, is a list of pictures: the canvas
@@ -55,18 +61,28 @@ answer is the generator's drawing; `vobsub_damage`'s is ffmpeg's alone.
 
 Run from this directory, on Windows, with gyan.dev's ffmpeg (2026-03-09, git
 9b7439c31b) and MKVToolNix's mkvmerge 99.0 on PATH (or in the MKVMERGE
-environment variable): `python generate_subtitle_fixtures.py`.
+environment variable), and GPAC's MP4Box (26.08-DEV, git a23ae2d) built in
+WSL (MP4BOX): `python generate_subtitle_fixtures.py`, or `--webvtt` or
+`--dvb` for those fixtures alone.
 """
 
 import hashlib
+import json
 import os
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MKVMERGE = os.environ.get("MKVMERGE", "mkvmerge")
+# GPAC's MP4Box, the reference implementation of WebVTT in MP4 (`wvtt`,
+# ISO/IEC 14496-30), which ffmpeg does not read: built from source in WSL
+# (github.com/gpac/gpac, `./configure --static-bin && make`), there being no
+# Windows build that installs without an administrator. A command line run
+# under `wsl -d Ubuntu --`.
+MP4BOX = os.environ.get("MP4BOX", "~/gpac/bin/gcc/MP4Box")
 
 # --- SubRip: markup, as players have written it for twenty years ---
 SUBRIP = [
@@ -485,6 +501,25 @@ OVERLAP = [
     (12000, 13000, "after them all"),
 ]
 
+# WebVTT cues overlapping, which WebVTT in MP4 cuts into a sample for every
+# stretch between one cue's start or end and the next -- each cue in every
+# sample it shows through, a sample saying so where none shows -- for a
+# reader to join again: (start, end, identifier, settings, text). Two cues
+# beginning together come in the file's order; two alike but for their
+# identifier are two, the one after the other.
+WEBVTT_OVERLAP = [
+    (1000, 10000, "long", "line:0", "long, under all but the last"),
+    (2000, 3000, "", "", "short, inside the long"),
+    (2000, 4000, "", "align:start position:0%", "begun with the short, ended after it"),
+    (5000, 6000, "a", "", "the same text"),
+    (6000, 7000, "b", "", "the same text"),
+    (12000, 13000, "", "", "after them all, past a stretch of none"),
+    # A pair: the first ends while the second still shows, so a reader
+    # gives it out with the second still on screen.
+    (14000, 16000, "", "", "first of a pair"),
+    (15000, 17000, "", "", "second of a pair"),
+]
+
 # Fixture name -> {cue number: the answer, where it is not ffmpeg's}, each
 # checked by hand against libass (ASS, SSA), HTML and libass through ffmpeg's
 # own SubRip decoder (SubRip), or the WebVTT specification.
@@ -602,6 +637,17 @@ DEPARTURES = {
 # Matroska's WebVTT is WebM's cues, so its answers too; and mkvmerge stores
 # a cue's text without the spaces around it.
 DEPARTURES["webvtt_mkv"] = {**DEPARTURES["webvtt"], 7: 'spaced'}
+# MP4's WebVTT is the same cues again, split into samples and joined; and
+# MP4Box stores a cue's text without the spaces after it -- those before it
+# the reader passes over, as in WebM.
+DEPARTURES["webvtt_mp4"] = {**DEPARTURES["webvtt"], 7: 'spaced'}
+DEPARTURES["webvtt_overlap"] = {
+    # Placed by their settings, as in `webvtt`.
+    1: '{\\an8}long, under all but the last',
+    3: '{\\an1}begun with the short, ended after it',
+}
+DEPARTURES["webvtt_overlap_mp4"] = DEPARTURES["webvtt_overlap"]
+DEPARTURES["webvtt_overlap_fragments"] = DEPARTURES["webvtt_overlap"]
 DEPARTURES["movtext_styles"] = {
     # Timed text is plain text: `<i>` and `{\an8}` in it are characters,
     # kept from reading as SRT markup.
@@ -656,6 +702,29 @@ def mkvmerge(out, src, *options):
         sys.exit(f"mkvmerge {out} {src} failed:\n{r.stdout}{r.stderr}")
 
 
+def mp4box(out, src, *options):
+    """`src`, a .vtt or a .ttml, imported by MP4Box as the one track of a new
+    MP4, `out`, split into samples as ISO/IEC 14496-30 has them -- with
+    `-for-test`, which writes no date and no version, so the same source
+    makes the same file. Run in WSL, from a scratch directory whose path
+    has no spaces."""
+    scratch = tempfile.mkdtemp(prefix="mp4box")
+    try:
+        source = "in" + os.path.splitext(src)[1]
+        shutil.copyfile(src, os.path.join(scratch, source))
+        drive, rest = os.path.splitdrive(scratch)
+        where = "/mnt/" + drive.rstrip(":").lower() + rest.replace(os.sep, "/")
+        command = f"cd '{where}' && {MP4BOX} -for-test -add {source} -new out.mp4 {' '.join(options)}"
+        r = subprocess.run(["wsl", "-d", "Ubuntu", "--", "bash", "-c", command],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        made = os.path.join(scratch, "out.mp4")
+        if r.returncode != 0 or not os.path.exists(made):
+            sys.exit(f"MP4Box {out} {src} failed:\n{r.stdout}{r.stderr}")
+        shutil.copyfile(made, out)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def cues_of(srt):
     """An SRT file's cues, each [number, times, text]."""
     if "\r" in srt:
@@ -668,13 +737,15 @@ def cues_of(srt):
     return cues
 
 
-def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, codec="copy"):
+def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, codec="copy",
+         options=()):
     """Mux `source` into NAME.container -- with ffmpeg (`codec` its subtitle
-    codec), with mkvmerge, or, for muxer "written", by `source` itself, a
-    function writing the file -- then write ffmpeg's SRT of it
-    (NAME.ffmpeg.srt) and the answer (NAME.srt): ffmpeg's, its DEPARTURES
-    made. A track this ffmpeg cannot read takes its SRT from fixture
-    `answer_from`, made already, which holds the same cues."""
+    codec), with mkvmerge, with MP4Box (`options` its own), or, for muxer
+    "written", by `source` itself, a function writing the file -- then write
+    ffmpeg's SRT of it (NAME.ffmpeg.srt) and the answer (NAME.srt):
+    ffmpeg's, its DEPARTURES made. A track this ffmpeg cannot read takes its
+    SRT from fixture `answer_from`, made already, which holds the same
+    cues."""
     src = os.path.join(HERE, f"{name}.source.{source_ext}")
     out = os.path.join(HERE, f"{name}.{container}")
     if muxer == "written":
@@ -683,6 +754,8 @@ def make(name, source_ext, source, container, muxer="ffmpeg", answer_from=None, 
         write(src, source)
         if muxer == "mkvmerge":
             mkvmerge(out, src)
+        elif muxer == "mp4box":
+            mp4box(out, src, *options)
         else:
             ffmpeg("-i", src, "-c:s", codec, "-fflags", "+bitexact", "-flags", "+bitexact", out)
         os.remove(src)
@@ -2051,6 +2124,9 @@ def dvb_scenes():
         DvbSet(24000, page(10, 2, [(1, 100, 100), (2, 110, 108), (1, 400, 400)]),
                ("region", 1, 0, 40, 20, 4, 1, 1, [(1, 0, 0)]), ("region", 2, 0, 40, 20, 4, 1, 4, [(1, 0, 0)]),
                ("clut", 1, 0, DVB_FOUR), ("object", DvbObject(1, [[2] * 4] * 2)), ("end",)),
+        # A mode change forgets every region: a page listing one defined
+        # before the change at 24 s -- region 8, at 11 s -- shows nothing.
+        DvbSet(25000, page(10, 0, [(8, 100, 100)]), ("end",)),
     ]
     # A page of the version held changes nothing: the second lists the
     # regions again, and the screen stays clear.
@@ -2186,7 +2262,10 @@ def dvb_damage():
     good = [("region", 1, 0, 200, 24, 4, 1, None, [(1, 0, 0)]), ("clut", 1, 0, DVB_FOUR),
             ("object", DvbObject(1, line))]
     unplaced = DvbObject(9, line).segment()
-    chars = dvb_seg(DVB_OBJECT, struct.pack(">HB", 1, 0x05) + bytes([2]) + b"\x00A\x00B")
+    # An object of characters: none, then bytes that read as pixels would be
+    # a top field of two bytes and no bottom -- damage only as characters,
+    # which FFmpeg does not read, not by any length.
+    chars = dvb_seg(DVB_OBJECT, struct.pack(">HB", 1, 0x05) + bytes([0, 2, 0, 0, 0x10, 0xF0, 0]))
     fields_past = dvb_seg(DVB_OBJECT, struct.pack(">HBHH", 1, 0x01, 400, 400) + bytes(20))
     clut_cut = DvbSet(0, ("clut", 1, 5, DVB_BLUE)).bytes()[:-2]
     clut_cut = clut_cut[:4] + struct.pack(">H", len(clut_cut) - 6) + clut_cut[6:]
@@ -2277,6 +2356,504 @@ def make_mixed():
     print("wrote", path("dvb_and_pgs.mkv"))
 
 
+# --- TTML in MP4 (`stpp`) ------------------------------------------------
+#
+# FFmpeg has no TTML decoder. The answers are ttconv's (pip install ttconv,
+# 1.2.3: the converter from the IMSC 1 reference implementation's authors),
+# used as a library: its intermediate synchronic documents say what shows
+# at each moment, region by region -- its timing, region association,
+# styles and white space -- and the generator says each paragraph as the
+# crate says it (subtitle/ttml.rs): a cue a stretch of showing the same;
+# bold, italic (oblique too), underline, line-through and colour (white
+# being none); breaks never two together nor at either end; hidden text
+# dropped; `{\anN}` for the third of the picture each way its anchor falls
+# in. The answer, NAME.cues, is those cues as runs of styled text, which
+# the test compares with the crate's markup read back into runs.
+#
+# ISO/IEC 14496-30 makes each sample a whole document, shown only for the
+# sample's stretch of time, so the answer is read from the MP4's samples,
+# not from the document they were made from: ttconv's reading of each
+# sample, cut to the sample, the stretches of showing the same joined across
+# samples. A sample ttconv cannot read shows nothing, and is counted
+# (`damaged N`). The samples written here are each the whole document, and
+# their reading is checked to be the document's. MP4Box's are its own
+# rewriting of the document, and say less, two ways (GPAC git a23ae2d):
+#
+#   - Its splitter times each paragraph by its own begin and end alone: a
+#     container's begin, a sequence's turns and an untimed paragraph's
+#     parent are not counted, so a paragraph lands in samples it does not
+#     show in, and is missing from those it does (`ttml_timing`: four cues
+#     of the document's thirteen).
+#   - It writes `&lt;` and `&amp;` back as bare `<` and `&` -- its DOM
+#     decodes the references when it parses, and its serialiser skips
+#     escaping for text it marked as parsed from a file -- so a sample with
+#     either is not XML. GPAC rejects it too, reading the file back
+#     (`gpac -i ttml.mp4 -o back.ttml`: "Corrupted Data", the paragraph
+#     gone), as do ttconv and the browsers' parsers (`ttml`: its sample of
+#     `a &lt; b &amp; c`).
+#
+# What MP4Box's files say is held to as they say it -- a reader shows what
+# the samples hold, inside each sample's stretch -- and `ttml_timing_one`,
+# the timing document in one sample of its own, holds the reader to the
+# document's own timing.
+
+TTML_NS = ('xmlns="http://www.w3.org/ns/ttml" xmlns:tts="http://www.w3.org/ns/ttml#styling" '
+           'xmlns:ttp="http://www.w3.org/ns/ttml#parameter"')
+
+TTML_BASIC = f"""<?xml version="1.0" encoding="UTF-8"?>
+<tt {TTML_NS} ttp:timeBase="media" xml:lang="en">
+  <head>
+    <styling>
+      <style xml:id="base" tts:color="yellow"/>
+      <style xml:id="loud" style="base" tts:fontWeight="bold"/>
+      <style xml:id="quiet" tts:fontStyle="italic" tts:color="cyan"/>
+    </styling>
+    <layout>
+      <region xml:id="bottom" tts:origin="10% 75%" tts:extent="80% 20%" tts:displayAlign="after" tts:textAlign="center"/>
+      <region xml:id="top" tts:origin="10% 5%" tts:extent="80% 20%" tts:displayAlign="before" tts:textAlign="center"/>
+      <region xml:id="left" tts:origin="5% 40%" tts:extent="25% 20%" tts:displayAlign="center" tts:textAlign="start"/>
+    </layout>
+  </head>
+  <body>
+    <div region="bottom">
+      <p xml:id="plain" begin="00:00:01.000" end="00:00:02.500">Plain text</p>
+      <p xml:id="styles" begin="3s" end="4s"><span tts:fontWeight="bold">bold</span>, <span tts:fontStyle="italic">italic</span>, <span tts:textDecoration="underline">under</span>, <span tts:textDecoration="lineThrough">struck</span></p>
+      <p xml:id="referenced" begin="5s" end="6s" style="loud">loud yellow <span style="quiet">quiet cyan</span> loud again</p>
+      <p xml:id="broken" begin="7s" end="8s">two<br/>lines</p>
+      <p xml:id="spaced" begin="9s" end="10s">   spaced
+         out   </p>
+      <p xml:id="kept" begin="11s" end="12s" xml:space="preserve">kept   spaces</p>
+      <p xml:id="colours" begin="13s" end="14s"><span tts:color="#ff000080">half red</span> <span tts:color="rgb(0,128,255)">rgb</span> <span tts:color="white">white</span></p>
+      <p xml:id="escaped" begin="15s" end="16s"><span tts:fontStyle="oblique">oblique</span> a &lt; b &amp; c {{\\an8}}</p>
+      <p xml:id="hidden" begin="17s" end="18s">seen <span tts:visibility="hidden">hidden</span> and on</p>
+      <p xml:id="nested" begin="19s" end="20s"><span tts:textDecoration="underline">under <span tts:fontWeight="bold">and bold</span> <span tts:textDecoration="noUnderline">not under</span></span></p>
+      <p xml:id="breaks" begin="21s" end="22s"><br/>a<br/><br/>b<br/></p>
+    </div>
+    <div region="top"><p xml:id="up" begin="1s" end="2s">at the top</p></div>
+    <div region="left"><p xml:id="aside" begin="1s" end="2s">at the left</p></div>
+  </body>
+</tt>
+"""
+
+TTML_TIMING = f"""<?xml version="1.0" encoding="UTF-8"?>
+<tt {TTML_NS} ttp:frameRate="25" ttp:tickRate="1000">
+  <head>
+    <layout>
+      <region xml:id="r" tts:origin="10% 80%" tts:extent="80% 15%" tts:displayAlign="after" tts:textAlign="center"/>
+    </layout>
+  </head>
+  <body region="r">
+    <!-- An end of its own: ttconv ends a parallel container that begins
+         late early, where its children's ends are on its own clock and its
+         implicit end on its parent's (the reader follows TTML there, and a
+         unit test holds it). -->
+    <div begin="1s" end="6s">
+      <p xml:id="offset" begin="0s" end="2s">offset by the div</p>
+      <p xml:id="frames" begin="00:00:01:05" dur="00:00:00:20">frames</p>
+      <p xml:id="ticks" begin="2500t" end="3.5s">ticks</p>
+    </div>
+    <div begin="5s" timeContainer="seq">
+      <p xml:id="first" dur="1s">first in turn</p>
+      <p xml:id="second" dur="1500ms">second in turn</p>
+      <p xml:id="gap" begin="500ms" dur="1s">after a gap</p>
+    </div>
+    <div begin="10s" end="13s">
+      <p xml:id="growing">whole div <span begin="1s">and later</span><span begin="2s" end="2500ms"> and briefly</span></p>
+    </div>
+    <div>
+      <p xml:id="long" begin="14s" end="17s">long</p>
+      <p xml:id="inside" begin="15s" end="16s">inside</p>
+      <p xml:id="hours" begin="0.005h" end="0.31m">by hours and minutes</p>
+    </div>
+  </body>
+</tt>
+"""
+
+TTML_REGIONS = f"""<?xml version="1.0" encoding="UTF-8"?>
+<tt {TTML_NS}>
+  <head>
+    <styling>
+      <style xml:id="hide" tts:display="none"/>
+    </styling>
+    <layout>
+      <region xml:id="a" tts:origin="0% 0%" tts:extent="50% 50%" tts:displayAlign="before" tts:textAlign="start"/>
+      <region xml:id="b" tts:origin="50% 50%" tts:extent="50% 50%" tts:displayAlign="after" tts:textAlign="end"/>
+      <region xml:id="c" tts:origin="25% 25%" tts:extent="50% 50%" tts:displayAlign="center"/>
+    </layout>
+  </head>
+  <body>
+    <div region="a">
+      <p xml:id="in_a" begin="1s" end="2s">in a</p>
+      <p xml:id="overridden" begin="1s" end="2s" region="b">named b inside a: shown nowhere</p>
+    </div>
+    <div>
+      <p xml:id="in_b" begin="1s" end="2s" region="b">in b</p>
+      <p xml:id="in_c" begin="1s" end="2s" region="c">in c, the middle of it</p>
+      <p xml:id="nowhere" begin="1s" end="2s">in no region: shown nowhere</p>
+      <p xml:id="unknown" begin="1s" end="2s" region="zz">an unknown region: shown nowhere</p>
+      <p xml:id="gone" begin="3s" end="4s" region="a" style="hide">display none</p>
+      <p xml:id="span_region" begin="3s" end="4s"><span region="b">a span's own region</span></p>
+    </div>
+  </body>
+</tt>
+"""
+
+# No layout at all: the root container is the one region, and TTML's
+# initial alignments put the text at its top left.
+TTML_DEFAULT = f"""<?xml version="1.0" encoding="UTF-8"?>
+<tt {TTML_NS}><body><div><p xml:id="lone" begin="1s" end="2s">no region at all</p></div></body></tt>
+"""
+
+
+def stpp_mp4(path, samples):
+    """An MP4 of one TTML track (`stpp`, ISO/IEC 14496-30), written here
+    box by box: `samples` each (start, end, document) in milliseconds,
+    contiguous, the first from 0."""
+    def full(kind, version, flags, *parts):
+        return tx3g_box(kind, struct.pack(">I", (version << 24) | flags), *parts)
+
+    data = [doc for _, _, doc in samples]
+    durations = [end - start for start, end, _ in samples]
+    total = sum(durations)
+    identity = struct.pack(">9i", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+    ftyp = tx3g_box(b"ftyp", b"isom", struct.pack(">I", 0x200), b"isom", b"iso2", b"mp41")
+    mdat = tx3g_box(b"mdat", b"".join(data))
+    entry = tx3g_box(b"stpp", b"\0" * 6, struct.pack(">H", 1),
+                     b"http://www.w3.org/ns/ttml\0", b"\0", b"\0")
+    runs = []
+    for d in durations:
+        if runs and runs[-1][1] == d:
+            runs[-1][0] += 1
+        else:
+            runs.append([1, d])
+    offsets, at = [], len(ftyp) + 8
+    for d in data:
+        offsets.append(at)
+        at += len(d)
+    stbl = tx3g_box(
+        b"stbl",
+        full(b"stsd", 0, 0, struct.pack(">I", 1), entry),
+        full(b"stts", 0, 0, struct.pack(">I", len(runs)), *[struct.pack(">II", n, d) for n, d in runs]),
+        full(b"stsc", 0, 0, struct.pack(">I", 1), struct.pack(">III", 1, 1, 1)),
+        full(b"stsz", 0, 0, struct.pack(">II", 0, len(data)), *[struct.pack(">I", len(s)) for s in data]),
+        full(b"stco", 0, 0, struct.pack(">I", len(offsets)), *[struct.pack(">I", o) for o in offsets]),
+    )
+    dinf = tx3g_box(b"dinf", full(b"dref", 0, 0, struct.pack(">I", 1), full(b"url ", 0, 1)))
+    mdia = tx3g_box(
+        b"mdia",
+        full(b"mdhd", 0, 0, struct.pack(">IIIIHH", 0, 0, 1000, total, 0x55C4, 0)),
+        full(b"hdlr", 0, 0, struct.pack(">I4s", 0, b"subt"), b"\0" * 12, b"SubtitleHandler\0"),
+        tx3g_box(b"minf", full(b"sthd", 0, 0), dinf, stbl),
+    )
+    tkhd = full(b"tkhd", 0, 3, struct.pack(">IIIII", 0, 0, 1, 0, total), b"\0" * 8,
+                struct.pack(">hhhH", 0, 0, 0, 0), identity, struct.pack(">II", 0, 0))
+    mvhd = full(b"mvhd", 0, 0, struct.pack(">IIII", 0, 0, 1000, total), struct.pack(">IH", 0x10000, 0x100),
+                b"\0" * 10, identity, b"\0" * 24, struct.pack(">I", 2))
+    moov = tx3g_box(b"moov", mvhd, tx3g_box(b"trak", tkhd, mdia))
+    with open(path, "wb") as f:
+        f.write(ftyp + mdat + moov)
+
+
+def stpp_samples(path):
+    """The samples of the MP4 at `path`, its one track TTML: [(start, end,
+    bytes)], start and end exact fractions of a second. The track is
+    checked to carry nothing that would move its samples (an edit list,
+    composition offsets), which this does not apply."""
+    from fractions import Fraction
+
+    with open(path, "rb") as f:
+        data = f.read()
+
+    def boxes(start, end):
+        at = start
+        while at + 8 <= end:
+            size, kind = struct.unpack(">I4s", data[at:at + 8])
+            head = 8
+            if size == 1:
+                size, head = struct.unpack(">Q", data[at + 8:at + 16])[0], 16
+            elif size == 0:
+                size = end - at
+            yield kind, at + head, at + size
+            at += size
+
+    def inside(start, end, *path):
+        for kind, body, stop in boxes(start, end):
+            if kind == path[0]:
+                return (body, stop) if len(path) == 1 else inside(body, stop, *path[1:])
+        sys.exit(f"{path}: no {path[0]!r}")
+
+    trak = inside(0, len(data), b"moov", b"trak")
+    if any(kind == b"edts" for kind, _, _ in boxes(*trak)):
+        sys.exit(f"{path}: an edit list, which stpp_samples does not apply")
+    mdhd = inside(*trak, b"mdia", b"mdhd")[0]
+    scale = struct.unpack(">I", data[mdhd + (20 if data[mdhd] == 1 else 12):][:4])[0]
+    tables = {kind: body for kind, body, _ in boxes(*inside(*trak, b"mdia", b"minf", b"stbl"))}
+    if b"ctts" in tables:
+        sys.exit(f"{path}: composition offsets, which stpp_samples does not apply")
+
+    def entries(kind, fmt):
+        body = tables[kind]
+        n = struct.unpack(">I", data[body + 4:body + 8])[0]
+        size = struct.calcsize(fmt)
+        return [struct.unpack(fmt, data[body + 8 + size * i:body + 8 + size * (i + 1)]) for i in range(n)]
+
+    durations = [d for n, d in entries(b"stts", ">II") for _ in range(n)]
+    body = tables[b"stsz"]
+    fixed, count = struct.unpack(">II", data[body + 4:body + 12])
+    sizes = [fixed] * count if fixed else list(struct.unpack(f">{count}I", data[body + 12:body + 12 + 4 * count]))
+    chunks = [o for (o,) in (entries(b"stco", ">I") if b"stco" in tables else entries(b"co64", ">Q"))]
+    stsc = entries(b"stsc", ">III")
+    offsets = []
+    for number, at in enumerate(chunks, 1):
+        for _ in range([e for e in stsc if e[0] <= number][-1][1]):
+            if len(offsets) < len(sizes):
+                offsets.append(at)
+                at += sizes[len(offsets) - 1]
+    if not len(offsets) == len(sizes) == len(durations):
+        sys.exit(f"{path}: tables that disagree on how many samples")
+    samples, t = [], 0
+    for offset, size, d in zip(offsets, sizes, durations):
+        samples.append((Fraction(t, scale), Fraction(t + d, scale), data[offset:offset + size]))
+        t += d
+    return samples
+
+
+def ttml_cues(samples):
+    """ttconv's reading of a TTML track's `samples` [(start, end, bytes)] --
+    each a whole document shown only from `start` to `end` (`None`: on and
+    on), as ISO/IEC 14496-30 has it -- said as the crate says it:
+    ([(start_ns, end_ns, an, runs)], damaged). Each run is ("text", text,
+    flags, colour) or ("break",); the cues come in the order they begin --
+    those beginning together region by region in the document's order, then
+    in the document's order -- and `damaged` counts the samples ttconv
+    cannot read, which show nothing."""
+    import xml.etree.ElementTree as et
+    from fractions import Fraction
+    import ttconv.model as model
+    from ttconv.imsc.reader import to_model
+    from ttconv.isd import ISD
+    from ttconv.style_properties import (DisplayAlignType, FontStyleType, FontWeightType, StyleProperties as S,
+                                         TextAlignType, VisibilityType)
+
+    third = lambda v: 0 if v < Fraction(1, 3) else (1 if v < Fraction(2, 3) else 2)
+
+    def runs_of(p):
+        pieces = []
+
+        def walk(e, style):
+            for c in e:
+                if isinstance(c, model.Br):
+                    pieces.append(("break",))
+                elif isinstance(c, model.Text):
+                    if c.get_text():
+                        pieces.append(("text", c.get_text(), style))
+                else:
+                    walk(c, span_style(c) if isinstance(c, model.Span) else style)
+        walk(p, None)
+        # Hidden text dropped; kept line feeds breaks; breaks never two
+        # together nor at either end.
+        steps = []
+        for piece in pieces:
+            if piece[0] == "break":
+                if steps and steps[-1][0] != "break":
+                    steps.append(piece)
+                continue
+            text, style = piece[1], piece[2]
+            if style["hidden"]:
+                continue
+            for i, line in enumerate(text.split("\n")):
+                if i and steps and steps[-1][0] != "break":
+                    steps.append(("break",))
+                if line:
+                    steps.append(("text", line, style))
+        while steps and steps[-1][0] == "break":
+            steps.pop()
+        if all(s[0] == "break" or s[1].isspace() or not s[1] for s in steps):
+            return None
+        # Runs of one style together.
+        runs = []
+        for s in steps:
+            if s[0] == "break":
+                runs.append(("break",))
+                continue
+            flags = "".join("1" if s[2][k] else "0" for k in ("bold", "italic", "underline", "strike"))
+            colour = s[2]["colour"]
+            if runs and runs[-1][0] == "text" and runs[-1][2:] == (flags, colour):
+                runs[-1] = ("text", runs[-1][1] + s[1], flags, colour)
+            else:
+                runs.append(("text", s[1], flags, colour))
+        return tuple(runs)
+
+    def span_style(span):
+        r, g, b, _ = span.get_style(S.Color).components
+        td = span.get_style(S.TextDecoration)
+        return {
+            "bold": span.get_style(S.FontWeight) is FontWeightType.bold,
+            "italic": span.get_style(S.FontStyle) in (FontStyleType.italic, FontStyleType.oblique),
+            "underline": bool(td and td.underline),
+            "strike": bool(td and td.line_through),
+            "colour": "-" if (r, g, b) == (255, 255, 255) else "%02x%02x%02x" % (r, g, b),
+            "hidden": span.get_style(S.Visibility) is VisibilityType.hidden,
+        }
+
+    def placement(region, p):
+        origin, extent = region.get_style(S.Origin), region.get_style(S.Extent)
+        left, top = Fraction(origin.x.value) / 100, Fraction(origin.y.value) / 100
+        width, height = Fraction(extent.width.value) / 100, Fraction(extent.height.value) / 100
+        # ttconv reads left and justify as start, right as end.
+        across = {TextAlignType.start: 0, TextAlignType.center: 1, TextAlignType.end: 2}[p.get_style(S.TextAlign)]
+        down = {DisplayAlignType.before: 0, DisplayAlignType.center: 1,
+                DisplayAlignType.after: 2}[region.get_style(S.DisplayAlign)]
+        column, row = third(left + width * Fraction(across, 2)), third(top + height * Fraction(down, 2))
+        return (7, 4, 1)[row] + column
+
+    def ns(t):
+        return int((t * 10**9 + Fraction(1, 2)) // 1)
+
+    def paragraphs(e):
+        for c in e:
+            if isinstance(c, model.P):
+                yield c
+            elif not isinstance(c, (model.Span, model.Text, model.Br)):
+                yield from paragraphs(c)
+
+    def shown_in(isd):
+        """What shows in `isd`: (id, an, runs), region by region."""
+        shown = []
+        for region in isd.iter_regions():
+            for body in region:
+                for p in paragraphs(body):
+                    runs = runs_of(p)
+                    if runs is not None:
+                        shown.append((p.get_id() or "", placement(region, p), runs))
+        return shown
+
+    # What shows in each stretch, sample by sample: from the sample's start,
+    # and from each change inside it, what ttconv shows then -- its
+    # intermediate synchronic document in force, the last at or before.
+    stretches, damaged = [], 0
+    for start, stop, document in samples:
+        try:
+            doc = to_model(et.ElementTree(et.fromstring(document)))
+        except et.ParseError:
+            damaged += 1
+            stretches.append((start, stop, []))
+            continue
+        isds = ISD.generate_isd_sequence(doc)
+        points = [start] + [t for t, _ in isds if t > start and (stop is None or t < stop)]
+        for k, at in enumerate(points):
+            until = points[k + 1] if k + 1 < len(points) else stop
+            in_force = [isd for t, isd in isds if t <= at]
+            shown = shown_in(in_force[-1]) if in_force else []
+            if shown and until is None:
+                sys.exit("a TTML sample shows something for ever")
+            stretches.append((at, until, shown))
+    # Each paragraph's stretches of showing the same, joined; cues in the
+    # order they begin, then of beginning.
+    cues, showing, order = [], {}, 0
+    for begin, end, shown in stretches:
+        now = {}
+        for key in shown:
+            if key in showing and showing[key][1] == begin:
+                now[key] = (showing[key][0], end, showing[key][2])
+            else:
+                now[key] = (begin, end, order)
+                order += 1
+        for key, (start, stop, o) in showing.items():
+            if key not in now:
+                cues.append((start, stop, o, key))
+        showing = now
+    for key, (start, stop, o) in showing.items():
+        cues.append((start, stop, o, key))
+    cues.sort(key=lambda c: (c[0], c[2]))
+    return [(ns(start), ns(stop), key[1], key[2]) for start, stop, _, key in cues], damaged
+
+
+def write_cues(path, name, cues, damaged):
+    lines = [f"# {name}: ttconv's reading of its samples, said as videocodec says it "
+             "(generate_subtitle_fixtures.py)."]
+    if damaged:
+        lines.append(f"damaged {damaged}")
+    for start, end, an, runs in cues:
+        lines.append(f"cue {start} {end} {an}")
+        for r in runs:
+            if r[0] == "break":
+                lines.append("break")
+            else:
+                lines.append(f"text {r[2]} {r[3]} {json.dumps(r[1], ensure_ascii=False)}")
+    write(path, "\n".join(lines) + "\n")
+
+
+def make_ttml(name, source, cut=None):
+    """NAME.mp4 of the TTML `source`: MP4Box's (`cut` None) -- its own
+    rewriting of the document, in samples cut where what shows changes --
+    or written here, the whole document in every sample: samples of `cut`
+    milliseconds, or ("one") a single sample to the document's last end.
+    NAME.cues is ttconv's reading of the MP4's samples, said as the crate
+    says it; for samples written here, it is checked to be the document's."""
+    from fractions import Fraction
+
+    out = os.path.join(HERE, f"{name}.mp4")
+    document = source.encode("utf-8")
+    whole, _ = ttml_cues([(Fraction(0), None, document)])
+    if cut is None:
+        src = os.path.join(HERE, f"{name}.source.ttml")
+        write(src, source)
+        try:
+            mp4box(out, src)
+        finally:
+            os.remove(src)
+    else:
+        last = -(-max(end for _, end, _, _ in whole) // 10**6)
+        step = last if cut == "one" else cut
+        edges = list(range(0, last + step, step))
+        stpp_mp4(out, [(a, b, document) for a, b in zip(edges, edges[1:])])
+    cues, damaged = ttml_cues(stpp_samples(out))
+    if (cues, damaged) != (whole, 0):
+        if cut is not None:
+            sys.exit(f"{out}: its samples, each the whole document, read otherwise than the document")
+        print(f"note: {out}: MP4Box's samples show {len(cues)} cues of the document's {len(whole)}, "
+              f"and {damaged} of them are no XML (see the TTML notes above)")
+    write_cues(os.path.join(HERE, f"{name}.cues"), f"{name}.mp4", cues, damaged)
+    print("wrote", out, f"{len(cues)} cues")
+
+
+def ttml_main():
+    """The TTML fixtures (`python generate_subtitle_fixtures.py --ttml` makes
+    them alone)."""
+    make_ttml("ttml", TTML_BASIC)
+    make_ttml("ttml_split", TTML_BASIC, cut=2000)
+    make_ttml("ttml_timing", TTML_TIMING)
+    make_ttml("ttml_timing_one", TTML_TIMING, cut="one")
+    make_ttml("ttml_timing_split", TTML_TIMING, cut=1500)
+    make_ttml("ttml_regions", TTML_REGIONS)
+    make_ttml("ttml_default", TTML_DEFAULT)
+
+
+def webvtt_main():
+    """The WebVTT fixtures, in WebM, Matroska and MP4 (`python
+    generate_subtitle_fixtures.py --webvtt` makes them alone)."""
+    cues = [("", text) for text in WEBVTT] + WEBVTT_PLACED
+    vtt = "WEBVTT\n\n" + "".join(f"{vtt_time(1000 + 1500 * i)} --> {vtt_time(2000 + 1500 * i)}"
+                                  f"{' ' + settings if settings else ''}\n{text}\n\n"
+                                  for i, (settings, text) in enumerate(cues))
+    make("webvtt", "vtt", vtt, "webm")
+    make("webvtt_mkv", "vtt", vtt, "mkv", muxer="mkvmerge", answer_from="webvtt")
+    # WebVTT in MP4 (`wvtt`), which ffmpeg does not read: MP4Box's, the
+    # format's reference implementation, from the same .vtt -- the answer
+    # ffmpeg's for the same cues in WebM.
+    make("webvtt_mp4", "vtt", vtt, "mp4", muxer="mp4box", answer_from="webvtt")
+    overlap = "WEBVTT\n\n" + "".join(f"{ident + chr(10) if ident else ''}{vtt_time(start)} --> {vtt_time(end)}"
+                                      f"{' ' + settings if settings else ''}\n{text}\n\n"
+                                      for start, end, ident, settings, text in WEBVTT_OVERLAP)
+    make("webvtt_overlap", "vtt", overlap, "webm")
+    make("webvtt_overlap_mp4", "vtt", overlap, "mp4", muxer="mp4box", answer_from="webvtt_overlap")
+    # Fragmented, as DASH and HLS segments carry it: a fragment every two
+    # seconds, cues cut at none of them.
+    make("webvtt_overlap_fragments", "vtt", overlap, "mp4", muxer="mp4box", answer_from="webvtt_overlap",
+         options=("-frag", "2000"))
+
+
 def main():
     # One cue a second and a half apart, a second long.
     def srt_of(texts):
@@ -2299,12 +2876,8 @@ def main():
                      for i, (style, text) in enumerate(SSA))
     make("ssa", "ssa", SSA_HEADER + events, "mkv", muxer="mkvmerge")
 
-    cues = [("", text) for text in WEBVTT] + WEBVTT_PLACED
-    vtt = "WEBVTT\n\n" + "".join(f"{vtt_time(1000 + 1500 * i)} --> {vtt_time(2000 + 1500 * i)}"
-                                  f"{' ' + settings if settings else ''}\n{text}\n\n"
-                                  for i, (settings, text) in enumerate(cues))
-    make("webvtt", "vtt", vtt, "webm")
-    make("webvtt_mkv", "vtt", vtt, "mkv", muxer="mkvmerge", answer_from="webvtt")
+    webvtt_main()
+    ttml_main()
 
     overlap = "".join(f"{i + 1}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n\n"
                       for i, (start, end, text) in enumerate(OVERLAP))
@@ -2338,5 +2911,9 @@ def main():
 if __name__ == "__main__":
     if "--dvb" in sys.argv:
         dvb_main()
+    elif "--webvtt" in sys.argv:
+        webvtt_main()
+    elif "--ttml" in sys.argv:
+        ttml_main()
     else:
         main()

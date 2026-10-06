@@ -1,0 +1,5 @@
+# edits_stale_discards.mp4: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vfx0 1/10240 64x48 1106 31/1
+packet 0 -102 -102 1000 10 736 KD_ 0b4648fd02d8bc30c4b9dca2f3542646 0
+packet 0 -300 -300 2000 10 746 KD_ b2299ea67f6cc710408072e9631d16eb 0
+packet 0 0 0 300 10 756 K__ 7d69e2fd722b989d34d524e3b4ec7e28 0

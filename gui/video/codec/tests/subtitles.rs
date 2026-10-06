@@ -147,6 +147,451 @@ fn overlapping_cues() {
     held_to_its_answer("overlap", "overlap.mkv", SubtitleFormat::SubRip);
 }
 
+/// WebVTT in MP4 (`wvtt`), as MP4Box writes it: the cues of `webvtt`'s
+/// `.vtt`, each a sample of its own, read as WebM's are.
+#[test]
+fn webvtt_in_mp4() {
+    held_to_its_answer("webvtt_mp4", "webvtt_mp4.mp4", SubtitleFormat::WebVtt);
+}
+
+#[test]
+fn webvtt_overlapping_cues() {
+    held_to_its_answer(
+        "webvtt_overlap",
+        "webvtt_overlap.webm",
+        SubtitleFormat::WebVtt,
+    );
+}
+
+/// The same cues in MP4, where WebVTT cuts them into a sample for every
+/// stretch between one cue's start or end and the next, every cue in each
+/// sample it shows through: joined again, they are WebM's cues, in its
+/// order.
+#[test]
+fn webvtt_in_mp4_cut_into_samples_is_joined_again() {
+    held_to_its_answer(
+        "webvtt_overlap_mp4",
+        "webvtt_overlap_mp4.mp4",
+        SubtitleFormat::WebVtt,
+    );
+}
+
+/// And in fragments, as DASH and HLS segments carry it.
+#[test]
+fn webvtt_in_mp4_fragments() {
+    held_to_its_answer(
+        "webvtt_overlap_fragments",
+        "webvtt_overlap_fragments.mp4",
+        SubtitleFormat::WebVtt,
+    );
+}
+
+/// A run of a cue's text: its text and style -- bold, italic, underline and
+/// strike as four `0`/`1`, the colour as `rrggbb` or `-` for SRT's white --
+/// or a line break.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Run {
+    Text {
+        text: String,
+        flags: String,
+        colour: String,
+    },
+    Break,
+}
+
+/// A TTML cue: its times in nanoseconds, its placement (1 to 9, a numeric
+/// keypad's) and its runs.
+type TtmlCue = (i64, i64, u8, Vec<Run>);
+
+/// A TTML fixture's answer, `NAME.cues`: its cues, and how many of its
+/// samples are no document (`damaged N`; none where the line is missing).
+fn cue_answers(name: &str) -> (Vec<TtmlCue>, u64) {
+    let path = data(name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let path = path.display();
+    let mut cues: Vec<TtmlCue> = Vec::new();
+    let mut damaged = 0;
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
+        match kind {
+            "damaged" => damaged = rest.parse().unwrap(),
+            "cue" => {
+                let w: Vec<&str> = rest.split(' ').collect();
+                cues.push((
+                    w[0].parse().unwrap(),
+                    w[1].parse().unwrap(),
+                    w[2].parse().unwrap(),
+                    Vec::new(),
+                ));
+            }
+            "break" => cues.last_mut().unwrap().3.push(Run::Break),
+            "text" => {
+                let (flags, rest) = rest.split_once(' ').unwrap();
+                let (colour, quoted) = rest.split_once(' ').unwrap();
+                cues.last_mut().unwrap().3.push(Run::Text {
+                    text: json_string(quoted),
+                    flags: flags.to_owned(),
+                    colour: colour.to_owned(),
+                });
+            }
+            other => panic!("{path}: a line this test does not know: {other}"),
+        }
+    }
+    (cues, damaged)
+}
+
+/// A JSON string's text: what the generator writes with `json.dumps`.
+fn json_string(quoted: &str) -> String {
+    let inner = quoted
+        .strip_prefix('"')
+        .and_then(|q| q.strip_suffix('"'))
+        .unwrap();
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next().unwrap() {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            '/' => out.push('/'),
+            'u' => {
+                let hex: String = chars.by_ref().take(4).collect();
+                out.push(char::from_u32(u32::from_str_radix(&hex, 16).unwrap()).unwrap());
+            }
+            other => panic!("an escape this test does not know: {other}"),
+        }
+    }
+    out
+}
+
+/// A cue's SRT markup read back into its placement and runs: `{\anN}`
+/// first, then `<b>`, `<i>`, `<u>`, `<s>` and `<font color>` and their ends,
+/// and line breaks; the word joiners the writer puts after what SRT would
+/// read as markup dropped; neighbouring runs of one style one run.
+fn runs_of(markup: &str) -> (u8, Vec<Run>) {
+    let (an, mut rest) = match markup.strip_prefix("{\\an") {
+        Some(r) if r.chars().nth(1) == Some('}') => (r[..1].parse().unwrap(), &r[2..]),
+        _ => (2, markup),
+    };
+    let (mut b, mut i, mut u, mut s) = (0, 0, 0, 0);
+    let mut colours: Vec<String> = Vec::new();
+    let mut runs: Vec<Run> = Vec::new();
+    while let Some(c) = rest.chars().next() {
+        if c == '<' && !rest[1..].starts_with('\u{2060}') {
+            let end = rest.find('>').unwrap();
+            let tag = &rest[1..end];
+            rest = &rest[end + 1..];
+            match tag {
+                "b" => b += 1,
+                "/b" => b -= 1,
+                "i" => i += 1,
+                "/i" => i -= 1,
+                "u" => u += 1,
+                "/u" => u -= 1,
+                "s" => s += 1,
+                "/s" => s -= 1,
+                "/font" => {
+                    colours.pop();
+                }
+                _ => {
+                    let colour = tag
+                        .strip_prefix("font color=\"#")
+                        .and_then(|t| t.strip_suffix('"'))
+                        .unwrap_or_else(|| panic!("a tag this test does not know: {tag}"));
+                    colours.push(colour.to_owned());
+                }
+            }
+            continue;
+        }
+        rest = &rest[c.len_utf8()..];
+        match c {
+            '\u{2060}' => {}
+            '\n' => runs.push(Run::Break),
+            c => {
+                let flag = |n: i32| if n > 0 { '1' } else { '0' };
+                let flags: String = [flag(b), flag(i), flag(u), flag(s)].iter().collect();
+                let colour = colours.last().cloned().unwrap_or_else(|| "-".to_owned());
+                match runs.last_mut() {
+                    Some(Run::Text {
+                        text,
+                        flags: f,
+                        colour: k,
+                    }) if *f == flags && *k == colour => text.push(c),
+                    _ => runs.push(Run::Text {
+                        text: c.to_string(),
+                        flags,
+                        colour,
+                    }),
+                }
+            }
+        }
+    }
+    (an, runs)
+}
+
+/// Every cue of `NAME.mp4`, a TTML track, against `NAME.cues`: ttconv's
+/// reading of its samples, said as this crate says it -- and the samples
+/// that are no document counted, as ttconv cannot read them either.
+fn ttml_held_to_its_answer(name: &str) {
+    let file = format!("{name}.mp4");
+    let mut subtitles = Subtitles::open(File::open(data(&file)).unwrap()).unwrap();
+    assert_eq!(subtitles.info().format, SubtitleFormat::Ttml, "{file}");
+    let got: Vec<TtmlCue> = read_all(&mut subtitles)
+        .into_iter()
+        .map(|c| {
+            let (an, runs) = runs_of(&c.text);
+            (c.start, c.end, an, runs)
+        })
+        .collect();
+    let (want, damaged) = cue_answers(&format!("{name}.cues"));
+    let mut wrong = Vec::new();
+    for (k, (w, g)) in want.iter().zip(&got).enumerate() {
+        if w != g {
+            wrong.push(format!("cue {}:\n  want {w:?}\n  got  {g:?}", k + 1));
+        }
+    }
+    assert!(
+        wrong.is_empty() && want.len() == got.len(),
+        "{file}: {} cues read, {} wanted; these differ:\n{}",
+        got.len(),
+        want.len(),
+        wrong.join("\n")
+    );
+    assert_eq!(subtitles.damaged(), damaged, "{file}");
+}
+
+/// TTML in MP4 (`stpp`), as MP4Box writes it: styles inline and
+/// referenced, three regions, breaks, white space, colours. Its sample of
+/// `a &lt; b &amp; c` is no XML -- MP4Box writes the two bare -- and shows
+/// nothing, as in GPAC itself and ttconv.
+#[test]
+fn ttml_in_mp4() {
+    ttml_held_to_its_answer("ttml");
+}
+
+/// The same document whole in every sample of two seconds, each showing
+/// only its own stretch, as ISO/IEC 14496-30 has it: the paragraphs cut at
+/// every sample's edge are joined again into the same cues -- the escapes
+/// MP4Box loses among them.
+#[test]
+fn ttml_in_samples_of_two_seconds_is_joined_again() {
+    ttml_held_to_its_answer("ttml_split");
+}
+
+/// Time containers, offsets, frames and ticks, a sequence, spans of their
+/// own times: the document in one sample, read through.
+#[test]
+fn ttml_timing() {
+    ttml_held_to_its_answer("ttml_timing_one");
+}
+
+#[test]
+fn ttml_timing_cut_into_samples() {
+    ttml_held_to_its_answer("ttml_timing_split");
+}
+
+/// The same document as MP4Box splits it -- each paragraph in the samples
+/// its own begin and end alone would put it in, so most show in none of
+/// theirs -- shows each sample's document only in that sample's stretch:
+/// what the samples hold, not what the document they came from would show.
+#[test]
+fn ttml_shows_each_sample_only_in_its_own_stretch() {
+    ttml_held_to_its_answer("ttml_timing");
+}
+
+/// The TTML cues of `file` from a seek to `time` on.
+fn ttml_after_seek(file: &str, time: i64) -> Vec<TtmlCue> {
+    let mut subtitles = Subtitles::open(File::open(data(file)).unwrap()).unwrap();
+    subtitles.seek(time).unwrap();
+    read_all(&mut subtitles)
+        .into_iter()
+        .map(|c| {
+            let (an, runs) = runs_of(&c.text);
+            (c.start, c.end, an, runs)
+        })
+        .collect()
+}
+
+/// A seek into TTML in MP4 gives the cues showing at the time, then the
+/// rest: from the document in one sample, each as the document has it; from
+/// samples of a second and a half, each still showing from the sample the
+/// seek landed in -- as far as the samples after the seek say -- as WebVTT's
+/// in MP4.
+#[test]
+fn a_seek_in_ttml_gives_the_cues_showing_then() {
+    const SAMPLE: i64 = 1_500_000_000;
+    let (one, _) = cue_answers("ttml_timing_one.cues");
+    let (split, _) = cue_answers("ttml_timing_split.cues");
+    assert_eq!(one, split, "the two files carry the same document");
+    // Inside a cue, at a cue's start and end, inside a sequence's turn,
+    // between cues, past the last.
+    for time in [
+        0,
+        1_000_000_000,
+        2_500_000_000,
+        3_000_000_000,
+        5_500_000_000,
+        7_400_000_000,
+        11_200_000_000,
+        15_500_000_000,
+        17_000_000_000,
+        18_300_000_000,
+        30_000_000_000,
+    ] {
+        let showing: Vec<TtmlCue> = one.iter().filter(|c| c.1 > time).cloned().collect();
+        assert_eq!(
+            ttml_after_seek("ttml_timing_one.mp4", time),
+            showing,
+            "the one sample, from {time} ns"
+        );
+        let landed = time - time % SAMPLE;
+        let from_sample: Vec<TtmlCue> = showing
+            .iter()
+            .map(|c| (c.0.max(landed), c.1, c.2, c.3.clone()))
+            .collect();
+        assert_eq!(
+            ttml_after_seek("ttml_timing_split.mp4", time),
+            from_sample,
+            "samples of 1.5 s, from {time} ns"
+        );
+    }
+}
+
+/// Which region a paragraph shows in, if any, and where that is.
+#[test]
+fn ttml_regions() {
+    ttml_held_to_its_answer("ttml_regions");
+}
+
+/// A document of no regions: the root container is the one, its text at
+/// the top left by TTML's initial alignments.
+#[test]
+fn ttml_without_regions() {
+    ttml_held_to_its_answer("ttml_default");
+}
+
+/// A seek back after reading forgets what was read: the cues read again are
+/// the same cues, none twice -- from part way through, and from the end,
+/// where a cue reaching the last sample's end was still open.
+#[test]
+fn a_seek_in_ttml_forgets_what_was_read() {
+    let said = |cues: Vec<Cue>| -> Vec<(i64, i64, String)> {
+        cues.into_iter().map(|c| (c.start, c.end, c.text)).collect()
+    };
+    for file in [
+        "ttml_timing_one.mp4",
+        "ttml_timing_split.mp4",
+        "ttml_split.mp4",
+    ] {
+        let mut subtitles = Subtitles::open(File::open(data(file)).unwrap()).unwrap();
+        let all = said(read_all(&mut subtitles));
+        subtitles.seek(0).unwrap();
+        assert_eq!(said(read_all(&mut subtitles)), all, "{file}, from the end");
+        subtitles.seek(0).unwrap();
+        for _ in 0..3 {
+            subtitles.next_cue().unwrap();
+        }
+        subtitles.seek(0).unwrap();
+        assert_eq!(said(read_all(&mut subtitles)), all, "{file}, from part way");
+    }
+}
+
+/// A seek into WebVTT in MP4 gives the cues showing at the time -- each
+/// beginning, as far as the samples after the seek say, at the sample the
+/// seek landed in -- then the rest.
+#[test]
+fn a_seek_in_webvtt_in_mp4_gives_the_cues_showing_then() {
+    let file = "webvtt_overlap_mp4.mp4";
+    assert_eq!(
+        after_seek(file, 5.5),
+        [
+            "{\\an8}long, under all but the last",
+            "the same text",
+            "the same text",
+            "after them all, past a stretch of none",
+            "first of a pair",
+            "second of a pair"
+        ]
+    );
+    assert_eq!(
+        after_seek(file, 11.0),
+        [
+            "after them all, past a stretch of none",
+            "first of a pair",
+            "second of a pair"
+        ]
+    );
+    assert_eq!(after_seek(file, 0.0).len(), 8);
+    assert!(after_seek(file, 60.0).is_empty());
+    let mut subtitles = Subtitles::open(File::open(data(file)).unwrap()).unwrap();
+    subtitles.seek(5_500_000_000).unwrap();
+    let first = subtitles.next_cue().unwrap().unwrap();
+    assert_eq!(
+        (first.start, first.end),
+        (5_000_000_000, 10_000_000_000),
+        "the long cue, from the sample the seek landed in"
+    );
+}
+
+/// A seek while a cue still shows forgets it: the samples read after the
+/// seek are joined to nothing read before it.
+#[test]
+fn a_seek_in_webvtt_in_mp4_forgets_the_cue_showing_before_it() {
+    let file = File::open(data("webvtt_overlap_mp4.mp4")).unwrap();
+    let mut subtitles = Subtitles::open(file).unwrap();
+    subtitles.seek(14_500_000_000).unwrap();
+    // The first of the pair is given while the second still shows.
+    let first = subtitles.next_cue().unwrap().unwrap();
+    assert_eq!(first.text, "first of a pair");
+    subtitles.seek(14_500_000_000).unwrap();
+    let texts: Vec<String> = read_all(&mut subtitles)
+        .into_iter()
+        .map(|c| c.text)
+        .collect();
+    assert_eq!(texts, ["first of a pair", "second of a pair"]);
+}
+
+/// A sample of WebVTT in MP4 that cannot be read shows nothing, and is
+/// counted: the cues showing end where it begins, and one in the samples
+/// on both sides of it is two cues.
+#[test]
+fn a_damaged_webvtt_sample_in_mp4_shows_nothing_and_is_counted() {
+    let mut bytes = std::fs::read(data("webvtt_overlap_mp4.mp4")).unwrap();
+    // The short cue is in one sample alone, 2 s to 3 s: its text's box made
+    // to run past its cue.
+    let text = b"short, inside the long";
+    let at = bytes
+        .windows(4 + text.len())
+        .position(|w| &w[..4] == b"payl" && &w[4..] == text)
+        .expect("the cue's text box");
+    bytes[at - 4..at].copy_from_slice(&0xFFFFu32.to_be_bytes());
+    let mut subtitles = Subtitles::open(std::io::Cursor::new(bytes)).unwrap();
+    let mut got = Vec::new();
+    while let Some(cue) = subtitles.next_cue().unwrap() {
+        got.push((cue.start / 1_000_000, cue.end / 1_000_000, cue.text));
+    }
+    let long = "{\\an8}long, under all but the last".to_owned();
+    assert_eq!(
+        got[..3],
+        [
+            (1000, 2000, long.clone()),
+            (3000, 10_000, long),
+            (
+                3000,
+                4000,
+                "{\\an1}begun with the short, ended after it".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(got.len(), 8, "{got:?}");
+    assert_eq!(subtitles.damaged(), 1);
+}
+
 #[test]
 fn timed_text_in_mp4_as_ffmpeg_writes_it() {
     held_to_its_answer("movtext", "movtext.mp4", SubtitleFormat::MovText);

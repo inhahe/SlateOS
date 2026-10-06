@@ -733,11 +733,23 @@ fn packets_of_edits_repeat() {
     demuxes_as_ffmpeg_does("edits_repeat.mp4");
 }
 
+/// An edit that never reached its start leaves a dropped frame's duration
+/// behind; the next edit's dropped frame counts back by its own.
+#[test]
+fn packets_of_edits_stale_discards() {
+    demuxes_as_ffmpeg_does("edits_stale_discards.mp4");
+}
+
 // Files the fuzzer found.
 
 #[test]
 fn packets_of_found_tx3g_claims_billions() {
     demuxes_as_ffmpeg_does("found_tx3g_claims_billions.mp4");
+}
+
+#[test]
+fn packets_of_found_seek_over_discards() {
+    demuxes_as_ffmpeg_does("found_seek_over_discards.mp4");
 }
 
 /// One seek's answer: where to, in milliseconds, and each packet after it
@@ -903,6 +915,30 @@ fn seeks_in_edit_at_shown_key() {
     seeks_as_ffmpeg_does("edit_at_shown_key.mp4");
 }
 
+/// The fuzzer's file whose seeks walked a run of discarded entries once for
+/// each entry of it: a seek back past the start -- the one that took a
+/// third of a second -- answered at once.
+///
+/// Not held to ffprobe's seeks: its edits make an index far past one entry
+/// a byte of the file, which the crate holds to that (design-decisions
+/// §1364), and FFmpeg's seeks land in what is past it.
+#[test]
+fn seeks_in_found_seek_over_discards() {
+    let mut d = Demuxer::open(File::open(data("found_seek_over_discards.mp4")).unwrap()).unwrap();
+    for track in 0..d.tracks().len() {
+        let started = std::time::Instant::now();
+        d.seek(track, -1).unwrap();
+        // FFmpeg's walks took seconds here in a test build; this takes a
+        // millisecond, so a second's bound holds on any machine however
+        // busy, and still fails the walks.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "track {track}: a seek back past the start took {:?}",
+            started.elapsed()
+        );
+    }
+}
+
 /// Every packet of a demuxer, to the end.
 fn every_packet<R: std::io::Read + std::io::Seek>(d: &mut Demuxer<R>) -> Vec<mp4::Packet> {
     let mut all = Vec::new();
@@ -912,11 +948,23 @@ fn every_packet<R: std::io::Read + std::io::Seek>(d: &mut Demuxer<R>) -> Vec<mp4
     all
 }
 
+/// Where a track read alone goes on past where it ends among the others: a
+/// track passed over has a sample past the end of the file, whose read ends
+/// the reading of every track -- and which, unread, ends nothing, as FFmpeg
+/// reads nothing of a stream it discards (`mov_read_packet`). Alone, the
+/// track gives its packets among the others, then those after.
+const READ_ON_PAST_ANOTHERS_END: &[(&str, usize)] = &[
+    // The picture track's samples run past the file's end before the
+    // sound's first turn: among the others the sound gives nothing.
+    ("found_seek_over_discards.mp4", 1),
+];
+
 /// A track read alone (`Demuxer::select_tracks`) gives exactly the packets it
 /// gives among the others, in every fixture the demuxer opens: the others'
 /// samples, passed over unread, still take their turns. Read ahead little
 /// -- as a reader of one track reads (`videocodec`'s sound and subtitles) --
-/// or a few bytes at a time, a file reads the same.
+/// or a few bytes at a time, a file reads the same. The one difference,
+/// FFmpeg's too, is [`READ_ON_PAST_ANOTHERS_END`].
 #[test]
 fn a_track_selected_alone_gives_the_packets_it_gives_among_the_others() {
     let mut differ = Vec::new();
@@ -941,6 +989,11 @@ fn a_track_selected_alone_gives_the_packets_it_gives_among_the_others() {
             alone.set_read_ahead(1024).unwrap();
             let got = every_packet(&mut alone);
             let want: Vec<_> = all.iter().filter(|p| p.track == track).cloned().collect();
+            let reads_on = READ_ON_PAST_ANOTHERS_END.contains(&(name.as_str(), track));
+            if reads_on && got.len() > want.len() && got.starts_with(&want) {
+                checked += 1;
+                continue;
+            }
             if got != want {
                 differ.push(format!(
                     "{name} track {track}: {} packets, {} wanted",

@@ -1243,6 +1243,27 @@ mod tests {
         // An acquisition point forgets the regions and CLUTs.
         d.block(&[pcs(4, 1, 9, &[(1, 0, 0)]), end()].concat());
         assert!(d.regions.is_empty() && d.cluts.is_empty());
+        // A normal case keeps what it has; a mode change forgets it too.
+        let define = |version| {
+            [
+                pcs(version, 0, 9, &[(1, 0, 0)]),
+                rcs(1, 2, 2, 2, Some(1), &[]),
+                cds(0, &[WHITE]),
+                end(),
+            ]
+            .concat()
+        };
+        d.block(&define(5));
+        d.block(&[pcs(6, 0, 9, &[(1, 0, 0)]), end()].concat());
+        assert!(
+            !d.regions.is_empty() && !d.cluts.is_empty(),
+            "a normal case forgot"
+        );
+        d.block(&[pcs(7, 2, 9, &[(1, 0, 0)]), end()].concat());
+        assert!(
+            d.regions.is_empty() && d.cluts.is_empty(),
+            "a mode change remembered"
+        );
     }
 
     #[test]

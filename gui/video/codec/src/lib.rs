@@ -292,10 +292,13 @@ pub enum SubtitleFormat {
     Ass,
     /// SubStation Alpha (`S_TEXT/SSA`).
     Ssa,
-    /// WebVTT (`D_WEBVTT/SUBTITLES` in WebM, `S_TEXT/WEBVTT`).
+    /// WebVTT (`D_WEBVTT/SUBTITLES` in WebM, `S_TEXT/WEBVTT`; `wvtt` in
+    /// MP4).
     WebVtt,
     /// 3GPP timed text, MP4's (`tx3g`; QuickTime's `text`).
     MovText,
+    /// TTML -- IMSC 1, broadcasting's -- in MP4 (`stpp`).
+    Ttml,
     /// Blu-ray's pictures of text (`S_HDMV/PGS`), read as images.
     Pgs,
     /// DVD's pictures of text (`S_VOBSUB`), read as images.
@@ -311,7 +314,7 @@ impl SubtitleFormat {
     pub const fn is_text(self) -> bool {
         matches!(
             self,
-            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText
+            Self::SubRip | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText | Self::Ttml
         )
     }
 
@@ -330,6 +333,7 @@ impl fmt::Display for SubtitleFormat {
             Self::Ssa => "SSA",
             Self::WebVtt => "WebVTT",
             Self::MovText => "3GPP timed text",
+            Self::Ttml => "TTML",
             Self::Pgs => "PGS",
             Self::VobSub => "VobSub",
             Self::Dvb => "DVB",

@@ -52,6 +52,21 @@ pane opens, and says "Can't be changed yet" in the slider's place -- or
 its own slider, as for the volume. Once the desktop holds the right,
 setting it goes in `backlight` and the slider comes back.
 
+### The speaker in the tray
+
+With a volume that is real, the tray gets the speaker every desktop has,
+left of the bell (`gui/desktop/src/volume_flyout.rs`): its picture the
+level's -- muted, or dimmed while there is no card to turn -- its tooltip
+the level in words or why there is none, the wheel over it a volume step a
+notch, and a press opening a flyout above it with the master volume's
+slider, the level, and a mute switch; the arrows move the slider while it
+is open, and Escape or a press elsewhere closes it. Opening it closes the
+calendar, the notification pane and the start menu, and each of them closes
+it. With the card out of reach the flyout says why where the slider would
+be. The roadmap's popup also has an output device chooser and each
+program's volume; the kernel's mixer offers programs the master alone, so
+those wait on it.
+
 ### The switches above them
 
 The same rule for the quick settings' switches. Wi-Fi and Bluetooth have

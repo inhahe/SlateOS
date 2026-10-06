@@ -1849,7 +1849,9 @@ live.
   card cannot be reached -- every native program on SlateOS until lanes A
   and D open the door (`requests/e-ad-no-application-can-reach-the-sound-device.md`,
   the control device included) -- the pane says why in the slider's place
-  and the volume keys say it on screen. The brightness slider beside it,
+  and the volume keys say it on screen. The tray has a speaker now, left of
+  the bell: the wheel over it turns the volume, and a press opens a flyout
+  with the master's slider and a mute switch. The brightness slider beside it,
   which moved a number too, now shows the screen's brightness as the
   kernel reports it and says it cannot be changed yet: the kernel's call
   exists, the right to make it is not given to the desktop

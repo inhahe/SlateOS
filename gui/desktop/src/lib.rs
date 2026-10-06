@@ -137,6 +137,7 @@ pub mod tray_dnd;
 pub mod update_settings;
 pub mod user_accounts;
 pub mod volume;
+pub mod volume_flyout;
 pub mod wallpaper;
 pub mod widgets;
 pub mod window_peek;
@@ -544,6 +545,14 @@ const SHOW_DESKTOP_FILL_LIT: u8 = 46;
 /// buttons sideways every time something was posted.
 const TRAY_BELL_WIDTH: f32 = 24.0;
 
+/// How wide the tray's speaker is, left of the bell: a glyph's square, as
+/// the bell's is, so the level it shows never widens the tray.
+const TRAY_VOLUME_WIDTH: f32 = 24.0;
+
+/// How strongly the speaker is drawn while there is no sound card to turn:
+/// the disabled controls' opacity, so it reads as there and unusable.
+const SPEAKER_OUT_OF_REACH_ALPHA: u8 = 128;
+
 /// How wide one application tray icon's slot is.
 ///
 /// The same as the bell, so the tray reads as a row of equal things rather
@@ -928,6 +937,8 @@ enum TooltipKey {
     TrayOverflow,
     /// The clock, which is named by the whole date.
     Clock,
+    /// The speaker, named by the volume's level.
+    Volume,
 }
 
 /// What in the open start menu the pointer is over, drawn lit as the
@@ -1426,6 +1437,11 @@ pub enum Hit {
     EndingPanel,
     /// The tray's notification bell, which opens the notification pane.
     NotificationBell,
+    /// The tray's speaker, left of the bell, which opens the volume flyout.
+    VolumeIcon,
+    /// The open volume flyout -- its controls and its inert space alike, so
+    /// a press in its own margin does not close it.
+    VolumeFlyout,
     /// The chevron at the left of the icon run, which lists the icons the
     /// bar had no room for.
     TrayOverflow,
@@ -2013,6 +2029,12 @@ pub struct DesktopShell {
     /// earned scrolling one session of the menu must not deliver a row to the
     /// next one, which would jump the list the instant it opened.
     start_menu_wheel: wheel::Accumulator,
+    /// The part of a notch the wheel over the speaker has turned and not yet
+    /// made a whole step of.
+    volume_wheel: f32,
+    /// The flyout the tray's speaker opens: the master volume's slider and
+    /// its mute switch (`volume_flyout`).
+    volume_flyout: volume_flyout::VolumeFlyout,
     /// Whether the power menu is showing.
     ///
     /// Only ever true while [`start_menu_open`](Self::start_menu_open) is: it
@@ -2898,6 +2920,8 @@ impl DesktopShell {
             start_menu_open: false,
             start_menu_scroll: 0,
             start_menu_wheel: wheel::Accumulator::default(),
+            volume_wheel: 0.0,
+            volume_flyout: volume_flyout::VolumeFlyout::new(),
             power_menu_open: false,
             shortcut_card_open: false,
             shortcut_editor: shortcut_editor::ShortcutEditor::new(),
@@ -4956,6 +4980,8 @@ impl DesktopShell {
             // stopped reading it. Symmetrical with `toggle_shortcut_card`, which
             // closes this menu.
             self.shortcut_card_open = false;
+            // Two panels over one taskbar, as the calendar's rule has it.
+            self.volume_flyout.set_visible(false);
             self.start_menu_scroll = 0;
             // The offset is being rewound, so the fraction that was pushing it
             // must be rewound too — otherwise a menu opened just after a
@@ -5078,6 +5104,12 @@ impl DesktopShell {
             }
         }
 
+        // The volume flyout, the whole of its panel -- its own margin is not
+        // the desktop behind it, and a press there must not close it.
+        if self.volume_flyout.is_visible() && self.volume_flyout_layout().panel.contains(x, y) {
+            return Hit::VolumeFlyout;
+        }
+
         if self.start_button_rect().contains(x, y) {
             return Hit::StartButton;
         }
@@ -5099,6 +5131,10 @@ impl DesktopShell {
             // rather than by a rounding error going the way it happens to.
             if self.bell_rect().contains(x, y) {
                 return Hit::NotificationBell;
+            }
+            // Left of the bell, placed from it, so the two cannot overlap.
+            if self.volume_icon_rect().contains(x, y) {
+                return Hit::VolumeIcon;
             }
             // The application icons, left of the shell's own tray items and
             // tested before the window buttons: `tray_width` already reserved
@@ -5602,6 +5638,28 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // A drag of the volume flyout's slider follows the pointer wherever it
+        // goes until the button comes up, as any slider's does.
+        if self.volume_flyout.dragging() {
+            let action = match event.kind {
+                MouseEventKind::Move => {
+                    let layout = self.volume_flyout_layout();
+                    self.volume_flyout.drag(&layout, (event.x, event.y))
+                }
+                MouseEventKind::Release(_) => self.volume_flyout.release(),
+                _ => None,
+            };
+            if let Some(action) = action {
+                self.apply_volume_action(action);
+            }
+            if matches!(
+                event.kind,
+                MouseEventKind::Move | MouseEventKind::Release(_)
+            ) {
+                return ShellAction::Consumed;
+            }
+        }
+
         match event.kind {
             // These were one arm until the desktop icons were drawn, on the
             // stated grounds that "nothing it draws does anything on the second
@@ -5759,7 +5817,11 @@ impl DesktopShell {
             self.hover_changed = true;
         }
         let tray = match hit {
-            Hit::TrayIcon(_) | Hit::TrayOverflow | Hit::NotificationBell | Hit::Clock => Some(hit),
+            Hit::TrayIcon(_)
+            | Hit::TrayOverflow
+            | Hit::NotificationBell
+            | Hit::VolumeIcon
+            | Hit::Clock => Some(hit),
             _ => None,
         };
         if tray != self.tray_lit {
@@ -5814,6 +5876,11 @@ impl DesktopShell {
             // which says it already.
             Hit::Clock if !self.calendar.visible => {
                 Some((TooltipKey::Clock, self.clock_tooltip_at(Self::unix_now())))
+            }
+            // The speaker is a picture alone: its level in words, or why it
+            // has none -- but not over the flyout it opened, which shows it.
+            Hit::VolumeIcon if !self.volume_flyout.is_visible() => {
+                Some((TooltipKey::Volume, self.volume_tooltip()))
             }
             // The caret is a chevron alone, and says what it opens as the
             // reference's does.
@@ -6116,6 +6183,14 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // And for the volume flyout: a press on it is its own, a press on the
+        // speaker toggles it below, and a press anywhere else closes it and
+        // is spent doing so.
+        if self.volume_flyout.is_visible() && !matches!(hit, Hit::VolumeIcon | Hit::VolumeFlyout) {
+            self.volume_flyout.set_visible(false);
+            return ShellAction::Consumed;
+        }
+
         // And for the notification pane, which by this point can only be a
         // press on the taskbar: every other press was consumed by the pane
         // above. Pressing the bell falls through to its own arm, which toggles
@@ -6323,6 +6398,19 @@ impl DesktopShell {
             }
             Hit::NotificationBell => {
                 self.toggle_notifications();
+                ShellAction::Consumed
+            }
+            Hit::VolumeIcon => {
+                self.toggle_volume_flyout();
+                ShellAction::Consumed
+            }
+            Hit::VolumeFlyout => {
+                let layout = self.volume_flyout_layout();
+                let reachable = self.volume.out_of_reach().is_none();
+                let level = self.notifications.volume();
+                if let Some(action) = self.volume_flyout.press(&layout, (x, y), level, reachable) {
+                    self.apply_volume_action(action);
+                }
                 ShellAction::Consumed
             }
             // Handled above the primary-button gate, along with the chevron
@@ -6576,6 +6664,26 @@ impl DesktopShell {
         ) {
             let rows = scroll_rows(&mut self.start_menu_wheel, dy);
             self.scroll_start_menu(rows);
+            return ShellAction::Consumed;
+        }
+        // The wheel over the speaker or its flyout turns the volume, a step a
+        // notch, as the volume keys do -- away from the user (`dy` positive)
+        // is louder. Fractions of a notch, from a fine-grained wheel, are
+        // kept until they make one.
+        if matches!(self.hit_test(x, y), Hit::VolumeIcon | Hit::VolumeFlyout) {
+            if dy.is_finite() {
+                self.volume_wheel += dy;
+            }
+            let whole = self.volume_wheel.trunc();
+            self.volume_wheel -= whole;
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "whole notches of one event, far inside i16"
+            )]
+            let notches = whole.clamp(-20.0, 20.0) as i16;
+            if notches != 0 {
+                self.step_volume(notches.saturating_mul(VolumeStep::SIZE));
+            }
             return ShellAction::Consumed;
         }
         if self.hit_test(x, y).is_shell_chrome() {
@@ -7582,6 +7690,36 @@ impl DesktopShell {
             return self.key_on_start_menu(key);
         }
 
+        // The volume flyout owns the arrows, Page Up and Down, Home and End
+        // while it is open -- its slider's keys -- and Escape closes it.
+        // Everything else goes on: the volume keys among them, which move the
+        // level it shows.
+        if self.volume_flyout.is_visible() && key.pressed {
+            if key.key == Key::Escape {
+                self.volume_flyout.set_visible(false);
+                return HotkeyOutcome::consumed();
+            }
+            let reachable = self.volume.out_of_reach().is_none();
+            let level = self.notifications.volume();
+            if let Some(action) = self.volume_flyout.key(key, level, reachable) {
+                self.apply_volume_action(action);
+                return HotkeyOutcome::consumed();
+            }
+            if matches!(
+                key.key,
+                Key::Left
+                    | Key::Right
+                    | Key::Up
+                    | Key::Down
+                    | Key::PageUp
+                    | Key::PageDown
+                    | Key::Home
+                    | Key::End
+            ) {
+                return HotkeyOutcome::consumed();
+            }
+        }
+
         // The overview gets every press before the shortcut table does, and
         // swallows the ones it does not recognise. It has a text field in it:
         // if the table went first, typing "d" into the search bar would show the
@@ -8229,12 +8367,7 @@ impl DesktopShell {
                 } else {
                     VolumeStep::Down
                 };
-                self.read_volume();
-                if self.volume.out_of_reach().is_none() {
-                    self.notifications.adjust_volume(step.delta());
-                    self.write_volume();
-                }
-                self.show_volume_osd();
+                self.step_volume(step.delta());
                 HotkeyOutcome::consumed()
             }
             HotkeyAction::VolumeMute => {
@@ -9031,6 +9164,38 @@ impl DesktopShell {
                 self.font_size(TextRole::Glyph),
             );
         }
+
+        // The speaker, left of the bell: the level's picture -- muted, or no
+        // card to turn, in the muted picture dimmed -- lit under the pointer.
+        let speaker = self.volume_icon_rect();
+        if self.tray_lit == Some(Hit::VolumeIcon) {
+            self.light_tray_item(&mut tree, speaker);
+        }
+        let (speaker_icon, speaker_color) = if self.volume.out_of_reach().is_some() {
+            (
+                osd::volume_muted_icon(),
+                with_alpha(self.theme.taskbar_fg, SPEAKER_OUT_OF_REACH_ALPHA),
+            )
+        } else if self.notifications.is_muted() {
+            (osd::volume_muted_icon(), self.theme.taskbar_fg)
+        } else {
+            (
+                osd::volume_icon(self.notifications.volume()),
+                self.theme.taskbar_fg,
+            )
+        };
+        self.icon_in(
+            &mut tree,
+            Rect::new(
+                speaker.x,
+                bar.y,
+                self.scale(TRAY_VOLUME_WIDTH).min(speaker.w),
+                bar.h,
+            ),
+            speaker_icon,
+            TASKBAR_ICON,
+            speaker_color,
+        );
 
         let bell = self.bell_rect();
         if self.tray_lit == Some(Hit::NotificationBell) {
@@ -10763,18 +10928,30 @@ impl DesktopShell {
     /// is how a shipped default of `show_date: true` could have gone unnoticed,
     /// since nothing about a clipped clock says which end was cut.
     fn tray_width(&self) -> f32 {
+        // The application icons are part of the tray's width, or the window
+        // buttons would be laid out into space the icons occupy and the
+        // rightmost button would sit under them -- and the "Show desktop"
+        // strip is right of it all.
+        (self.shell_tray_width() + self.app_tray_width()).max(self.scale(TRAY_MIN_WIDTH))
+            + self.show_desktop_rect().w
+    }
+
+    /// How much of the tray the shell's own items take, their paddings
+    /// included: the clock, the bell, the speaker, the desktop indicator and
+    /// the keyboard layout -- padding at the right edge, between each pair,
+    /// and at the tray's left.
+    ///
+    /// The one sum: the tray's width, the application icons' run and the
+    /// chevron's fallback place all start from it, so an item added here
+    /// moves all three together.
+    fn shell_tray_width(&self) -> f32 {
         let padding = self.scale(TRAY_PADDING);
-        let content = self.clock_width()
+        self.clock_width()
             + self.scale(TRAY_BELL_WIDTH)
+            + self.scale(TRAY_VOLUME_WIDTH)
             + self.desktop_indicator_width()
             + self.layout_indicator_width()
-            // The application icons are part of the tray's width, or the
-            // window buttons would be laid out into space the icons occupy and
-            // the rightmost button would sit under them.
-            + self.app_tray_width();
-        // Padding at the right edge, between each pair of items, and at the
-        // left of the tray -- and the "Show desktop" strip right of it all.
-        (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH)) + self.show_desktop_rect().w
+            + padding * 5.0
     }
 
     /// Every icon in the tray: those other programs have put there, as the
@@ -12387,13 +12564,8 @@ impl DesktopShell {
         let bar = self.taskbar_rect();
         let slot = self.tray_icon_slot();
         let padding = self.scale(TRAY_PADDING);
-        // The left edge of everything the shell itself draws in the tray.
-        let shell_items = self.clock_width()
-            + self.scale(TRAY_BELL_WIDTH)
-            + self.desktop_indicator_width()
-            + self.layout_indicator_width()
-            + padding * 4.0;
-        let mut x = (self.tray_right() - shell_items - self.app_tray_width() + padding).max(0.0);
+        let mut x = (self.tray_right() - self.shell_tray_width() - self.app_tray_width() + padding)
+            .max(0.0);
         // The chevron, when there is one, sits at the *left* of the run: it is
         // the edge the run grows from, so the icons that do fit keep the same
         // position as icons appear and depart behind it.
@@ -12444,13 +12616,9 @@ impl DesktopShell {
             // one icon beside it. The run's origin is then the chevron's.
             None => {
                 let padding = self.scale(TRAY_PADDING);
-                let shell_items = self.clock_width()
-                    + self.scale(TRAY_BELL_WIDTH)
-                    + self.desktop_indicator_width()
-                    + self.layout_indicator_width()
-                    + padding * 4.0;
-                let x =
-                    (self.tray_right() - shell_items - self.app_tray_width() + padding).max(0.0);
+                let x = (self.tray_right() - self.shell_tray_width() - self.app_tray_width()
+                    + padding)
+                    .max(0.0);
                 Some(Rect::new(x, bar.y, slot, bar.h))
             }
         }
@@ -12472,6 +12640,18 @@ impl DesktopShell {
         let padding = self.scale(TRAY_PADDING);
         let width = self.scale(TRAY_BELL_WIDTH) + padding;
         let x = (self.clock_rect().x - width).max(0.0);
+        Rect::new(x, bar.y, width.min((bar.w - x).max(0.0)), bar.h)
+    }
+
+    /// The tray's speaker, immediately left of the bell: placed from the bell
+    /// as the bell is from the clock, for the reason
+    /// [`bell_rect`](Self::bell_rect) gives, and the bar's full height.
+    #[must_use]
+    pub fn volume_icon_rect(&self) -> Rect {
+        let bar = self.taskbar_rect();
+        let padding = self.scale(TRAY_PADDING);
+        let width = self.scale(TRAY_VOLUME_WIDTH) + padding;
+        let x = (self.bell_rect().x - width).max(0.0);
         Rect::new(x, bar.y, width.min((bar.w - x).max(0.0)), bar.h)
     }
 
@@ -12588,6 +12768,7 @@ impl DesktopShell {
         // Opening a popup closes the other one: two panels covering the same
         // taskbar at once is a state the user cannot have asked for.
         self.close_start_menu();
+        self.volume_flyout.set_visible(false);
         self.shortcut_card_open = false;
 
         let now = SystemTime::now()
@@ -12621,6 +12802,7 @@ impl DesktopShell {
         // a state the user cannot have asked for.
         self.close_start_menu();
         self.calendar.set_visible(false);
+        self.volume_flyout.set_visible(false);
         // The pane's scrim dims the whole screen behind it, so a card left open
         // under it would be a card the user cannot read.
         self.shortcut_card_open = false;
@@ -12692,6 +12874,94 @@ impl DesktopShell {
         let _refused = self.volume.write(level, muted);
         self.notifications
             .set_volume_out_of_reach(self.volume.out_of_reach());
+    }
+
+    /// Move the volume by `delta` points, from the card's level as it is now,
+    /// and onto the card -- the volume keys and the wheel over the speaker --
+    /// and show where it went. A card out of reach is said to be, and nothing
+    /// moves: a number changing on screen while nothing changes in the
+    /// speakers is the lie this replaced.
+    fn step_volume(&mut self, delta: i16) {
+        self.read_volume();
+        if self.volume.out_of_reach().is_none() {
+            let _level = self.notifications.adjust_volume(delta);
+            self.write_volume();
+        }
+        self.show_volume_osd();
+    }
+
+    /// Open the volume flyout above the speaker, or close it if it is open.
+    /// Opening it closes what else hangs off the taskbar -- two panels over
+    /// one bar is a state the user cannot have asked for -- and reads the
+    /// card, so it shows the level as it is now.
+    pub fn toggle_volume_flyout(&mut self) {
+        if self.volume_flyout.is_visible() {
+            self.volume_flyout.set_visible(false);
+            return;
+        }
+        self.close_start_menu();
+        self.calendar.set_visible(false);
+        if self.notifications.pane_state().is_visible() {
+            self.notifications.hide();
+        }
+        self.read_volume();
+        self.volume_flyout.set_visible(true);
+    }
+
+    /// Where the volume flyout is: above the taskbar, its right edge on the
+    /// speaker's, kept on the screen.
+    #[must_use]
+    pub fn volume_flyout_layout(&self) -> volume_flyout::Layout {
+        let scale = self.appearance.scale_factor();
+        let (width, height) = (volume_flyout::WIDTH * scale, volume_flyout::HEIGHT * scale);
+        let speaker = self.volume_icon_rect();
+        let padding = self.scale(TRAY_PADDING);
+        let (screen_w, _) = self.viewport();
+        let x = (speaker.x + speaker.w - width).clamp(0.0, (screen_w - width).max(0.0));
+        let y = (self.taskbar_rect().y - height - padding).max(0.0);
+        volume_flyout::Layout::new((x, y), scale)
+    }
+
+    /// Carry out what the flyout asked for, on the card: a level, which a
+    /// user's change of it unmutes, as the slider in the pane does -- or a
+    /// mute turned over.
+    fn apply_volume_action(&mut self, action: volume_flyout::Action) {
+        match action {
+            volume_flyout::Action::Level(level) => self.notifications.set_volume(level),
+            volume_flyout::Action::ToggleMute => {
+                let _muted = self.notifications.toggle_mute();
+            }
+        }
+        self.write_volume();
+    }
+
+    /// What the speaker's tooltip says: the level, muted or not -- or why
+    /// there is none to change.
+    fn volume_tooltip(&self) -> String {
+        match self.volume.out_of_reach() {
+            Some(why) => format!("Volume: {why}"),
+            None if self.notifications.is_muted() => {
+                format!("Volume: muted ({}%)", self.notifications.volume())
+            }
+            None => format!("Volume: {}%", self.notifications.volume()),
+        }
+    }
+
+    /// Render the volume flyout, if it is open.
+    #[must_use]
+    pub fn render_volume_flyout(&self) -> Option<RenderTree> {
+        if !self.volume_flyout.is_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.volume_flyout.render(
+            &Palette::from_settings(&self.appearance),
+            &self.volume_flyout_layout(),
+            self.notifications.volume(),
+            self.notifications.is_muted(),
+            self.volume.out_of_reach(),
+        ));
+        Some(tree)
     }
 
     /// The overlay for the volume as it is now: its level and whether it is
@@ -14682,6 +14952,7 @@ impl DesktopShell {
             || self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
+            || self.volume_flyout.is_visible()
             || self.notifications.pane_state().is_visible()
             || self.snap.is_overlay_visible()
             || self.overview.visible
@@ -14719,6 +14990,7 @@ impl DesktopShell {
         // leave the drag to finish on the release.
         self.close_start_menu();
         self.calendar.set_visible(false);
+        self.volume_flyout.set_visible(false);
         // The pane's own Escape handling closes it too; this is the path for a
         // press that dismissed something else at the same time, and for a
         // caller dismissing everything without a key at all.
@@ -24613,7 +24885,7 @@ mod taskbar_pin_tests {
         );
         // The tray's width counts the strip, or everything laid out from its
         // left edge -- the desktop indicator, then the keyboard layout's --
-        // runs into the bell.
+        // runs into the speaker, and the speaker into the bell.
         let pad = shell.scale(super::TRAY_PADDING);
         assert!(
             shell.tray_x()
@@ -24621,8 +24893,13 @@ mod taskbar_pin_tests {
                 + shell.desktop_indicator_width()
                 + pad
                 + shell.layout_indicator_width()
-                <= shell.bell_rect().x + 0.01,
-            "the tray's left-hand items run into the bell"
+                <= shell.volume_icon_rect().x + 0.01,
+            "the tray's left-hand items run into the speaker"
+        );
+        let speaker = shell.volume_icon_rect();
+        assert!(
+            speaker.x + speaker.w <= shell.bell_rect().x + 0.01,
+            "the speaker runs into the bell"
         );
         assert_eq!(
             shell.hit_test(strip.x + strip.w / 2.0, strip.y + strip.h / 2.0),

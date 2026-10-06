@@ -2404,6 +2404,9 @@ impl<T: Transport> ShellSession<T> {
             self.shell.render_overview(),
             self.shell.render_start_menu(),
             self.shell.render_calendar(),
+            // Beside the calendar, and for its reason: a panel over the bar
+            // that opening any other closes.
+            self.shell.render_volume_flyout(),
             // Over the menus, under Alt-Tab: opening the tiling overlay
             // dismisses them (`toggle_zone_overlay`), so the order between
             // the three above is a statement of the invariant rather than a

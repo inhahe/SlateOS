@@ -1028,8 +1028,9 @@ fn same_category(a: &OsdKind, b: &OsdKind) -> bool {
     )
 }
 
-/// The volume icon for `level`, by its name in the icon theme.
-fn volume_icon(level: u8) -> &'static str {
+/// The volume icon for `level`, by its name in the icon theme -- the
+/// overlay's, and the tray's speaker's.
+pub(crate) fn volume_icon(level: u8) -> &'static str {
     if level == 0 {
         "audio-volume-muted"
     } else if level < 33 {
@@ -1042,7 +1043,7 @@ fn volume_icon(level: u8) -> &'static str {
 }
 
 /// The volume icon when the sound is off, whatever its level.
-fn volume_muted_icon() -> &'static str {
+pub(crate) fn volume_muted_icon() -> &'static str {
     "audio-volume-muted"
 }
 

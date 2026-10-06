@@ -1258,7 +1258,48 @@ impl ServiceRegistry {
 
     /// Start a service (read ELF from VFS, spawn process).
     /// Returns the child PID or a negative error code.
+    ///
+    /// A start that fails is tried again after the backoff, which doubles,
+    /// as after a crash (`schedule_retry`).  Until 2026-10-06 a failed
+    /// *restart* left the restart time in the past, so every poll -- ten or
+    /// twenty a second -- tried again and printed why it failed, for as long
+    /// as the cause lasted; and a failed *first* start was never tried again.
     fn start_service(&mut self, idx: usize) -> i64 {
+        let pid = self.spawn_service(idx);
+        if pid < 0 {
+            #[allow(clippy::cast_sign_loss)]
+            self.schedule_retry(idx, clock_monotonic() as u64);
+        }
+        pid
+    }
+
+    /// After a start of service `idx` that failed at `now_ns`: try again
+    /// after the backoff, and double the backoff (to its cap) for the next
+    /// time -- unless the service is not to be restarted.
+    fn schedule_retry(&mut self, idx: usize, now_ns: u64) {
+        let Some(svc) = self.services.get_mut(idx) else {
+            return;
+        };
+        if !svc.active || !svc.auto_restart || svc.pid != 0 {
+            return;
+        }
+        // Never 0, which means "no restart pending".
+        svc.restart_after_ns = now_ns.saturating_add(svc.backoff_ns).max(1);
+        print("[svc] Will try ");
+        console_write(&svc.name[..svc.name_len]);
+        print(" again in ");
+        print_u64(svc.backoff_ns / 1_000_000_000);
+        print("s\n");
+        svc.backoff_ns = svc
+            .backoff_ns
+            .checked_shl(BACKOFF_MULTIPLIER)
+            .unwrap_or(BACKOFF_MAX_NS)
+            .min(BACKOFF_MAX_NS);
+    }
+
+    /// [`start_service`](Self::start_service)'s work: read the ELF and
+    /// spawn it, saying why not.
+    fn spawn_service(&mut self, idx: usize) -> i64 {
         if idx >= MAX_SERVICES || !self.services[idx].active {
             return -1;
         }

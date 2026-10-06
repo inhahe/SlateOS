@@ -2732,10 +2732,14 @@ authors never wrote a single automation handler.
   as Tab steps to it, one pressed as letting go on it switches to it. And
   the overview (`desktop::overview::OverviewPart`): its search, each
   window's card and close button, each desktop's lane -- a switch shown in
-  it, too. Not yet: the shell's Run box, file chooser, character picker,
-  snap overlay and list of programs holding up a shutdown; the toolkit's
-  icon grid, ribbon, dock, radio group and text editors (`codeview`,
-  `textview`, `richinput`). There is no font picker yet to show.*
+  it, too. And the Run box (`desktop::run_dialog::RunPart`: its line, typed
+  over and run, its suggestions, OK, Cancel, Browse...), the file chooser
+  over it and the character picker over a field, each the component's own
+  parts where the shell draws it, what they choose going where a click's
+  would. Not yet: the shell's snap overlay and list of programs holding up
+  a shutdown; the toolkit's icon grid, ribbon, dock, radio group and text
+  editors (`codeview`, `textview`, `richinput`). There is no font picker
+  yet to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

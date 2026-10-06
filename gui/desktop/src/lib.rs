@@ -8655,8 +8655,20 @@ impl DesktopShell {
     /// would be holding a borrow of it. The drained `Vec` is owned, so the loop
     /// borrows nothing.
     fn drain_run_dialog(&mut self) -> Vec<run_dialog::RunRequest> {
+        let said = self.run_dialog.drain_events();
+        self.act_on_run_dialog(said)
+    }
+
+    /// Act on what the Run box `said` -- drained after a press or a key, or
+    /// handed back to a tool that used it (`accessible`): a line to run is
+    /// put in the history and answered, Browse puts the chooser up, and the
+    /// rest needs nothing.
+    fn act_on_run_dialog(
+        &mut self,
+        said: Vec<run_dialog::RunDialogEvent>,
+    ) -> Vec<run_dialog::RunRequest> {
         let mut launches = Vec::new();
-        for event in self.run_dialog.drain_events() {
+        for event in said {
             match event {
                 // Run, so put in the history -- which is to be written.
                 run_dialog::RunDialogEvent::Execute(request) => {

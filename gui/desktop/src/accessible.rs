@@ -24,7 +24,15 @@
 //! notification pane is open, its parts (`notif_pane::accessible`); and
 //! every menu open over everything -- the desktop's, a notification's, a
 //! tile's, a field's -- with its rows, and the submenu a row opened
-//! (`guitk::menu::MenuPart`), a row chosen as a click chooses it.
+//! (`guitk::menu::MenuPart`), a row chosen as a click chooses it. While
+//! it is up, the Run box (`run_dialog::accessible`): its line, typed over
+//! and run, its suggestions, OK, Cancel, Browse... -- a line run started,
+//! as after a click. While they are up, the file chooser
+//! (`guitk::dialog::DialogTarget`), whose
+//! choice goes where it was put up for -- the Run box's line, a folder
+//! frame -- and the character picker over a field (`charpicker::Target`),
+//! whose pick is typed into the field: each the component's own parts,
+//! where the shell draws it.
 //!
 //! # As the user would
 //!
@@ -41,6 +49,7 @@
 //! pressed. The search's text, the volume's level, its mute and the
 //! brightness are set as typing and the controls set them.
 
+use guitk::dialog::DialogTarget;
 use guitk::menu::{ContextMenu, MenuPart};
 use guitk::widget::CheckState;
 use guitk::widget::automation::{Accessible, Action, Node, Refusal, Role, Value};
@@ -48,6 +57,7 @@ use guitk::widget::automation::{Accessible, Action, Node, Refusal, Role, Value};
 use crate::calendar::{CalendarHit, CalendarPart, CalendarViewMode};
 use crate::notif_pane::PanePart;
 use crate::overview::{self, OverviewPart};
+use crate::run_dialog::RunPart;
 use crate::{
     DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, Rect, ShellAction, StartRow,
     StartShortcut, SwitchView, TaskbarSlot, TextRole, WindowId, click, icons, power, volume_flyout,
@@ -100,6 +110,15 @@ pub enum ShellPart {
     /// A window in the switcher: chosen as Tab steps to it, pressed as
     /// letting go on it switches to it.
     SwitchTo(WindowId),
+    /// A part of the character picker, while it is up over a field
+    /// (`char_picker`): what is picked is typed into the field.
+    CharPicker(charpicker::Target),
+    /// A part of the file chooser, while it is up: what it chooses goes
+    /// where it was put up for -- the Run box's line, a folder frame.
+    Chooser(DialogTarget),
+    /// A part of the Run box, while it is up: a line run is started, and
+    /// Browse puts the chooser up.
+    RunBox(RunPart),
 }
 
 /// A menu the shell opens over everything.
@@ -172,12 +191,11 @@ fn level_of(value: f64) -> u8 {
 }
 
 impl DesktopShell {
-    /// Whether something open over everything takes every press wherever it
-    /// lands, before any part of the shell under it could: a menu, the
-    /// character picker, the Run box or a chooser, the overview, the tiling
-    /// overlay, the list a shut down waits on, or a drag or a press under
-    /// way -- as `handle_mouse_with` and `handle_press_with` hand a press.
-    fn takes_every_press(&self) -> bool {
+    /// Whether something the shell hands a press to before its file chooser
+    /// takes every press wherever it lands: the character picker, a menu, a
+    /// wallpaper being moved, or a drag or a press under way -- as
+    /// `handle_mouse_with` asks them, in that order.
+    fn ahead_of_chooser(&self) -> bool {
         self.char_picker.is_some()
             || self.field_menu.is_some()
             || self.wallpaper_move.is_some()
@@ -191,11 +209,84 @@ impl DesktopShell {
             || self.window_press.is_some()
             || self.pin_drag.is_some()
             || self.tray_drag.is_some()
+    }
+
+    /// Whether something open over everything takes every press wherever it
+    /// lands, before any part of the shell under it could: what is ahead of
+    /// the chooser ([`ahead_of_chooser`](Self::ahead_of_chooser)), the
+    /// chooser, the Run box, the overview, the tiling overlay, or the list a
+    /// shut down waits on -- as `handle_mouse_with` and `handle_press_with`
+    /// hand a press.
+    fn takes_every_press(&self) -> bool {
+        self.ahead_of_chooser()
             || self.chooser.is_some()
             || self.run_dialog.is_visible()
             || self.overview.visible
             || self.snap.is_overlay_visible()
             || self.ending_listing()
+    }
+
+    /// The file chooser as tools see it, where the shell draws it, while it
+    /// is up.
+    fn chooser_node(&self) -> Option<Node<ShellPart>> {
+        let dialog = self.chooser.as_ref()?;
+        let (x, y, width, height) = self.chooser_rect();
+        Some(
+            dialog
+                .automation(width, height)
+                .map(&ShellPart::Chooser)
+                .translated(x, y),
+        )
+    }
+
+    /// `action` on `target` of the file chooser, as the chooser's own click
+    /// or key does it -- and what the shell does after one: a file chosen
+    /// goes where the chooser was put up for, and the chooser comes down, as
+    /// it does on Cancel.
+    fn invoke_chooser(
+        &mut self,
+        target: DialogTarget,
+        action: Action,
+    ) -> Result<Option<ShellAction>, Refusal> {
+        if self.chooser.is_none() {
+            return Err(Refusal::NoSuchWidget);
+        }
+        if self.ahead_of_chooser() {
+            return Err(Refusal::Hidden);
+        }
+        let (_, _, width, height) = self.chooser_rect();
+        let dialog = self.chooser.as_mut().ok_or(Refusal::NoSuchWidget)?;
+        if let Some(answer) = dialog.invoke(&target, action, width, height)? {
+            self.apply_chooser_action(answer);
+        }
+        Ok(None)
+    }
+
+    /// `action` on `part` of the Run box, as the box's own click or key does
+    /// it -- and what the shell does after one, from the same code: a line
+    /// run is started (`run_request`), Browse puts the chooser up over it.
+    /// Refused under the chooser, and under anything ahead of that.
+    fn invoke_run_box(
+        &mut self,
+        part: RunPart,
+        action: Action,
+    ) -> Result<Option<ShellAction>, Refusal> {
+        if !self.run_dialog.is_visible() {
+            return Err(Refusal::NoSuchWidget);
+        }
+        if self.ahead_of_chooser() || self.chooser.is_some() {
+            return Err(Refusal::Hidden);
+        }
+        let said = self
+            .run_dialog
+            .invoke(&part, action, 0.0, 0.0)?
+            .unwrap_or_default();
+        // The first, as after a press (`handle_mouse_with`): one action
+        // reaches one button, and only OK or Enter runs a line.
+        let request = self.act_on_run_dialog(said).into_iter().next();
+        Ok(request
+            .and_then(|request| self.run_request(request))
+            .map(ShellAction::Launch))
     }
 
     /// Whether a press at `(x, y)` on `hit` -- what the shell's hit test
@@ -992,6 +1083,16 @@ impl Accessible for DesktopShell {
                     .map(&ShellPart::Pane),
             );
         }
+        if self.run_dialog.is_visible() {
+            root.children.push(
+                self.run_dialog
+                    .automation(width, height)
+                    .map(&ShellPart::RunBox),
+            );
+        }
+        if let Some(chooser) = self.chooser_node() {
+            root.children.push(chooser);
+        }
         // The menus last, as they are drawn over everything else -- the one
         // a press reaches first last of all.
         for which in ShellMenu::IN_PRESS_ORDER.into_iter().rev() {
@@ -1002,6 +1103,10 @@ impl Accessible for DesktopShell {
                 which.name().clone_into(&mut node.name);
                 root.children.push(node);
             }
+        }
+        // And over even a field's menu, the picker it opened.
+        if let Some(picker) = self.char_picker_node() {
+            root.children.push(picker.map(&ShellPart::CharPicker));
         }
         root
     }
@@ -1141,6 +1246,11 @@ impl Accessible for DesktopShell {
             (ShellPart::AudioSettings, _) => Err(not_for(Role::Button)),
             (ShellPart::Pane(part), action) => self.invoke_pane(part, action),
             (ShellPart::Menu(which, part), action) => self.invoke_menu(which, part, &action),
+            (ShellPart::Chooser(target), action) => self.invoke_chooser(target, action),
+            (ShellPart::RunBox(part), action) => self.invoke_run_box(part, action),
+            (ShellPart::CharPicker(target), action) => {
+                self.invoke_char_picker(target, action).map(answered)
+            }
             (ShellPart::StartList | ShellPart::PowerMenu, _) => Err(not_for(Role::List)),
             (ShellPart::StartMenu, _) => Err(not_for(Role::Dialog)),
             (ShellPart::Desktop | ShellPart::Taskbar | ShellPart::Volume, _) => {

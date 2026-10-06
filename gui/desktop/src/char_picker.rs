@@ -32,10 +32,11 @@
 //! when the picker comes down having learned something
 //! ([`DesktopShell::save_char_picker`]).
 
-use charpicker::{CharPicker, CharPickerEvent};
+use charpicker::{CharPicker, CharPickerEvent, Target};
 use guitk::event::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
 use guitk::menu::{MenuItem, MenuItemId};
 use guitk::render::RenderTree;
+use guitk::widget::automation::{Accessible, Action, Node, Refusal};
 
 use crate::{DesktopShell, HotkeyOutcome, MenuField, Palette, Rect, ShellAction};
 
@@ -265,6 +266,36 @@ impl DesktopShell {
                 ShellAction::Consumed
             }
         }
+    }
+
+    /// The picker as tools see it, where it is on the screen, while it is up
+    /// (`crate::accessible`).
+    pub(crate) fn char_picker_node(&self) -> Option<Node<Target>> {
+        let open = self.char_picker.as_ref()?;
+        Some(
+            open.picker
+                .automation(open.rect.w, open.rect.h)
+                .translated(open.rect.x, open.rect.y),
+        )
+    }
+
+    /// `action` on the picker's `target`, as the picker's own click or key
+    /// does it -- and what follows, as after one: a pick typed into the field
+    /// the picker is over, and the picker taken down.
+    ///
+    /// # Errors
+    ///
+    /// The picker's own refusal; [`Refusal::NoSuchWidget`] while it is down.
+    pub(crate) fn invoke_char_picker(
+        &mut self,
+        target: Target,
+        action: Action,
+    ) -> Result<ShellAction, Refusal> {
+        let open = self.char_picker.as_mut().ok_or(Refusal::NoSuchWidget)?;
+        let said = open
+            .picker
+            .invoke(&target, action, open.rect.w, open.rect.h)?;
+        Ok(self.char_picker_said(said))
     }
 
     /// The picker's draw commands, `None` when it is down.

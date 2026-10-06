@@ -42,6 +42,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::row_strip::RowStrip;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::text::scaled;
@@ -58,6 +59,9 @@ use guitk::textfind::fuzzy_score;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+
+mod accessible;
+pub use accessible::RunPart;
 
 // ============================================================================
 // Colour
@@ -100,6 +104,10 @@ const CONTENT_WIDTH: f32 = 448.0;
 const CONTENT_HEIGHT: f32 = 148.0;
 /// The title on the frame's bar.
 const TITLE: &str = "Run";
+/// What the box says it is for, over the command line -- and, to tools, its
+/// description (`accessible`).
+const INSTRUCTION: &str =
+    "Type the name of a program, folder, or document, and the OS will open it for you.";
 const PADDING: f32 = 16.0;
 const INPUT_HEIGHT: f32 = 28.0;
 /// The instruction's top, from the content's.
@@ -807,6 +815,37 @@ impl RunDialog {
         field.y + field.h + scaled(UNDER_FIELD_GAP)
     }
 
+    /// Where the suggestion list hangs while it shows, and its rows: under
+    /// the field, as wide as it, a row per suggestion.
+    ///
+    /// Longer than the room under the field -- two rows reach the buttons,
+    /// three the box's bottom edge -- so it is drawn over everything the box
+    /// draws, and past its edge, as a field's list drops over what is under
+    /// it; and a press is asked of it before anything else. The one layout
+    /// for both, so a press lands on the row drawn under it.
+    fn suggestion_rows(&self) -> Option<(guitk::frame::Rect, RowStrip)> {
+        if !self.show_autocomplete || self.suggestions.is_empty() {
+            return None;
+        }
+        let field = self.field_rect();
+        let top = self.under_field_y();
+        let rows = RowStrip::new(
+            top,
+            core::iter::repeat_n(scaled(AUTOCOMPLETE_ROW_HEIGHT), self.suggestions.len()),
+        );
+        let list = guitk::frame::Rect::new(field.x, top, field.w, rows.total_height());
+        Some((list, rows))
+    }
+
+    /// The suggestion whose row is at `(x, y)`, while the list shows.
+    fn suggestion_at(&self, x: f32, y: f32) -> Option<usize> {
+        let (list, rows) = self.suggestion_rows()?;
+        if !list.contains(x, y) {
+            return None;
+        }
+        rows.index_at(y)
+    }
+
     /// The command field's right-click menu: Cut, Copy, Paste, Delete and
     /// Select all, each dimmed when it would do nothing and saying why while
     /// the pointer rests on it.
@@ -839,6 +878,24 @@ impl RunDialog {
 
         let layout = self.layout();
         let (x, y) = (event.x, event.y);
+
+        // The suggestion list first: it is drawn over the box and hangs past
+        // its bottom edge, so a press on a row is the row's -- where it lies
+        // over a button, or below the box. Asked after the box, a row over
+        // the buttons pressed the button under it, and a row below the box
+        // dismissed the box.
+        if let Some(index) = self.suggestion_at(x, y) {
+            match event.kind {
+                MouseEventKind::Press(MouseButton::Left) => {
+                    self.suggestion_index = Some(index);
+                    self.accept_suggestion();
+                }
+                // Over the list, the pointer is over no button.
+                MouseEventKind::Move => self.hovered_button = None,
+                _ => {}
+            }
+            return EventResult::Consumed;
+        }
 
         // Check if click is outside dialog bounds — dismiss.
         if !layout.outer.contains(x, y) {
@@ -877,21 +934,8 @@ impl RunDialog {
                     Some(ButtonId::Browse) => {
                         self.events.push(RunDialogEvent::Browse);
                     }
-                    None => {
-                        // Check autocomplete dropdown clicks.
-                        if self.show_autocomplete {
-                            let field = self.field_rect();
-                            let dropdown_y = self.under_field_y();
-                            let rel_y = y - dropdown_y;
-                            if rel_y >= 0.0 && x >= field.x {
-                                let idx = (rel_y / scaled(AUTOCOMPLETE_ROW_HEIGHT)) as usize;
-                                if idx < self.suggestions.len() {
-                                    self.suggestion_index = Some(idx);
-                                    self.accept_suggestion();
-                                }
-                            }
-                        }
-                    }
+                    // The suggestions were asked first, above.
+                    None => {}
                 }
             }
             _ => {}
@@ -922,9 +966,7 @@ impl RunDialog {
         cmds.push(RenderCommand::Text {
             x: x + scaled(PADDING),
             y: y + scaled(INSTRUCTION_Y),
-            text: "Type the name of a program, folder, or document, and the \
-                   OS will open it for you."
-                .to_string(),
+            text: INSTRUCTION.to_string(),
             color: p.subtext0,
             font_size: scaled(BODY_FONT_SIZE),
             font_weight: FontWeightHint::Regular,
@@ -1040,53 +1082,6 @@ impl RunDialog {
             });
         }
 
-        // Autocomplete dropdown.
-        if self.show_autocomplete && !self.suggestions.is_empty() {
-            let dropdown_x = input_x;
-            let dropdown_y = self.under_field_y();
-            let dropdown_h = self.suggestions.len() as f32 * scaled(AUTOCOMPLETE_ROW_HEIGHT);
-
-            let mut paint = p.surface_paint(Surface::Panel);
-            paint.border = Some(paint.border.unwrap_or(p.surface1));
-            p.push_paint_radii(
-                &mut cmds,
-                dropdown_x,
-                dropdown_y,
-                input_w,
-                dropdown_h,
-                CornerRadii::all(4.0),
-                paint,
-            );
-
-            for (i, suggestion) in self.suggestions.iter().enumerate() {
-                let row_y = dropdown_y + i as f32 * scaled(AUTOCOMPLETE_ROW_HEIGHT);
-                let is_selected = self.suggestion_index == Some(i);
-
-                if is_selected {
-                    p.push_surface(
-                        &mut cmds,
-                        dropdown_x + 1.0,
-                        row_y,
-                        input_w - 2.0,
-                        scaled(AUTOCOMPLETE_ROW_HEIGHT),
-                        0.0,
-                        Surface::Selected,
-                    );
-                }
-
-                cmds.push(RenderCommand::Text {
-                    x: dropdown_x + scaled(8.0),
-                    y: row_y + scaled(6.0),
-                    text: suggestion.text.clone(),
-                    color: if is_selected { p.ink(p.accent) } else { p.text },
-                    font_size: scaled(INPUT_FONT_SIZE),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(input_w - scaled(16.0)),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
         // Buttons row.
         for (label, id, primary) in [
             ("OK", ButtonId::Ok, true),
@@ -1101,6 +1096,52 @@ impl RunDialog {
                 id,
                 primary,
             );
+        }
+
+        // The suggestions last, over the buttons and past the box's edge
+        // (`suggestion_rows`).
+        if let Some((list, rows)) = self.suggestion_rows() {
+            let mut paint = p.surface_paint(Surface::Panel);
+            paint.border = Some(paint.border.unwrap_or(p.surface1));
+            p.push_paint_radii(
+                &mut cmds,
+                list.x,
+                list.y,
+                list.w,
+                list.h,
+                CornerRadii::all(4.0),
+                paint,
+            );
+
+            for (i, suggestion) in self.suggestions.iter().enumerate() {
+                let (Some(row_y), Some(row_h)) = (rows.top(i), rows.height(i)) else {
+                    continue;
+                };
+                let is_selected = self.suggestion_index == Some(i);
+
+                if is_selected {
+                    p.push_surface(
+                        &mut cmds,
+                        list.x + 1.0,
+                        row_y,
+                        list.w - 2.0,
+                        row_h,
+                        0.0,
+                        Surface::Selected,
+                    );
+                }
+
+                cmds.push(RenderCommand::Text {
+                    x: list.x + scaled(8.0),
+                    y: row_y + scaled(6.0),
+                    text: suggestion.text.clone(),
+                    color: if is_selected { p.ink(p.accent) } else { p.text },
+                    font_size: scaled(INPUT_FONT_SIZE),
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(list.w - scaled(16.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
         }
 
         cmds
@@ -1659,6 +1700,83 @@ mod tests {
             field.y + field.h
         );
         assert!((size - ERROR_FONT_SIZE * 2.0).abs() < 0.01, "{size}");
+    }
+
+    /// The box up in the middle of a 1920 x 1080 screen, offering `n`
+    /// suggestions, `f0` on.
+    fn offering(n: usize) -> RunDialog {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.centre_on(1920.0, 1080.0);
+        dialog.input.set_text("f");
+        dialog.suggestions = (0..n)
+            .map(|i| Suggestion {
+                text: format!("f{i}"),
+                exact: format!("f{i}").into(),
+                score: 1,
+            })
+            .collect();
+        dialog.show_autocomplete = true;
+        dialog
+    }
+
+    /// A press of the left button at `(x, y)`.
+    fn press_at(x: f32, y: f32) -> MouseEvent {
+        MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }
+    }
+
+    /// **A suggestion pressed is chosen wherever its row lies** -- below the
+    /// box, or over its buttons, which the list hangs over. A row below the
+    /// box dismissed the box, and a row over a button pressed the button.
+    #[test]
+    fn a_suggestion_is_chosen_wherever_its_row_lies() {
+        let mut dialog = offering(6);
+        let (list, rows) = dialog.suggestion_rows().expect("the list shows");
+        let bottom = dialog.layout().outer.bottom();
+        let below = (0..6)
+            .find(|&i| rows.top(i).is_some_and(|top| top >= bottom))
+            .expect("the premise: a row below the box");
+        let y = rows.top(below).expect("the row") + 1.0;
+        dialog.handle_mouse_event(&press_at(list.x + 4.0, y));
+        assert!(dialog.is_visible(), "the box stayed up");
+        assert_eq!(dialog.input.text(), format!("f{below}"));
+        assert!(dialog.drain_events().is_empty(), "nothing cancelled");
+
+        let mut dialog = offering(6);
+        let ok = RunDialog::button_rect(dialog.layout().content, ButtonId::Ok);
+        let (ok_x, ok_y) = ok.centre();
+        let (_, rows) = dialog.suggestion_rows().expect("the list shows");
+        let over = rows.index_at(ok_y).expect("the premise: a row over OK");
+        dialog.handle_mouse_event(&press_at(ok_x, ok_y));
+        assert_eq!(dialog.input.text(), format!("f{over}"));
+        assert!(dialog.drain_events().is_empty(), "OK was not pressed");
+    }
+
+    /// **The suggestions are drawn over the buttons**, whose presses they
+    /// take -- and a press beside the list, on neither, is no row's.
+    #[test]
+    fn the_suggestions_are_drawn_over_the_buttons() {
+        let dialog = offering(3);
+        let drawn = |wanted: &str| {
+            dialog
+                .render(&Palette::for_mode(false))
+                .iter()
+                .position(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == wanted))
+                .unwrap_or_else(|| panic!("{wanted} is drawn"))
+        };
+        assert!(drawn("f0") > drawn("OK"), "the list after the buttons");
+
+        let (list, _) = dialog.suggestion_rows().expect("the list shows");
+        assert_eq!(
+            dialog.suggestion_at(list.right() + 1.0, list.y + 1.0),
+            None,
+            "right of the list"
+        );
+        assert_eq!(dialog.suggestion_at(list.x + 1.0, list.y + 1.0), Some(0));
     }
 
     /// Where the dialog *draws* its caret, in the order it drew it.

@@ -990,3 +990,152 @@ fn the_overview_is_used_as_the_user_uses_it() {
         "closed"
     );
 }
+
+/// The Run box up, its Browse's chooser over it, showing one file, `hello`.
+fn browsing() -> DesktopShell {
+    let mut shell = shell();
+    shell.toggle_run_dialog();
+    shell.open_run_box_chooser();
+    shell.set_chooser_entries(vec![guitk::dialog::DirEntry {
+        name: "hello".into(),
+        is_dir: false,
+        size: 1,
+        modified_timestamp: 0,
+        extension: std::ffi::OsString::new(),
+    }]);
+    shell
+}
+
+/// **The file chooser is the file dialog's own parts, where the shell draws
+/// it, and what it chooses goes where it was put up for**: a file the Run
+/// box's Browse finds is put on the box's line, and the chooser comes down.
+/// Under it nothing is pressed.
+#[test]
+fn the_run_boxs_chooser_is_used_as_the_user_uses_it() {
+    let mut shell = browsing();
+    let (x, y, w, h) = shell.chooser_rect();
+    let entry = node(&shell, ShellPart::Chooser(DialogTarget::Entry(0)));
+    assert_eq!(entry.name, "hello");
+    let (cx, cy) = entry.bounds.centre();
+    assert!(
+        Rect::new(x, y, w, h).contains(cx, cy),
+        "where the shell draws it: {:?} in {:?}",
+        entry.bounds,
+        (x, y, w, h)
+    );
+    assert_eq!(
+        press(&mut shell, ShellPart::Control(Hit::StartButton)),
+        Err(Refusal::Hidden),
+        "nothing under it"
+    );
+    assert_eq!(
+        shell.invoke(
+            &ShellPart::Chooser(DialogTarget::Entry(0)),
+            Action::Choose,
+            0.0,
+            0.0
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        press(&mut shell, ShellPart::Chooser(DialogTarget::Confirm)),
+        Ok(None)
+    );
+    assert!(!shell.chooser_open(), "chosen, it comes down");
+    assert_eq!(shell.run_dialog.line(), "/hello");
+    assert_eq!(
+        press(&mut shell, ShellPart::Chooser(DialogTarget::Cancel)),
+        Err(Refusal::NoSuchWidget),
+        "down"
+    );
+
+    let mut cancelled = browsing();
+    press(&mut cancelled, ShellPart::Chooser(DialogTarget::Cancel)).unwrap();
+    assert!(!cancelled.chooser_open());
+    assert_eq!(cancelled.run_dialog.line(), "", "the box as it was");
+}
+
+/// **The character picker over a field is its own parts, where the shell
+/// draws it, and a character pressed is typed into the field**, the picker
+/// taken down; while it is up, the chooser under it is not pressed.
+#[test]
+fn the_character_picker_types_into_its_field() {
+    let mut shell = browsing();
+    shell.open_char_picker(crate::MenuField::RunBox);
+    let root = tree(&shell);
+    assert!(
+        matches!(
+            root.children.last().map(|n| n.id),
+            Some(ShellPart::CharPicker(_))
+        ),
+        "drawn over everything"
+    );
+    assert_eq!(
+        press(&mut shell, ShellPart::Chooser(DialogTarget::Cancel)),
+        Err(Refusal::Hidden),
+        "the picker is over the chooser"
+    );
+    assert!(shell.chooser_open());
+
+    let picker = root.children.last().unwrap().clone();
+    let field = shell.run_dialog.field_rect();
+    assert_eq!(
+        (picker.bounds.x, picker.bounds.y),
+        (field.x, field.bottom()),
+        "under its field, where the shell draws it"
+    );
+    let cell = picker
+        .walk()
+        .find(|n| matches!(n.id, ShellPart::CharPicker(charpicker::Target::Cell(_))))
+        .unwrap()
+        .clone();
+    let (cx, cy) = cell.bounds.centre();
+    assert!(picker.bounds.contains(cx, cy), "{:?}", cell.bounds);
+    // A cell is named by its character's name, and holds the character.
+    let Some(Value::Text(character)) = cell.value.clone() else {
+        panic!("{:?} holds no character", cell.name);
+    };
+    press(&mut shell, cell.id).unwrap();
+    assert!(!shell.char_picker_open(), "one pick, then gone");
+    press(&mut shell, ShellPart::Chooser(DialogTarget::Cancel)).unwrap();
+    assert!(
+        shell.run_dialog.line().ends_with(character.as_str()),
+        "{character:?} typed into {:?}",
+        shell.run_dialog.line()
+    );
+}
+
+/// **The Run box is among the shell's parts while it is up, and a line run
+/// from it is started as after a click**; Browse puts the chooser up over
+/// it, and under the chooser the box is not pressed.
+#[test]
+fn the_run_box_runs_a_line_and_browses() {
+    let mut running = shell();
+    running.toggle_run_dialog();
+    let field = ShellPart::RunBox(RunPart::Field);
+    assert_eq!(node(&running, field).name, "Open:");
+    running
+        .invoke(&field, Action::SetText("calculator".to_owned()), 0.0, 0.0)
+        .unwrap();
+    let launched = running.invoke(&field, Action::Press, 0.0, 0.0).unwrap();
+    assert!(
+        matches!(launched, Some(ShellAction::Launch(_))),
+        "{launched:?}"
+    );
+    assert!(!running.run_dialog.is_visible(), "run, the box goes");
+    assert_eq!(press(&mut running, field), Err(Refusal::NoSuchWidget));
+
+    let mut browsing = shell();
+    browsing.toggle_run_dialog();
+    assert_eq!(
+        press(&mut browsing, ShellPart::RunBox(RunPart::Browse)),
+        Ok(None)
+    );
+    assert!(browsing.chooser_open(), "Browse puts the chooser up");
+    assert_eq!(
+        press(&mut browsing, ShellPart::RunBox(RunPart::Cancel)),
+        Err(Refusal::Hidden),
+        "the chooser is over the box"
+    );
+    assert!(browsing.run_dialog.is_visible());
+}

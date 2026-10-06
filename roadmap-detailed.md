@@ -2750,9 +2750,14 @@ authors never wrote a single automation handler.
   (`guitk::grid::GridPart`): every item, chosen as clicked and opened as
   double-clicked, scrolled into view first. Its radio group
   (`guitk::radio::RadioAccess`): each option where its host draws it, the
-  chosen one chosen, chosen as clicked. Not yet: its text views
-  (`codeview`, `textview`, `richinput`). There is no font picker yet to
-  show.*
+  chosen one chosen, chosen as clicked. Its text views
+  (`guitk::textview::TextViewPart`, `RichTextPart`): each a document
+  holding its text, scrolled as the wheel scrolls it; a rich view's
+  blocks as what they are -- headings, paragraphs, items of a list,
+  code, pictures by their words -- and its links, each pressed as
+  clicked, scrolled into sight first. Not yet: its code editor
+  (`codeview`) and rich field (`richinput`). There is no font picker yet
+  to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

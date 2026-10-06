@@ -118,6 +118,15 @@ pub enum Role {
     /// A field showing one choice of several, which opens a list to choose
     /// another: a drop-down.
     ComboBox,
+    /// Text shown to be read rather than typed into, scrolled: a log, a
+    /// page.
+    Document,
+    /// A heading over part of a document.
+    Heading,
+    /// A paragraph of a document.
+    Paragraph,
+    /// Words that go somewhere when pressed.
+    Link,
 }
 
 impl Role {
@@ -168,6 +177,10 @@ impl Role {
             Self::Tree => "tree",
             Self::TreeItem => "tree item",
             Self::ComboBox => "combo box",
+            Self::Document => "document",
+            Self::Heading => "heading",
+            Self::Paragraph => "paragraph",
+            Self::Link => "link",
         }
     }
 }

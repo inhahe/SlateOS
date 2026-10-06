@@ -5,6 +5,13 @@
 //! - [`RichTextView`]: Formatted rich text with headings, lists, links, and styling.
 //!
 //! Both support vertical scrolling, text selection, copy-to-clipboard, and search.
+//!
+//! # To tools
+//!
+//! Each is a document to automation and assistive tools (`accessible`):
+//! its text, scrolled as the wheel scrolls it, and a rich view's blocks as
+//! what they are -- headings, paragraphs, items of a list -- with its links,
+//! each pressed as clicked ([`TextViewPart`], [`RichTextPart`]).
 
 use crate::color::Color;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
@@ -15,6 +22,9 @@ use crate::style::CornerRadii;
 use crate::theme::with_alpha;
 use crate::wheel;
 use textfind::Case;
+
+mod accessible;
+pub use accessible::{RichTextPart, TextViewPart};
 
 // ---------------------------------------------------------------------------
 // Catppuccin Mocha palette (dark theme)
@@ -2533,15 +2543,17 @@ impl RichTextView {
     fn handle_mouse(&mut self, event: &MouseEvent) -> (EventResult, Option<RichTextEvent>) {
         match &event.kind {
             MouseEventKind::Press(crate::event::MouseButton::Left) => {
+                // A link is followed whether or not the words can be
+                // selected: this asked only in a view whose words could be,
+                // so in one whose could not, every link went nowhere.
+                if let Some(link_url) = self.link_at(event.x, event.y) {
+                    return (
+                        EventResult::Consumed,
+                        Some(RichTextEvent::LinkClicked(link_url)),
+                    );
+                }
                 if self.config.selectable {
                     let pos = self.hit_test(event.x, event.y);
-                    // Check if clicking on a link
-                    if let Some(link_url) = self.link_at(event.x, event.y) {
-                        return (
-                            EventResult::Consumed,
-                            Some(RichTextEvent::LinkClicked(link_url)),
-                        );
-                    }
                     self.selection_anchor = Some(pos);
                     self.selection = Some(Selection::new(pos, pos));
                     self.dragging = true;

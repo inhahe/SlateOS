@@ -82,6 +82,7 @@
 )]
 
 pub mod about;
+pub mod accessible;
 pub mod animations;
 pub mod autologin;
 pub mod background_program;

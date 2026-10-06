@@ -961,7 +961,9 @@ CEA608 = [
         "a Carriage Return brings the top line back to the base row",
         "                    rows.rotate_left(1);\n                    if let Some(last) = rows.last_mut() {\n                        *last = BLANK_ROW;\n                    }",
         "                    rows.rotate_left(1);",
-        [C_ROLL, CEA_ROLLUP],
+        # The fixture's lines are none longer than the line after them, so
+        # only the unit test, whose first line is, can see this.
+        [C_ROLL],
     ),
     (
         "End of Caption shows nothing",

@@ -3,27 +3,21 @@
 # WHAT SHIPS IS NOT THIS.  The libc every SlateOS program links,
 # `toolchain/sysroot/lib/libc.a`, is built by `toolchain/build-sysroot.ps1`
 # for its own target, `posix/x86_64-slateos-libc.json` (hard-float, SSE2;
-# design-decisions.md §1106), with `-Zbuild-std` on nightly.
+# design-decisions.md §1106), with `-Zbuild-std` on nightly.  The pipeline
+# runs it, so that is the build that generates the code.
 #
-# WHAT THIS PIN IS FOR.  Two things compile posix for the stock bare-metal
-# target, `x86_64-unknown-none` -- a kernel's target, soft-float, SSE off --
-# and they must agree:
+# WHAT THIS PIN IS FOR.  Pre-push gate 40
+# (`scripts/check-pinned-target-build.py`) runs a plain `cargo check` here,
+# which type-checks the libc's configuration -- target_os = "none", so
+# no_std, `no_mangle` and the assembly -- on a stock target.  It is a type
+# check and no more: the stock target is a kernel's, soft-float with SSE
+# off, and cannot generate code for the SSE2 string functions (§1181), whose
+# assembly helpers enable SSE2 themselves so that the check passes.  Keep it
+# the stock target and nothing more.  On 2026-10-06 it briefly also had
+# `+sse,+sse2`, and the gate then checked a configuration nothing else used.
 #
-#   - every kernel build: the workspace root's `default-members` are
-#     `kernel`, `posix` and `toolchain/stubs`, so `cargo build` at the root
-#     (the boot test's "Building kernel") compiles posix for it, with the
-#     root's config, not this one;
-#   - pre-push gate 40 (`scripts/check-pinned-target-build.py`), which runs a
-#     plain `cargo check` here, with this pin.
-#
-# So the pin is the stock target and nothing more.  From 2026-10-06 this
-# file also gave it `+sse,+sse2` for the libc's SSE2 string functions: gate
-# 40 then passed while the boot's root build, which never reads this file,
-# refused the same code ("register class `xmm_reg` requires the `sse`
-# target feature") an hour and ten minutes in.  The functions now carry
-# `#[target_feature(enable = "sse2")]` themselves (`string.rs`, "The
-# engines"), so posix compiles on any x86-64 target, and the gate checks
-# what the root builds.
+# The workspace root no longer builds posix at all (it was a
+# `default-members` entry until 2026-10-06; the root `Cargo.toml` says why).
 #
 # For running tests on the host:
 #   cargo test --target x86_64-pc-windows-gnu

@@ -320,9 +320,20 @@ members = [
 # target/ directory and so `cargo build -p <crate>` continues to work
 # from anywhere; building them explicitly (or from inside a zone)
 # still picks up the zone's x86_64-slateos target.
+#
+# `posix` was one of these until 2026-10-06, from when the libc was built
+# for x86_64-unknown-none. Since design-decisions §1106 it is built for its
+# own hard-float target, `posix/x86_64-slateos-libc.json`, by
+# `toolchain/build-sysroot.ps1` (which the pipeline runs), and its memory and
+# string functions are SSE2 (§1181): the stock soft-float target cannot
+# generate code for them at all ("rustc-LLVM ERROR: Do not know how to soften
+# the result of this operator!"). Nothing linked the build this produced --
+# the kernel does not depend on posix -- so every kernel build compiled a
+# libc for nothing, and stopped the boot the day it could not. Pre-push gate
+# 40 still type-checks posix for the stock target (`cargo check`, in
+# `posix/`), which is what that configuration is good for.
 default-members = [
     "kernel",
-    "posix",
     "toolchain/stubs",
 ]
 exclude = [

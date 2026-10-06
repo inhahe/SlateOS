@@ -93,11 +93,12 @@ use crate::types::SizeT;
 // EVERY HELPER WITH SSE ASSEMBLY SAYS SO: `#[target_feature(enable =
 // "sse2")]`, and `#[inline]` rather than `#[inline(always)]`, which may not
 // be combined with it.  The libc's own target has SSE2, so there it changes
-// nothing.  But every kernel build compiles posix for the stock
-// `x86_64-unknown-none` as well (the workspace's `default-members`), a
-// soft-float target with SSE off, where an `xmm_reg` operand is refused
-// unless the function enables SSE itself -- as the intrinsics these
-// functions also call do.  That build links into nothing.
+// nothing.  But pre-push gate 40 type-checks posix for the stock
+// `x86_64-unknown-none`, a soft-float target with SSE off, where an
+// `xmm_reg` operand is refused unless the function enables SSE itself.  That
+// target can type-check this code and no more: it cannot generate code for
+// SSE2 vectors, so nothing builds posix for it (the root `Cargo.toml`'s
+// `default-members` note).
 
 /// Below this many bytes, a copy or fill is a few overlapping loads and
 /// stores; from it up, a loop.

@@ -17,16 +17,16 @@ for their names returned 0 before this gate existed.
 
 `posix` and `toolchain/stubs` ARE members, which is worse rather than better,
 because it looks like coverage. The push hook runs `cargo test -p posix` -- on
-the HOST target. Nothing on the push path builds posix for
-`x86_64-unknown-none`, and the kernel does not link it -- but the boot does
-compile it: the workspace's `default-members` are `kernel`, `posix` and
-`toolchain/stubs`, so the boot test's `cargo build` at the root ("Building
-kernel") compiles posix for the stock target, with the root's config. So the
-pin in `posix/.cargo/config.toml` must stay the stock target and nothing more,
-or this gate checks a configuration the boot does not build: on 2026-10-06 the
-pin was given `+sse,+sse2`, this gate passed SSE2 code, and the boot refused it
-an hour and ten minutes in. What actually ships is built only by
-`toolchain/build-sysroot.ps1`, run by hand, for its own target spec.
+the HOST target. Nothing else builds posix for `x86_64-unknown-none`: the
+kernel does not link it, and since 2026-10-06 it is not one of the workspace's
+`default-members` either (the root `Cargo.toml` says why -- the stock target
+is soft-float, and cannot generate code for posix's SSE2 string functions).
+What ships is built by `toolchain/build-sysroot.ps1`, for the libc's own
+target spec, which the pipeline runs. So this gate's `cargo check` of posix is
+a type check of its no_std configuration, and the pin in
+`posix/.cargo/config.toml` must stay the stock target and nothing more: on
+2026-10-06 it was briefly given `+sse,+sse2`, and this gate then passed what
+the boot's root build refused an hour and ten minutes in.
 
 Both are the same question: *a verdict whose answer depends on a configuration
 the command did not name.*

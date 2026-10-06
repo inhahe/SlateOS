@@ -100,6 +100,11 @@ pub enum Role {
     Grid,
     /// One cell of a grid.
     GridCell,
+    /// A menu: a context menu, or a submenu opened from one of its rows.
+    Menu,
+    /// One row of a menu: an action, a check, or a row a submenu opens
+    /// from.
+    MenuItem,
 }
 
 impl Role {
@@ -142,6 +147,8 @@ impl Role {
             Self::ListItem => "list item",
             Self::Grid => "grid",
             Self::GridCell => "grid cell",
+            Self::Menu => "menu",
+            Self::MenuItem => "menu item",
         }
     }
 }

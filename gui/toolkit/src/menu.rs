@@ -17,6 +17,9 @@ use crate::style::CornerRadii;
 use crate::surface::Surface;
 use crate::text::scaled;
 
+mod accessible;
+pub use accessible::MenuPart;
+
 // ─── Catppuccin Mocha palette ───────────────────────────────────────────────
 
 // The colours come from the user's palette, threaded in by the caller.
@@ -137,6 +140,20 @@ pub enum MenuItem {
         enabled: bool,
         children: Vec<MenuItem>,
     },
+}
+
+/// What a click on a menu came to ([`ContextMenu::click`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuClick {
+    /// A row was chosen, and the menu closed.
+    Chosen(MenuItemId),
+    /// A row's submenu opened -- in the menu, or in a submenu of it -- and
+    /// the menu stays open, as a menu does when a row of it opens another.
+    Opened,
+    /// Nothing that does anything: a line between rows, a greyed row, the
+    /// panel's padding -- or outside the menu, which closed it. A host
+    /// closes the menu on this, as every menu closes on a miss.
+    Missed,
 }
 
 /// Result of handling a menu interaction.
@@ -514,26 +531,48 @@ impl ContextMenu {
     }
 
     /// Handle a mouse click. Returns the selected item ID if an action item was clicked.
+    ///
+    /// A click that opened a submenu answers `None`, as a miss does: a host
+    /// that closes its menu on `None` closes it on a row it should have
+    /// opened instead. [`click`](Self::click) tells the two apart.
     pub fn handle_click(&mut self, mx: f32, my: f32) -> Option<MenuItemId> {
+        match self.click(mx, my) {
+            MenuClick::Chosen(id) => Some(id),
+            MenuClick::Opened | MenuClick::Missed => None,
+        }
+    }
+
+    /// Handle a mouse click, and say what it came to: a row chosen, a
+    /// submenu opened, or a miss.
+    pub fn click(&mut self, mx: f32, my: f32) -> MenuClick {
         if !self.visible {
-            return None;
+            return MenuClick::Missed;
         }
 
-        // Check if click is in open submenu first.
-        if let Some((_, ref mut submenu)) = self.open_submenu
-            && let Some(id) = submenu.handle_click(mx, my)
-        {
-            self.hide();
-            return Some(id);
+        // Check if click is in open submenu first. A submenu that opened a
+        // submenu of its own keeps the whole menu open: it used to answer
+        // nothing, and this menu, finding the click outside its own bounds,
+        // closed itself and every submenu with it.
+        if let Some((_, ref mut submenu)) = self.open_submenu {
+            match submenu.click(mx, my) {
+                MenuClick::Chosen(id) => {
+                    self.hide();
+                    return MenuClick::Chosen(id);
+                }
+                MenuClick::Opened => return MenuClick::Opened,
+                MenuClick::Missed => {}
+            }
         }
 
         // Check if click is within our bounds.
         if !self.point_in_bounds(mx, my) {
             self.hide();
-            return None;
+            return MenuClick::Missed;
         }
 
-        let idx = self.index_at_y(my)?;
+        let Some(idx) = self.index_at_y(my) else {
+            return MenuClick::Missed;
+        };
 
         match self.items.get(idx) {
             Some(MenuItem::Action {
@@ -541,7 +580,7 @@ impl ContextMenu {
             }) => {
                 let id = *id;
                 self.hide();
-                Some(id)
+                MenuClick::Chosen(id)
             }
             Some(MenuItem::Submenu {
                 enabled: true,
@@ -551,9 +590,9 @@ impl ContextMenu {
                 // Clicking a submenu item opens it (same as hover).
                 let sub = self.submenu(idx, children);
                 self.open_submenu = Some((idx, Box::new(sub)));
-                None
+                MenuClick::Opened
             }
-            _ => None, // Separator, disabled item
+            _ => MenuClick::Missed, // Separator, disabled item
         }
     }
 
@@ -2630,6 +2669,83 @@ mod tests {
         let (idx, ref sub) = *menu.open_submenu.as_ref().expect("submenu should be open");
         assert_eq!(idx, 0);
         assert!(sub.is_visible());
+    }
+
+    /// **A click says what it came to**: a row chosen, a submenu opened --
+    /// the menu staying open for it, two deep as one deep -- or a miss.
+    /// `handle_click` answered `None` for an opening as for a miss, so a
+    /// host closing its menu on `None` closed it on the row that opens
+    /// "View", and a submenu opened inside a submenu closed the whole menu
+    /// by itself.
+    #[test]
+    fn a_click_says_whether_it_chose_opened_or_missed() {
+        let leaf = |id: MenuItemId, label: &str| MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        };
+        let items = vec![
+            leaf(1, "Refresh"),
+            MenuItem::Separator,
+            MenuItem::Submenu {
+                id: 20,
+                label: "View".to_string(),
+                icon: None,
+                enabled: true,
+                children: vec![
+                    leaf(21, "Large icons"),
+                    MenuItem::Submenu {
+                        id: 30,
+                        label: "Sort by".to_string(),
+                        icon: None,
+                        enabled: true,
+                        children: vec![leaf(31, "Name")],
+                    },
+                ],
+            },
+        ];
+        let mut menu = ContextMenu::new(items);
+        menu.show(0.0, 0.0, SCREEN);
+        let centre = |menu: &ContextMenu, index: usize| {
+            menu.item_rect(index).expect("the row is shown").centre()
+        };
+
+        let (x, y) = centre(&menu, 2);
+        assert_eq!(menu.click(x, y), MenuClick::Opened);
+        assert!(menu.is_visible());
+        let (sx, sy) = {
+            let (_, sub) = menu.open_submenu.as_ref().expect("View is open");
+            centre(sub, 1)
+        };
+        assert_eq!(menu.click(sx, sy), MenuClick::Opened, "two deep");
+        assert!(menu.is_visible(), "the whole menu closed");
+        let (nx, ny) = {
+            let (_, sub) = menu.open_submenu.as_ref().expect("View is open");
+            let (_, nested) = sub.open_submenu.as_ref().expect("Sort by is open");
+            centre(nested, 0)
+        };
+        assert_eq!(menu.click(nx, ny), MenuClick::Chosen(31));
+        assert!(!menu.is_visible());
+
+        menu.show(0.0, 0.0, SCREEN);
+        let separator = {
+            let strip = menu.strip();
+            strip.top(1).expect("the line") + strip.height(1).expect("the line") / 2.0
+        };
+        assert_eq!(menu.click(x, separator), MenuClick::Missed, "the line");
+        assert!(
+            menu.is_visible(),
+            "a miss inside leaves the menu to its host"
+        );
+        assert_eq!(
+            menu.click(SCREEN.0 - 1.0, SCREEN.1 - 1.0),
+            MenuClick::Missed
+        );
+        assert!(!menu.is_visible(), "a miss outside closes it");
+        assert_eq!(menu.click(x, y), MenuClick::Missed, "closed");
     }
 
     #[test]

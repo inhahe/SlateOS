@@ -1,0 +1,19 @@
+[package]
+name = "dyndns"
+version = "0.1.0"
+edition = "2024"
+description = "Keeps dynamic-DNS hostnames pointed at this network: /etc/dyndns.yaml in, /run/dyndns.yaml and the journal out"
+
+# A `std` daemon, like `backupd` beside it: it reads files, keeps time and
+# talks to the network through the C library, so it is a workspace member
+# built for x86_64-slateos like the programs in userspace/ (the root
+# Cargo.toml says why a member may live under the excluded `services`).
+
+[lints]
+workspace = true
+
+[dependencies]
+dyndnsproviders = { path = "providers" }
+httpclient = { path = "../../net/httpclient" }
+journalrec = { path = "../../userspace/journalrec" }
+yamldoc = { path = "../../yamldoc" }

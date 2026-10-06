@@ -292,6 +292,13 @@ members = [
     # a member, as `rustcrypto/seal` is. Out of `default-members` for
     # procinfo's reason.
     "services/backupd",
+    # The dynamic-DNS service and what each provider is (lane E's
+    # requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md):
+    # `std` crates named inside the excluded `services`, as `backupd` is, and
+    # out of `default-members` for the same reason. The provider crate is
+    # shared with Settings' Dynamic DNS page.
+    "services/dyndns",
+    "services/dyndns/providers",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

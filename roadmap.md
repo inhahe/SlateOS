@@ -3025,6 +3025,24 @@ D's to act on once answered).
   boot, and not confining**, for three reasons in other lanes' trees
   (`known-issues.md` -> `D-SCHEDULED-BACKUPS-STILL-DO-NOT-RUN`).
 
+- `[-]` `[D]` **The dynamic-DNS service** (2026-10-06; lane E's
+  `requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`,
+  design-decisions §1175). `services/dyndns` keeps each entry of
+  `/etc/dyndns.yaml` pointed at this network and reports what happened to
+  `/run/dyndns.yaml` and the journal. `services/dyndns/providers`
+  (`dyndnsproviders`) is what each provider is, which Settings shares:
+  Dynu, No-IP, DuckDNS, Cloudflare, FreeDNS and a custom URL. Written and
+  tested on the host against each provider's documented answers.
+  **It updates nothing on SlateOS yet**, for three reasons
+  (`known-issues/D-DYNAMIC-DNS-UPDATES-NOTHING-YET.md`):
+  - its passwords have nowhere to be kept (D-Q4);
+  - nothing in userspace speaks TLS
+    (`requests/d-a-nothing-in-userspace-can-make-an-https-connection.md`);
+  - it is not on the image or started at boot.
+
+  Still lane D's: learning the address from the router (UPnP, NAT-PMP),
+  and the port forwards.
+
 Known-issues: the POSIX/libc entries that lane B's list above still names —
 `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (blocked only on the operator's Q48;
 the full state is in lane B's list) and `TD-FASTPY-PURE-MODE-FVALUE` — are

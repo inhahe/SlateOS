@@ -1068,6 +1068,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyndns"
+version = "0.1.0"
+dependencies = [
+ "dyndnsproviders",
+ "httpclient",
+ "journalrec",
+ "yamldoc",
+]
+
+[[package]]
+name = "dyndnsproviders"
+version = "0.1.0"
+
+[[package]]
 name = "earlyoom"
 version = "0.1.0"
 dependencies = [

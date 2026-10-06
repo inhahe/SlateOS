@@ -115,6 +115,9 @@ pub enum Role {
     Tree,
     /// One row of a tree, holding the rows under it while it is open.
     TreeItem,
+    /// A field showing one choice of several, which opens a list to choose
+    /// another: a drop-down.
+    ComboBox,
 }
 
 impl Role {
@@ -164,6 +167,7 @@ impl Role {
             Self::Tab => "tab",
             Self::Tree => "tree",
             Self::TreeItem => "tree item",
+            Self::ComboBox => "combo box",
         }
     }
 }

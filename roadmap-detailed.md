@@ -2719,13 +2719,23 @@ authors never wrote a single automation handler.
   its menu bar (`guitk::menubar::MenuBarPart`: each title, the open menu's
   rows and every submenu open below it) and its path bar
   (`guitk::pathbar::PathBarPart`: the address, typed over and confirmed as
-  Enter confirms it, each crumb, and the suggestions while typing).
+  Enter confirms it, each crumb, and the suggestions while typing). Its
+  dialogs (`guitk::modal::ModalPart`): a message box's buttons -- the one
+  with the keyboard, a destructive one said to be -- an input dialog's
+  field (a password's text never shown) with OK and Cancel, a progress
+  dialog's bar and Cancel, a floating dialog's close button; a dialog that
+  has answered takes no more input while it fades. Its drop-down
+  (`guitk::dropdown::DropdownAccess`, a combo box: its choice, and while
+  its list is open each option, chosen as its row is clicked).
   And the window switcher
   (Alt+Tab): its windows, the one the switch goes to chosen -- one chosen
   as Tab steps to it, one pressed as letting go on it switches to it. And
   the overview (`desktop::overview::OverviewPart`): its search, each
   window's card and close button, each desktop's lane -- a switch shown in
-  it, too. Not yet: the font picker.*
+  it, too. Not yet: the shell's Run box, file chooser, character picker,
+  snap overlay and list of programs holding up a shutdown; the toolkit's
+  icon grid, ribbon, dock, radio group and text editors (`codeview`,
+  `textview`, `richinput`). There is no font picker yet to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

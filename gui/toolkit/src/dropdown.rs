@@ -30,6 +30,12 @@
 //! Enter open the list. Open, the arrows move the highlight, Enter or Space
 //! chooses it and closes, Escape closes and changes nothing, and Tab closes
 //! and is passed on so the focus moves.
+//!
+//! # To tools
+//!
+//! A drop-down with where its host draws it ([`DropdownAccess`]) is a combo
+//! box to automation and assistive tools, its open list's options named by
+//! [`DropdownPart`], each used as the user uses it.
 
 use crate::color::Color;
 use crate::disabled::DISABLED_OPACITY;
@@ -40,6 +46,9 @@ use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::surface::CommandSink;
 use crate::text::scaled;
+
+mod accessible;
+pub use accessible::{DropdownAccess, DropdownPart};
 
 /// A drop-down's height where the caller has no layout of its own: the
 /// reference's 26.

@@ -31,6 +31,7 @@ pub mod codeedit;
 pub mod codeview;
 pub mod color;
 pub mod colorpicker;
+pub mod css;
 pub mod date;
 pub mod datetime;
 pub mod dialog;
@@ -64,6 +65,7 @@ pub mod radio;
 pub mod ratio;
 pub mod render;
 pub mod ribbon;
+pub mod richinput;
 pub mod surface;
 /// Random numbers — see [`randrange`] for the whole story.
 ///

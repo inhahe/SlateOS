@@ -28,9 +28,19 @@
 //! cuts it to its box, and draws its bars: down its right edge for content
 //! taller than it, across its foot for content wider.
 
+pub mod automation;
+#[cfg(test)]
+mod automation_tests;
+#[cfg(test)]
+mod css_tests;
 mod draw;
+mod signal;
+#[cfg(test)]
+mod signal_tests;
 #[cfg(test)]
 mod tree_tests;
+
+pub use signal::{MAX_QUEUED_SIGNALS, Signal, SignalKind, SlotId};
 
 use crate::color::Color;
 use crate::event::{Event, EventResult, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -39,9 +49,16 @@ use crate::layout::{
     flex_layout,
 };
 use crate::palette::Palette;
-use crate::render::{FontWeightHint, RenderCommand, RenderTree};
-use crate::style::{CornerRadii, Edges, FontWeight, Style};
+use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
+use crate::style::{CornerRadii, Edges, FontWeight, Position, Style};
 use crate::text::TextCursor;
+
+use std::sync::Arc;
+
+use crate::css::compute::{self as css_compute, Computed, Env as CssEnv, Inherited, InheritedLine};
+use crate::css::decl::{Declared, Family};
+use crate::css::sheet::{self as css_sheet, Block, StyleSheet, Subject, Warning};
+use crate::css::transition::{Animated, TransitionSpec, Transitions};
 
 /// How tall a progress bar is by default.
 const PROGRESS_HEIGHT: f32 = 12.0;
@@ -107,6 +124,149 @@ pub struct Widget {
     hovered: bool,
     /// Tooltip text.
     pub tooltip: Option<String>,
+    /// Its classes, for a style sheet's `.class` selectors
+    /// ([`Widget::class`]).
+    pub classes: Vec<String>,
+    /// Its name, for a style sheet's `#name` selector ([`Widget::named`]).
+    pub name: Option<String>,
+    /// Its own CSS ([`Widget::css`]): applied after its tree's style
+    /// sheet's rules, and what it sets that is inherited reaches its
+    /// children.
+    css: Option<Arc<OwnCss>>,
+    /// Its style as CSS left it at the last layout: what it is laid out and
+    /// drawn in when there is one ([`Widget::look`]).
+    computed: Option<Box<Computed>>,
+    /// The family its text is drawn and measured in, as CSS's `font-family`
+    /// left it at the last layout -- the first of the list drawn in its own
+    /// face here -- or `None` where no style gave it one, and it is in
+    /// whatever its drawing is.
+    font: Option<FontFamily>,
+    /// Its style's transitions: what it last was, and what of it is moving
+    /// -- kept from one layout to the next while a style of it has a
+    /// `transition` ([`crate::css::transition`]).
+    transitions: Option<Box<Transitions>>,
+    /// Whether its style has been computed before: a style it was shown in
+    /// is what a change is a change from, and before its first there is
+    /// none -- a widget appears in its style, rather than moving into it.
+    styled_before: bool,
+    /// What its user did that its tree has not yet gathered
+    /// ([`signal`]): emitted as it handles an event, taken by the tree after.
+    signals: Vec<SignalKind>,
+    /// What a tool calls it, where its program said ([`Widget::labelled`]).
+    label: Option<String>,
+    /// Whether tools see it, and what it holds ([`automation`]): every
+    /// widget does unless its program says not
+    /// ([`Widget::hidden_from_automation`]).
+    exposed: bool,
+}
+
+/// A widget's own CSS, read: its block, and what in it was not.
+#[derive(Debug)]
+struct OwnCss {
+    block: Block,
+    warnings: Vec<Warning>,
+}
+
+/// A widget's states as selectors ask about them: hover, active, focus,
+/// enabled, checked ([`Widget::states`]).
+type States = [bool; 5];
+
+/// One of a widget's ancestors, as a style sheet's selectors ask about it.
+#[derive(Clone, Debug)]
+struct Ancestor {
+    kind: &'static str,
+    classes: Vec<String>,
+    name: Option<String>,
+    hover: bool,
+    active: bool,
+    focus: bool,
+    enabled: bool,
+    checked: bool,
+}
+
+/// What a widget's parent leaves it as its style is computed.
+struct Parent<'p> {
+    /// The style the parent is drawn in: what `inherit` takes, and `em`s of
+    /// a font size are of.
+    style: &'p Style,
+    /// The family the parent's text is in, where a style gave it one.
+    font: Option<FontFamily>,
+    /// The inherited properties a style set on the parent.
+    inherited: &'p Inherited,
+    /// What moves in the parent: what `transition: inherit` takes.
+    transition: &'p TransitionSpec,
+}
+
+/// Put what `transitions` is moving, of what `computed` leaves its children
+/// -- the text's colour, the font's size, the line height, the text's
+/// shadow -- where it is now, so a child inheriting it moves with it, as a
+/// CSS child inherits its parent's value part-way. Only what a style set is
+/// left to children at all.
+fn carry_moving_inheritance(transitions: &Transitions, computed: &mut Computed) {
+    let shown = &computed.style;
+    let leaves = &mut computed.inherited;
+    if transitions.moves(Animated::Color) && leaves.color.is_some() {
+        leaves.color = shown.foreground;
+    }
+    if transitions.moves(Animated::FontSize) && leaves.font_size.is_some() {
+        leaves.font_size = Some(shown.font_size);
+    }
+    if transitions.moves(Animated::LineHeight) {
+        leaves.line_height = match leaves.line_height {
+            Some(InheritedLine::Multiple(_)) => Some(InheritedLine::Multiple(shown.line_height)),
+            Some(InheritedLine::Px(_)) => {
+                Some(InheritedLine::Px(shown.line_height * shown.font_size))
+            }
+            None => None,
+        };
+    }
+    if transitions.moves(Animated::TextShadow) && leaves.text_shadow.is_some() {
+        leaves.text_shadow = Some(shown.text_shadow);
+    }
+}
+
+/// Run `f` measuring in `font` where a style gave one
+/// ([`crate::text::in_family`]), and in whatever is in force where not.
+fn within<R>(font: Option<FontFamily>, f: impl FnOnce() -> R) -> R {
+    match font {
+        Some(family) => crate::text::in_family(family, f),
+        None => f(),
+    }
+}
+
+/// The family a style's `font-family` list draws in: the first of it drawn
+/// in its own face here -- a generic name always is -- or the UI face, CSS's
+/// "the platform's default", when none is.
+///
+/// A family by name is passed over: a render tree cannot name one until
+/// `FontFamily::Named` reaches `main` with the compositor's half
+/// (`requests/c-f-text-in-a-family-the-drawing-names.md`), and a list
+/// naming one falls through to its generic family, as a browser's does
+/// on a machine without the font.
+fn first_drawable(families: &[Family]) -> FontFamily {
+    families
+        .iter()
+        .find_map(|family| match family {
+            Family::Ui => Some(FontFamily::Ui),
+            Family::Mono => Some(FontFamily::Mono),
+            Family::Named(_) => None,
+        })
+        .unwrap_or(FontFamily::Ui)
+}
+
+impl Ancestor {
+    fn subject(&self) -> Subject<'_> {
+        Subject {
+            kind: self.kind,
+            classes: &self.classes,
+            name: self.name.as_deref(),
+            hover: self.hover,
+            active: self.active,
+            focus: self.focus,
+            enabled: self.enabled,
+            checked: self.checked,
+        }
+    }
 }
 
 /// Widget content type.
@@ -235,6 +395,16 @@ impl Widget {
             focused: false,
             hovered: false,
             tooltip: None,
+            classes: Vec::new(),
+            name: None,
+            css: None,
+            computed: None,
+            font: None,
+            transitions: None,
+            styled_before: false,
+            signals: Vec::new(),
+            label: None,
+            exposed: true,
         }
     }
 
@@ -430,6 +600,335 @@ impl Widget {
         self
     }
 
+    /// Style it with CSS -- `color: var(--accent); padding: 4px 8px` --
+    /// with blocks for its states: `&:hover { background-color:
+    /// var(--surface1) }`. Applied over its [`style`](Self::style), after its
+    /// tree's style sheet ([`WidgetTree::set_style_sheet`]), in the order
+    /// written; what cannot be read is dropped, and
+    /// [`WidgetTree::css_warnings`] says what. See [`crate::css`].
+    #[must_use]
+    pub fn css(mut self, text: &str) -> Self {
+        let (block, warnings) = css_sheet::parse_block(text);
+        self.css = Some(Arc::new(OwnCss { block, warnings }));
+        self
+    }
+
+    /// Give it the class `class`, for a style sheet's `.class` selectors.
+    #[must_use]
+    pub fn class(mut self, class: &str) -> Self {
+        self.classes.push(class.to_string());
+        self
+    }
+
+    /// Name it `name`, for a style sheet's `#name` selector -- and for a tool
+    /// ([`automation`]), whose scripts find it by this name from one run of
+    /// its program to the next.
+    #[must_use]
+    pub fn named(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
+        self
+    }
+
+    /// What a tool -- a screen reader, a script ([`automation`]) -- calls it,
+    /// where what it shows does not say: a field with no placeholder beside
+    /// a label, a slider, a picture. A button's, a label's or a box's own
+    /// text needs none.
+    #[must_use]
+    pub fn labelled(mut self, name: &str) -> Self {
+        self.label = Some(name.to_string());
+        self
+    }
+
+    /// Keep it, and all it holds, out of the tree tools see
+    /// ([`automation`]): a decoration, or a part its program shows tools
+    /// another way. Every widget is in it unless its program says not.
+    #[must_use]
+    pub fn hidden_from_automation(mut self) -> Self {
+        self.exposed = false;
+        self
+    }
+
+    /// Its style as it is laid out and drawn: its program's
+    /// [`style`](Self::style), as CSS left it at the last layout.
+    ///
+    /// The program's own is kept apart and is what CSS starts from each
+    /// time, so a state's style -- `:hover`'s -- comes off when the state
+    /// does, and a change the program makes to `style` is taken up at the
+    /// next layout.
+    #[must_use]
+    pub fn look(&self) -> &Style {
+        self.computed.as_ref().map_or(&self.style, |c| &c.style)
+    }
+
+    /// Its kind's name, as a style sheet's selectors name it: `Button`,
+    /// `Label`, `TextInput` ...
+    #[must_use]
+    pub const fn kind_name(&self) -> &'static str {
+        match self.kind {
+            WidgetKind::Container => "Container",
+            WidgetKind::Label { .. } => "Label",
+            WidgetKind::Button { .. } => "Button",
+            WidgetKind::TextInput { .. } => "TextInput",
+            WidgetKind::TextArea { .. } => "TextArea",
+            WidgetKind::Checkbox { .. } => "Checkbox",
+            WidgetKind::RadioButton { .. } => "RadioButton",
+            WidgetKind::ScrollView { .. } => "ScrollView",
+            WidgetKind::Separator { .. } => "Separator",
+            WidgetKind::ProgressBar { .. } => "ProgressBar",
+            WidgetKind::Slider { .. } => "Slider",
+            WidgetKind::Image { .. } => "Image",
+        }
+    }
+
+    /// It, as a selector asks about it: its kind, classes, name and state.
+    fn ancestor(&self) -> Ancestor {
+        let [hover, active, focus, enabled, checked] = self.states();
+        Ancestor {
+            kind: self.kind_name(),
+            classes: self.classes.clone(),
+            name: self.name.clone(),
+            hover,
+            active,
+            focus,
+            enabled,
+            checked,
+        }
+    }
+
+    /// The states a selector asks about -- `:hover`, `:active`, `:focus`,
+    /// `:enabled` (`:disabled` its opposite) and `:checked` -- in that
+    /// order.
+    fn states(&self) -> States {
+        [
+            self.hovered,
+            matches!(self.kind, WidgetKind::Button { pressed: true, .. }),
+            self.focused,
+            self.enabled,
+            matches!(
+                self.kind,
+                WidgetKind::Checkbox {
+                    checked: CheckState::Checked,
+                    ..
+                } | WidgetKind::RadioButton { selected: true, .. }
+            ),
+        ]
+    }
+
+    /// Its [`states`](Self::states), and every widget's in it, in the
+    /// tree's order.
+    fn gather_states(&self, out: &mut Vec<States>) {
+        out.push(self.states());
+        for child in &self.children {
+            child.gather_states(out);
+        }
+    }
+
+    /// Compute its style, and its children's: the style sheet's rules that
+    /// choose it and its own CSS, in its present state, over its program's
+    /// style -- under `parent`, with `ancestors` its parents from the root --
+    /// and take up what changed: a value its `transition` moves starts
+    /// moving from where it is shown.
+    ///
+    /// A widget nothing styles, under a parent that left it nothing, has no
+    /// computed style and is drawn in its program's: a tree with no CSS
+    /// draws exactly as it did.
+    fn compute_css(
+        &mut self,
+        sheet: &StyleSheet,
+        env: &CssEnv<'_>,
+        parent: &Parent<'_>,
+        ancestors: &mut Vec<Ancestor>,
+    ) {
+        let me = self.ancestor();
+        let mut computed = {
+            let mut path: Vec<Subject<'_>> = ancestors.iter().map(Ancestor::subject).collect();
+            path.push(me.subject());
+            let mut declared: Vec<&Declared> = sheet.applying(&path);
+            if let (Some(own), Some(subject)) = (self.css.as_deref(), path.last()) {
+                declared.extend(own.block.applying(subject));
+            }
+            let styled = !declared.is_empty() || *parent.inherited != Inherited::default();
+            styled.then(|| {
+                Box::new(css_compute::compute(
+                    &self.style,
+                    &declared,
+                    parent.style,
+                    parent.inherited,
+                    parent.transition,
+                    env,
+                ))
+            })
+        };
+        self.take_up_transitions(computed.as_deref_mut(), env);
+        self.styled_before = true;
+        // Its family: the one its list draws in; and where it has none but
+        // its parent has -- `font-family: initial` under a styled family --
+        // the UI face, the initial one, not the parent's it is drawn inside.
+        self.font = match computed.as_deref().and_then(|c| c.font_family.as_deref()) {
+            Some(families) => Some(first_drawable(families)),
+            None => parent.font.map(|_| FontFamily::Ui),
+        };
+        self.computed = computed;
+        ancestors.push(me);
+        let none = Inherited::default();
+        let still = TransitionSpec::default();
+        let Self {
+            style,
+            computed,
+            children,
+            font,
+            ..
+        } = self;
+        let leaves = computed.as_deref().map_or(
+            Parent {
+                style,
+                font: *font,
+                inherited: &none,
+                transition: &still,
+            },
+            |c| Parent {
+                style: &c.style,
+                font: *font,
+                inherited: &c.inherited,
+                transition: &c.transition,
+            },
+        );
+        for child in children.iter_mut() {
+            child.compute_css(sheet, env, &leaves, ancestors);
+        }
+        ancestors.pop();
+    }
+
+    /// Take up its newly computed style, `computed`, into its transitions,
+    /// at the tree's clock in `env`: what changed starts moving where its
+    /// `transition` says, and what moves is shown where it is now -- in its
+    /// style, and in what its children inherit, so a parent's moving colour
+    /// moves theirs.
+    ///
+    /// Its transitions are kept only while a style has some: the first one
+    /// that does starts them from the style it is shown in until then
+    /// ([`look`](Self::look)), so a change into a state whose style moves
+    /// -- `&:hover { color: red; transition: color 1s }` -- moves from where
+    /// it was. A change into a style with no `transition` is shown at once,
+    /// as in CSS.
+    fn take_up_transitions(&mut self, computed: Option<&mut Computed>, env: &CssEnv<'_>) {
+        let Some(c) = computed else {
+            self.transitions = None;
+            return;
+        };
+        if self.transitions.is_none() && c.transition.moves_anything() {
+            self.transitions = Some(Box::new(if self.styled_before {
+                Transitions::from_shown(self.look())
+            } else {
+                Transitions::default()
+            }));
+        }
+        let Some(t) = self.transitions.as_deref_mut() else {
+            return;
+        };
+        t.update(
+            &mut c.style,
+            &c.transition,
+            &c.lengths,
+            env.now_ms,
+            env.palette.motion,
+        );
+        carry_moving_inheritance(t, c);
+        if !t.is_moving() && !c.transition.moves_anything() {
+            self.transitions = None;
+        }
+    }
+
+    /// Settle its lengths that are percentages of its container, now that
+    /// the container's content is known to be `width` by `height` -- and
+    /// take them up into its transitions, those that waited on it as well.
+    fn settle_lengths(&mut self, width: f32, height: f32) {
+        if let Some(c) = self.computed.as_deref_mut()
+            && c.lengths.waits()
+        {
+            let lengths = c.lengths;
+            lengths.apply(&mut c.style, width, height);
+            if let Some(t) = self.transitions.as_deref_mut() {
+                t.settle(&mut c.style, &c.transition, &lengths);
+            }
+        }
+    }
+
+    /// The fixed widgets in it, at any depth -- each with its `z-index` and
+    /// its path of child indexes from it -- in tree order. A hidden subtree
+    /// is not drawn, and its fixed widgets are left out with it.
+    fn collect_fixed(&self, path: &mut Vec<usize>, out: &mut Vec<(i32, Vec<usize>)>) {
+        for (i, child) in self.children.iter().enumerate() {
+            if !child.visible {
+                continue;
+            }
+            path.push(i);
+            if child.is_fixed() {
+                out.push((child.look().z_index, path.clone()));
+            }
+            child.collect_fixed(path, out);
+            path.pop();
+        }
+    }
+
+    /// The widget `path` -- child indexes -- leads to from it.
+    fn at_path(&self, path: &[usize]) -> Option<&Self> {
+        path.iter().try_fold(self, |w, &i| w.children.get(i))
+    }
+
+    /// [`at_path`](Self::at_path), to change.
+    fn at_path_mut(&mut self, path: &[usize]) -> Option<&mut Self> {
+        path.iter().try_fold(self, |w, &i| w.children.get_mut(i))
+    }
+
+    /// Take what it and every widget in it signalled since last asked, as
+    /// [`Signal`]s, into `out` -- each widget's in the order it emitted
+    /// them, parents before children.
+    fn gather_signals(&mut self, out: &mut Vec<Signal>) {
+        let from = self.id;
+        out.extend(self.signals.drain(..).map(|kind| Signal { from, kind }));
+        for child in &mut self.children {
+            child.gather_signals(out);
+        }
+    }
+
+    /// Whether anything in it, or in any widget in it, is moving.
+    fn any_moving(&self) -> bool {
+        self.transitions
+            .as_deref()
+            .is_some_and(Transitions::is_moving)
+            || self.children.iter().any(Self::any_moving)
+    }
+
+    /// Whether it, or any widget in it, has CSS of its own that says
+    /// anything -- in any state, not only the present one.
+    fn any_css(&self) -> bool {
+        self.css.as_deref().is_some_and(|own| !own.block.is_empty())
+            || self.children.iter().any(Self::any_css)
+    }
+
+    /// What in this widget's CSS, and its children's, was not used: the
+    /// parse's warnings and the last computing's.
+    fn gather_css_warnings(&self, out: &mut Vec<String>) {
+        if let Some(own) = self.css.as_deref() {
+            out.extend(
+                own.warnings
+                    .iter()
+                    .map(|w| format!("{} (its CSS, at {}): {}", self.kind_name(), w.at, w.message)),
+            );
+        }
+        if let Some(c) = self.computed.as_deref() {
+            out.extend(
+                c.warnings
+                    .iter()
+                    .map(|w| format!("{}: {w}", self.kind_name())),
+            );
+        }
+        for child in &self.children {
+            child.gather_css_warnings(out);
+        }
+    }
+
     pub fn with_flex_grow(mut self, grow: f32) -> Self {
         self.flex_item.grow = grow;
         self
@@ -611,7 +1110,13 @@ impl Widget {
         // scroll view's scrolled, and shown only inside its box.
         if !self.scrolls() || self.shows_children_at(px, py) {
             let (ox, oy) = self.children_origin();
-            for child in self.children.iter().rev() {
+            // What is drawn on top first; a fixed child is the tree's to ask.
+            for child in self
+                .paint_order()
+                .into_iter()
+                .rev()
+                .filter_map(|i| self.children.get(i))
+            {
                 if let Some(hit) = child.focus_target_at(px - ox, py - oy) {
                     return Some(hit);
                 }
@@ -627,14 +1132,27 @@ impl Widget {
     }
 
     /// Note where the pointer is, in this widget's parent's content space:
-    /// over this widget or not, and over which of its children.
+    /// over this widget or not, and over which of its children -- the one
+    /// drawn on top where two overlap, as CSS's `:hover` is the one hit and
+    /// what holds it, not what lies beneath. A fixed child is the tree's to
+    /// note ([`WidgetTree`]'s hover).
     fn set_hover(&mut self, px: f32, py: f32) {
         self.hovered = self.visible && self.contains(px, py);
         let reaches = self.hovered && (!self.scrolls() || self.shows_children_at(px, py));
         let (ox, oy) = self.children_origin();
-        for child in &mut self.children {
-            if reaches {
-                child.set_hover(px - ox, py - oy);
+        let (cx, cy) = (px - ox, py - oy);
+        let over = if reaches {
+            self.paint_order().into_iter().rev().find(|&i| {
+                self.children
+                    .get(i)
+                    .is_some_and(|c| c.visible && c.contains(cx, cy))
+            })
+        } else {
+            None
+        };
+        for (i, child) in self.children.iter_mut().enumerate() {
+            if Some(i) == over {
+                child.set_hover(cx, cy);
             } else {
                 child.clear_hover();
             }
@@ -675,8 +1193,8 @@ impl Widget {
     fn measure(&self, text: &str) -> f32 {
         crate::text::measure(
             text,
-            self.style.font_size,
-            weight_to_hint(self.style.font_weight),
+            self.look().font_size,
+            weight_to_hint(self.look().font_weight),
         )
     }
 
@@ -685,19 +1203,26 @@ impl Widget {
     ///
     /// A control the toolkit's component modules draw is as big as they make
     /// it ([`crate::button::width`], [`crate::checkbox::width`], ...), so
-    /// what is laid out and what is drawn agree.
+    /// what is laid out and what is drawn agree -- measured in the family it
+    /// is drawn in, where a style gave it one.
     pub fn intrinsic_size(&self, p: &Palette) -> Size {
+        within(self.font, || self.measured_size(p))
+    }
+
+    /// [`intrinsic_size`](Self::intrinsic_size), in whatever family is
+    /// being measured in.
+    fn measured_size(&self, p: &Palette) -> Size {
         let padded = |w: f32, h: f32| {
             Size::new(
-                w + self.style.padding.horizontal(),
-                h + self.style.padding.vertical(),
+                w + self.look().padding.horizontal(),
+                h + self.look().padding.vertical(),
             )
         };
-        let line = self.style.font_size * self.style.line_height;
+        let line = self.look().font_size * self.look().line_height;
         let least = |w: f32, h: f32| {
             Size::new(
-                self.style.min_width.unwrap_or(w),
-                self.style.min_height.unwrap_or(h),
+                self.look().min_width.unwrap_or(w),
+                self.look().min_height.unwrap_or(h),
             )
         };
         match &self.kind {
@@ -716,8 +1241,8 @@ impl Widget {
             }
             WidgetKind::ProgressBar { .. } => least(200.0, PROGRESS_HEIGHT),
             WidgetKind::Slider { .. } => Size::new(
-                self.style.min_width.unwrap_or(120.0),
-                SLIDER_HEIGHT.max(self.style.min_height.unwrap_or(0.0)),
+                self.look().min_width.unwrap_or(120.0),
+                SLIDER_HEIGHT.max(self.look().min_height.unwrap_or(0.0)),
             ),
             WidgetKind::Image { width, height, .. } => {
                 let side = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
@@ -740,10 +1265,10 @@ impl Widget {
     /// The widths of this widget's border, from its style.
     fn border_edges(&self) -> Edges {
         Edges {
-            top: self.style.border.top.width,
-            right: self.style.border.right.width,
-            bottom: self.style.border.bottom.width,
-            left: self.style.border.left.width,
+            top: self.look().border.top.width,
+            right: self.look().border.right.width,
+            bottom: self.look().border.bottom.width,
+            left: self.look().border.left.width,
         }
     }
 
@@ -752,8 +1277,8 @@ impl Widget {
     fn frame(&self) -> (f32, f32) {
         let border = self.border_edges();
         (
-            self.style.padding.horizontal() + border.horizontal(),
-            self.style.padding.vertical() + border.vertical(),
+            self.look().padding.horizontal() + border.horizontal(),
+            self.look().padding.vertical() + border.vertical(),
         )
     }
 
@@ -772,12 +1297,14 @@ impl Widget {
         )
     }
 
-    /// The visible children as a flex container lays them out: each one's
-    /// border box with room to spare, and its item.
+    /// The visible children in its flow as a flex container lays them out:
+    /// each one's border box with room to spare, and its item. A child
+    /// placed out of the flow (`position: absolute` or `fixed`) takes no
+    /// room in it.
     fn flex_children(&self, p: &Palette) -> Vec<(Size, FlexItem)> {
         self.children
             .iter()
-            .filter(|c| c.visible)
+            .filter(|c| c.visible && c.in_flow())
             .map(|c| (c.border_box_size(p), c.flex_item_in_layout()))
             .collect()
     }
@@ -797,7 +1324,7 @@ impl Widget {
         );
         if let Some(ref flex) = self.flex_layout
             && !self.scrolls()
-            && self.children.iter().any(|c| c.visible)
+            && self.children.iter().any(|c| c.visible && c.in_flow())
         {
             let unbounded = Size::new(f32::INFINITY, f32::INFINITY);
             let boxes = flex_layout(unbounded, flex, &self.flex_children(p), &Edges::ZERO);
@@ -812,6 +1339,15 @@ impl Widget {
             size.width = size.width.max(wide + frame_h);
             size.height = size.height.max(tall + frame_v);
         }
+        // A width or height its style fixes is its border box's, whatever
+        // its content would take.
+        let look = self.look();
+        if let Some(w) = look.width {
+            size.width = w;
+        }
+        if let Some(h) = look.height {
+            size.height = h;
+        }
         size
     }
 
@@ -821,17 +1357,30 @@ impl Widget {
     /// in a row or a column as they hold alone. The sizes are its border
     /// box's.
     fn flex_item_in_layout(&self) -> FlexItem {
-        let s = &self.style;
+        let s = self.look();
         let item = &self.flex_item;
+        let mut min = Size::new(
+            s.min_width.unwrap_or(0.0).max(item.min.width),
+            s.min_height.unwrap_or(0.0).max(item.min.height),
+        );
+        let mut max = Size::new(
+            s.max_width.unwrap_or(f32::INFINITY).min(item.max.width),
+            s.max_height.unwrap_or(f32::INFINITY).min(item.max.height),
+        );
+        // A fixed size is both limits -- held between them first, the least
+        // winning over the most, as CSS holds a `width` between `min-width`
+        // and `max-width`.
+        if let Some(w) = s.width {
+            let w = w.min(max.width).max(min.width);
+            (min.width, max.width) = (w, w);
+        }
+        if let Some(h) = s.height {
+            let h = h.min(max.height).max(min.height);
+            (min.height, max.height) = (h, h);
+        }
         FlexItem {
-            min: Size::new(
-                s.min_width.unwrap_or(0.0).max(item.min.width),
-                s.min_height.unwrap_or(0.0).max(item.min.height),
-            ),
-            max: Size::new(
-                s.max_width.unwrap_or(f32::INFINITY).min(item.max.width),
-                s.max_height.unwrap_or(f32::INFINITY).min(item.max.height),
-            ),
+            min,
+            max,
             margin: s.margin,
             ..item.clone()
         }
@@ -862,12 +1411,23 @@ impl Widget {
         let outer = constraint.constrain(self.border_box_size(p));
         self.layout.width = (outer.width - frame_h).max(0.0);
         self.layout.height = (outer.height - frame_v).max(0.0);
-        self.layout.padding = self.style.padding;
-        self.layout.margin = self.style.margin;
+        // Its corners' radii that are percentages of its own box, now that
+        // it has one -- `border-radius: 50%` a circle.
+        if let Some(c) = self.computed.as_deref_mut()
+            && c.lengths.radii_wait()
+        {
+            let lengths = c.lengths;
+            lengths.apply_radii(&mut c.style, outer.width, outer.height);
+            if let Some(t) = self.transitions.as_deref_mut() {
+                t.settle_radii(&mut c.style, &c.transition, &lengths);
+            }
+        }
+        self.layout.padding = self.look().padding;
+        self.layout.margin = self.look().margin;
         self.layout.border_widths = self.border_edges();
 
         if let Some(ref flex) = self.flex_layout
-            && self.children.iter().any(|c| c.visible)
+            && self.children.iter().any(|c| c.visible && c.in_flow())
         {
             let scrolls = self.scrolls();
             // The room inside: what the constraint allows less the frame,
@@ -881,16 +1441,34 @@ impl Widget {
                     (constraint.max_height - frame_v).max(0.0),
                 )
             };
+            // The children's lengths that are percentages of this widget's
+            // content, settled now that it is known -- before they are
+            // measured, which their padding and limits are part of.
+            for child in self
+                .children
+                .iter_mut()
+                .filter(|c| c.visible && c.in_flow())
+            {
+                child.settle_lengths(room.width, room.height);
+            }
             let boxes = flex_layout(room, flex, &self.flex_children(p), &Edges::ZERO);
 
-            // `flex_children` takes the visible children in order and
-            // `flex_layout` answers one box each, so the visible children
-            // and the boxes pair off one to one -- which is what `zip` says.
-            for (child, lb) in self.children.iter_mut().filter(|c| c.visible).zip(&boxes) {
+            // `flex_children` takes the visible children in the flow, in
+            // order, and `flex_layout` answers one box each, so they and the
+            // boxes pair off one to one -- which is what `zip` says.
+            for (child, lb) in self
+                .children
+                .iter_mut()
+                .filter(|c| c.visible && c.in_flow())
+                .zip(&boxes)
+            {
                 // Its border box is exactly what the flex layout gave it.
                 child.do_layout(SizeConstraint::tight(Size::new(lb.width, lb.height)), p);
-                child.layout.x = lb.x;
-                child.layout.y = lb.y;
+                // Moved from there if it is placed relative to it -- after
+                // the flow is laid out, so nothing around it moves.
+                let (dx, dy) = child.relative_offset();
+                child.layout.x = lb.x + dx;
+                child.layout.y = lb.y + dy;
             }
 
             let wide = boxes
@@ -915,21 +1493,154 @@ impl Widget {
                 *content_height = tall;
                 *scroll_x = scroll_x.clamp(0.0, (wide - view_w).max(0.0));
                 *scroll_y = scroll_y.clamp(0.0, (tall - view_h).max(0.0));
-                return;
-            }
-
-            if !constraint.max_width.is_finite() {
-                self.layout.width = wide;
-            }
-            if !constraint.max_height.is_finite() {
-                self.layout.height = tall;
+            } else {
+                if !constraint.max_width.is_finite() {
+                    self.layout.width = wide;
+                }
+                if !constraint.max_height.is_finite() {
+                    self.layout.height = tall;
+                }
             }
         }
+        // Its children placed out of its flow, in the padding box it now has.
+        self.place_absolute_children(p);
     }
 
     /// Whether this widget scrolls what it holds.
     const fn scrolls(&self) -> bool {
         matches!(self.kind, WidgetKind::ScrollView { .. })
+    }
+
+    /// Whether it is in its container's flow -- placed by the container's
+    /// layout, as a static or relative widget is -- rather than out of it.
+    fn in_flow(&self) -> bool {
+        matches!(self.look().position, Position::Static | Position::Relative)
+    }
+
+    /// Whether it is placed in the window, over everything
+    /// (`position: fixed`).
+    fn is_fixed(&self) -> bool {
+        self.look().position == Position::Fixed
+    }
+
+    /// How far a relative widget is moved from where the flow put it: its
+    /// left inset, else its right one leftward; its top, else its bottom
+    /// upward. Nothing for any other.
+    fn relative_offset(&self) -> (f32, f32) {
+        let look = self.look();
+        if look.position != Position::Relative {
+            return (0.0, 0.0);
+        }
+        let i = look.inset;
+        (
+            i.left.or(i.right.map(|r| -r)).unwrap_or(0.0),
+            i.top.or(i.bottom.map(|b| -b)).unwrap_or(0.0),
+        )
+    }
+
+    /// Its children in the order they are drawn -- by `z-index`, then as
+    /// they were added -- leaving out the fixed ones, which are drawn over
+    /// the whole window. The pointer is offered them the other way round,
+    /// so what is drawn on top takes it first.
+    fn paint_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = self
+            .children
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_fixed())
+            .map(|(i, _)| i)
+            .collect();
+        // Stable: siblings at one level stay in the order they were added.
+        order.sort_by_key(|&i| self.children.get(i).map_or(0, |c| c.look().z_index));
+        order
+    }
+
+    /// Lay out its children placed out of its flow (`position: absolute`),
+    /// each by its insets in this widget's padding box -- which it has now
+    /// been given -- and their own percentages settled against that box.
+    fn place_absolute_children(&mut self, p: &Palette) {
+        let pad = self.layout.padding;
+        let block = Size::new(
+            self.layout.width + pad.horizontal(),
+            self.layout.height + pad.vertical(),
+        );
+        // Where an absolute widget with no insets sits: where this widget's
+        // content starts, as near as this comes to CSS's "where the flow
+        // would have put it".
+        let start = (pad.left, pad.top);
+        for child in self
+            .children
+            .iter_mut()
+            .filter(|c| c.visible && c.look().position == Position::Absolute)
+        {
+            child.settle_lengths(block.width, block.height);
+            let (x, y, size) = child.placed_in(block, start, p);
+            child.do_layout(SizeConstraint::tight(size), p);
+            // In this widget's content space, which starts a padding in from
+            // the padding box.
+            child.layout.x = x - pad.left;
+            child.layout.y = y - pad.top;
+        }
+    }
+
+    /// Where it goes in a block `block` big -- its parent's padding box, or
+    /// the window -- as CSS places an absolutely positioned box: its margin
+    /// box's corner, from the block's, and its border box's size.
+    ///
+    /// Each way, a size its style fixes is its own; with none, insets on
+    /// both sides stretch it between them, and otherwise it takes what its
+    /// content takes, no more than the room left. Its limits hold either
+    /// way. It sits at its start inset, else its end inset back from the far
+    /// side, else at `start` -- where the block's content begins.
+    fn placed_in(&self, block: Size, start: (f32, f32), p: &Palette) -> (f32, f32, Size) {
+        let look = self.look();
+        let inset = look.inset;
+        let margin = look.margin;
+        let natural = self.border_box_size(p);
+        let item = self.flex_item_in_layout();
+        let axis = |from: Option<f32>,
+                    to: Option<f32>,
+                    fixed: Option<f32>,
+                    natural: f32,
+                    extent: f32,
+                    (m_from, m_to): (f32, f32),
+                    (least, most): (f32, f32),
+                    at_start: f32| {
+            let room = extent - from.unwrap_or(0.0) - to.unwrap_or(0.0) - m_from - m_to;
+            let size = match (from, to, fixed) {
+                (_, _, Some(fixed)) => fixed,
+                (Some(_), Some(_), None) => room,
+                _ => natural.min(room.max(0.0)),
+            };
+            let size = size.min(most).max(least).max(0.0);
+            let at = match (from, to) {
+                (Some(from), _) => from,
+                (None, Some(to)) => extent - to - (size + m_from + m_to),
+                (None, None) => at_start,
+            };
+            (at, size)
+        };
+        let (x, width) = axis(
+            inset.left,
+            inset.right,
+            look.width,
+            natural.width,
+            block.width,
+            (margin.left, margin.right),
+            (item.min.width, item.max.width),
+            start.0,
+        );
+        let (y, height) = axis(
+            inset.top,
+            inset.bottom,
+            look.height,
+            natural.height,
+            block.height,
+            (margin.top, margin.bottom),
+            (item.min.height, item.max.height),
+            start.1,
+        );
+        (x, y, Size::new(width, height))
     }
 
     /// Where this widget's children are, in its parent's content space: its
@@ -979,54 +1690,131 @@ impl Widget {
     /// background of the nearest widget round it that has one, laid over
     /// what that one is drawn on, and at the root the palette's `base`, the
     /// colour the toolkit's windows clear to.
+    ///
+    /// Its text is drawn in the family a style gave it (`font-family`), in a
+    /// [`RenderCommand::PushFont`] round it and its children -- which
+    /// inherit it, and push again only a family of their own.
+    ///
+    /// Its children are drawn by `z-index`, then as added. A fixed one
+    /// (`position: fixed`) is not drawn here: it is placed in the window,
+    /// and [`WidgetTree::render`] draws it over everything.
     pub fn render(&self, p: &Palette, tree: &mut RenderTree) {
-        self.render_on(p, p.base, tree);
+        self.render_on(p, p.base, None, tree);
     }
 
-    /// [`render`](Self::render), on `ground`: the colour behind this widget.
-    fn render_on(&self, p: &Palette, ground: Color, tree: &mut RenderTree) {
+    /// [`render`](Self::render), on `ground`: the colour behind this widget,
+    /// in `drawn_in`, the family a widget round it pushed (`None` where none
+    /// did, and it is drawn in whatever its caller's drawing is).
+    fn render_on(
+        &self,
+        p: &Palette,
+        ground: Color,
+        drawn_in: Option<FontFamily>,
+        tree: &mut RenderTree,
+    ) {
         if !self.visible {
             return;
         }
         // A NaN opacity is a style nobody set on purpose: drawn as the
         // default, opaque, rather than vanishing.
-        let opacity = self.style.opacity;
+        let opacity = self.look().opacity;
         if opacity.is_nan() || opacity >= 1.0 {
-            self.render_opaque(p, ground, tree);
+            self.render_opaque(p, ground, drawn_in, tree);
         } else if opacity > 0.0 {
             // Faded as a group: drawn opaque, on the same ground, and then
             // every command faded alike -- so a child is drawn on its
             // parent's background as it is before the fade.
             let mut own = RenderTree::new();
-            self.render_opaque(p, ground, &mut own);
+            self.render_opaque(p, ground, drawn_in, &mut own);
             tree.commands
                 .extend(own.commands.into_iter().map(|c| c.faded(opacity)));
         }
     }
 
+    /// Its margin's colour ([`Style::margin_color`]): each side's band
+    /// between the margin's edge and the border's, filled where a style gave
+    /// that side a colour -- `design.txt`'s margin "including color". The
+    /// corners are the top and bottom bands', so a uniform colour is one
+    /// frame round the box with no seams.
+    fn render_margin(&self, tree: &mut RenderTree) {
+        let colors = self.look().margin_color;
+        let m = self.layout.margin;
+        let (x, y) = (self.layout.x, self.layout.y);
+        let (w, h) = (self.layout.outer_width(), self.layout.outer_height());
+        let between = self.layout.border_box_height();
+        let bands = [
+            (x, y, w, m.top, colors.top),
+            (x, y + h - m.bottom, w, m.bottom, colors.bottom),
+            (x, y + m.top, m.left, between, colors.left),
+            (x + w - m.right, y + m.top, m.right, between, colors.right),
+        ];
+        for (bx, by, bw, bh, color) in bands {
+            if color.a > 0 && bw > 0.0 && bh > 0.0 {
+                tree.push(RenderCommand::FillRect {
+                    x: bx,
+                    y: by,
+                    width: bw,
+                    height: bh,
+                    color,
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+        }
+    }
+
     /// [`render_on`](Self::render_on), at full opacity.
-    fn render_opaque(&self, p: &Palette, ground: Color, tree: &mut RenderTree) {
+    fn render_opaque(
+        &self,
+        p: &Palette,
+        ground: Color,
+        drawn_in: Option<FontFamily>,
+        tree: &mut RenderTree,
+    ) {
         let x = self.layout.x + self.layout.margin.left;
         let y = self.layout.y + self.layout.margin.top;
         let w = self.layout.border_box_width();
         let h = self.layout.border_box_height();
 
+        // Its margin, where a style gives it a colour: each side's band
+        // between the margin's edge and the border's, the corners the top
+        // and bottom bands'.
+        self.render_margin(tree);
+
+        // Its shadow, under it: the box offset, grown by the spread and
+        // blurred, by the renderer.
+        if let Some(s) = self.look().shadow
+            && s.color.a > 0
+        {
+            tree.push(RenderCommand::BoxShadow {
+                x,
+                y,
+                width: w,
+                height: h,
+                offset_x: s.offset_x,
+                offset_y: s.offset_y,
+                blur: s.blur,
+                spread: s.spread,
+                color: s.color,
+                corner_radii: self.look().border_radius,
+            });
+        }
+
         // Background
-        if self.style.background.a > 0 {
+        if self.look().background.a > 0 {
             tree.push(RenderCommand::FillRect {
                 x,
                 y,
                 width: w,
                 height: h,
-                color: self.style.background,
-                corner_radii: self.style.border_radius,
+                color: self.look().background,
+                corner_radii: self.look().border_radius,
             });
         }
 
         // Border: one stroke round a box whose four sides agree, as most do,
         // round corners and all; otherwise each side its own strip, square
         // -- where it used to be the top side's width and colour all round.
-        let b = &self.style.border;
+        let b = &self.look().border;
         let same = |s: &crate::style::Border| {
             (s.width - b.top.width).abs() < f32::EPSILON && s.color == b.top.color
         };
@@ -1039,7 +1827,7 @@ impl Widget {
                     height: h,
                     color: b.top.color,
                     line_width: b.top.width,
-                    corner_radii: self.style.border_radius,
+                    corner_radii: self.look().border_radius,
                 });
             }
         } else {
@@ -1063,11 +1851,21 @@ impl Widget {
             }
         }
 
+        // Its text, and its children's, in its own family where it is not
+        // the one already pushed round it -- and measured in it while drawn,
+        // so what is placed by measuring (a centred label, a caret) is placed
+        // by the face it is drawn in.
+        let push = self.font.filter(|&family| Some(family) != drawn_in);
+        if let Some(family) = push {
+            tree.push(RenderCommand::PushFont { family });
+        }
+        let drawn_in = self.font.or(drawn_in);
+
         // What the widget is, drawn by the component module for it, and its
         // children, on its background -- or, where it has none, on what it
         // is itself drawn on.
-        let ground = self.style.background.over(ground);
-        self.draw_kind(p, ground, tree, (x, y, w, h));
+        let ground = self.look().background.over(ground);
+        within(self.font, || self.draw_kind(p, ground, tree, (x, y, w, h)));
 
         // Its children, from where they are -- a scroll view's scrolled -- and
         // cut to its content box.
@@ -1082,8 +1880,14 @@ impl Widget {
                 height: self.layout.height,
             });
 
-            for child in &self.children {
-                child.render_on(p, ground, tree);
+            // By `z-index`, then as added; a fixed one is drawn over the
+            // window, after everything ([`WidgetTree::render`]).
+            for child in self
+                .paint_order()
+                .into_iter()
+                .filter_map(|i| self.children.get(i))
+            {
+                child.render_on(p, ground, drawn_in, tree);
             }
 
             tree.push(RenderCommand::PopClip);
@@ -1091,6 +1895,9 @@ impl Widget {
         }
         // A scroll view's bars, over what it holds.
         self.draw_scrollbars(p, tree);
+        if push.is_some() {
+            tree.push(RenderCommand::PopFont);
+        }
     }
 
     // ======================================================================
@@ -1122,7 +1929,15 @@ impl Widget {
             event
         };
         if offer {
-            for index in (0..self.children.len()).rev() {
+            // The pointer goes to what is drawn on top first, and not to a
+            // fixed child -- the tree offers it that where it is in the
+            // window; a key goes to each child, as it always has.
+            let order: Vec<usize> = if matches!(event, Event::Mouse(_)) {
+                self.paint_order()
+            } else {
+                (0..self.children.len()).collect()
+            };
+            for index in order.into_iter().rev() {
                 let Some(child) = self.children.get_mut(index) else {
                     continue;
                 };
@@ -1133,8 +1948,10 @@ impl Widget {
             }
         }
 
-        // Handle at this widget level
-        match event {
+        // Handle at this widget level -- measuring in its own family, so a
+        // click or an arrow key finds the caret by the face it is drawn in.
+        let font = self.font;
+        within(font, || match event {
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             // A keystroke goes to the focused widget and to nothing else. The
             // recursion above has already offered it to the children, so
@@ -1148,7 +1965,7 @@ impl Widget {
             // field filled in the second.
             Event::Key(key) if self.focused => self.handle_key(key),
             _ => EventResult::Ignored,
-        }
+        })
     }
 
     /// After the child at `index` took an event: if it is a radio button and
@@ -1172,8 +1989,8 @@ impl Widget {
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
         let inside = self.contains(mouse.x, mouse.y);
-        let font_size = self.style.font_size;
-        let row = font_size * self.style.line_height;
+        let font_size = self.look().font_size;
+        let row = font_size * self.look().line_height;
         let (content_x, content_y) = self.content_origin();
         let (content_w, content_h) = (self.layout.width, self.layout.height);
         let focused = self.focused;
@@ -1191,12 +2008,19 @@ impl Widget {
             // A slider follows its drag wherever the pointer goes, and decides
             // itself what of the pointer is its; the wheel moves it only while
             // it has the keyboard, as its module asks.
-            WidgetKind::Slider { slider } => match mouse.kind {
-                MouseEventKind::Scroll { dy, .. } if focused && inside => {
-                    taken(slider.wheel(dy).is_taken())
+            WidgetKind::Slider { slider } => {
+                let before = slider.value();
+                let result = match mouse.kind {
+                    MouseEventKind::Scroll { dy, .. } if focused && inside => {
+                        taken(slider.wheel(dy).is_taken())
+                    }
+                    _ => taken(slider.handle_mouse(&placement, mouse).is_taken()),
+                };
+                if slider.value().to_bits() != before.to_bits() {
+                    self.signals.push(SignalKind::Moved(slider.value()));
                 }
-                _ => taken(slider.handle_mouse(&placement, mouse).is_taken()),
-            },
+                result
+            }
             // A text area selects while a press in it is held, wherever the
             // pointer goes; and scrolls under the wheel.
             WidgetKind::TextArea {
@@ -1226,6 +2050,15 @@ impl Widget {
                 }
                 _ => EventResult::Ignored,
             },
+            // A press on a button released off it is no click, and the
+            // button is let go of: it was left drawn pressed, and the next
+            // release over it -- after a press anywhere -- clicked it.
+            WidgetKind::Button { pressed, .. }
+                if !inside && matches!(mouse.kind, MouseEventKind::Release(_)) =>
+            {
+                *pressed = false;
+                EventResult::Ignored
+            }
             _ if !inside => EventResult::Ignored,
             // The wheel scrolls a scroll view, as far as it goes; a turn
             // that moves nothing is left for a scroll view round it.
@@ -1249,6 +2082,9 @@ impl Widget {
             // its group (`choose_radio`).
             WidgetKind::RadioButton { selected, .. } => {
                 if matches!(mouse.kind, MouseEventKind::Release(_)) {
+                    if !*selected {
+                        self.signals.push(SignalKind::Chosen);
+                    }
                     *selected = true;
                     EventResult::Consumed
                 } else {
@@ -1290,7 +2126,12 @@ impl Widget {
                     *pressed = true;
                     EventResult::Consumed
                 }
+                // Released over it after a press on it: a click. A press
+                // begun elsewhere and released here is not one.
                 MouseEventKind::Release(_) => {
+                    if *pressed {
+                        self.signals.push(SignalKind::Clicked);
+                    }
                     *pressed = false;
                     EventResult::Consumed
                 }
@@ -1299,6 +2140,7 @@ impl Widget {
             WidgetKind::Checkbox { checked, .. } => {
                 if matches!(&mouse.kind, MouseEventKind::Release(_)) {
                     *checked = checked.toggled();
+                    self.signals.push(SignalKind::Toggled(*checked));
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -1318,7 +2160,7 @@ impl Widget {
         // it at the size it is *drawn* at (see the `Left` arm), which lives in
         // `style` — a different field of the same `self`. A text area's box is
         // read for the same reason.
-        let font_size = self.style.font_size;
+        let font_size = self.look().font_size;
         let metrics = self.text_metrics();
 
         let shift = key.modifiers.shift;
@@ -1358,6 +2200,7 @@ impl Widget {
                             .next_in(value)
                             .unwrap_or_else(|| TextCursor::from(value.len()));
                     }
+                    self.signals.push(SignalKind::Edited);
                     return EventResult::Consumed;
                 }
                 match key.key {
@@ -1375,24 +2218,38 @@ impl Widget {
                         // character before it removes something the user never
                         // pointed at, which is the one editing mistake that
                         // cannot be seen happening.
-                        if !crate::textedit::delete_selection(value, cursor, selection_anchor) {
-                            if let Some(prev) = cursor.prev_in(value) {
-                                value.remove(prev.byte());
-                                *cursor = prev;
-                            }
+                        let mut edited =
+                            crate::textedit::delete_selection(value, cursor, selection_anchor);
+                        if !edited && let Some(prev) = cursor.prev_in(value) {
+                            value.remove(prev.byte());
+                            *cursor = prev;
+                            edited = true;
+                        }
+                        if edited {
+                            self.signals.push(SignalKind::Edited);
                         }
                         EventResult::Consumed
                     }
                     crate::event::Key::Delete => {
-                        if !crate::textedit::delete_selection(value, cursor, selection_anchor) {
-                            // Forward delete is the logical *next* character,
-                            // for the same reason Backspace is the logical
-                            // previous one, and `next_in` is what refuses to
-                            // hand back an offset inside one.
-                            if cursor.byte() < value.len() {
-                                value.remove(cursor.byte());
-                            }
+                        let mut edited =
+                            crate::textedit::delete_selection(value, cursor, selection_anchor);
+                        // Forward delete is the logical *next* character, for
+                        // the same reason Backspace is the logical previous
+                        // one, and `next_in` is what refuses to hand back an
+                        // offset inside one.
+                        if !edited && cursor.byte() < value.len() {
+                            value.remove(cursor.byte());
+                            edited = true;
                         }
+                        if edited {
+                            self.signals.push(SignalKind::Edited);
+                        }
+                        EventResult::Consumed
+                    }
+                    // Enter is a form's "done": the field says so, and what is
+                    // done about it is the program's.
+                    crate::event::Key::Enter => {
+                        self.signals.push(SignalKind::Submitted);
                         EventResult::Consumed
                     }
                     // The arrows step *visually* — one position left or right on
@@ -1476,9 +2333,15 @@ impl Widget {
             // focus onto a button that then had no way to be activated, which
             // is worse than not being in the tab order at all: the user would
             // see the focus land somewhere it could not act.
+            // Space or Enter clicks a focused button, as a press and release
+            // over it does. It used to toggle the button's pressed look and
+            // leave it there -- key releases are not seen here -- so a button
+            // worked from the keyboard stayed drawn pressed until the next
+            // Space, and nothing told its program it had been clicked.
             WidgetKind::Button { pressed, .. } => match key.key {
                 crate::event::Key::Space | crate::event::Key::Enter => {
-                    *pressed = !*pressed;
+                    *pressed = false;
+                    self.signals.push(SignalKind::Clicked);
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,
@@ -1486,6 +2349,7 @@ impl Widget {
             WidgetKind::Checkbox { checked, .. } => {
                 if key.key == crate::event::Key::Space {
                     *checked = checked.toggled();
+                    self.signals.push(SignalKind::Toggled(*checked));
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -1494,6 +2358,9 @@ impl Widget {
             // Space chooses a radio button, as a click does.
             WidgetKind::RadioButton { selected, .. } => {
                 if key.key == crate::event::Key::Space {
+                    if !*selected {
+                        self.signals.push(SignalKind::Chosen);
+                    }
                     *selected = true;
                     EventResult::Consumed
                 } else {
@@ -1501,18 +2368,25 @@ impl Widget {
                 }
             }
             WidgetKind::Slider { slider } => {
-                if slider.handle_key(key).is_taken() {
+                let before = slider.value();
+                let result = if slider.handle_key(key).is_taken() {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
+                };
+                if slider.value().to_bits() != before.to_bits() {
+                    self.signals.push(SignalKind::Moved(slider.value()));
                 }
+                result
             }
             // A text area's editing keys are its module's: typing, deleting,
             // the arrows and their selections, undo, the clipboard. What it
             // leaves -- Escape, Tab -- is the window's.
             WidgetKind::TextArea { area, .. } => match area.edit_key(key, &metrics) {
                 crate::textinput::KeyEdit::Unhandled => EventResult::Ignored,
-                crate::textinput::KeyEdit::Handled | crate::textinput::KeyEdit::Changed => {
+                crate::textinput::KeyEdit::Handled => EventResult::Consumed,
+                crate::textinput::KeyEdit::Changed => {
+                    self.signals.push(SignalKind::Edited);
                     EventResult::Consumed
                 }
             },
@@ -1538,6 +2412,66 @@ pub struct WidgetTree {
     /// ([`set_palette`](Self::set_palette)). Its theme's widget style also
     /// sizes the controls.
     palette: Palette,
+    /// The style sheet its widgets are styled by
+    /// ([`set_style_sheet`](Self::set_style_sheet)).
+    style_sheet: StyleSheet,
+    /// What in the style sheet was not read.
+    sheet_warnings: Vec<Warning>,
+    /// Pixels to a millimetre on the display, for CSS's `mm` and `cm`.
+    px_per_mm: f32,
+    /// Whether it had any CSS at the last layout -- a style sheet with
+    /// rules, or a widget with its own: what makes a change of state (the
+    /// pointer over a widget, the keyboard on one) worth styling it again
+    /// for, as a `:hover` may change a widget's look and size.
+    styled: bool,
+    /// What its transitions tell the time by ([`time_by_ticks`](Self::time_by_ticks)).
+    clock: Clock,
+    /// Whether a transition was moving at the last layout
+    /// ([`animating`](Self::animating)).
+    animating: bool,
+    /// Signals not yet taken ([`take_signals`](Self::take_signals)), the
+    /// oldest first, at most [`MAX_QUEUED_SIGNALS`].
+    queued: std::collections::VecDeque<Signal>,
+    /// Callbacks connected to its signals ([`connect`](Self::connect)).
+    slots: Vec<signal::Slot>,
+    /// Channels its signals are sent on ([`connect_channel`](Self::connect_channel)).
+    channels: Vec<std::sync::mpsc::Sender<Signal>>,
+    /// The next callback's [`SlotId`].
+    next_slot: u64,
+}
+
+/// What a tree tells the time by, for its transitions.
+#[derive(Clone, Copy, Debug)]
+enum Clock {
+    /// The machine's, from when the tree was made: a transition is over on
+    /// time whether or not its program sends ticks, so one that never does
+    /// sees it finished at the first event it hands the tree after its end,
+    /// rather than stuck part-way for good.
+    Real(std::time::Instant),
+    /// Its ticks', in milliseconds: time passes only as [`Event::Tick`]s
+    /// say -- what a test steps through, a frame at a time.
+    Ticks(f64),
+}
+
+impl Clock {
+    /// Milliseconds since the clock started.
+    fn now_ms(&self) -> f64 {
+        match self {
+            Self::Real(epoch) => epoch.elapsed().as_secs_f64() * 1000.0,
+            Self::Ticks(ms) => *ms,
+        }
+    }
+
+    /// A tick of `elapsed_ms`: the time it says has passed, for a clock of
+    /// ticks; the machine's has its own.
+    fn tick(&mut self, elapsed_ms: u64) {
+        if let Self::Ticks(ms) = self {
+            // Exact below 2^53 ms -- some 285,000 years of ticks.
+            #[allow(clippy::cast_precision_loss)]
+            let elapsed = elapsed_ms as f64;
+            *ms += elapsed;
+        }
+    }
 }
 
 impl WidgetTree {
@@ -1550,7 +2484,180 @@ impl WidgetTree {
             window_width: width,
             window_height: height,
             palette: Palette::for_mode(true),
+            style_sheet: StyleSheet::default(),
+            sheet_warnings: Vec::new(),
+            px_per_mm: crate::css::value::Units::REFERENCE_PX_PER_MM,
+            styled: false,
+            clock: Clock::Real(std::time::Instant::now()),
+            animating: false,
+            queued: std::collections::VecDeque::new(),
+            slots: Vec::new(),
+            channels: Vec::new(),
+            next_slot: 0,
         }
+    }
+
+    /// What its widgets' users did since this was last asked -- clicks,
+    /// ticks, edits -- oldest first: the way to hear its signals for a
+    /// program that owns its state, after each event it hands the tree.
+    /// See [`Signal`].
+    pub fn take_signals(&mut self) -> Vec<Signal> {
+        self.queued.drain(..).collect()
+    }
+
+    /// Call `slot` with each signal `from` sends -- or every widget's, for
+    /// `None` -- as it is sent, until [`disconnect`](Self::disconnect).
+    /// Answers the connection's handle.
+    pub fn connect(
+        &mut self,
+        from: Option<WidgetId>,
+        slot: impl FnMut(&Signal) + 'static,
+    ) -> SlotId {
+        let id = SlotId(self.next_slot);
+        self.next_slot = self.next_slot.wrapping_add(1);
+        self.slots.push(signal::Slot {
+            id,
+            from,
+            call: Box::new(slot),
+        });
+        id
+    }
+
+    /// Stop calling the callback `slot` connected. Answers whether it was
+    /// connected.
+    pub fn disconnect(&mut self, slot: SlotId) -> bool {
+        let before = self.slots.len();
+        self.slots.retain(|s| s.id != slot);
+        self.slots.len() != before
+    }
+
+    /// Send each signal on `sender` as it is sent -- for a program whose
+    /// state lives on another thread. A channel whose receiver has gone is
+    /// let go of at its next signal.
+    pub fn connect_channel(&mut self, sender: std::sync::mpsc::Sender<Signal>) {
+        self.channels.push(sender);
+    }
+
+    /// Gather what its widgets signalled while handling an event, and hand
+    /// each signal to every way its program has asked to hear it: the queue
+    /// (its oldest dropped past [`MAX_QUEUED_SIGNALS`]), each channel, each
+    /// callback connected to its widget or to all.
+    fn send_signals(&mut self) {
+        let mut sent = Vec::new();
+        self.root.gather_signals(&mut sent);
+        for signal in sent {
+            // A channel whose receiver is gone has nowhere to send to.
+            self.channels.retain(|ch| ch.send(signal.clone()).is_ok());
+            for slot in &mut self.slots {
+                if slot.from.is_none_or(|from| from == signal.from) {
+                    (slot.call)(&signal);
+                }
+            }
+            if self.queued.len() >= MAX_QUEUED_SIGNALS {
+                self.queued.pop_front();
+            }
+            self.queued.push_back(signal);
+        }
+    }
+
+    /// Tell the time for its transitions by its ticks from now on -- each
+    /// [`Event::Tick`]'s `elapsed_ms` -- rather than by the machine's clock:
+    /// for a test that steps a transition through, or a program that draws
+    /// frames at a time of its own (a recording). The clock starts at nought.
+    pub fn time_by_ticks(&mut self) {
+        self.clock = Clock::Ticks(0.0);
+    }
+
+    /// Whether a transition is moving: while it is, its program sends the
+    /// tree [`Event::Tick`]s (an `App`'s `tick_interval`) and draws it again
+    /// after each, and stops when this turns false. A program that sends
+    /// none sees a transition move only as it hands the tree other events --
+    /// each lays the tree out at the time it is handled -- and over by the
+    /// first after its end.
+    #[must_use]
+    pub const fn animating(&self) -> bool {
+        self.animating
+    }
+
+    /// Style its widgets with the style sheet `text` -- rules of selectors
+    /// and declarations, applied in the order written and before each
+    /// widget's own CSS ([`Widget::css`]) -- and lay it out again. Answers
+    /// what in it was not read. See [`crate::css`].
+    pub fn set_style_sheet(&mut self, text: &str) -> &[Warning] {
+        let (sheet, warnings) = css_sheet::parse_sheet(text);
+        self.style_sheet = sheet;
+        self.sheet_warnings = warnings;
+        self.layout();
+        &self.sheet_warnings
+    }
+
+    /// How many pixels make a millimetre on the display it is drawn on, for
+    /// CSS's `mm` and `cm`: CSS's 96 to the inch until a program that knows
+    /// the display's size says otherwise. A size that is not a positive
+    /// number is not taken.
+    pub fn set_pixels_per_mm(&mut self, px: f32) {
+        if px.is_finite() && px > 0.0 {
+            self.px_per_mm = px;
+            self.layout();
+        }
+    }
+
+    /// What in its CSS was not used, and why: its style sheet's, each
+    /// widget's own, and what the last layout could not compute (a variable
+    /// that stands for nothing).
+    #[must_use]
+    pub fn css_warnings(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .sheet_warnings
+            .iter()
+            .map(|w| format!("the style sheet, at {}: {}", w.at, w.message))
+            .collect();
+        self.root.gather_css_warnings(&mut out);
+        out
+    }
+
+    /// Compute every widget's style from the style sheet and its own CSS,
+    /// in its present state.
+    fn compute_css(&mut self) {
+        // A `0` in the family a style's list draws in; with none, in what
+        // the tree is measured in.
+        let zero_width = |size: f32, weight: FontWeight, families: Option<&[Family]>| {
+            let weight = weight_to_hint(weight);
+            match families {
+                Some(families) => {
+                    crate::text::measure_in("0", size, weight, first_drawable(families))
+                }
+                None => crate::text::measure("0", size, weight),
+            }
+        };
+        let env = CssEnv {
+            root_font_size: crate::text::scaled(Style::default().font_size),
+            viewport: (self.window_width, self.window_height),
+            px_per_mm: self.px_per_mm,
+            palette: &self.palette,
+            zero_width: &zero_width,
+            now_ms: self.clock.now_ms(),
+        };
+        let window = Parent {
+            style: &Style::default(),
+            font: None,
+            inherited: &Inherited::default(),
+            transition: &TransitionSpec::default(),
+        };
+        self.root
+            .compute_css(&self.style_sheet, &env, &window, &mut Vec::new());
+        self.styled = !self.style_sheet.rules.is_empty() || self.root.any_css();
+    }
+
+    /// Its widgets' [`states`](Widget::states) in tree order, if it is
+    /// styled: what [`restyle`](Self::restyle) compares with after
+    /// something that may have changed one.
+    fn states_if_styled(&self) -> Option<Vec<States>> {
+        self.styled.then(|| {
+            let mut states = Vec::new();
+            self.root.gather_states(&mut states);
+            states
+        })
     }
 
     /// Draw in `palette` from now on -- the user's, and again when the user
@@ -1567,11 +2674,16 @@ impl WidgetTree {
         &self.palette
     }
 
-    /// Perform layout on the entire tree.
+    /// Perform layout on the entire tree -- its styles computed first, from
+    /// its CSS, in each widget's present state.
     pub fn layout(&mut self) {
+        self.compute_css();
+        // The root's percentages are of the window.
+        self.root
+            .settle_lengths(self.window_width, self.window_height);
         // The root's border box is the window less the root's own margins:
         // the window is its margin box, at the window's corner.
-        let margin = self.root.style.margin;
+        let margin = self.root.look().margin;
         self.root.do_layout(
             SizeConstraint::tight(Size::new(
                 (self.window_width - margin.horizontal()).max(0.0),
@@ -1581,12 +2693,106 @@ impl WidgetTree {
         );
         self.root.layout.x = 0.0;
         self.root.layout.y = 0.0;
+        self.place_fixed();
+        self.animating = self.root.any_moving();
     }
 
-    /// Render the entire tree into a render command list, in its palette.
+    /// Its fixed widgets' paths, in the order they are drawn: by `z-index`,
+    /// then in tree order. Found afresh each time, from the tree as it is
+    /// -- a program may add and remove widgets between layouts, and a path
+    /// kept from before would lead to another widget.
+    fn fixed_paths(&self) -> Vec<Vec<usize>> {
+        let mut found = Vec::new();
+        self.root.collect_fixed(&mut Vec::new(), &mut found);
+        found.sort_by_key(|(z, _)| *z);
+        found.into_iter().map(|(_, path)| path).collect()
+    }
+
+    /// The fixed widget on top under the point, in the window, as its path.
+    fn fixed_at(&self, x: f32, y: f32) -> Option<Vec<usize>> {
+        self.fixed_paths()
+            .into_iter()
+            .rev()
+            .find(|path| self.root.at_path(path).is_some_and(|w| w.contains(x, y)))
+    }
+
+    /// Lay out its fixed widgets, each by its insets in the window -- its
+    /// percentages of the window -- after everything else.
+    fn place_fixed(&mut self) {
+        let window = Size::new(self.window_width, self.window_height);
+        for path in self.fixed_paths() {
+            let palette = &self.palette;
+            if let Some(w) = self.root.at_path_mut(&path) {
+                w.settle_lengths(window.width, window.height);
+                let (x, y, size) = w.placed_in(window, (0.0, 0.0), palette);
+                w.do_layout(SizeConstraint::tight(size), palette);
+                w.layout.x = x;
+                w.layout.y = y;
+            }
+        }
+    }
+
+    /// Note where the pointer is: over a fixed widget, that one, and
+    /// nothing beneath it; else whatever it is over in the tree.
+    fn hover_at(&mut self, x: f32, y: f32) {
+        match self.fixed_at(x, y) {
+            Some(path) => {
+                self.root.clear_hover();
+                if let Some(w) = self.root.at_path_mut(&path) {
+                    w.set_hover(x, y);
+                }
+            }
+            None => self.root.set_hover(x, y),
+        }
+    }
+
+    /// The topmost focusable widget under the point, in the window -- in a
+    /// fixed widget there, if one is, and nothing beneath it.
+    fn focus_target_at(&self, x: f32, y: f32) -> Option<WidgetId> {
+        match self.fixed_at(x, y) {
+            Some(path) => self
+                .root
+                .at_path(&path)
+                .and_then(|w| w.focus_target_at(x, y)),
+            None => self.root.focus_target_at(x, y),
+        }
+    }
+
+    /// Hand a pointer event to its widgets: to the fixed ones first, on top
+    /// and at their places in the window, then to the tree -- except a
+    /// press, a double click or a turn of the wheel over a fixed widget,
+    /// which lands on it and nothing beneath. A move or a release goes on,
+    /// so a drag begun beneath one follows the pointer across it.
+    fn pointer_event(&mut self, event: &Event, mouse: &MouseEvent) -> EventResult {
+        for path in self.fixed_paths().into_iter().rev() {
+            if let Some(w) = self.root.at_path_mut(&path)
+                && w.handle_event(event) == EventResult::Consumed
+            {
+                return EventResult::Consumed;
+            }
+        }
+        let aimed = matches!(
+            mouse.kind,
+            MouseEventKind::Press(_)
+                | MouseEventKind::DoubleClick(_)
+                | MouseEventKind::Scroll { .. }
+        );
+        if aimed && self.fixed_at(mouse.x, mouse.y).is_some() {
+            return EventResult::Ignored;
+        }
+        self.root.handle_event(event)
+    }
+
+    /// Render the entire tree into a render command list, in its palette --
+    /// its fixed widgets last, over everything, by `z-index`.
     pub fn render(&self) -> RenderTree {
         let mut tree = RenderTree::new();
         self.root.render(&self.palette, &mut tree);
+        for path in self.fixed_paths() {
+            if let Some(w) = self.root.at_path(&path) {
+                w.render(&self.palette, &mut tree);
+            }
+        }
         tree
     }
 
@@ -1605,8 +2811,35 @@ impl WidgetTree {
     /// since the caller last looked must not leave the focus on the widget
     /// before it, which would silently redirect the next keystroke.
     pub fn focus(&mut self, id: Option<WidgetId>) -> bool {
+        let before = self.states_if_styled();
+        let landed = self.set_focus(id);
+        self.restyle(before);
+        landed
+    }
+
+    /// [`focus`](Self::focus), without styling the tree again: for a caller
+    /// that will once it is done.
+    fn set_focus(&mut self, id: Option<WidgetId>) -> bool {
         self.root.clear_focus();
         id.is_some_and(|id| self.root.focus_by_id(id))
+    }
+
+    /// Style and lay the tree out again if a widget's state changed since
+    /// its states were `before` ([`states_if_styled`](Self::states_if_styled)):
+    /// a change of state -- the pointer, the keyboard, a press -- may change
+    /// what its CSS gives a widget (`:hover { ... }`), and so its size.
+    ///
+    /// A tree no CSS styles has nothing that hangs on its state (`before`
+    /// is `None`), and a pointer moving within one widget changes none: the
+    /// tree is laid out again only when a style could have changed. Answers
+    /// whether it was.
+    fn restyle(&mut self, before: Option<Vec<States>>) -> bool {
+        let changed =
+            before.is_some_and(|before| self.states_if_styled().is_none_or(|now| now != before));
+        if changed {
+            self.layout();
+        }
+        changed
     }
 
     /// Focus the first widget that will take it, if any. Returns whether one
@@ -1621,12 +2854,18 @@ impl WidgetTree {
     /// With nothing focused it takes the first — which is what makes Tab work
     /// on a freshly-opened window that nobody has clicked in yet.
     pub fn focus_next(&mut self) -> bool {
-        self.step_focus(true)
+        let before = self.states_if_styled();
+        let landed = self.step_focus(true);
+        self.restyle(before);
+        landed
     }
 
     /// Move the focus to the previous focusable widget in tab order, wrapping.
     pub fn focus_prev(&mut self) -> bool {
-        self.step_focus(false)
+        let before = self.states_if_styled();
+        let landed = self.step_focus(false);
+        self.restyle(before);
+        landed
     }
 
     fn step_focus(&mut self, forward: bool) -> bool {
@@ -1646,7 +2885,7 @@ impl WidgetTree {
             None if forward => 0,
             None => order.len().saturating_sub(1),
         };
-        self.focus(order.get(next).copied())
+        self.set_focus(order.get(next).copied())
     }
 
     /// Dispatch an event to the widget tree.
@@ -1661,7 +2900,25 @@ impl WidgetTree {
     ///   hit. The focus moves first, so the click is delivered to a widget that
     ///   is already focused — otherwise the first click into a field would
     ///   position a caret that was not yet being drawn.
+    ///
+    /// A tick moves its transitions on: while one is moving
+    /// ([`animating`](Self::animating)) the tree is laid out again at the
+    /// new time, and the tick is consumed -- the program's cue to draw it.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        if let Event::Tick { elapsed_ms } = event {
+            self.clock.tick(*elapsed_ms);
+            if self.animating {
+                self.layout();
+                return EventResult::Consumed;
+            }
+        }
+        // What the pointer or a key is about to do -- a press, a hover, a
+        // box ticked -- may change a state a style hangs on.
+        let before = if matches!(event, Event::Mouse(_) | Event::Key(_)) {
+            self.states_if_styled()
+        } else {
+            None
+        };
         match event {
             Event::Key(key) if key.pressed && key.key == crate::event::Key::Tab => {
                 if key.modifiers.shift {
@@ -1677,21 +2934,34 @@ impl WidgetTree {
                 // is how a user says "not that field any more", and a caret
                 // still blinking in a field the user has clicked away from is
                 // a caret that lies about where the next keystroke goes.
-                self.focus(self.root.focus_target_at(mouse.x, mouse.y));
+                self.set_focus(self.focus_target_at(mouse.x, mouse.y));
             }
             // The pointer's moves say what it is over, which lights a button
             // or a box as the pointer crosses it.
             Event::Mouse(mouse)
                 if matches!(mouse.kind, MouseEventKind::Move | MouseEventKind::Enter) =>
             {
-                self.root.set_hover(mouse.x, mouse.y);
+                self.hover_at(mouse.x, mouse.y);
             }
             Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Leave) => {
                 self.root.clear_hover();
             }
             _ => {}
         }
-        self.root.handle_event(event)
+        let result = match event {
+            Event::Mouse(mouse) => self.pointer_event(event, mouse),
+            _ => self.root.handle_event(event),
+        };
+        let restyled = self.restyle(before);
+        // A transition under way moves on with every event, not with ticks
+        // alone: a program that sends none still sees it go on as the user
+        // works, and over by the first event after its end.
+        if self.animating && !restyled {
+            self.layout();
+        }
+        // What the user did, to its program -- once the tree has settled.
+        self.send_signals();
+        result
     }
 
     /// Resize the window and re-layout.
@@ -2401,14 +3671,23 @@ mod tests {
             "Space must tick the focused checkbox"
         );
 
+        let ticked = tree.take_signals();
         tree.handle_event(&Event::Key(pressed(crate::event::Key::Tab)));
         tree.handle_event(&Event::Key(pressed(crate::event::Key::Enter)));
-        assert!(
-            matches!(
-                tree.root.children[1].kind,
-                WidgetKind::Button { pressed: true, .. }
-            ),
-            "Enter must press the focused button"
+        assert_eq!(
+            tree.take_signals(),
+            [Signal {
+                from: tree.root.children[1].id,
+                kind: SignalKind::Clicked
+            }],
+            "Enter must click the focused button"
+        );
+        assert_eq!(
+            ticked,
+            [Signal {
+                from: tree.root.children[0].id,
+                kind: SignalKind::Toggled(CheckState::Checked)
+            }]
         );
         assert!(
             matches!(

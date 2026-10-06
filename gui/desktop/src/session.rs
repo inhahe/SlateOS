@@ -745,6 +745,9 @@ impl<T: Transport> ShellSession<T> {
         // The Run box's history, which its Up key walks: written on every
         // run, and never read back until this (`C-RUN-HISTORY-IS-NOT-PERSISTED`).
         shell.load_run_history();
+        // What the character picker remembers -- its recent picks and skin
+        // tone -- shared with every program that offers the picker.
+        shell.load_char_picker();
         shell.populate_icons();
         let bar = shell.taskbar_rect();
 
@@ -2419,6 +2422,11 @@ impl<T: Transport> ShellSession<T> {
             // it is up (`handle_mouse_inner`, `handle_hotkey_inner`), so it
             // is drawn over everything that could be open with it.
             self.shell.render_field_menu(),
+            // The character picker, over the field it types into, which
+            // stays open under it, and in the field menu's place: it is
+            // opened from that menu, which closes as it opens. It takes every
+            // press and key while it is up, as the menu does.
+            self.shell.render_char_picker(),
             // The card that says how to move the wallpaper, while it is
             // moved: nothing else is open then (`begin_wallpaper_move`
             // dismisses the popups), so its place here states that.
@@ -2660,6 +2668,12 @@ impl<T: Transport> ShellSession<T> {
         if self.shell.take_run_history_dirty() {
             let saved = self.shell.save_run_history();
             self.report_save("The Run box's history", saved);
+        }
+        // And what the character picker learned -- a pick, a skin tone --
+        // when it came down.
+        if self.shell.take_char_picker_dirty() {
+            let saved = self.shell.save_char_picker();
+            self.report_save("The character picker's recent picks", saved);
         }
         // And the notifications, which one arriving, read or dismissed has
         // changed. A failure is said once (`report_save`), and the notice

@@ -117,6 +117,41 @@ impl Borders {
     }
 }
 
+/// The colour each side's margin is filled with -- `design.txt`'s "set
+/// margin (including color) ... on all sides or individual sides". A margin
+/// is clear unless a colour is set: [`Color::TRANSPARENT`], the default,
+/// draws nothing, and the band is the margin's room outside the border,
+/// laid out as it always was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarginColors {
+    pub top: Color,
+    pub right: Color,
+    pub bottom: Color,
+    pub left: Color,
+}
+
+impl MarginColors {
+    /// Every side clear.
+    pub const CLEAR: Self = Self::all(Color::TRANSPARENT);
+
+    /// Every side in `color`.
+    #[must_use]
+    pub const fn all(color: Color) -> Self {
+        Self {
+            top: color,
+            right: color,
+            bottom: color,
+            left: color,
+        }
+    }
+}
+
+impl Default for MarginColors {
+    fn default() -> Self {
+        Self::CLEAR
+    }
+}
+
 /// A drop shadow, apart from the shape that casts it.
 ///
 /// One value rather than five loose parameters because the five are one
@@ -254,6 +289,8 @@ pub struct Style {
 
     // Margin (outside border)
     pub margin: Edges,
+    /// What each side's margin is filled with; clear by default.
+    pub margin_color: MarginColors,
 
     // Border
     pub border: Borders,
@@ -266,6 +303,12 @@ pub struct Style {
     pub line_height: f32,
 
     // Size constraints
+    /// A fixed width for the border box, as a style sheet's `width` gives
+    /// one (`box-sizing: border-box`); `None` sizes it by its content and
+    /// its container.
+    pub width: Option<f32>,
+    /// A fixed height for the border box, as `width` is for its width.
+    pub height: Option<f32>,
     pub min_width: Option<f32>,
     pub max_width: Option<f32>,
     pub min_height: Option<f32>,
@@ -279,6 +322,55 @@ pub struct Style {
 
     // Box shadow (simplified: single shadow)
     pub shadow: Option<BoxShadow>,
+
+    /// A shadow under the text: drawn as a copy of the text, offset and in
+    /// its colour. Its blur is not drawn -- the renderer has no blurred
+    /// text -- and its spread is not a text shadow's.
+    pub text_shadow: Option<BoxShadow>,
+
+    /// Where it is placed: in its container's flow, or out of it -- see
+    /// [`Position`].
+    pub position: Position,
+    /// How far a positioned widget's margin edges are from its container's
+    /// (or, for a relative one, from where the flow put it).
+    pub inset: Inset,
+    /// Where it is drawn among its siblings, and so which of two takes the
+    /// pointer where they overlap: higher above, and siblings alike in the
+    /// order they were added -- every widget is its children's stacking
+    /// context (`design-decisions.md` §1478).
+    pub z_index: i32,
+}
+
+/// How a widget is placed (CSS's `position`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Position {
+    /// In its container's flow, where the container's layout puts it.
+    #[default]
+    Static,
+    /// In the flow, then moved by its [`Inset`] -- nothing around it moves.
+    Relative,
+    /// Out of the flow, placed by its [`Inset`] in its container's padding
+    /// box -- its *parent's*, whatever the parent's own `position`.
+    Absolute,
+    /// Out of the flow, placed by its [`Inset`] in the window: drawn over
+    /// everything else, uncut by the widgets around it, and the first to
+    /// take the pointer.
+    Fixed,
+}
+
+/// How far a positioned widget's margin edges are from its container's
+/// edges: CSS's `top`, `right`, `bottom` and `left`, in pixels. `None` is
+/// `auto`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Inset {
+    /// From the top edge, down.
+    pub top: Option<f32>,
+    /// From the right edge, leftward.
+    pub right: Option<f32>,
+    /// From the bottom edge, upward.
+    pub bottom: Option<f32>,
+    /// From the left edge, rightward.
+    pub left: Option<f32>,
 }
 
 impl Default for Style {
@@ -291,12 +383,15 @@ impl Default for Style {
             caret_width: crate::textedit::CARET_WIDTH,
             padding: Edges::ZERO,
             margin: Edges::ZERO,
+            margin_color: MarginColors::CLEAR,
             border: Borders::default(),
             border_radius: CornerRadii::ZERO,
             font_size: 14.0,
             font_weight: FontWeight::Regular,
             text_align: TextAlign::Left,
             line_height: 1.4,
+            width: None,
+            height: None,
             min_width: None,
             max_width: None,
             min_height: None,
@@ -304,6 +399,10 @@ impl Default for Style {
             opacity: 1.0,
             cursor: Cursor::Default,
             shadow: None,
+            text_shadow: None,
+            position: Position::Static,
+            inset: Inset::default(),
+            z_index: 0,
         }
     }
 }

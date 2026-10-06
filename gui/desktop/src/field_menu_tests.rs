@@ -169,6 +169,7 @@ fn the_run_boxs_line_offers_its_menu_and_the_box_stays() {
             ("Paste", false),
             ("Delete", false),
             ("Select all", true),
+            (charpicker::MENU_LABEL, true),
         ])
     );
     assert_eq!(choose(&mut shell, "Select all"), ShellAction::Consumed);
@@ -182,6 +183,7 @@ fn the_run_boxs_line_offers_its_menu_and_the_box_stays() {
             ("Paste", false),
             ("Delete", true),
             ("Select all", true),
+            (charpicker::MENU_LABEL, true),
         ])
     );
     choose(&mut shell, "Cut");
@@ -389,6 +391,7 @@ fn a_search_can_be_pasted_into_the_start_menu() {
             ("Paste", true),
             ("Delete", false),
             ("Select all", false),
+            (charpicker::MENU_LABEL, true),
         ])
     );
     choose(&mut shell, "Paste");
@@ -467,6 +470,7 @@ fn a_right_click_opens_a_note_and_offers_its_menu() {
             ("Paste", false),
             ("Delete", false),
             ("Select all", false),
+            (charpicker::MENU_LABEL, true),
             ("Remove this widget", true),
             ("Remove all widgets", true),
         ])
@@ -612,6 +616,7 @@ fn a_rename_offers_its_menu_and_keeps_going() {
             ("Paste", false),
             ("Delete", true),
             ("Select all", true),
+            (charpicker::MENU_LABEL, true),
         ])
     );
     choose(&mut shell, "Cut");

@@ -86,6 +86,7 @@ pub mod animations;
 pub mod autologin;
 pub mod bluetooth;
 pub mod calendar;
+mod char_picker;
 pub mod clipboard_viewer;
 pub mod datetime_settings;
 pub mod device_settings;
@@ -2149,6 +2150,16 @@ pub struct DesktopShell {
     /// being edited -- when it is open, and the field it was opened on: what
     /// the field's keys do, for the pointer (`guitk::editmenu`).
     field_menu: Option<(guitk::menu::ContextMenu, MenuField)>,
+    /// The character picker, while it is up over one of those fields
+    /// (`char_picker`).
+    char_picker: Option<char_picker::FieldPicker>,
+    /// What the character picker remembers -- the recent picks and the skin
+    /// tone -- handed back to it each time it opens; `charpicker.yaml`'s,
+    /// read at the start of the session.
+    char_remembered: charpicker::Remembered,
+    /// The picker came down remembering something new, which
+    /// [`save_char_picker`](Self::save_char_picker) is to write.
+    char_picker_dirty: bool,
     /// How far the wallpaper's picture can move across and down the screen:
     /// the screen's size less the picture's as it is drawn, negative where it
     /// overflows; `None` when no picture is up or it fills the screen
@@ -2884,6 +2895,9 @@ impl DesktopShell {
             taskbar_menu: None,
             notification_menu: None,
             field_menu: None,
+            char_picker: None,
+            char_remembered: charpicker::Remembered::default(),
+            char_picker_dirty: false,
             wallpaper_room: None,
             wallpaper_move: None,
             pin_drag: None,
@@ -5115,6 +5129,13 @@ impl DesktopShell {
         event: &MouseEvent,
         modifiers: guitk::event::Modifiers,
     ) -> ShellAction {
+        // The character picker before even a field's menu: it is opened from
+        // one, which closed as it did, and it is drawn over the field it
+        // types into -- whose rename or note must not be put down by a press
+        // meant for the picker. A press outside it closes it.
+        if self.char_picker.is_some() {
+            return self.mouse_on_char_picker(event);
+        }
         // A text field's menu first of all, ahead of even the rename and the
         // note below: it is opened over the field it is about, and a press on
         // one of its rows must not first put that field down -- keep the
@@ -7345,6 +7366,13 @@ impl DesktopShell {
             }
         }
 
+        // The character picker, ahead of the field it is over -- the Run box's
+        // line, the start menu's search -- for the field menu's reason just
+        // below: Escape closes the picker and leaves the field, and the keys
+        // it walks and searches with must not type into the field as well.
+        if self.char_picker.is_some() {
+            return self.key_on_char_picker(key);
+        }
         // A text field's menu, on the pin menu's terms below. Ahead of the
         // start menu and the Run box, which it may be open over: Escape
         // closes the menu and leaves them, as a press outside the menu does.
@@ -7560,6 +7588,9 @@ impl DesktopShell {
     /// which is the desktop's: the Super key that opened the menu closes it
     /// again, and Super+E closes it and opens the file manager.
     fn key_on_start_menu(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        if self.char_picker_chord(MenuField::StartSearch, key) {
+            return HotkeyOutcome::consumed();
+        }
         let is_super =
             key.modifiers.super_key || matches!(key.key, Key::LeftSuper | Key::RightSuper);
         if is_super {
@@ -8191,6 +8222,9 @@ impl DesktopShell {
     /// character. The chord that opened it still reaches the table, so that
     /// Super+R closes what Super+R opened.
     fn key_on_run_dialog(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        if self.char_picker_chord(MenuField::RunBox, key) {
+            return HotkeyOutcome::consumed();
+        }
         if self.bound_action(key) == Some(HotkeyAction::ToggleRunDialog) {
             return self.run_desktop_action(&HotkeyAction::ToggleRunDialog);
         }
@@ -11520,6 +11554,9 @@ impl DesktopShell {
         let Some(mut menu) = menu else {
             return;
         };
+        // Every field takes a character it has no key for, from the one
+        // picker (`char_picker`).
+        menu.extend([MenuItem::Separator, char_picker::menu_row()]);
         if matches!(field, MenuField::Note(_)) {
             // A note is never a photo frame.
             menu.extend(std::iter::once(MenuItem::Separator).chain(Self::widget_menu_items(false)));
@@ -11553,6 +11590,10 @@ impl DesktopShell {
     /// text, and a note's change is saved with the layout, as a typed one is.
     /// A note's widget rows are the widget menu's.
     fn activate_field_menu_item(&mut self, id: MenuItemId, field: MenuField) -> ShellAction {
+        if id == char_picker::MENU_ROW {
+            self.open_char_picker(field);
+            return ShellAction::Consumed;
+        }
         match field {
             MenuField::RunBox => {
                 // Whether the row was the line's is not asked: every row of
@@ -14250,6 +14291,11 @@ impl DesktopShell {
         // saved with the layout at every change -- a keystroke is a change the
         // user made, not a step of a gesture still under way, and a note is
         // the thing on a desktop most worth not losing.
+        if let Some(note) = self.widgets.writing_note()
+            && self.char_picker_chord(MenuField::Note(note), key)
+        {
+            return ShellAction::Consumed;
+        }
         match self.widgets.note_key(key) {
             widgets::NoteKey::NotWriting => {}
             widgets::NoteKey::Changed => {
@@ -14261,6 +14307,9 @@ impl DesktopShell {
         // While a name is being edited every key is the field's, so that a
         // Delete meant for a letter cannot remove the icon being renamed.
         if self.icons.renaming().is_some() {
+            if self.char_picker_chord(MenuField::Rename, key) {
+                return ShellAction::Consumed;
+            }
             if let icons::RenameKey::Finished { renamed } = self.icons.rename_key(key) {
                 self.icons_dirty |= renamed;
             }
@@ -14451,6 +14500,7 @@ impl DesktopShell {
             || self.taskbar_menu.is_some()
             || self.notification_menu.is_some()
             || self.field_menu.is_some()
+            || self.char_picker.is_some()
             || self.wallpaper_move.is_some()
             || self.ending_listing()
             || self.start_menu_open
@@ -14479,6 +14529,7 @@ impl DesktopShell {
         self.taskbar_menu = None;
         self.close_notification_menu();
         self.field_menu = None;
+        self.close_char_picker();
         // A wallpaper being moved is kept where it is: whatever dismissed it
         // -- another popup opening -- is not the user taking the move back.
         self.end_wallpaper_move(true);

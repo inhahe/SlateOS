@@ -2712,7 +2712,11 @@ authors never wrote a single automation handler.
   reach is refused (`design-decisions.md` §1491). The toolkit's context
   menu shows tools its rows itself (`guitk::menu::MenuPart`: each row's
   label, its keys or why it is greyed, its tick, and the submenu it
-  opened), so any program's menus are seen. And the window switcher
+  opened), so any program's menus are seen; so do its tab bar
+  (`guitk::tabs::TabPart`: each tab and its close button) and its tree
+  (`guitk::treeview::TreePart`, through the view and its source together,
+  `TreeAccess`: rows nested as the tree nests them, each arrow and box).
+  And the window switcher
   (Alt+Tab): its windows, the one the switch goes to chosen -- one chosen
   as Tab steps to it, one pressed as letting go on it switches to it. And
   the overview (`desktop::overview::OverviewPart`): its search, each

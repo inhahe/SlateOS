@@ -2,7 +2,7 @@
 //!
 //! Provides a tab bar with selection, close buttons, dirty indicators,
 //! keyboard navigation (Ctrl+Tab / Ctrl+Shift+Tab), scroll arrows for
-//! overflow, and dark theme styling.
+//! overflow, and dark theme styling. It shows tools its tabs ([`TabPart`]).
 
 use crate::event::{Key, KeyEvent};
 use crate::frame::Rect;
@@ -11,6 +11,9 @@ use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::surface::{Edge, Surface};
 use crate::text::scaled;
+
+mod accessible;
+pub use accessible::TabPart;
 
 /// A single tab definition.
 #[derive(Clone, Debug)]

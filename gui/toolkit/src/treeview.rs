@@ -78,6 +78,13 @@
 //! "everything in here" — and not a tick on each file in it, because the files
 //! in an unopened folder have not been read, and the ones created tomorrow do
 //! not exist yet.
+//!
+//! # What tools see
+//!
+//! A tree shows tools its rows nested as it nests them, with their arrows and
+//! boxes ([`TreePart`]), through the view and its source together
+//! ([`TreeAccess`]): opening a node for a tool asks the source for its
+//! children, as the pointer's opening does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -98,6 +105,9 @@ use crate::surface::Surface;
 use crate::text;
 use crate::wheel;
 use crate::widget::CheckState;
+
+mod accessible;
+pub use accessible::{TreeAccess, TreePart};
 
 // ============================================================================
 // What a source reports

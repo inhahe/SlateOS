@@ -105,6 +105,14 @@ pub enum Role {
     /// One row of a menu: an action, a check, or a row a submenu opens
     /// from.
     MenuItem,
+    /// A row of tabs, one page of which shows.
+    TabList,
+    /// One tab: chosen, its page shows.
+    Tab,
+    /// A tree of rows, each of which may hold others.
+    Tree,
+    /// One row of a tree, holding the rows under it while it is open.
+    TreeItem,
 }
 
 impl Role {
@@ -149,6 +157,10 @@ impl Role {
             Self::GridCell => "grid cell",
             Self::Menu => "menu",
             Self::MenuItem => "menu item",
+            Self::TabList => "tab list",
+            Self::Tab => "tab",
+            Self::Tree => "tree",
+            Self::TreeItem => "tree item",
         }
     }
 }

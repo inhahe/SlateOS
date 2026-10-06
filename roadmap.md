@@ -3092,8 +3092,15 @@ D's to act on once answered).
     (`requests/d-a-nothing-in-userspace-can-make-an-https-connection.md`);
   - it is not on the image or started at boot.
 
-  Still lane D's: learning the address from the router (UPnP, NAT-PMP),
-  and the port forwards.
+  **The router half, 2026-10-06** (design-decisions §1178): the same service
+  finds the router (the default gateway, asked over NAT-PMP, then UPnP),
+  learns its internet address -- which a custom URL naming `{ip}` now
+  takes -- and keeps the port forwards of `/etc/portforwards.yaml`,
+  reporting to `/run/portforwards.yaml`. The protocols are
+  `services/dyndns/router` (`dyndnsrouter`), tested against a router
+  simulated in memory; no real router has been asked yet. Settings' page
+  for it is lane E's (the request's third reply), and the kernel's own
+  UPnP module can go (`requests/d-a-the-kernels-upnp-module-is-done-in-userspace-now.md`).
 
 Known-issues: the POSIX/libc entries that lane B's list above still names —
 `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (blocked only on the operator's Q48;

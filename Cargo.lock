@@ -1072,6 +1072,7 @@ name = "dyndns"
 version = "0.1.0"
 dependencies = [
  "dyndnsproviders",
+ "dyndnsrouter",
  "httpclient",
  "journalrec",
  "yamldoc",

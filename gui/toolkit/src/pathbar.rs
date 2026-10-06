@@ -14,6 +14,10 @@
 //! text until the host answers -- [`PathBar::set_path`] with wherever it went,
 //! or [`PathBar::set_path_valid`]`(false)` when it could not go there, which
 //! leaves the text in a red edge to be corrected rather than retyped.
+//!
+//! Tools see the bar -- its address, its crumbs, its suggestions -- and use
+//! it as the user does through its [`Accessible`](crate::widget::automation::Accessible)
+//! side, in `accessible`, named by [`PathBarPart`].
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
@@ -29,6 +33,9 @@ use crate::text::TextCursor;
 use crate::text::scaled;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+
+mod accessible;
+pub use accessible::PathBarPart;
 
 // ---------------------------------------------------------------------------
 // Catppuccin Mocha palette
@@ -883,9 +890,14 @@ impl PathBar {
     /// Scroll the dropdown the least distance that brings the selected row into
     /// view.
     fn ensure_completion_visible(&mut self) {
-        let Some(idx) = self.completion_index else {
-            return;
-        };
+        if let Some(idx) = self.completion_index {
+            self.scroll_completion_into_view(idx);
+        }
+    }
+
+    /// Scroll the dropdown the least distance that brings row `idx` into
+    /// view: what the arrow keys do to the row they move to.
+    fn scroll_completion_into_view(&mut self, idx: usize) {
         // The topmost scroll position that still shows `idx`: far enough down
         // that `idx` is the last visible row. `saturating_sub` is what makes it
         // 0 for a row already within the first windowful, which is the same

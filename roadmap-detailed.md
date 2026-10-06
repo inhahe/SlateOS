@@ -2678,25 +2678,38 @@ and **interact with** individual controls. This is what makes generic UI
 automation, macro recording/replay, and assistive tech work against apps whose
 authors never wrote a single automation handler.
 
-- [ ] **Automatic exposure by the toolkit.** Buttons, checkboxes, radios, toggles,
+- [-] **Automatic exposure by the toolkit.** Buttons, checkboxes, radios, toggles,
   text fields, combo boxes, list/tree/grid rows and cells, menu items, tabs,
   sliders, scrollbars, ribbon commands, etc. are each surfaced as an automation
   node the moment they're created — the app opts *out*, not in. Custom-drawn or
   canvas widgets can supply their own nodes via a toolkit hook so they aren't
-  invisible to automation.
-- [ ] **Identify (query/enumerate).** Walk the widget tree; query each node's
+  invisible to automation. — *2026-10-06 (lane C): every widget of the
+  toolkit's retained tree (`guitk::widget`) is a node unless its program says
+  `hidden_from_automation` (`guitk::widget::automation`, `design-decisions.md`
+  §1482). Not yet: the components drawn outside the tree (`guitk::frame`'s --
+  the font, character and file pickers) and the hook for custom-drawn ones.*
+- [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find
   widgets by role, name, text, or path so a script can locate "the *Save* button"
   or "the search field" without pixel coordinates. Exposed as standard automation
   meta-commands/actions (e.g. `ui.tree`, `ui.find`, `ui.get`, read-only
-  `ui.*` properties) alongside `describe`.
-- [ ] **Interact (invoke).** Perform the widget's semantic action through the
+  `ui.*` properties) alongside `describe`. — *2026-10-06 (lane C): in the
+  program's own process, done -- `WidgetTree::automation` (role, name,
+  description, value, enabled/shown/focused/focusable, bounds, the CSS
+  `#name` as the stable identifier) and `WidgetTree::find` (role, name, key,
+  text). The `ui.*` meta-commands wait on `libautomation` (above, not yet
+  built), which needs only these calls.*
+- [-] **Interact (invoke).** Perform the widget's semantic action through the
   toolkit — click/press a button, toggle a checkbox, set a slider/field value,
   select a list item or menu entry, focus/scroll a control — routed through the
   real widget so it behaves exactly as a user action (validation, events,
   enabled-state all honored). No synthetic pixel clicks needed. Actions respect
   the widget's own enabled/visibility state (a disabled control refuses invoke).
+  — *2026-10-06 (lane C): in-process, done -- `WidgetTree::invoke` (press,
+  toggle, choose, set text, set value, focus, scroll), through the widget's own
+  paths: the same signals and group rules, the restyle after, a refusal from a
+  hidden or disabled one. Carrying it to another process is `libautomation`'s.*
 - [ ] **Capability-gated, same model as the rest of the framework.** Enumerating a
   program's widget tree needs `automation.connect` + a new
   `automation.ui_inspect` right; interacting needs `automation.invoke` +

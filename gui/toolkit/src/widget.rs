@@ -28,6 +28,9 @@
 //! cuts it to its box, and draws its bars: down its right edge for content
 //! taller than it, across its foot for content wider.
 
+pub mod automation;
+#[cfg(test)]
+mod automation_tests;
 #[cfg(test)]
 mod css_tests;
 mod draw;
@@ -149,6 +152,12 @@ pub struct Widget {
     /// What its user did that its tree has not yet gathered
     /// ([`signal`]): emitted as it handles an event, taken by the tree after.
     signals: Vec<SignalKind>,
+    /// What a tool calls it, where its program said ([`Widget::labelled`]).
+    label: Option<String>,
+    /// Whether tools see it, and what it holds ([`automation`]): every
+    /// widget does unless its program says not
+    /// ([`Widget::hidden_from_automation`]).
+    exposed: bool,
 }
 
 /// A widget's own CSS, read: its block, and what in it was not.
@@ -394,6 +403,8 @@ impl Widget {
             transitions: None,
             styled_before: false,
             signals: Vec::new(),
+            label: None,
+            exposed: true,
         }
     }
 
@@ -609,10 +620,31 @@ impl Widget {
         self
     }
 
-    /// Name it `name`, for a style sheet's `#name` selector.
+    /// Name it `name`, for a style sheet's `#name` selector -- and for a tool
+    /// ([`automation`]), whose scripts find it by this name from one run of
+    /// its program to the next.
     #[must_use]
     pub fn named(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
+        self
+    }
+
+    /// What a tool -- a screen reader, a script ([`automation`]) -- calls it,
+    /// where what it shows does not say: a field with no placeholder beside
+    /// a label, a slider, a picture. A button's, a label's or a box's own
+    /// text needs none.
+    #[must_use]
+    pub fn labelled(mut self, name: &str) -> Self {
+        self.label = Some(name.to_string());
+        self
+    }
+
+    /// Keep it, and all it holds, out of the tree tools see
+    /// ([`automation`]): a decoration, or a part its program shows tools
+    /// another way. Every widget is in it unless its program says not.
+    #[must_use]
+    pub fn hidden_from_automation(mut self) -> Self {
+        self.exposed = false;
         self
     }
 

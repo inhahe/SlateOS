@@ -1,13 +1,36 @@
-# Build configuration for the posix crate.
+# Build configuration for the posix crate, when cargo is run in this directory.
 #
-# Default target is bare-metal x86_64 (our OS kernel target).
+# WHAT SHIPS IS NOT THIS.  The libc every SlateOS program links,
+# `toolchain/sysroot/lib/libc.a`, is built by `toolchain/build-sysroot.ps1`
+# for its own target, `posix/x86_64-slateos-libc.json` (hard-float, SSE2;
+# design-decisions.md §1106), with `-Zbuild-std` on nightly.  The pin below
+# is what a plain `cargo check` here compiles -- which is what pre-push gate
+# 40 (`scripts/check-pinned-target-build.py`) runs, to catch a change that
+# builds on the host and not for bare metal.  So it must be the shipped
+# configuration as nearly as a stock target allows:
+#
+#   x86_64-unknown-none       target_os = "none", so the code compiled is the
+#                             libc's (no_std, `no_mangle`, the assembly), not
+#                             the host's.
+#   +sse,+sse2                the libc's target has them, and its memory and
+#                             string functions are SSE2 (`string.rs`, "The
+#                             engines").  The stock target turns SSE off -- it
+#                             is a kernel's -- and the gate refused the libc
+#                             for that on 2026-10-06 ("register class
+#                             `xmm_reg` requires the `sse` target feature"),
+#                             checking a configuration no build ships.
+#
+# The float ABI still differs (the stock target's is soft-float), which a
+# compile check cannot notice and does not need to.
+#
 # For running tests on the host:
-#   cargo test --target x86_64-pc-windows-gnu -- --test-threads=1
-#
-# Single-threaded is required because getopt/stdlib tests use global state.
+#   cargo test --target x86_64-pc-windows-gnu
 # The crate conditionally compiles:
 #   - target_os = "none": no_std, no_mangle symbols, global_asm trampolines
 #   - otherwise (host):   std, mangled symbols, asm excluded
 
 [build]
 target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = ["-C", "target-feature=+sse,+sse2"]

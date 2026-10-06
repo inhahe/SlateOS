@@ -8029,6 +8029,22 @@ fn a_notes_character_picker_is_drawn_and_its_pick_is_the_notes() {
     });
 }
 
+/// **What the character picker remembered at the last login -- its recent
+/// picks and skin tone -- is there at this one's start**, for it to open
+/// on.
+#[test]
+fn the_character_pickers_memory_is_read_at_the_start() {
+    settingsfile::testing::with_scratch_config("desktop-picker-start", |_root| {
+        let remembered = charpicker::Remembered {
+            recent: vec!["\u{2605}".to_string()],
+            tone: Some(charpicker::SkinTone::Dark),
+        };
+        remembered.save().expect("saved");
+        let (session, _desktop, _turn) = session();
+        assert_eq!(session.shell().char_remembered, remembered);
+    });
+}
+
 // ---- icons -----------------------------------------------------------------------
 
 /// The icon ids a tree names, with the side each is drawn at.

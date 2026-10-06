@@ -1,4 +1,5 @@
-//! Making themes: deriving one from another, changing its colours and what
+//! Making themes: deriving one from another, putting one together from the
+//! user's mix of others ([`compose`]), changing its colours and what
 //! describes it, installing one from a folder or a file, copying one out to
 //! share, and removing one -- the model under a theme editor
 //! (`roadmap-detailed.md` §4.6, *Theme Editor in Settings App*: "Derive from
@@ -67,11 +68,13 @@ use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors, syntax_roles};
 use yamldoc::Document;
 
 use super::{
-    BUILT_IN, BUILT_IN_NAME, DARK_SECTION, FILE_NAME, LIGHT_SECTION, MAX_FILE_BYTES, META_SECTION,
-    Origin, SYNTAX_DARK_SECTION, SYNTAX_LIGHT_SECTION, TERMINAL_DARK_SECTION,
-    TERMINAL_LIGHT_SECTION, ThemeDirs, ThemeError, ThemeFile, confined, is_valid_id, parse, quoted,
-    read_theme_bytes,
+    ANIMATION_SECTION, BUILT_IN, BUILT_IN_NAME, DARK_SECTION, DECORATIONS_SECTION, FILE_NAME,
+    FONTS_SECTION, LIGHT_SECTION, MAX_FILE_BYTES, META_SECTION, Origin, PANEL_SECTION,
+    SYNTAX_DARK_SECTION, SYNTAX_LIGHT_SECTION, TERMINAL_DARK_SECTION, TERMINAL_LIGHT_SECTION,
+    ThemeDirs, ThemeError, ThemeFile, WALLPAPERS_DIR, WALLPAPERS_SECTION, WIDGET_SECTION, confined,
+    is_valid_id, parse, quoted, read_theme_bytes,
 };
+use crate::AppearanceSettings;
 use crate::cursors::CURSORS_DIR;
 use crate::icons::{self, ICONS_DIR};
 use crate::sounds::STEREO_DIR;
@@ -222,6 +225,9 @@ const TAGS_KEY: &str = "tags";
 
 /// The key of the `meta` block's list of screenshots.
 const SCREENSHOTS_KEY: &str = "screenshots";
+
+/// The key of the `meta` block's list of the axes a theme covers.
+const SUPPORTS_KEY: &str = "supports";
 
 // ============================================================================
 // What can go wrong
@@ -943,6 +949,359 @@ fn with_left_out(mut report: Report, mut left_out: Vec<Finding>) -> Report {
     left_out.sort_by_key(|finding| Reverse(finding.severity));
     report.findings = left_out;
     report
+}
+
+// ============================================================================
+// One theme from the user's mix
+// ============================================================================
+
+/// The axes a theme's file carries that [`compose`] takes from the theme
+/// chosen for each, with the sections that hold them -- in the order a
+/// composed theme's file has them, the built-in theme's.
+const FILE_AXES: [(&str, &[&str]); 6] = [
+    (
+        "colours",
+        &[
+            DARK_SECTION,
+            LIGHT_SECTION,
+            TERMINAL_DARK_SECTION,
+            TERMINAL_LIGHT_SECTION,
+            SYNTAX_DARK_SECTION,
+            SYNTAX_LIGHT_SECTION,
+        ],
+    ),
+    ("controls", &[WIDGET_SECTION]),
+    ("animation", &[ANIMATION_SECTION]),
+    ("window frames", &[DECORATIONS_SECTION]),
+    ("taskbar", &[PANEL_SECTION]),
+    ("fonts", &[FONTS_SECTION]),
+];
+
+/// Make a new theme of the user's, `id`, named `name`, out of what
+/// `settings` choose axis by axis -- one theme's colours, another's
+/// controls, a third's icons -- so that the look the user has put together
+/// can be shared as one theme: roadmap §4.6's "export current
+/// customizations as a shareable theme YAML". [`export`] then copies it
+/// out.
+///
+/// Each axis a theme's file carries is copied from the chosen theme's file
+/// as written, section by section and comments with them -- from the
+/// built-in theme's template where that is the one chosen, so every axis is
+/// there and the theme looks the same to whoever chooses it for all of them
+/// as it does here. The wallpaper theme's recommended pictures come too,
+/// into the new theme's `wallpapers` folder; and the icon theme's icons (the
+/// built-in theme's written out). A chosen theme that is not installed is
+/// the built-in one, as the desktop shows it. Cursors and sounds are themes
+/// of their own, often from other desktops, and are not carried: said in
+/// what is returned. `meta.supports` lists what the new theme covers.
+///
+/// Returns the new theme, open, and what was left out or stood in for.
+///
+/// # Errors
+///
+/// [`AuthoringError::InvalidName`] or [`AuthoringError::Exists`] when `id`
+/// cannot be had; [`AuthoringError::Unreadable`] when a chosen theme's file
+/// cannot be read; [`AuthoringError::TooLarge`] when the new file would be
+/// too large to read; [`AuthoringError::Io`] when the theme cannot be
+/// written. On any error nothing is left behind.
+pub fn compose(
+    dirs: &ThemeDirs,
+    settings: &AppearanceSettings,
+    id: &OsStr,
+    name: &str,
+) -> Result<(ThemeDraft, Vec<Finding>), AuthoringError> {
+    let place = new_theme_place(dirs, id, false)?;
+    let staging = Staging::new(&users_root(dirs)?, id)?;
+    let mut said: Vec<Finding> = Vec::new();
+    let mut body = String::new();
+
+    let chosen = [
+        settings.color_theme.id(),
+        settings.widget_theme.id(),
+        settings.animation_theme.id(),
+        settings.decoration_theme.id(),
+        settings.panel_theme.id(),
+        settings.font_theme.id(),
+    ];
+    for ((axis, sections), theme) in FILE_AXES.iter().zip(chosen) {
+        let (text, shown) = chosen_text(dirs, theme, axis, &mut said)?;
+        let mut taken = String::new();
+        for section in *sections {
+            if let Some(block) = section_text(&text, section) {
+                taken.push_str(&block);
+                taken.push('\n');
+            }
+        }
+        if !taken.is_empty() {
+            body.push_str(&format!("# The {axis}: {shown}'s.\n"));
+            body.push_str(&taken);
+        }
+    }
+    if let Some(section) = compose_wallpapers(dirs, settings, staging.dir(), &mut said)? {
+        body.push_str(&section);
+    }
+    compose_icons(dirs, settings, staging.dir(), &mut said)?;
+    for (theme, what) in [
+        (settings.cursor_theme.id(), "cursors"),
+        (settings.sound_theme.id(), "sounds"),
+    ] {
+        if theme != OsStr::new(BUILT_IN) {
+            said.push(Finding {
+                severity: Severity::Note,
+                place: String::new(),
+                message: format!(
+                    "the theme chosen for the {what}, {}, is one of its own and is not carried: whoever chooses this theme chooses that beside it",
+                    pathcodec::display_os(theme)
+                ),
+            });
+        }
+    }
+
+    // What it covers is the checker's reading of the folder as made, so the
+    // claim cannot say more than the theme does.
+    let header = composed_header();
+    write_theme_file(
+        staging.dir(),
+        &format!("{header}{}{body}", meta_text(name, &[])),
+    )?;
+    let covers = themecheck::check(staging.dir()).covers;
+    write_theme_file(
+        staging.dir(),
+        &format!("{header}{}{body}", meta_text(name, &covers)),
+    )?;
+    staging.place(&place)?;
+    Ok((ThemeDraft::open(dirs, id)?, said))
+}
+
+/// The opening comment of a composed theme's file.
+fn composed_header() -> String {
+    "# A theme put together from the parts of others its author chose -- the\n\
+     # colours of one, the controls of another -- each section below taken\n\
+     # from the theme named above it, as that theme writes it.\n\
+     #\n\
+     # Colours are opaque, written \"#rrggbb\" -- in quotes, because an unquoted\n\
+     # `#` after a space begins a comment. `themecheck <this folder>` says what\n\
+     # in it the desktop would refuse, ignore or adjust.\n\n"
+        .to_owned()
+}
+
+/// A `meta` block naming the theme `name` (none when blank) and claiming
+/// `covers`.
+fn meta_text(name: &str, covers: &[&str]) -> String {
+    let mut doc = Document::new();
+    set_or_remove(&mut doc, &[META_SECTION, MetaText::Name.key()], name);
+    if !covers.is_empty() {
+        doc.set_seq(&[META_SECTION, SUPPORTS_KEY], covers);
+    }
+    let mut text = doc.to_text();
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text
+}
+
+/// The file text of the theme `id` chosen for `axis`, and its name as
+/// shown: the built-in template for the built-in theme, and for one that is
+/// not installed -- which the desktop shows as the built-in one, and which
+/// is said in `said`.
+fn chosen_text(
+    dirs: &ThemeDirs,
+    id: &OsStr,
+    axis: &str,
+    said: &mut Vec<Finding>,
+) -> Result<(String, String), AuthoringError> {
+    match Source::find(dirs, id) {
+        Ok(Source::BuiltIn) => Ok((BUILT_IN_TEMPLATE.to_owned(), BUILT_IN_NAME.to_owned())),
+        Ok(Source::Folder(dir, _)) => {
+            let text = read_text(&dir.join(FILE_NAME))?;
+            let shown = parse(&text)
+                .meta
+                .name
+                .unwrap_or_else(|| pathcodec::display_os(id));
+            Ok((text, shown))
+        }
+        Err(_) => {
+            said.push(Finding {
+                severity: Severity::Note,
+                place: String::new(),
+                message: format!(
+                    "the theme chosen for the {axis}, {}, is not installed: the built-in theme's stand in, as they do on the desktop",
+                    pathcodec::display_os(id)
+                ),
+            });
+            Ok((BUILT_IN_TEMPLATE.to_owned(), BUILT_IN_NAME.to_owned()))
+        }
+    }
+}
+
+/// Bring the wallpaper theme's recommended pictures into `dir`'s
+/// `wallpapers` folder, answering the `wallpapers` section naming them
+/// there; `None` when the theme recommends none here.
+fn compose_wallpapers(
+    dirs: &ThemeDirs,
+    settings: &AppearanceSettings,
+    dir: &Path,
+    said: &mut Vec<Finding>,
+) -> Result<Option<String>, AuthoringError> {
+    let id = settings.wallpaper_theme.id();
+    let Ok(Source::Folder(from, _)) = Source::find(dirs, id) else {
+        return Ok(None);
+    };
+    let text = read_text(&from.join(FILE_NAME))?;
+    let Some(names) = parse(&text).wallpapers else {
+        return Ok(None);
+    };
+    let mut doc = Document::new();
+    for (mode, name) in [("dark", names.dark), ("light", names.light)] {
+        let Some(name) = name else { continue };
+        let Some(picture) = confined(&from, &name).filter(|path| path.is_file()) else {
+            said.push(Finding {
+                severity: Severity::Note,
+                place: String::new(),
+                message: format!(
+                    "the {mode} wallpaper {} recommends, `{}`, is not in its folder, and is not carried",
+                    pathcodec::display_os(id),
+                    quoted(&name)
+                ),
+            });
+            continue;
+        };
+        let pictures = dir.join(WALLPAPERS_DIR);
+        fs::create_dir_all(&pictures).map_err(|err| io_error("make", &pictures, &err))?;
+        // Named for its mode, keeping its kind: two pictures of one name
+        // from two folders cannot cover each other, and the file can name
+        // it -- a theme's file is text, and a picture's name need not be.
+        let kind = picture
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(|ext| format!(".{ext}"))
+            .unwrap_or_default();
+        let file_name = format!("{mode}{kind}");
+        let target = pictures.join(&file_name);
+        match copy_file(&picture, &target, MAX_COPIED_BYTES) {
+            Ok(Copied::Whole) => {}
+            Ok(Copied::TooLarge(size)) => {
+                said.push(Finding {
+                    severity: Severity::Warning,
+                    place: String::new(),
+                    message: format!(
+                        "the {mode} wallpaper is {size} bytes, larger than any file in a theme, and is not carried"
+                    ),
+                });
+                continue;
+            }
+            Err(CopyFailure::Read(err)) => return Err(io_error("read", &picture, &err)),
+            Err(CopyFailure::Write(err)) => return Err(io_error("write", &target, &err)),
+        }
+        doc.set_str(
+            &[WALLPAPERS_SECTION, mode],
+            &format!("{WALLPAPERS_DIR}/{file_name}"),
+        );
+    }
+    if doc.is_empty() {
+        return Ok(None);
+    }
+    let shown = parse(&text)
+        .meta
+        .name
+        .unwrap_or_else(|| pathcodec::display_os(id));
+    Ok(Some(format!(
+        "# The wallpapers: {shown}'s.\n{}\n",
+        doc.to_text()
+    )))
+}
+
+/// Bring the icon theme's icons into `dir`'s `icons` folder -- the built-in
+/// theme's written out -- saying in `said` what was left out of the copy.
+fn compose_icons(
+    dirs: &ThemeDirs,
+    settings: &AppearanceSettings,
+    dir: &Path,
+    said: &mut Vec<Finding>,
+) -> Result<(), AuthoringError> {
+    let id = settings.icon_theme.id();
+    match Source::find(dirs, id) {
+        Ok(Source::BuiltIn) => write_built_in_icons(dir),
+        Ok(Source::Folder(from, _)) => {
+            let icons = from.join(ICONS_DIR);
+            if !icons.is_dir() {
+                return Ok(());
+            }
+            let to = dir.join(ICONS_DIR);
+            fs::create_dir(&to).map_err(|err| io_error("make", &to, &err))?;
+            for mut finding in copy_folder(&icons, &to, &BTreeSet::new())? {
+                finding.place = if finding.place.is_empty() {
+                    ICONS_DIR.to_owned()
+                } else {
+                    format!("{ICONS_DIR}/{}", finding.place)
+                };
+                said.push(finding);
+            }
+            Ok(())
+        }
+        Err(_) => {
+            said.push(Finding {
+                severity: Severity::Note,
+                place: String::new(),
+                message: format!(
+                    "the theme chosen for the icons, {}, is not installed: the built-in theme's stand in, as they do on the desktop",
+                    pathcodec::display_os(id)
+                ),
+            });
+            write_built_in_icons(dir)
+        }
+    }
+}
+
+/// The text of the top-level `section` of a theme's file, as written: the
+/// comment lines directly above its key, its key's line, and every line
+/// after that is blank or indented -- what it holds, its comments with it --
+/// with trailing blank lines dropped and line ends made `\n`. `None` when
+/// the file has no such section.
+fn section_text(text: &str, section: &str) -> Option<String> {
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let start = lines
+        .iter()
+        .position(|line| top_level_key(line).as_deref() == Some(section))?;
+    let mut first = start;
+    while let Some(above) = first.checked_sub(1)
+        && lines.get(above).is_some_and(|line| line.starts_with('#'))
+    {
+        first = above;
+    }
+    let mut end = start.saturating_add(1);
+    while lines
+        .get(end)
+        .is_some_and(|line| line.trim().is_empty() || line.starts_with([' ', '\t']))
+    {
+        end = end.saturating_add(1);
+    }
+    while end > start.saturating_add(1)
+        && lines
+            .get(end.saturating_sub(1))
+            .is_some_and(|line| line.trim().is_empty())
+    {
+        end = end.saturating_sub(1);
+    }
+    let mut out = String::new();
+    for line in lines.get(first..end)? {
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+/// The key a line of a theme's file opens at the top level with, as
+/// `yamldoc` reads it -- quoting resolved -- or `None` for a line that is
+/// indented, blank or a comment.
+fn top_level_key(line: &str) -> Option<String> {
+    if line.trim().is_empty() || line.starts_with([' ', '\t', '#']) {
+        return None;
+    }
+    Document::parse(line).keys(&[]).into_iter().next()
 }
 
 // ============================================================================

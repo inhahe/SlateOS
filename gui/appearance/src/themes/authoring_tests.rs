@@ -11,7 +11,11 @@
 )]
 
 use super::*;
-use crate::themes::{Origin, ThemeDirs, available_in};
+use crate::cursors::CursorTheme;
+use crate::icons::IconTheme;
+use crate::themes::{
+    ColorTheme, FontTheme, Origin, ThemeDirs, WallpaperTheme, WidgetTheme, available_in,
+};
 use scratchdir::ScratchDir;
 
 /// A user's and a system's theme directories in a scratch directory, and
@@ -1171,4 +1175,233 @@ fn every_error_says_what_went_wrong() {
         said[10],
         "the theme did not pass its check: 2 errors, the first: error: run.sh: is a script"
     );
+}
+
+// ---- one theme from the user's mix ----
+
+/// A file with comments above and inside its sections, a blank line in one,
+/// and sections one after another.
+const MIXED: &str = "\
+# Nord, for a cold night.
+meta:
+  name: Nord
+# The page and the ink.
+colors:
+  base: \"#2e3440\"  # the page
+
+  text: \"#eceff4\"
+
+terminal:
+  red: \"#bf616a\"
+widget-style:
+  button:
+    radius: 9
+";
+
+/// **A section is taken as its theme writes it**: the comments directly
+/// above it, every line inside it -- blank ones and comments included --
+/// and nothing after it.
+#[test]
+fn a_sections_text_is_taken_as_written() {
+    let section = |name: &str| section_text(MIXED, name);
+    assert_eq!(
+        section("colors").as_deref(),
+        Some(
+            "# The page and the ink.\ncolors:\n  base: \"#2e3440\"  # the page\n\n  text: \"#eceff4\"\n"
+        )
+    );
+    assert_eq!(
+        section("terminal").as_deref(),
+        Some("terminal:\n  red: \"#bf616a\"\n")
+    );
+    assert_eq!(
+        section("widget-style").as_deref(),
+        Some("widget-style:\n  button:\n    radius: 9\n")
+    );
+    assert_eq!(
+        section("meta").as_deref(),
+        Some("# Nord, for a cold night.\nmeta:\n  name: Nord\n")
+    );
+    assert_eq!(section("syntax"), None);
+    // Line ends are made `\n`; a quoted key is found by its name.
+    assert_eq!(
+        section_text("colors:\r\n  base: \"#000000\"\r\n", "colors").as_deref(),
+        Some("colors:\n  base: \"#000000\"\n")
+    );
+    assert_eq!(
+        section_text("\"colors\":\n  base: \"#000000\"\n", "colors").as_deref(),
+        Some("\"colors\":\n  base: \"#000000\"\n")
+    );
+    // A key inside another section is not a section.
+    assert_eq!(section_text("meta:\n  colors: x\n", "colors"), None);
+}
+
+/// **A theme is put together from the user's mix**: each axis as the theme
+/// chosen for it writes it, the built-in theme's from its template, the
+/// wallpaper theme's pictures and the icon theme's icons copied in -- and
+/// what it covers claimed as the checker reads it.
+#[test]
+fn a_theme_is_put_together_from_the_users_mix() {
+    let fx = Fixture::new("compose");
+    let dirs = fx.dirs();
+    fx.system_theme("nord", MIXED);
+    fx.user_theme(
+        "round",
+        "meta:\n  name: Round\nwidget-style:\n  button:\n    radius: 14   # a pill\n",
+    );
+    fx.user_theme("fonty", "fonts:\n  ui: [Inter, Noto Sans]\n");
+    let pics = fx.user_theme(
+        "pics",
+        "meta:\n  name: Pictures\nwallpapers:\n  dark: night.png\n  light: shots/day.png\n",
+    );
+    fx.write(&pics, "night.png", png());
+    fx.write(&pics, "shots/day.png", png());
+    fx.write(&fx.user().join("lines"), "icons/folder.svg", SQUARE);
+    let settings = AppearanceSettings {
+        color_theme: ColorTheme::load_from(&dirs, os("nord")),
+        widget_theme: WidgetTheme::load_from(&dirs, os("round")),
+        font_theme: FontTheme::load_from(&dirs, os("fonty")),
+        wallpaper_theme: WallpaperTheme::load_from(&dirs, os("pics")),
+        icon_theme: IconTheme::named(os("lines"), dirs.clone()),
+        cursor_theme: CursorTheme::load(os("Adwaita")),
+        ..AppearanceSettings::default()
+    };
+
+    let (draft, said) = compose(&dirs, &settings, os("my-look"), "My look").unwrap();
+    assert_eq!(draft.id(), os("my-look"));
+    let dir = fx.user().join("my-look");
+    let text = fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+
+    // Each section as its theme writes it, under a line saying whose.
+    for section in [DARK_SECTION, TERMINAL_DARK_SECTION] {
+        assert!(
+            text.contains(&section_text(MIXED, section).unwrap()),
+            "{section}: {text}"
+        );
+    }
+    assert!(text.contains("# The colours: Nord's.\n"), "{text}");
+    assert!(text.contains("# The controls: Round's.\n"), "{text}");
+    assert!(text.contains("    radius: 14   # a pill\n"), "{text}");
+    assert!(
+        !text.contains("radius: 9"),
+        "Nord's controls were taken: {text}"
+    );
+    for section in [ANIMATION_SECTION, DECORATIONS_SECTION, PANEL_SECTION] {
+        assert!(
+            text.contains(&section_text(BUILT_IN_TEMPLATE, section).unwrap()),
+            "{section}: {text}"
+        );
+    }
+    assert!(
+        text.contains("fonts:\n  ui: [Inter, Noto Sans]\n"),
+        "{text}"
+    );
+
+    let file = parse(&text);
+    assert_eq!(file.warnings, Vec::<String>::new());
+    assert_eq!(file.meta.name.as_deref(), Some("My look"));
+    assert_eq!(file.colors, parse(MIXED).colors);
+    assert_eq!(
+        file.widget_style,
+        parse("widget-style:\n  button:\n    radius: 14\n").widget_style
+    );
+    assert_eq!(file.motion, parse(BUILT_IN_TEMPLATE).motion);
+    assert_eq!(file.decorations, parse(BUILT_IN_TEMPLATE).decorations);
+    assert_eq!(file.panel, parse(BUILT_IN_TEMPLATE).panel);
+
+    // The pictures, named for their modes, and the icons.
+    assert_eq!(fs::read(dir.join("wallpapers/dark.png")).unwrap(), png());
+    assert_eq!(fs::read(dir.join("wallpapers/light.png")).unwrap(), png());
+    let names = file.wallpapers.clone().unwrap();
+    assert_eq!(names.dark.as_deref(), Some("wallpapers/dark.png"));
+    assert_eq!(names.light.as_deref(), Some("wallpapers/light.png"));
+    assert_eq!(
+        fs::read_to_string(dir.join("icons/folder.svg")).unwrap(),
+        SQUARE
+    );
+
+    // What it claims to cover is what the checker finds it covers.
+    let report = themecheck::check(&dir);
+    assert!(report.passes(), "{}", listing(&report.findings));
+    assert_eq!(file.meta.supports, report.covers);
+    for axis in [
+        "colors",
+        "widget-style",
+        "animation",
+        "wallpapers",
+        "fonts",
+        "icons",
+    ] {
+        assert!(report.covers.contains(&axis), "{axis}: {:?}", report.covers);
+    }
+
+    // The cursors stay a theme of their own, and say so; the sounds are
+    // the built-in ones, and nothing is said of them.
+    assert!(
+        said.iter()
+            .any(|f| f.message.contains("cursors") && f.message.contains("Adwaita")),
+        "{}",
+        listing(&said)
+    );
+    assert!(!said.iter().any(|f| f.message.contains("sounds")));
+    assert_eq!(
+        fx.user_entries(),
+        ["fonty", "lines", "my-look", "pics", "round"]
+    );
+}
+
+/// **The built-in theme's look, put together, is its template and its
+/// icons**; and a theme chosen that is not installed is the built-in one,
+/// as the desktop shows it, which is said.
+#[test]
+fn the_built_in_look_and_a_missing_theme_are_the_template() {
+    let fx = Fixture::new("compose-built-in");
+    let dirs = fx.dirs();
+    let (_, said) = compose(&dirs, &AppearanceSettings::default(), os("plain"), "Plain").unwrap();
+    assert_eq!(said, Vec::new(), "{}", listing(&said));
+    let dir = fx.user().join("plain");
+    let file = parse(&fs::read_to_string(dir.join(FILE_NAME)).unwrap());
+    let template = parse(BUILT_IN_TEMPLATE);
+    assert_eq!(file.colors, template.colors);
+    assert_eq!(file.widget_style, template.widget_style);
+    assert_eq!(file.motion, template.motion);
+    assert_eq!(file.wallpapers, None);
+    assert_eq!(file.fonts, None);
+    assert_eq!(
+        fs::read_dir(dir.join(ICONS_DIR)).unwrap().count(),
+        icons::built_in_icons().len()
+    );
+    assert!(themecheck::check(&dir).passes());
+
+    let gone = AppearanceSettings {
+        color_theme: ColorTheme::load_from(&dirs, os("gone")),
+        ..AppearanceSettings::default()
+    };
+    let (draft, said) = compose(&dirs, &gone, os("gone-look"), "").unwrap();
+    assert_eq!(draft.file().colors, template.colors);
+    assert_eq!(draft.file().meta.name, None, "a blank name: the folder's");
+    assert!(
+        said.iter().any(|f| f.severity == Severity::Note
+            && f.message.contains("colours")
+            && f.message.contains("gone")
+            && f.message.contains("not installed")),
+        "{}",
+        listing(&said)
+    );
+}
+
+/// **A theme put together needs a name of its own**, and leaves nothing
+/// behind without one.
+#[test]
+fn a_theme_put_together_needs_a_free_name() {
+    let fx = Fixture::new("compose-names");
+    fx.user_theme("mine", NORD);
+    fx.system_theme("solar", NORD);
+    let dirs = fx.dirs();
+    let made = |id: &str| compose(&dirs, &AppearanceSettings::default(), os(id), "X").map(|_| ());
+    assert_eq!(made("mine"), Err(AuthoringError::Exists));
+    // Never standing in for a system theme: it is a theme of its own.
+    assert_eq!(made("solar"), Err(AuthoringError::Exists));
+    assert_eq!(made(BUILT_IN), Err(AuthoringError::InvalidName));
+    assert_eq!(fx.user_entries(), ["mine"]);
 }

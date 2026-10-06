@@ -4,6 +4,7 @@
 //! ```text
 //! theme list
 //! theme derive THEME NAME [--as FOLDER]
+//! theme compose NAME [--as FOLDER]
 //! theme install PATH [--as FOLDER]
 //! theme export THEME FOLDER
 //! theme remove THEME
@@ -28,6 +29,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use appearance::AppearanceSettings;
 use appearance::themecheck::{Finding, Report, Severity};
 use appearance::themes::authoring::{self, AuthoringError, ColorSection, MetaText, ThemeDraft};
 use appearance::themes::{self, Origin, ThemeDirs, ThemeFile, ThemeInfo};
@@ -45,6 +47,9 @@ built-in one (aero), is changed by deriving a copy of it.
   theme derive THEME NAME [--as FOLDER]
       a copy of THEME called NAME, yours to change; its folder is named
       for NAME unless --as names it
+  theme compose NAME [--as FOLDER]
+      one theme called NAME made of your look as it is: each part taken
+      from the theme you chose for it -- to keep, or to export and share
   theme install PATH [--as FOLDER]
       install the theme folder, or the lone theme file, at PATH -- once a
       copy of it passes the checks themecheck makes
@@ -81,6 +86,10 @@ enum Command {
     List,
     Derive {
         from: OsString,
+        name: String,
+        folder: Option<OsString>,
+    },
+    Compose {
         name: String,
         folder: Option<OsString>,
     },
@@ -157,15 +166,19 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Command>, St
     };
     let rest: Vec<OsString> = words.collect();
     let verb = verb.to_str().unwrap_or_default().to_owned();
-    if folder.is_some() && verb != "derive" && verb != "install" {
+    if folder.is_some() && !matches!(verb.as_str(), "derive" | "compose" | "install") {
         return Err(format!(
-            "`--as` names the folder for derive and install, not {verb}"
+            "`--as` names the folder for derive, compose and install, not {verb}"
         ));
     }
     let command = match (verb.as_str(), rest.as_slice()) {
         ("list", []) => Command::List,
         ("derive", [from, name]) => Command::Derive {
             from: from.clone(),
+            name: text(name, "NAME")?,
+            folder,
+        },
+        ("compose", [name]) => Command::Compose {
             name: text(name, "NAME")?,
             folder,
         },
@@ -217,8 +230,8 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Option<Command>, St
                 .collect::<Result<_, _>>()?,
         },
         (
-            "list" | "derive" | "install" | "export" | "remove" | "get" | "set" | "unset"
-            | "describe" | "tags",
+            "list" | "derive" | "compose" | "install" | "export" | "remove" | "get" | "set"
+            | "unset" | "describe" | "tags",
             _,
         ) => {
             return Err(format!(
@@ -301,8 +314,11 @@ fn main() -> ExitCode {
         }
     };
     let dirs = ThemeDirs::standard();
+    // The user's settings, read only for the one command that asks what
+    // they choose.
+    let settings = || appearance::AppearanceFile::load().settings;
     let mut out = io::stdout().lock();
-    match run(&command, &dirs, &mut out) {
+    match run(&command, &dirs, settings, &mut out) {
         Ok(Done::Yes) => ExitCode::SUCCESS,
         Ok(Done::No(why)) => {
             eprintln!("theme: {why}");
@@ -330,9 +346,15 @@ impl From<AuthoringError> for Done {
     }
 }
 
-/// Do `command` on the themes in `dirs`, saying what was done on `out`. The
-/// `Err` is only for `out` itself failing.
-fn run(command: &Command, dirs: &ThemeDirs, out: &mut impl Write) -> io::Result<Done> {
+/// Do `command` on the themes in `dirs`, saying what was done on `out` --
+/// `settings` giving the user's appearance settings, for the command that
+/// asks. The `Err` is only for `out` itself failing.
+fn run(
+    command: &Command,
+    dirs: &ThemeDirs,
+    settings: impl FnOnce() -> AppearanceSettings,
+    out: &mut impl Write,
+) -> io::Result<Done> {
     match command {
         Command::List => {
             for info in themes::available_in(dirs) {
@@ -354,6 +376,24 @@ fn run(command: &Command, dirs: &ThemeDirs, out: &mut impl Write) -> io::Result<
                         pathcodec::display_path(draft.dir())
                     )?;
                     show_findings(out, &left_out)?;
+                    Ok(Done::Yes)
+                }
+                Err(err) => Ok(err.into()),
+            }
+        }
+        Command::Compose { name, folder } => {
+            let id = folder
+                .clone()
+                .unwrap_or_else(|| authoring::id_for(dirs, name));
+            match authoring::compose(dirs, &settings(), &id, name) {
+                Ok((draft, said)) => {
+                    writeln!(
+                        out,
+                        "made {} of your look, in {}",
+                        shown(draft.id()),
+                        pathcodec::display_path(draft.dir())
+                    )?;
+                    show_findings(out, &said)?;
                     Ok(Done::Yes)
                 }
                 Err(err) => Ok(err.into()),
@@ -808,7 +848,7 @@ mod tests {
     fn ran(list: &[&str], dirs: &ThemeDirs) -> (Done, String) {
         let command = parsed(list);
         let mut out = Vec::new();
-        let done = run(&command, dirs, &mut out).unwrap();
+        let done = run(&command, dirs, AppearanceSettings::default, &mut out).unwrap();
         (done, String::from_utf8(out).unwrap())
     }
 
@@ -965,6 +1005,46 @@ colors-light:
             fs::read_to_string(to.join(themes::FILE_NAME)).unwrap(),
             NORD
         );
+    }
+
+    /// `compose` makes one theme of the look the settings choose, named as
+    /// asked, its folder named for the name unless `--as` says.
+    #[test]
+    fn a_theme_is_composed_of_the_look_chosen() {
+        assert_eq!(
+            parsed(&["compose", "My look"]),
+            Command::Compose {
+                name: "My look".to_owned(),
+                folder: None,
+            }
+        );
+        assert_eq!(
+            parsed(&["compose", "My look", "--as", "look"]),
+            Command::Compose {
+                name: "My look".to_owned(),
+                folder: Some("look".into()),
+            }
+        );
+        assert!(refused(&["compose"]).contains("takes other arguments"));
+
+        let (_scratch, dirs) = scratch("compose");
+        let (done, said) = ran(&["compose", "My look"], &dirs);
+        assert_eq!(done, Done::Yes, "{said}");
+        assert!(said.starts_with("made My look of your look, in "), "{said}");
+        let file = dirs
+            .user
+            .as_ref()
+            .unwrap()
+            .join("My look")
+            .join(themes::FILE_NAME);
+        let text = fs::read_to_string(file).unwrap();
+        assert!(text.contains("# The colours: Aero's.\n"), "{text}");
+        // Again under the name: a free folder is found.
+        let (done, said) = ran(&["compose", "My look"], &dirs);
+        assert_eq!(done, Done::Yes, "{said}");
+        assert!(said.starts_with("made My look-2 of your look"), "{said}");
+        let (done, _) = ran(&["compose", "Mine", "--as", "aero"], &dirs);
+        assert_eq!(done, AuthoringError::InvalidName.into());
     }
 
     #[test]

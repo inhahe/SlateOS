@@ -9,6 +9,10 @@
 //! - `DialogResult` — return values from dialog interactions
 //!
 //! All dialogs use a Catppuccin Mocha dark theme and render to `RenderTree`.
+//!
+//! Tools see each dialog and use its parts as the user does through its
+//! [`Accessible`](crate::widget::automation::Accessible) side, in
+//! `accessible`, named by [`ModalPart`].
 
 use crate::color::Color;
 #[allow(unused_imports)]
@@ -20,6 +24,9 @@ use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 use crate::text::TextCursor;
 use crate::text::scaled;
+
+mod accessible;
+pub use accessible::ModalPart;
 
 // --- Catppuccin Mocha palette ---
 
@@ -815,18 +822,24 @@ impl AlertDialog {
     }
 
     /// Handle an event. Returns EventResult indicating consumption.
+    ///
+    /// Answered, the dialog is on its way out: still modal while it fades,
+    /// but it takes nothing more. A second click during the fade used to
+    /// answer again -- a "Cancel" followed by a click where "Delete" was drawn
+    /// became a "Delete" for a host that read the answer when the fade ended.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         if !self.overlay.active {
             return EventResult::Ignored;
         }
 
         match event {
-            Event::Key(key_event) => self.handle_key(key_event),
-            Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             Event::Tick { elapsed_ms } => {
                 self.tick(*elapsed_ms);
                 EventResult::Consumed
             }
+            Event::Key(_) | Event::Mouse(_) if self.result.is_some() => EventResult::Consumed,
+            Event::Key(key_event) => self.handle_key(key_event),
+            Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             _ => EventResult::Ignored,
         }
     }
@@ -1503,18 +1516,24 @@ impl InputDialog {
     }
 
     /// Handle an event.
+    ///
+    /// Answered, the dialog takes nothing more while it fades, as
+    /// [`AlertDialog::handle_event`] does: a key typed during the fade would
+    /// otherwise land in the text already handed back, or a second click
+    /// answer again.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         if !self.overlay.active {
             return EventResult::Ignored;
         }
 
         match event {
-            Event::Key(key_event) => self.handle_key(key_event),
-            Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             Event::Tick { elapsed_ms } => {
                 self.tick(*elapsed_ms);
                 EventResult::Consumed
             }
+            Event::Key(_) | Event::Mouse(_) if self.result.is_some() => EventResult::Consumed,
+            Event::Key(key_event) => self.handle_key(key_event),
+            Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             _ => EventResult::Ignored,
         }
     }
@@ -2234,6 +2253,9 @@ pub struct ProgressDialog {
     /// could have been aimed at. A dialog that has not been drawn has no button
     /// to press for the same reason a non-cancelable one does not.
     cancel_rect: Option<(f32, f32, f32, f32)>,
+    /// Where the bar was last drawn, or `None` before the first frame: where
+    /// a tool is told the progress is shown (`accessible`).
+    bar_rect: Option<(f32, f32, f32, f32)>,
 }
 
 /// Progress mode.
@@ -2263,6 +2285,7 @@ impl ProgressDialog {
             anim_tick: 0,
             overlay,
             cancel_rect: None,
+            bar_rect: None,
         }
     }
 
@@ -2283,6 +2306,7 @@ impl ProgressDialog {
             anim_tick: 0,
             overlay,
             cancel_rect: None,
+            bar_rect: None,
         }
     }
 
@@ -2517,6 +2541,7 @@ impl ProgressDialog {
         // Progress bar.
         let bar_width = width - scaled(CONTENT_PADDING) * 2.0;
         let bar_x = x + scaled(CONTENT_PADDING);
+        self.bar_rect = Some((bar_x, content_y, bar_width, scaled(PROGRESS_BAR_HEIGHT)));
 
         // Bar background.
         tree.push(RenderCommand::FillRect {
@@ -2772,6 +2797,20 @@ impl NonModalDialog {
         self.y = (area_height - self.height) / 2.0;
     }
 
+    /// Where the close button is, as `(x, y, width, height)`: at the right of
+    /// the title bar, centred in it.
+    ///
+    /// One sum for the press, the hover and the drawing -- they were three
+    /// copies of it, which agreed only while nobody edited one.
+    fn close_rect(&self) -> (f32, f32, f32, f32) {
+        (
+            self.x + self.width - scaled(CONTENT_PADDING) - scaled(CLOSE_BUTTON_SIZE),
+            self.y + (scaled(TITLE_BAR_HEIGHT) - scaled(CLOSE_BUTTON_SIZE)) / 2.0,
+            scaled(CLOSE_BUTTON_SIZE),
+            scaled(CLOSE_BUTTON_SIZE),
+        )
+    }
+
     /// Handle an event. Returns whether the event was consumed.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
         if !self.visible {
@@ -2790,17 +2829,8 @@ impl NonModalDialog {
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 // Check close button hit.
-                let close_x =
-                    self.x + self.width - scaled(CONTENT_PADDING) - scaled(CLOSE_BUTTON_SIZE);
-                let close_y = self.y + (scaled(TITLE_BAR_HEIGHT) - scaled(CLOSE_BUTTON_SIZE)) / 2.0;
-                if point_in_rect(
-                    event.x,
-                    event.y,
-                    close_x,
-                    close_y,
-                    scaled(CLOSE_BUTTON_SIZE),
-                    scaled(CLOSE_BUTTON_SIZE),
-                ) {
+                let (close_x, close_y, close_w, close_h) = self.close_rect();
+                if point_in_rect(event.x, event.y, close_x, close_y, close_w, close_h) {
                     self.hide();
                     return EventResult::Consumed;
                 }
@@ -2860,17 +2890,9 @@ impl NonModalDialog {
                 }
 
                 // Update close button hover state.
-                let close_x =
-                    self.x + self.width - scaled(CONTENT_PADDING) - scaled(CLOSE_BUTTON_SIZE);
-                let close_y = self.y + (scaled(TITLE_BAR_HEIGHT) - scaled(CLOSE_BUTTON_SIZE)) / 2.0;
-                self.close_hovered = point_in_rect(
-                    event.x,
-                    event.y,
-                    close_x,
-                    close_y,
-                    scaled(CLOSE_BUTTON_SIZE),
-                    scaled(CLOSE_BUTTON_SIZE),
-                );
+                let (close_x, close_y, close_w, close_h) = self.close_rect();
+                self.close_hovered =
+                    point_in_rect(event.x, event.y, close_x, close_y, close_w, close_h);
 
                 if point_in_rect(event.x, event.y, self.x, self.y, self.width, self.height) {
                     return EventResult::Consumed;
@@ -2953,8 +2975,7 @@ impl NonModalDialog {
         });
 
         // Close button (X).
-        let close_x = self.x + self.width - scaled(CONTENT_PADDING) - scaled(CLOSE_BUTTON_SIZE);
-        let close_y = self.y + (scaled(TITLE_BAR_HEIGHT) - scaled(CLOSE_BUTTON_SIZE)) / 2.0;
+        let (close_x, close_y, _, _) = self.close_rect();
         let close_bg = if self.close_hovered {
             palette.surface2
         } else {

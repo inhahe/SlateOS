@@ -744,6 +744,34 @@ fn a_notifications_menu_is_chosen_from_over_the_pane() {
     });
 }
 
+/// **Of two menus open, only the one a press reaches is pressed**: with the
+/// desktop's open and a notification's beside it, the desktop's takes every
+/// press, so a row of the other is refused, and nothing changes.
+#[test]
+fn a_menu_under_another_is_not_pressed() {
+    appearance::config::testing::with_scratch_config("acc-menu-under", |_root| {
+        let mut shell = shell();
+        shell.open_desktop_menu(400.0, 300.0);
+        shell.open_notification_menu("Chat".to_owned(), 900.0, 500.0, false);
+        assert!(
+            shell.desktop_menu.is_visible() && shell.notification_menu.is_some(),
+            "the test's premise: both open"
+        );
+        let row = node(
+            &shell,
+            ShellPart::Menu(ShellMenu::Notification, MenuPart::Menu),
+        )
+        .children[1]
+            .id;
+        assert_eq!(press(&mut shell, row), Err(Refusal::Hidden));
+        assert!(
+            shell.notification_menu.is_some(),
+            "a refusal changes nothing"
+        );
+        assert!(shell.desktop_menu.is_visible());
+    });
+}
+
 /// **The window switcher shows tools its windows, the one the switch goes
 /// to chosen**: one chosen is stepped to as Tab steps, and one pressed ends
 /// the switch on it, asking for it to be raised, as letting go does.

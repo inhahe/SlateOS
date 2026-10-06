@@ -128,10 +128,16 @@ fn a_chosen_days_events_are_listed() {
     let mut store = EventStore::new();
     store.add_event(event("Dentist", 10, 9, 30)).unwrap();
     store.add_event(event("Call Mum", 10, 18, 0)).unwrap();
+    store.add_event(event("Haircut", 12, 11, 0)).unwrap();
     let tenth = CalendarPart::Control(CalendarHit::Day(day_index(&view, 10)));
     assert_eq!(
         node(&view, &store, tenth).description.as_deref(),
         Some("2 events")
+    );
+    let twelfth = CalendarPart::Control(CalendarHit::Day(day_index(&view, 12)));
+    assert_eq!(
+        node(&view, &store, twelfth).description.as_deref(),
+        Some("1 event")
     );
 
     assert!(view.apply(CalendarHit::Day(day_index(&view, 10))));

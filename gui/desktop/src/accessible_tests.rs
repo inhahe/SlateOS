@@ -9,6 +9,7 @@
 use guitk::widget::automation::Query;
 
 use super::*;
+use crate::notif_pane::QuickSetting;
 use crate::volume::Output;
 use crate::volume::volume_tests::card;
 use crate::{WindowId, WindowInfo, WindowList};
@@ -399,4 +400,234 @@ fn what_a_part_is_not_for_is_refused() {
         Err(Refusal::NoSuchWidget),
         "no power button with the menu closed"
     );
+}
+
+/// A notification from `app`, titled `title`.
+fn notif(app: &str, title: &str) -> crate::notif_pane::Notification {
+    crate::notif_pane::Notification {
+        id: 0,
+        app_name: app.to_owned(),
+        title: title.to_owned(),
+        body: String::new(),
+        timestamp: 0,
+        priority: crate::notif_pane::NotifPriority::Normal,
+        read: false,
+        action: None,
+        silent: false,
+    }
+}
+
+/// **The notification pane is held among the shell's parts while it is
+/// open**, stopping at the taskbar as it is drawn; closed, it is not.
+#[test]
+fn the_notification_pane_is_among_the_shells_parts_while_open() {
+    let mut shell = shell();
+    let in_tree = |shell: &DesktopShell| {
+        tree(shell)
+            .walk()
+            .any(|node| node.id == ShellPart::Pane(PanePart::Pane))
+    };
+    assert!(!in_tree(&shell));
+    press(&mut shell, ShellPart::Control(Hit::NotificationBell)).unwrap();
+    let pane = node(&shell, ShellPart::Pane(PanePart::Pane));
+    assert_eq!(
+        (pane.role, pane.name.as_str()),
+        (Role::Dialog, "Notifications")
+    );
+    assert_eq!(pane.bounds.bottom(), shell.notification_pane_height());
+    let dark = node(
+        &shell,
+        ShellPart::Pane(PanePart::Switch(QuickSetting::DarkMode)),
+    );
+    assert_eq!(dark.role, Role::CheckBox);
+    press(&mut shell, ShellPart::Control(Hit::NotificationBell)).unwrap();
+    assert!(!in_tree(&shell), "closed by its bell");
+}
+
+/// **A notification pressed through the shell is opened as a click opens
+/// it** -- what it names is started, and the pane closes over it -- and
+/// its cross dismisses it, pointed at first as the pointer would be.
+#[test]
+fn a_notification_is_opened_and_dismissed_as_the_pointer_would() {
+    appearance::config::testing::with_scratch_config("acc-pane-cards", |_root| {
+        let mut shell = shell();
+        let mut mail = notif("Mail", "Invoice");
+        mail.action = Some("/apps/mail".to_owned());
+        let mail = shell.notify(mail);
+        let chat = shell.notify(notif("Chat", "Lunch?"));
+        shell.toggle_notifications();
+
+        assert_eq!(
+            press(&mut shell, ShellPart::Pane(PanePart::Dismiss(chat))),
+            Ok(None)
+        );
+        assert!(
+            shell
+                .notifications
+                .notifications()
+                .iter()
+                .all(|n| n.id != chat),
+            "the card stayed"
+        );
+        assert_eq!(
+            press(&mut shell, ShellPart::Pane(PanePart::Card(mail))),
+            Ok(Some(ShellAction::Launch(crate::hotkeys::Launch::program(
+                "/apps/mail"
+            ))))
+        );
+        assert!(!shell.notifications.pane_state().is_visible());
+        assert_eq!(
+            press(&mut shell, ShellPart::Pane(PanePart::Card(mail))),
+            Err(Refusal::NoSuchWidget),
+            "the pane is closed"
+        );
+    });
+}
+
+/// **The pane's levels are set as their sliders set them, its switches
+/// flip as a click flips them, and one with nothing behind it is out of
+/// use.**
+#[test]
+fn the_panes_levels_and_switches_are_set_as_the_user_sets_them() {
+    appearance::config::testing::with_scratch_config("acc-pane-levels", |_root| {
+        let mut shell = shell();
+        shell.toggle_notifications();
+        let set = |shell: &mut DesktopShell, part: PanePart, value: f64| {
+            shell.invoke(&ShellPart::Pane(part), Action::SetValue(value), 0.0, 0.0)
+        };
+        assert_eq!(set(&mut shell, PanePart::Volume, 42.4), Ok(None));
+        assert_eq!(shell.notifications.volume(), 42, "on a whole step");
+        assert_eq!(
+            set(&mut shell, PanePart::Volume, f64::NAN),
+            Err(Refusal::NotANumber)
+        );
+        assert_eq!(set(&mut shell, PanePart::Brightness, 155.0), Ok(None));
+        assert_eq!(shell.notifications.brightness(), 100, "within its bounds");
+
+        let toggle = |shell: &mut DesktopShell, setting: QuickSetting| {
+            shell.invoke(
+                &ShellPart::Pane(PanePart::Switch(setting)),
+                Action::Toggle,
+                0.0,
+                0.0,
+            )
+        };
+        assert_eq!(
+            toggle(&mut shell, QuickSetting::WiFi),
+            Err(Refusal::Disabled),
+            "no radio is behind it"
+        );
+        let dark = shell
+            .notifications
+            .quick_setting_value(QuickSetting::DarkMode);
+        assert_eq!(toggle(&mut shell, QuickSetting::DarkMode), Ok(None));
+        assert_eq!(
+            shell
+                .notifications
+                .quick_setting_value(QuickSetting::DarkMode),
+            !dark
+        );
+        assert_eq!(shell.appearance.is_light(), dark, "the desktop turned");
+        assert_eq!(
+            press(&mut shell, ShellPart::Pane(PanePart::Volume)),
+            Err(Refusal::NotApplicable {
+                role: Role::Slider,
+                action: "press"
+            })
+        );
+    });
+}
+
+/// **A press that would not reach its part is refused, and changes
+/// nothing**: a notification's menu open over the pane takes every press;
+/// the pane's scrim covers the desktop's icons; an open flyout spends a
+/// press anywhere else closing itself.
+#[test]
+fn a_press_that_would_not_reach_its_part_is_refused() {
+    appearance::config::testing::with_scratch_config("acc-pane-covered", |_root| {
+        let mut shell = shell();
+        shell.icons.populate_defaults();
+        let icon = shell.icons.icon_ids()[0];
+        let chat = shell.notify(notif("Chat", "Lunch?"));
+        shell.toggle_notifications();
+        assert_eq!(
+            press(&mut shell, ShellPart::Icon(icon)),
+            Err(Refusal::Hidden),
+            "under the pane's scrim"
+        );
+        assert!(shell.notifications.pane_state().is_visible());
+
+        let (x, y) = node(&shell, ShellPart::Pane(PanePart::Card(chat)))
+            .bounds
+            .centre();
+        shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        assert!(shell.notification_menu.is_some(), "its menu opened");
+        assert_eq!(
+            press(&mut shell, ShellPart::Pane(PanePart::ClearAll)),
+            Err(Refusal::Hidden)
+        );
+        let volume = shell.notifications.volume();
+        assert_eq!(
+            shell.invoke(
+                &ShellPart::Pane(PanePart::Volume),
+                Action::SetValue(f64::from(volume) / 2.0),
+                0.0,
+                0.0
+            ),
+            Err(Refusal::Hidden),
+            "set under the menu"
+        );
+        assert_eq!(shell.notifications.volume(), volume);
+        assert_eq!(shell.notifications.notifications().len(), 1);
+        assert!(shell.notification_menu.is_some(), "the menu was closed");
+
+        let mut flyout = DesktopShell::new(1920, 1080);
+        press(&mut flyout, ShellPart::Control(Hit::VolumeIcon)).unwrap();
+        assert_eq!(
+            press(&mut flyout, ShellPart::Control(Hit::Clock)),
+            Err(Refusal::Hidden),
+            "a press on the clock would only close the flyout"
+        );
+        assert!(flyout.volume_flyout.is_visible());
+        assert!(!flyout.calendar.visible);
+        // The speaker is the flyout's own, and closes it; then the clock is
+        // reached.
+        press(&mut flyout, ShellPart::Control(Hit::VolumeIcon)).unwrap();
+        assert!(!flyout.volume_flyout.is_visible());
+        press(&mut flyout, ShellPart::Control(Hit::Clock)).unwrap();
+        assert!(flyout.calendar.visible);
+    });
+}
+
+/// **Whatever is open over everything takes every press, and nothing under
+/// it is pressed**: the desktop's menu, the Run box, the overview.
+#[test]
+fn nothing_is_pressed_under_what_is_open_over_everything() {
+    /// What opens something over everything, and what it is.
+    type Opener = (&'static str, fn(&mut DesktopShell));
+    let opened: [Opener; 3] = [
+        ("the desktop's menu", |shell| {
+            shell.open_desktop_menu(400.0, 300.0);
+        }),
+        ("the Run box", DesktopShell::toggle_run_dialog),
+        ("the overview", |shell| {
+            shell
+                .overview
+                .show(crate::overview::OverviewMode::AllWindows);
+        }),
+    ];
+    for (what, open) in opened {
+        let mut shell = shell();
+        open(&mut shell);
+        assert_eq!(
+            press(&mut shell, ShellPart::Control(Hit::StartButton)),
+            Err(Refusal::Hidden),
+            "Start under {what}"
+        );
+        assert!(!shell.start_menu_open, "{what}: Start opened under it");
+    }
 }

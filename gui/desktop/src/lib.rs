@@ -154,6 +154,8 @@ mod notification_menu_tests;
 #[cfg(test)]
 mod open_with_tests;
 #[cfg(test)]
+mod pane_launch_tests;
+#[cfg(test)]
 mod photo_frame_tests;
 #[cfg(test)]
 mod pointer_tests;
@@ -1602,6 +1604,23 @@ impl StartSection {
             Self::All => "All apps",
         }
     }
+}
+
+/// A surface a press away from it closes, and is spent closing
+/// (`DesktopShell::closed_by_press`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenSurface {
+    /// The power choices -- and the start menu with them, unless the press
+    /// was on the start menu.
+    PowerMenu,
+    /// The start menu.
+    StartMenu,
+    /// The calendar.
+    Calendar,
+    /// The volume flyout.
+    VolumeFlyout,
+    /// The notification pane.
+    NotificationPane,
 }
 
 /// One row of the start menu's list.
@@ -5220,14 +5239,11 @@ impl DesktopShell {
         let action = self.handle_mouse_inner(event, modifiers);
         self.settle_switch();
         match (action, self.apply_pane_events()) {
-            // A click on a notification card that names a program. The pane
-            // consumed the press and marked the card read; starting the
-            // program is the part only the caller can do.
-            // `PathBuf::from` at the edge: a notification's path comes from
-            // its sender as text, so this is where text becomes a path.
-            (ShellAction::Consumed, Some(path)) => {
-                ShellAction::Launch(hotkeys::Launch::program(PathBuf::from(path)))
-            }
+            // A click on a notification card that names a program, or on the
+            // way to Settings. The pane consumed the press and marked the
+            // card read; starting the program is the part only the caller
+            // can do.
+            (ShellAction::Consumed, Some(launch)) => ShellAction::Launch(launch),
             (action, _) => action,
         }
     }
@@ -6136,6 +6152,44 @@ impl DesktopShell {
         self.handle_press_with(x, y, button, guitk::event::Modifiers::NONE)
     }
 
+    /// What a press on `hit` closes instead of reaching it: the open surface
+    /// it landed off, if any.
+    ///
+    /// A click anywhere outside an open menu dismisses it, and is spent doing
+    /// so rather than also reaching what it landed on. Dismissing is what the
+    /// user aimed at; acting as well would make the click do something they
+    /// could not see coming.
+    ///
+    /// The submenu is asked about first and on its own: a click that lands
+    /// on the application list while the power menu is open closes the power
+    /// menu without also launching the program underneath it. The calendar's
+    /// `Hit::CalendarControl` covers the popup's inert space as well as its
+    /// controls, so a click in its own margin does not close it -- which is
+    /// the single most irritating way for a popup to behave -- while a click
+    /// anywhere off it does. A press on the volume flyout is its own, and one
+    /// on the speaker toggles it. The notification pane is asked about last,
+    /// and by `handle_press_with` only for a press on the taskbar: every
+    /// other press was the pane's. Its bell toggles it -- otherwise the
+    /// button that opened the pane would close it here and then reopen it.
+    fn closed_by_press(&self, hit: Hit) -> Option<OpenSurface> {
+        if self.power_menu_open && !matches!(hit, Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel) {
+            return Some(OpenSurface::PowerMenu);
+        }
+        if self.start_menu_open && !Self::keeps_start_menu_open(hit) {
+            return Some(OpenSurface::StartMenu);
+        }
+        if self.calendar.visible && !matches!(hit, Hit::Clock | Hit::CalendarControl(_)) {
+            return Some(OpenSurface::Calendar);
+        }
+        if self.volume_flyout.is_visible() && !matches!(hit, Hit::VolumeIcon | Hit::VolumeFlyout) {
+            return Some(OpenSurface::VolumeFlyout);
+        }
+        if self.notifications.pane_state().is_visible() && !matches!(hit, Hit::NotificationBell) {
+            return Some(OpenSurface::NotificationPane);
+        }
+        None
+    }
+
     /// A press at `(x, y)` with `button`, made with `modifiers` held.
     fn handle_press_with(
         &mut self,
@@ -6167,51 +6221,22 @@ impl DesktopShell {
         }
 
         // A click anywhere outside an open menu dismisses it, and is spent
-        // doing so rather than also reaching what it landed on. Dismissing is
-        // what the user aimed at; acting as well would make the click do
-        // something they could not see coming.
-        //
-        // The submenu is dismissed first and on its own: a click that lands on
-        // the application list while the power menu is open closes the power
-        // menu without also launching the program underneath it.
-        if self.power_menu_open && !matches!(hit, Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel) {
-            self.power_menu_open = false;
-            if !Self::keeps_start_menu_open(hit) {
-                self.close_start_menu();
+        // doing so rather than also reaching what it landed on -- see
+        // `closed_by_press`, which says which and is what the shell's
+        // automation asks before it presses anything.
+        if let Some(open) = self.closed_by_press(hit) {
+            match open {
+                OpenSurface::PowerMenu => {
+                    self.power_menu_open = false;
+                    if !Self::keeps_start_menu_open(hit) {
+                        self.close_start_menu();
+                    }
+                }
+                OpenSurface::StartMenu => self.close_start_menu(),
+                OpenSurface::Calendar => self.calendar.set_visible(false),
+                OpenSurface::VolumeFlyout => self.volume_flyout.set_visible(false),
+                OpenSurface::NotificationPane => self.notifications.hide(),
             }
-            return ShellAction::Consumed;
-        }
-
-        if self.start_menu_open && !Self::keeps_start_menu_open(hit) {
-            self.close_start_menu();
-            return ShellAction::Consumed;
-        }
-
-        // Same rule for the calendar. `Hit::CalendarControl` covers the
-        // popup's inert space as well as its controls, so a click in its own
-        // margin does not close it — which is the single most irritating way
-        // for a popup to behave — while a click anywhere off it does.
-        if self.calendar.visible && !matches!(hit, Hit::Clock | Hit::CalendarControl(_)) {
-            self.calendar.set_visible(false);
-            return ShellAction::Consumed;
-        }
-
-        // And for the volume flyout: a press on it is its own, a press on the
-        // speaker toggles it below, and a press anywhere else closes it and
-        // is spent doing so.
-        if self.volume_flyout.is_visible() && !matches!(hit, Hit::VolumeIcon | Hit::VolumeFlyout) {
-            self.volume_flyout.set_visible(false);
-            return ShellAction::Consumed;
-        }
-
-        // And for the notification pane, which by this point can only be a
-        // press on the taskbar: every other press was consumed by the pane
-        // above. Pressing the bell falls through to its own arm, which toggles
-        // — otherwise the button that opened the pane would close it here and
-        // then reopen it a line later. Anything else on the bar closes the pane
-        // and is spent doing so, like every other dismissal in this function.
-        if self.notifications.pane_state().is_visible() && !matches!(hit, Hit::NotificationBell) {
-            self.notifications.hide();
             return ShellAction::Consumed;
         }
 
@@ -13342,18 +13367,21 @@ impl DesktopShell {
 
     /// Act on everything the pane reported since the last call, and empty it.
     ///
-    /// Returns the one thing the shell cannot do itself: the program a clicked
-    /// notification's [`action`](notif_pane::Notification::action) names, for
-    /// the caller to turn into a [`ShellAction::Launch`]. Everything else the
-    /// pane has already done to its own state before reporting it, so the rest
-    /// of the arms are the shell deciding whether anything *outside* the pane
-    /// should follow.
+    /// Returns the one thing the shell cannot do itself: the program to
+    /// start -- the one a clicked notification's
+    /// [`action`](notif_pane::Notification::action) names, or Settings on its
+    /// notifications page -- for the caller to turn into a
+    /// [`ShellAction::Launch`]. Either closes the pane: the window it opens
+    /// is what the user asked to see, and the pane's scrim would dim it.
+    /// Everything else the pane has already done to its own state before
+    /// reporting it, so the rest of the arms are the shell deciding whether
+    /// anything *outside* the pane should follow.
     ///
     /// Calling this is mandatory, not housekeeping: the pane's event buffer is
     /// unbounded and nothing else empties it. Until this existed the shell
     /// accumulated one entry per click for the life of the session and the
     /// quick-setting switches moved without changing anything.
-    fn apply_pane_events(&mut self) -> Option<String> {
+    fn apply_pane_events(&mut self) -> Option<hotkeys::Launch> {
         use notif_pane::{NotifPaneEvent, QuickSetting};
         let mut launch = None;
         for event in self.notifications.drain_events() {
@@ -13386,13 +13414,25 @@ impl DesktopShell {
                     // already follows: one press produces at most one click
                     // event, so a second can only come from a drain that was
                     // skipped, and the newer intent is the right one to honour.
-                    launch = self
+                    // `PathBuf::from` at the edge: a notification's path comes
+                    // from its sender as text, so this is where text becomes a
+                    // path.
+                    let program = self
                         .notifications
                         .notifications()
                         .iter()
                         .find(|n| n.id == id)
-                        .and_then(|n| n.action.clone())
-                        .or(launch);
+                        .and_then(|n| n.action.clone());
+                    if let Some(program) = program {
+                        self.notifications.hide();
+                        launch = Some(hotkeys::Launch::program(PathBuf::from(program)));
+                    }
+                }
+                // "Open full notification settings…", below the programs'
+                // switches: the page those switches are the short form of.
+                NotifPaneEvent::SettingsAsked => {
+                    self.notifications.hide();
+                    launch = Some(launcher::settings_page(launcher::NOTIFICATIONS_PAGE));
                 }
                 // The pane records the change in its own list and reports
                 // it. Until this arm existed the report went nowhere, so a

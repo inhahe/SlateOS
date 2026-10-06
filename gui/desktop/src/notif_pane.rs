@@ -65,6 +65,9 @@ use guitk::text;
 use guitk::wheel;
 use notifsettings::Importance;
 
+mod accessible;
+pub use accessible::PanePart;
+
 // ============================================================================
 // Colour
 // ============================================================================
@@ -170,6 +173,17 @@ const APP_CARD_PITCH: f32 = 108.0;
 /// Where the enabled pill sits below its app card's top.
 const APP_TOGGLE_TOP: f32 = 10.0;
 
+/// Height of the row below the last program's card that opens Settings on
+/// its notifications page -- a press anywhere on it does; its words are drawn
+/// [`FULL_SETTINGS_TEXT_DY`] down it.
+const FULL_SETTINGS_ROW: f32 = 36.0;
+
+/// How far down its row "Open full notification settings…" is drawn.
+const FULL_SETTINGS_TEXT_DY: f32 = 12.0;
+
+/// What the row below the programs' cards says.
+const FULL_SETTINGS_LABEL: &str = "Open full notification settings\u{2026}";
+
 /// How far one arrow-key press scrolls the list.
 const ARROW_KEY_STEP: f32 = 40.0;
 
@@ -185,9 +199,18 @@ const CARD_RADIUS: f32 = 8.0;
 /// Dismiss button size.
 const DISMISS_BTN_SIZE: f32 = 20.0;
 
+/// How far in from its card's right edge a card's dismiss button is drawn.
+const DISMISS_INSET: f32 = 8.0;
+
+/// How far down its card a card's dismiss button is drawn.
+const DISMISS_DY: f32 = 6.0;
+
 /// Toggle pill dimensions.
 const TOGGLE_WIDTH: f32 = 40.0;
 const TOGGLE_HEIGHT: f32 = 22.0;
+
+/// How far down its row a quick setting's switch is drawn.
+const QS_SWITCH_DY: f32 = 6.0;
 
 /// Slider dimensions.
 const SLIDER_WIDTH: f32 = 140.0;
@@ -389,6 +412,42 @@ enum QsHit {
     Brightness,
 }
 
+/// A link in the pane's header.
+///
+/// One statement of each link's words and of where it is, which the renderer
+/// draws from and the hit test and the pane's automation measure against:
+/// they were three copies of the same numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderLink {
+    /// "Settings", over the notifications: each program's switch in their
+    /// place.
+    Settings,
+    /// "Clear all", over the notifications: every one gone.
+    ClearAll,
+    /// "Back", over the programs' switches: the notifications again.
+    Back,
+}
+
+impl HeaderLink {
+    /// What it says.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Settings => "Settings",
+            Self::ClearAll => "Clear all",
+            Self::Back => "Back",
+        }
+    }
+
+    /// Where it begins across the pane, and how wide it is.
+    const fn span(self) -> (f32, f32) {
+        match self {
+            Self::Settings => (PANE_WIDTH - PANE_PADDING - 130.0, 60.0),
+            Self::ClearAll => (PANE_WIDTH - PANE_PADDING - 60.0, 60.0),
+            Self::Back => (PANE_WIDTH - PANE_PADDING - 40.0, 40.0),
+        }
+    }
+}
+
 /// Per-app notification settings.
 ///
 /// **The same rule the desktop obeys**, not a copy of it. This was a local
@@ -468,6 +527,9 @@ pub enum NotifPaneEvent {
     },
     /// Quick setting toggled.
     QuickSettingToggled(QuickSetting),
+    /// "Open full notification settings…" was pressed, below the programs'
+    /// switches: the Settings program, on its notifications page.
+    SettingsAsked,
     /// Pane was closed.
     Closed,
 }
@@ -1014,8 +1076,9 @@ impl NotificationPane {
                 // `dy` is in notches, not pixels. This was `dy * 30.0` -- a
                 // private pixels-per-notch constant, one of the twelve
                 // different ones `MouseEventKind::Scroll` was invented to put
-                // an end to. A notch is three rows, and a row here is a card.
-                self.scroll_offset += wheel::pixels(*dy, NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING);
+                // an end to. A notch is three rows, and a row here is a card
+                // -- a notification's, or a program's.
+                self.scroll_offset += wheel::pixels(*dy, self.row_pitch());
                 self.clamp_scroll();
                 EventResult::Consumed
             }
@@ -1165,9 +1228,8 @@ impl NotificationPane {
     /// the shell's tests, which cannot see the block's layout.
     #[cfg(test)]
     pub(crate) fn press_switch(&mut self, setting: QuickSetting) {
-        let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
-        let y = Self::qs_toggle_top(setting.index()) + QS_ROW_HEIGHT / 2.0;
-        self.handle_quick_settings_click(pill_x + TOGGLE_WIDTH / 2.0, y);
+        let (x, y) = Self::qs_switch_rect(setting.index()).centre();
+        self.handle_quick_settings_click(x, y);
     }
 
     /// Mark the notification `id` read -- it was opened somewhere other than
@@ -1391,6 +1453,58 @@ impl NotificationPane {
         Self::qs_start_y() + QUICK_SETTINGS_HEIGHT + QS_SEPARATOR_HEIGHT
     }
 
+    /// The links the header shows, left to right: "Settings" and "Clear
+    /// all" over the notifications, "Back" over the programs' switches.
+    const fn header_links(&self) -> &'static [HeaderLink] {
+        if self.show_settings {
+            &[HeaderLink::Back]
+        } else {
+            &[HeaderLink::Settings, HeaderLink::ClearAll]
+        }
+    }
+
+    /// The box `link` is drawn in and takes a press in, in pane-local
+    /// coordinates: its span across, and the header's whole height down
+    /// from the top of the screen -- the pane's top is the screen's, so a
+    /// press thrown against the top edge above a link lands on it.
+    const fn header_link_rect(link: HeaderLink) -> Rect {
+        let (x, width) = link.span();
+        Rect::new(x, 0.0, width, Self::qs_start_y())
+    }
+
+    /// The row "Open full notification settings…" is drawn in and takes a
+    /// press in, below the last program's card, in the list's own
+    /// coordinates (before scrolling): as wide as a card, where the card
+    /// after the last would begin.
+    fn full_settings_rect(&self) -> Rect {
+        Rect::new(
+            PANE_PADDING,
+            Self::app_card_top(self.app_settings.len()),
+            Self::card_width(),
+            FULL_SETTINGS_ROW,
+        )
+    }
+
+    /// How far a row of the list showing is: a notification's card and the
+    /// space below it, or a program's card and its gutter -- what a notch of
+    /// the wheel moves three of.
+    const fn row_pitch(&self) -> f32 {
+        if self.show_settings {
+            APP_CARD_PITCH
+        } else {
+            NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING
+        }
+    }
+
+    /// Show the programs' switches in the notifications' place, or the
+    /// notifications again -- each from its top: a list is not scrolled as
+    /// far down as the other one was.
+    fn show_programs(&mut self, programs: bool) {
+        self.show_settings = programs;
+        self.scroll_offset = 0.0;
+        self.hovered_notif = None;
+    }
+
     /// Top of the `idx`-th toggle row, relative to the quick-settings block's
     /// own top.
     #[allow(clippy::cast_precision_loss)]
@@ -1403,6 +1517,30 @@ impl NotificationPane {
     #[allow(clippy::cast_precision_loss)]
     fn qs_slider_top(slot: usize) -> f32 {
         Self::qs_toggle_top(QuickSetting::COUNT) + QS_SLIDER_GAP + (slot as f32) * QS_ROW_HEIGHT
+    }
+
+    /// The `idx`-th switch's pill, relative to the quick-settings block's own
+    /// top: where it is drawn. A press across its row from the pill's left
+    /// edge takes it -- the label to its left is not the switch.
+    fn qs_switch_rect(idx: usize) -> Rect {
+        Rect::new(
+            PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING,
+            Self::qs_toggle_top(idx) + QS_SWITCH_DY,
+            TOGGLE_WIDTH,
+            TOGGLE_HEIGHT,
+        )
+    }
+
+    /// The cross that dismisses the card whose top is at `card_top`, in the
+    /// same coordinates as `card_top`: where it is drawn while the pointer is
+    /// on the card.
+    fn dismiss_rect(card_top: f32) -> Rect {
+        Rect::new(
+            PANE_PADDING + Self::card_width() - DISMISS_BTN_SIZE - DISMISS_INSET,
+            card_top + DISMISS_DY,
+            DISMISS_BTN_SIZE,
+            DISMISS_BTN_SIZE,
+        )
     }
 
     /// A level slider, 0 to 100 in whole steps.
@@ -1522,7 +1660,8 @@ impl NotificationPane {
         APP_HEADING_HEIGHT + (idx as f32) * APP_CARD_PITCH
     }
 
-    /// The app card painted at `local_y`, measured from the list's own top.
+    /// The app card painted at `local_y`, measured from the top of the list's
+    /// viewport -- the list scrolled as it is.
     ///
     /// `None` for the caption above the first card, for the eight-pixel gutter
     /// between two cards, for anything past the last app, and for anything
@@ -1541,12 +1680,13 @@ impl NotificationPane {
         if !local_y.is_finite() || local_y < 0.0 || local_y >= self.list_height() {
             return None;
         }
+        let content_y = local_y + self.scroll_offset;
         // A walk rather than a division, so the gutter between two cards can
         // answer honestly: it is inside no card's painted height, and
         // `position`-style search says so by finding nothing.
         (0..self.app_settings.len()).find(|&idx| {
             let top = Self::app_card_top(idx);
-            local_y >= top && local_y < top + APP_CARD_HEIGHT
+            content_y >= top && content_y < top + APP_CARD_HEIGHT
         })
     }
 
@@ -1590,8 +1730,13 @@ impl NotificationPane {
         tops
     }
 
-    /// Total height of the list's contents, headers included.
+    /// Total height of the list's contents: the notifications, headers
+    /// included -- or the programs' cards, the caption above them and the way
+    /// to Settings below them.
     fn content_height(&self) -> f32 {
+        if self.show_settings {
+            return self.full_settings_rect().bottom();
+        }
         match self.card_tops().last() {
             // The trailing spacing is not content: it would let the list scroll
             // eight pixels past its own last card.
@@ -1739,7 +1884,7 @@ impl NotificationPane {
         cmds
     }
 
-    fn render_header(&self, p: &Palette, cmds: &mut Vec<RenderCommand>, y: f32) -> f32 {
+    fn render_header(&self, p: &Palette, cmds: &mut Vec<RenderCommand>, y: f32) {
         // Title.
         let title = if self.show_settings {
             "Notification Settings"
@@ -1785,48 +1930,24 @@ impl NotificationPane {
             });
         }
 
-        if !self.show_settings {
-            // "Clear all" button.
-            let clear_x = PANE_WIDTH - PANE_PADDING - 60.0;
+        // The links, each drawn in the box its press is taken in.
+        for &link in self.header_links() {
+            let (x, width) = link.span();
             cmds.push(RenderCommand::Text {
-                x: clear_x,
+                x,
                 y: y + 6.0,
-                text: "Clear all".to_string(),
-                color: p.ink(p.accent),
+                text: link.label().to_string(),
+                color: if link == HeaderLink::Settings {
+                    p.subtext0
+                } else {
+                    p.ink(p.accent)
+                },
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(60.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Settings gear link.
-            let gear_x = PANE_WIDTH - PANE_PADDING - 130.0;
-            cmds.push(RenderCommand::Text {
-                x: gear_x,
-                y: y + 6.0,
-                text: "Settings".to_string(),
-                color: p.subtext0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(60.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        } else {
-            // "Back" link.
-            let back_x = PANE_WIDTH - PANE_PADDING - 40.0;
-            cmds.push(RenderCommand::Text {
-                x: back_x,
-                y: y + 6.0,
-                text: "Back".to_string(),
-                color: p.ink(p.accent),
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(40.0),
+                max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
             });
         }
-
-        HEADER_HEIGHT
     }
 
     /// Draw the quick-settings block and report how tall it turned out.
@@ -1856,17 +1977,8 @@ impl NotificationPane {
         });
 
         // Toggle rows.
-        for (idx, qs) in QuickSetting::all().iter().enumerate() {
-            let enabled = self.quick_settings.get(*qs);
-            self.render_toggle_row(
-                p,
-                cmds,
-                PANE_PADDING,
-                start_y + Self::qs_toggle_top(idx),
-                qs.label(),
-                enabled,
-                self.unavailable(*qs),
-            );
+        for (idx, &setting) in QuickSetting::all().iter().enumerate() {
+            self.render_toggle_row(p, cmds, start_y, idx, setting);
         }
 
         // Volume slider.
@@ -1878,25 +1990,26 @@ impl NotificationPane {
         Self::qs_slider_top(1) + QS_ROW_HEIGHT
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "where, what it is called, whether it is on, and why it cannot be used"
-    )]
+    /// Draw the `idx`-th switch's row -- what it switches, and the switch or
+    /// why it cannot be used -- in a quick-settings block whose top is at
+    /// `start_y`.
     fn render_toggle_row(
         &self,
         p: &Palette,
         cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        label: &str,
-        enabled: bool,
-        unavailable: Option<&str>,
+        start_y: f32,
+        idx: usize,
+        setting: QuickSetting,
     ) {
+        let x = PANE_PADDING;
+        let y = start_y + Self::qs_toggle_top(idx);
+        let pill = Self::qs_switch_rect(idx);
+        let pill = Rect::new(pill.x, pill.y + start_y, pill.w, pill.h);
         // Label.
         cmds.push(RenderCommand::Text {
             x,
             y: y + 8.0,
-            text: label.to_string(),
+            text: setting.label().to_string(),
             color: p.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
@@ -1906,8 +2019,8 @@ impl NotificationPane {
 
         // A switch that would do nothing says why where it would be, ending
         // where its pill ends: a switch there would move and change nothing.
-        if let Some(why) = unavailable {
-            let right = PANE_WIDTH - PANE_PADDING - PANE_PADDING;
+        if let Some(why) = self.unavailable(setting) {
+            let right = pill.right();
             let room = right - (x + 180.0);
             let width = guitk::text::measure(why, 12.0, FontWeightHint::Regular).min(room);
             cmds.push(RenderCommand::Text {
@@ -1930,14 +2043,9 @@ impl NotificationPane {
         // the switch that says it is on was the part you could not see. The
         // toolkit's knob is derived from the track. The geometry is the same:
         // this pane's knob was already inset two pixels all round.
-        let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
+        let enabled = self.quick_settings.get(setting);
         let pill_bg = if enabled { p.accent } else { p.surface2 };
-        cmds.extend(guitk::switch::shapes(
-            p,
-            guitk::frame::Rect::new(pill_x, y + 6.0, TOGGLE_WIDTH, TOGGLE_HEIGHT),
-            enabled,
-            pill_bg,
-        ));
+        cmds.extend(guitk::switch::shapes(p, pill, enabled, pill_bg));
     }
 
     /// Draw the `slot`-th slider's row -- its label and level, and the
@@ -2172,21 +2280,20 @@ impl NotificationPane {
 
         // Dismiss button (X) — shown on hover.
         if is_hovered {
-            let btn_x = x + card_width - DISMISS_BTN_SIZE - 8.0;
-            let btn_y = y + 6.0;
+            let cross = Self::dismiss_rect(y);
             p.push_surface(
                 cmds,
-                btn_x,
-                btn_y,
-                DISMISS_BTN_SIZE,
-                DISMISS_BTN_SIZE,
-                DISMISS_BTN_SIZE / 2.0,
+                cross.x,
+                cross.y,
+                cross.w,
+                cross.h,
+                cross.w / 2.0,
                 Surface::Selected,
             );
             // "X" glyph.
             cmds.push(RenderCommand::Text {
-                x: btn_x + 5.0,
-                y: btn_y + 2.0,
+                x: cross.x + 5.0,
+                y: cross.y + 2.0,
                 text: "x".to_string(),
                 color: p.text,
                 font_size: 12.0,
@@ -2211,10 +2318,14 @@ impl NotificationPane {
             height: available_height,
         });
 
+        // The list scrolls, the caption with it: a program past the bottom
+        // of the pane is reached as a notification there is.
+        let origin = start_y - self.scroll_offset;
+
         // "Manage notifications" heading.
         cmds.push(RenderCommand::Text {
             x: PANE_PADDING,
-            y: start_y,
+            y: origin,
             text: "Per-App Settings".to_string(),
             color: p.subtext0,
             font_size: 11.0,
@@ -2229,7 +2340,10 @@ impl NotificationPane {
             // The card tops come from `app_card_top`, which is what
             // `app_card_at` inverts -- walking a running total here instead is
             // how the click ended up eight pixels out of step per card.
-            let y = start_y + Self::app_card_top(idx);
+            let y = origin + Self::app_card_top(idx);
+            if y + APP_CARD_HEIGHT < start_y {
+                continue;
+            }
             if y > start_y + available_height {
                 break;
             }
@@ -2318,20 +2432,21 @@ impl NotificationPane {
             });
         }
 
-        // "Manage notifications" link at bottom -- below where the card after
-        // the last one would have started, from the same walk the cards use.
-        if !self.app_settings.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: PANE_PADDING,
-                y: start_y + Self::app_card_top(self.app_settings.len()) + 12.0,
-                text: "Open full notification settings...".to_string(),
-                color: p.ink(p.accent),
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(250.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
+        // The way to Settings, below where the card after the last one would
+        // have started, from the same walk the cards use -- with no programs
+        // too, when it is the only thing here to do. It was drawn as a link
+        // and took no press.
+        let link = self.full_settings_rect();
+        cmds.push(RenderCommand::Text {
+            x: link.x,
+            y: origin + link.y + FULL_SETTINGS_TEXT_DY,
+            text: FULL_SETTINGS_LABEL.to_string(),
+            color: p.ink(p.accent),
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(link.w),
+            overflow: TextOverflow::Ellipsis,
+        });
 
         cmds.push(RenderCommand::PopClip);
     }
@@ -2341,28 +2456,18 @@ impl NotificationPane {
     // ========================================================================
 
     fn handle_click(&mut self, rx: f32, ry: f32, screen_height: f32) {
-        // Header area.
-        if ry < PANE_PADDING + HEADER_HEIGHT {
-            if !self.show_settings {
-                // "Clear all" button region.
-                let clear_x = PANE_WIDTH - PANE_PADDING - 60.0;
-                if rx >= clear_x && rx <= clear_x + 60.0 {
-                    self.clear_all();
-                    return;
-                }
-                // "Settings" link region.
-                let gear_x = PANE_WIDTH - PANE_PADDING - 130.0;
-                if rx >= gear_x && rx <= gear_x + 60.0 {
-                    self.show_settings = true;
-                    return;
-                }
-            } else {
-                // "Back" button region.
-                let back_x = PANE_WIDTH - PANE_PADDING - 40.0;
-                if rx >= back_x && rx <= back_x + 40.0 {
-                    self.show_settings = false;
-                    return;
-                }
+        // Header area: a link, or nothing.
+        if ry < Self::qs_start_y() {
+            let link = self
+                .header_links()
+                .iter()
+                .copied()
+                .find(|&link| Self::header_link_rect(link).contains(rx, ry));
+            match link {
+                Some(HeaderLink::ClearAll) => self.clear_all(),
+                Some(HeaderLink::Settings) => self.show_programs(true),
+                Some(HeaderLink::Back) => self.show_programs(false),
+                None => {}
             }
             return;
         }
@@ -2386,8 +2491,7 @@ impl NotificationPane {
         match Self::qs_at(local_y) {
             Some(QsHit::Toggle(idx)) => {
                 // Only the pill on the right is the control; the label is not.
-                let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
-                if rx < pill_x {
+                if rx < Self::qs_switch_rect(idx).x {
                     return;
                 }
                 if let Some(&qs) = QuickSetting::all().get(idx)
@@ -2442,13 +2546,10 @@ impl NotificationPane {
             return;
         };
 
-        // Check if dismiss button was clicked.
-        let card_width = Self::card_width();
-        let btn_x = PANE_PADDING + card_width - DISMISS_BTN_SIZE - 8.0;
-        if rx >= btn_x
-            && rx <= btn_x + DISMISS_BTN_SIZE
-            && (adjusted_y - top) < DISMISS_BTN_SIZE + 6.0
-        {
+        // Check if dismiss button was clicked: its column, from the card's
+        // top edge down to the cross's foot.
+        let cross = Self::dismiss_rect(top);
+        if rx >= cross.x && rx <= cross.right() && adjusted_y < cross.bottom() {
             self.dismiss_notification(idx);
             self.events.push(NotifPaneEvent::NotificationDismissed(id));
         } else if let Some(notif) = self.notifications.get_mut(idx) {
@@ -2462,11 +2563,25 @@ impl NotificationPane {
     }
 
     fn handle_app_settings_click(&mut self, rx: f32, local_y: f32) {
+        // Inside the list's viewport only: what is scrolled out of it, or
+        // clipped below the pane's foot, is not on screen to be pressed.
+        if !local_y.is_finite() || local_y < 0.0 || local_y >= self.list_height() {
+            return;
+        }
+        let content_y = local_y + self.scroll_offset;
+        if self.full_settings_rect().contains(rx, content_y) {
+            self.events.push(NotifPaneEvent::SettingsAsked);
+            return;
+        }
         let Some(idx) = self.app_card_at(local_y) else {
             return;
         };
         let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(Self::app_card_top(idx));
-        if rx < pill_x || rx >= pill_x + pill_w || local_y < pill_y || local_y >= pill_y + pill_h {
+        if rx < pill_x
+            || rx >= pill_x + pill_w
+            || content_y < pill_y
+            || content_y >= pill_y + pill_h
+        {
             // On the card but not on its one control. The name, the priority
             // badge and the status line are labels, not buttons.
             return;
@@ -3491,6 +3606,160 @@ mod tests {
         assert_eq!(pane.app_card_at(0.0), None);
         assert_eq!(pane.app_card_at(APP_HEADING_HEIGHT - 0.01), None);
         assert_eq!(pane.app_card_at(APP_HEADING_HEIGHT), Some(0));
+    }
+
+    /// No event at all.
+    const NOTHING: [NotifPaneEvent; 0] = [];
+
+    /// Where the pane draws `text`, in its own coordinates -- its `y` the
+    /// screen's.
+    fn drawn_at(pane: &NotificationPane, text: &str) -> (f32, f32) {
+        pane.render(&test_palette(), SCREEN_W, TEST_SCREEN_H)
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text: t, x, y, .. } if t == text => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text:?} is drawn"))
+    }
+
+    /// A left press at `local_x` across the pane and `y` down the screen,
+    /// and what the pane said of it.
+    fn press_pane(pane: &mut NotificationPane, local_x: f32, y: f32) -> Vec<NotifPaneEvent> {
+        pane.events.clear();
+        let event = MouseEvent {
+            x: SCREEN_W - PANE_WIDTH + local_x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        pane.handle_mouse_event(&event, SCREEN_W, TEST_SCREEN_H);
+        pane.drain_events()
+    }
+
+    /// **A list of programs longer than the pane scrolls to its last
+    /// switch**, which takes a press where it is drawn -- it was cut off at
+    /// the pane's foot with no way down to it. A notch of the wheel moves
+    /// three of their cards.
+    #[test]
+    fn a_long_list_of_programs_scrolls_to_its_last_switch() {
+        let mut pane = settings_pane(20);
+        let last = pane.app_settings.last().unwrap().app_name.clone();
+        wheel_at(&mut pane, -1.0);
+        assert_eq!(pane.scroll_offset, 3.0 * APP_CARD_PITCH);
+        press_key(&mut pane, Key::End);
+        assert_eq!(pane.scroll_offset, pane.max_scroll());
+
+        let &(px, py, pw, ph) = painted_app_pills(&pane).last().unwrap();
+        assert!(py + ph <= TEST_SCREEN_H, "the last switch is on screen");
+        assert_eq!(
+            settings_click(&mut pane, px + pw / 2.0, py + ph / 2.0),
+            Some(last),
+            "the last switch drawn is the last program's"
+        );
+        // Scrolled to the end is scrolled to the way to Settings below it,
+        // the whole of its row.
+        let (x, y) = drawn_at(&pane, FULL_SETTINGS_LABEL);
+        assert_eq!(
+            y - FULL_SETTINGS_TEXT_DY + FULL_SETTINGS_ROW,
+            TEST_SCREEN_H,
+            "the way to Settings ends the list"
+        );
+        assert_eq!(
+            press_pane(&mut pane, x + 2.0, y + 2.0),
+            [NotifPaneEvent::SettingsAsked]
+        );
+        // And Home goes back up to the first.
+        press_key(&mut pane, Key::Home);
+        let first = pane.app_settings[0].app_name.clone();
+        let &(px, py, pw, ph) = painted_app_pills(&pane).first().unwrap();
+        assert_eq!(
+            settings_click(&mut pane, px + pw / 2.0, py + ph / 2.0),
+            Some(first)
+        );
+    }
+
+    /// **"Open full notification settings…" takes a press where it is
+    /// drawn, with no programs as with some, and none below its row**; it
+    /// was drawn as a link and took no press at all.
+    #[test]
+    fn the_way_to_settings_takes_a_press_where_it_is_drawn() {
+        for programs in [0, 2] {
+            let mut pane = settings_pane(programs);
+            let (x, y) = drawn_at(&pane, FULL_SETTINGS_LABEL);
+            assert_eq!(
+                press_pane(&mut pane, x + 2.0, y + 2.0),
+                [NotifPaneEvent::SettingsAsked],
+                "{programs} programs"
+            );
+            let below = y - FULL_SETTINGS_TEXT_DY + FULL_SETTINGS_ROW + 0.5;
+            assert_eq!(
+                press_pane(&mut pane, x + 2.0, below),
+                NOTHING,
+                "{programs} programs: below the row"
+            );
+        }
+    }
+
+    /// **The way to Settings scrolled below the pane's foot takes no
+    /// press** where it would be: it is not on screen.
+    #[test]
+    fn the_way_to_settings_below_the_pane_takes_no_press() {
+        let mut pane = settings_pane(20);
+        let row = pane.full_settings_rect();
+        let y = NotificationPane::list_start_y() + row.y + row.h / 2.0;
+        assert!(y > TEST_SCREEN_H, "the fixture's row is below the pane");
+        assert_eq!(press_pane(&mut pane, row.x + 10.0, y), NOTHING);
+    }
+
+    /// **Each link in the header takes a press where it is drawn, and the
+    /// space between them none**; "Settings" and "Back" each show their
+    /// list from its top, not as far down as the other was scrolled.
+    #[test]
+    fn the_header_links_take_a_press_where_they_are_drawn() {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.state = PaneState::Visible;
+        for i in 0..40 {
+            pane.push_notification(make_notif(&format!("App{}", i % 20), "N", 1000));
+        }
+        pane.current_time = 1000;
+        pane.set_screen_height(TEST_SCREEN_H);
+        press_key(&mut pane, Key::End);
+        assert!(pane.scroll_offset > 0.0, "the fixture scrolls");
+
+        let (sx, sy) = drawn_at(&pane, "Settings");
+        let (cx, cy) = drawn_at(&pane, "Clear all");
+        let between = (sx + HeaderLink::Settings.span().1 + cx) / 2.0;
+        assert_eq!(press_pane(&mut pane, between, sy + 2.0), NOTHING);
+        assert!(!pane.show_settings, "the space between opened Settings");
+        // The header's whole height is a link's, down to the quick settings.
+        assert_eq!(
+            press_pane(&mut pane, sx + 2.0, NotificationPane::qs_start_y() - 0.5),
+            NOTHING
+        );
+        assert!(pane.show_settings, "the foot of the header is the link's");
+        pane.show_programs(false);
+        press_key(&mut pane, Key::End);
+
+        assert_eq!(press_pane(&mut pane, sx + 2.0, sy + 2.0), NOTHING);
+        assert!(pane.show_settings, "Settings shows the programs");
+        assert_eq!(pane.scroll_offset, 0.0, "from their top");
+        // Where "Settings" was, nothing now: "Back" is the one link.
+        assert_eq!(press_pane(&mut pane, sx + 2.0, sy + 2.0), NOTHING);
+        assert!(pane.show_settings);
+
+        press_key(&mut pane, Key::End);
+        assert!(pane.scroll_offset > 0.0, "the programs scroll");
+        let (bx, by) = drawn_at(&pane, "Back");
+        assert_eq!(press_pane(&mut pane, bx + 2.0, by + 2.0), NOTHING);
+        assert!(!pane.show_settings, "Back shows the notifications");
+        assert_eq!(pane.scroll_offset, 0.0, "from their top");
+
+        assert_eq!(
+            press_pane(&mut pane, cx + 2.0, cy + 2.0),
+            [NotifPaneEvent::ClearAll]
+        );
+        assert!(pane.notifications.is_empty());
     }
 
     // ========================================================================

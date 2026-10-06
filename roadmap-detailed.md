@@ -2701,9 +2701,13 @@ authors never wrote a single automation handler.
   pinned program and window, the tray's icons, the speaker, the bell, the
   clock, Show desktop -- and, while open, the start menu (its search, every
   row of its list, its places, the power button and caret), the power
-  choices and the volume flyout; a part pressed is the shell's own click
-  on it. Not yet: the font picker, and the shell's other surfaces -- the
-  notification pane, the calendar, Alt+Tab.*
+  choices, the volume flyout and the notification pane
+  (`desktop::notif_pane::PanePart`: its links, its switches and levels,
+  each notification with its cross, and each program's switch); a part
+  pressed is the shell's own click on it, and one the click would not
+  reach is refused (`design-decisions.md` §1491). Not yet: the font
+  picker, and the shell's other surfaces -- the calendar, Alt+Tab, the
+  menus.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

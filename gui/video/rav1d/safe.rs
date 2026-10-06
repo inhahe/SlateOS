@@ -280,6 +280,32 @@ pub struct Colour {
     pub chroma_sample_position: u8,
 }
 
+/// The display a picture was mastered on (SMPTE ST 2086), as the latest HDR
+/// mastering display metadata OBU said it: the numbers as the bitstream
+/// carries them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MasteringDisplay {
+    /// Its red, green and blue primaries' CIE 1931 x and y, each in 0.16
+    /// fixed point.
+    pub primaries: [[u16; 2]; 3],
+    /// Its white point's x and y, in 0.16 fixed point.
+    pub white_point: [u16; 2],
+    /// Its peak, in cd/m2 in 24.8 fixed point.
+    pub max_luminance: u32,
+    /// Its black, in cd/m2 in 18.14 fixed point.
+    pub min_luminance: u32,
+}
+
+/// How bright a picture's content gets (CTA-861.3), as the latest HDR
+/// content light level metadata OBU said it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContentLightLevel {
+    /// MaxCLL: its brightest pixel's light, in cd/m2.
+    pub max_content_light_level: u16,
+    /// MaxFALL: its brightest frame's average light, in cd/m2.
+    pub max_frame_average_light_level: u16,
+}
+
 /// One plane of samples copied out of a picture: `height` rows of `width`
 /// samples, packed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -342,6 +368,31 @@ impl Picture {
             matrix: header.mtrx.0,
             full_range: header.color_range != 0,
             chroma_sample_position: header.chr as u8,
+        })
+    }
+
+    /// The mastering display the bitstream's metadata says: the latest HDR
+    /// mastering display OBU before this picture, which stays in force until
+    /// another, or a new sequence -- dav1d gives it with every picture, as
+    /// FFmpeg's libdav1d wrapper then gives it with every frame.
+    pub fn mastering_display(&self) -> Option<MasteringDisplay> {
+        self.0
+            .mastering_display
+            .as_deref()
+            .map(|m| MasteringDisplay {
+                primaries: m.primaries,
+                white_point: m.white_point,
+                max_luminance: m.max_luminance,
+                min_luminance: m.min_luminance,
+            })
+    }
+
+    /// The content light level the bitstream's metadata says, as
+    /// [`Picture::mastering_display`] is said.
+    pub fn content_light(&self) -> Option<ContentLightLevel> {
+        self.0.content_light.as_deref().map(|c| ContentLightLevel {
+            max_content_light_level: c.max_content_light_level,
+            max_frame_average_light_level: c.max_frame_average_light_level,
         })
     }
 

@@ -6,7 +6,9 @@
 //! A cursor theme is a folder with a `cursors` directory of XCursor files,
 //! one per cursor name -- the layout every desktop on Linux uses, so a theme
 //! drawn for one of them (Adwaita, Breeze, Bibata, ...) is installed here as
-//! it is. A theme is looked for under the SlateOS theme roots first, beside a
+//! it is -- and, where it has one, a `cursors_scalable` directory of SVG
+//! pictures, as KDE Plasma ships its own ([`scalable`]): drawn at exactly
+//! the size asked for, and preferred to the XCursor file of the same name. A theme is looked for under the SlateOS theme roots first, beside a
 //! `theme.yaml` as a theme's icons are ([`crate::themes::ThemeDirs`]), and
 //! then where other desktops install cursor themes: `$XDG_DATA_HOME/icons`,
 //! `~/.icons`, and each of `$XDG_DATA_DIRS`' `icons` -- libXcursor's order.
@@ -33,6 +35,7 @@
 //! believed. A file larger than [`MAX_CURSOR_BYTES`], or one that is not a
 //! readable XCursor file, is passed over for the next place to look.
 
+pub mod scalable;
 pub mod xcursor;
 
 use std::collections::BTreeMap;
@@ -243,8 +246,14 @@ fn find(
     visited.push(id.to_os_string());
     for candidate in std::iter::once(name).chain(aliases(name).iter().copied()) {
         for root in roots {
-            let file = root.join(id).join(CURSORS_DIR).join(candidate);
-            if let Some(images) = read_cursor(&file, size) {
+            let theme = root.join(id);
+            // Scalable first: drawn at the size asked, where an XCursor
+            // file has the sizes it was drawn at -- as KWin prefers it.
+            let scalable = theme.join(scalable::SCALABLE_DIR).join(candidate);
+            if let Some(images) = scalable::read(&scalable, size) {
+                return Some(images);
+            }
+            if let Some(images) = read_cursor(&theme.join(CURSORS_DIR).join(candidate), size) {
                 return Some(images);
             }
         }
@@ -360,7 +369,8 @@ pub struct CursorThemeInfo {
 }
 
 /// Every cursor theme installed, for a picker: the built-in one first, then
-/// every folder with a `cursors` directory under any root, by name. A theme
+/// every folder with a `cursors` or `cursors_scalable` directory under any
+/// root, by name. A theme
 /// installed in two roots is listed once, as the first root's copy -- the
 /// one [`CursorTheme::cursor`] would read.
 #[must_use]
@@ -386,7 +396,8 @@ pub fn available_in(roots: &[PathBuf]) -> Vec<CursorThemeInfo> {
             if found.contains_key(&id)
                 || !themes::is_valid_id(&id)
                 || id == themes::BUILT_IN
-                || !entry.path().join(CURSORS_DIR).is_dir()
+                || !(entry.path().join(CURSORS_DIR).is_dir()
+                    || entry.path().join(scalable::SCALABLE_DIR).is_dir())
             {
                 continue;
             }

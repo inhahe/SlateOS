@@ -859,7 +859,7 @@ pub fn remove(dirs: &ThemeDirs, id: &OsStr) -> Result<(), AuthoringError> {
     }
     let holder = Holder::new(&users_root(dirs)?)?;
     let aside = holder.path().join(id);
-    fs::rename(&dir, &aside).map_err(|err| io_error("move", &dir, &err))?;
+    rename_settled(&dir, &aside).map_err(|err| io_error("move", &dir, &err))?;
     fs::remove_dir_all(holder.path()).map_err(|err| io_error("remove", &aside, &err))
 }
 
@@ -1379,9 +1379,36 @@ impl Staging {
     /// Put the folder in place at `to`, in one rename. The holder, empty
     /// now, goes when this does.
     fn place(self, to: &Path) -> Result<(), AuthoringError> {
-        fs::rename(&self.dir, to).map_err(|err| io_error("move into place", to, &err))?;
+        rename_settled(&self.dir, to).map_err(|err| io_error("move into place", to, &err))?;
         drop(self.holder);
         Ok(())
+    }
+}
+
+/// `fs::rename`, tried again for a few seconds where Windows refuses it as
+/// "access denied" -- which it does to a folder renamed while something
+/// still holds a file in it open: a virus scanner or the search indexer
+/// reading what was just written, for a moment after. One try elsewhere,
+/// where a rename succeeds or fails for good. The development host is
+/// Windows; SlateOS is not.
+fn rename_settled(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut tries: u64 = 0;
+        loop {
+            match fs::rename(from, to) {
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied && tries < 20 => {
+                    tries = tries.saturating_add(1);
+                    // 25 ms, 50 ms, ... -- about five seconds in all.
+                    std::thread::sleep(std::time::Duration::from_millis(tries.saturating_mul(25)));
+                }
+                other => return other,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(from, to)
     }
 }
 

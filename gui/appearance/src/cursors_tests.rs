@@ -600,6 +600,68 @@ fn the_built_in_theme_draws_nothing_of_its_own() {
     assert_eq!(colour(&theme, "default"), Some(14));
 }
 
+/// Put a scalable cursor `name` in `theme` under `root`: one square picture
+/// of colour `mark`, drawn 24 units for a nominal 24.
+fn put_scalable(f: &Fixture, root: &str, theme: &str, name: &str, mark: u32) {
+    let dir = f
+        .root(root)
+        .join(theme)
+        .join(scalable::SCALABLE_DIR)
+        .join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("a.svg"),
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#{:06x}"/></svg>"##,
+            mark & 0x00FF_FFFF
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join(scalable::METADATA_FILE),
+        r#"[{"filename": "a.svg", "nominal_size": 24, "hotspot_x": 2, "hotspot_y": 2}]"#,
+    )
+    .unwrap();
+}
+
+/// **A theme's scalable cursor is preferred to its XCursor file of the same
+/// name**, and drawn at the size asked; one it has only as an XCursor file
+/// is still found; and an older name's scalable picture is found too.
+#[test]
+fn a_scalable_cursor_is_preferred_to_the_file() {
+    let f = Fixture::new("scalable");
+    f.put("share", "Breeze", "default", 1);
+    put_scalable(&f, "share", "Breeze", "default", 2);
+    f.put("share", "Breeze", "text", 3);
+    put_scalable(&f, "share", "Breeze", "hand2", 4);
+    let breeze = f.theme("Breeze");
+    assert_eq!(colour(&breeze, "default"), Some(2), "the scalable picture");
+    let big = breeze.cursor("default", 40).unwrap();
+    assert_eq!(big.frames[0].width, 40, "drawn at the size asked");
+    assert_eq!(
+        colour(&breeze, "text"),
+        Some(3),
+        "the file, where it is all there is"
+    );
+    assert_eq!(colour(&breeze, "pointer"), Some(4), "under an older name");
+}
+
+/// **A theme with scalable cursors alone is a cursor theme**, listed for a
+/// picker as one with XCursor files is.
+#[test]
+fn a_theme_of_scalable_cursors_alone_is_listed() {
+    let f = Fixture::new("scalable-listed");
+    put_scalable(&f, "share", "breeze_scalable", "default", 1);
+    f.index(
+        "share",
+        "breeze_scalable",
+        "[Icon Theme]\nName=Breeze Scalable\n",
+    );
+    let roots = f.theme("x").roots();
+    let names: Vec<String> = available_in(&roots).into_iter().map(|t| t.name).collect();
+    assert!(names.contains(&"Breeze Scalable".to_owned()), "{names:?}");
+}
+
 /// **The installed themes, for a picker**: the built-in one first, then every
 /// folder with cursors by the name it gives itself, a theme in two roots once.
 #[test]

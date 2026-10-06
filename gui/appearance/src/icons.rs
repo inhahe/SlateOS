@@ -236,6 +236,11 @@ const BUILT_IN: &[(&str, &str)] = &[
         "system-lock-screen",
         include_str!("../themes/aero/icons/system-lock-screen.svg"),
     ),
+    // A screen gone dark: the power menu's "Sleep the display".
+    (
+        "video-display",
+        include_str!("../themes/aero/icons/video-display.svg"),
+    ),
     (
         "avatar-default",
         include_str!("../themes/aero/icons/avatar-default.svg"),

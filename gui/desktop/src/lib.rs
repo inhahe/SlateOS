@@ -1874,6 +1874,11 @@ pub enum ShellRequest {
         /// Client-area height.
         height: u32,
     },
+    /// Put every display to sleep until the user touches a key or the
+    /// pointer: the "Sleep the display" shortcut and power menu row
+    /// (`HotkeyAction::SleepDisplay`, `power::PowerChoice::SleepDisplay`).
+    /// The session hears the wake, and locks if the settings say so.
+    SleepDisplays,
 }
 
 impl ShellRequest {
@@ -8420,6 +8425,9 @@ impl DesktopShell {
             // nothing visibly. See `known-issues.md` →
             // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
             HotkeyAction::BrightnessUp | HotkeyAction::BrightnessDown => HotkeyOutcome::consumed(),
+            // The compositor's to do: it owns the displays, and the input that
+            // wakes them never reaches the shell either.
+            HotkeyAction::SleepDisplay => HotkeyOutcome::ask(Some(ShellRequest::SleepDisplays)),
         }
     }
 
@@ -10369,9 +10377,15 @@ impl DesktopShell {
     /// What carrying out `choice` asks of the session: its program, or --
     /// for log out, whose login screen is the shell's own -- the session end.
     fn power_action(choice: power::PowerChoice) -> ShellAction {
-        match choice.command() {
-            Some(launch) => ShellAction::Launch(launch),
-            None => ShellAction::LogOut,
+        match (choice, choice.command()) {
+            // The two the shell carries out itself: the displays are the
+            // compositor's, asked by the session; the login screen is the
+            // shell's own.
+            (power::PowerChoice::SleepDisplay, _) => {
+                ShellAction::Control(ShellRequest::SleepDisplays)
+            }
+            (_, Some(launch)) => ShellAction::Launch(launch),
+            (_, None) => ShellAction::LogOut,
         }
     }
 

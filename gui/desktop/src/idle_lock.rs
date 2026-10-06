@@ -1,9 +1,11 @@
-//! How long the session waits before locking itself.
+//! How long the session waits before locking itself -- and whether waking
+//! the displays from "Sleep the display" locks it.
 //!
-//! One integer, read from the `session` settings group. The Settings
-//! application writes it; this reads it and hands it to
-//! `EventLoop::watch_idle`, after which the compositor says when the delay has
-//! passed and [`crate::session`] queues the lock.
+//! An integer and a switch, read from the `session` settings group. The
+//! Settings application writes them; this reads them. The delay is handed to
+//! `EventLoop::watch_idle`, after which the compositor says when it has
+//! passed and [`crate::session`] queues the lock; the switch is asked when
+//! the displays wake ([`lock_on_display_wake`]).
 //!
 //! # Why a settings group and not a crate
 //!
@@ -35,6 +37,28 @@ pub const CONFIG_NAME: &str = "session";
 
 /// The key holding the delay, in whole minutes.
 const LOCK_AFTER_MINUTES: [&str; 2] = ["lock", "after_minutes"];
+
+/// The key saying whether waking the displays locks the session.
+const LOCK_ON_DISPLAY_WAKE: [&str; 2] = ["lock", "on_display_wake"];
+
+/// Whether waking the displays from the sleep the user put them in --
+/// "Sleep the display", the shortcut or the power menu's row -- locks the
+/// session: yes, unless `lock.on_display_wake` in the `session` group says
+/// `false`.
+///
+/// Yes by default, as a display put to sleep on purpose is most often a
+/// machine being left: the person who wakes it may not be the person who
+/// put it to sleep. A session with no password is still never locked
+/// (`design-decisions.md` 818, applied where every lock is queued). Anything
+/// in the file but `true` or `false` is the default, as for the delay: a
+/// shell that misread a mistyped switch as "never lock" would be the worse
+/// failure.
+#[must_use]
+pub fn lock_on_display_wake() -> bool {
+    settingsfile::load(CONFIG_NAME)
+        .get_bool(&LOCK_ON_DISPLAY_WAKE)
+        .unwrap_or(true)
+}
 
 /// Minutes before the session locks itself, or `None` for never.
 ///
@@ -92,6 +116,21 @@ mod tests {
             doc.set_i64(&LOCK_AFTER_MINUTES, 0);
             settingsfile::store(CONFIG_NAME, &doc).expect("the scratch config is writable");
             assert_eq!(lock_after(), None);
+        });
+    }
+
+    /// **Waking the displays locks unless the settings say it does not.**
+    #[test]
+    fn waking_the_displays_locks_unless_switched_off() {
+        settingsfile::testing::with_scratch_config("idle-lock-wake", |_root| {
+            assert!(lock_on_display_wake(), "absent: locks");
+            let mut doc = settingsfile::load(CONFIG_NAME);
+            doc.set_bool(&LOCK_ON_DISPLAY_WAKE, false);
+            settingsfile::store(CONFIG_NAME, &doc).expect("the scratch config is writable");
+            assert!(!lock_on_display_wake());
+            doc.set_i64(&LOCK_ON_DISPLAY_WAKE, 0);
+            settingsfile::store(CONFIG_NAME, &doc).expect("the scratch config is writable");
+            assert!(lock_on_display_wake(), "not a switch: the default");
         });
     }
 

@@ -151,6 +151,9 @@ pub enum PowerChoice {
     Hibernate,
     /// Lock the screen; the session carries on behind it.
     Lock,
+    /// Put the displays to sleep -- the machine carries on -- until a key or
+    /// the pointer wakes them (`ShellRequest::SleepDisplays`).
+    SleepDisplay,
     /// End the session and return to the login screen.
     LogOut,
 }
@@ -160,10 +163,11 @@ impl PowerChoice {
     /// session's choices first, then the machine's from the lightest to
     /// switching it off -- so "Shut down" is last, nearest the button the
     /// menu rises from. The Aero reference's order (`SM_POWER`), with lock
-    /// where it has "sleep the display".
-    pub const ALL: [Self; 6] = [
+    /// above its "sleep the display".
+    pub const ALL: [Self; 7] = [
         Self::LogOut,
         Self::Lock,
+        Self::SleepDisplay,
         Self::Sleep,
         Self::Hibernate,
         Self::Restart,
@@ -180,6 +184,7 @@ impl PowerChoice {
             Self::Sleep => "Sleep",
             Self::Hibernate => "Hibernate",
             Self::Lock => "Lock",
+            Self::SleepDisplay => "Sleep the display",
             Self::LogOut => "Log out",
         }
     }
@@ -194,6 +199,7 @@ impl PowerChoice {
             Self::Sleep => "system-suspend",
             Self::Hibernate => "system-suspend-hibernate",
             Self::Lock => "system-lock-screen",
+            Self::SleepDisplay => "video-display",
             Self::LogOut => "system-log-out",
         }
     }
@@ -216,14 +222,17 @@ impl PowerChoice {
             Self::Sleep => "sleep",
             Self::Hibernate => "hibernate",
             Self::Lock => "lock",
+            Self::SleepDisplay => "sleep the display",
             Self::LogOut => "log out",
         }
     }
 
-    /// The program that carries this out, or `None` for [`LogOut`], which
-    /// the shell does itself: it owns the login screen the user returns to.
+    /// The program that carries this out, or `None` for the two the shell
+    /// does itself: [`LogOut`] -- it owns the login screen the user returns
+    /// to -- and [`SleepDisplay`], which it asks of the compositor.
     ///
     /// [`LogOut`]: Self::LogOut
+    /// [`SleepDisplay`]: Self::SleepDisplay
     #[must_use]
     pub fn command(self) -> Option<Launch> {
         match self {
@@ -235,7 +244,7 @@ impl PowerChoice {
             // same launch, so `design-decisions.md` 818 (a session with no
             // password is never locked) applies to both.
             Self::Lock => Some(Launch::program(LOCK_COMMAND)),
-            Self::LogOut => None,
+            Self::SleepDisplay | Self::LogOut => None,
         }
     }
 }

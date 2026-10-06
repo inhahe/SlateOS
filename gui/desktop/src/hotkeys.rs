@@ -593,6 +593,17 @@ pub enum HotkeyAction {
     BrightnessUp,
     /// Decrease display brightness. See [`BrightnessUp`](Self::BrightnessUp).
     BrightnessDown,
+    /// Put every display to sleep until a key, a click or the pointer wakes
+    /// it -- the input that wakes it reaching no window -- and, waking, lock
+    /// the session where the user's settings say so
+    /// ([`crate::idle_lock::lock_on_display_wake`]).
+    ///
+    /// The operator's "a key to put the monitor to sleep" (`design-decisions.md`
+    /// §1416), carried out by the compositor's `SleepDisplays`
+    /// (`requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`).
+    /// Unbound by default, as §1416 has it: listed on the shortcut card, to
+    /// be bound there.
+    SleepDisplay,
 
     // ---- starting a program ---------------------------------------------
     /// Start the program named by this command line.
@@ -664,7 +675,7 @@ impl HotkeyAction {
     /// `scripts/check-variant-lists.py` checks it: an action added to the enum
     /// and not here fails that gate rather than quietly being unbindable from
     /// the card.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::CloseWindow,
         Self::MinimizeWindow,
         Self::MaximizeWindow,
@@ -691,6 +702,7 @@ impl HotkeyAction {
         Self::VolumeMute,
         Self::BrightnessUp,
         Self::BrightnessDown,
+        Self::SleepDisplay,
         Self::LaunchApp(String::new()),
         Self::ShowTaskManager,
         Self::SystemSettings,
@@ -825,6 +837,7 @@ impl HotkeyAction {
             Self::VolumeMute => "volume_mute".to_string(),
             Self::BrightnessUp => "brightness_up".to_string(),
             Self::BrightnessDown => "brightness_down".to_string(),
+            Self::SleepDisplay => "sleep_display".to_string(),
             Self::LaunchApp(app) => format!("launch:{app}"),
             Self::ShowTaskManager => "show_task_manager".to_string(),
             Self::SystemSettings => "system_settings".to_string(),
@@ -874,6 +887,7 @@ impl HotkeyAction {
             "volume_mute" => Ok(Self::VolumeMute),
             "brightness_up" => Ok(Self::BrightnessUp),
             "brightness_down" => Ok(Self::BrightnessDown),
+            "sleep_display" => Ok(Self::SleepDisplay),
             "show_task_manager" => Ok(Self::ShowTaskManager),
             "system_settings" => Ok(Self::SystemSettings),
             "screen_lock" => Ok(Self::ScreenLock),
@@ -921,6 +935,7 @@ impl HotkeyAction {
             Self::VolumeMute => "Volume Mute",
             Self::BrightnessUp => "Brightness Up",
             Self::BrightnessDown => "Brightness Down",
+            Self::SleepDisplay => "Sleep the Display",
             Self::LaunchApp(_) => "Launch App",
             Self::ShowTaskManager => "Task Manager",
             Self::SystemSettings => "Settings",
@@ -3302,6 +3317,7 @@ mod tests {
             HotkeyAction::VolumeMute,
             HotkeyAction::BrightnessUp,
             HotkeyAction::BrightnessDown,
+            HotkeyAction::SleepDisplay,
             HotkeyAction::LaunchApp("/usr/bin/my_app".to_string()),
             HotkeyAction::ShowTaskManager,
             HotkeyAction::SystemSettings,

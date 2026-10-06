@@ -6440,6 +6440,120 @@ fn a_session_with_a_password_still_locks() {
     );
 }
 
+/// Bind Super+F12 to "Sleep the display", as a user would on the shortcut
+/// card, and press it through the compositor.
+fn press_sleep_display(desktop: &Desktop, session: &mut Session) {
+    let chord = crate::hotkeys::Hotkey::new(Key::F12, Modifiers::super_key());
+    if !session.shell().hotkeys.is_registered(&chord) {
+        session
+            .shell_mut()
+            .hotkeys
+            .register(chord, crate::hotkeys::HotkeyAction::SleepDisplay)
+            .expect("Super+F12 is free");
+        // The session grabs what the registry holds on its next pump.
+        session.pump().expect("pump");
+    }
+    let window = session.panel().window();
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        window,
+        guitk::event::Event::Key(KeyEvent {
+            key: Key::F12,
+            pressed: true,
+            modifiers: Modifiers::super_key(),
+            text: String::new(),
+        }),
+    )]);
+    session.pump().expect("pump");
+}
+
+/// How many times the compositor was asked to put the displays to sleep.
+///
+/// Served first: a sleep is held by the harness until the wake only once it
+/// has been served, and `asked` alone would read it off the wire unserved,
+/// leaving the wake nothing to answer.
+fn sleeps_asked(desktop: &Desktop) -> usize {
+    let mut desktop = desktop.borrow_mut();
+    desktop.serve();
+    desktop
+        .asked()
+        .into_iter()
+        .filter(|name| *name == "SleepDisplays")
+        .count()
+}
+
+/// **"Sleep the display" asks the compositor once, and the wake locks the
+/// session** -- through the lock every trigger queues, so the lock screen is
+/// the same one the shortcut starts, and nothing locks while the displays
+/// are still asleep.
+#[test]
+fn sleeping_the_display_asks_once_and_the_wake_locks() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(session.login().is_none(), "the desktop should be open");
+    drop(session.take_launches());
+
+    press_sleep_display(&desktop, &mut session);
+    assert_eq!(sleeps_asked(&desktop), 1);
+    // The power menu's row in the same sleep is not a second ask.
+    press_sleep_display(&desktop, &mut session);
+    assert_eq!(sleeps_asked(&desktop), 1, "asleep already: asked once");
+    assert!(
+        session.take_launches().is_empty(),
+        "asleep: nothing is locked until the wake"
+    );
+
+    desktop.borrow_mut().wake_displays();
+    session.pump().expect("pump");
+    assert_eq!(
+        session
+            .take_launches()
+            .into_iter()
+            .map(|l| l.program)
+            .collect::<Vec<_>>(),
+        [std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND)],
+        "the wake did not ask for the lock screen"
+    );
+    // Awake again: the next press asks again.
+    press_sleep_display(&desktop, &mut session);
+    assert_eq!(sleeps_asked(&desktop), 2);
+}
+
+/// **The wake does not lock where the user switched it off, nor -- 818 --
+/// a session with no password.**
+#[test]
+fn the_wake_locks_only_where_it_may() {
+    let (mut session, desktop, _dir, _turn) = session_with_passwordless_login();
+    type_password(&desktop, &mut session, "");
+    assert!(session.login().is_none(), "the desktop should be open");
+    drop(session.take_launches());
+    press_sleep_display(&desktop, &mut session);
+    assert_eq!(sleeps_asked(&desktop), 1);
+    desktop.borrow_mut().wake_displays();
+    session.pump().expect("pump");
+    assert!(
+        session.take_launches().is_empty(),
+        "818: a session with no password is not locked by a wake"
+    );
+
+    // The switch written to a scratch directory, never the real one.
+    settingsfile::testing::with_scratch_config("sleep-display-no-lock", |_root| {
+        let (mut session, desktop, _dir, _turn) = session_with_login();
+        type_password(&desktop, &mut session, "password");
+        drop(session.take_launches());
+        let mut doc = settingsfile::load(crate::idle_lock::CONFIG_NAME);
+        doc.set_bool(&["lock", "on_display_wake"], false);
+        settingsfile::store(crate::idle_lock::CONFIG_NAME, &doc).expect("writable");
+        press_sleep_display(&desktop, &mut session);
+        assert_eq!(sleeps_asked(&desktop), 1);
+        desktop.borrow_mut().wake_displays();
+        session.pump().expect("pump");
+        assert!(
+            session.take_launches().is_empty(),
+            "switched off: waking does not lock"
+        );
+    });
+}
+
 /// Press Super+L on the open desktop, through the compositor.
 ///
 /// Not `shell_mut().handle_hotkey(...)`: that returns the outcome to the

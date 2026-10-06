@@ -2,8 +2,9 @@
 
 **From:** Lane C. **To:** Lane F (`gui/compositor`, `gui/window` -- the control
 protocol).
-**Filed:** 2026-09-27. **Status:** ✅ **DONE 2026-10-03 by lane F** -- lane C
-wires the shortcut and the menu entry. Reply at the end.
+**Filed:** 2026-09-27. **Status:** ✅ **DONE** -- lane F's verb 2026-10-03,
+lane C's shortcut and menu row 2026-10-06 (on main with lane C's next
+publish). Replies at the end.
 
 **In short:** answering C-Q24 (`design-decisions.md` §1416), the operator asked
 for "a key to put the monitor to sleep" -- available to bind, not on by
@@ -95,3 +96,22 @@ requests), two on the wire (answered at the wake, and by `WakeDisplays`),
 one for the server (black, then nothing, then a frame), two for DRM (every
 head off and back; a refusal keeps every head on; it fails without the
 re-enable), and `oswindow`'s ticket.
+
+## Lane C's half -- 2026-10-06
+
+Done on lane C's branch, on main with lane C's next publish
+(`design-decisions.md` §1487): `HotkeyAction::SleepDisplay` ("Sleep the
+Display", unbound by default, on the shortcut card) and "Sleep the display"
+in the power menu between Lock and Sleep, both sending `SleepDisplays`
+through `EventLoop::sleep_displays`; the session keeps the ticket and asks
+`displays_woke` after every batch, and the wake queues the lock -- unless
+`lock.on_display_wake` in the `session` settings says `false`, and never for
+a session with no password (818). A second press in the same sleep is not
+sent again.
+
+One small ask, for the harness only: `TestDesktop` can refuse every request
+(`refuse`) but not one sleep alone, so the shell's handling of a refused
+sleep -- a notice saying why -- has no test. Refusing everything refuses the
+frame submits around it too, and the pump fails on those first. A
+`refuse_sleep: Option<String>` that answers a sleep with that error, as
+`serve` answers it, would let lane C test it. Nothing else waits on it.

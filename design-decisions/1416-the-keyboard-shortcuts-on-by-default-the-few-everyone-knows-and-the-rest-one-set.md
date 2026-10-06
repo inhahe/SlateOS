@@ -84,5 +84,6 @@ change:
   putting the monitor to sleep needs a compositor verb that does not exist
   (lane F, `requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`).
 - **Still lane C's to do:** the monitor-sleep action, once lane F's verb
-  lands. (What Alt+Tab shows was done the same day, as an action rather than a
+  lands. *Done 2026-10-06 (§1487): `SleepDisplay`, unbound, and "Sleep the
+  display" in the power menu.* (What Alt+Tab shows was done the same day, as an action rather than a
   setting: §1419.)

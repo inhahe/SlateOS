@@ -702,6 +702,7 @@ fn the_power_menu_offers_every_power_action_and_carries_each_out() {
         [
             "Log out",
             "Lock",
+            "Sleep the display",
             "Sleep",
             "Hibernate",
             "Restart",
@@ -717,9 +718,14 @@ fn the_power_menu_offers_every_power_action_and_carries_each_out() {
         assert!(shell.power_menu_open);
 
         let rect = shell.power_menu_row_rect(row);
-        let expected = choice
-            .command()
-            .map_or(ShellAction::LogOut, ShellAction::Launch);
+        let expected = match choice {
+            crate::power::PowerChoice::SleepDisplay => {
+                ShellAction::Control(crate::ShellRequest::SleepDisplays)
+            }
+            _ => choice
+                .command()
+                .map_or(ShellAction::LogOut, ShellAction::Launch),
+        };
         assert_eq!(click_at(&mut shell, rect), expected, "{choice:?}");
         // Both menus go: the machine is about to change state behind them.
         assert!(!shell.power_menu_open);
@@ -771,16 +777,30 @@ fn every_power_choice_draws_its_picture_before_its_words() {
     let expected = [
         ("Log out", "system-log-out"),
         ("Lock", "system-lock-screen"),
+        ("Sleep the display", "video-display"),
         ("Sleep", "system-suspend"),
         ("Hibernate", "system-suspend-hibernate"),
         ("Restart", "system-reboot"),
         ("Shut down", "system-shutdown"),
     ];
     assert_eq!(shell.power_menu_visible_rows(), expected.len());
+    // The menu's own pictures: those drawn after its panel, which covers
+    // whatever of the start menu it rises over.
+    let menu = shell.power_menu_rect();
+    let panel = tree
+        .commands
+        .iter()
+        .rposition(|cmd| {
+            matches!(cmd, RenderCommand::FillRect { x, y, width, height, .. }
+                if (*x - menu.x).abs() < 0.5
+                    && (*y - menu.y).abs() < 0.5
+                    && (*width - menu.w).abs() < 0.5
+                    && (*height - menu.h).abs() < 0.5)
+        })
+        .expect("the power menu's panel is drawn");
     for (row, (label, icon)) in expected.iter().enumerate() {
         let rect = shell.power_menu_row_rect(row);
-        let images: Vec<(f32, f32, u64)> = tree
-            .commands
+        let images: Vec<(f32, f32, u64)> = tree.commands[panel..]
             .iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::Image {
@@ -845,6 +865,11 @@ fn the_power_actions_are_carried_out_by_programs_that_exist() {
         ))
     );
     assert_eq!(PowerChoice::LogOut.command(), None);
+    assert_eq!(
+        PowerChoice::SleepDisplay.command(),
+        None,
+        "the compositor's, asked by the session"
+    );
 }
 
 /// The login screen's power buttons do exactly what the start menu's do.

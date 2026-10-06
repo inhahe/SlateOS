@@ -2040,10 +2040,16 @@ live.
   Tab, a switch on any chord but Alt+Tab never ended, and the overview's arrows
   could light a card on a desktop not shown.
 
-- `[C]` **A shortcut that puts the monitor to sleep** -- blocked by lane F
-  (`requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`: no
-  compositor verb exists). `design.txt` line 1321 names it; §1416 makes it
-  available, unbound by default. Then "Sleep the display" in the power menu too.
+- `[C]` **A shortcut that puts the monitor to sleep** -- done 2026-10-06
+  (`design-decisions.md` §1487), on lane F's `SleepDisplays` (2026-10-03,
+  `requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`).
+  `design.txt` line 1321 names it; §1416 makes it available, unbound by
+  default: `HotkeyAction::SleepDisplay` ("Sleep the Display" on the shortcut
+  card), and "Sleep the display" in the power menu, between Lock and Sleep.
+  The wake locks the session unless `lock.on_display_wake` in the `session`
+  settings says not (818 still holds: a session with no password is not
+  locked); the switch on the Settings page is lane E's
+  (`requests/c-e-a-switch-for-locking-when-the-display-wakes.md`).
 
 - `[C]` **A redo tree in the toolkit** -- done 2026-09-27 (§1416, §1420).
   `guitk::undo::UndoHistory<E>` keeps every step as a tree: typing after undoing

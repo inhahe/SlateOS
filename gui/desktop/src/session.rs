@@ -88,8 +88,8 @@ use appearance::Palette;
 use guitk::event::{Event, Key, Modifiers, MouseEvent, SettingsGroup};
 use guitk::render::RenderTree;
 use oswindow::{
-    BlurKind, ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer,
-    PixelFormat, Spec,
+    BlurKind, ConnectionError, ConnectionTransport as Transport, DisplaySleep, Error, EventLoop,
+    Layer, PixelFormat, Spec,
 };
 
 use crate::animations::{AnimationManager, WindowAnimation};
@@ -120,6 +120,9 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// notifications -- the body naming which, and why
 /// ([`ShellSession::report_save`]).
 const NOT_SAVED_TITLE: &str = "Not saved";
+
+/// The title of the notice a refused "Sleep the display" posts.
+const DISPLAY_SLEEP_TITLE: &str = "The display could not sleep";
 
 /// Whether `held` -- what a slot last asked the decoding thread for, as an
 /// image id and a path -- is the request `job` answers.
@@ -441,6 +444,10 @@ pub struct ShellSession<T: Transport> {
     /// not learned that the account is passwordless, and refusing to lock on a
     /// guess is the failure 818 is trying to avoid pointing the other way.
     lockable: bool,
+    /// The displays put to sleep -- "Sleep the display" -- and not yet woken:
+    /// the request whose answer is the wake. Looked at after every batch
+    /// ([`Self::finish_batch`]); `None` while the displays are awake.
+    display_sleep: Option<DisplaySleep>,
     /// Everything currently moving. Empty means no wake-up is registered and
     /// the loop parks with no bound at all, which is what keeps an idle desktop
     /// idle.
@@ -977,6 +984,7 @@ impl<T: Transport> ShellSession<T> {
             running: false,
             launches: Vec::new(),
             lockable: true,
+            display_sleep: None,
             animations: AnimationManager::new(),
             autohide: AutoHideManager::new(AutoHideConfig {
                 enabled: false,
@@ -2709,6 +2717,9 @@ impl<T: Transport> ShellSession<T> {
             worked = true;
         }
 
+        // The displays, woken from the sleep the user put them in.
+        worked |= self.notice_display_wake()?;
+
         // The tray, on its own revision. Separate from the window list
         // deliberately: the two arrive in different frames and change for
         // unrelated reasons, and folding them together would repaint the
@@ -4299,6 +4310,14 @@ impl<T: Transport> ShellSession<T> {
                 self.events
                     .shell_set_opacity(window.0, f32::from(alpha) / 255.0)
             }
+            // Asked once: the displays already asleep -- a second press
+            // cannot reach the shell before the wake, but a power menu row
+            // and a key in one batch could -- are not asked again, and the
+            // one wake answers it.
+            ShellRequest::SleepDisplays if self.display_sleep.is_some() => Ok(()),
+            ShellRequest::SleepDisplays => self.events.sleep_displays().map(|sleep| {
+                self.display_sleep = Some(sleep);
+            }),
         };
         match sent {
             Ok(()) => {}
@@ -4312,6 +4331,43 @@ impl<T: Transport> ShellSession<T> {
             Err(other) => return Err(other),
         }
         Ok(())
+    }
+
+    /// Whether the displays have woken from the sleep the user put them in
+    /// -- and, if so, the session locked where the user's settings ask it to
+    /// be (`idle_lock::lock_on_display_wake`), through the lock every other
+    /// trigger goes through, so `design-decisions.md` 818 holds here too.
+    ///
+    /// A compositor that would not put them to sleep says why, and the
+    /// shell says it on screen: a shortcut that does nothing would look
+    /// broken.
+    fn notice_display_wake(&mut self) -> Result<bool, Error<T>> {
+        let Some(sleep) = self.display_sleep.as_ref() else {
+            return Ok(false);
+        };
+        match self.events.displays_woke(sleep) {
+            Ok(false) => Ok(false),
+            Ok(true) => {
+                self.display_sleep = None;
+                if crate::idle_lock::lock_on_display_wake() {
+                    self.queue_launches(vec![crate::hotkeys::Launch::program(
+                        crate::hotkeys::LOCK_COMMAND,
+                    )]);
+                }
+                self.dirty = true;
+                Ok(true)
+            }
+            Err(ConnectionError::Refused(why)) => {
+                self.display_sleep = None;
+                self.post_desktop_notice(
+                    DISPLAY_SLEEP_TITLE,
+                    &format!("The compositor refused: {why}"),
+                );
+                self.dirty = true;
+                Ok(true)
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// Follow the display to a new size.

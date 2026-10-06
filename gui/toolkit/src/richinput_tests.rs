@@ -478,3 +478,132 @@ fn a_colour_and_a_size_go_on_the_selection() {
     input.set_size(Some(f32::NAN));
     assert_eq!(input.doc().format_at(1).size, None);
 }
+
+/// **Typing at a boundary between two formats takes the format before the
+/// caret**, not the one after it -- in the middle of the text, where the two
+/// differ, as well as at its end.
+#[test]
+fn typing_between_two_formats_takes_the_one_before() {
+    let mut input = RichInput::with_doc(RichDoc::plain("ab", Format::default()));
+    input.set_cursor(0);
+    input.move_right(true);
+    input.toggle(Toggle::Bold);
+    input.set_cursor(1);
+    typed(&mut input, "x");
+    assert_eq!(bold_runs(&input), [(0, 2, true), (2, 3, false)]);
+}
+
+/// **Backspaces one after another are one step to undo**, as typing is:
+/// the whole run of them comes back at once.
+#[test]
+fn backspaces_one_after_another_undo_together() {
+    let mut input = RichInput::new();
+    typed(&mut input, "abcdef");
+    for _ in 0..3 {
+        assert!(input.backspace());
+    }
+    assert_eq!(input.text(), "abc");
+    assert!(input.undo());
+    assert_eq!(input.text(), "abcdef", "one backspace undone, not the run");
+}
+
+/// **Up and Down keep the column they started from** across a shorter line
+/// between: up from a long line through a short one lands on the long one
+/// above, over where it began -- not under the short line's end.
+#[test]
+fn up_and_down_keep_their_column_across_a_short_line() {
+    let w = |t: &str| crate::text::measure(t, SIZE, FontWeightHint::Regular);
+    // Three lines when wrapped: eight a's, a lone b, eight a's -- the same
+    // letter above and below, so a column is the same count of them in a
+    // face of any widths.
+    let mut input = RichInput::with_doc(RichDoc::plain("aaaaaaaa b aaaaaaaa", Format::default()));
+    let narrow = m(w("aaaaaaaa") + 1.0);
+    // Six letters into the last line.
+    input.set_cursor(17);
+    input.move_up(false, &narrow);
+    assert!(
+        (9..=11).contains(&input.cursor()),
+        "on the short line: {}",
+        input.cursor()
+    );
+    input.move_up(false, &narrow);
+    assert_eq!(
+        input.cursor(),
+        6,
+        "under where it began, not at the short line's end"
+    );
+}
+
+/// **An underline is drawn under the text** -- below the baseline, in the
+/// lower part of the line -- not through it.
+#[test]
+fn an_underline_is_drawn_under_the_text() {
+    let palette = Palette::for_mode(false);
+    let look = Look {
+        rect: (0.0, 0.0, 400.0, 100.0),
+        focused: false,
+        placeholder: "",
+    };
+    let mut doc = RichDoc::plain("under", Format::default());
+    doc.apply(0, 5, |f| f.underline = true);
+    let input = RichInput::with_doc(doc);
+    let mut tree = RenderTree::new();
+    input.draw(&mut tree, &palette, &look, &wide());
+    let text_y = tree
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::Text { text, y, .. } if text == "under" => Some(*y),
+            _ => None,
+        })
+        .expect("the text is drawn");
+    let line_y = tree
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::FillRect { y, height, .. } if *height <= 3.0 => Some(*y),
+            _ => None,
+        })
+        .expect("the underline is drawn");
+    // Below the baseline -- the text's top and its ascent -- where a strike
+    // through it is above.
+    let baseline = text_y + crate::text::ascent(SIZE, FontWeightHint::Regular);
+    assert!(
+        line_y >= baseline,
+        "the underline at {line_y} runs through text whose baseline is {baseline}"
+    );
+    assert!(
+        line_y < baseline + SIZE * 0.5,
+        "the underline at {line_y} is far under text whose baseline is {baseline}"
+    );
+}
+
+/// **Runs of different sizes on one line share its baseline**: the smaller
+/// is set lower, by the difference in their ascents, not at the line's top.
+#[test]
+fn runs_of_two_sizes_share_the_lines_baseline() {
+    let palette = Palette::for_mode(false);
+    let look = Look {
+        rect: (0.0, 0.0, 400.0, 100.0),
+        focused: false,
+        placeholder: "",
+    };
+    let mut doc = RichDoc::plain("BIG small", Format::default());
+    doc.apply(0, 3, |f| f.size = Some(SIZE * 2.0));
+    let input = RichInput::with_doc(doc);
+    let mut tree = RenderTree::new();
+    input.draw(&mut tree, &palette, &look, &wide());
+    let y_of = |word: &str| {
+        tree.commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, y, .. } if text.trim() == word => Some(*y),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{word} is not drawn: {:?}", tree.commands))
+    };
+    assert!(
+        y_of("small") > y_of("BIG"),
+        "the small run is set at the line's top"
+    );
+}

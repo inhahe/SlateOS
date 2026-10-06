@@ -252,6 +252,34 @@ fn a_ring_that_never_drains_is_given_up_on() {
     assert_eq!(playback.finish(), Err(PcmError::Stalled));
 }
 
+/// **A ring that drains slowly is waited on to its end**: what is given up
+/// on is a ring that has stopped, not one that is slow. Each step it plays
+/// starts [`STALL_MS`] over, however long the whole of it takes -- a sound's
+/// end is not cut off because the device behind the mixer is slow to play it.
+#[test]
+fn a_ring_that_drains_slowly_is_waited_on_to_its_end() {
+    let mut fake = Fake::new();
+    // A frame a millisecond: a full ring takes seconds to play, many times
+    // `STALL_MS`, and never stops for any of them.
+    fake.rate = 1000;
+    fake.queued = u64::from(RING_FRAMES);
+    Playback::open(Keep(&mut fake)).unwrap().finish().unwrap();
+    let paused: u64 = fake
+        .calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Pause(ms) => Some(*ms),
+            _ => None,
+        })
+        .sum();
+    assert!(
+        paused > STALL_MS * 4,
+        "waited {paused} ms: not long enough to have tested the stall"
+    );
+    assert_eq!(fake.queued, 0, "played to the end");
+    assert_eq!(fake.ioctls().last(), Some(&IOCTL_DRAIN), "and not dropped");
+}
+
 /// **A refused configuration plays nothing**, and **a device that settles
 /// on another configuration is refused** rather than fed the mixer's.
 #[test]

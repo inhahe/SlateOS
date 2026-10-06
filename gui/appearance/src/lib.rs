@@ -2820,14 +2820,15 @@ impl AppearanceSettings {
             let volume = volume as f32;
             s.sounds.volume = volume;
         }
-        // The user's own sounds: an event's name and `off` or a path. One
-        // that is neither, or is no event's, is passed over rather than
-        // costing the rest.
+        // The user's own sounds: an event's name and `off` or a path. A value
+        // that is neither is passed over rather than costing the rest; a
+        // name that is no event's is dropped by `validate`, below, which
+        // holds that rule for settings made in code as well as read.
         for name in doc.keys(&["sounds", "events"]) {
-            let choice = doc
+            if let Some(choice) = doc
                 .get_str(&["sounds", "events", &name])
-                .and_then(|value| EventSound::parse(&value));
-            if let Some(choice) = choice.filter(|_| sounds::is_valid_name(&name)) {
+                .and_then(|value| EventSound::parse(&value))
+            {
                 s.sounds.events.insert(name, choice);
             }
         }

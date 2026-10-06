@@ -7,7 +7,7 @@
 //!
 //! Time is the fake's to keep: a [`PcmSys::pause`] of `ms` milliseconds
 //! plays `ms` milliseconds of the queue, unless the fake is told the ring
-//! never drains.
+//! never drains, or drains slower than it should.
 
 #![allow(
     clippy::unwrap_used,
@@ -41,6 +41,11 @@ pub struct Fake {
     pub queued: u64,
     /// Whether a pause plays any of the queue.
     pub drains: bool,
+    /// How many frames a second of pause plays: the mixer's [`RATE`],
+    /// unless a test slows the device down.
+    ///
+    /// [`RATE`]: crate::pcm::RATE
+    pub rate: u64,
     /// How `HW_PARAMS` answers: the payload it writes back, or the errno.
     pub configure: Result<Vec<u8>, Errno>,
     /// The errno the next write answers with, once, instead of taking.
@@ -57,6 +62,7 @@ impl Fake {
             written: Vec::new(),
             queued: 0,
             drains: true,
+            rate: u64::from(crate::pcm::RATE),
             configure: Ok(hw_params_request().to_vec()),
             refuse_write: None,
             largest_write: usize::MAX,
@@ -131,7 +137,7 @@ impl PcmSys for Fake {
     fn pause(&mut self, ms: u64) {
         self.calls.push(Call::Pause(ms));
         if self.drains {
-            let played = u64::from(crate::pcm::RATE) * ms / 1000;
+            let played = self.rate * ms / 1000;
             self.queued = self.queued.saturating_sub(played);
         }
     }

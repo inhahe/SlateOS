@@ -328,18 +328,6 @@ fn us_to_clock_t(us: u64) -> i64 {
     i64::try_from(us / US_PER_CLOCK_TICK).unwrap_or(i64::MAX)
 }
 
-/// Split microseconds into a `timeval`, saturating rather than wrapping.
-#[inline]
-#[must_use]
-fn us_to_timeval(us: u64) -> crate::time::Timeval {
-    const US_PER_SEC: u64 = 1_000_000;
-    crate::time::Timeval {
-        tv_sec: i64::try_from(us / US_PER_SEC).unwrap_or(i64::MAX),
-        // `% 1_000_000` is < 2^20, so this conversion cannot fail.
-        tv_usec: i64::try_from(us % US_PER_SEC).unwrap_or(0),
-    }
-}
-
 /// Render a [`WaitInfo`] as the `struct rusage` that `wait3`/`wait4` promise.
 ///
 /// Only the six fields the kernel can source are filled; the rest stay zero.
@@ -351,17 +339,18 @@ fn us_to_timeval(us: u64) -> crate::time::Timeval {
 /// where no syscall reaches a kernel.
 #[must_use]
 fn rusage_from_wait_info(info: &WaitInfo) -> crate::resource::Rusage {
-    crate::resource::Rusage {
-        ru_utime: us_to_timeval(info.utime_us),
-        ru_stime: us_to_timeval(info.stime_us),
-        ru_minflt: i64::try_from(info.minflt).unwrap_or(i64::MAX),
-        ru_majflt: i64::try_from(info.majflt).unwrap_or(i64::MAX),
-        ru_nvcsw: i64::try_from(info.nvcsw).unwrap_or(i64::MAX),
-        ru_nivcsw: i64::try_from(info.nivcsw).unwrap_or(i64::MAX),
-        // Every remaining field: no counter exists behind it anywhere in the
-        // system, so zero is the honest answer rather than a discarded one.
-        ..crate::resource::Rusage::default()
-    }
+    // The converter `getrusage` uses too, so a parent's report of a reaped
+    // child and the child's own report cannot disagree. A reaped child's
+    // peak resident set is not kept: its address space is gone.
+    crate::resource::rusage_from_counters(&crate::resource::Counters {
+        utime_us: info.utime_us,
+        stime_us: info.stime_us,
+        minflt: info.minflt,
+        majflt: info.majflt,
+        nvcsw: info.nvcsw,
+        nivcsw: info.nivcsw,
+        maxrss_kib: 0,
+    })
 }
 
 /// How a wait names what it is waiting for.
@@ -4848,15 +4837,15 @@ mod tests {
 
     #[test]
     fn test_us_to_timeval_splits_and_never_goes_negative() {
-        let tv = us_to_timeval(0);
+        let tv = crate::resource::us_to_timeval(0);
         assert_eq!((tv.tv_sec, tv.tv_usec), (0, 0));
-        let tv = us_to_timeval(1_500_000);
+        let tv = crate::resource::us_to_timeval(1_500_000);
         assert_eq!((tv.tv_sec, tv.tv_usec), (1, 500_000));
-        let tv = us_to_timeval(999_999);
+        let tv = crate::resource::us_to_timeval(999_999);
         assert_eq!((tv.tv_sec, tv.tv_usec), (0, 999_999), "no carry below 1s");
         // Same reasoning as above: /1 000 000 makes the seconds conversion
         // total, and `% 1 000 000` is < 2^20 by construction.
-        let tv = us_to_timeval(u64::MAX);
+        let tv = crate::resource::us_to_timeval(u64::MAX);
         assert_eq!(tv.tv_sec, (u64::MAX / 1_000_000) as i64);
         assert!(tv.tv_sec > 0 && (0..1_000_000).contains(&tv.tv_usec));
     }

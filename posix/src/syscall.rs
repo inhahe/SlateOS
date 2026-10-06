@@ -159,6 +159,11 @@ pub const SYS_PROCESS_TRY_WAIT: u64 = 507;
 /// job-control stop — every value is a legitimate exit code — and cannot
 /// grow an options argument its existing callers do not set.
 pub const SYS_PROCESS_WAIT_STATUS: u64 = 1063;
+/// `SYS_PROCESS_GET_RUSAGE` — the caller's own resource accounting: `arg0` a
+/// `who` (`RUSAGE_SELF` 0, `RUSAGE_CHILDREN` -1, `RUSAGE_THREAD` 1), `arg1`
+/// a pointer to a [`crate::resource::RusageInfo`], `arg2` its size; writes
+/// `min(size, 56)` bytes, the rest zero. Backs `resource::getrusage`.
+pub const SYS_PROCESS_GET_RUSAGE: u64 = 1064;
 pub const SYS_PROCESS_IS_READY: u64 = 509;
 pub const SYS_THREAD_CREATE: u64 = 510;
 pub const SYS_THREAD_EXIT: u64 = 511;

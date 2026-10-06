@@ -2954,6 +2954,11 @@ D's to act on once answered).
   The kernel's files wait on lane A
   (`requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`),
   the NULL-pointer audit's last item.
+  **`getrusage` is the caller's own -- 2026-10-06 (lane D).** It reported
+  the machine's system and interrupt time as the caller's, and nothing for
+  `RUSAGE_CHILDREN`, for seven weeks after the kernel's per-process call
+  landed. It now reads that call (`SYS_PROCESS_GET_RUSAGE`) through the
+  converter `wait4` uses. The ring-3 check is `services/ctest-rusage`.
 
 - `[x]` `[D]` **The image carries fonts -- 2026-09-26**, lane D's half of
   `requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`.

@@ -89,6 +89,44 @@ fn a_declaration_sets_only_what_it_names() {
     assert!(c.warnings.is_empty());
 }
 
+/// **A margin's colour is computed per side, is not inherited, and is clear
+/// to begin with.**
+#[test]
+fn a_margins_colour_is_computed_per_side() {
+    let red = Color::rgba(255, 0, 0, 255);
+    let blue = Color::rgba(0, 0, 255, 255);
+    let c = top("margin-color: red; margin-left-color: blue");
+    assert_eq!(c.style.margin_color.top, red);
+    assert_eq!(c.style.margin_color.left, blue);
+    assert_eq!(
+        Style::default().margin_color,
+        crate::style::MarginColors::CLEAR
+    );
+    // A parent's is not the child's, unless the child asks for it.
+    let parent = c.style.clone();
+    let child = computed(
+        "color: red",
+        &Style::default(),
+        &parent,
+        &Inherited::default(),
+    );
+    assert_eq!(child.style.margin_color, crate::style::MarginColors::CLEAR);
+    let asked = computed(
+        "margin-color: inherit",
+        &Style::default(),
+        &parent,
+        &Inherited::default(),
+    );
+    assert_eq!(asked.style.margin_color.left, blue);
+    let reset = computed(
+        "margin-color: initial",
+        &parent,
+        &parent,
+        &Inherited::default(),
+    );
+    assert_eq!(reset.style.margin_color, crate::style::MarginColors::CLEAR);
+}
+
 /// **A later declaration wins** -- the order is the whole rule.
 #[test]
 fn a_later_declaration_wins() {

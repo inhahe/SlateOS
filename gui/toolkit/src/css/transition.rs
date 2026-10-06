@@ -274,6 +274,8 @@ pub enum Animated {
     Background,
     /// A side's border colour.
     BorderColor(Side),
+    /// A side's margin colour.
+    MarginColor(Side),
     /// A side's border width.
     BorderWidth(Side),
     /// A corner's radius.
@@ -317,6 +319,7 @@ impl Animated {
             Property::Color => Self::Color,
             Property::BackgroundColor => Self::Background,
             Property::BorderColor(side) => Self::BorderColor(side),
+            Property::MarginColor(side) => Self::MarginColor(side),
             Property::BorderWidth(side) => Self::BorderWidth(side),
             Property::BorderRadius(corner) => Self::Radius(corner),
             Property::Opacity => Self::Opacity,
@@ -352,6 +355,7 @@ impl Animated {
         let sides = Side::ALL.into_iter().flat_map(|s| {
             [
                 Self::BorderColor(s),
+                Self::MarginColor(s),
                 Self::BorderWidth(s),
                 Self::Padding(s),
                 Self::Margin(s),
@@ -455,6 +459,12 @@ impl Animated {
             Self::Color => Part::MaybeColor(style.foreground),
             Self::Background => Part::Color(style.background),
             Self::BorderColor(s) => Part::Color(border(s).color),
+            Self::MarginColor(s) => Part::Color(match s {
+                Side::Top => style.margin_color.top,
+                Side::Right => style.margin_color.right,
+                Side::Bottom => style.margin_color.bottom,
+                Side::Left => style.margin_color.left,
+            }),
             Self::BorderWidth(s) => Part::Number(border(s).width),
             Self::Radius(c) => Part::Number(match c {
                 Corner::TopLeft => style.border_radius.top_left,
@@ -500,6 +510,12 @@ impl Animated {
             (Self::Color, Part::MaybeColor(c)) => style.foreground = c,
             (Self::Background, Part::Color(c)) => style.background = c,
             (Self::BorderColor(s), Part::Color(c)) => border(style, s).color = c,
+            (Self::MarginColor(s), Part::Color(c)) => match s {
+                Side::Top => style.margin_color.top = c,
+                Side::Right => style.margin_color.right = c,
+                Side::Bottom => style.margin_color.bottom = c,
+                Side::Left => style.margin_color.left = c,
+            },
             (Self::BorderWidth(s), Part::Number(v)) => border(style, s).width = least(v),
             (Self::Radius(c), Part::Number(v)) => {
                 let r = &mut style.border_radius;

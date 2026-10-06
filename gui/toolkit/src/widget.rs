@@ -1731,6 +1731,37 @@ impl Widget {
         }
     }
 
+    /// Its margin's colour ([`Style::margin_color`]): each side's band
+    /// between the margin's edge and the border's, filled where a style gave
+    /// that side a colour -- `design.txt`'s margin "including color". The
+    /// corners are the top and bottom bands', so a uniform colour is one
+    /// frame round the box with no seams.
+    fn render_margin(&self, tree: &mut RenderTree) {
+        let colors = self.look().margin_color;
+        let m = self.layout.margin;
+        let (x, y) = (self.layout.x, self.layout.y);
+        let (w, h) = (self.layout.outer_width(), self.layout.outer_height());
+        let between = self.layout.border_box_height();
+        let bands = [
+            (x, y, w, m.top, colors.top),
+            (x, y + h - m.bottom, w, m.bottom, colors.bottom),
+            (x, y + m.top, m.left, between, colors.left),
+            (x + w - m.right, y + m.top, m.right, between, colors.right),
+        ];
+        for (bx, by, bw, bh, color) in bands {
+            if color.a > 0 && bw > 0.0 && bh > 0.0 {
+                tree.push(RenderCommand::FillRect {
+                    x: bx,
+                    y: by,
+                    width: bw,
+                    height: bh,
+                    color,
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+        }
+    }
+
     /// [`render_on`](Self::render_on), at full opacity.
     fn render_opaque(
         &self,
@@ -1743,6 +1774,11 @@ impl Widget {
         let y = self.layout.y + self.layout.margin.top;
         let w = self.layout.border_box_width();
         let h = self.layout.border_box_height();
+
+        // Its margin, where a style gives it a colour: each side's band
+        // between the margin's edge and the border's, the corners the top
+        // and bottom bands'.
+        self.render_margin(tree);
 
         // Its shadow, under it: the box offset, grown by the spread and
         // blurred, by the renderer.

@@ -90,6 +90,10 @@ pub enum Property {
     TextAlign,
     /// `margin-*`.
     Margin(Side),
+    /// `margin-*-color`: what a side's margin is filled with -- not CSS's,
+    /// whose margins are always clear, but `design.txt`'s "margin
+    /// (including color)".
+    MarginColor(Side),
     /// `padding-*`.
     Padding(Side),
     /// `border-*-width`.
@@ -375,6 +379,9 @@ fn longhand(name: &str) -> Option<Property> {
         if name == format!("margin-{s}") {
             return Some(Property::Margin(side));
         }
+        if name == format!("margin-{s}-color") {
+            return Some(Property::MarginColor(side));
+        }
         if name == format!("padding-{s}") {
             return Some(Property::Padding(side));
         }
@@ -434,6 +441,9 @@ pub fn read(name: &str, tokens: &[Spanned]) -> Result<Vec<(Property, Value)>, Va
         )],
         "font" => font_shorthand(&mut c)?,
         "margin" => sides(&mut c, Property::Margin, margin_value)?,
+        "margin-color" => sides(&mut c, Property::MarginColor, |c| {
+            Ok(Value::Color(value::color(c)?))
+        })?,
         "padding" => sides(&mut c, Property::Padding, padding_value)?,
         "border-width" => sides(&mut c, Property::BorderWidth, border_width)?,
         "border-color" => sides(&mut c, Property::BorderColor, |c| {
@@ -474,6 +484,7 @@ fn properties_of(name: &str) -> Option<Vec<Property>> {
             Property::LineHeight,
         ]),
         "margin" => per_side(Property::Margin),
+        "margin-color" => per_side(Property::MarginColor),
         "padding" => per_side(Property::Padding),
         "inset" => per_side(Property::Inset),
         "border-width" => per_side(Property::BorderWidth),
@@ -520,9 +531,10 @@ fn properties_of(name: &str) -> Option<Vec<Property>> {
 /// A longhand's value.
 fn longhand_value(property: Property, c: &mut Cursor<'_>) -> Result<Value, ValueError> {
     match property {
-        Property::Color | Property::BackgroundColor | Property::BorderColor(_) => {
-            Ok(Value::Color(value::color(c)?))
-        }
+        Property::Color
+        | Property::BackgroundColor
+        | Property::BorderColor(_)
+        | Property::MarginColor(_) => Ok(Value::Color(value::color(c)?)),
         Property::FontFamily => font_family(c),
         Property::FontSize => font_size(c),
         Property::FontWeight => font_weight(c),

@@ -838,6 +838,17 @@ impl<'s> Computing<'s, '_> {
                 (Property::BorderColor(side), Value::Initial) => {
                     border_mut(&mut self.style, side).color = current;
                 }
+                (Property::MarginColor(side), Value::Color(c)) => {
+                    let c = self.color_of(c);
+                    *margin_color_mut(&mut self.style, side) = c;
+                }
+                (Property::MarginColor(side), Value::Inherit) => {
+                    *margin_color_mut(&mut self.style, side) =
+                        margin_color_of(self.parent_style, side);
+                }
+                (Property::MarginColor(side), Value::Initial) => {
+                    *margin_color_mut(&mut self.style, side) = margin_color_of(&initial, side);
+                }
                 (Property::BorderWidth(side), Value::Length(l)) => {
                     border_mut(&mut self.style, side).width = l.resolve(units, 0.0).max(0.0);
                 }
@@ -1005,6 +1016,24 @@ pub(super) const fn corner_index(corner: Corner) -> usize {
         Corner::TopRight => 1,
         Corner::BottomRight => 2,
         Corner::BottomLeft => 3,
+    }
+}
+
+fn margin_color_mut(style: &mut Style, side: Side) -> &mut crate::color::Color {
+    match side {
+        Side::Top => &mut style.margin_color.top,
+        Side::Right => &mut style.margin_color.right,
+        Side::Bottom => &mut style.margin_color.bottom,
+        Side::Left => &mut style.margin_color.left,
+    }
+}
+
+const fn margin_color_of(style: &Style, side: Side) -> crate::color::Color {
+    match side {
+        Side::Top => style.margin_color.top,
+        Side::Right => style.margin_color.right,
+        Side::Bottom => style.margin_color.bottom,
+        Side::Left => style.margin_color.left,
     }
 }
 

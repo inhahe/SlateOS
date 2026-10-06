@@ -42,6 +42,46 @@ fn moved_to(tree: &mut WidgetTree, x: f32, y: f32) {
     }));
 }
 
+/// **A coloured margin is drawn as four bands round the border box** -- the
+/// top and bottom whole across, the sides between them -- and a clear one
+/// draws nothing.
+#[test]
+fn a_coloured_margin_is_drawn_round_the_box() {
+    let tree = tree_of(vec![
+        Widget::label("hi").css("margin: 10px 20px; margin-color: red; margin-left-color: blue"),
+        Widget::label("plain").css("margin: 10px"),
+    ]);
+    let label = &tree.root.children[0];
+    let (x, y) = (label.layout.x, label.layout.y);
+    let (w, h) = (label.layout.outer_width(), label.layout.outer_height());
+    let fills: Vec<(f32, f32, f32, f32, Color)> = tree
+        .render()
+        .commands
+        .into_iter()
+        .filter_map(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if color == RED || color == BLUE => Some((x, y, width, height, color)),
+            _ => None,
+        })
+        .collect();
+    let between = label.layout.border_box_height();
+    assert_eq!(
+        fills,
+        [
+            (x, y, w, 10.0, RED),
+            (x, y + h - 10.0, w, 10.0, RED),
+            (x, y + 10.0, 20.0, between, BLUE),
+            (x + w - 20.0, y + 10.0, 20.0, between, RED),
+        ]
+    );
+}
+
 /// **A widget's own CSS sets its look, and leaves its program's style as it
 /// was**: what CSS starts from each time.
 #[test]

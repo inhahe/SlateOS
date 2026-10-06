@@ -83,6 +83,26 @@ fn sides_take_one_to_four_values() {
     );
 }
 
+/// **`margin-color` gives each side's margin a colour, by CSS's rule for one
+/// to four values; `margin-left-color` one side's.**
+#[test]
+fn margin_color_colours_each_sides_margin() {
+    let all = get("margin-color", "red").unwrap();
+    assert_eq!(all.len(), 4);
+    assert!(
+        all.iter()
+            .all(|(p, v)| matches!(p, Property::MarginColor(_)) && *v == color(255, 0, 0))
+    );
+    let two = get("margin-color", "red blue").unwrap();
+    assert!(two.contains(&(Property::MarginColor(Side::Top), color(255, 0, 0))));
+    assert!(two.contains(&(Property::MarginColor(Side::Left), color(0, 0, 255))));
+    assert_eq!(one("margin-left-color", "#0f0"), color(0, 255, 0));
+    assert!(
+        get("margin-color", "2px").is_err(),
+        "a colour, not a length"
+    );
+}
+
 /// **`border` sets each side's width, style and colour, in any order**; what
 /// it leaves out is CSS's initial value -- so a border with no style is none.
 #[test]

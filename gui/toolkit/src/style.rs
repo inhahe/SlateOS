@@ -117,6 +117,41 @@ impl Borders {
     }
 }
 
+/// The colour each side's margin is filled with -- `design.txt`'s "set
+/// margin (including color) ... on all sides or individual sides". A margin
+/// is clear unless a colour is set: [`Color::TRANSPARENT`], the default,
+/// draws nothing, and the band is the margin's room outside the border,
+/// laid out as it always was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarginColors {
+    pub top: Color,
+    pub right: Color,
+    pub bottom: Color,
+    pub left: Color,
+}
+
+impl MarginColors {
+    /// Every side clear.
+    pub const CLEAR: Self = Self::all(Color::TRANSPARENT);
+
+    /// Every side in `color`.
+    #[must_use]
+    pub const fn all(color: Color) -> Self {
+        Self {
+            top: color,
+            right: color,
+            bottom: color,
+            left: color,
+        }
+    }
+}
+
+impl Default for MarginColors {
+    fn default() -> Self {
+        Self::CLEAR
+    }
+}
+
 /// A drop shadow, apart from the shape that casts it.
 ///
 /// One value rather than five loose parameters because the five are one
@@ -254,6 +289,8 @@ pub struct Style {
 
     // Margin (outside border)
     pub margin: Edges,
+    /// What each side's margin is filled with; clear by default.
+    pub margin_color: MarginColors,
 
     // Border
     pub border: Borders,
@@ -346,6 +383,7 @@ impl Default for Style {
             caret_width: crate::textedit::CARET_WIDTH,
             padding: Edges::ZERO,
             margin: Edges::ZERO,
+            margin_color: MarginColors::CLEAR,
             border: Borders::default(),
             border_radius: CornerRadii::ZERO,
             font_size: 14.0,

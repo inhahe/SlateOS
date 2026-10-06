@@ -865,6 +865,43 @@ fn a_fixed_widget_is_placed_in_the_window_over_everything() {
     assert!(is_pressed(&tree, 0));
 }
 
+/// **A press over a fixed widget goes nowhere beneath it, even when it does
+/// nothing with the press itself** -- a label laid over a button keeps the
+/// button from being pressed through it.
+#[test]
+fn a_press_on_an_overlay_that_takes_none_reaches_nothing_beneath() {
+    let mut tree = tree_of(vec![
+        Widget::button("beneath").css("width: 200px; height: 60px"),
+        Widget::label("a note over it")
+            .css("position: fixed; left: 10px; top: 10px; width: 120px; height: 30px"),
+    ]);
+    pressed_at(&mut tree, 20.0, 20.0);
+    assert!(!is_pressed(&tree, 0), "pressed through the note");
+    // Clear of it, the button takes the press.
+    pressed_at(&mut tree, 150.0, 50.0);
+    assert!(is_pressed(&tree, 0));
+}
+
+/// **A widget placed with `position: absolute` takes no room in its
+/// container's flow**: what follows it is where it would be without it.
+#[test]
+fn an_absolute_widget_takes_no_room_in_the_flow() {
+    let placed = |with: bool| {
+        let mut children = Vec::new();
+        if with {
+            children.push(
+                Widget::label("placed")
+                    .css("position: absolute; left: 0; top: 0; width: 100px; height: 40px"),
+            );
+        }
+        children.push(Widget::label("after"));
+        let tree = tree_of(children);
+        let after = tree.root.children.last().unwrap();
+        (after.layout.x, after.layout.y)
+    };
+    assert_eq!(placed(true), placed(false));
+}
+
 /// **`border-radius: 50%` draws a circle**: the radius is half the box's
 /// side, once it is laid out -- and drawn so.
 #[test]

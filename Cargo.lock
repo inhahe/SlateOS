@@ -4284,6 +4284,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "themepreview"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "compositor",
+ "desktop",
+ "guiremote",
+ "guitk",
+ "imagecodec",
+ "pathcodec",
+ "scratchdir",
+ "settingsfile",
+]
+
+[[package]]
 name = "thumbs"
 version = "0.1.0"
 dependencies = [

@@ -2269,6 +2269,72 @@ impl AppearanceSettings {
         self.sound_theme.sound(name)
     }
 
+    /// Wear the theme `info`, found in `dirs`, on every axis it can be chosen
+    /// for -- its colours, controls, motion, window frames, taskbar, wallpaper,
+    /// fonts, icons, cursors and sounds -- and leave every other axis as it
+    /// is. What a theme browser's "apply" does in one click, and what a
+    /// picture of the theme shows (`gui/themepreview`). Answers the axes
+    /// taken, by the names `meta.supports` gives them, in that order.
+    ///
+    /// An axis is taken as [`themes::ThemeInfo`]'s `provides_*` says, so a
+    /// theme listed as giving no colours is never worn for them; a folder of
+    /// cursors or of sounds (`cursors/`, `stereo/`) beside its file gives
+    /// those. Nothing is saved: the caller saves what it means to keep.
+    pub fn wear_theme(
+        &mut self,
+        info: &themes::ThemeInfo,
+        dirs: &themes::ThemeDirs,
+    ) -> Vec<&'static str> {
+        let id = info.id.as_os_str();
+        let holds = |folder: &str| {
+            info.dir
+                .as_ref()
+                .is_some_and(|dir| dir.join(folder).is_dir())
+        };
+        let mut taken = Vec::new();
+        if info.provides_colors() {
+            self.color_theme = themes::ColorTheme::load_from(dirs, id);
+            taken.push(themes::DARK_SECTION);
+        }
+        if info.provides_widget_style() {
+            self.widget_theme = themes::WidgetTheme::load_from(dirs, id);
+            taken.push(themes::WIDGET_SECTION);
+        }
+        if info.provides_animation() {
+            self.animation_theme = themes::AnimationTheme::load_from(dirs, id);
+            taken.push(themes::ANIMATION_SECTION);
+        }
+        if info.provides_decorations() {
+            self.decoration_theme = themes::DecorationTheme::load_from(dirs, id);
+            taken.push(themes::DECORATIONS_SECTION);
+        }
+        if info.provides_panel() {
+            self.panel_theme = themes::PanelTheme::load_from(dirs, id);
+            taken.push(themes::PANEL_SECTION);
+        }
+        if info.provides_wallpapers() {
+            self.wallpaper_theme = themes::WallpaperTheme::load_from(dirs, id);
+            taken.push(themes::WALLPAPERS_SECTION);
+        }
+        if info.provides_fonts() {
+            self.font_theme = themes::FontTheme::load_from(dirs, id);
+            taken.push(themes::FONTS_SECTION);
+        }
+        if info.provides_icons() {
+            self.icon_theme = icons::IconTheme::named(id, dirs.clone());
+            taken.push(icons::ICONS_DIR);
+        }
+        if info.origin == themes::Origin::BuiltIn || holds(cursors::CURSORS_DIR) {
+            self.cursor_theme = cursors::CursorTheme::named(id, dirs.clone(), cursors::icon_dirs());
+            taken.push(cursors::CURSORS_DIR);
+        }
+        if info.origin == themes::Origin::BuiltIn || holds(sounds::STEREO_DIR) {
+            self.sound_theme = sounds::SoundTheme::named(id, dirs.clone(), sounds::sound_dirs());
+            taken.push(sounds::AXIS);
+        }
+        taken
+    }
+
     /// Validate and clamp settings to sane ranges.
     pub fn validate(&mut self) {
         // A volume is a fraction; a NaN set in code is the default rather
@@ -4639,6 +4705,101 @@ mod tests {
         let mut doc = Document::new();
         plain.write_into(&mut doc);
         assert_eq!(dependency_paths_in(&doc, &dirs), [system]);
+    }
+
+    /// **A theme is worn on every axis it covers, and on no other**: a full
+    /// theme on all ten, a colours-only theme on its colours alone with the
+    /// rest left as they were, the built-in theme on everything compiled in.
+    #[test]
+    fn a_theme_is_worn_on_every_axis_it_covers() {
+        let scratch = scratchdir::ScratchDir::new("appearance-wear-theme");
+        let dirs = themes::ThemeDirs {
+            user: Some(scratch.dir().join("user")),
+            system: scratch.dir().join("system"),
+        };
+        let full = scratch.dir().join("user").join("full");
+        for folder in ["icons", "cursors", "stereo", "wallpapers"] {
+            std::fs::create_dir_all(full.join(folder)).unwrap();
+        }
+        std::fs::write(full.join("wallpapers/night.png"), b"not decoded here").unwrap();
+        std::fs::write(
+            full.join("theme.yaml"),
+            "colors:\n  base: \"#101010\"\n\
+             widget-style:\n  button:\n    radius: 9\n\
+             animation:\n  duration-ms: 300\n\
+             window-decorations:\n  border: 2\n\
+             taskbar-panel:\n  gloss: 0\n\
+             wallpapers:\n  dark: wallpapers/night.png\n\
+             fonts:\n  ui: [Inter]\n",
+        )
+        .unwrap();
+        let only = scratch.dir().join("user").join("only");
+        std::fs::create_dir_all(&only).unwrap();
+        std::fs::write(only.join("theme.yaml"), "colors:\n  base: \"#202020\"\n").unwrap();
+        let listed = themes::available_in(&dirs);
+        let info = |id: &str| listed.iter().find(|i| i.id == id).unwrap().clone();
+
+        let mut s = AppearanceSettings::default();
+        let taken = s.wear_theme(&info("full"), &dirs);
+        assert_eq!(
+            taken,
+            [
+                "colors",
+                "widget-style",
+                "animation",
+                "window-decorations",
+                "taskbar-panel",
+                "wallpapers",
+                "fonts",
+                "icons",
+                "cursors",
+                "sounds"
+            ]
+        );
+        let full_id = std::ffi::OsStr::new("full");
+        assert_eq!(s.color_theme.id(), full_id);
+        assert_eq!(s.widget_theme.id(), full_id);
+        assert_eq!(s.animation_theme.id(), full_id);
+        assert_eq!(s.decoration_theme.id(), full_id);
+        assert_eq!(s.panel_theme.id(), full_id);
+        assert_eq!(s.wallpaper_theme.id(), full_id);
+        assert_eq!(s.font_theme.id(), full_id);
+        assert_eq!(s.icon_theme.id(), full_id);
+        assert_eq!(s.cursor_theme.id(), full_id);
+        assert_eq!(s.sound_theme.id(), full_id);
+        assert_eq!(Palette::from_settings(&s).base, Color::from_hex(0x10_1010));
+
+        // Colours only: the rest stays the full theme's -- worn before, and
+        // nothing about this theme speaks for them.
+        let taken = s.wear_theme(&info("only"), &dirs);
+        assert_eq!(taken, ["colors"]);
+        assert_eq!(s.color_theme.id(), std::ffi::OsStr::new("only"));
+        assert_eq!(s.widget_theme.id(), full_id);
+        assert_eq!(s.icon_theme.id(), full_id);
+        assert_eq!(Palette::from_settings(&s).base, Color::from_hex(0x20_2020));
+
+        // The built-in theme: everything it has compiled in, which is all
+        // but a wallpaper and fonts -- choosing it for those is choosing
+        // your own.
+        let built_in = listed
+            .iter()
+            .find(|i| i.origin == themes::Origin::BuiltIn)
+            .unwrap();
+        let taken = s.wear_theme(built_in, &dirs);
+        assert!(
+            !taken.contains(&"wallpapers") && !taken.contains(&"fonts"),
+            "{taken:?}"
+        );
+        assert!(
+            taken.contains(&"colors") && taken.contains(&"icons"),
+            "{taken:?}"
+        );
+        assert!(s.color_theme.is_built_in());
+        assert_eq!(
+            s.wallpaper_theme.id(),
+            full_id,
+            "a wallpaper it does not give"
+        );
     }
 
     // ---- the widget style ----

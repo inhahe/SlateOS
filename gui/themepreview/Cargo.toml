@@ -1,0 +1,37 @@
+[package]
+name = "themepreview"
+version = "0.1.0"
+edition = "2024"
+description = "Pictures of a theme: the desktop drawn in it by its own code, composed headless"
+
+[[bin]]
+name = "theme-preview"
+path = "src/main.rs"
+
+[dependencies]
+# The settings a picture is drawn in, and the themes it is of.
+appearance = { path = "../appearance" }
+# The desktop's own drawing -- its taskbar, start menu, icons, wallpaper,
+# notifications -- so a picture shows what the desktop draws, not an
+# imitation of it.
+desktop = { path = "../desktop" }
+# The compositor's own composing, run headless: the windows' frames, the glass
+# behind the taskbar and the menus, all as the screen would show them.
+compositor = { path = "../compositor" }
+# What a surface is asked for as: its place, its layer, its blur.
+guiremote = { path = "../remote" }
+# The controls the sample window holds.
+guitk = { path = "../toolkit" }
+# The wallpaper decoded, and the picture written as a PNG.
+imagecodec = { path = "../imagecodec" }
+# A theme's name or a path shown in a message, every byte of it.
+pathcodec = { path = "../pathcodec" }
+# The picture written whole or not at all.
+settingsfile = { path = "../settingsfile" }
+
+[dev-dependencies]
+# Scratch theme directories for the tests.
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

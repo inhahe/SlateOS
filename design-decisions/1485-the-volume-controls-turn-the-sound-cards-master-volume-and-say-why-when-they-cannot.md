@@ -52,6 +52,21 @@ pane opens, and says "Can't be changed yet" in the slider's place -- or
 its own slider, as for the volume. Once the desktop holds the right,
 setting it goes in `backlight` and the slider comes back.
 
+### The switches above them
+
+The same rule for the quick settings' switches. Wi-Fi and Bluetooth have
+no service behind them that the desktop can ask, so they say "Not
+available yet" where the switch would be and take no press
+(`TD-C-THE-RADIO-SWITCHES-HAVE-NO-RADIOS-BEHIND-THEM`). And a switch that
+does work joins them: **Dark Mode**, the quick toggle
+`roadmap-detailed.md` asks for beside the automatic mode.
+
+| Choice | Instead of | For | Against |
+|---|---|---|---|
+| **The switch shows what is drawn** (`is_light`), set wherever the appearance is | the setting alone | In the automatic mode it shows the hour's mode; a mode chosen in Settings turns it too. | -- |
+| **Flipping it chooses the other mode outright**, leaving the automatic mode | flipping only until the next edge of the day | A switch that flipped and then showed the same mode until evening would look broken; this is what choosing a mode in Settings does. | A user of the automatic mode who flips it must choose "System (Auto)" in Settings to have it back. |
+| **The radios' rows stay, saying why** | removing them until a service exists | The user learns where they will be; the layout does not shift when they come. | Two rows that do nothing yet. |
+
 ### What it does not do
 
 - **Per-program volume, the output device, the volume flyout**

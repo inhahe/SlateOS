@@ -155,6 +155,8 @@ mod photo_frame_tests;
 #[cfg(test)]
 mod pointer_tests;
 #[cfg(test)]
+mod quick_settings_tests;
+#[cfg(test)]
 mod service_menu_tests;
 #[cfg(test)]
 mod tray_window_tests;
@@ -209,6 +211,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ============================================================================
 // Geometry
 // ============================================================================
+
+/// What the quick settings' Wi-Fi and Bluetooth switches say where the
+/// switch would be: no radio is reachable from the shell -- there is no
+/// wireless service to ask -- so a switch there would move and change
+/// nothing (`TD-C-THE-RADIO-SWITCHES-HAVE-NO-RADIOS-BEHIND-THEM`).
+pub const RADIOS_UNAVAILABLE: &str = "Not available yet";
 
 /// The file the pinned applications live in.
 const TASKBAR_CONFIG_NAME: &str = "taskbar";
@@ -3023,6 +3031,21 @@ impl DesktopShell {
         shell
             .icons
             .set_icon_size(shell.appearance.icon_size.pixels());
+        // The Dark Mode switch shows what the starting settings draw; and the
+        // radios' switches, which no service behind them would answer, say so
+        // rather than move (design-decisions §1485).
+        let dark = !shell.appearance.is_light();
+        shell
+            .notifications
+            .set_quick_setting(notif_pane::QuickSetting::DarkMode, dark);
+        for radio in [
+            notif_pane::QuickSetting::WiFi,
+            notif_pane::QuickSetting::Bluetooth,
+        ] {
+            shell
+                .notifications
+                .set_unavailable(radio, Some(RADIOS_UNAVAILABLE));
+        }
         shell
     }
 
@@ -3140,6 +3163,11 @@ impl DesktopShell {
         // nothing.
         self.icons.set_icon_size(appearance.icon_size.pixels());
         guitk::scaling::set_global_scale(appearance.scale_factor());
+        // The quick settings' Dark Mode switch shows what is drawn: set here,
+        // so a mode chosen in Settings, or the automatic mode's hour turning,
+        // turns the switch with it.
+        self.notifications
+            .set_quick_setting(notif_pane::QuickSetting::DarkMode, !appearance.is_light());
         self.appearance = appearance;
         // After the store: the taskbar's thickness follows the scale just
         // set, and the icons must stay clear of the bar as it is drawn.
@@ -7960,6 +7988,34 @@ impl DesktopShell {
         // The compositor warms the frame, and it reads the file rather than
         // being handed a value. Saying "go and read it again" is the session's
         // job because only it holds the connection.
+        self.appearance_dirty = true;
+    }
+
+    /// The quick settings' Dark Mode switch: the desktop drawn dark if it is
+    /// light, light if it is dark.
+    ///
+    /// By what is drawn, not the setting alone: in the automatic mode the
+    /// switch shows the hour's mode, and flipping it chooses the other one
+    /// outright -- leaving the automatic mode, as choosing a mode in Settings
+    /// does -- since a switch that flipped and showed the same mode until the
+    /// next edge of the day would look broken. Load, modify, save, for
+    /// [`toggle_night_light`](Self::toggle_night_light)'s reasons; the shell
+    /// takes the new appearance at once and the compositor is told to read
+    /// the file again.
+    fn toggle_dark_mode(&mut self) {
+        let mode = if self.appearance.is_light() {
+            appearance::ThemeMode::Dark
+        } else {
+            appearance::ThemeMode::Light
+        };
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.theme_mode = mode;
+        if let Err(err) = file.save() {
+            eprintln!("desktop: could not save appearance.yaml: {err}");
+        }
+        let mut now = self.appearance.clone();
+        now.theme_mode = mode;
+        self.set_appearance(now);
         self.appearance_dirty = true;
     }
 
@@ -12941,13 +12997,11 @@ impl DesktopShell {
                         self.apply_focus_toggle(qs);
                     }
                     QuickSetting::NightLight => self.toggle_night_light(),
-                    // Wi-Fi and Bluetooth have no service in this process to
-                    // talk to: they are the network and bluetooth daemons'
-                    // state, reached over IPC the shell does not hold yet. The
-                    // switches move and are remembered by the pane, and that
-                    // is all they do — recorded in known-issues.md rather than
-                    // left to be rediscovered by someone wondering why the
-                    // radio stayed on.
+                    QuickSetting::DarkMode => self.toggle_dark_mode(),
+                    // Wi-Fi and Bluetooth have no service to talk to: no
+                    // radio is reachable from this process. Their switches say
+                    // so and take no press (`RADIOS_UNAVAILABLE`, set when the
+                    // shell is made), so neither arrives here.
                     //
                     // Night Light used to be in this list, described as "the
                     // compositor's gamma ramp". It is an appearance setting

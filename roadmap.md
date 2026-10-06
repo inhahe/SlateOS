@@ -1853,7 +1853,11 @@ live.
   which moved a number too, now shows the screen's brightness as the
   kernel reports it and says it cannot be changed yet: the kernel's call
   exists, the right to make it is not given to the desktop
-  (`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`).
+  (`TD-C-THE-DESKTOP-CANNOT-SET-THE-BRIGHTNESS-IT-SHOWS`). Above them, the
+  Wi-Fi and Bluetooth switches, with no radio service behind them, say
+  "Not available yet" (`TD-C-THE-RADIO-SWITCHES-HAVE-NO-RADIOS-BEHIND-THEM`),
+  and a Dark Mode switch joins them: the quick toggle the automatic mode's
+  roadmap entry asks for.
 
 - `[C]` **Pictures of a theme** -- done 2026-10-06 (`design-decisions.md`
   §1484). `theme-preview THEME OUT.png` draws one standard scene in a

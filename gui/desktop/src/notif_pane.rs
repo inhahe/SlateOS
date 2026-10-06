@@ -320,6 +320,9 @@ pub struct Notification {
 pub enum QuickSetting {
     DoNotDisturb,
     NightLight,
+    /// Whether the desktop is drawn dark: on is the dark mode, off the light
+    /// one -- what is drawn, so in the automatic mode it follows the hour.
+    DarkMode,
     WiFi,
     Bluetooth,
     FocusMode,
@@ -330,6 +333,7 @@ impl QuickSetting {
         match self {
             Self::DoNotDisturb => "Do Not Disturb",
             Self::NightLight => "Night Light",
+            Self::DarkMode => "Dark Mode",
             Self::WiFi => "Wi-Fi",
             Self::Bluetooth => "Bluetooth",
             Self::FocusMode => "Focus Mode",
@@ -340,10 +344,23 @@ impl QuickSetting {
         &[
             Self::DoNotDisturb,
             Self::NightLight,
+            Self::DarkMode,
             Self::WiFi,
             Self::Bluetooth,
             Self::FocusMode,
         ]
+    }
+
+    /// Where this setting is in [`all`](Self::all).
+    const fn index(self) -> usize {
+        match self {
+            Self::DoNotDisturb => 0,
+            Self::NightLight => 1,
+            Self::DarkMode => 2,
+            Self::WiFi => 3,
+            Self::Bluetooth => 4,
+            Self::FocusMode => 5,
+        }
     }
 
     /// How many toggles the quick-settings block draws.
@@ -511,6 +528,7 @@ impl PaneState {
 struct QuickSettingsState {
     do_not_disturb: bool,
     night_light: bool,
+    dark_mode: bool,
     wifi: bool,
     bluetooth: bool,
     focus_mode: bool,
@@ -532,6 +550,8 @@ impl Default for QuickSettingsState {
         Self {
             do_not_disturb: false,
             night_light: false,
+            // The desktop's default appearance is dark.
+            dark_mode: true,
             wifi: true,
             bluetooth: true,
             focus_mode: false,
@@ -557,6 +577,7 @@ impl QuickSettingsState {
         match setting {
             QuickSetting::DoNotDisturb => self.do_not_disturb,
             QuickSetting::NightLight => self.night_light,
+            QuickSetting::DarkMode => self.dark_mode,
             QuickSetting::WiFi => self.wifi,
             QuickSetting::Bluetooth => self.bluetooth,
             QuickSetting::FocusMode => self.focus_mode,
@@ -567,6 +588,7 @@ impl QuickSettingsState {
         match setting {
             QuickSetting::DoNotDisturb => self.do_not_disturb = !self.do_not_disturb,
             QuickSetting::NightLight => self.night_light = !self.night_light,
+            QuickSetting::DarkMode => self.dark_mode = !self.dark_mode,
             QuickSetting::WiFi => self.wifi = !self.wifi,
             QuickSetting::Bluetooth => self.bluetooth = !self.bluetooth,
             QuickSetting::FocusMode => self.focus_mode = !self.focus_mode,
@@ -601,6 +623,9 @@ pub struct NotificationPane {
     /// of reach (`crate::volume`) or the screen's brightness cannot be set
     /// (`crate::backlight`).
     fixed: [Option<Fixed>; 2],
+    /// The switches that cannot be used, by their place in
+    /// [`QuickSetting::all`]: why, shown where the switch would be.
+    unavailable: [Option<&'static str>; QuickSetting::COUNT],
     /// Per-app notification settings.
     app_settings: Vec<AppNotifSettings>,
     /// Scroll offset in the notification list (pixels).
@@ -652,6 +677,7 @@ impl NotificationPane {
             quick_settings: QuickSettingsState::default(),
             qs_sliders: [Self::level_slider(), Self::level_slider()],
             fixed: [None, None],
+            unavailable: [None; QuickSetting::COUNT],
             app_settings: Vec::new(),
             scroll_offset: 0.0,
             events: Vec::new(),
@@ -1118,6 +1144,30 @@ impl NotificationPane {
         if self.quick_settings.get(setting) != value {
             self.quick_settings.toggle(setting);
         }
+    }
+
+    /// Say the switch for `setting` cannot be used, and why in a few words --
+    /// shown where the switch would be, which takes no press meanwhile -- or,
+    /// with `None`, that it can.
+    pub fn set_unavailable(&mut self, setting: QuickSetting, why: Option<&'static str>) {
+        if let Some(slot) = self.unavailable.get_mut(setting.index()) {
+            *slot = why;
+        }
+    }
+
+    /// Why the switch for `setting` cannot be used, while it cannot.
+    #[must_use]
+    pub fn unavailable(&self, setting: QuickSetting) -> Option<&'static str> {
+        self.unavailable.get(setting.index()).copied().flatten()
+    }
+
+    /// A press on the middle of `setting`'s switch, where it is drawn: for
+    /// the shell's tests, which cannot see the block's layout.
+    #[cfg(test)]
+    pub(crate) fn press_switch(&mut self, setting: QuickSetting) {
+        let pill_x = PANE_WIDTH - PANE_PADDING - TOGGLE_WIDTH - PANE_PADDING;
+        let y = Self::qs_toggle_top(setting.index()) + QS_ROW_HEIGHT / 2.0;
+        self.handle_quick_settings_click(pill_x + TOGGLE_WIDTH / 2.0, y);
     }
 
     /// Mark the notification `id` read -- it was opened somewhere other than
@@ -1808,6 +1858,7 @@ impl NotificationPane {
                 start_y + Self::qs_toggle_top(idx),
                 qs.label(),
                 enabled,
+                self.unavailable(*qs),
             );
         }
 
@@ -1820,6 +1871,10 @@ impl NotificationPane {
         Self::qs_slider_top(1) + QS_ROW_HEIGHT
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "where, what it is called, whether it is on, and why it cannot be used"
+    )]
     fn render_toggle_row(
         &self,
         p: &Palette,
@@ -1828,6 +1883,7 @@ impl NotificationPane {
         y: f32,
         label: &str,
         enabled: bool,
+        unavailable: Option<&str>,
     ) {
         // Label.
         cmds.push(RenderCommand::Text {
@@ -1840,6 +1896,25 @@ impl NotificationPane {
             max_width: Some(180.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        // A switch that would do nothing says why where it would be, ending
+        // where its pill ends: a switch there would move and change nothing.
+        if let Some(why) = unavailable {
+            let right = PANE_WIDTH - PANE_PADDING - PANE_PADDING;
+            let room = right - (x + 180.0);
+            let width = guitk::text::measure(why, 12.0, FontWeightHint::Regular).min(room);
+            cmds.push(RenderCommand::Text {
+                x: right - width,
+                y: y + 9.0,
+                text: why.to_string(),
+                color: p.subtext0,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
 
         // The switch, through the toolkit's. This pane drew its own and
         // filled the knob with `text` -- the eighteenth copy of the defect
@@ -2308,7 +2383,9 @@ impl NotificationPane {
                 if rx < pill_x {
                     return;
                 }
-                if let Some(&qs) = QuickSetting::all().get(idx) {
+                if let Some(&qs) = QuickSetting::all().get(idx)
+                    && self.unavailable(qs).is_none()
+                {
                     self.quick_settings.toggle(qs);
                     self.events.push(NotifPaneEvent::QuickSettingToggled(qs));
                 }

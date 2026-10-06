@@ -566,6 +566,22 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: SizeT) -> *const u8 {
         if n >= 16 {
             let needle = splat(byte);
             let mut i = 0usize;
+            // Sixty-four bytes a step while they last: four blocks' matches
+            // ORed, so one test a step; the block that matched is found
+            // after.
+            while n.wrapping_sub(i) >= 64 {
+                if matches64(s.add(i), needle) != 0 {
+                    let mut at = i;
+                    loop {
+                        let mask = matches16(s.add(at), needle);
+                        if mask != 0 {
+                            return s.add(at.wrapping_add(mask.trailing_zeros() as usize));
+                        }
+                        at = at.wrapping_add(16);
+                    }
+                }
+                i = i.wrapping_add(64);
+            }
             while n.wrapping_sub(i) >= 16 {
                 let mask = matches16(s.add(i), needle);
                 if mask != 0 {
@@ -594,65 +610,165 @@ pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: SizeT) -> *const u8 {
     core::ptr::null()
 }
 
+/// Whether any of the 64 bytes at `p` equals `needle`'s: nonzero if so.
+///
+/// # Safety
+///
+/// `p` readable for 64 bytes.
+#[inline(always)]
+unsafe fn matches64(p: *const u8, needle: __m128i) -> u32 {
+    use core::arch::x86_64::{_mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128};
+    // SAFETY: the caller's 64 bytes; unaligned loads.
+    unsafe {
+        let at = |k: usize| _mm_cmpeq_epi8(_mm_loadu_si128(p.add(k).cast::<__m128i>()), needle);
+        let any = _mm_or_si128(_mm_or_si128(at(0), at(16)), _mm_or_si128(at(32), at(48)));
+        // pmovmskb's 16 bits: never negative.
+        _mm_movemask_epi8(any) as u32
+    }
+}
+
+/// The aligned scan the unbounded scanners share: the first byte at or
+/// after `s` that `stop16` marks, where `stop16(block)` is the mask of the
+/// stops in the 16-byte-aligned block at `block` and `stop64(chunk)` is
+/// nonzero when the 64-byte-aligned chunk at `chunk` holds one.  The first
+/// block's bytes below `s` are not looked at; then 16 bytes a step over the
+/// first 64 and on to a 64-byte boundary, and 64 a step after -- glibc's
+/// SSE2 shape, where the four blocks are folded with `pminub` and tested
+/// once.
+///
+/// Every read is aligned and starts at a byte at or below the first not yet
+/// examined, so lies in a page that byte occupies: a 64-byte-aligned chunk
+/// lies within one page as a 16-byte block does.
+///
+/// # Safety
+///
+/// The bytes from `s` to the first stop are readable, and there is a stop.
+#[inline(always)]
+unsafe fn scan_aligned(
+    s: *const u8,
+    stop16: impl Fn(*const u8) -> u32,
+    stop64: impl Fn(*const u8) -> u32,
+) -> *const u8 {
+    let skip = (s as usize & 15) as u32;
+    let mut block = s.wrapping_sub(skip as usize);
+    let first = stop16(block).wrapping_shr(skip);
+    if first != 0 {
+        return s.wrapping_add(first.trailing_zeros() as usize);
+    }
+    block = block.wrapping_add(16);
+    // Sixteen at a time over the first 64 bytes -- most strings end there,
+    // and a 64-byte step, with the search for its block after, costs a short
+    // string more than it saves (measured: 5.4 ns against 8.4 for 64 bytes)
+    // -- then on to a 64-byte boundary.
+    // (Two loops, each with one simple condition: tested together, the pair
+    // cost every step six instructions more.)
+    let short_end = (s as usize).wrapping_add(64);
+    while (block as usize) < short_end {
+        let mask = stop16(block);
+        if mask != 0 {
+            return block.wrapping_add(mask.trailing_zeros() as usize);
+        }
+        block = block.wrapping_add(16);
+    }
+    while !(block as usize).is_multiple_of(64) {
+        let mask = stop16(block);
+        if mask != 0 {
+            return block.wrapping_add(mask.trailing_zeros() as usize);
+        }
+        block = block.wrapping_add(16);
+    }
+    loop {
+        if stop64(block) != 0 {
+            // One of its four blocks holds the stop.
+            loop {
+                let mask = stop16(block);
+                if mask != 0 {
+                    return block.wrapping_add(mask.trailing_zeros() as usize);
+                }
+                block = block.wrapping_add(16);
+            }
+        }
+        block = block.wrapping_add(64);
+    }
+}
+
+/// The zero bytes of the 16-byte-aligned block at `block`, as a mask.
+///
+/// # Safety
+///
+/// `block` is 16-byte aligned and holds a readable byte.
+#[inline(always)]
+unsafe fn zeros16(block: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable block, aligned as the memory operand of
+    // `pcmpeqb` needs.
+    unsafe {
+        core::arch::asm!(
+            "pxor {zero}, {zero}",
+            "pcmpeqb {zero}, xmmword ptr [{block}]",
+            "pmovmskb {mask:e}, {zero}",
+            block = in(reg) block,
+            zero = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// Nonzero when one of the 64 bytes of the 64-byte-aligned chunk at
+/// `chunk` is zero: the four blocks' unsigned minimum, compared with zero.
+///
+/// # Safety
+///
+/// `chunk` is 64-byte aligned and holds a readable byte.
+#[inline(always)]
+unsafe fn zeros64(chunk: *const u8) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable chunk, which lies within one page; each
+    // memory operand is 16-byte aligned, as `pminub` needs.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {low}, xmmword ptr [{chunk}]",
+            "pminub {low}, xmmword ptr [{chunk} + 16]",
+            "pminub {low}, xmmword ptr [{chunk} + 32]",
+            "pminub {low}, xmmword ptr [{chunk} + 48]",
+            "pxor {zero}, {zero}",
+            "pcmpeqb {low}, {zero}",
+            "pmovmskb {mask:e}, {low}",
+            chunk = in(reg) chunk,
+            low = out(xmm_reg) _,
+            zero = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
 /// Compute the length of a C string (excluding null terminator).
 ///
-/// Sixteen bytes a step: aligned 16-byte loads, compared with zero (SSE2).
-/// An aligned load never crosses a page boundary, so though it may read
-/// bytes past the terminator, they are in a page the string occupies and the
-/// read cannot fault -- how glibc's and every other fast `strlen` read.  It
-/// is assembly, rather than Rust over intrinsics, because those bytes are
-/// past the end of the object as Rust sees it.
+/// Aligned loads, compared with zero (SSE2): 16 bytes a step to a 64-byte
+/// boundary, then 64 ([`scan_aligned`]).  An aligned load never crosses a
+/// page boundary, so though it may read bytes past the terminator, they are
+/// in a page the string occupies and the read cannot fault -- how glibc's
+/// and every other fast `strlen` reads.  The loads are assembly, rather
+/// than intrinsics, because those bytes are past the end of the object as
+/// Rust sees it.
 ///
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strlen(s: *const u8) -> SizeT {
-    let len: usize;
-    // SAFETY: the caller's string is readable to its terminator.  Every load
-    // is 16-byte aligned and starts at or below a byte of the string, so it
-    // lies within a page the string occupies.  The first block's bytes below
-    // `s` are shifted out of the mask before it is looked at.
-    unsafe {
-        core::arch::asm!(
-            "mov {base}, {s}",
-            "and {base}, -16",
-            "pxor {zero}, {zero}",
-            "movdqa {chunk}, xmmword ptr [{base}]",
-            "pcmpeqb {chunk}, {zero}",
-            "pmovmskb {mask:e}, {chunk}",
-            "mov ecx, {s:e}",
-            "and ecx, 15",
-            "shr {mask:e}, cl",
-            "test {mask:e}, {mask:e}",
-            "jnz 3f",
-            "2:",
-            "add {base}, 16",
-            "movdqa {chunk}, xmmword ptr [{base}]",
-            "pcmpeqb {chunk}, {zero}",
-            "pmovmskb {mask:e}, {chunk}",
-            "test {mask:e}, {mask:e}",
-            "jz 2b",
-            "bsf {mask:e}, {mask:e}",
-            "sub {base}, {s}",
-            "add {base}, {mask}",
-            "mov {len}, {base}",
-            "jmp 4f",
-            "3:",
-            "bsf {mask:e}, {mask:e}",
-            "mov {len}, {mask}",
-            "4:",
-            s = in(reg) s,
-            base = out(reg) _,
-            mask = out(reg) _,
-            len = out(reg) len,
-            zero = out(xmm_reg) _,
-            chunk = out(xmm_reg) _,
-            out("ecx") _,
-            options(nostack, readonly),
-        );
-    }
-    len
+    // SAFETY (both): `scan_aligned` passes an aligned block or chunk that
+    // holds a readable byte.
+    let stop16 = |block: *const u8| unsafe { zeros16(block) };
+    let stop64 = |chunk: *const u8| unsafe { zeros64(chunk) };
+    // SAFETY: the caller's string is readable to its terminator, which is
+    // the stop.
+    let end = unsafe { scan_aligned(s, stop16, stop64) };
+    (end as usize).wrapping_sub(s as usize)
 }
 
 // ---------------------------------------------------------------------------
@@ -788,27 +904,127 @@ fn highest_bit(mask: u32) -> usize {
 #[inline(always)]
 unsafe fn byte_or_nul(s: *const u8, byte: u8) -> *const u8 {
     let needle = splat(byte);
-    let skip = (s as usize & 15) as u32;
-    let mut block = s.wrapping_sub(skip as usize);
-    // SAFETY: the string is readable to its terminator.  The first block
-    // holds `s`; each later one is read only when the one before held
-    // neither the byte nor the terminator, so it starts at a byte of the
-    // string not yet examined, and lies in that byte's page.
+    // SAFETY (both): `scan_aligned` passes an aligned block or chunk that
+    // holds a readable byte.
+    let stop16 = |block: *const u8| unsafe { zero_or_byte16(block, needle) };
+    let stop64 = |chunk: *const u8| unsafe { zero_or_byte64(chunk, needle) };
+    // SAFETY: the string is readable to its terminator, which is a stop.
+    unsafe { scan_aligned(s, stop16, stop64) }
+}
+
+/// The bytes of the 16-byte-aligned block at `block` that are zero or
+/// `needle`'s, as a mask: `min(x, x ^ needle)` is zero exactly there.
+///
+/// # Safety
+///
+/// `block` is 16-byte aligned and holds a readable byte.
+#[inline(always)]
+unsafe fn zero_or_byte16(block: *const u8, needle: __m128i) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable, aligned block.
     unsafe {
-        let (zeros, hits) = block_masks(block, needle);
-        // The first block's bytes below `s` are not the string's.
-        let first = (zeros | hits).wrapping_shr(skip);
-        if first != 0 {
-            return s.wrapping_add(first.trailing_zeros() as usize);
-        }
-        loop {
-            block = block.wrapping_add(16);
-            let (zeros, hits) = block_masks(block, needle);
-            if zeros | hits != 0 {
-                return block.wrapping_add((zeros | hits).trailing_zeros() as usize);
-            }
-        }
+        core::arch::asm!(
+            "movdqa {x}, xmmword ptr [{block}]",
+            "movdqa {t}, {x}",
+            "pxor {t}, {needle}",
+            "pminub {x}, {t}",
+            "pxor {t}, {t}",
+            "pcmpeqb {x}, {t}",
+            "pmovmskb {mask:e}, {x}",
+            block = in(reg) block,
+            needle = in(xmm_reg) needle,
+            x = out(xmm_reg) _,
+            t = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
     }
+    mask
+}
+
+/// Nonzero when one of the 64 bytes of the 64-byte-aligned chunk at
+/// `chunk` is zero or `needle`'s: each block's `min(x, x ^ needle)`, their
+/// minimum, compared with zero.
+///
+/// # Safety
+///
+/// `chunk` is 64-byte aligned and holds a readable byte.
+#[inline(always)]
+unsafe fn zero_or_byte64(chunk: *const u8, needle: __m128i) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable chunk, which lies within one page.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {acc}, xmmword ptr [{chunk}]",
+            "movdqa {t}, {acc}",
+            "pxor {t}, {needle}",
+            "pminub {acc}, {t}",
+            "movdqa {x}, xmmword ptr [{chunk} + 16]",
+            "movdqa {t}, {x}",
+            "pxor {t}, {needle}",
+            "pminub {x}, {t}",
+            "pminub {acc}, {x}",
+            "movdqa {x}, xmmword ptr [{chunk} + 32]",
+            "movdqa {t}, {x}",
+            "pxor {t}, {needle}",
+            "pminub {x}, {t}",
+            "pminub {acc}, {x}",
+            "movdqa {x}, xmmword ptr [{chunk} + 48]",
+            "movdqa {t}, {x}",
+            "pxor {t}, {needle}",
+            "pminub {x}, {t}",
+            "pminub {acc}, {x}",
+            "pxor {t}, {t}",
+            "pcmpeqb {acc}, {t}",
+            "pmovmskb {mask:e}, {acc}",
+            chunk = in(reg) chunk,
+            needle = in(xmm_reg) needle,
+            acc = out(xmm_reg) _,
+            x = out(xmm_reg) _,
+            t = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
+}
+
+/// Nonzero when one of the 64 bytes of the 64-byte-aligned chunk at
+/// `chunk` is `needle`'s: each block XORed with it, their unsigned minimum,
+/// compared with zero.  `rawmemchr`'s, which stops at no terminator.
+///
+/// # Safety
+///
+/// `chunk` is 64-byte aligned and holds a readable byte.
+#[inline(always)]
+unsafe fn byte64(chunk: *const u8, needle: __m128i) -> u32 {
+    let mask: u32;
+    // SAFETY: the caller's readable chunk, which lies within one page.
+    unsafe {
+        core::arch::asm!(
+            "movdqa {acc}, xmmword ptr [{chunk}]",
+            "pxor {acc}, {needle}",
+            "movdqa {x}, xmmword ptr [{chunk} + 16]",
+            "pxor {x}, {needle}",
+            "pminub {acc}, {x}",
+            "movdqa {x}, xmmword ptr [{chunk} + 32]",
+            "pxor {x}, {needle}",
+            "pminub {acc}, {x}",
+            "movdqa {x}, xmmword ptr [{chunk} + 48]",
+            "pxor {x}, {needle}",
+            "pminub {acc}, {x}",
+            "pxor {x}, {x}",
+            "pcmpeqb {acc}, {x}",
+            "pmovmskb {mask:e}, {acc}",
+            chunk = in(reg) chunk,
+            needle = in(xmm_reg) needle,
+            acc = out(xmm_reg) _,
+            x = out(xmm_reg) _,
+            mask = lateout(reg) mask,
+            options(nostack, readonly, pure, preserves_flags),
+        );
+    }
+    mask
 }
 
 /// The length of the C string at `s`, or `max` if its first `max` bytes
@@ -2964,25 +3180,13 @@ mod gnu_rawmemchr {
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
         let needle = splat(c as u8);
-        let skip = (s as usize & 15) as u32;
-        let mut block = s.wrapping_sub(skip as usize);
-        // SAFETY: the caller vouches the byte occurs, so every byte up to
-        // it is readable.  Each block read starts at or below one of those
-        // not yet examined (the first holds `s`), and lies in its page.
-        unsafe {
-            let (_, hits) = block_masks(block, needle);
-            let first = hits.wrapping_shr(skip);
-            if first != 0 {
-                return s.wrapping_add(first.trailing_zeros() as usize);
-            }
-            loop {
-                block = block.wrapping_add(16);
-                let (_, hits) = block_masks(block, needle);
-                if hits != 0 {
-                    return block.wrapping_add(hits.trailing_zeros() as usize);
-                }
-            }
-        }
+        // SAFETY (both): `scan_aligned` passes an aligned block or chunk
+        // that holds a readable byte.
+        let stop16 = |block: *const u8| unsafe { block_masks(block, needle).1 };
+        let stop64 = |chunk: *const u8| unsafe { byte64(chunk, needle) };
+        // SAFETY: the caller vouches the byte occurs, so every byte up to it
+        // is readable, and it is the stop.
+        unsafe { scan_aligned(s, stop16, stop64) }
     }
 }
 pub use gnu_rawmemchr::rawmemchr;
@@ -3206,10 +3410,33 @@ mod tests {
                     let base = buf.as_ptr().wrapping_add(s);
                     // SAFETY: `buf` holds `s + n` bytes.
                     assert!(unsafe { memchr(base, 0x80, n) }.is_null(), "n {n}: absent");
+                    // Past 64 bytes, each of a 64-byte step's four blocks,
+                    // either side of the steps' boundaries, the middle and
+                    // the end.
                     let at: Vec<usize> = if n <= 64 {
                         (0..n).collect()
                     } else {
-                        vec![0, 15, 16, 17, n / 2, n - 1]
+                        [
+                            0,
+                            15,
+                            16,
+                            17,
+                            31,
+                            32,
+                            47,
+                            48,
+                            63,
+                            64,
+                            65,
+                            127,
+                            128,
+                            129,
+                            n / 2,
+                            n - 1,
+                        ]
+                        .into_iter()
+                        .filter(|&p| p < n)
+                        .collect()
                     };
                     for p in at {
                         buf[s + p] = 0x80;
@@ -3372,7 +3599,9 @@ mod tests {
 
         #[test]
         fn strchr_strchrnul_and_rawmemchr_find_the_first() {
-            for len in 0..=70 {
+            // Past 64 bytes for the 64-byte steps, which begin at the first
+            // 64-byte boundary.
+            for len in (0..=70).chain([100, 127, 128, 129, 200]) {
                 for align in 0..16 {
                     for sought in SOUGHT {
                         let c = i32::from(sought);
@@ -4103,7 +4332,9 @@ mod tests {
             fn nothing_reads_past_a_strings_page() {
                 let (g, h, out) = (Guarded::new(), Guarded::new(), Guarded::new());
                 let every: Vec<u8> = (1..=255).chain([0]).collect();
-                for len in 0..=48 {
+                // Long enough, too, for the 64-byte steps to reach the page's
+                // last chunks.
+                for len in (0..=48).chain([63, 64, 65, 100, 127, 128, 129, 200, 255]) {
                     let s = terminated(&filler(len, len));
                     let (p, q) = (g.at_end(&s), h.at_end(&s));
                     let c = i32::from(SOUGHT[0]);

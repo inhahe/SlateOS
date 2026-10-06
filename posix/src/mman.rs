@@ -9,6 +9,8 @@ use crate::errno;
 use crate::syscall::*;
 use crate::types::*;
 
+mod file_map;
+
 // ---------------------------------------------------------------------------
 // mmap protection flags
 // ---------------------------------------------------------------------------
@@ -153,8 +155,11 @@ pub extern "C" fn mmap(
     // A file-backed mapping needs the file, which an `O_PATH` descriptor does
     // not have: EBADF (measured on Linux 6.6).  `MAP_ANONYMOUS` ignores `fd`
     // entirely, so it is not consulted there.
-    if (flags & MAP_ANONYMOUS) == 0 && crate::file::reject_path_fd(fd) {
-        return MAP_FAILED;
+    if (flags & MAP_ANONYMOUS) == 0 {
+        if crate::file::reject_path_fd(fd) {
+            return MAP_FAILED;
+        }
+        return file_map::map(addr, length, prot, flags, fd, offset);
     }
 
     let ret = syscall6(

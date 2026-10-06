@@ -3055,6 +3055,16 @@ D's to act on once answered).
   in libc — see design-decisions.md §345 for the alternative and why it fails.
 
 - `[D]` Translate POSIX calls to native syscalls (line ~1738)
+  - `[-]` **`mmap` of a file, for native programs** (2026-10-06). It gave
+    anonymous memory -- zeros, with no error -- because the native
+    `SYS_MMAP` takes no file and the library passed the descriptor where
+    nothing reads it. The library now copies the file into the mapping
+    (`posix/src/mman/file_map.rs`): the bytes are right, but read at once,
+    and a writable `MAP_SHARED` mapping is refused with `ENODEV`.
+    `services/ctest-mmap-file` checks it on SlateOS. The real fix is native
+    file mappings in the kernel
+    (`requests/d-a-a-native-program-cannot-map-a-file.md`;
+    `known-issues/D-POSIX-A-NATIVE-FILE-MAPPING-IS-A-COPY.md`).
 
 - `[D]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 

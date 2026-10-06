@@ -1686,7 +1686,10 @@ mod tests {
     /// one put back with other effects says its new effect.
     #[test]
     fn a_target_changed_under_the_drag_says_so() {
-        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &[DropEffect::Copy])], &EFFECTS);
+        let mut mgr = dragging(
+            vec![text_target(1, 0.0, 0.0, &[DropEffect::Copy])],
+            &EFFECTS,
+        );
         assert_eq!(
             said(&mgr.update_position(10.0, 10.0)),
             ["enter 1 Copy", "move"]
@@ -2037,7 +2040,8 @@ mod tests {
     #[test]
     fn another_programs_drag_over_nothing_answers_nothing() {
         let mut mgr = html_or_text();
-        let entered = mgr.offer_entered(vec![DataFormat::PlainText], EFFECTS.to_vec(), 100.0, 100.0);
+        let entered =
+            mgr.offer_entered(vec![DataFormat::PlainText], EFFECTS.to_vec(), 100.0, 100.0);
         assert_eq!(said(&entered), ["move"]);
         assert_eq!(mgr.offer_status(), (DropEffect::None, None));
         let (events, asked) = mgr.offer_dropped(100.0, 100.0);

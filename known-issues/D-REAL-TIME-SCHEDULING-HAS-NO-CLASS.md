@@ -15,8 +15,10 @@ there. They still cannot have it.
 
 **Where:** `posix/src/sched.rs` -- `sched_setscheduler`'s step 8 refuses;
 `rt_permitted` is Linux's permission rule, kept and tested for the day the
-class exists. `pthread_setschedparam` refuses real-time with `EINVAL` and
-`pthread_create` an explicit real-time attribute with `EPERM`, as before.
+class exists. `pthread_setschedparam` gives `sched_setscheduler`'s answer,
+as glibc's does, so `EPERM` too (it said `EINVAL`, a malformed request's
+answer, until later on 2026-10-06), and `pthread_create` refuses an explicit
+real-time attribute with `EPERM`, as before.
 `posix_spawn`'s `POSIX_SPAWN_SETSCHEDULER` asks `sched_setscheduler`'s
 question once lane D's spawn attributes reach `main` (branch
 `lane-d-spawn-attrs`, waiting on lane A's spawn fields) -- step 8 goes into

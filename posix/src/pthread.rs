@@ -5355,32 +5355,42 @@ pub extern "C" fn pthread_getschedparam(
     0
 }
 
-/// Set a thread's scheduling policy and parameters.
+/// Set a thread's scheduling policy and parameters, answering as glibc does:
+/// with whatever `sched_setscheduler` answers for the thread
+/// ([`crate::sched::sched_setscheduler`]).
 ///
-/// Accepts `SCHED_OTHER` at priority 0 and **refuses everything else with
-/// `EINVAL`**, rather than accepting a request it cannot carry out.
+/// - `EINVAL` for a policy it does not know, a priority outside the policy's
+///   range, `SCHED_DEADLINE`, or a NULL `param`.
+/// - `EPERM` for a well-formed `SCHED_FIFO` or `SCHED_RR` request, because the
+///   scheduler has no real-time class to grant (that function's step 8).
+/// - 0 for the ordinary policies at priority 0, which every thread already
+///   runs as.
 ///
-/// That choice is the point of this function. A silent success would tell a
-/// caller its real-time thread is running at the priority it asked for, when
-/// nothing in the scheduler distinguishes that thread from any other — and a
-/// program that believes it has a priority it does not have makes worse
-/// decisions than one that knows it cannot have one. `EINVAL` is a documented
-/// answer to `pthread_setschedparam`; a false yes is not.
+/// A false yes is what this avoids. A program told its real-time thread runs
+/// real-time makes worse decisions than one told it cannot.
+///
+/// Until 2026-10-06, every request but `SCHED_OTHER` at 0 was `EINVAL`. That
+/// is Linux's answer for a malformed request; for a well-formed one it will
+/// not grant, Linux answers `EPERM`, which is what audio servers check for
+/// before running without real-time. A NULL `param` was `EFAULT`, where Linux
+/// answers `EINVAL`.
+///
+/// The answer is the return value. `errno` is left as the caller had it, as
+/// musl leaves it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setschedparam(
     _thread: PthreadT,
     policy: i32,
     param: *const crate::sched::SchedParam,
 ) -> i32 {
-    if param.is_null() {
-        return errno::EFAULT;
-    }
-    // SAFETY: verified non-null above; `SchedParam` is repr(C).
-    let requested = unsafe { (*param).sched_priority };
-    if policy != crate::sched::SCHED_OTHER || requested != 0 {
-        return errno::EINVAL;
-    }
-    0
+    let caller_errno = errno::get_errno();
+    let answer = if crate::sched::sched_setscheduler(0, policy, param) == 0 {
+        0
+    } else {
+        errno::get_errno()
+    };
+    errno::set_errno(caller_errno);
+    answer
 }
 
 /// Set a thread's priority within its policy: 0, the one priority
@@ -6037,37 +6047,86 @@ mod tests {
 
     #[test]
     fn setschedparam_refuses_a_priority_it_cannot_deliver() {
+        use crate::sched::{SCHED_DEADLINE, SCHED_FIFO, SCHED_OTHER, SCHED_RR, SchedParam};
+        let at = |sched_priority| SchedParam {
+            sched_priority,
+            ..SchedParam::default()
+        };
         // The important one. Accepting this would tell a caller its real-time
         // thread runs at priority 50 when nothing in the scheduler
         // distinguishes it from any other thread -- and a program that
         // believes it has a priority it does not have makes worse decisions
-        // than one that knows it cannot have one.
-        let rt = crate::sched::SchedParam {
-            sched_priority: 50,
-            ..crate::sched::SchedParam::default()
-        };
+        // than one that knows it cannot have one. Well-formed, it is EPERM,
+        // as sched_setscheduler answers it: what an audio server looks for.
+        for policy in [SCHED_FIFO, SCHED_RR] {
+            for prio in [1, 50, 99] {
+                let param = at(prio);
+                assert_eq!(
+                    pthread_setschedparam(0, policy, &raw const param),
+                    errno::EPERM,
+                    "{policy} at {prio}"
+                );
+            }
+        }
+        // Malformed is EINVAL: a priority SCHED_OTHER does not have, one
+        // outside the real-time range at either end, a policy nobody knows,
+        // and SCHED_DEADLINE, whose parameters only sched_setattr can give.
+        for (policy, prio) in [
+            (SCHED_OTHER, 50),
+            (SCHED_FIFO, 0),
+            (SCHED_RR, 100),
+            (4, 0),
+            (-1, 0),
+            (SCHED_DEADLINE, 0),
+        ] {
+            let param = at(prio);
+            assert_eq!(
+                pthread_setschedparam(0, policy, &raw const param),
+                errno::EINVAL,
+                "{policy} at {prio}"
+            );
+        }
+    }
+
+    #[test]
+    fn setschedparam_accepts_what_every_thread_already_is() {
+        use crate::sched::{SCHED_BATCH, SCHED_IDLE, SCHED_OTHER, SCHED_RESET_ON_FORK, SchedParam};
+        let plain = SchedParam::default();
+        for policy in [
+            SCHED_OTHER,
+            SCHED_BATCH,
+            SCHED_IDLE,
+            SCHED_OTHER | SCHED_RESET_ON_FORK,
+        ] {
+            assert_eq!(
+                pthread_setschedparam(0, policy, &raw const plain),
+                0,
+                "{policy:#x}"
+            );
+        }
+        // NULL is EINVAL, as Linux's do_sched_setscheduler answers it.
         assert_eq!(
-            pthread_setschedparam(0, crate::sched::SCHED_FIFO, &raw const rt),
-            errno::EINVAL
-        );
-        // Same policy, priority it cannot give either.
-        assert_eq!(
-            pthread_setschedparam(0, crate::sched::SCHED_OTHER, &raw const rt),
+            pthread_setschedparam(0, SCHED_OTHER, core::ptr::null()),
             errno::EINVAL
         );
     }
 
     #[test]
-    fn setschedparam_accepts_the_one_request_it_can_satisfy() {
-        let plain = crate::sched::SchedParam::default();
+    fn setschedparam_answers_without_touching_errno() {
+        use crate::sched::{SCHED_FIFO, SCHED_OTHER, SchedParam};
+        let rt = SchedParam {
+            sched_priority: 50,
+            ..SchedParam::default()
+        };
+        errno::set_errno(errno::ENOENT);
         assert_eq!(
-            pthread_setschedparam(0, crate::sched::SCHED_OTHER, &raw const plain),
-            0
+            pthread_setschedparam(0, SCHED_FIFO, &raw const rt),
+            errno::EPERM
         );
-        assert_eq!(
-            pthread_setschedparam(0, crate::sched::SCHED_OTHER, core::ptr::null()),
-            errno::EFAULT
-        );
+        assert_eq!(errno::get_errno(), errno::ENOENT, "a refusal");
+        let plain = SchedParam::default();
+        assert_eq!(pthread_setschedparam(0, SCHED_OTHER, &raw const plain), 0);
+        assert_eq!(errno::get_errno(), errno::ENOENT, "a success");
     }
     use core::sync::atomic::{AtomicI32, Ordering};
 

@@ -47,7 +47,7 @@ it finds, as Linux's `attach_to_pi_owner` does. That is tracked in
 
 **Not done, and why:** `PTHREAD_PRIO_PROTECT` (priority ceilings) needs a
 mapping from POSIX's `SCHED_FIFO` priorities to the kernel's 0-31 levels,
-which this library does not have -- `pthread_setschedparam` takes only
-`SCHED_OTHER` at 0. Robust mutexes need the kernel to keep a robust list
+which this library does not have -- `pthread_setschedparam` grants no
+real-time priority at all. Robust mutexes need the kernel to keep a robust list
 for its own ABI; today only the Linux ABI can register one. Both are still
 refused with `ENOTSUP`.

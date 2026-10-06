@@ -19,7 +19,7 @@
  *
  * Priorities are the kernel scheduler's, 0 highest to 31, set with
  * SYS_THREAD_SET_PRIORITY: POSIX's are not mapped to them
- * (pthread_setschedparam takes SCHED_OTHER at 0 alone).
+ * (pthread_setschedparam refuses every real-time priority with EPERM).
  *
  * Exit code 42 == every check passed.  Anything else is the first failing
  * check and step: the tens digit names the check, the units the step.  No

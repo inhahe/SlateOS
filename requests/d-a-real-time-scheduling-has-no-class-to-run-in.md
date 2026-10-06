@@ -64,8 +64,10 @@ for real-time without the right gets on Linux, which audio servers already
 handle by running without it -- instead of a success that changes nothing;
 `posix_spawn`'s `POSIX_SPAWN_SETSCHEDULER` does the same once lane D's
 spawn attributes reach `main` after your spawn fields.
-`pthread_setschedparam` already refuses with `EINVAL`, and `pthread_create`
-with an explicit real-time attribute with `EPERM`. Until this lands,
+`pthread_setschedparam` gives `sched_setscheduler`'s answer, as glibc's
+does -- `EPERM` too (it was `EINVAL`, the answer for a malformed request,
+until later the same day) -- and `pthread_create` with an explicit real-time
+attribute fails with `EPERM`. Until this lands,
 `known-issues/D-REAL-TIME-SCHEDULING-HAS-NO-CLASS.md` tracks it.
 
 **After:** `sched_setscheduler`, `sched_setparam`, `sched_getscheduler`,

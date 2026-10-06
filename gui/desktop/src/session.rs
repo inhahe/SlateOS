@@ -524,6 +524,9 @@ pub struct ShellSession<T: Transport> {
     background_paused: bool,
     /// The desktop's mode and accent as it was last told them.
     background_theme_told: Option<background_program::Event>,
+    /// Whether a maximised window on the desktop shown covers the
+    /// background, as the last window list had it: nobody sees it then.
+    background_covered: bool,
     /// The loop's waker, which a background program's pictures wake.
     waker: Option<Waker>,
     /// How a background program is started: a process, or in a test, a
@@ -1037,6 +1040,7 @@ impl<T: Transport> ShellSession<T> {
             background_size: None,
             background_paused: false,
             background_theme_told: None,
+            background_covered: false,
             waker: background_waker,
             start_background: Box::new(start_background_process),
             wallpaper_stamp: None,
@@ -1927,12 +1931,13 @@ impl<T: Transport> ShellSession<T> {
     }
 
     /// Tell the background program what it should know now: whether anyone
-    /// can see the background -- not while the login screen covers it, nor,
-    /// with motion turned off, after its first picture -- and the desktop's
-    /// look, where it changed.
+    /// can see the background -- not while the login screen covers it, nor
+    /// a maximised window on the desktop shown, nor, with motion turned off,
+    /// after its first picture -- and the desktop's look, where it changed.
     fn sync_background(&mut self) {
         let theme = self.background_theme();
         let pause = self.login.is_some()
+            || self.background_covered
             || (!self.shell.appearance.animations_enabled() && self.background_size.is_some());
         let Some((_, source)) = self.background_program.as_mut() else {
             return;
@@ -2931,16 +2936,16 @@ impl<T: Transport> ShellSession<T> {
             // and where its windows are -- topmost first, no title, no
             // program (`backdrop`'s documentation).
             let told = self.events.desktop().map(|list| {
-                let rects = list
-                    .windows
-                    .iter()
-                    .rev()
-                    .filter(|w| {
-                        w.visible
-                            && !w.minimized
-                            && w.workspace == list.current_workspace
-                            && w.layer == guiremote::control::Layer::Normal
-                    })
+                let shown = list.windows.iter().rev().filter(|w| {
+                    w.visible
+                        && !w.minimized
+                        && w.workspace == list.current_workspace
+                        && w.layer == guiremote::control::Layer::Normal
+                });
+                // A maximised window hides the background but for the
+                // taskbar's strip: a moving one is paused under it.
+                let covered = shown.clone().any(|w| w.maximized);
+                let rects = shown
                     .map(|w| background_program::Rect {
                         x: w.x,
                         y: w.y,
@@ -2948,9 +2953,12 @@ impl<T: Transport> ShellSession<T> {
                         height: w.height,
                     })
                     .collect::<Vec<_>>();
-                (list.current_workspace, rects)
+                (list.current_workspace, rects, covered)
             });
-            if let (Some((desktop, rects)), Some((_, source))) =
+            if let Some((_, _, covered)) = told.as_ref() {
+                self.background_covered = *covered;
+            }
+            if let (Some((desktop, rects, _)), Some((_, source))) =
                 (told, self.background_program.as_mut())
             {
                 source.tell(&background_program::Event::Desktop(desktop));

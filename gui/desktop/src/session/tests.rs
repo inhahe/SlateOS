@@ -4551,6 +4551,44 @@ fn a_background_program_pauses_behind_the_login_screen() {
     assert_eq!(script.told.borrow().last(), Some(&Told::Resume));
 }
 
+/// **A maximised window hides the background**: the program is told to
+/// pause while one is up on the desktop shown, and to go on when it is
+/// restored -- one minimised, or on another desktop, hides nothing.
+#[test]
+fn a_maximised_window_pauses_the_background() {
+    use crate::background_program::Event as Told;
+    let (mut session, desktop, _turn) = session();
+    let (script, _started) = script_backgrounds(&mut session);
+    session.shell_mut().appearance.wallpaper_program =
+        Some(std::path::PathBuf::from("/home/u/bin/stars"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    let maximised = |id: u64| {
+        let mut w = WindowInfo::new(id, id, "big").at(0, 0, 1920, 1040);
+        w.maximized = true;
+        w
+    };
+    let mut hidden = maximised(2);
+    hidden.minimized = true;
+    let mut elsewhere = maximised(3);
+    elsewhere.workspace = 1;
+    desktop.borrow_mut().send_window_list(&[hidden, elsewhere]);
+    session.pump().expect("pump");
+    assert!(
+        !script.told.borrow().contains(&Told::Pause),
+        "nothing hides it: {:?}",
+        script.told.borrow()
+    );
+    desktop.borrow_mut().send_window_list(&[maximised(1)]);
+    session.pump().expect("pump");
+    assert!(script.told.borrow().contains(&Told::Pause));
+    let mut restored = maximised(1);
+    restored.maximized = false;
+    desktop.borrow_mut().send_window_list(&[restored]);
+    session.pump().expect("pump");
+    assert_eq!(script.told.borrow().last(), Some(&Told::Resume));
+}
+
 /// **With motion turned off, the first picture is the background**: the
 /// program is told nobody needs another.
 #[test]

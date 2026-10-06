@@ -30,7 +30,7 @@ or anything typed.
 | **The program paces itself; the desktop shows the newest picture read** | the desktop asking for frames on a clock | A film knows its frame times, a clock-driven background its own; the desktop needs no timer and never queues stale pictures. | A program that writes faster than the screen wastes its own time -- the desktop drops all but the newest. |
 | **A frame is sent no larger than needed to cover the background** (`wallvideo::cover_size`, a box-filter `shrink`) | sending the film's own size | A 4K film on a 1080p screen would move four times the bytes the screen can show, twice. | A user who chooses "fit" on a film far wider than the screen gets it scaled once more by the compositor. |
 | **Told only where windows are, never what they are** | the window list as the shell has it | A background is something the user installed to look at; titles and programs are not its business. Rectangles are enough to move out of the windows' way. | A background cannot react to which program is in front. |
-| **Paused behind the login screen, and after its first picture with motion turned off** | always running | Nobody sees it; the accessibility switch for less motion is honoured as a picture viewer honours it. | A background that wanted to keep a clock running behind the login screen cannot. |
+| **Paused behind the login screen, under a maximised window on the desktop shown, and after its first picture with motion turned off** | always running | Nobody sees it; the accessibility switch for less motion is honoured as a picture viewer honours it. A maximised window leaves only the taskbar's strip, whose glass shows the background frozen. | A background that wanted to keep a clock running behind the login screen cannot. |
 | **The video player is beside the desktop's own program** (`current_exe`'s directory) | a path in the settings | Installed together (`/usr/bin`), built together (`target/...`); nothing to configure. | Moving one without the other loses video backgrounds -- said on screen when it happens. |
 | **A program that stops says why and is not restarted** | starting it again | As a picture that will not open is not read again at every repaint: a crashing background would otherwise spin. | Choosing the same wallpaper again is needed after fixing it. |
 
@@ -41,7 +41,8 @@ or anything typed.
   (`requests/c-e-a-video-or-a-program-as-the-wallpaper.md`). Until then both
   are set in `appearance.yaml` (`wallpaper:` naming a video,
   `wallpaper.program:`).
-- **Pausing while windows cover the whole background** or on battery: the
-  login screen and reduced motion are the pauses today.
+- **Pausing on battery**, and under windows that cover the background
+  without being maximised: the login screen, a maximised window and reduced
+  motion are the pauses today.
 - **Sound** from a video background: none, by design -- a wallpaper is seen,
   not heard.

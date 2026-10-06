@@ -69,14 +69,13 @@ impl Fixture {
     }
 
     /// The names in the user's directory, hidden ones included: what a
-    /// failure must not leave behind.
-    fn user_entries(&self) -> Vec<String> {
+    /// failure must not leave behind. Kept as the names they are, bytes and
+    /// all, so a name that is not text is not reported as another.
+    fn user_entries(&self) -> Vec<OsString> {
         let Ok(listing) = fs::read_dir(self.user()) else {
             return Vec::new();
         };
-        let mut names: Vec<String> = listing
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
+        let mut names: Vec<OsString> = listing.map(|entry| entry.unwrap().file_name()).collect();
         names.sort();
         names
     }
@@ -625,7 +624,7 @@ fn a_failed_derive_leaves_nothing_behind() {
         ),
         "{result:?}"
     );
-    assert_eq!(fx.user_entries(), Vec::<String>::new());
+    assert_eq!(fx.user_entries(), Vec::<OsString>::new());
 }
 
 // ---- installing ----
@@ -681,7 +680,7 @@ fn a_theme_that_fails_its_check_is_refused_and_nothing_is_installed() {
         "{}",
         listing(&report.findings)
     );
-    assert_eq!(fx.user_entries(), Vec::<String>::new());
+    assert_eq!(fx.user_entries(), Vec::<OsString>::new());
 }
 
 #[test]
@@ -710,7 +709,7 @@ fn a_lone_file_too_large_to_be_a_theme_is_not_installed() {
         install(&fx.dirs(), &from, os("big")),
         Err(AuthoringError::TooLarge(MAX_FILE_BYTES + 1))
     );
-    assert_eq!(fx.user_entries(), Vec::<String>::new());
+    assert_eq!(fx.user_entries(), Vec::<OsString>::new());
 }
 
 #[test]
@@ -802,7 +801,7 @@ fn a_copy_stops_at_the_checkers_depth() {
         "{}",
         listing(&report.findings)
     );
-    assert_eq!(fx.user_entries(), Vec::<String>::new());
+    assert_eq!(fx.user_entries(), Vec::<OsString>::new());
 }
 
 #[test]
@@ -954,7 +953,7 @@ fn a_link_to_a_folder_is_not_followed() {
         "{}",
         listing(&report.findings)
     );
-    assert_eq!(fx.user_entries(), Vec::<String>::new());
+    assert_eq!(fx.user_entries(), Vec::<OsString>::new());
     // Nothing was read through it into the copy -- and nothing outside was
     // touched.
     assert!(elsewhere.join("secret.txt").is_file());
@@ -1032,7 +1031,7 @@ fn a_users_theme_is_removed_and_no_other_is() {
 
     remove(&dirs, os("mine")).unwrap();
     assert!(!mine.exists());
-    assert_eq!(fx.user_entries(), Vec::<String>::new());
+    assert_eq!(fx.user_entries(), Vec::<OsString>::new());
     assert!(!available_in(&dirs).iter().any(|info| info.id == "mine"));
 
     assert_eq!(remove(&dirs, os("mine")), Err(AuthoringError::NotInstalled));

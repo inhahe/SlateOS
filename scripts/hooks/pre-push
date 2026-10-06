@@ -184,6 +184,12 @@
 #      thousands of lines is not a gate. (Lane B wrote it as 51 on its own
 #      branch on 2026-09-16; main's 51 came first, and the merge of
 #      2026-10-01 numbered this one after it.)
+#  53. Refuse a `programs.md` that is not what `scripts/program-catalogue.py`
+#      writes now: one row a program, from its first doc line, its crate and
+#      the image (design-decisions 1053). The boot test's tooling suite
+#      refuses the same (`test-program-catalogue.py`) about an hour in,
+#      after the pipeline; lane C lost a boot to it on 2026-10-05 and lane D
+#      one on 2026-10-06, each over one program's changed description.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -6094,6 +6100,63 @@ say which, rather than allowing it dead everywhere.
 
 To push anyway:
     ALLOW_LIBC_TARGET_WARNINGS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 53: programs.md is what program-catalogue.py writes now.
+#
+# WHAT IT CATCHES.  `programs.md` (design-decisions 1053) is generated, one
+# row a program, from each program's first doc line, its crate and the rootfs
+# manifest.  A change to any of those without the regeneration leaves it
+# stale, and the boot test's tooling suite refuses to build on it
+# (`test-program-catalogue.py`) -- after the pipeline, about an hour into the
+# boot.  Lane C's boot of 2026-10-05 stopped there over its new `themecheck`
+# program, and lane D's of 2026-10-06 over the dynamic-DNS service's changed
+# description.  Gates 48-50 are here for the same reason: a boot-only check is
+# paid for by whoever boots, an hour late.
+#
+# COST.  About 2.7 s for the check and 0.7 s for the generator's self-test.
+# It runs on every push, for gate 18's reason: what feeds the catalogue is a
+# doc line in any program anywhere in the tree, which `touches` cannot narrow
+# usefully.  Like the others it reads the working tree.
+# ---------------------------------------------------------------------------
+progcat="${repo_root:-.}/scripts/program-catalogue.py"
+skip_progcat=0
+# Bypass: ALLOW_STALE_PROGRAMS_MD=1 git push origin <branch>
+if [ "${ALLOW_STALE_PROGRAMS_MD:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_STALE_PROGRAMS_MD=1 set - skipping the program-catalogue gate." >&2
+    skip_progcat=1
+fi
+[ -n "$py" ] || skip_progcat=1
+[ -f "$progcat" ] || skip_progcat=1
+note_gate program-catalogue "$skip_progcat"
+
+progcat_failed=0
+if [ "$skip_progcat" != "1" ]; then
+    if ! run_checker program-catalogue-selftest "$py" "$progcat" --selftest; then
+        echo "pre-push: program-catalogue.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        progcat_failed=1
+    elif ! run_checker program-catalogue "$py" "$progcat" --check; then
+        progcat_failed=1
+    fi
+fi
+if [ "$progcat_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - programs.md is not what the generator writes now.
+
+A program was added or removed, or its first doc line, its crate or its
+place on the image changed, and programs.md was not regenerated with it.
+The boot test refuses to build on the same thing, about an hour in; this is
+the same check, before the pipeline.  Regenerate it and commit it with the
+change:
+
+    python scripts/program-catalogue.py
+
+To push anyway:
+    ALLOW_STALE_PROGRAMS_MD=1 git push $remote_name ...
 
 EOF
     exit 1

@@ -84,6 +84,8 @@ pub const STALL_MS: u64 = 500;
 pub struct Errno(pub i32);
 
 impl Errno {
+    /// No such thing: an element a card does not have.
+    pub const ENOENT: Self = Self(2);
     /// Interrupted: try again.
     pub const EINTR: Self = Self(4);
     /// Not a device this can use.
@@ -94,6 +96,9 @@ impl Errno {
     pub const ENODEV: Self = Self(19);
     /// The request was refused.
     pub const EINVAL: Self = Self(22);
+    /// Not a device this request is for: what a native program's `ioctl`
+    /// on a sound device answers on SlateOS today.
+    pub const ENOTTY: Self = Self(25);
     /// Not this system's.
     pub const ENOSYS: Self = Self(38);
 }
@@ -595,17 +600,8 @@ pub fn open_device() -> Result<Unavailable, PcmError> {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod device {
     use super::{DEVICE_PATH, Errno, PcmSys};
-    use std::ffi::{c_int, c_ulong, c_void};
     use std::io::Write;
     use std::os::fd::AsRawFd;
-
-    unsafe extern "C" {
-        /// The C library's `ioctl`. Declared variadic, as glibc and musl
-        /// declare it, so the call is right for theirs; lane D's takes the
-        /// same three arguments in the same registers.
-        #[link_name = "ioctl"]
-        fn c_ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
-    }
 
     /// `/dev/snd/pcmC0D0p`, open for writing.
     #[derive(Debug)]
@@ -630,29 +626,9 @@ mod device {
 
     impl PcmSys for Device {
         fn ioctl(&mut self, request: u32, payload: &mut [u8]) -> Result<(), Errno> {
-            let arg: *mut c_void = if payload.is_empty() {
-                std::ptr::null_mut()
-            } else {
-                payload.as_mut_ptr().cast()
-            };
-            // SAFETY: `ioctl(fd, request, arg)` through the C library. `fd`
-            // is this device's, open for as long as `self`. `arg` is null
-            // for a request that carries no payload, and otherwise points at
-            // `payload`, which is live and exclusively borrowed for the call
-            // and is the size `request` encodes: the requests are this
-            // module's constants, and their payloads are built at those
-            // sizes (`HW_PARAMS_SIZE`, `STATUS_SIZE`). The kernel reads and
-            // writes within that size and keeps no pointer past the call.
-            let ret = unsafe { c_ioctl(self.file.as_raw_fd(), c_ulong::from(request), arg) };
-            if ret < 0 {
-                Err(Errno(
-                    std::io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(Errno::EINVAL.0),
-                ))
-            } else {
-                Ok(())
-            }
+            // The payloads are built at the sizes the requests encode
+            // (`HW_PARAMS_SIZE`, `STATUS_SIZE`, none); `sys::ioctl` checks.
+            crate::sys::ioctl(self.file.as_raw_fd(), request, payload)
         }
 
         fn write(&mut self, bytes: &[u8]) -> Result<usize, Errno> {

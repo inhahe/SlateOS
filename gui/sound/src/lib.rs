@@ -1,6 +1,8 @@
 //! System sounds: a sound file decoded ([`decode`]), made the kernel mixer's
 //! stream ([`convert`]), and played through the ALSA PCM device ([`pcm`]) --
-//! and the sounds played for a theme that brings none ([`builtin`]).
+//! and the sounds played for a theme that brings none ([`builtin`]). And the
+//! card's master volume and mute, through its ALSA control device
+//! ([`mixer`]), for the desktop's volume control and a settings page's.
 //!
 //! # The path a sound takes
 //!
@@ -35,11 +37,14 @@
 pub mod builtin;
 pub mod convert;
 pub mod decode;
+pub mod mixer;
 pub mod pcm;
 pub mod wav;
 
 #[cfg(test)]
 mod fake;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod sys;
 
 use std::fmt;
 use std::io::Read;

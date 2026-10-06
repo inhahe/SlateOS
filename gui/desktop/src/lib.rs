@@ -135,6 +135,7 @@ pub mod touchpad;
 pub mod tray_dnd;
 pub mod update_settings;
 pub mod user_accounts;
+pub mod volume;
 pub mod wallpaper;
 pub mod widgets;
 pub mod window_peek;
@@ -156,6 +157,8 @@ mod pointer_tests;
 mod service_menu_tests;
 #[cfg(test)]
 mod tray_window_tests;
+#[cfg(test)]
+mod volume_wiring_tests;
 #[cfg(test)]
 mod wallpaper_move_tests;
 
@@ -2458,6 +2461,11 @@ pub struct DesktopShell {
     /// [`PaneState::is_visible`](notif_pane::PaneState::is_visible) **is** the
     /// open flag. See `design-decisions.md` §493.
     pub notifications: notif_pane::NotificationPane,
+    /// What the volume the pane, the volume keys and the overlay show is the
+    /// volume of: the sound card's, once the `desktop` binary attaches it
+    /// ([`attach_volume`](Self::attach_volume)) -- or the shell's own number
+    /// where none was asked for (design-decisions §1485).
+    volume: volume::Output,
     /// The notifications popping up as they arrive, beside the pane that
     /// holds them: [`notify`](Self::notify) files a notification in the pane
     /// and shows it here (design-decisions §1447). Placed against the screen
@@ -2971,6 +2979,9 @@ impl DesktopShell {
             system_zone: Tz::utc(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
             notifications: notif_pane::NotificationPane::new(),
+            // No card until the `desktop` binary attaches one: a test or a
+            // harness that builds a shell must not turn the machine's volume.
+            volume: volume::Output::Own,
             toasts: toasts::ToastStack::new(),
             focus: focus_assist::FocusAssistManager::new(),
             events: calendar::EventStore::new(),
@@ -5548,6 +5559,9 @@ impl DesktopShell {
                 self.screen_width as f32,
                 self.notification_pane_height(),
             );
+            // A press or a drag on the volume slider moved the level: onto
+            // the card, as it goes. Nothing is written when it did not move.
+            self.write_volume();
             // The events this produced are drained by `handle_mouse`, which
             // wraps this call and turns a clicked action into a `Launch`.
             return ShellAction::Consumed;
@@ -7587,6 +7601,8 @@ impl DesktopShell {
             // meaning for the key, because a press the overlay did not use is
             // not therefore the desktop's.
             let _ = self.notifications.handle_key_event(key);
+            // An arrow on the volume slider moved the level: onto the card.
+            self.write_volume();
             return HotkeyOutcome::consumed();
         }
 
@@ -8140,28 +8156,31 @@ impl DesktopShell {
             // from the level this arm asked for: `adjust_volume` clamps, so at
             // either end of the range the two differ, and an indicator that
             // read 105% would be reporting a keystroke rather than a volume.
+            // Each from the card's level as it is now -- another program may
+            // have moved it -- and onto the card. A card out of reach is said
+            // to be, and no level moves: a number changing on screen while
+            // nothing changes in the speakers is the lie this replaced.
             HotkeyAction::VolumeUp | HotkeyAction::VolumeDown => {
                 let step = if matches!(action, HotkeyAction::VolumeUp) {
                     VolumeStep::Up
                 } else {
                     VolumeStep::Down
                 };
-                let level = self.notifications.adjust_volume(step.delta());
-                self.show_osd(osd::OsdKind::Volume {
-                    level,
-                    muted: self.notifications.is_muted(),
-                });
+                self.read_volume();
+                if self.volume.out_of_reach().is_none() {
+                    self.notifications.adjust_volume(step.delta());
+                    self.write_volume();
+                }
+                self.show_volume_osd();
                 HotkeyOutcome::consumed()
             }
             HotkeyAction::VolumeMute => {
-                let muted = self.notifications.toggle_mute();
-                // The level as well as the flag, because muting does not change
-                // the level and the overlay is what tells you what unmuting
-                // will bring back.
-                self.show_osd(osd::OsdKind::Volume {
-                    level: self.notifications.volume(),
-                    muted,
-                });
+                self.read_volume();
+                if self.volume.out_of_reach().is_none() {
+                    self.notifications.toggle_mute();
+                    self.write_volume();
+                }
+                self.show_volume_osd();
                 HotkeyOutcome::consumed()
             }
             // Consumed unconditionally, like the three toggles above. Super+R is
@@ -12546,7 +12565,69 @@ impl DesktopShell {
         // of the user, and a toast left over the pane's edge would cover a
         // card of its own notification.
         self.toasts.clear();
+        // The volume as the card has it now, which another program may have
+        // changed since the pane last showed it.
+        self.read_volume();
         self.notifications.show();
+    }
+
+    /// Make the volume the pane, the volume keys and the overlay show the
+    /// volume of `output`, and show its level and mute now. The `desktop`
+    /// binary attaches the sound card's ([`volume::Output::open`]); nothing
+    /// else need: a shell with none attached keeps its own number, as a test
+    /// must (see [`volume`]).
+    pub fn attach_volume(&mut self, output: volume::Output) {
+        self.volume = output;
+        self.read_volume();
+    }
+
+    /// What the shell's volume is the volume of.
+    #[must_use]
+    pub const fn volume_output(&self) -> &volume::Output {
+        &self.volume
+    }
+
+    /// Bring the pane's level and mute up to the card's -- before a volume
+    /// key moves them, and as the pane opens -- and have it say so when the
+    /// card cannot be read.
+    fn read_volume(&mut self) {
+        // Out of reach is not lost here: it is shown just below.
+        if let Ok(Some((level, muted))) = self.volume.read() {
+            self.notifications.show_card_volume(level, muted);
+        }
+        self.notifications
+            .set_volume_out_of_reach(self.volume.out_of_reach());
+    }
+
+    /// Put the pane's level and mute on the card, writing only what changed
+    /// since the card was last read or written -- and have the pane say so
+    /// when the card refuses.
+    fn write_volume(&mut self) {
+        let (level, muted) = (self.notifications.volume(), self.notifications.is_muted());
+        // A refusal makes the card out of reach, which is shown just below;
+        // the level stays where the user put it, to be tried again on the
+        // next change once the card is back.
+        let _refused = self.volume.write(level, muted);
+        self.notifications
+            .set_volume_out_of_reach(self.volume.out_of_reach());
+    }
+
+    /// The overlay for the volume as it is now: its level and whether it is
+    /// muted -- the level as well as the flag, because muting does not change
+    /// the level and the overlay is what tells you what unmuting will bring
+    /// back -- or, with the card out of reach, why the volume cannot change.
+    fn show_volume_osd(&mut self) {
+        let kind = match self.volume.out_of_reach() {
+            Some(why) => osd::OsdKind::Custom {
+                icon: osd::OsdIcon::Speaker,
+                message: why.to_string(),
+            },
+            None => osd::OsdKind::Volume {
+                level: self.notifications.volume(),
+                muted: self.notifications.is_muted(),
+            },
+        };
+        self.show_osd(kind);
     }
 
     /// What the shortcut editor needs to know about this desktop.

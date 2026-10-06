@@ -1840,6 +1840,17 @@ live.
   themes' folders (§1483,
   `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE` closed).
 
+- `[C]` **The volume controls turn the sound card's volume** -- done
+  2026-10-06 (`design-decisions.md` §1485). The notification pane's slider,
+  the volume keys and the mute key moved a number the desktop showed and
+  nothing else. They now turn the card's master volume and mute switch
+  through its ALSA control device, as `amixer` does (`gui/sound`'s
+  `mixer`), reading the card whenever they are about to show it. Where the
+  card cannot be reached -- every native program on SlateOS until lanes A
+  and D open the door (`requests/e-ad-no-application-can-reach-the-sound-device.md`,
+  the control device included) -- the pane says why in the slider's place
+  and the volume keys say it on screen.
+
 - `[C]` **Pictures of a theme** -- done 2026-10-06 (`design-decisions.md`
   §1484). `theme-preview THEME OUT.png` draws one standard scene in a
   theme -- its wallpaper with icons, the taskbar with the start menu open, a

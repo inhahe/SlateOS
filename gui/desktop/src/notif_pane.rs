@@ -586,6 +586,9 @@ pub struct NotificationPane {
     /// being dragged, where it was taken hold of, where the drag began -- and
     /// whether the pointer is where a press would take hold of a thumb.
     qs_sliders: [Slider; 2],
+    /// Why the volume cannot be changed -- shown in its slider's place --
+    /// while the sound card is out of reach (`crate::volume`).
+    volume_out_of_reach: Option<&'static str>,
     /// Per-app notification settings.
     app_settings: Vec<AppNotifSettings>,
     /// Scroll offset in the notification list (pixels).
@@ -636,6 +639,7 @@ impl NotificationPane {
             ids: IdSeq::new(),
             quick_settings: QuickSettingsState::default(),
             qs_sliders: [Self::level_slider(), Self::level_slider()],
+            volume_out_of_reach: None,
             app_settings: Vec::new(),
             scroll_offset: 0.0,
             events: Vec::new(),
@@ -1236,6 +1240,27 @@ impl NotificationPane {
         self.quick_settings.muted
     }
 
+    /// The level and mute the sound card holds, as read from it -- each as it
+    /// is, neither unmuting the other as a user's change of the level does
+    /// ([`set_volume`](Self::set_volume)).
+    pub const fn show_card_volume(&mut self, level: u8, muted: bool) {
+        self.quick_settings.volume = if level > 100 { 100 } else { level };
+        self.quick_settings.muted = muted;
+    }
+
+    /// Say the volume cannot be changed, and why in a few words -- shown in
+    /// the slider's place, which takes no input meanwhile -- or, with `None`,
+    /// that it can (`crate::volume`).
+    pub const fn set_volume_out_of_reach(&mut self, why: Option<&'static str>) {
+        self.volume_out_of_reach = why;
+    }
+
+    /// Why the volume cannot be changed, while it cannot.
+    #[must_use]
+    pub const fn volume_out_of_reach(&self) -> Option<&'static str> {
+        self.volume_out_of_reach
+    }
+
     /// Get brightness (0..=100).
     pub fn brightness(&self) -> u8 {
         self.quick_settings.brightness
@@ -1319,6 +1344,11 @@ impl NotificationPane {
     /// lives, so there is nothing to preview separately from saving -- a drag
     /// changes the volume as it goes, and Escape puts it back.
     fn qs_slider_input(&mut self, slot: usize, input: impl FnOnce(&mut Slider) -> Response) {
+        // A volume that cannot be changed has no slider to take hold of: its
+        // place says why instead.
+        if slot == 0 && self.volume_out_of_reach.is_some() {
+            return;
+        }
         let level = self.qs_level(slot);
         let Some(slider) = self.qs_sliders.get_mut(slot) else {
             return;
@@ -1796,17 +1826,45 @@ impl NotificationPane {
     ) {
         let value = self.qs_level(slot);
         let y = start_y + Self::qs_slider_top(slot);
-        // Label + value.
+        let out_of_reach = if slot == 0 {
+            self.volume_out_of_reach
+        } else {
+            None
+        };
+        // Label + value -- no value for a volume that is not the card's.
         cmds.push(RenderCommand::Text {
             x: PANE_PADDING,
             y: y + 8.0,
-            text: format!("{label}  {value}%"),
+            text: if out_of_reach.is_some() {
+                label.to_string()
+            } else {
+                format!("{label}  {value}%")
+            },
             color: p.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        // A volume the sound card cannot be asked for says why, where its
+        // slider would be: a slider there would move a level that changes
+        // nothing anyone hears.
+        if let Some(why) = out_of_reach {
+            let track = Self::qs_slider_placement(slot, start_y).track;
+            cmds.push(RenderCommand::Text {
+                x: track.x,
+                y: y + 9.0,
+                text: why.to_string(),
+                color: p.subtext0,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                // From where the track begins to the pane's padding.
+                max_width: Some(PANE_WIDTH - PANE_PADDING - track.x),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
 
         // The slider, showing the level as it is now: the level can change
         // under it (a media key), and the slider's own copy is refreshed only

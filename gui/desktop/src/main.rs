@@ -193,6 +193,13 @@ fn main() -> ExitCode {
         }
     };
 
+    // The volume controls are the sound card's from here on, or say why they
+    // cannot be (design-decisions 1485). The desktop's alone, as its sounds
+    // are: nothing else that builds a shell turns the machine's volume.
+    session
+        .shell_mut()
+        .attach_volume(desktop::volume::Output::open());
+
     // Every window hears when a settings file changes (design-decisions
     // 1418). With no configuration directory there is nothing to watch, and
     // nothing any program could have saved either.

@@ -2712,8 +2712,11 @@ authors never wrote a single automation handler.
   reach is refused (`design-decisions.md` §1491). The toolkit's context
   menu shows tools its rows itself (`guitk::menu::MenuPart`: each row's
   label, its keys or why it is greyed, its tick, and the submenu it
-  opened), so any program's menus are seen. Not yet: the font picker, and
-  the shell's window switcher (Alt+Tab).*
+  opened), so any program's menus are seen. And the window switcher
+  (Alt+Tab): its windows, the one the switch goes to chosen -- one chosen
+  as Tab steps to it, one pressed as letting go on it switches to it. Not
+  yet: the font picker; a switch shown in the overview, which is the
+  overview's to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

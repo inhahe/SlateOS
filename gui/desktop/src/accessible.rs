@@ -17,8 +17,10 @@
 //! caret; while the power choices are open, they; while the volume flyout
 //! is open, its level, its mute switch and "Audio settings…"; while the
 //! calendar is open, its arrows, its title, "Today", its days or months and
-//! the chosen day's events (`calendar::accessible`); while the
-//! notification pane is open, its parts (`notif_pane::accessible`); and
+//! the chosen day's events (`calendar::accessible`); while a window
+//! switch is under way, the switcher's windows, the one it goes to chosen;
+//! while the notification pane is open, its parts
+//! (`notif_pane::accessible`); and
 //! every menu open over everything -- the desktop's, a notification's, a
 //! tile's, a field's -- with its rows, and the submenu a row opened
 //! (`guitk::menu::MenuPart`), a row chosen as a click chooses it.
@@ -46,7 +48,7 @@ use crate::calendar::{CalendarHit, CalendarPart, CalendarViewMode};
 use crate::notif_pane::PanePart;
 use crate::{
     DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, Rect, ShellAction, StartRow,
-    StartShortcut, TaskbarSlot, click, icons, power, volume_flyout,
+    StartShortcut, SwitchView, TaskbarSlot, TextRole, WindowId, click, icons, power, volume_flyout,
 };
 
 /// A part of the shell, as tools name it.
@@ -88,6 +90,11 @@ pub enum ShellPart {
     /// Its controls -- the arrows, the title, "Today", a day, a month -- are
     /// [`Control`](Self::Control)s, pressed as clicked.
     Calendar(CalendarPart),
+    /// The window switcher, while a switch is shown as its strip.
+    Switcher,
+    /// A window in the switcher: chosen as Tab steps to it, pressed as
+    /// letting go on it switches to it.
+    SwitchTo(WindowId),
 }
 
 /// A menu the shell opens over everything.
@@ -237,6 +244,74 @@ impl DesktopShell {
             }
             _ => None,
         }
+    }
+
+    /// Whether a switch is under way and shown as the switcher's strip --
+    /// one shown in the overview is the overview's to draw.
+    fn switcher_shown(&self) -> bool {
+        self.alt_tab_active && self.alt_tab_view == SwitchView::Switcher
+    }
+
+    /// The window switcher: each window the switch can go to, by its title,
+    /// the one it goes to chosen -- each boxed in its cell on the page of the
+    /// strip that shows it, as the strip is drawn once it is chosen.
+    fn switcher_node(&self) -> Node<ShellPart> {
+        let windows = self.switcher_windows();
+        let size = self.font_size(TextRole::Body);
+        let title_width = |index: usize| {
+            windows
+                .get(index)
+                .map_or(0.0, |window| guitk::text::width(&window.title, size))
+        };
+        let shown = self.switcher_layout(
+            windows.len(),
+            self.alt_tab_index,
+            title_width(self.alt_tab_index),
+        );
+        let mut list = Node::new(
+            ShellPart::Switcher,
+            Role::List,
+            "Switch windows",
+            shown.panel,
+        );
+        for (index, window) in windows.iter().enumerate() {
+            let page = self.switcher_layout(windows.len(), index, title_width(index));
+            let bounds = page
+                .cells
+                .iter()
+                .find(|(at, _)| *at == index)
+                .map_or(page.panel, |(_, cell)| *cell);
+            let name = if window.title.is_empty() {
+                window.app_id.clone()
+            } else {
+                window.title.clone()
+            };
+            let mut item = Node::new(ShellPart::SwitchTo(window.id), Role::ListItem, name, bounds);
+            item.value = Some(Value::Chosen(index == self.alt_tab_index));
+            item.focused = index == self.alt_tab_index;
+            item.focusable = true;
+            list.children.push(item);
+        }
+        list
+    }
+
+    /// Choose the window `id` in the switch under way, as Tab steps to it --
+    /// and, where `go`, end the switch on it, as letting go does: the window
+    /// raised is the host's to ask the compositor for.
+    fn switch_to(&mut self, id: WindowId, go: bool) -> Result<Option<ShellAction>, Refusal> {
+        if !self.switcher_shown() {
+            return Err(Refusal::NoSuchWidget);
+        }
+        let index = self
+            .switcher_windows()
+            .iter()
+            .position(|window| window.id == id)
+            .ok_or(Refusal::NoSuchWidget)?;
+        self.alt_tab_index = index;
+        if !go {
+            return Ok(None);
+        }
+        Ok(self.finish_alt_tab().map(ShellAction::Control))
     }
 
     /// Whether the day in cell `index` of the month the calendar shows is
@@ -813,6 +888,9 @@ impl Accessible for DesktopShell {
         if self.calendar.visible {
             root.children.push(self.calendar_node());
         }
+        if self.switcher_shown() {
+            root.children.push(self.switcher_node());
+        }
         if self.notifications.pane_state().is_visible() {
             root.children.push(
                 self.notifications
@@ -891,6 +969,10 @@ impl Accessible for DesktopShell {
                 _,
             ) => Err(not_for(Role::GridCell)),
             (ShellPart::Control(_), _) => Err(not_for(Role::Button)),
+            (ShellPart::SwitchTo(id), Action::Choose | Action::Focus) => self.switch_to(id, false),
+            (ShellPart::SwitchTo(id), Action::Press) => self.switch_to(id, true),
+            (ShellPart::SwitchTo(_), _) => Err(not_for(Role::ListItem)),
+            (ShellPart::Switcher, _) => Err(not_for(Role::List)),
             (ShellPart::Calendar(part), _) => Err(not_for(match part {
                 CalendarPart::Popup => Role::Dialog,
                 CalendarPart::Grid => Role::Grid,

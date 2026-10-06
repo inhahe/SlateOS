@@ -744,6 +744,87 @@ fn a_notifications_menu_is_chosen_from_over_the_pane() {
     });
 }
 
+/// **The window switcher shows tools its windows, the one the switch goes
+/// to chosen**: one chosen is stepped to as Tab steps, and one pressed ends
+/// the switch on it, asking for it to be raised, as letting go does.
+#[test]
+fn the_window_switcher_is_stepped_and_let_go_of_as_the_user_does() {
+    let mut shell = shell();
+    let _asked = shell.apply_window_list(&WindowList::new(
+        0,
+        vec![
+            WindowInfo::new(1, 40, "notes.md"),
+            WindowInfo::new(2, 41, "Inbox"),
+            WindowInfo::new(3, 42, "Calendar"),
+        ],
+    ));
+    let switcher = |shell: &DesktopShell| {
+        tree(shell)
+            .walk()
+            .any(|node| node.id == ShellPart::Switcher)
+    };
+    assert!(!switcher(&shell), "no switch under way");
+    assert_eq!(
+        press(&mut shell, ShellPart::SwitchTo(WindowId(1))),
+        Err(Refusal::NoSuchWidget)
+    );
+
+    shell.start_alt_tab();
+    let list = node(&shell, ShellPart::Switcher);
+    assert_eq!(
+        (list.role, list.name.as_str()),
+        (Role::List, "Switch windows")
+    );
+    assert_eq!(list.children.len(), shell.switcher_windows().len());
+    let chosen: Vec<ShellPart> = list
+        .children
+        .iter()
+        .filter(|item| item.value == Some(Value::Chosen(true)))
+        .map(|item| item.id)
+        .collect();
+    let goes_to = shell.switcher_windows()[shell.alt_tab_index].id;
+    assert_eq!(
+        chosen,
+        [ShellPart::SwitchTo(goes_to)],
+        "one chosen: where it goes"
+    );
+    for item in &list.children {
+        assert!(
+            list.bounds
+                .contains(item.bounds.centre().0, item.bounds.centre().1),
+            "{} is boxed in the strip",
+            item.name
+        );
+    }
+
+    let other = list
+        .children
+        .iter()
+        .find(|item| item.id != ShellPart::SwitchTo(goes_to))
+        .expect("another window")
+        .clone();
+    assert_eq!(shell.invoke(&other.id, Action::Choose, 0.0, 0.0), Ok(None));
+    assert_eq!(node(&shell, other.id).value, Some(Value::Chosen(true)));
+    let ShellPart::SwitchTo(id) = other.id else {
+        panic!("{:?} is no window", other.id);
+    };
+    assert_eq!(
+        press(&mut shell, other.id),
+        Ok(Some(ShellAction::Control(crate::ShellRequest::window(
+            id,
+            crate::ShellControlAction::Activate
+        ))))
+    );
+    assert!(!switcher(&shell), "let go of, the switch ends");
+    assert_eq!(
+        shell.invoke(&ShellPart::Switcher, Action::Press, 0.0, 0.0),
+        Err(Refusal::NotApplicable {
+            role: Role::List,
+            action: "press"
+        })
+    );
+}
+
 /// **The clock opens the calendar, and its controls are pressed as they
 /// are clicked**: the next month shown, a day chosen -- and chosen again,
 /// left chosen, where a click would have cleared it -- and "Today" back.

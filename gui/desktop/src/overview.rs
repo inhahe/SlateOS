@@ -64,7 +64,7 @@
 //! was lit. See `design-decisions.md` §520.
 
 use crate::animations::{Animation, DEFAULT_DURATION_MS, Easing};
-use crate::{Layer, ShellControlAction, ShellRequest, WindowId};
+use crate::{Layer, Rect, ShellControlAction, ShellRequest, WindowId};
 use appearance::{Palette, readable_on};
 use guiremote::window_list::WindowList;
 use guitk::color::Color;
@@ -72,6 +72,9 @@ use guitk::motion::Motion;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
+
+pub mod accessible;
+pub use accessible::OverviewPart;
 
 // ============================================================================
 // Colour
@@ -169,6 +172,59 @@ pub struct ThumbnailLayout {
     pub render_y: f32,
     pub render_width: f32,
     pub render_height: f32,
+}
+
+impl ThumbnailLayout {
+    /// The card as it is drawn and takes a press: its place, grown by
+    /// [`HOVER_GROWTH`] on every side while it is `hovered`.
+    ///
+    /// The one statement of it. The renderer grew the hovered card and the
+    /// hit test did not, so the four pixels round a lit card were drawn as
+    /// the card and pressed as whatever lay under them.
+    #[must_use]
+    pub fn card_rect(&self, hovered: bool) -> Rect {
+        let grow = if hovered { HOVER_GROWTH } else { 0.0 };
+        Rect::new(
+            self.render_x - grow,
+            self.render_y - grow,
+            self.render_width + 2.0 * grow,
+            self.render_height + 2.0 * grow,
+        )
+    }
+}
+
+/// The close button of a card drawn at `card`: on its top-right corner,
+/// standing [`CLOSE_RISE`] above its top edge.
+#[must_use]
+pub fn close_rect(card: Rect) -> Rect {
+    Rect::new(
+        card.right() - CLOSE_INSET,
+        card.y - CLOSE_RISE,
+        CLOSE_SIDE,
+        CLOSE_SIDE,
+    )
+}
+
+/// A desktop's lane, while the overview shows every desktop: the band across
+/// the content area its label and its cards are drawn in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LaneLayout {
+    /// The desktop.
+    pub desktop_id: u32,
+    /// Its band.
+    pub rect: Rect,
+}
+
+/// What the overview has under a point, of what it draws and takes a press
+/// on ([`hit_test`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverviewHit {
+    /// A window's close button: drawn, and taken, on the hovered card alone.
+    Close(u64),
+    /// A window's card.
+    Card(u64),
+    /// A desktop's lane, off its cards.
+    Lane(u32),
 }
 
 /// Full mutable state of the overview.
@@ -675,20 +731,17 @@ pub fn compute_lane_layout(
 
     let pad = config.thumbnail_padding;
     let label_h: f32 = if config.show_desktop_labels {
-        28.0
+        LANE_LABEL_H
     } else {
         0.0
     };
     let lane_count = lanes.len();
-    let lane_h = (bh - pad * (lane_count as f32 + 1.0)) / lane_count as f32;
-
-    if lane_h <= 0.0 {
-        return Vec::new();
-    }
 
     let mut out = Vec::new();
     for (li, lane) in lanes.iter().enumerate() {
-        let ly = by + pad + li as f32 * (lane_h + pad);
+        let Some((ly, lane_h)) = lane_band(li, lane_count, by, bh, pad) else {
+            return Vec::new();
+        };
         let content_y = ly + label_h;
         let content_h = (lane_h - label_h).max(0.0);
 
@@ -724,11 +777,26 @@ pub fn compute_lane_layout(
     out
 }
 
+/// The proportions a window the compositor has not placed is drawn at: a
+/// screen's, its card filling its cell as a window filling its screen would.
+///
+/// Zero by zero is how a window list says a window was not placed
+/// (`WindowInfo::new`). Its card used to be zero by zero too -- a point,
+/// drawn as nothing, pressed only at that exact pixel -- so the window was
+/// missing from the overview that exists to show every window.
+const UNPLACED_WINDOW: (f32, f32) = (16.0, 10.0);
+
 /// Scale `(w, h)` to fit inside `(max_w, max_h)` while preserving aspect
-/// ratio.  Returns the scaled `(width, height)`.
+/// ratio.  Returns the scaled `(width, height)`. A window with no size is
+/// drawn at a screen's proportions, as large as fits ([`UNPLACED_WINDOW`]).
 fn fit_aspect(w: f32, h: f32, max_w: f32, max_h: f32) -> (f32, f32) {
-    if w <= 0.0 || h <= 0.0 || max_w <= 0.0 || max_h <= 0.0 {
+    if max_w <= 0.0 || max_h <= 0.0 {
         return (0.0, 0.0);
+    }
+    if w <= 0.0 || h <= 0.0 {
+        let (w, h) = UNPLACED_WINDOW;
+        let scale = (max_w / w).min(max_h / h);
+        return ((w * scale).max(1.0), (h * scale).max(1.0));
     }
     let scale = (max_w / w).min(max_h / h).min(1.0);
     // Ensure at least 1-pixel dimensions so thumbnails remain visible.
@@ -745,6 +813,119 @@ fn fit_aspect(w: f32, h: f32, max_w: f32, max_h: f32) -> (f32, f32) {
 const CONTENT_TOP: f32 = 70.0;
 /// Margin left below the thumbnail area and at either side of it.
 const CONTENT_MARGIN: f32 = 20.0;
+/// How far a card grows on every side while it is hovered.
+const HOVER_GROWTH: f32 = 4.0;
+/// A card's close button, square.
+const CLOSE_SIDE: f32 = 18.0;
+/// How far in from its card's right edge the close button begins.
+const CLOSE_INSET: f32 = 22.0;
+/// How far above its card's top edge the close button stands.
+const CLOSE_RISE: f32 = 6.0;
+/// Height of a lane's label row, above its cards, where labels are shown.
+const LANE_LABEL_H: f32 = 28.0;
+
+/// The thumbnail area of a `screen_w` × `screen_h` display: left, top,
+/// width, height.
+fn content_area(screen_w: f32, screen_h: f32) -> (f32, f32, f32, f32) {
+    (
+        CONTENT_MARGIN,
+        CONTENT_TOP,
+        screen_w - CONTENT_MARGIN * 2.0,
+        screen_h - CONTENT_TOP - CONTENT_MARGIN,
+    )
+}
+
+/// The band the `index`-th of `count` lanes takes in a content area `by`
+/// down and `bh` tall, `pad` apart: its top and its height -- `None` where
+/// `count` lanes do not fit.
+///
+/// The one statement of where a lane is: the lanes' cards are laid out in it,
+/// its label is drawn at its top, and a press on it off its cards switches to
+/// its desktop. The labels used to work the band out again for themselves.
+fn lane_band(index: usize, count: usize, by: f32, bh: f32, pad: f32) -> Option<(f32, f32)> {
+    let (index, count) = (index as f32, count as f32);
+    let lane_h = (bh - pad * (count + 1.0)) / count;
+    (lane_h > 0.0).then_some((by + pad + index * (lane_h + pad), lane_h))
+}
+
+/// Where each desktop's lane is, while the overview shows every desktop --
+/// none in its other modes, or while it is closed.
+#[must_use]
+pub fn lane_layout(
+    state: &OverviewState,
+    config: &OverviewConfig,
+    screen_w: f32,
+    screen_h: f32,
+) -> Vec<LaneLayout> {
+    if !state.visible || state.mode != OverviewMode::AllDesktops {
+        return Vec::new();
+    }
+    let (bx, by, bw, bh) = content_area(screen_w, screen_h);
+    let count = state.lanes.len();
+    state
+        .lanes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, lane)| {
+            let (top, height) = lane_band(index, count, by, bh, config.thumbnail_padding)?;
+            Some(LaneLayout {
+                desktop_id: lane.desktop_id,
+                rect: Rect::new(bx, top, bw, height),
+            })
+        })
+        .collect()
+}
+
+/// The search bar, at the top middle of a `screen_w` wide display.
+fn search_bar_rect(screen_w: f32) -> Rect {
+    let bar_w = 400.0_f32.min(screen_w - 40.0);
+    Rect::new((screen_w - bar_w) / 2.0, 16.0, bar_w, 36.0)
+}
+
+/// What the overview has under `(mx, my)`: the hovered card's close
+/// button, a card, or a lane off its cards -- from the same rectangles the
+/// overview is drawn from.
+///
+/// The hovered card is asked first, its close button before it: both are
+/// drawn over the rest, the card grown and the button standing above the
+/// card's top edge. The button used to be tested at a place four pixels
+/// from where it is drawn and only within the card's own rectangle, so its
+/// top half took no press and its right edge raised the window it was
+/// meant to close.
+#[must_use]
+pub fn hit_test(
+    state: &OverviewState,
+    layouts: &[ThumbnailLayout],
+    lanes: &[LaneLayout],
+    mx: f32,
+    my: f32,
+) -> Option<OverviewHit> {
+    if !state.visible {
+        return None;
+    }
+    let hovered = state
+        .hovered_window
+        .and_then(|id| layouts.iter().find(|layout| layout.window_id == id));
+    if let Some(card) = hovered {
+        let rect = card.card_rect(true);
+        if close_rect(rect).contains(mx, my) {
+            return Some(OverviewHit::Close(card.window_id));
+        }
+        if rect.contains(mx, my) {
+            return Some(OverviewHit::Card(card.window_id));
+        }
+    }
+    if let Some(card) = layouts
+        .iter()
+        .find(|layout| layout.card_rect(false).contains(mx, my))
+    {
+        return Some(OverviewHit::Card(card.window_id));
+    }
+    lanes
+        .iter()
+        .find(|lane| lane.rect.contains(mx, my))
+        .map(|lane| OverviewHit::Lane(lane.desktop_id))
+}
 
 /// Where every thumbnail lands on a `screen_w` × `screen_h` display.
 ///
@@ -768,28 +949,13 @@ pub fn overview_layout(
     if !state.visible {
         return Vec::new();
     }
-    let content_h = screen_h - CONTENT_TOP - CONTENT_MARGIN;
-    let content_w = screen_w - CONTENT_MARGIN * 2.0;
+    let (bx, by, bw, bh) = content_area(screen_w, screen_h);
     match state.mode {
         OverviewMode::AllWindows | OverviewMode::RecentApps => {
             let thumbs = collect_thumbs_for_mode(state);
-            compute_grid_layout(
-                &thumbs,
-                CONTENT_MARGIN,
-                CONTENT_TOP,
-                content_w,
-                content_h,
-                config,
-            )
+            compute_grid_layout(&thumbs, bx, by, bw, bh, config)
         }
-        OverviewMode::AllDesktops => compute_lane_layout(
-            &state.lanes,
-            CONTENT_MARGIN,
-            CONTENT_TOP,
-            content_w,
-            content_h,
-            config,
-        ),
+        OverviewMode::AllDesktops => compute_lane_layout(&state.lanes, bx, by, bw, bh, config),
     }
 }
 
@@ -838,6 +1004,23 @@ pub fn render_overview(
         render_desktop_labels(&mut cmds, state, config, p, content_y, screen_w, content_h);
     }
 
+    // The lane the wheel has chosen, ringed: Enter switches to it. It was
+    // chosen and never drawn, and a press anywhere off the cards switched to
+    // it, wherever the press was.
+    for lane in lane_layout(state, config, screen_w, screen_h) {
+        if state.selected_desktop == Some(lane.desktop_id) {
+            cmds.push(RenderCommand::StrokeRect {
+                x: lane.rect.x,
+                y: lane.rect.y,
+                width: lane.rect.w,
+                height: lane.rect.h,
+                color: p.accent,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(8.0),
+            });
+        }
+    }
+
     // Thumbnail cards.
     for layout in &layouts {
         let is_hovered = state.hovered_window == Some(layout.window_id);
@@ -872,10 +1055,8 @@ fn render_search_bar(
     p: &Palette,
     screen_w: f32,
 ) {
-    let bar_w = 400.0_f32.min(screen_w - 40.0);
-    let bar_x = (screen_w - bar_w) / 2.0;
-    let bar_y = 16.0;
-    let bar_h = 36.0;
+    let bar = search_bar_rect(screen_w);
+    let (bar_x, bar_y, bar_w, bar_h) = (bar.x, bar.y, bar.w, bar.h);
 
     // Background.
     cmds.push(RenderCommand::FillRect {
@@ -933,16 +1114,11 @@ fn render_desktop_labels(
 ) {
     let pad = config.thumbnail_padding;
     let lane_count = state.lanes.len();
-    if lane_count == 0 {
-        return;
-    }
-    let lane_h = (content_h - pad * (lane_count as f32 + 1.0)) / lane_count as f32;
-    if lane_h <= 0.0 {
-        return;
-    }
 
     for (li, lane) in state.lanes.iter().enumerate() {
-        let ly = content_y + pad + li as f32 * (lane_h + pad);
+        let Some((ly, _)) = lane_band(li, lane_count, content_y, content_h, pad) else {
+            return;
+        };
 
         // Current desktop indicator bar.
         if lane.is_current {
@@ -982,20 +1158,10 @@ fn render_thumbnail_card(
     is_hovered: bool,
     is_dimmed: bool,
 ) {
-    let x = layout.render_x;
-    let y = layout.render_y;
-    let w = layout.render_width;
-    let h = layout.render_height;
-
-    // A label row sits below the card; reserve space.
-    let label_h = 32.0;
-
-    // Hover: slight scale-up effect simulated with padding reduction.
-    let (dx, dy, dw, dh) = if is_hovered {
-        (-4.0_f32, -4.0_f32, 8.0_f32, 8.0_f32)
-    } else {
-        (0.0, 0.0, 0.0, 0.0)
-    };
+    // Hover: slight scale-up effect simulated with padding reduction -- the
+    // card as it takes a press, too ([`ThumbnailLayout::card_rect`]).
+    let card = layout.card_rect(is_hovered);
+    let (x, y, w, h) = (card.x, card.y, card.w, card.h);
 
     // Card background (window representation).
     let bg_color = if is_dimmed {
@@ -1004,10 +1170,10 @@ fn render_thumbnail_card(
         p.surface0
     };
     cmds.push(RenderCommand::FillRect {
-        x: x + dx,
-        y: y + dy,
-        width: w + dw,
-        height: h + dh,
+        x,
+        y,
+        width: w,
+        height: h,
         color: bg_color,
         corner_radii: CornerRadii::all(6.0),
     });
@@ -1017,13 +1183,13 @@ fn render_thumbnail_card(
     // forty on a card with room for all of it read as a title of thirty.
     let title_color = if is_dimmed { p.overlay0 } else { p.text };
     cmds.push(RenderCommand::Text {
-        x: x + dx + 8.0,
-        y: y + dy + 8.0,
+        x: x + 8.0,
+        y: y + 8.0,
         text: layout.title.clone(),
         color: title_color,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
-        max_width: Some((w + dw - 16.0).max(0.0)),
+        max_width: Some((w - 16.0).max(0.0)),
         overflow: TextOverflow::Ellipsis,
     });
 
@@ -1037,10 +1203,10 @@ fn render_thumbnail_card(
     };
     let border_width = if is_hovered { 2.0 } else { 1.0 };
     cmds.push(RenderCommand::StrokeRect {
-        x: x + dx,
-        y: y + dy,
-        width: w + dw,
-        height: h + dh,
+        x,
+        y,
+        width: w,
+        height: h,
         color: border_color,
         line_width: border_width,
         corner_radii: CornerRadii::all(6.0),
@@ -1049,16 +1215,16 @@ fn render_thumbnail_card(
     // Minimized indicator.
     if layout.is_minimized {
         cmds.push(RenderCommand::FillRect {
-            x: x + dx + w + dw - 20.0,
-            y: y + dy + 4.0,
+            x: x + w - 20.0,
+            y: y + 4.0,
             width: 16.0,
             height: 16.0,
             color: p.yellow,
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + dx + w + dw - 18.0,
-            y: y + dy + 6.0,
+            x: x + w - 18.0,
+            y: y + 6.0,
             text: "_".to_string(),
             color: readable_on(p.yellow),
             font_size: 10.0,
@@ -1068,17 +1234,18 @@ fn render_thumbnail_card(
         });
     }
 
-    // Close button (visible on hover).
+    // Close button (visible on hover), where it takes a press
+    // ([`close_rect`]).
     if is_hovered {
-        let cb_x = x + dx + w + dw - 22.0;
-        let cb_y = y + dy - 6.0;
+        let button = close_rect(card);
+        let (cb_x, cb_y) = (button.x, button.y);
         cmds.push(RenderCommand::FillRect {
             x: cb_x,
             y: cb_y,
-            width: 18.0,
-            height: 18.0,
+            width: button.w,
+            height: button.h,
             color: p.red,
-            corner_radii: CornerRadii::all(9.0),
+            corner_radii: CornerRadii::all(button.w / 2.0),
         });
         cmds.push(RenderCommand::Text {
             x: cb_x + 4.0,
@@ -1097,9 +1264,6 @@ fn render_thumbnail_card(
     // string, so on a real desktop it drew an empty line of reserved space
     // under every thumbnail — the layout paying for text that was never going
     // to arrive.
-
-    // Suppress unused-variable warning — label_h is used to document intent.
-    let _ = label_h;
 }
 
 // ============================================================================
@@ -1160,6 +1324,10 @@ pub fn on_key(state: &mut OverviewState, key: OverviewKey) -> OverviewAction {
                     WindowId(wid),
                     ShellControlAction::Activate,
                 ))
+            } else if let Some(desktop) = chosen_lane(state) {
+                // No window lit: the desktop the wheel has chosen.
+                state.hide();
+                OverviewAction::Request(ShellRequest::SwitchDesktop { desktop })
             } else {
                 OverviewAction::None
             }
@@ -1193,7 +1361,25 @@ pub fn on_key(state: &mut OverviewState, key: OverviewKey) -> OverviewAction {
     }
 }
 
+/// The desktop whose lane the wheel has chosen, while every desktop shows.
+fn chosen_lane(state: &OverviewState) -> Option<u32> {
+    if state.mode != OverviewMode::AllDesktops {
+        return None;
+    }
+    let chosen = state.selected_desktop?;
+    state
+        .lanes
+        .iter()
+        .any(|lane| lane.desktop_id == chosen)
+        .then_some(chosen)
+}
+
 /// Process a mouse-move event.  Updates hover state.
+///
+/// A card is lit while the pointer is on it as drawn -- grown, once lit --
+/// or on its close button, which stands above it: the button used to go out
+/// as the pointer reached it, the card under it no longer being under the
+/// pointer.
 pub fn on_mouse_move(
     state: &mut OverviewState,
     mx: f32,
@@ -1203,84 +1389,58 @@ pub fn on_mouse_move(
     if !state.visible {
         return OverviewAction::None;
     }
-    state.hovered_window = None;
-    for layout in layouts {
-        if mx >= layout.render_x
-            && mx <= layout.render_x + layout.render_width
-            && my >= layout.render_y
-            && my <= layout.render_y + layout.render_height
-        {
-            state.hovered_window = Some(layout.window_id);
-            return OverviewAction::NavigateSelection;
-        }
+    state.hovered_window = match hit_test(state, layouts, &[], mx, my) {
+        Some(OverviewHit::Close(id) | OverviewHit::Card(id)) => Some(id),
+        Some(OverviewHit::Lane(_)) | None => None,
+    };
+    if state.hovered_window.is_some() {
+        OverviewAction::NavigateSelection
+    } else {
+        OverviewAction::None
     }
-    OverviewAction::None
 }
 
-/// Process a mouse click.
-///
-/// The close button occupies the top-right corner of each hovered thumbnail.
+/// Process a mouse click: the hovered card's close button closes its window,
+/// a card switches to its window, and a lane off its cards to its desktop --
+/// whatever [`hit_test`] finds there.
 ///
 /// Takes no screen size: everything clickable in the overview is a rectangle in
-/// `layouts`, and `layouts` already came from [`overview_layout`], which is the
-/// one place the screen size is applied. It used to take both, for the "+"
-/// add-desktop button that was positioned relative to the bottom-right corner —
-/// the only thing here that was placed independently of the layout pass, and
-/// therefore the only thing that could be drawn in one place and clicked in
-/// another. It is gone; so is the second copy of the screen size.
+/// `layouts` or `lanes`, which came from [`overview_layout`] and
+/// [`lane_layout`], the one place the screen size is applied. It used to take
+/// it, for the "+" add-desktop button that was positioned relative to the
+/// bottom-right corner — the only thing here that was placed independently of
+/// the layout pass, and therefore the only thing that could be drawn in one
+/// place and clicked in another. It is gone; so is the second copy of the
+/// screen size.
+///
+/// A press on a lane off its cards used to switch to the desktop the wheel
+/// had chosen -- which was never drawn -- wherever the press was, and to
+/// nothing before the wheel had moved.
 pub fn on_mouse_click(
     state: &mut OverviewState,
     mx: f32,
     my: f32,
     layouts: &[ThumbnailLayout],
+    lanes: &[LaneLayout],
 ) -> OverviewAction {
-    if !state.visible {
-        return OverviewAction::None;
-    }
-
-    // Check thumbnails.
-    for layout in layouts {
-        let lx = layout.render_x;
-        let ly = layout.render_y;
-        let lw = layout.render_width;
-        let lh = layout.render_height;
-
-        if mx >= lx && mx <= lx + lw && my >= ly && my <= ly + lh {
-            // Close button — top-right 18x18 area.
-            let cb_x = lx + lw - 22.0;
-            let cb_y = ly - 6.0;
-            if mx >= cb_x && mx <= cb_x + 18.0 && my >= cb_y && my <= cb_y + 18.0 {
-                return OverviewAction::Request(ShellRequest::window(
-                    WindowId(layout.window_id),
-                    ShellControlAction::Close,
-                ));
-            }
-
-            // Otherwise — switch to this window.
+    match hit_test(state, layouts, lanes, mx, my) {
+        Some(OverviewHit::Close(id)) => OverviewAction::Request(ShellRequest::window(
+            WindowId(id),
+            ShellControlAction::Close,
+        )),
+        Some(OverviewHit::Card(id)) => {
             state.hide();
-            return OverviewAction::Request(ShellRequest::window(
-                WindowId(layout.window_id),
+            OverviewAction::Request(ShellRequest::window(
+                WindowId(id),
                 ShellControlAction::Activate,
-            ));
+            ))
         }
-    }
-
-    // Click on empty area with a lane -> select desktop.
-    if state.mode == OverviewMode::AllDesktops {
-        let target = state.selected_desktop.and_then(|did| {
-            state
-                .lanes
-                .iter()
-                .find(|l| l.desktop_id == did)
-                .map(|l| l.desktop_id)
-        });
-        if let Some(did) = target {
+        Some(OverviewHit::Lane(desktop)) => {
             state.hide();
-            return OverviewAction::Request(ShellRequest::SwitchDesktop { desktop: did });
+            OverviewAction::Request(ShellRequest::SwitchDesktop { desktop })
         }
+        None => OverviewAction::None,
     }
-
-    OverviewAction::None
 }
 
 /// Process a mouse-scroll event in AllDesktops mode.
@@ -1944,11 +2104,14 @@ mod tests {
         assert!((h - 100.0).abs() < 0.01);
     }
 
+    /// A window with no size -- one the compositor has not placed -- is
+    /// drawn at a screen's proportions filling its cell, not as a card of no
+    /// size that could be neither seen nor pressed.
     #[test]
-    fn test_fit_aspect_zero_source() {
-        let (w, h) = fit_aspect(0.0, 0.0, 100.0, 100.0);
-        assert_eq!(w, 0.0);
-        assert_eq!(h, 0.0);
+    fn an_unplaced_window_fills_its_cell_at_a_screens_proportions() {
+        assert_eq!(fit_aspect(0.0, 0.0, 100.0, 100.0), (100.0, 62.5));
+        assert_eq!(fit_aspect(0.0, 300.0, 320.0, 100.0), (160.0, 100.0));
+        assert_eq!(fit_aspect(0.0, 0.0, 0.0, 100.0), (0.0, 0.0), "no cell");
     }
 
     #[test]
@@ -2223,7 +2386,7 @@ mod tests {
             render_width: 200.0,
             render_height: 150.0,
         }];
-        let action = on_mouse_click(&mut s, 150.0, 150.0, &layouts);
+        let action = on_mouse_click(&mut s, 150.0, 150.0, &layouts, &[]);
         assert_eq!(
             action,
             OverviewAction::Request(ShellRequest::window(
@@ -2245,7 +2408,7 @@ mod tests {
         // that corner is backdrop like any other part of the backdrop.
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllDesktops);
-        let action = on_mouse_click(&mut s, 1870.0, 1030.0, &[]);
+        let action = on_mouse_click(&mut s, 1870.0, 1030.0, &[], &[]);
         assert_eq!(action, OverviewAction::None);
     }
 
@@ -2253,8 +2416,199 @@ mod tests {
     fn test_mouse_click_empty_area() {
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
-        let action = on_mouse_click(&mut s, 5.0, 5.0, &[]);
+        let action = on_mouse_click(&mut s, 5.0, 5.0, &[], &[]);
         assert_eq!(action, OverviewAction::None);
+    }
+
+    /// An overview of this desktop's windows on a 1920 x 1080 screen, card
+    /// `lit` lit, and where its cards are.
+    fn lit(lit: Option<u64>) -> (OverviewState, Vec<ThumbnailLayout>) {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllWindows);
+        s.hovered_window = lit;
+        let layouts = overview_layout(&s, &default_config(), 1920.0, 1080.0);
+        (s, layouts)
+    }
+
+    /// Where the overview draws its close button: its one red square.
+    fn drawn_close(s: &OverviewState) -> Rect {
+        let cmds = render_overview(
+            s,
+            &default_config(),
+            &Palette::for_mode(false),
+            1920.0,
+            1080.0,
+        );
+        let found: Vec<Rect> = cmds
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if width == CLOSE_SIDE && height == CLOSE_SIDE => {
+                    Some(Rect::new(x, y, width, height))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "one close button is drawn");
+        found[0]
+    }
+
+    /// **The close button takes a press wherever it is drawn** -- its top
+    /// half, standing above the card, as its right edge -- and closes its
+    /// window. It was tested four pixels from where it is drawn, and only
+    /// inside the card: its top half took no press, and its right edge
+    /// raised the window it was meant to close.
+    #[test]
+    fn the_close_button_takes_a_press_where_it_is_drawn() {
+        let (s, layouts) = lit(Some(1));
+        let card = layouts[0].card_rect(true);
+        let button = drawn_close(&s);
+        assert_eq!(button, close_rect(card), "drawn where it is placed");
+        assert!(button.y < card.y, "it stands above the card");
+        for (x, y) in [
+            (button.x + 1.0, button.y + 1.0),
+            (button.right() - 1.0, button.y + 1.0),
+            (button.right() - 1.0, button.bottom() - 1.0),
+            (button.x + 1.0, button.bottom() - 1.0),
+        ] {
+            assert_eq!(
+                hit_test(&s, &layouts, &[], x, y),
+                Some(OverviewHit::Close(1)),
+                "({x}, {y}) on the button drawn at {button:?}"
+            );
+            let mut pressed = s.clone();
+            assert_eq!(
+                on_mouse_click(&mut pressed, x, y, &layouts, &[]),
+                OverviewAction::Request(ShellRequest::window(
+                    WindowId(1),
+                    ShellControlAction::Close
+                ))
+            );
+        }
+    }
+
+    /// **A lit card takes a press over the whole of it as drawn, grown**,
+    /// and an unlit one only where it is; the pointer moving onto the close
+    /// button, above the card, keeps the card lit, so the button stays.
+    #[test]
+    fn a_lit_card_is_pressed_as_drawn_and_stays_lit_under_its_button() {
+        let (s, layouts) = lit(Some(1));
+        let grown = layouts[0].card_rect(true);
+        let edge = (grown.x + 1.0, grown.y + grown.h / 2.0);
+        assert!(edge.0 < layouts[0].render_x, "off the card as placed");
+        assert_eq!(
+            hit_test(&s, &layouts, &[], edge.0, edge.1),
+            Some(OverviewHit::Card(1))
+        );
+        let (unlit, layouts) = lit(None);
+        assert_eq!(hit_test(&unlit, &layouts, &[], edge.0, edge.1), None);
+
+        let mut s = unlit;
+        let (cx, cy) = layouts[0].card_rect(false).centre();
+        on_mouse_move(&mut s, cx, cy, &layouts);
+        assert_eq!(s.hovered_window, Some(1));
+        let button = close_rect(layouts[0].card_rect(true));
+        on_mouse_move(&mut s, button.x + 2.0, button.y + 1.0, &layouts);
+        assert_eq!(
+            s.hovered_window,
+            Some(1),
+            "the button went out under the pointer"
+        );
+    }
+
+    /// **A press on a lane off its cards switches to that lane's desktop**:
+    /// the one under the pointer, whatever the wheel has chosen. It switched
+    /// to the wheel's choice wherever the press was, and to nothing before
+    /// the wheel had moved.
+    #[test]
+    fn a_press_on_a_lane_switches_to_that_lanes_desktop() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllDesktops);
+        let layouts = overview_layout(&s, &default_config(), 1920.0, 1080.0);
+        let lanes = lane_layout(&s, &default_config(), 1920.0, 1080.0);
+        assert_eq!(lanes.len(), 2);
+        for lane in &lanes {
+            // The label row, which no card reaches.
+            let at = (lane.rect.x + 2.0, lane.rect.y + LANE_LABEL_H / 2.0);
+            s.selected_desktop = Some(1 - lane.desktop_id);
+            assert_eq!(
+                hit_test(&s, &layouts, &lanes, at.0, at.1),
+                Some(OverviewHit::Lane(lane.desktop_id))
+            );
+            let mut pressed = s.clone();
+            assert_eq!(
+                on_mouse_click(&mut pressed, at.0, at.1, &layouts, &lanes),
+                OverviewAction::Request(ShellRequest::SwitchDesktop {
+                    desktop: lane.desktop_id
+                })
+            );
+            assert!(!pressed.visible);
+        }
+        // The space below the last lane belongs to none.
+        let below = lanes[1].rect.bottom() + 1.0;
+        assert_eq!(hit_test(&s, &layouts, &lanes, 30.0, below), None);
+        // Nor are there lanes outside the desktops' view.
+        let (one, _) = lit(None);
+        assert!(lane_layout(&one, &default_config(), 1920.0, 1080.0).is_empty());
+    }
+
+    /// **The lane the wheel chose is ringed, and Enter goes to it** -- with
+    /// no window lit; with one lit, Enter goes to the window.
+    #[test]
+    fn the_lane_the_wheel_chose_is_ringed_and_enter_goes_to_it() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllDesktops);
+        on_mouse_scroll(&mut s, 1.0);
+        assert_eq!(s.selected_desktop, Some(1));
+        let p = Palette::for_mode(false);
+        let lanes = lane_layout(&s, &default_config(), 1920.0, 1080.0);
+        let ring = render_overview(&s, &default_config(), &p, 1920.0, 1080.0)
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if color == p.accent => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ring, [lanes[1].rect], "the chosen lane, ringed");
+
+        assert_eq!(
+            on_key(&mut s, OverviewKey::Enter),
+            OverviewAction::Request(ShellRequest::SwitchDesktop { desktop: 1 })
+        );
+        assert!(!s.visible);
+
+        s.show(OverviewMode::AllDesktops);
+        s.selected_desktop = Some(1);
+        s.hovered_window = Some(3);
+        assert_eq!(
+            on_key(&mut s, OverviewKey::Enter),
+            OverviewAction::Request(ShellRequest::window(
+                WindowId(3),
+                ShellControlAction::Activate
+            ))
+        );
+        s.show(OverviewMode::AllWindows);
+        s.selected_desktop = Some(1);
+        assert_eq!(
+            on_key(&mut s, OverviewKey::Enter),
+            OverviewAction::None,
+            "no lanes in this view"
+        );
     }
 
     #[test]

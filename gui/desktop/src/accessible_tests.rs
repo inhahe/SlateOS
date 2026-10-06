@@ -879,3 +879,86 @@ fn the_calendar_is_used_as_the_user_uses_it() {
         );
     });
 }
+
+/// **The overview shows tools its windows, and is used as the pointer and
+/// the keys use it**: the search's text set as typing sets it, a close
+/// button pressed with its card lit first, a card pressed as clicked --
+/// which switches to its window and closes the overview.
+#[test]
+fn the_overview_is_used_as_the_user_uses_it() {
+    let mut shell = shell();
+    let _asked = shell.apply_window_list(&WindowList::new(
+        0,
+        vec![
+            WindowInfo::new(1, 40, "notes.md"),
+            WindowInfo::new(2, 41, "Inbox"),
+        ],
+    ));
+    assert_eq!(
+        press(&mut shell, ShellPart::Overview(OverviewPart::Card(1))),
+        Err(Refusal::NoSuchWidget),
+        "not while it is closed"
+    );
+    shell
+        .overview
+        .show(crate::overview::OverviewMode::AllWindows);
+    let root = node(&shell, ShellPart::Overview(OverviewPart::Overview));
+    assert_eq!((root.role, root.name.as_str()), (Role::Dialog, "Overview"));
+    let mut cards: Vec<String> = tree(&shell)
+        .walk()
+        .filter(|n| matches!(n.id, ShellPart::Overview(OverviewPart::Card(_))))
+        .map(|n| n.name.clone())
+        .collect();
+    cards.sort();
+    assert_eq!(cards, ["Inbox", "notes.md"]);
+
+    let search = ShellPart::Overview(OverviewPart::Search);
+    assert_eq!(
+        shell.invoke(&search, Action::SetText("inb".to_owned()), 0.0, 0.0),
+        Ok(None)
+    );
+    assert_eq!(
+        node(&shell, search).value,
+        Some(Value::Text("inb".to_owned()))
+    );
+    assert_eq!(shell.overview.search_results, [2]);
+
+    assert_eq!(
+        press(&mut shell, ShellPart::Overview(OverviewPart::Close(1))),
+        Ok(Some(ShellAction::Control(crate::ShellRequest::window(
+            WindowId(1),
+            crate::ShellControlAction::Close
+        ))))
+    );
+    assert_eq!(shell.overview.hovered_window, Some(1), "lit to be closed");
+    assert_eq!(
+        shell.invoke(
+            &ShellPart::Overview(OverviewPart::Card(2)),
+            Action::Choose,
+            0.0,
+            0.0
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        shell.overview.hovered_window,
+        Some(2),
+        "lit as the pointer lights it"
+    );
+    assert_eq!(
+        press(&mut shell, ShellPart::Overview(OverviewPart::Card(2))),
+        Ok(Some(ShellAction::Control(crate::ShellRequest::window(
+            WindowId(2),
+            crate::ShellControlAction::Activate
+        ))))
+    );
+    assert!(
+        !shell.overview.visible,
+        "a window taken closes the overview"
+    );
+    assert_eq!(
+        press(&mut shell, search),
+        Err(Refusal::NoSuchWidget),
+        "closed"
+    );
+}

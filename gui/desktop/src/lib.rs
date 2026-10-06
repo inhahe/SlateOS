@@ -6660,7 +6660,8 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
         let layouts = self.overview_layout();
-        let action = overview::on_mouse_click(&mut self.overview, x, y, &layouts);
+        let lanes = self.overview_lanes();
+        let action = overview::on_mouse_click(&mut self.overview, x, y, &layouts, &lanes);
         self.act_on_overview(action)
     }
 
@@ -15534,6 +15535,18 @@ impl DesktopShell {
     #[must_use]
     pub fn overview_layout(&self) -> Vec<overview::ThumbnailLayout> {
         overview::overview_layout(
+            &self.overview,
+            &self.overview_config,
+            self.screen_width as f32,
+            self.screen_height as f32,
+        )
+    }
+
+    /// Where each desktop's lane is in the overview, while it shows every
+    /// desktop: what a press off the cards switches to.
+    #[must_use]
+    pub fn overview_lanes(&self) -> Vec<overview::LaneLayout> {
+        overview::lane_layout(
             &self.overview,
             &self.overview_config,
             self.screen_width as f32,

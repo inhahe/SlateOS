@@ -2714,9 +2714,10 @@ authors never wrote a single automation handler.
   label, its keys or why it is greyed, its tick, and the submenu it
   opened), so any program's menus are seen. And the window switcher
   (Alt+Tab): its windows, the one the switch goes to chosen -- one chosen
-  as Tab steps to it, one pressed as letting go on it switches to it. Not
-  yet: the font picker; a switch shown in the overview, which is the
-  overview's to show.*
+  as Tab steps to it, one pressed as letting go on it switches to it. And
+  the overview (`desktop::overview::OverviewPart`): its search, each
+  window's card and close button, each desktop's lane -- a switch shown in
+  it, too. Not yet: the font picker.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

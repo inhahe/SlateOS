@@ -19,8 +19,9 @@
 //! calendar is open, its arrows, its title, "Today", its days or months and
 //! the chosen day's events (`calendar::accessible`); while a window
 //! switch is under way, the switcher's windows, the one it goes to chosen;
-//! while the notification pane is open, its parts
-//! (`notif_pane::accessible`); and
+//! while the overview is open, its search, its windows' cards and close
+//! buttons and its desktops' lanes (`overview::accessible`); while the
+//! notification pane is open, its parts (`notif_pane::accessible`); and
 //! every menu open over everything -- the desktop's, a notification's, a
 //! tile's, a field's -- with its rows, and the submenu a row opened
 //! (`guitk::menu::MenuPart`), a row chosen as a click chooses it.
@@ -46,6 +47,7 @@ use guitk::widget::automation::{Accessible, Action, Node, Refusal, Role, Value};
 
 use crate::calendar::{CalendarHit, CalendarPart, CalendarViewMode};
 use crate::notif_pane::PanePart;
+use crate::overview::{self, OverviewPart};
 use crate::{
     DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, Rect, ShellAction, StartRow,
     StartShortcut, SwitchView, TaskbarSlot, TextRole, WindowId, click, icons, power, volume_flyout,
@@ -90,6 +92,9 @@ pub enum ShellPart {
     /// Its controls -- the arrows, the title, "Today", a day, a month -- are
     /// [`Control`](Self::Control)s, pressed as clicked.
     Calendar(CalendarPart),
+    /// A part of the overview, while it is open: its search, its windows'
+    /// cards and their close buttons, its desktops' lanes.
+    Overview(OverviewPart),
     /// The window switcher, while a switch is shown as its strip.
     Switcher,
     /// A window in the switcher: chosen as Tab steps to it, pressed as
@@ -196,11 +201,14 @@ impl DesktopShell {
     /// Whether a press at `(x, y)` on `hit` -- what the shell's hit test
     /// says is there -- would reach it: nothing drawn over it takes the
     /// press, and it is not spent closing something open elsewhere.
+    ///
+    /// The notification pane is the second: while it is open, a press on
+    /// any of the shell's parts but its bell never reaches the part -- above
+    /// the taskbar the pane or its backdrop takes the press, and on the bar
+    /// the press is spent closing it -- so `closed_by_press`, which says so
+    /// of every part but the bell, answers for both.
     fn reaches(&self, x: f32, y: f32, hit: Hit) -> bool {
-        let under_pane =
-            self.notifications.pane_state().is_visible() && !self.taskbar_rect().contains(x, y);
         !self.takes_every_press()
-            && !under_pane
             && self.hit_test(x, y) == hit
             && self.closed_by_press(hit).is_none()
     }
@@ -243,6 +251,81 @@ impl DesktopShell {
                     .control_rect(control, x, y, self.calendar_scale())
             }
             _ => None,
+        }
+    }
+
+    /// Where a press lands on `part` of the open overview, or why there is
+    /// nowhere.
+    fn overview_point(&self, part: OverviewPart) -> Result<(f32, f32), Refusal> {
+        let (width, height) = self.viewport();
+        overview::accessible::press_point(
+            &self.overview,
+            &self.overview_config,
+            width,
+            height,
+            part,
+        )
+        .ok_or(Refusal::Hidden)
+    }
+
+    /// The pointer moved to `(x, y)`: what lights a card, as the pointer
+    /// does.
+    fn point_at(&mut self, x: f32, y: f32) {
+        // Where the pointer is is nothing a tool answers to.
+        let _moved = self.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        });
+    }
+
+    /// Do `action` to `part` of the open overview, as the user would: a
+    /// card lit as the pointer lights it and pressed as clicked; a close
+    /// button pressed with its card lit first, as the pointer reaching it
+    /// lights it; a lane pressed off its cards; the search's text set as
+    /// typing sets it.
+    fn invoke_overview(
+        &mut self,
+        part: OverviewPart,
+        action: &Action,
+    ) -> Result<Option<ShellAction>, Refusal> {
+        if !self.overview.visible {
+            return Err(Refusal::NoSuchWidget);
+        }
+        let (width, height) = self.viewport();
+        let role =
+            overview::accessible::automation(&self.overview, &self.overview_config, width, height)
+                .walk()
+                .find(|node| node.id == part)
+                .map(|node| node.role)
+                .ok_or(Refusal::NoSuchWidget)?;
+        match (part, action) {
+            (OverviewPart::Search, Action::SetText(text)) => {
+                self.overview.search_query.clone_from(text);
+                self.overview.update_search();
+                Ok(None)
+            }
+            // It has the keys whenever the overview is open.
+            (OverviewPart::Search, Action::Focus) => Ok(None),
+            (OverviewPart::Card(_), Action::Choose | Action::Focus) => {
+                let (x, y) = self.overview_point(part)?;
+                self.point_at(x, y);
+                Ok(None)
+            }
+            (OverviewPart::Card(_) | OverviewPart::Lane(_), Action::Press) => {
+                let (x, y) = self.overview_point(part)?;
+                Ok(self.click_at(x, y))
+            }
+            (OverviewPart::Close(id), Action::Press) => {
+                let (cx, cy) = self.overview_point(OverviewPart::Card(id))?;
+                self.point_at(cx, cy);
+                let (x, y) = self.overview_point(part)?;
+                Ok(self.click_at(x, y))
+            }
+            _ => Err(Refusal::NotApplicable {
+                role,
+                action: action.name(),
+            }),
         }
     }
 
@@ -891,6 +974,17 @@ impl Accessible for DesktopShell {
         if self.switcher_shown() {
             root.children.push(self.switcher_node());
         }
+        if self.overview.visible {
+            root.children.push(
+                overview::accessible::automation(
+                    &self.overview,
+                    &self.overview_config,
+                    width,
+                    height,
+                )
+                .map(&ShellPart::Overview),
+            );
+        }
         if self.notifications.pane_state().is_visible() {
             root.children.push(
                 self.notifications
@@ -969,6 +1063,7 @@ impl Accessible for DesktopShell {
                 _,
             ) => Err(not_for(Role::GridCell)),
             (ShellPart::Control(_), _) => Err(not_for(Role::Button)),
+            (ShellPart::Overview(part), action) => self.invoke_overview(part, &action),
             (ShellPart::SwitchTo(id), Action::Choose | Action::Focus) => self.switch_to(id, false),
             (ShellPart::SwitchTo(id), Action::Press) => self.switch_to(id, true),
             (ShellPart::SwitchTo(_), _) => Err(not_for(Role::ListItem)),

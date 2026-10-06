@@ -1,8 +1,9 @@
 //! C string functions required by the C runtime.
 //!
 //! These are not strictly POSIX but are required by virtually every
-//! C program.  A real libc would provide optimized (SIMD) versions;
-//! these are correct reference implementations.
+//! C program.  The memory primitives and `strlen` are the fast ones a libc
+//! needs (SSE2, `rep movsb`; see "The engines" below); the rest are plain
+//! loops, correct and not yet tuned.
 //!
 //! Includes: `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`,
 //! `memrchr`, `memccpy`, `mempcpy`, `memmem`, `rawmemchr`,
@@ -53,55 +54,365 @@
 
 use crate::types::SizeT;
 
+// ---------------------------------------------------------------------------
+// The engines behind memcpy, memmove, memset, memcmp, memchr and strlen
+// ---------------------------------------------------------------------------
+//
+// These are the hottest functions in the system: every `Vec` and `String`
+// copy in the Rust userland reaches this `memcpy` (the sysroot builds
+// `compiler_builtins` without its `mem` feature, so `libc.a` supplies the
+// symbol), and every C string this `strlen`.  Until 2026-10-06 each was a
+// byte loop, which LLVM left a byte loop -- `memcpy` compiled to a `movb`
+// pair, `strlen` to a `cmpb` -- at about 1.5 GB/s.  `posix/benches/mem.rs`
+// measures them.
+//
+// - **Small sizes** (under [`SMALL`] bytes): two loads and two stores of the
+//   widest power of two not wider than the size, one at each end, the two
+//   overlapping in the middle -- glibc's small-size paths.  All loads come
+//   before any store, so it is a correct `memmove` as well.
+// - **Medium sizes**: 16-byte SSE2 loads and stores.  SSE2 is in every
+//   x86-64 and in the sysroot's target spec.
+// - **Large forward copies and fills** (from [`REP_THRESHOLD`] bytes):
+//   `rep movsb` / `rep stosb`, which every x86-64 since Ivy Bridge runs at
+//   memory bandwidth (ERMS); glibc switches at the same 2 KiB for 16-byte
+//   vectors.
+//
+// THE LOOPS ARE ASSEMBLY, NOT RUST.  LLVM's loop-idiom pass turns a copy or
+// fill loop into a call to `memcpy`, `memmove` or `memset` -- inside those
+// very functions, a call to themselves.  It refrains only inside a function
+// of exactly that name, which a helper is not.  `memchr`, `memcmp` and
+// `strlen` copy nothing, and are Rust over SSE2 intrinsics where they read
+// within their bounds; `strlen`, which has no bound, is assembly too (below).
+
+/// Below this many bytes, a copy or fill is a few overlapping loads and
+/// stores; from it up, a loop.
+const SMALL: usize = 32;
+
+/// From this many bytes, a forward copy or a fill is `rep movsb`/`rep stosb`.
+const REP_THRESHOLD: usize = 2048;
+
+/// Copy `n < SMALL` bytes from `src` to `dst`, which may overlap either way:
+/// every load is done before any store.
+///
+/// # Safety
+///
+/// `src` readable and `dst` writable for `n` bytes.
+#[inline(always)]
+unsafe fn copy_small(dst: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: each access lies within the first `n` bytes of `src` or `dst`,
+    // which the caller vouches for, and is an unaligned access of a plain
+    // integer.
+    unsafe {
+        if n >= 16 {
+            let head = src.cast::<u128>().read_unaligned();
+            let tail = src.add(n.wrapping_sub(16)).cast::<u128>().read_unaligned();
+            dst.cast::<u128>().write_unaligned(head);
+            dst.add(n.wrapping_sub(16))
+                .cast::<u128>()
+                .write_unaligned(tail);
+        } else if n >= 8 {
+            let head = src.cast::<u64>().read_unaligned();
+            let tail = src.add(n.wrapping_sub(8)).cast::<u64>().read_unaligned();
+            dst.cast::<u64>().write_unaligned(head);
+            dst.add(n.wrapping_sub(8))
+                .cast::<u64>()
+                .write_unaligned(tail);
+        } else if n >= 4 {
+            let head = src.cast::<u32>().read_unaligned();
+            let tail = src.add(n.wrapping_sub(4)).cast::<u32>().read_unaligned();
+            dst.cast::<u32>().write_unaligned(head);
+            dst.add(n.wrapping_sub(4))
+                .cast::<u32>()
+                .write_unaligned(tail);
+        } else if n >= 2 {
+            let head = src.cast::<u16>().read_unaligned();
+            let tail = src.add(n.wrapping_sub(2)).cast::<u16>().read_unaligned();
+            dst.cast::<u16>().write_unaligned(head);
+            dst.add(n.wrapping_sub(2))
+                .cast::<u16>()
+                .write_unaligned(tail);
+        } else if n == 1 {
+            dst.write(src.read());
+        }
+    }
+}
+
+/// Copy `n >= SMALL` bytes forward: correct when the regions do not overlap
+/// or `dst` is below `src`.
+///
+/// # Safety
+///
+/// `src` readable and `dst` writable for `n` bytes, `n >= SMALL`.
+#[inline(always)]
+unsafe fn copy_forward(dst: *mut u8, src: *const u8, n: usize) {
+    if n >= REP_THRESHOLD {
+        // SAFETY: the caller's bounds; `rep movsb` copies `rcx` bytes from
+        // `rsi` to `rdi` upwards (the ABI keeps the direction flag clear),
+        // with the architecture's byte-at-a-time semantics -- so a
+        // destination below an overlapping source is copied correctly.
+        unsafe {
+            core::arch::asm!(
+                "rep movsb",
+                inout("rcx") n => _,
+                inout("rdi") dst => _,
+                inout("rsi") src => _,
+                options(nostack, preserves_flags),
+            );
+        }
+        return;
+    }
+    // SAFETY: the caller's bounds.  The last 16 bytes are loaded before the
+    // loops and stored after them: they cover the remainder, and they are
+    // read before the loops' stores can reach them when `dst` is below `src`.
+    // Blocks of 64 bytes, then of 16, go upwards from the start, each read
+    // whole before any of it is written; with `dst` below `src` a block's
+    // stores reach only source bytes below its end, already read.
+    unsafe {
+        core::arch::asm!(
+            "movdqu {tail}, xmmword ptr [{src} + {n16}]",
+            "xor {off:e}, {off:e}",
+            "2:",
+            "lea {end}, [{off} + 64]",
+            "cmp {end}, {n16}",
+            "ja 3f",
+            "movdqu {x0}, xmmword ptr [{src} + {off}]",
+            "movdqu {x1}, xmmword ptr [{src} + {off} + 16]",
+            "movdqu {x2}, xmmword ptr [{src} + {off} + 32]",
+            "movdqu {x3}, xmmword ptr [{src} + {off} + 48]",
+            "movdqu xmmword ptr [{dst} + {off}], {x0}",
+            "movdqu xmmword ptr [{dst} + {off} + 16], {x1}",
+            "movdqu xmmword ptr [{dst} + {off} + 32], {x2}",
+            "movdqu xmmword ptr [{dst} + {off} + 48], {x3}",
+            "add {off}, 64",
+            "jmp 2b",
+            "3:",
+            "cmp {off}, {n16}",
+            "jae 5f",
+            "4:",
+            "movdqu {x0}, xmmword ptr [{src} + {off}]",
+            "movdqu xmmword ptr [{dst} + {off}], {x0}",
+            "add {off}, 16",
+            "cmp {off}, {n16}",
+            "jb 4b",
+            "5:",
+            "movdqu xmmword ptr [{dst} + {n16}], {tail}",
+            src = in(reg) src,
+            dst = in(reg) dst,
+            n16 = in(reg) n.wrapping_sub(16),
+            off = out(reg) _,
+            end = out(reg) _,
+            x0 = out(xmm_reg) _,
+            x1 = out(xmm_reg) _,
+            x2 = out(xmm_reg) _,
+            x3 = out(xmm_reg) _,
+            tail = out(xmm_reg) _,
+            options(nostack),
+        );
+    }
+}
+
+/// Copy `n >= SMALL` bytes backward: for `dst` above an overlapping `src`.
+///
+/// # Safety
+///
+/// `src` readable and `dst` writable for `n` bytes, `n >= SMALL`.
+#[inline(always)]
+unsafe fn copy_backward(dst: *mut u8, src: *const u8, n: usize) {
+    // SAFETY: the caller's bounds.  The first 16 bytes are loaded before the
+    // loops and stored after them: they cover the remainder, read before any
+    // store.  Blocks of 64 bytes, then of 16, go from the top down, each read
+    // whole before any of it is written; with `dst` above `src` a block's
+    // stores reach only source bytes at or above its start, already read.
+    // `rep movsb` backwards (`std`) is microcoded a byte at a time on most
+    // cores, so it is not used.
+    unsafe {
+        core::arch::asm!(
+            "movdqu {head}, xmmword ptr [{src}]",
+            "mov {off}, {n}",
+            "2:",
+            "cmp {off}, 80",
+            "jb 3f",
+            "sub {off}, 64",
+            "movdqu {x0}, xmmword ptr [{src} + {off}]",
+            "movdqu {x1}, xmmword ptr [{src} + {off} + 16]",
+            "movdqu {x2}, xmmword ptr [{src} + {off} + 32]",
+            "movdqu {x3}, xmmword ptr [{src} + {off} + 48]",
+            "movdqu xmmword ptr [{dst} + {off}], {x0}",
+            "movdqu xmmword ptr [{dst} + {off} + 16], {x1}",
+            "movdqu xmmword ptr [{dst} + {off} + 32], {x2}",
+            "movdqu xmmword ptr [{dst} + {off} + 48], {x3}",
+            "jmp 2b",
+            "3:",
+            "cmp {off}, 16",
+            "jbe 5f",
+            "4:",
+            "sub {off}, 16",
+            "movdqu {x0}, xmmword ptr [{src} + {off}]",
+            "movdqu xmmword ptr [{dst} + {off}], {x0}",
+            "cmp {off}, 16",
+            "ja 4b",
+            "5:",
+            "movdqu xmmword ptr [{dst}], {head}",
+            src = in(reg) src,
+            dst = in(reg) dst,
+            n = in(reg) n,
+            off = out(reg) _,
+            x0 = out(xmm_reg) _,
+            x1 = out(xmm_reg) _,
+            x2 = out(xmm_reg) _,
+            x3 = out(xmm_reg) _,
+            head = out(xmm_reg) _,
+            options(nostack),
+        );
+    }
+}
+
+/// `byte` in each of a `u64`'s eight bytes.
+#[inline(always)]
+fn broadcast(byte: u8) -> u64 {
+    u64::from(byte).wrapping_mul(0x0101_0101_0101_0101)
+}
+
+/// Fill `n < SMALL` bytes at `dst` with `byte`, two overlapping stores at
+/// most.
+///
+/// # Safety
+///
+/// `dst` writable for `n` bytes.
+#[inline(always)]
+unsafe fn fill_small(dst: *mut u8, byte: u8, n: usize) {
+    let word = broadcast(byte);
+    // SAFETY: each store lies within the first `n` bytes of `dst`, which the
+    // caller vouches for; unaligned stores of plain integers.
+    unsafe {
+        if n >= 16 {
+            let wide = u128::from(word) | (u128::from(word) << 64);
+            dst.cast::<u128>().write_unaligned(wide);
+            dst.add(n.wrapping_sub(16))
+                .cast::<u128>()
+                .write_unaligned(wide);
+        } else if n >= 8 {
+            dst.cast::<u64>().write_unaligned(word);
+            dst.add(n.wrapping_sub(8))
+                .cast::<u64>()
+                .write_unaligned(word);
+        } else if n >= 4 {
+            #[allow(clippy::cast_possible_truncation)] // the low half of a repeated byte
+            let w = word as u32;
+            dst.cast::<u32>().write_unaligned(w);
+            dst.add(n.wrapping_sub(4)).cast::<u32>().write_unaligned(w);
+        } else if n >= 2 {
+            #[allow(clippy::cast_possible_truncation)] // the low quarter, likewise
+            let w = word as u16;
+            dst.cast::<u16>().write_unaligned(w);
+            dst.add(n.wrapping_sub(2)).cast::<u16>().write_unaligned(w);
+        } else if n == 1 {
+            dst.write(byte);
+        }
+    }
+}
+
+/// Fill `n >= SMALL` bytes at `dst` with `byte`.
+///
+/// # Safety
+///
+/// `dst` writable for `n` bytes, `n >= SMALL`.
+#[inline(always)]
+unsafe fn fill_large(dst: *mut u8, byte: u8, n: usize) {
+    if n >= REP_THRESHOLD {
+        // SAFETY: the caller's bound; `rep stosb` stores `al` into `rcx`
+        // bytes upwards from `rdi`.
+        unsafe {
+            core::arch::asm!(
+                "rep stosb",
+                inout("rcx") n => _,
+                inout("rdi") dst => _,
+                in("al") byte,
+                options(nostack, preserves_flags),
+            );
+        }
+        return;
+    }
+    // SAFETY: the caller's bound: the last 16 bytes, then blocks of 64 and
+    // of 16 bytes from the start until the last 16 are reached.
+    unsafe {
+        core::arch::asm!(
+            "movq {v}, {pattern}",
+            "punpcklqdq {v}, {v}",
+            "movdqu xmmword ptr [{dst} + {n16}], {v}",
+            "xor {off:e}, {off:e}",
+            "2:",
+            "lea {end}, [{off} + 64]",
+            "cmp {end}, {n16}",
+            "ja 3f",
+            "movdqu xmmword ptr [{dst} + {off}], {v}",
+            "movdqu xmmword ptr [{dst} + {off} + 16], {v}",
+            "movdqu xmmword ptr [{dst} + {off} + 32], {v}",
+            "movdqu xmmword ptr [{dst} + {off} + 48], {v}",
+            "add {off}, 64",
+            "jmp 2b",
+            "3:",
+            "cmp {off}, {n16}",
+            "jae 5f",
+            "4:",
+            "movdqu xmmword ptr [{dst} + {off}], {v}",
+            "add {off}, 16",
+            "cmp {off}, {n16}",
+            "jb 4b",
+            "5:",
+            dst = in(reg) dst,
+            n16 = in(reg) n.wrapping_sub(16),
+            pattern = in(reg) broadcast(byte),
+            off = out(reg) _,
+            end = out(reg) _,
+            v = out(xmm_reg) _,
+            options(nostack),
+        );
+    }
+}
+
 /// Copy `n` bytes from `src` to `dest`.  Regions must not overlap.
 ///
-/// Returns `dest`.
+/// Returns `dest`.  See the engines above for how.
 ///
 /// # Safety
 ///
 /// `dest` and `src` must be valid for `n` bytes and must not overlap.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
-    // SAFETY: Caller guarantees no overlap and valid pointers.
-    let mut i: usize = 0;
-    while i < n {
-        unsafe {
-            *dest.add(i) = *src.add(i);
+    // SAFETY: the caller's bounds, which the engines need.
+    unsafe {
+        if n < SMALL {
+            copy_small(dest, src, n);
+        } else {
+            copy_forward(dest, src, n);
         }
-        i = i.wrapping_add(1);
     }
     dest
 }
 
 /// Copy `n` bytes from `src` to `dest`.  Regions may overlap.
 ///
-/// Returns `dest`.
+/// Returns `dest`.  A destination below the source, or past its end, is
+/// copied forward; one inside it, backward.
 ///
 /// # Safety
 ///
 /// `dest` and `src` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
-    if (dest as usize) < (src as usize) {
-        // Copy forward.
-        let mut i: usize = 0;
-        while i < n {
-            unsafe {
-                *dest.add(i) = *src.add(i);
-            }
-            i = i.wrapping_add(1);
-        }
-    } else if (dest as usize) > (src as usize) {
-        // Copy backward.
-        let mut i = n;
-        while i > 0 {
-            i = i.wrapping_sub(1);
-            unsafe {
-                *dest.add(i) = *src.add(i);
-            }
+    // SAFETY: the caller's bounds, which the engines need.  Forward is right
+    // when `dest - src` (wrapping) is at least `n`: `dest` below `src`, or at
+    // or past its end.  Otherwise `dest` starts inside the source.
+    unsafe {
+        if n < SMALL {
+            copy_small(dest, src, n);
+        } else if (dest as usize).wrapping_sub(src as usize) >= n {
+            copy_forward(dest, src, n);
+        } else {
+            copy_backward(dest, src, n);
         }
     }
-    // If dest == src, no copy needed.
     dest
 }
 
@@ -114,68 +425,221 @@ pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: SizeT) -> *mu
 /// `dest` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: SizeT) -> *mut u8 {
-    let val = c as u8;
-    let mut i: usize = 0;
-    while i < n {
-        unsafe {
-            *dest.add(i) = val;
+    // C's `(unsigned char)c`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let byte = c as u8;
+    // SAFETY: the caller's bound, which the engines need.
+    unsafe {
+        if n < SMALL {
+            fill_small(dest, byte, n);
+        } else {
+            fill_large(dest, byte, n);
         }
-        i = i.wrapping_add(1);
     }
     dest
 }
 
+/// The difference of the first bytes that differ in a 16-byte block whose
+/// equality mask (`pmovmskb` of `pcmpeqb`, a bit set for each equal byte)
+/// is not all ones, as `memcmp` answers it: `a`'s byte less `b`'s.
+///
+/// # Safety
+///
+/// `a` and `b` readable for 16 bytes.
+#[inline(always)]
+unsafe fn first_difference(a: *const u8, b: *const u8, equal: u32) -> i32 {
+    let at = (!equal).trailing_zeros() as usize;
+    // SAFETY: `!equal` has a bit below 16 set (`equal` is not 0xFFFF), so
+    // `at < 16`, within the caller's 16 bytes.
+    unsafe { i32::from(a.add(at).read()).wrapping_sub(i32::from(b.add(at).read())) }
+}
+
 /// Compare `n` bytes of `s1` and `s2`.
 ///
-/// Returns 0 if equal, negative if s1 < s2, positive if s1 > s2.
+/// Returns 0 if equal, else the difference of the first differing bytes as
+/// unsigned values (`s1`'s less `s2`'s), as glibc's does: negative if `s1`
+/// sorts first.  Sixteen bytes a step (SSE2), never reading past `n`.
 ///
 /// # Safety
 ///
 /// `s1` and `s2` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 {
-    let mut i: usize = 0;
-    while i < n {
-        let a = unsafe { *s1.add(i) };
-        let b = unsafe { *s2.add(i) };
-        if a != b {
-            return i32::from(a).wrapping_sub(i32::from(b));
+    use core::arch::x86_64::{__m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8};
+    /// The equality mask of the 16 bytes at `a` and `b`.
+    ///
+    /// # Safety
+    ///
+    /// `a` and `b` readable for 16 bytes.
+    #[inline(always)]
+    #[allow(clippy::cast_sign_loss)] // pmovmskb's 16 bits, never negative
+    unsafe fn equal16(a: *const u8, b: *const u8) -> u32 {
+        // SAFETY: the caller's 16 bytes; unaligned loads.
+        unsafe {
+            let x = _mm_loadu_si128(a.cast::<__m128i>());
+            let y = _mm_loadu_si128(b.cast::<__m128i>());
+            _mm_movemask_epi8(_mm_cmpeq_epi8(x, y)) as u32
         }
-        i = i.wrapping_add(1);
+    }
+    // SAFETY: every read below lies within the first `n` bytes of both
+    // strings, which the caller vouches for.
+    unsafe {
+        if n >= 16 {
+            let mut i = 0usize;
+            while n.wrapping_sub(i) >= 16 {
+                let (a, b) = (s1.add(i), s2.add(i));
+                let equal = equal16(a, b);
+                if equal != 0xFFFF {
+                    return first_difference(a, b, equal);
+                }
+                i = i.wrapping_add(16);
+            }
+            if i < n {
+                // The last 16 bytes, overlapping some already found equal,
+                // which cannot hold the first difference.
+                let at = n.wrapping_sub(16);
+                let (a, b) = (s1.add(at), s2.add(at));
+                let equal = equal16(a, b);
+                if equal != 0xFFFF {
+                    return first_difference(a, b, equal);
+                }
+            }
+            return 0;
+        }
+        let mut i = 0usize;
+        while i < n {
+            let (a, b) = (s1.add(i).read(), s2.add(i).read());
+            if a != b {
+                return i32::from(a).wrapping_sub(i32::from(b));
+            }
+            i = i.wrapping_add(1);
+        }
     }
     0
 }
 
 /// Find the first occurrence of byte `c` in the first `n` bytes of `s`.
 ///
-/// Returns a pointer to the byte, or NULL if not found.
+/// Returns a pointer to the byte, or NULL if not found.  Sixteen bytes a
+/// step (SSE2), never reading past `n`.
 ///
 /// # Safety
 ///
 /// `s` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: SizeT) -> *const u8 {
-    let val = c as u8;
-    let mut i: usize = 0;
-    while i < n {
-        if unsafe { *s.add(i) } == val {
-            return unsafe { s.add(i) };
+    use core::arch::x86_64::{
+        __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
+    };
+    /// The mask of the bytes of the 16 at `p` that equal `needle`'s.
+    ///
+    /// # Safety
+    ///
+    /// `p` readable for 16 bytes.
+    #[inline(always)]
+    #[allow(clippy::cast_sign_loss)] // pmovmskb's 16 bits, never negative
+    unsafe fn matches16(p: *const u8, needle: __m128i) -> u32 {
+        // SAFETY: the caller's 16 bytes; an unaligned load.
+        unsafe {
+            let chunk = _mm_loadu_si128(p.cast::<__m128i>());
+            _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, needle)) as u32
         }
-        i = i.wrapping_add(1);
+    }
+    // C's `(unsigned char)c`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let byte = c as u8;
+    // SAFETY: every read below lies within the first `n` bytes of `s`, which
+    // the caller vouches for.
+    unsafe {
+        if n >= 16 {
+            #[allow(clippy::cast_possible_wrap)] // the byte's bits, as `epi8` takes them
+            let needle = _mm_set1_epi8(byte as i8);
+            let mut i = 0usize;
+            while n.wrapping_sub(i) >= 16 {
+                let mask = matches16(s.add(i), needle);
+                if mask != 0 {
+                    return s.add(i.wrapping_add(mask.trailing_zeros() as usize));
+                }
+                i = i.wrapping_add(16);
+            }
+            if i < n {
+                // The last 16 bytes, overlapping some already searched.
+                let at = n.wrapping_sub(16);
+                let mask = matches16(s.add(at), needle);
+                if mask != 0 {
+                    return s.add(at.wrapping_add(mask.trailing_zeros() as usize));
+                }
+            }
+            return core::ptr::null();
+        }
+        let mut i = 0usize;
+        while i < n {
+            if s.add(i).read() == byte {
+                return s.add(i);
+            }
+            i = i.wrapping_add(1);
+        }
     }
     core::ptr::null()
 }
 
 /// Compute the length of a C string (excluding null terminator).
 ///
+/// Sixteen bytes a step: aligned 16-byte loads, compared with zero (SSE2).
+/// An aligned load never crosses a page boundary, so though it may read
+/// bytes past the terminator, they are in a page the string occupies and the
+/// read cannot fault -- how glibc's and every other fast `strlen` read.  It
+/// is assembly, rather than Rust over intrinsics, because those bytes are
+/// past the end of the object as Rust sees it.
+///
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strlen(s: *const u8) -> SizeT {
-    let mut len: usize = 0;
-    while unsafe { *s.add(len) } != 0 {
-        len = len.wrapping_add(1);
+    let len: usize;
+    // SAFETY: the caller's string is readable to its terminator.  Every load
+    // is 16-byte aligned and starts at or below a byte of the string, so it
+    // lies within a page the string occupies.  The first block's bytes below
+    // `s` are shifted out of the mask before it is looked at.
+    unsafe {
+        core::arch::asm!(
+            "mov {base}, {s}",
+            "and {base}, -16",
+            "pxor {zero}, {zero}",
+            "movdqa {chunk}, xmmword ptr [{base}]",
+            "pcmpeqb {chunk}, {zero}",
+            "pmovmskb {mask:e}, {chunk}",
+            "mov ecx, {s:e}",
+            "and ecx, 15",
+            "shr {mask:e}, cl",
+            "test {mask:e}, {mask:e}",
+            "jnz 3f",
+            "2:",
+            "add {base}, 16",
+            "movdqa {chunk}, xmmword ptr [{base}]",
+            "pcmpeqb {chunk}, {zero}",
+            "pmovmskb {mask:e}, {chunk}",
+            "test {mask:e}, {mask:e}",
+            "jz 2b",
+            "bsf {mask:e}, {mask:e}",
+            "sub {base}, {s}",
+            "add {base}, {mask}",
+            "mov {len}, {base}",
+            "jmp 4f",
+            "3:",
+            "bsf {mask:e}, {mask:e}",
+            "mov {len}, {mask}",
+            "4:",
+            s = in(reg) s,
+            base = out(reg) _,
+            mask = out(reg) _,
+            len = out(reg) len,
+            zero = out(xmm_reg) _,
+            chunk = out(xmm_reg) _,
+            out("ecx") _,
+            options(nostack, readonly),
+        );
     }
     len
 }
@@ -2104,6 +2568,222 @@ pub static sys_errlist: [SyncPtr; 134] = {
 
 #[cfg(test)]
 mod tests {
+    /// The engines behind `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`
+    /// and `strlen`, against what byte loops answer: every size to 300 (the
+    /// small paths, the boundary at `SMALL`, the 16-byte loops) and either
+    /// side of each threshold, every alignment of source and destination,
+    /// every overlap of a move in both directions, and the bytes around
+    /// what was written left alone.
+    #[allow(clippy::cast_possible_truncation, clippy::indexing_slicing)]
+    mod engines {
+        use super::super::{REP_THRESHOLD, SMALL, memchr, memcmp, memcpy, memmove, memset, strlen};
+
+        fn sizes() -> Vec<usize> {
+            let mut v: Vec<usize> = (0..=300).collect();
+            for t in [SMALL, REP_THRESHOLD, 4096] {
+                v.extend([t - 17, t - 16, t - 1, t, t + 1, t + 15, t + 16, t + 17]);
+            }
+            v.extend([10_000, 65_537]);
+            v.sort_unstable();
+            v.dedup();
+            v
+        }
+
+        /// The alignments tried at size `n`: all pairs while it is small,
+        /// a spread above.
+        fn offsets(n: usize) -> Vec<(usize, usize)> {
+            if n <= 96 {
+                (0..16).flat_map(|a| (0..16).map(move |b| (a, b))).collect()
+            } else {
+                vec![(0, 0), (1, 0), (0, 1), (3, 7), (8, 8), (15, 1), (15, 15)]
+            }
+        }
+
+        /// Bytes no two near neighbours of which are equal, high ones too.
+        fn pattern(len: usize, seed: u8) -> Vec<u8> {
+            (0..len)
+                .map(|i| (i as u8).wrapping_mul(37).wrapping_add(seed) ^ ((i >> 8) as u8))
+                .collect()
+        }
+
+        #[test]
+        fn memcpy_is_a_byte_copy() {
+            for n in sizes() {
+                for (s, d) in offsets(n) {
+                    let src = pattern(n + 16, 5);
+                    let mut dst = vec![0xEE_u8; n + 48];
+                    // SAFETY: `src` holds `s + n` bytes and `dst` `16 + d + n`.
+                    let r = unsafe { memcpy(dst.as_mut_ptr().add(16 + d), src.as_ptr().add(s), n) };
+                    assert_eq!(r, dst.as_mut_ptr().wrapping_add(16 + d));
+                    assert_eq!(
+                        &dst[16 + d..16 + d + n],
+                        &src[s..s + n],
+                        "n {n}, at {s}/{d}"
+                    );
+                    assert!(dst[..16 + d].iter().all(|&b| b == 0xEE), "n {n}: before");
+                    assert!(dst[16 + d + n..].iter().all(|&b| b == 0xEE), "n {n}: after");
+                }
+            }
+        }
+
+        #[test]
+        fn memmove_is_a_byte_move_every_way_it_overlaps() {
+            for n in sizes() {
+                let shifts: Vec<isize> = if n <= 300 {
+                    (-40..=40).collect()
+                } else {
+                    vec![-40, -17, -16, -15, -1, 0, 1, 15, 16, 17, 40]
+                };
+                for shift in shifts {
+                    let from = 48usize;
+                    let to = from.wrapping_add_signed(shift);
+                    let mut buf = pattern(n + 96, 11);
+                    let mut want = buf.clone();
+                    want.copy_within(from..from + n, to);
+                    // SAFETY: `buf` holds `max(from, to) + n` bytes.
+                    unsafe { memmove(buf.as_mut_ptr().add(to), buf.as_ptr().add(from), n) };
+                    assert!(buf == want, "n {n}, shift {shift}");
+                }
+            }
+            // Two separate buffers, as memcpy's case.
+            let src = pattern(5000, 3);
+            let mut dst = vec![0u8; 5000];
+            // SAFETY: both hold 5000 bytes.
+            unsafe { memmove(dst.as_mut_ptr(), src.as_ptr(), 5000) };
+            assert_eq!(dst, src);
+        }
+
+        #[test]
+        fn memset_fills_with_the_low_byte_of_c() {
+            for n in sizes() {
+                for (d, _) in offsets(n).into_iter().filter(|&(_, b)| b == 0 || b == 7) {
+                    for (c, byte) in [
+                        (0, 0u8),
+                        (0x5A, 0x5A),
+                        (0xFF, 0xFF),
+                        (-1, 0xFF),
+                        (0x15A, 0x5A),
+                    ] {
+                        let mut buf = vec![0xEE_u8; n + 48];
+                        // SAFETY: `buf` holds `16 + d + n` bytes.
+                        let r = unsafe { memset(buf.as_mut_ptr().add(16 + d), c, n) };
+                        assert_eq!(r, buf.as_mut_ptr().wrapping_add(16 + d));
+                        assert!(
+                            buf[16 + d..16 + d + n].iter().all(|&b| b == byte),
+                            "n {n}, c {c}"
+                        );
+                        assert!(buf[..16 + d].iter().all(|&b| b == 0xEE), "n {n}: before");
+                        assert!(buf[16 + d + n..].iter().all(|&b| b == 0xEE), "n {n}: after");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn memcmp_answers_the_first_difference_as_unsigned_bytes() {
+            for n in sizes().into_iter().filter(|&n| n <= 4200) {
+                let a = pattern(n + 16, 9);
+                for (s, d) in offsets(n).into_iter().take(9) {
+                    let mut b = vec![0u8; n + 16];
+                    b[d..d + n].copy_from_slice(&a[s..s + n]);
+                    let (pa, pb) = (a.as_ptr().wrapping_add(s), b.as_ptr().wrapping_add(d));
+                    // SAFETY: both hold `n` bytes from these offsets.
+                    assert_eq!(unsafe { memcmp(pa, pb, n) }, 0, "n {n}: equal");
+                    let mut at: Vec<usize> = if n <= 64 {
+                        (0..n).collect()
+                    } else {
+                        vec![0, 1, 15, 16, 17, n / 2, n - 17, n - 16, n - 1]
+                    };
+                    at.dedup();
+                    for p in at {
+                        for (x, y) in [(0x00u8, 0xFFu8), (0x80, 0x7F), (0x41, 0x42), (0xFE, 0x01)] {
+                            let mut a2 = a[s..s + n].to_vec();
+                            let mut b2 = a2.clone();
+                            a2[p] = x;
+                            b2[p] = y;
+                            // A later difference the other way does not count.
+                            if p + 1 < n {
+                                a2[p + 1] = 0x00;
+                                b2[p + 1] = 0xFF;
+                            }
+                            // SAFETY: both hold `n` bytes.
+                            let got = unsafe { memcmp(a2.as_ptr(), b2.as_ptr(), n) };
+                            assert_eq!(got, i32::from(x) - i32::from(y), "n {n}, at {p}");
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn memchr_finds_the_first_and_reads_no_further_than_n() {
+            for n in sizes().into_iter().filter(|&n| n <= 4200) {
+                for (s, _) in offsets(n).into_iter().take(5) {
+                    // A buffer with no 0x80 in it, and the needle placed.
+                    let mut buf: Vec<u8> = pattern(n + 32, 1)
+                        .into_iter()
+                        .map(|b| if b == 0x80 { 0x81 } else { b })
+                        .collect();
+                    let base = buf.as_ptr().wrapping_add(s);
+                    // SAFETY: `buf` holds `s + n` bytes.
+                    assert!(unsafe { memchr(base, 0x80, n) }.is_null(), "n {n}: absent");
+                    let at: Vec<usize> = if n <= 64 {
+                        (0..n).collect()
+                    } else {
+                        vec![0, 15, 16, 17, n / 2, n - 1]
+                    };
+                    for p in at {
+                        buf[s + p] = 0x80;
+                        if p + 3 < n {
+                            buf[s + p + 3] = 0x80; // a later one does not count
+                        }
+                        let base = buf.as_ptr().wrapping_add(s);
+                        for c in [0x80, 0x180, -128] {
+                            // SAFETY: as above.
+                            let got = unsafe { memchr(base, c, n) };
+                            assert_eq!(got, base.wrapping_add(p), "n {n}, at {p}, c {c}");
+                        }
+                        buf[s + p] = 0x81;
+                        if p + 3 < n {
+                            buf[s + p + 3] = 0x81;
+                        }
+                    }
+                    // Just past `n` is not looked at.
+                    buf[s + n] = 0x80;
+                    let base = buf.as_ptr().wrapping_add(s);
+                    // SAFETY: as above.
+                    assert!(
+                        unsafe { memchr(base, 0x80, n) }.is_null(),
+                        "n {n}: past the end"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn strlen_counts_to_the_terminator_at_any_alignment() {
+            let mut lengths: Vec<usize> = (0..=200).collect();
+            lengths.extend([255, 256, 257, 4095, 4096, 4097, 70_000]);
+            for len in lengths {
+                for start in 0..48usize {
+                    if len > 300 && start % 7 != 0 {
+                        continue;
+                    }
+                    let mut buf: Vec<u8> = (0..start + len + 64)
+                        .map(|i| 0x80 | (i as u8) | 1)
+                        .collect();
+                    buf[start + len] = 0;
+                    // SAFETY: a NUL-terminated string at `start`.
+                    assert_eq!(
+                        unsafe { strlen(buf.as_ptr().add(start)) },
+                        len,
+                        "len {len}, at {start}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn strcasecmp_l_and_strncasecmp_l_are_the_one_locales_comparisons() {
         let (a, b) = (b"HeLLo\0", b"hello, world\0");

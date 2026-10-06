@@ -238,6 +238,26 @@ fn up_down_home_and_end_move_by_line() {
     assert_eq!(input.cursor(), 11, "below the last: the end");
 }
 
+/// **Ctrl and an arrow move a word at a time**, past the spaces first --
+/// and with Shift, select it.
+#[test]
+fn ctrl_and_an_arrow_move_a_word_at_a_time() {
+    let mut input = RichInput::with_doc(RichDoc::plain("one  two three", Format::default()));
+    input.set_cursor(0);
+    input.handle_key(&key(Key::Right, true, false), &wide());
+    assert_eq!(input.cursor(), 3, "the end of one");
+    input.handle_key(&key(Key::Right, true, false), &wide());
+    assert_eq!(input.cursor(), 8, "past the spaces, the end of two");
+    input.handle_key(&key(Key::Left, true, true), &wide());
+    assert_eq!(input.selection_range(), Some((5, 8)), "two, selected");
+    input.doc_end(false);
+    input.handle_key(&key(Key::Left, true, false), &wide());
+    assert_eq!(input.cursor(), 9, "the start of three");
+    input.set_cursor(0);
+    input.move_word_left(false);
+    assert_eq!(input.cursor(), 0, "nothing before");
+}
+
 /// **A press puts the caret where it lands; a drag selects from there.**
 #[test]
 fn a_press_and_a_drag_select() {

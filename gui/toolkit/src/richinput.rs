@@ -586,6 +586,30 @@ impl RichInput {
         self.moved();
     }
 
+    /// To the start of the word before the caret: past any spaces, then past
+    /// the word's letters.
+    pub fn move_word_left(&mut self, shift: bool) {
+        self.begin_or_end_selection(shift);
+        let before = self.doc.text().get(..self.cursor).unwrap_or("");
+        let trimmed = before.trim_end_matches(char::is_whitespace);
+        let word = trimmed.trim_end_matches(|c: char| !c.is_whitespace());
+        self.cursor = word.len();
+        self.moved();
+    }
+
+    /// To the end of the word after the caret: past any spaces, then past
+    /// the word's letters.
+    pub fn move_word_right(&mut self, shift: bool) {
+        self.begin_or_end_selection(shift);
+        let text = self.doc.text();
+        let after = text.get(self.cursor..).unwrap_or("");
+        let spaces = after.len().saturating_sub(after.trim_start_matches(char::is_whitespace).len());
+        let rest = after.get(spaces..).unwrap_or("");
+        let word = rest.len().saturating_sub(rest.trim_start_matches(|c: char| !c.is_whitespace()).len());
+        self.cursor = self.cursor.saturating_add(spaces).saturating_add(word).min(text.len());
+        self.moved();
+    }
+
     /// One line up or down (`down`), keeping as near the same distance
     /// across as the line allows -- and across a run of them, the distance
     /// the first started from.
@@ -673,7 +697,8 @@ impl RichInput {
     // -----------------------------------------------------------------
 
     /// Handle a key as a rich field does: typing, deleting, Enter's line
-    /// break, the arrows, Home and End (with Ctrl, the document's), Shift's
+    /// break, the arrows (with Ctrl, a word at a time), Home and End (with
+    /// Ctrl, the document's), Shift's
     /// selections, Ctrl+A, the switches (Ctrl+B, Ctrl+I, Ctrl+U), undo and
     /// redo (Ctrl+Z; Ctrl+Y or Ctrl+Shift+Z) and the clipboard (Ctrl+C,
     /// Ctrl+X, Ctrl+V). What is left -- Escape, Tab -- is the window's.
@@ -703,6 +728,8 @@ impl RichInput {
                 Key::V => self.paste(),
                 Key::Home => self.doc_start(shift),
                 Key::End => self.doc_end(shift),
+                Key::Left => self.move_word_left(shift),
+                Key::Right => self.move_word_right(shift),
                 _ => return KeyEdit::Unhandled,
             }
         } else if key.types_text() {

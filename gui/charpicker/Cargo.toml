@@ -1,0 +1,13 @@
+[package]
+name = "charpicker"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS character picker: every emoji and the symbols, maths, arrows, currency signs and letters a keyboard lacks, by category or by search, for a program to insert -- the one Unicode selection dialog every surface opens."
+
+[dependencies]
+# The names, keywords, groups and search it shows.
+charnames = { path = "../charnames" }
+guitk = { path = "../toolkit" }
+
+[lints]
+workspace = true

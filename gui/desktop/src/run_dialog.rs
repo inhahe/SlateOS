@@ -1756,6 +1756,31 @@ mod tests {
         assert!(dialog.drain_events().is_empty(), "OK was not pressed");
     }
 
+    /// **The pointer over the list is over no button**, though one is drawn
+    /// under the row it is on: the button's light goes out.
+    #[test]
+    fn the_pointer_over_the_list_lights_no_button() {
+        let mut dialog = offering(6);
+        let ok = RunDialog::button_rect(dialog.layout().content, ButtonId::Ok);
+        let (ok_x, ok_y) = ok.centre();
+        dialog.suggestions.clear();
+        dialog.show_autocomplete = false;
+        dialog.handle_mouse_event(&MouseEvent {
+            x: ok_x,
+            y: ok_y,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(dialog.hovered_button, Some(ButtonId::Ok), "the premise");
+        let mut over = offering(6);
+        over.hovered_button = Some(ButtonId::Ok);
+        over.handle_mouse_event(&MouseEvent {
+            x: ok_x,
+            y: ok_y,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(over.hovered_button, None);
+    }
+
     /// **The suggestions are drawn over the buttons**, whose presses they
     /// take -- and a press beside the list, on neither, is no row's.
     #[test]

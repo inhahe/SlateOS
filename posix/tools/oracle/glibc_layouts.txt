@@ -24,6 +24,7 @@ struct mallinfo	malloc.h	40	arena=0,ordblks=4,smblks=8,hblks=12,hblkhd=16,usmblk
 struct mallinfo2	malloc.h	80	arena=0,ordblks=8,smblks=16,hblks=24,hblkhd=32,usmblks=40,fsmblks=48,uordblks=56,fordblks=64,keepcost=72
 struct ntptimeval	sys/timex.h	72	time=0,maxerror=16,esterror=24,tai=32,__glibc_reserved1=40,__glibc_reserved2=48,__glibc_reserved3=56,__glibc_reserved4=64
 struct obstack	obstack.h	88	chunk_size=0,chunk=8,object_base=16,next_free=24,chunk_limit=32,temp=40,alignment_mask=48,chunkfun=56,freefun=64,extra_arg=72
+struct printf_info	printf.h	20	prec=0,width=4,spec=8,user=14,pad=16
 struct random_data	stdlib.h	48	fptr=0,rptr=8,state=16,rand_type=24,rand_deg=28,rand_sep=32,end_ptr=40
 struct re_pattern_buffer	regex.h	64	buffer=0,allocated=8,used=16,syntax=24,fastmap=32,translate=40,re_nsub=48
 struct re_registers	regex.h	24	num_regs=0,start=8,end=16

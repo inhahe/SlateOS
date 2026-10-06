@@ -539,7 +539,7 @@ pub(crate) unsafe fn va_arg_long_double(va: &mut VaList) -> crate::x87::LongDoub
 /// -7)` from C printed 4294967289, `%hhd` of 300 printed 300 where glibc
 /// prints 44, and `%n` stored an `int` whatever it was given.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Length {
+pub(crate) enum Length {
     /// None: `int`, `unsigned int`, `double`.
     Int,
     /// `hh`: `signed char`, `unsigned char`.
@@ -548,9 +548,14 @@ enum Length {
     Short,
     /// `l`: `long`; on `%c` and `%s`, a wide character and a wide string.
     Long,
-    /// `ll` and glibc's `q`: `long long` -- and, as glibc reads them on a
-    /// floating conversion, `long double`.
+    /// `ll`: `long long` -- and, as glibc reads it on a floating
+    /// conversion, `long double`.
     LongLong,
+    /// glibc's `q`, 4.4BSD's `long long`: formatted as `ll` is, but
+    /// `<printf.h>` tells it from `ll` -- glibc's parser sets only
+    /// `is_long_double` for it, where `ll` sets `is_long` too, so
+    /// `parse_printf_format` calls `%qd` a `PA_INT` and `%lld` a `long`.
+    Quad,
     /// `L`: `long double`; on an integer conversion, `long long`, as glibc
     /// reads it.
     LongDouble,
@@ -568,19 +573,24 @@ enum Length {
 
 impl Length {
     /// How many bits of an integer argument's slot are its value.
-    const fn int_bits(self) -> u32 {
+    pub(crate) const fn int_bits(self) -> u32 {
         match self {
             Self::Int => 32,
             Self::Char => 8,
             Self::Short => 16,
             Self::Bits(n) => n,
-            Self::Long | Self::LongLong | Self::LongDouble | Self::Word | Self::Invalid => 64,
+            Self::Long
+            | Self::LongLong
+            | Self::Quad
+            | Self::LongDouble
+            | Self::Word
+            | Self::Invalid => 64,
         }
     }
 
     /// A floating conversion with this length takes a `long double`.
-    const fn is_long_double(self) -> bool {
-        matches!(self, Self::LongDouble | Self::LongLong)
+    pub(crate) const fn is_long_double(self) -> bool {
+        matches!(self, Self::LongDouble | Self::LongLong | Self::Quad)
     }
 }
 
@@ -599,7 +609,7 @@ unsafe fn parse_length(fmt: *const u8, fpos: &mut usize) -> Length {
         b'h' => (Length::Short, next),
         b'l' if at(next) == b'l' => (Length::LongLong, next.wrapping_add(1)),
         b'l' => (Length::Long, next),
-        b'q' => (Length::LongLong, next),
+        b'q' => (Length::Quad, next),
         b'L' => (Length::LongDouble, next),
         b'j' | b'z' | b'Z' | b't' => (Length::Word, next),
         b'w' => {
@@ -1565,14 +1575,14 @@ fn write_all(fd: i32, data: *const u8, len: usize) -> bool {
 
 /// What a `*` names: the next argument in order, or (`*m$`) the `m`th.
 #[derive(Clone, Copy, Debug)]
-enum Star {
+pub(crate) enum Star {
     Next,
     At(usize),
 }
 
 /// A width or precision as the format gives it: a number, or a `*`.
 #[derive(Clone, Copy, Debug)]
-enum Count {
+pub(crate) enum Count {
     Given(usize),
     Star(Star),
 }
@@ -1580,17 +1590,17 @@ enum Count {
 /// One conversion's specification as written, before any argument is
 /// read: what [`parse_spec`] produces, and what a format with positional
 /// arguments is scanned for ([`Positional::scan`]).
-struct RawSpec {
+pub(crate) struct RawSpec {
     /// `n$`: the argument the conversion formats, by position.
-    position: Option<usize>,
-    flags: FormatFlags,
-    width: Count,
-    precision: Option<Count>,
-    length: Length,
+    pub(crate) position: Option<usize>,
+    pub(crate) flags: FormatFlags,
+    pub(crate) width: Count,
+    pub(crate) precision: Option<Count>,
+    pub(crate) length: Length,
     /// A number in it -- a position, a width, a precision, or the digits
     /// after a `*`, `$` or not -- is past [`INT_MAX`]: the call fails,
     /// `EOVERFLOW`, as glibc's `read_int` makes it fail.
-    overflow: bool,
+    pub(crate) overflow: bool,
 }
 
 /// C's `INT_MAX`: the largest position, width or precision a format may
@@ -1598,7 +1608,7 @@ struct RawSpec {
 /// its positional pass ignores one -- `"%1$d %2147483648d"` of 5 is `5 5`
 /// there -- which this library does not copy: past `INT_MAX` is `EOVERFLOW`
 /// wherever the number is.
-const INT_MAX: usize = 0x7fff_ffff;
+pub(crate) const INT_MAX: usize = 0x7fff_ffff;
 
 /// Parsed format specifier state, its `*`s read.
 struct FormatSpec {
@@ -1655,7 +1665,7 @@ unsafe fn parse_position(fmt: *const u8, fpos: &mut usize, overflow: &mut bool) 
 /// `fpos` points past the initial '%'.  On return, `fpos` points to the
 /// conversion character (d, s, x, etc.).  Nothing is read from the
 /// arguments: a `*` is recorded, and [`resolve_spec`] reads it.
-fn parse_spec(fmt: *const u8, fpos: &mut usize) -> RawSpec {
+pub(crate) fn parse_spec(fmt: *const u8, fpos: &mut usize) -> RawSpec {
     // SAFETY: `fmt` is NUL-terminated -- the callers' contract -- and no
     // step below moves past the NUL, so every index `at` is given is in it.
     let at = |i: usize| unsafe { *fmt.add(i) };
@@ -2273,18 +2283,18 @@ fn format_specs(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
 // Printf flags are inherently boolean — each is an independent on/off switch
 // matching the C standard's format flag characters (-, 0, +, space, #).
 #[allow(clippy::struct_excessive_bools)]
-struct FormatFlags {
-    left_align: bool,
-    zero_pad: bool,
-    force_sign: bool,
-    space_sign: bool,
-    alt_form: bool,
+pub(crate) struct FormatFlags {
+    pub(crate) left_align: bool,
+    pub(crate) zero_pad: bool,
+    pub(crate) force_sign: bool,
+    pub(crate) space_sign: bool,
+    pub(crate) alt_form: bool,
     /// `'`: group by the locale's thousands separator. This library's
     /// locale is C, which has none, so it changes no number -- as glibc's
     /// does not in C and C.UTF-8 -- and is kept for [`format_unknown`].
-    group: bool,
+    pub(crate) group: bool,
     /// glibc's `I`: the locale's own digits, which C has not either.
-    i18n: bool,
+    pub(crate) i18n: bool,
 }
 
 impl FormatFlags {

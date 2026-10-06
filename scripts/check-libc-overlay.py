@@ -182,6 +182,7 @@ OVERLAY_TYPES: dict[str, str] = {
     "struct argp": "argp.h",
     "struct argp_child": "argp.h",
     "struct argp_state": "argp.h",
+    "struct printf_info": "printf.h",
 }
 
 # C type -> (glibc's layout as the reference has it, the overlay's, why), each

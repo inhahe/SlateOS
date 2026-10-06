@@ -360,6 +360,7 @@ obstack_exit_failure	obstack.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext
 obstack_printf	stdio.h	gnu	int (struct obstack *, const char *, ...)
 obstack_vprintf	stdio.h	gnu	int (struct obstack *, const char *, struct __va_list_tag *)
 on_exit	stdlib.h	default,gnu,gnu23,bsd	int (void (*)(int, void *), void *)
+parse_printf_format	printf.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	unsigned long (const char *, unsigned long, int *)
 pidfd_getfd	sys/pidfd.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (int, int, unsigned int)
 pidfd_getpid	sys/pidfd.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (int)
 pidfd_open	sys/pidfd.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (int, unsigned int)

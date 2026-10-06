@@ -592,6 +592,28 @@ fn a_size_moves_and_is_laid_out_as_it_does() {
     assert_eq!(width(&tree), before + 20.0);
 }
 
+/// **A transition moves on with every event, not with ticks alone**: on the
+/// machine's clock, a program that sends none sees it over at the first
+/// event after its end -- here a move within the widget, which changes no
+/// state -- rather than left where it started.
+#[test]
+fn a_transition_ends_at_an_event_without_ticks() {
+    let mut tree = tree_of(vec![Widget::button("Go").css(
+        "background-color: red; transition: background-color 1ms linear; \
+         &:hover { background-color: blue }",
+    )]);
+    let mut palette = Palette::for_mode(false);
+    palette.motion = LINEAR;
+    tree.set_palette(palette);
+    let (x, y) = middle_of_first(&tree);
+    moved_to(&mut tree, x, y);
+    assert!(tree.animating(), "under way");
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    moved_to(&mut tree, x + 1.0, y);
+    assert_eq!(tree.root.children[0].look().background, BLUE, "over");
+    assert!(!tree.animating());
+}
+
 /// A press of the left button at a point.
 fn pressed_at(tree: &mut WidgetTree, x: f32, y: f32) -> EventResult {
     tree.handle_event(&Event::Mouse(MouseEvent {

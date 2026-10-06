@@ -2377,7 +2377,8 @@ pub struct WidgetTree {
 enum Clock {
     /// The machine's, from when the tree was made: a transition is over on
     /// time whether or not its program sends ticks, so one that never does
-    /// sees it finished at its next frame rather than stuck part-way.
+    /// sees it finished at the first event it hands the tree after its end,
+    /// rather than stuck part-way for good.
     Real(std::time::Instant),
     /// Its ticks', in milliseconds: time passes only as [`Event::Tick`]s
     /// say -- what a test steps through, a frame at a time.
@@ -2502,7 +2503,9 @@ impl WidgetTree {
     /// Whether a transition is moving: while it is, its program sends the
     /// tree [`Event::Tick`]s (an `App`'s `tick_interval`) and draws it again
     /// after each, and stops when this turns false. A program that sends
-    /// none sees each transition over by its next frame.
+    /// none sees a transition move only as it hands the tree other events --
+    /// each lays the tree out at the time it is handled -- and over by the
+    /// first after its end.
     #[must_use]
     pub const fn animating(&self) -> bool {
         self.animating
@@ -2760,13 +2763,15 @@ impl WidgetTree {
     ///
     /// A tree no CSS styles has nothing that hangs on its state (`before`
     /// is `None`), and a pointer moving within one widget changes none: the
-    /// tree is laid out again only when a style could have changed.
-    fn restyle(&mut self, before: Option<Vec<States>>) {
-        if let Some(before) = before
-            && self.states_if_styled().is_none_or(|now| now != before)
-        {
+    /// tree is laid out again only when a style could have changed. Answers
+    /// whether it was.
+    fn restyle(&mut self, before: Option<Vec<States>>) -> bool {
+        let changed =
+            before.is_some_and(|before| self.states_if_styled().is_none_or(|now| now != before));
+        if changed {
             self.layout();
         }
+        changed
     }
 
     /// Focus the first widget that will take it, if any. Returns whether one
@@ -2879,7 +2884,13 @@ impl WidgetTree {
             Event::Mouse(mouse) => self.pointer_event(event, mouse),
             _ => self.root.handle_event(event),
         };
-        self.restyle(before);
+        let restyled = self.restyle(before);
+        // A transition under way moves on with every event, not with ticks
+        // alone: a program that sends none still sees it go on as the user
+        // works, and over by the first event after its end.
+        if self.animating && !restyled {
+            self.layout();
+        }
         // What the user did, to its program -- once the tree has settled.
         self.send_signals();
         result

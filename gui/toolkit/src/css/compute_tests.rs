@@ -30,7 +30,14 @@ fn env(palette: &Palette) -> Env<'_> {
         viewport: (800.0, 600.0),
         px_per_mm: 4.0,
         palette,
-        zero_width: &|size, _| size / 2.0,
+        // A `0` is half the size, and in a fixed-pitch family the whole of it.
+        zero_width: &|size, _, family| {
+            if family.is_some_and(|f| f.first() == Some(&Family::Mono)) {
+                size
+            } else {
+                size / 2.0
+            }
+        },
     }
 }
 
@@ -335,4 +342,24 @@ fn families_are_kept_and_inherited() {
     let child = computed("", &Style::default(), &parent.style, &parent.inherited);
     assert_eq!(child.font_family, parent.font_family);
     assert_eq!(top("").font_family, None);
+}
+
+/// **A `ch` is a `0` in the widget's own family** -- the one its style gives
+/// it or its parent's style left it -- and for `font-size`, in its parent's.
+#[test]
+fn a_ch_is_a_zero_in_the_widgets_family() {
+    assert_eq!(
+        top("font-family: monospace; width: 2ch").style.width,
+        Some(28.0),
+        "a fixed-pitch 0, the whole of the size 14"
+    );
+    let parent = top("font-family: monospace; font-size: 10px");
+    let c = computed(
+        "font-size: 2ch; padding: 1ch",
+        &Style::default(),
+        &parent.style,
+        &parent.inherited,
+    );
+    assert_eq!(c.style.font_size, 20.0, "two of the parent's 0s");
+    assert_eq!(c.style.padding.left, 20.0, "one of its own, inherited");
 }

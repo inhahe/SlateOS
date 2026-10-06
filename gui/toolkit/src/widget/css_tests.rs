@@ -10,13 +10,14 @@
     clippy::float_cmp
 )]
 
-use super::{Widget, WidgetTree};
+use super::{Widget, WidgetKind, WidgetTree, weight_to_hint};
 use crate::color::Color;
-use crate::event::{Event, MouseEvent, MouseEventKind};
+use crate::event::{Event, MouseButton, MouseEvent, MouseEventKind};
 use crate::layout::FlexDirection;
 use crate::palette::Palette;
-use crate::render::RenderCommand;
+use crate::render::{FontFamily, FontWeightHint, RenderCommand};
 use crate::style::Edges;
+use crate::text::{in_family, measure_in};
 
 const RED: Color = Color::rgba(255, 0, 0, 255);
 const BLUE: Color = Color::rgba(0, 0, 255, 255);
@@ -303,4 +304,144 @@ fn what_is_not_read_is_said() {
     assert!(all[0].contains("style sheet"));
     assert!(all.iter().any(|w| w.contains("colour")));
     assert!(all.iter().any(|w| w.contains("--nothing")));
+}
+
+/// The fonts `commands` push and pop, in order: each push's family, and a
+/// pop as `None`.
+fn fonts_of(commands: &[RenderCommand]) -> Vec<Option<FontFamily>> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::PushFont { family } => Some(Some(*family)),
+            RenderCommand::PopFont => Some(None),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The width of `w`'s text as it is measured to lay it out, padding off.
+fn text_width(w: &Widget, p: &Palette) -> f32 {
+    w.intrinsic_size(p).width - w.look().padding.horizontal()
+}
+
+/// `text` at `w`'s size and weight, in `family`.
+fn measured(w: &Widget, text: &str, family: FontFamily) -> f32 {
+    let look = w.look();
+    measure_in(
+        text,
+        look.font_size,
+        weight_to_hint(look.font_weight),
+        family,
+    )
+}
+
+/// **A widget's family is pushed round its drawing, and its text is
+/// measured in it**: a label in `monospace` is laid out as wide as its text
+/// in the fixed-pitch face, and drawn in that face.
+#[test]
+fn a_family_draws_and_measures_a_widgets_text() {
+    let text = "Hamburgefonstiv WMQ";
+    let tree = tree_of(vec![Widget::label(text).css("font-family: monospace")]);
+    let label = &tree.root.children[0];
+    assert_eq!(
+        text_width(label, tree.palette()),
+        measured(label, text, FontFamily::Mono)
+    );
+    let commands = tree.render().commands;
+    assert_eq!(
+        fonts_of(&commands),
+        vec![Some(FontFamily::Mono), None],
+        "pushed once"
+    );
+    let at = |want: fn(&RenderCommand) -> bool| commands.iter().position(want).unwrap();
+    let push = at(|c| matches!(c, RenderCommand::PushFont { .. }));
+    let drawn = at(|c| matches!(c, RenderCommand::Text { .. }));
+    let pop = at(|c| matches!(c, RenderCommand::PopFont));
+    assert!(push < drawn && drawn < pop, "{push} {drawn} {pop}");
+}
+
+/// **Children inherit their parent's family and are not pushed again**; a
+/// child with a family of its own pushes it, and one set back to `initial`
+/// pushes the UI face rather than staying in its parent's.
+#[test]
+fn children_inherit_a_family_and_push_only_their_own() {
+    let root = Widget::container()
+        .with_flex_direction(FlexDirection::Column)
+        .css("font-family: monospace")
+        .with_children(vec![
+            Widget::label("inherits"),
+            Widget::label("its own").css("font-family: system-ui"),
+            Widget::label("set back").css("font-family: initial"),
+        ]);
+    let mut tree = WidgetTree::new(root, 400.0, 300.0);
+    tree.layout();
+    let (mono, ui) = (Some(FontFamily::Mono), Some(FontFamily::Ui));
+    assert_eq!(
+        fonts_of(&tree.render().commands),
+        vec![mono, ui, None, ui, None, None]
+    );
+    let p = tree.palette();
+    let [inherits, own, back] = [0, 1, 2].map(|i| &tree.root.children[i]);
+    assert_eq!(
+        text_width(inherits, p),
+        measured(inherits, "inherits", FontFamily::Mono)
+    );
+    assert_eq!(text_width(own, p), measured(own, "its own", FontFamily::Ui));
+    assert_eq!(
+        text_width(back, p),
+        measured(back, "set back", FontFamily::Ui)
+    );
+}
+
+/// **A list's first family drawn here is the one**: a name this machine has
+/// no font for is passed over, and with none drawn here it is the UI face.
+#[test]
+fn a_list_takes_its_first_family_drawn_here() {
+    let font_of = |css: &str| tree_of(vec![Widget::label("x").css(css)]).root.children[0].font;
+    assert_eq!(
+        font_of("font-family: \"Slate No Such Family 3c9\", monospace"),
+        Some(FontFamily::Mono)
+    );
+    assert_eq!(
+        font_of("font-family: \"Slate No Such Family 3c9\""),
+        Some(FontFamily::Ui),
+        "none drawn here"
+    );
+    assert_eq!(font_of("color: red"), None, "no family: the drawing's");
+}
+
+/// **A click in a text field finds the caret by its family's advances** --
+/// the event handled measuring in the face the field is drawn in.
+#[test]
+fn a_click_finds_the_caret_in_the_fields_family() {
+    let value = "WWWWiiiiWWii";
+    let mut tree = tree_of(vec![
+        Widget::text_input(value, "").css("font-family: monospace"),
+    ]);
+    let field = &tree.root.children[0];
+    let WidgetKind::TextInput { cursor, .. } = field.kind else {
+        panic!("a text input");
+    };
+    let (content_x, _) = field.content_origin();
+    let (width, size) = (field.layout.width, field.look().font_size);
+    let y = field.layout.y + field.layout.border_box_height() / 2.0;
+    let at = |dx: f32| {
+        crate::textedit::cursor_at_click(value, cursor, width, size, FontWeightHint::Regular, dx)
+    };
+    // Where the two faces put a click differently, if anywhere: what only
+    // measuring in the field's own face gets right.
+    let dx = (1..80u8)
+        .map(|i| f32::from(i) * 2.0)
+        .find(|&dx| in_family(FontFamily::Mono, || at(dx)) != at(dx))
+        .unwrap_or(30.0);
+    let want = in_family(FontFamily::Mono, || at(dx));
+    tree.handle_event(&Event::Mouse(MouseEvent {
+        x: content_x + dx,
+        y,
+        kind: MouseEventKind::Press(MouseButton::Left),
+    }));
+    let WidgetKind::TextInput { cursor, .. } = tree.root.children[0].kind else {
+        panic!("a text input");
+    };
+    assert_eq!(cursor, want);
 }

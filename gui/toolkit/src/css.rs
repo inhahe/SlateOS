@@ -31,10 +31,13 @@
 //! lays itself out again when the pointer or a key changes a state -- over
 //! the program's own style, which is kept apart ([`Widget::look`] is the
 //! style it is drawn in). Percentages are settled as each container lays
-//! its children out; a box's and a label's text shadows are drawn.
+//! its children out; a box's and a label's text shadows are drawn. A
+//! `font-family` list draws in the first generic family of it (a family by
+//! name waits on `FontFamily::Named`), pushed round
+//! the widget's drawing and measured in while it is laid out, drawn and
+//! handles its events ([`crate::text::in_family`]).
 //!
-//! Font families, transitions and positioning follow (`design-decisions.md`
-//! §1478).
+//! Transitions and positioning follow (`design-decisions.md` §1478).
 //!
 //! [`Widget::css`]: crate::widget::Widget::css
 //! [`Widget::class`]: crate::widget::Widget::class

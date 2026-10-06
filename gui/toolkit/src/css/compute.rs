@@ -55,9 +55,13 @@ pub struct Env<'a> {
     pub px_per_mm: f32,
     /// The theme, whose colours are variables.
     pub palette: &'a Palette,
-    /// How wide a `0` is at a size and weight: what `ch` is.
-    pub zero_width: &'a dyn Fn(f32, FontWeight) -> f32,
+    /// How wide a `0` is: what `ch` is.
+    pub zero_width: &'a ZeroWidth<'a>,
 }
+
+/// How wide a `0` is at a size and weight, in a style's `font-family` list
+/// (`None` where no style gave one) -- [`Env::zero_width`].
+pub type ZeroWidth<'a> = dyn Fn(f32, FontWeight, Option<&[Family]>) -> f32 + 'a;
 
 /// What a widget's style leaves its children: the inherited properties a
 /// style set, and the custom properties in force.
@@ -400,20 +404,24 @@ pub fn compute(
             ..Inherited::default()
         },
     };
-    // The font size first, and the weight: every `em` but the size's own is
-    // of the size, and a `ch` of both.
+    // The font first -- its size, weight and family: every `em` but the
+    // size's own is of the size, and a `ch` is a `0` in all three.
     c.font_size();
     c.font_weight();
+    let font_family = c.font_family();
     let units = Units {
         em: c.style.font_size,
         rem: env.root_font_size,
-        ch: (env.zero_width)(c.style.font_size, c.style.font_weight),
+        ch: (env.zero_width)(
+            c.style.font_size,
+            c.style.font_weight,
+            font_family.as_deref(),
+        ),
         viewport: env.viewport,
         px_per_mm: env.px_per_mm,
     };
     // The text's colour next: it is what `currentcolor` is.
     c.color();
-    let font_family = c.font_family();
     c.line_height(&units);
     c.text_align();
     c.cursor();
@@ -496,7 +504,11 @@ impl<'s> Computing<'s, '_> {
         let units = Units {
             em: parent_size,
             rem: self.env.root_font_size,
-            ch: (self.env.zero_width)(parent_size, self.parent_style.font_weight),
+            ch: (self.env.zero_width)(
+                parent_size,
+                self.parent_style.font_weight,
+                self.parent.font_family.as_deref(),
+            ),
             viewport: self.env.viewport,
             px_per_mm: self.env.px_per_mm,
         };

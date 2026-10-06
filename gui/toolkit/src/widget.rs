@@ -41,14 +41,14 @@ use crate::layout::{
     flex_layout,
 };
 use crate::palette::Palette;
-use crate::render::{FontWeightHint, RenderCommand, RenderTree};
+use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree};
 use crate::style::{CornerRadii, Edges, FontWeight, Style};
 use crate::text::TextCursor;
 
 use std::sync::Arc;
 
 use crate::css::compute::{self as css_compute, Computed, Env as CssEnv, Inherited};
-use crate::css::decl::Declared;
+use crate::css::decl::{Declared, Family};
 use crate::css::sheet::{self as css_sheet, Block, StyleSheet, Subject, Warning};
 
 /// How tall a progress bar is by default.
@@ -127,6 +127,11 @@ pub struct Widget {
     /// Its style as CSS left it at the last layout: what it is laid out and
     /// drawn in when there is one ([`Widget::look`]).
     computed: Option<Box<Computed>>,
+    /// The family its text is drawn and measured in, as CSS's `font-family`
+    /// left it at the last layout -- the first of the list drawn in its own
+    /// face here -- or `None` where no style gave it one, and it is in
+    /// whatever its drawing is.
+    font: Option<FontFamily>,
 }
 
 /// A widget's own CSS, read: its block, and what in it was not.
@@ -151,6 +156,35 @@ struct Ancestor {
     focus: bool,
     enabled: bool,
     checked: bool,
+}
+
+/// Run `f` measuring in `font` where a style gave one
+/// ([`crate::text::in_family`]), and in whatever is in force where not.
+fn within<R>(font: Option<FontFamily>, f: impl FnOnce() -> R) -> R {
+    match font {
+        Some(family) => crate::text::in_family(family, f),
+        None => f(),
+    }
+}
+
+/// The family a style's `font-family` list draws in: the first of it drawn
+/// in its own face here -- a generic name always is -- or the UI face, CSS's
+/// "the platform's default", when none is.
+///
+/// A family by name is passed over: a render tree cannot name one until
+/// `FontFamily::Named` reaches `main` with the compositor's half
+/// (`requests/c-f-text-in-a-family-the-drawing-names.md`), and a list
+/// naming one falls through to its generic family, as a browser's does
+/// on a machine without the font.
+fn first_drawable(families: &[Family]) -> FontFamily {
+    families
+        .iter()
+        .find_map(|family| match family {
+            Family::Ui => Some(FontFamily::Ui),
+            Family::Mono => Some(FontFamily::Mono),
+            Family::Named(_) => None,
+        })
+        .unwrap_or(FontFamily::Ui)
 }
 
 impl Ancestor {
@@ -298,6 +332,7 @@ impl Widget {
             name: None,
             css: None,
             computed: None,
+            font: None,
         }
     }
 
@@ -597,8 +632,8 @@ impl Widget {
 
     /// Compute its style, and its children's: the style sheet's rules that
     /// choose it and its own CSS, in its present state, over its program's
-    /// style -- under a parent drawn in `parent_style` that left it
-    /// `inherited`, with `ancestors` its parents from the root.
+    /// style -- under a parent drawn in `parent_style` and `parent_font`
+    /// that left it `inherited`, with `ancestors` its parents from the root.
     ///
     /// A widget nothing styles, under a parent that left it nothing, has no
     /// computed style and is drawn in its program's: a tree with no CSS
@@ -608,6 +643,7 @@ impl Widget {
         sheet: &StyleSheet,
         env: &CssEnv<'_>,
         parent_style: &Style,
+        parent_font: Option<FontFamily>,
         inherited: &Inherited,
         ancestors: &mut Vec<Ancestor>,
     ) {
@@ -630,6 +666,13 @@ impl Widget {
                 ))
             })
         };
+        // Its family: the one its list draws in; and where it has none but
+        // its parent has -- `font-family: initial` under a styled family --
+        // the UI face, the initial one, not the parent's it is drawn inside.
+        self.font = match computed.as_deref().and_then(|c| c.font_family.as_deref()) {
+            Some(families) => Some(first_drawable(families)),
+            None => parent_font.map(|_| FontFamily::Ui),
+        };
         self.computed = computed;
         ancestors.push(me);
         let none = Inherited::default();
@@ -637,13 +680,14 @@ impl Widget {
             style,
             computed,
             children,
+            font,
             ..
         } = self;
         let (own_style, leaves) = computed
             .as_deref()
             .map_or((&*style, &none), |c| (&c.style, &c.inherited));
         for child in children.iter_mut() {
-            child.compute_css(sheet, env, own_style, leaves, ancestors);
+            child.compute_css(sheet, env, own_style, *font, leaves, ancestors);
         }
         ancestors.pop();
     }
@@ -943,8 +987,15 @@ impl Widget {
     ///
     /// A control the toolkit's component modules draw is as big as they make
     /// it ([`crate::button::width`], [`crate::checkbox::width`], ...), so
-    /// what is laid out and what is drawn agree.
+    /// what is laid out and what is drawn agree -- measured in the family it
+    /// is drawn in, where a style gave it one.
     pub fn intrinsic_size(&self, p: &Palette) -> Size {
+        within(self.font, || self.measured_size(p))
+    }
+
+    /// [`intrinsic_size`](Self::intrinsic_size), in whatever family is
+    /// being measured in.
+    fn measured_size(&self, p: &Palette) -> Size {
         let padded = |w: f32, h: f32| {
             Size::new(
                 w + self.look().padding.horizontal(),
@@ -1265,12 +1316,24 @@ impl Widget {
     /// background of the nearest widget round it that has one, laid over
     /// what that one is drawn on, and at the root the palette's `base`, the
     /// colour the toolkit's windows clear to.
+    ///
+    /// Its text is drawn in the family a style gave it (`font-family`), in a
+    /// [`RenderCommand::PushFont`] round it and its children -- which
+    /// inherit it, and push again only a family of their own.
     pub fn render(&self, p: &Palette, tree: &mut RenderTree) {
-        self.render_on(p, p.base, tree);
+        self.render_on(p, p.base, None, tree);
     }
 
-    /// [`render`](Self::render), on `ground`: the colour behind this widget.
-    fn render_on(&self, p: &Palette, ground: Color, tree: &mut RenderTree) {
+    /// [`render`](Self::render), on `ground`: the colour behind this widget,
+    /// in `drawn_in`, the family a widget round it pushed (`None` where none
+    /// did, and it is drawn in whatever its caller's drawing is).
+    fn render_on(
+        &self,
+        p: &Palette,
+        ground: Color,
+        drawn_in: Option<FontFamily>,
+        tree: &mut RenderTree,
+    ) {
         if !self.visible {
             return;
         }
@@ -1278,20 +1341,26 @@ impl Widget {
         // default, opaque, rather than vanishing.
         let opacity = self.look().opacity;
         if opacity.is_nan() || opacity >= 1.0 {
-            self.render_opaque(p, ground, tree);
+            self.render_opaque(p, ground, drawn_in, tree);
         } else if opacity > 0.0 {
             // Faded as a group: drawn opaque, on the same ground, and then
             // every command faded alike -- so a child is drawn on its
             // parent's background as it is before the fade.
             let mut own = RenderTree::new();
-            self.render_opaque(p, ground, &mut own);
+            self.render_opaque(p, ground, drawn_in, &mut own);
             tree.commands
                 .extend(own.commands.into_iter().map(|c| c.faded(opacity)));
         }
     }
 
     /// [`render_on`](Self::render_on), at full opacity.
-    fn render_opaque(&self, p: &Palette, ground: Color, tree: &mut RenderTree) {
+    fn render_opaque(
+        &self,
+        p: &Palette,
+        ground: Color,
+        drawn_in: Option<FontFamily>,
+        tree: &mut RenderTree,
+    ) {
         let x = self.layout.x + self.layout.margin.left;
         let y = self.layout.y + self.layout.margin.top;
         let w = self.layout.border_box_width();
@@ -1368,11 +1437,21 @@ impl Widget {
             }
         }
 
+        // Its text, and its children's, in its own family where it is not
+        // the one already pushed round it -- and measured in it while drawn,
+        // so what is placed by measuring (a centred label, a caret) is placed
+        // by the face it is drawn in.
+        let push = self.font.filter(|&family| Some(family) != drawn_in);
+        if let Some(family) = push {
+            tree.push(RenderCommand::PushFont { family });
+        }
+        let drawn_in = self.font.or(drawn_in);
+
         // What the widget is, drawn by the component module for it, and its
         // children, on its background -- or, where it has none, on what it
         // is itself drawn on.
         let ground = self.look().background.over(ground);
-        self.draw_kind(p, ground, tree, (x, y, w, h));
+        within(self.font, || self.draw_kind(p, ground, tree, (x, y, w, h)));
 
         // Its children, from where they are -- a scroll view's scrolled -- and
         // cut to its content box.
@@ -1388,7 +1467,7 @@ impl Widget {
             });
 
             for child in &self.children {
-                child.render_on(p, ground, tree);
+                child.render_on(p, ground, drawn_in, tree);
             }
 
             tree.push(RenderCommand::PopClip);
@@ -1396,6 +1475,9 @@ impl Widget {
         }
         // A scroll view's bars, over what it holds.
         self.draw_scrollbars(p, tree);
+        if push.is_some() {
+            tree.push(RenderCommand::PopFont);
+        }
     }
 
     // ======================================================================
@@ -1438,8 +1520,10 @@ impl Widget {
             }
         }
 
-        // Handle at this widget level
-        match event {
+        // Handle at this widget level -- measuring in its own family, so a
+        // click or an arrow key finds the caret by the face it is drawn in.
+        let font = self.font;
+        within(font, || match event {
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             // A keystroke goes to the focused widget and to nothing else. The
             // recursion above has already offered it to the children, so
@@ -1453,7 +1537,7 @@ impl Widget {
             // field filled in the second.
             Event::Key(key) if self.focused => self.handle_key(key),
             _ => EventResult::Ignored,
-        }
+        })
     }
 
     /// After the child at `index` took an event: if it is a radio button and
@@ -1914,8 +1998,17 @@ impl WidgetTree {
     /// Compute every widget's style from the style sheet and its own CSS,
     /// in its present state.
     fn compute_css(&mut self) {
-        let zero_width =
-            |size: f32, weight: FontWeight| crate::text::measure("0", size, weight_to_hint(weight));
+        // A `0` in the family a style's list draws in; with none, in what
+        // the tree is measured in.
+        let zero_width = |size: f32, weight: FontWeight, families: Option<&[Family]>| {
+            let weight = weight_to_hint(weight);
+            match families {
+                Some(families) => {
+                    crate::text::measure_in("0", size, weight, first_drawable(families))
+                }
+                None => crate::text::measure("0", size, weight),
+            }
+        };
         let env = CssEnv {
             root_font_size: crate::text::scaled(Style::default().font_size),
             viewport: (self.window_width, self.window_height),
@@ -1927,6 +2020,7 @@ impl WidgetTree {
             &self.style_sheet,
             &env,
             &Style::default(),
+            None,
             &Inherited::default(),
             &mut Vec::new(),
         );

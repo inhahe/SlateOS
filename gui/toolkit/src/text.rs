@@ -526,6 +526,44 @@ pub fn scaled(px: f32) -> f32 {
     px * size_scale()
 }
 
+std::thread_local! {
+    /// The family the functions that name none measure in on this thread
+    /// ([`in_family`]): the UI face until a caller says otherwise. Per
+    /// thread as [`BASE_SIZE`] is, for the same reasons.
+    static MEASURING: Cell<FontFamily> = const { Cell::new(FontFamily::Ui) };
+}
+
+/// The family the functions that name none -- [`measure`], [`line_height`],
+/// [`fit`], [`wrap`], [`caret_x`], [`cursor_at`] and the rest -- measure and
+/// draw in on this thread: [`FontFamily::Ui`], except inside [`in_family`].
+#[must_use]
+pub fn measuring_family() -> FontFamily {
+    MEASURING.with(Cell::get)
+}
+
+/// Run `f` with the functions that name no family measuring in `family`
+/// ([`measuring_family`]), and the family before restored when `f` returns
+/// or unwinds.
+///
+/// What a widget drawn inside a [`RenderCommand::PushFont`] of `family` --
+/// a style's `font-family` -- measures, lays out and handles its events in,
+/// so that everything it measures agrees with how the compositor draws it
+/// without each of its measuring calls naming the family: a text field in
+/// a serif face places its caret by the serif face's advances. A function
+/// that names a family (`measure_in` ...) measures in that one whatever the
+/// scope.
+pub fn in_family<R>(family: FontFamily, f: impl FnOnce() -> R) -> R {
+    /// Puts the family before back, on the way out however `f` leaves.
+    struct Restore(FontFamily);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MEASURING.with(|m| m.set(self.0));
+        }
+    }
+    let _restore = Restore(MEASURING.with(|m| m.replace(family)));
+    f()
+}
+
 /// Runs `f` with the font for `size` and `weight`.
 ///
 /// Poisoning is ignored deliberately. The guarded value is a cache of
@@ -562,9 +600,10 @@ fn family_of(family: FontFamily) -> Family {
     }
 }
 
-/// Width of `text` in pixels, as the compositor will actually draw it.
+/// Width of `text` in pixels, as the compositor will actually draw it -- in
+/// the [`measuring_family`], the UI face unless inside [`in_family`].
 pub fn measure(text: &str, size: f32, weight: FontWeightHint) -> f32 {
-    measure_in(text, size, weight, FontFamily::Ui)
+    measure_in(text, size, weight, measuring_family())
 }
 
 /// Width of `text` in pixels in `family`.
@@ -627,7 +666,7 @@ pub fn draw_into(
         baseline_y,
         size,
         weight,
-        FontFamily::Ui,
+        measuring_family(),
         color,
     )
 }
@@ -740,7 +779,7 @@ pub fn draw_onto_canvas(
         baseline_y,
         size,
         weight,
-        FontFamily::Ui,
+        measuring_family(),
         color,
     )
 }
@@ -875,7 +914,7 @@ pub fn width(text: &str, size: f32) -> f32 {
 
 /// Baseline-to-baseline distance in pixels.
 pub fn line_height(size: f32, weight: FontWeightHint) -> f32 {
-    line_height_in(size, weight, FontFamily::Ui)
+    line_height_in(size, weight, measuring_family())
 }
 
 /// Distance from the top of a line down to its baseline, in pixels.
@@ -883,7 +922,7 @@ pub fn line_height(size: f32, weight: FontWeightHint) -> f32 {
 /// Needed by callers that position text by its top edge, which is most of
 /// them, since layout works in boxes.
 pub fn ascent(size: f32, weight: FontWeightHint) -> f32 {
-    ascent_in(size, weight, FontFamily::Ui)
+    ascent_in(size, weight, measuring_family())
 }
 
 /// The x at which to draw `text` so that it is centred on `center`.
@@ -956,7 +995,7 @@ pub fn fit(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usi
     // do — is what makes the cut agree with `measure`: an unkerned sum drifts
     // from the width the text is actually drawn at, so an ellipsis appeared a
     // few pixels from where the string really ended.
-    with_font(size, weight, FontFamily::Ui, |font| {
+    with_font(size, weight, measuring_family(), |font| {
         font.shape(text).fit(max_width, text.len())
     })
 }
@@ -973,7 +1012,7 @@ pub fn fit_end(text: &str, max_width: f32, size: f32, weight: FontWeightHint) ->
     if max_width <= 0.0 {
         return text.len();
     }
-    with_font(size, weight, FontFamily::Ui, |font| {
+    with_font(size, weight, measuring_family(), |font| {
         font.shape(text).fit_end(max_width, text.len())
     })
 }
@@ -1114,7 +1153,7 @@ pub fn wrap(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> Ve
         // Reporting the paragraphs unwrapped keeps the line count meaningful.
         return text.split('\n').map(str::to_string).collect();
     }
-    with_font(size, weight, FontFamily::Ui, |font| {
+    with_font(size, weight, measuring_family(), |font| {
         font.wrap(text, max_width)
     })
 }
@@ -1150,7 +1189,7 @@ pub fn wrap_hard(text: &str, max_width: f32, size: f32, weight: FontWeightHint) 
         // cluster per line — an unbounded list for a box that cannot show it.
         return text.split('\n').map(str::to_string).collect();
     }
-    with_font(size, weight, FontFamily::Ui, |font| {
+    with_font(size, weight, measuring_family(), |font| {
         font.wrap_hard(text, max_width)
     })
 }
@@ -1597,7 +1636,7 @@ fn caret_offsets(text: &str) -> impl DoubleEndedIterator<Item = usize> + '_ {
 /// screen are different quantities, and this is the one that puts the caret
 /// where the user is looking.
 pub fn caret_x(text: &str, at: TextCursor, size: f32, weight: FontWeightHint) -> f32 {
-    caret_x_in(text, at, size, weight, FontFamily::Ui)
+    caret_x_in(text, at, size, weight, measuring_family())
 }
 
 /// The family-aware form of [`caret_x`]. A caller drawing inside a
@@ -1631,7 +1670,7 @@ pub fn selection_boxes(
     size: f32,
     weight: FontWeightHint,
 ) -> Vec<(f32, f32)> {
-    selection_boxes_in(text, from, to, size, weight, FontFamily::Ui)
+    selection_boxes_in(text, from, to, size, weight, measuring_family())
 }
 
 /// The family-aware form of [`selection_boxes`].
@@ -1657,7 +1696,7 @@ pub fn selection_boxes_in(
 /// tripping is the property that matters: `caret_x(cursor_at(x))` returns to
 /// the edge that was aimed at, which is not true of the byte offset alone.
 pub fn cursor_at(text: &str, offset: f32, size: f32, weight: FontWeightHint) -> TextCursor {
-    cursor_at_in(text, offset, size, weight, FontFamily::Ui)
+    cursor_at_in(text, offset, size, weight, measuring_family())
 }
 
 /// The family-aware form of [`cursor_at`].
@@ -1702,7 +1741,7 @@ pub fn caret_left(
     size: f32,
     weight: FontWeightHint,
 ) -> Option<TextCursor> {
-    caret_left_in(text, at, size, weight, FontFamily::Ui)
+    caret_left_in(text, at, size, weight, measuring_family())
 }
 
 /// The family-aware form of [`caret_left`].
@@ -1737,7 +1776,7 @@ pub fn caret_right(
     size: f32,
     weight: FontWeightHint,
 ) -> Option<TextCursor> {
-    caret_right_in(text, at, size, weight, FontFamily::Ui)
+    caret_right_in(text, at, size, weight, measuring_family())
 }
 
 /// The family-aware form of [`caret_right`].
@@ -1784,7 +1823,7 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
     // of a direction boundary are the *same* index — the affinity says which
     // of its two screen positions a caret should be drawn at, which is a
     // question for whoever draws the caret, not for whoever counts characters.
-    let at = with_font(size, weight, FontFamily::Ui, |font| {
+    let at = with_font(size, weight, measuring_family(), |font| {
         font.shape(text).offset_at(offset, text.len()).offset
     });
     text.get(..at)
@@ -2321,6 +2360,54 @@ mod tests {
     )]
 
     use super::*;
+
+    /// What the scope tests measure: Latin every face has, wide enough
+    /// that two families' advances differ.
+    const SAMPLE: &str = "Hamburgefonstiv 0123 WMQ";
+
+    /// **The functions that name no family measure in the scope's**: the UI
+    /// face outside [`in_family`], its family inside -- an inner scope its
+    /// own -- and the family before restored after, even when what ran in it
+    /// panicked.
+    #[test]
+    fn a_scope_says_what_the_functions_that_name_no_family_measure_in() {
+        let regular = FontWeightHint::Regular;
+        assert_eq!(measuring_family(), FontFamily::Ui);
+        in_family(FontFamily::Mono, || {
+            assert_eq!(measuring_family(), FontFamily::Mono);
+            assert_eq!(
+                measure(SAMPLE, 20.0, regular),
+                measure_in(SAMPLE, 20.0, regular, FontFamily::Mono)
+            );
+            assert_eq!(
+                line_height(20.0, FontWeightHint::Bold),
+                line_height_in(20.0, FontWeightHint::Bold, FontFamily::Mono)
+            );
+            assert_eq!(
+                ascent(20.0, regular),
+                ascent_in(20.0, regular, FontFamily::Mono)
+            );
+            assert_eq!(
+                cursor_at(SAMPLE, 61.0, 20.0, regular),
+                cursor_at_in(SAMPLE, 61.0, 20.0, regular, FontFamily::Mono)
+            );
+            let at = cursor_at_in(SAMPLE, 61.0, 20.0, regular, FontFamily::Mono);
+            assert_eq!(
+                caret_x(SAMPLE, at, 20.0, regular),
+                caret_x_in(SAMPLE, at, 20.0, regular, FontFamily::Mono)
+            );
+            in_family(FontFamily::Ui, || {
+                assert_eq!(measuring_family(), FontFamily::Ui, "the inner scope's");
+            });
+            assert_eq!(measuring_family(), FontFamily::Mono, "and back");
+        });
+        assert_eq!(measuring_family(), FontFamily::Ui);
+        let unwound = std::panic::catch_unwind(|| {
+            in_family(FontFamily::Mono, || panic!("what ran in the scope"));
+        });
+        assert!(unwound.is_err());
+        assert_eq!(measuring_family(), FontFamily::Ui, "restored as it unwound");
+    }
 
     /// **A family is installed, and fixed-pitch, as this system's font list
     /// says** -- the picker's lists and these answers come from one index,

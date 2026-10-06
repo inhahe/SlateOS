@@ -228,6 +228,32 @@ impl<Id> Node<Id> {
         }
     }
 
+    /// It and every node under it, each named by `rename` of its id instead:
+    /// for a component that holds another, naming the held one's parts as
+    /// parts of its own -- the shell's notification pane, say, among the
+    /// shell's.
+    #[must_use]
+    pub fn map<J>(self, rename: &impl Fn(Id) -> J) -> Node<J> {
+        Node {
+            id: rename(self.id),
+            role: self.role,
+            name: self.name,
+            key: self.key,
+            description: self.description,
+            value: self.value,
+            enabled: self.enabled,
+            shown: self.shown,
+            focused: self.focused,
+            focusable: self.focusable,
+            bounds: self.bounds,
+            children: self
+                .children
+                .into_iter()
+                .map(|child| child.map(rename))
+                .collect(),
+        }
+    }
+
     /// It and every node under it, depth first, in order.
     pub fn walk(&self) -> impl Iterator<Item = &Self> {
         let mut stack = vec![self];

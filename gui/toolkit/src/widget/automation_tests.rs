@@ -603,6 +603,50 @@ fn an_action_restyles_the_tree_and_reaches_its_listeners() {
     );
 }
 
+/// **A component holding another names the held one's parts as its own,**
+/// and nothing else of a node changes for it: what it is, what it says,
+/// where, and what it holds, in order.
+#[test]
+fn a_held_components_parts_are_renamed_and_nothing_else() {
+    let f = form();
+    let tree = f.tree.automation().unwrap();
+    let renamed = tree.clone().map(&|id: WidgetId| (7_u8, id));
+    let before: Vec<&Node> = tree.walk().collect();
+    let after: Vec<&Node<(u8, WidgetId)>> = renamed.walk().collect();
+    assert_eq!(after.len(), before.len(), "every node, the held ones too");
+    for (old, new) in before.iter().zip(&after) {
+        assert_eq!(new.id, (7, old.id));
+        assert_eq!(
+            (
+                new.role,
+                &new.name,
+                &new.key,
+                &new.description,
+                &new.value,
+                new.enabled,
+                new.shown,
+                new.focused,
+                new.focusable,
+                new.bounds,
+                new.children.len(),
+            ),
+            (
+                old.role,
+                &old.name,
+                &old.key,
+                &old.description,
+                &old.value,
+                old.enabled,
+                old.shown,
+                old.focused,
+                old.focusable,
+                old.bounds,
+                old.children.len(),
+            )
+        );
+    }
+}
+
 /// **A walk visits every node once, in order.**
 #[test]
 fn a_walk_visits_every_node_in_order() {

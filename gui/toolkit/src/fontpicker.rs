@@ -216,12 +216,18 @@ pub enum Target {
     Dialog,
     /// The search field.
     Search,
+    /// The family list's well, between and below its rows.
+    FamilyList,
     /// A family's row, by its place among the families shown.
     Family(usize),
+    /// The weights' well, below their rows.
+    WeightList,
     /// A weight's row.
     Weight(FontWeightHint),
     /// The size field.
     SizeField,
+    /// The size list's well, between and below its rows.
+    SizeList,
     /// A size's row, by its place in [`SIZES`].
     Size(usize),
     /// A list's scrollbar column, outside its thumb.
@@ -342,13 +348,27 @@ fn rows_in(height: f32, row: f32) -> usize {
     }
 }
 
-/// The top of row `slot` in a list whose first row is at `top`.
+/// The box of row `i` of a list drawn in `rect` from its row `first`, each
+/// row `row` tall, short of a scrollbar column `bar` wide: where the row is
+/// drawn and hit -- and, for one scrolled out of the list, where tools are
+/// told it would be, above or below it.
 #[allow(
     clippy::cast_precision_loss,
-    reason = "a row on screen: a few hundred at most, far inside f32's range"
+    reason = "a row of a list: a few thousand at most, far inside f32's range"
 )]
-fn row_top(top: f32, slot: usize, row: f32) -> f32 {
-    top + slot as f32 * row
+fn list_row_rect(rect: Rect, first: usize, i: usize, row: f32, bar: f32) -> Rect {
+    let below = i as f32 - first as f32;
+    Rect::new(rect.x, rect.y + below * row, (rect.w - bar).max(0.0), row)
+}
+
+/// How wide a list's scrollbar column is in `rect`, for `len` rows of which
+/// `capacity` show: none where they all do.
+fn bar_width(rect: Rect, len: usize, capacity: usize) -> f32 {
+    if scrollbar::needed(len, capacity) {
+        scaled(BAR_WIDTH).min(rect.w)
+    } else {
+        0.0
+    }
 }
 
 /// The top of a line of text `size` pixels at `weight` in `family`, centred
@@ -923,14 +943,18 @@ impl FontPickerDialog {
                 let rows = self.wheel.rows(dy);
                 match target {
                     Some(
-                        Target::Family(_)
+                        Target::FamilyList
+                        | Target::Family(_)
                         | Target::Track(List::Families)
                         | Target::Thumb(List::Families),
                     ) => {
                         self.family_view.scroll_by(rows, self.shown.len());
                     }
                     Some(
-                        Target::Size(_) | Target::Track(List::Sizes) | Target::Thumb(List::Sizes),
+                        Target::SizeList
+                        | Target::Size(_)
+                        | Target::Track(List::Sizes)
+                        | Target::Thumb(List::Sizes),
                     ) => {
                         self.size_view.scroll_by(rows, SIZES.len());
                     }
@@ -998,6 +1022,19 @@ impl FontPickerDialog {
             }
             Target::Ok => Some(self.confirm()),
             Target::Cancel => Some(self.cancel()),
+            // A press in a list's well, off its rows, gives it the keyboard.
+            Target::FamilyList => {
+                self.focus = Part::Families;
+                None
+            }
+            Target::WeightList => {
+                self.focus = Part::Weights;
+                None
+            }
+            Target::SizeList => {
+                self.focus = Part::Sizes;
+                None
+            }
             Target::Dialog => None,
         }
     }
@@ -1245,10 +1282,10 @@ impl FontPickerDialog {
         list: List,
         (len, capacity, first): (usize, usize, usize),
     ) -> f32 {
-        if !scrollbar::needed(len, capacity) {
+        let w = bar_width(rect, len, capacity);
+        if w <= 0.0 {
             return 0.0;
         }
-        let w = scaled(BAR_WIDTH).min(rect.w);
         let track = Rect::new(rect.right() - w, rect.y, w, rect.h);
         let thumb = scrollbar::thumb(track, len, capacity, first);
         scrollbar::draw(
@@ -1269,6 +1306,7 @@ impl FontPickerDialog {
     fn draw_families(&self, palette: &Palette, frame: &mut Frame<Target>, rect: Rect) {
         let focused = self.focus == Part::Families;
         self.draw_well(palette, frame, rect, focused);
+        frame.hit(Target::FamilyList, rect);
         let row_h = scaled(FAMILY_ROW);
         let len = self.shown.len();
         let capacity = rows_in(rect.h, row_h);
@@ -1303,16 +1341,12 @@ impl FontPickerDialog {
         let size = scaled(FAMILY_SIZE);
         let pad = scaled(ROW_PADDING);
         frame.clip(rect);
-        for (slot, i) in rows.enumerate() {
+        let first = rows.start;
+        for i in rows {
             let Some(name) = self.shown.get(i).and_then(|&f| self.families.get(f)) else {
                 continue;
             };
-            let row = Rect::new(
-                rect.x,
-                row_top(rect.y, slot, row_h),
-                (rect.w - bar).max(0.0),
-                row_h,
-            );
+            let row = list_row_rect(rect, first, i, row_h, bar);
             Self::draw_row_ground(
                 palette,
                 frame,
@@ -1344,13 +1378,14 @@ impl FontPickerDialog {
 
     fn draw_weights(&self, palette: &Palette, frame: &mut Frame<Target>, rect: Rect) {
         self.draw_well(palette, frame, rect, self.focus == Part::Weights);
+        frame.hit(Target::WeightList, rect);
         let row_h = scaled(ROW);
         let size = scaled(ROW_SIZE);
         let pad = scaled(ROW_PADDING);
         let family = self.choice.font_family();
         frame.clip(rect);
         for (slot, &weight) in self.weights().iter().enumerate() {
-            let row = Rect::new(rect.x, row_top(rect.y, slot, row_h), rect.w, row_h);
+            let row = list_row_rect(rect, 0, slot, row_h, 0.0);
             Self::draw_row_ground(
                 palette,
                 frame,
@@ -1378,6 +1413,7 @@ impl FontPickerDialog {
 
     fn draw_sizes(&self, palette: &Palette, frame: &mut Frame<Target>, rect: Rect) {
         self.draw_well(palette, frame, rect, self.focus == Part::Sizes);
+        frame.hit(Target::SizeList, rect);
         let row_h = scaled(ROW);
         let len = SIZES.len();
         let capacity = rows_in(rect.h, row_h);
@@ -1392,16 +1428,12 @@ impl FontPickerDialog {
         let size = scaled(ROW_SIZE);
         let pad = scaled(ROW_PADDING);
         frame.clip(rect);
-        for (slot, i) in rows.enumerate() {
+        let first = rows.start;
+        for i in rows {
             let Some(px) = SIZES.get(i) else {
                 continue;
             };
-            let row = Rect::new(
-                rect.x,
-                row_top(rect.y, slot, row_h),
-                (rect.w - bar).max(0.0),
-                row_h,
-            );
+            let row = list_row_rect(rect, first, i, row_h, bar);
             Self::draw_row_ground(
                 palette,
                 frame,
@@ -1479,6 +1511,9 @@ impl FontPickerDialog {
         }
     }
 }
+
+#[path = "fontpicker_accessible.rs"]
+mod accessible;
 
 #[cfg(test)]
 #[path = "fontpicker_tests.rs"]

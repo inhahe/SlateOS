@@ -1,4 +1,6 @@
-## TD-POSIX-GETLOGIN-IS-A-CONSTANT (lane B, 2026-08-24) — **open**
+## TD-POSIX-GETLOGIN-IS-A-CONSTANT (lane B, 2026-08-24) — **FIXED 2026-10-05**
+
+**Status:** FIXED 2026-10-05 (lane D) -- see the end.
 
 **What it is.** `posix::pwd::getlogin` (`posix/src/pwd.rs:514`) returns the
 string `root` unconditionally, and `getlogin_r` writes `root` into whatever
@@ -42,3 +44,16 @@ single-account constant for now on purpose: glibc's answer -- the `ut_user` of
 the terminal's login record -- would be "no login name" for every session
 until something writes one, which is lane B's `login` (asked in
 `requests/d-b-utmp-is-a-real-file-now-create-it-and-write-logins.md`). When it does, lane D switches `getlogin` over.
+
+**Fixed (lane D, 2026-10-05).** Both halves are in. `login` writes the
+terminal's `USER_PROCESS` record (lane B, 2026-10-01), and `services/init`
+starts the records at boot -- `/var/run/utmp` emptied with a `BOOT_TIME`
+record, the same record appended to `/var/log/wtmp`, `btmp` and `lastlog`
+made if missing (`start_login_records`). `getlogin_r` is glibc's
+`getlogin_r_fd0`: `ttyname_r(0)`, `/dev/` taken off, and that line's login
+record (`posix/src/utmpx.rs` `login_on_line`), its error numbers returned
+rather than -1; `getlogin` is it, into glibc's `name[UT_NAMESIZE + 1]`. A
+process on no terminal, or on one nobody logged in on, has no login name --
+`logname`'s "no login name". glibc's first step, the audit `loginuid`, is
+not taken: SlateOS's says "unset" for every process, which glibc reads as
+"no login name" without looking at the records (design-decisions §1172).

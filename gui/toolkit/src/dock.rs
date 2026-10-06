@@ -25,7 +25,10 @@
 //!   brought to the front, a panel closed, a divider moved or a panel moved;
 //! - **drawing** ([`draw`]): each group's tab bar through [`TabView`], so a
 //!   dock's tabs look like every other tab bar, the dividers, and where a
-//!   dragged tab would land.
+//!   dragged tab would land;
+//! - **tools** ([`DockAccess`]): its groups, tabs, close buttons and dividers
+//!   shown to automation and assistive tools, each used as the pointer
+//!   uses it.
 //!
 //! Like the splitter this is state and functions over it, and every case is
 //! testable headless. The application owns the [`Dock`] and the panels'
@@ -51,6 +54,9 @@ use crate::splitter;
 use crate::style::CornerRadii;
 use crate::surface::CommandSink;
 use crate::tabs::{TAB_BAR_HEIGHT, Tab, TabPosition, TabRect, TabView};
+
+mod accessible;
+pub use accessible::{DockAccess, DockPart};
 
 /// How far the pointer must travel with a tab held before it is a drag and
 /// not a click -- the toolkit's drag threshold, as `dnd` and `grid` use.

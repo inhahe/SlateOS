@@ -2743,10 +2743,13 @@ authors never wrote a single automation handler.
   (`guitk::ribbon::RibbonAccess`): its tabs, each group's controls --
   buttons, toggles, split buttons and their arrows, drop-downs, galleries --
   a folded group's button and panel, the Quick Access Toolbar and an open
-  menu's rows, each used as clicked. Not yet: the toolkit's icon grid,
-  dock, radio group and text views (`codeview`, `textview`, `richinput`)
-  -- none of the first three has a program using it yet. There is no font
-  picker yet to show.*
+  menu's rows, each used as clicked. Its dock (`guitk::dock::DockAccess`):
+  each group's tabs, the front one chosen and its close button, the front
+  panel's contents for the application to fill, and each divider, where it
+  stands and dragged to where it is set. Not yet: the toolkit's icon grid,
+  radio group and text views (`codeview`, `textview`, `richinput`) -- none
+  of the first two has a program using it yet. There is no font picker yet
+  to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,
   enabled/visible/focused), bounds, and a stable within-app identifier. Find

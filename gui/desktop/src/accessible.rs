@@ -25,14 +25,18 @@
 //! every menu open over everything -- the desktop's, a notification's, a
 //! tile's, a field's -- with its rows, and the submenu a row opened
 //! (`guitk::menu::MenuPart`), a row chosen as a click chooses it. While
-//! it is up, the Run box (`run_dialog::accessible`): its line, typed over
-//! and run, its suggestions, OK, Cancel, Browse... -- a line run started,
-//! as after a click. While they are up, the file chooser
-//! (`guitk::dialog::DialogTarget`), whose
-//! choice goes where it was put up for -- the Run box's line, a folder
-//! frame -- and the character picker over a field (`charpicker::Target`),
-//! whose pick is typed into the field: each the component's own parts,
-//! where the shell draws it.
+//! the tiling overlay is up, its zones, each named by where it is and
+//! pressed as clicked -- the focused window tiled there -- and its picker's
+//! layouts, chosen as the user chooses one: the pointer to the top edge,
+//! onto the layout, pressed. While a shut down waits on programs still
+//! open, its list: what it says, the programs, and "... anyway" and Cancel.
+//! While it is up, the Run box (`run_dialog::accessible`): its line, typed
+//! over and run, its suggestions, OK, Cancel, Browse... -- a line run
+//! started, as after a click. While they are up, the file chooser
+//! (`guitk::dialog::DialogTarget`), whose choice goes where it was put up
+//! for -- the Run box's line, a folder frame -- and the character picker
+//! over a field (`charpicker::Target`), whose pick is typed into the field:
+//! each the component's own parts, where the shell draws it.
 //!
 //! # As the user would
 //!
@@ -58,6 +62,7 @@ use crate::calendar::{CalendarHit, CalendarPart, CalendarViewMode};
 use crate::notif_pane::PanePart;
 use crate::overview::{self, OverviewPart};
 use crate::run_dialog::RunPart;
+use crate::snap::{SnapLayoutPreset, ZoneId};
 use crate::{
     DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, Rect, ShellAction, StartRow,
     StartShortcut, SwitchView, TaskbarSlot, TextRole, WindowId, click, icons, power, volume_flyout,
@@ -119,6 +124,24 @@ pub enum ShellPart {
     /// A part of the Run box, while it is up: a line run is started, and
     /// Browse puts the chooser up.
     RunBox(RunPart),
+    /// The tiling overlay, while it is up: its zones -- each a
+    /// [`Control`](Self::Control), pressed as clicked, the focused window
+    /// tiled into it -- and its layouts.
+    Snap,
+    /// The tiling overlay's layout picker, summoned by the pointer at the
+    /// top edge.
+    SnapLayouts,
+    /// A layout in the picker: chosen as the user chooses it, the pointer
+    /// brought to the top edge, onto it, and pressed.
+    SnapLayout(SnapLayoutPreset),
+    /// The list a shut down, restart or log out waits on, while it is up:
+    /// what it says, its programs, and its two buttons -- each a
+    /// [`Control`](Self::Control).
+    Ending,
+    /// The programs still open, on that list.
+    EndingPrograms,
+    /// A program still open, by its window.
+    EndingProgram(WindowId),
 }
 
 /// A menu the shell opens over everything.
@@ -287,6 +310,171 @@ impl DesktopShell {
         Ok(request
             .and_then(|request| self.run_request(request))
             .map(ShellAction::Launch))
+    }
+
+    /// Whether something the shell hands a press to before its own surfaces
+    /// -- the overview, the list a shut down waits on, the tiling overlay --
+    /// takes it: what is ahead of the chooser, the chooser, the Run box, or
+    /// the notification pane's scrim, as `handle_mouse_with` asks them.
+    fn ahead_of_own_surfaces(&self) -> bool {
+        self.ahead_of_chooser()
+            || self.chooser.is_some()
+            || self.run_dialog.is_visible()
+            || self.notifications.pane_state().is_visible()
+    }
+
+    /// The tiling overlay, while it is up: its zones, each named by where it
+    /// is, and the layouts of its picker -- the active one chosen, all of
+    /// them shown only while the picker is.
+    fn snap_node(&self) -> Option<Node<ShellPart>> {
+        if !self.snap.is_overlay_visible() {
+            return None;
+        }
+        let area = self.snap.work_area();
+        let mut overlay = Node::new(
+            ShellPart::Snap,
+            Role::Group,
+            "Snap layout",
+            Rect::new(area.x, area.y, area.width, area.height),
+        );
+        let active = self.snap.active_preset();
+        overlay.description = Some(active.label().to_owned());
+        for zone in &self.snap.layout().zones {
+            overlay.children.push(button(
+                Hit::SnapZone(zone.id),
+                zone.label,
+                Rect::new(zone.x, zone.y, zone.width, zone.height),
+            ));
+        }
+        let (x, y, w, h) = self.snap.picker_rect();
+        let mut picker = Node::new(
+            ShellPart::SnapLayouts,
+            Role::List,
+            "Layouts",
+            Rect::new(x, y, w, h),
+        );
+        picker.shown = self.snap.is_picker_visible();
+        for &preset in SnapLayoutPreset::all() {
+            let Some((tx, ty, size)) = self.snap.thumbnail_rect(preset) else {
+                continue;
+            };
+            let mut layout = Node::new(
+                ShellPart::SnapLayout(preset),
+                Role::ListItem,
+                preset.label(),
+                Rect::new(tx, ty, size, size),
+            );
+            layout.value = Some(Value::Chosen(preset == active));
+            layout.shown = picker.shown;
+            picker.children.push(layout);
+        }
+        overlay.children.push(picker);
+        Some(overlay)
+    }
+
+    /// A press on the tiling overlay's zone `zone` as the user's click at
+    /// its middle: the focused window tiled into it.
+    fn press_zone(&mut self, zone: ZoneId) -> Result<Option<ShellAction>, Refusal> {
+        if !self.snap.is_overlay_visible() {
+            return Err(Refusal::NoSuchWidget);
+        }
+        if self.ahead_of_own_surfaces() || self.overview.visible || self.ending_listing() {
+            return Err(Refusal::Hidden);
+        }
+        let at = self.snap.zone_by_id(zone).ok_or(Refusal::NoSuchWidget)?;
+        let (x, y) = (at.x + at.width / 2.0, at.y + at.height / 2.0);
+        // Under the open picker, a click would choose a layout instead.
+        if self.snap.picker_hit(x, y) {
+            return Err(Refusal::Hidden);
+        }
+        Ok(self.click_at(x, y))
+    }
+
+    /// Choose `preset` in the tiling overlay's picker as the user does: the
+    /// pointer to the top edge, which brings the picker; onto the layout's
+    /// thumbnail; pressed.
+    fn choose_layout(&mut self, preset: SnapLayoutPreset) -> Result<Option<ShellAction>, Refusal> {
+        if !self.snap.is_overlay_visible() {
+            return Err(Refusal::NoSuchWidget);
+        }
+        if self.ahead_of_own_surfaces() || self.overview.visible || self.ending_listing() {
+            return Err(Refusal::Hidden);
+        }
+        let (x, y, size) = self
+            .snap
+            .thumbnail_rect(preset)
+            .ok_or(Refusal::NoSuchWidget)?;
+        let area = self.snap.work_area();
+        self.point_at(area.x + area.width / 2.0, area.y + 1.0);
+        let (cx, cy) = (x + size / 2.0, y + size / 2.0);
+        self.point_at(cx, cy);
+        Ok(self.click_at(cx, cy))
+    }
+
+    /// The list a shut down waits on, while it is up: named by what it says
+    /// of how many are open and described by the rest; the programs still
+    /// open, each named as the list names it; and its two buttons.
+    fn ending_node(&self) -> Option<Node<ShellPart>> {
+        let ending = self.ending.filter(|ending| ending.listing)?;
+        let mut dialog = Node::new(
+            ShellPart::Ending,
+            Role::Dialog,
+            self.ending_title(),
+            self.ending_panel_rect(),
+        );
+        dialog.description = Some(Self::ending_lines(ending.choice).join(" "));
+        let rows = self.ending_rows();
+        let bounds = match (rows.first(), rows.last()) {
+            (Some((_, first)), Some((_, last))) => {
+                Rect::new(first.x, first.y, first.w, last.bottom() - first.y)
+            }
+            _ => Rect::default(),
+        };
+        let mut list = Node::new(
+            ShellPart::EndingPrograms,
+            Role::List,
+            "Programs still open",
+            bounds,
+        );
+        let more = self.windows.len().saturating_sub(rows.len());
+        list.description = (more > 0).then(|| format!("and {more} more"));
+        for (window, row) in &rows {
+            list.children.push(Node::new(
+                ShellPart::EndingProgram(window.id),
+                Role::ListItem,
+                self.ending_name(window),
+                *row,
+            ));
+        }
+        dialog.children.push(list);
+        let (anyway, cancel) = self.ending_button_rects();
+        dialog.children.push(button(
+            Hit::EndingAnyway,
+            format!("{} anyway", ending.choice.label()),
+            anyway,
+        ));
+        dialog
+            .children
+            .push(button(Hit::EndingCancel, "Cancel", cancel));
+        Some(dialog)
+    }
+
+    /// A press on the shut-down list's `hit` button, as the user's click at
+    /// its middle: going ahead, or not.
+    fn press_ending_button(&mut self, hit: Hit) -> Result<Option<ShellAction>, Refusal> {
+        if !self.ending_listing() {
+            return Err(Refusal::NoSuchWidget);
+        }
+        if self.ahead_of_own_surfaces() || self.overview.visible {
+            return Err(Refusal::Hidden);
+        }
+        let (anyway, cancel) = self.ending_button_rects();
+        let (x, y) = if hit == Hit::EndingAnyway {
+            anyway.centre()
+        } else {
+            cancel.centre()
+        };
+        Ok(self.click_at(x, y))
     }
 
     /// Whether a press at `(x, y)` on `hit` -- what the shell's hit test
@@ -1083,6 +1271,12 @@ impl Accessible for DesktopShell {
                     .map(&ShellPart::Pane),
             );
         }
+        if let Some(snap) = self.snap_node() {
+            root.children.push(snap);
+        }
+        if let Some(ending) = self.ending_node() {
+            root.children.push(ending);
+        }
         if self.run_dialog.is_visible() {
             root.children.push(
                 self.run_dialog
@@ -1128,6 +1322,21 @@ impl Accessible for DesktopShell {
             (ShellPart::Icon(id), Action::Press) => self.click_icon(id, true),
             (ShellPart::Icon(_), _) => Err(not_for(Role::ListItem)),
             (ShellPart::Icons, _) => Err(not_for(Role::List)),
+            // The tiling overlay's and the shut-down list's parts are the
+            // surfaces' own, asked for a press before the shell's others.
+            (ShellPart::Control(Hit::SnapZone(zone)), Action::Press) => self.press_zone(zone),
+            (ShellPart::Control(hit @ (Hit::EndingAnyway | Hit::EndingCancel)), Action::Press) => {
+                self.press_ending_button(hit)
+            }
+            (ShellPart::SnapLayout(preset), Action::Choose | Action::Press) => {
+                self.choose_layout(preset)
+            }
+            (ShellPart::SnapLayout(_) | ShellPart::EndingProgram(_), _) => {
+                Err(not_for(Role::ListItem))
+            }
+            (ShellPart::SnapLayouts | ShellPart::EndingPrograms, _) => Err(not_for(Role::List)),
+            (ShellPart::Snap, _) => Err(not_for(Role::Group)),
+            (ShellPart::Ending, _) => Err(not_for(Role::Dialog)),
             (
                 ShellPart::Control(hit @ Hit::StartMenuEntry(index)),
                 Action::Press | Action::Choose,

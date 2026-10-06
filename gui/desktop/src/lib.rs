@@ -10548,6 +10548,60 @@ impl DesktopShell {
         (anyway, cancel)
     }
 
+    /// What the list says over its rows: how many programs are still open.
+    fn ending_title(&self) -> String {
+        match self.windows.len() {
+            1 => "A program is still open".to_string(),
+            open => format!("{open} programs are still open"),
+        }
+    }
+
+    /// What the list says under its title, a line at a time, for ending the
+    /// session by `choice`.
+    fn ending_lines(choice: power::PowerChoice) -> [String; 3] {
+        [
+            "They were asked to close and have not. One may be asking".to_string(),
+            "whether to keep your work: Cancel, and close it yourself --".to_string(),
+            format!("or {} anyway, and lose what is not saved.", choice.verb()),
+        ]
+    }
+
+    /// The programs still open as the list shows them -- by window, oldest
+    /// first, at most [`ENDING_LIST_MAX`] -- each with its row, under the
+    /// title and the lines. One layout for the drawing and for tools.
+    fn ending_rows(&self) -> Vec<(&ManagedWindow, Rect)> {
+        let panel = self.ending_panel_rect();
+        let pad = self.scale(ENDING_PANEL_PADDING);
+        let heading = self.font_size(TextRole::Heading);
+        let body = self.font_size(TextRole::Body);
+        let x = panel.x + pad;
+        let inner = (panel.w - pad * 2.0).max(0.0);
+        let row_h = self.scale(ENDING_ROW_HEIGHT);
+        let mut y = panel.y + pad + heading * 1.4 + pad / 2.0 + body * 1.3 * 3.0 + pad / 2.0;
+        let mut windows: Vec<&ManagedWindow> = self.windows.values().collect();
+        windows.sort_by_key(|w| w.id.0);
+        windows
+            .into_iter()
+            .take(ENDING_LIST_MAX)
+            .map(|window| {
+                let row = Rect::new(x, y, inner, row_h);
+                y += row_h;
+                (window, row)
+            })
+            .collect()
+    }
+
+    /// What the list calls `window`: its title, or its program's name where
+    /// it has none.
+    fn ending_name<'a>(&'a self, window: &'a ManagedWindow) -> &'a str {
+        if window.title.is_empty() {
+            self.program_for_app_id(&window.app_id)
+                .map_or("A window with no title", |p| p.name.as_str())
+        } else {
+            window.title.as_str()
+        }
+    }
+
     /// The list of programs a shut down, restart or log out is still waiting
     /// for, when it is up: over a dimmed screen, what is still open -- its
     /// program's picture and its title -- and the choice to go ahead anyway or
@@ -10576,70 +10630,51 @@ impl DesktopShell {
         let mut y = panel.y + pad;
         let heading = self.font_size(TextRole::Heading);
         let open = self.windows.len();
-        let title = if open == 1 {
-            "A program is still open".to_string()
-        } else {
-            format!("{open} programs are still open")
-        };
         tree.text_in_weighted(
             x,
             y,
             inner,
-            &title,
+            &self.ending_title(),
             fg,
             heading,
             guitk::render::FontWeightHint::Bold,
         );
         y += heading * 1.4 + pad / 2.0;
         let body = self.font_size(TextRole::Body);
-        for line in [
-            "They were asked to close and have not. One may be asking",
-            "whether to keep your work: Cancel, and close it yourself --",
-            &format!(
-                "or {} anyway, and lose what is not saved.",
-                ending.choice.verb()
-            ),
-        ] {
+        for line in &Self::ending_lines(ending.choice) {
             tree.text_in(x, y, inner, line, with_alpha(fg, START_SECTION_ALPHA), body);
             y += body * 1.3;
         }
-        y += pad / 2.0;
         let px = self.icon_px(START_ROW_ICON);
         #[allow(clippy::cast_precision_loss)]
         let side = px as f32;
         let row_h = self.scale(ENDING_ROW_HEIGHT);
-        let mut windows: Vec<&ManagedWindow> = self.windows.values().collect();
-        windows.sort_by_key(|w| w.id.0);
-        for window in windows.iter().take(ENDING_LIST_MAX) {
+        let rows = self.ending_rows();
+        for (window, row) in &rows {
             let program = self.program_for_app_id(&window.app_id);
             let image_id = self.picture_of(program, px, fg);
             tree.push(guitk::render::RenderCommand::Image {
-                x,
-                y: y + (row_h - side) / 2.0,
+                x: row.x,
+                y: row.y + (row.h - side) / 2.0,
                 width: side,
                 height: side,
                 image_id,
             });
-            let text_x = x + side + self.scale(10.0);
-            let name = if window.title.is_empty() {
-                program.map_or("A window with no title", |p| p.name.as_str())
-            } else {
-                window.title.as_str()
-            };
+            let text_x = row.x + side + self.scale(10.0);
             tree.text_in(
                 text_x,
-                y + (row_h - body).max(0.0) / 2.0,
-                (x + inner - text_x).max(0.0),
-                name,
+                row.y + (row.h - body).max(0.0) / 2.0,
+                (row.right() - text_x).max(0.0),
+                self.ending_name(window),
                 fg,
                 body,
             );
-            y += row_h;
         }
         if open > ENDING_LIST_MAX {
+            let below = rows.last().map_or(y, |(_, row)| row.bottom());
             tree.text_in(
                 x,
-                y + (row_h - body).max(0.0) / 2.0,
+                below + (row_h - body).max(0.0) / 2.0,
                 inner,
                 &format!("and {} more", open.saturating_sub(ENDING_LIST_MAX)),
                 with_alpha(fg, START_SECTION_ALPHA),

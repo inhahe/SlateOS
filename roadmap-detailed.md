@@ -2736,9 +2736,12 @@ authors never wrote a single automation handler.
   over and run, its suggestions, OK, Cancel, Browse...), the file chooser
   over it and the character picker over a field, each the component's own
   parts where the shell draws it, what they choose going where a click's
-  would. Not yet: the shell's snap overlay and list of programs holding up
-  a shutdown; the toolkit's icon grid, ribbon, dock, radio group and text
-  editors (`codeview`, `textview`, `richinput`). There is no font picker
+  would. And the tiling overlay -- its zones, each tiling the focused
+  window as clicked, and its picker's layouts, chosen as the pointer
+  chooses one -- and the list a shut down waits on: its programs, and
+  "... anyway" and Cancel. Not yet: the toolkit's icon grid, ribbon, dock,
+  radio group and text views (`codeview`, `textview`, `richinput`) -- none
+  of the first four has a program using it yet. There is no font picker
   yet to show.*
 - [-] **Identify (query/enumerate).** Walk the widget tree; query each node's
   role/type, label/accessible name, value/state (checked, text, selection,

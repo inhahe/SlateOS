@@ -1139,3 +1139,149 @@ fn the_run_box_runs_a_line_and_browses() {
     );
     assert!(browsing.run_dialog.is_visible());
 }
+
+/// A shell with one focused window, "notes.md", and a second with no title.
+fn two_windows() -> DesktopShell {
+    let mut shell = shell();
+    let _asked = shell.apply_window_list(&WindowList::new(
+        0,
+        vec![
+            WindowInfo::new(1, 40, "notes.md"),
+            WindowInfo::new(2, 41, ""),
+        ],
+    ));
+    shell.focused_window = Some(WindowId(1));
+    shell
+}
+
+/// **The tiling overlay shows tools its zones, each named by where it is,
+/// and its picker's layouts**; a layout is chosen as the user chooses it --
+/// the pointer to the top edge, onto the layout, pressed -- and a zone
+/// pressed tiles the focused window into it, as a click does.
+#[test]
+fn the_tiling_overlay_tiles_and_changes_its_layout() {
+    let mut shell = two_windows();
+    assert!(shell.toggle_zone_overlay(), "the premise: it opens");
+    let snap = node(&shell, ShellPart::Snap);
+    assert_eq!(
+        snap.description.as_deref(),
+        Some(shell.snap.active_preset().label())
+    );
+    let zones: Vec<&str> = snap
+        .children
+        .iter()
+        .filter(|n| matches!(n.id, ShellPart::Control(Hit::SnapZone(_))))
+        .map(|n| n.name.as_str())
+        .collect();
+    assert_eq!(zones.len(), shell.snap.layout().zones.len(), "{zones:?}");
+    let picker = node(&shell, ShellPart::SnapLayouts);
+    assert!(!picker.shown, "the picker waits for the pointer");
+    assert_eq!(picker.children.len(), SnapLayoutPreset::all().len());
+    assert_eq!(
+        press(&mut shell, ShellPart::Control(Hit::StartButton)),
+        Err(Refusal::Hidden),
+        "under the overlay"
+    );
+
+    let other = SnapLayoutPreset::all()
+        .iter()
+        .copied()
+        .find(|&preset| preset != shell.snap.active_preset())
+        .expect("a second layout");
+    assert_eq!(
+        shell.invoke(&ShellPart::SnapLayout(other), Action::Choose, 0.0, 0.0),
+        Ok(None)
+    );
+    assert_eq!(shell.snap.active_preset(), other);
+    assert_eq!(
+        node(&shell, ShellPart::SnapLayout(other)).value,
+        Some(Value::Chosen(true))
+    );
+
+    let zone = node(&shell, ShellPart::Snap)
+        .children
+        .iter()
+        .find(|n| matches!(n.id, ShellPart::Control(Hit::SnapZone(_))))
+        .expect("a zone")
+        .id;
+    let tiled = press(&mut shell, zone);
+    assert!(
+        matches!(tiled, Ok(Some(ShellAction::Control(_)))),
+        "{tiled:?}"
+    );
+    assert!(!shell.snap.is_overlay_visible(), "chosen, it goes");
+    assert_eq!(press(&mut shell, zone), Err(Refusal::NoSuchWidget));
+}
+
+/// **The list a shut down waits on says what it says, names the programs
+/// still open, and is answered by its buttons** as a click answers it:
+/// Cancel leaves the session as it is, and going ahead anyway carries the
+/// shut down out. Nothing under it is pressed.
+#[test]
+fn the_list_a_shut_down_waits_on_is_answered_by_its_buttons() {
+    let listing = || {
+        let mut shell = two_windows();
+        let asked = shell.choose_power(crate::power::PowerChoice::ShutDown);
+        assert!(matches!(asked, ShellAction::ControlAll(_)), "{asked:?}");
+        shell.osd_clock_ms = shell.osd_clock_ms.saturating_add(crate::ENDING_GRACE_MS);
+        assert!(shell.tick_ending(), "the premise: the list goes up");
+        shell
+    };
+    let mut shell = listing();
+    let ending = node(&shell, ShellPart::Ending);
+    assert_eq!(ending.name, "2 programs are still open");
+    assert!(
+        ending
+            .description
+            .as_deref()
+            .is_some_and(|said| said.contains("Cancel, and close it yourself")),
+        "{:?}",
+        ending.description
+    );
+    let programs = node(&shell, ShellPart::EndingPrograms);
+    let names: Vec<(ShellPart, &str)> = programs
+        .children
+        .iter()
+        .map(|n| (n.id, n.name.as_str()))
+        .collect();
+    assert_eq!(
+        names[0],
+        (ShellPart::EndingProgram(WindowId(1)), "notes.md")
+    );
+    assert_eq!(names.len(), 2);
+    assert!(
+        !names[1].1.is_empty(),
+        "a window with no title is still named"
+    );
+    assert_eq!(
+        node(&shell, ShellPart::Control(Hit::EndingAnyway)).name,
+        "Shut down anyway"
+    );
+    assert_eq!(
+        press(&mut shell, ShellPart::Control(Hit::StartButton)),
+        Err(Refusal::Hidden),
+        "under the list"
+    );
+    assert_eq!(
+        press(&mut shell, ShellPart::EndingProgram(WindowId(1))),
+        Err(Refusal::NotApplicable {
+            role: Role::ListItem,
+            action: "press"
+        })
+    );
+
+    assert_eq!(
+        press(&mut shell, ShellPart::Control(Hit::EndingCancel)),
+        Ok(None)
+    );
+    assert!(shell.ending.is_none(), "cancelled");
+    assert_eq!(
+        press(&mut shell, ShellPart::Control(Hit::EndingCancel)),
+        Err(Refusal::NoSuchWidget)
+    );
+
+    let mut anyway = listing();
+    let went = press(&mut anyway, ShellPart::Control(Hit::EndingAnyway));
+    assert!(matches!(went, Ok(Some(ShellAction::Launch(_)))), "{went:?}");
+    assert!(anyway.ending.is_none());
+}

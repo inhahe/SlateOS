@@ -611,6 +611,30 @@ fn out_of_reach_the_flyout_says_why() {
     );
 }
 
+/// **"Audio settings…" at the flyout's foot opens Settings on its Sound
+/// page, and the flyout closes** -- with the card out of reach too, when a
+/// user most wants to look.
+#[test]
+fn audio_settings_opens_the_sound_page() {
+    for reachable in [true, false] {
+        let mut s = shell();
+        if reachable {
+            let (_card_state, output) = card(40, false);
+            s.attach_volume(output);
+        } else {
+            s.attach_volume(Output::OutOfReach("No sound card reachable"));
+        }
+        s.toggle_volume_flyout();
+        let (x, y) = middle(s.volume_flyout_layout().settings);
+        assert_eq!(
+            s.handle_mouse(&click(x, y)),
+            crate::ShellAction::Launch(crate::launcher::settings_page(crate::launcher::SOUND_PAGE)),
+            "reachable: {reachable}"
+        );
+        assert!(!s.volume_flyout.is_visible(), "reachable: {reachable}");
+    }
+}
+
 /// **The flyout and the other panels over the bar close one another.**
 #[test]
 fn the_flyout_and_the_other_panels_close_one_another() {

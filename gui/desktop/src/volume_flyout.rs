@@ -5,9 +5,12 @@
 //! ([`crate::volume`]); while the card is out of reach it says why where the
 //! slider would be, and nothing in it moves (design-decisions §1485).
 //!
-//! What the roadmap's popup has besides -- a chooser of the output device, a
-//! mixer of each program's volume -- waits on what the kernel's mixer offers
-//! programs, which is the master alone today.
+//! At its foot, below a line, "Audio settings…" opens Settings on its Sound
+//! page -- the one place for output and input both -- whether or not the card
+//! can be reached, since that is when a user most wants to look. What the
+//! roadmap's popup has besides -- a chooser of the output device, a mixer of
+//! each program's volume -- waits on what the kernel's mixer offers programs,
+//! which is the master alone today.
 //!
 //! The flyout holds the gesture -- a drag of the slider in progress -- and
 //! nothing about the level, which the shell passes in each time; it answers
@@ -24,8 +27,11 @@ use guitk::style::CornerRadii;
 
 /// The flyout's width, at a scale of 1.
 pub const WIDTH: f32 = 280.0;
-/// Its height, at a scale of 1.
-pub const HEIGHT: f32 = 104.0;
+/// Its height, at a scale of 1: the caption, the slider's row and the mute
+/// switch's, the line, and the settings row, inside the padding.
+pub const HEIGHT: f32 = PADDING * 2.0 + CAPTION_ROW + ROW * 3.0 + SEPARATOR;
+/// What "Audio settings…" says.
+pub const SETTINGS_LABEL: &str = "Audio settings\u{2026}";
 /// The space round its contents.
 const PADDING: f32 = 14.0;
 /// The caption's size.
@@ -46,6 +52,8 @@ const SWITCH: (f32, f32) = (40.0, 20.0);
 const ROW: f32 = 28.0;
 /// The caption's height.
 const CAPTION_ROW: f32 = 20.0;
+/// The room the line above the settings row takes, the line in its middle.
+const SEPARATOR: f32 = 9.0;
 
 /// What a press, a drag or a key in the flyout asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +62,9 @@ pub enum Action {
     Level(u8),
     /// Mute it if it sounds, let it sound if it is muted.
     ToggleMute,
+    /// Open Settings on its Sound page, and close the flyout: "Audio
+    /// settings…".
+    OpenSettings,
 }
 
 /// Where everything in a flyout is.
@@ -69,6 +80,8 @@ pub struct Layout {
     pub level: Rect,
     /// The mute switch.
     pub mute: Rect,
+    /// The "Audio settings…" row: a press anywhere on it opens Settings.
+    pub settings: Rect,
 }
 
 impl Layout {
@@ -99,12 +112,14 @@ impl Layout {
             px(SWITCH.0),
             px(SWITCH.1),
         );
+        let settings = Rect::new(inner_x, mute_row + px(ROW + SEPARATOR), inner_w, px(ROW));
         Self {
             panel,
             scale,
             slider,
             level,
             mute,
+            settings,
         }
     }
 }
@@ -150,8 +165,9 @@ impl VolumeFlyout {
     }
 
     /// A press at `(x, y)` -- on the slider, moving its thumb there or taking
-    /// hold of it; on the mute switch -- with the volume at `level`. Nothing
-    /// while the card is out of reach (`reachable` false), and nothing
+    /// hold of it; on the mute switch -- with the volume at `level`; or on
+    /// "Audio settings…", which opens Settings whatever the card. Nothing
+    /// else while the card is out of reach (`reachable` false), and nothing
     /// anywhere else in the panel.
     pub fn press(
         &mut self,
@@ -160,7 +176,13 @@ impl VolumeFlyout {
         level: u8,
         reachable: bool,
     ) -> Option<Action> {
-        if !reachable || !self.visible {
+        if !self.visible {
+            return None;
+        }
+        if layout.settings.contains(x, y) {
+            return Some(Action::OpenSettings);
+        }
+        if !reachable {
             return None;
         }
         if layout.mute.contains(x, y) {
@@ -282,47 +304,79 @@ impl VolumeFlyout {
                 px(TEXT_SIZE),
                 inner_w,
             );
-            return cmds;
+        } else {
+            let mut shown = self.slider.clone();
+            shown.set_value(f64::from(level));
+            shown.draw(
+                &mut cmds,
+                p,
+                &layout.slider,
+                Look::accent(p, p.surface2),
+                false,
+                0.0,
+            );
+            text(
+                &mut cmds,
+                layout.level.x + px(8.0),
+                layout.level.y + text_dy,
+                if muted {
+                    "Muted".to_owned()
+                } else {
+                    format!("{level}%")
+                },
+                p.text,
+                px(TEXT_SIZE),
+                (layout.level.w - px(8.0)).max(0.0),
+            );
+            let mute_row = slider_row + px(ROW);
+            text(
+                &mut cmds,
+                inner_x,
+                mute_row + text_dy,
+                "Mute".to_owned(),
+                p.text,
+                px(TEXT_SIZE),
+                (layout.mute.x - inner_x).max(0.0),
+            );
+            cmds.extend(guitk::switch::shapes(
+                p,
+                layout.mute,
+                muted,
+                if muted { p.accent } else { p.surface2 },
+            ));
         }
-        let mut shown = self.slider.clone();
-        shown.set_value(f64::from(level));
-        shown.draw(
-            &mut cmds,
-            p,
-            &layout.slider,
-            Look::accent(p, p.surface2),
-            false,
-            0.0,
-        );
+        // The foot, whatever the card: a line, and "Audio settings…" as a
+        // link -- the link's colour, and underlined, since colour alone does
+        // not mark one.
+        let settings = layout.settings;
+        cmds.push(RenderCommand::FillRect {
+            x: inner_x,
+            y: settings.y - px(SEPARATOR) / 2.0,
+            width: inner_w,
+            height: px(1.0),
+            color: p.surface1,
+            corner_radii: CornerRadii::ZERO,
+        });
+        let label_y = settings.y + text_dy;
         text(
             &mut cmds,
-            layout.level.x + px(8.0),
-            layout.level.y + text_dy,
-            if muted {
-                "Muted".to_owned()
-            } else {
-                format!("{level}%")
-            },
-            p.text,
+            settings.x,
+            label_y,
+            SETTINGS_LABEL.to_owned(),
+            p.link,
             px(TEXT_SIZE),
-            (layout.level.w - px(8.0)).max(0.0),
+            settings.w,
         );
-        let mute_row = slider_row + px(ROW);
-        text(
-            &mut cmds,
-            inner_x,
-            mute_row + text_dy,
-            "Mute".to_owned(),
-            p.text,
-            px(TEXT_SIZE),
-            (layout.mute.x - inner_x).max(0.0),
-        );
-        cmds.extend(guitk::switch::shapes(
-            p,
-            layout.mute,
-            muted,
-            if muted { p.accent } else { p.surface2 },
-        ));
+        let label_w = guitk::text::measure(SETTINGS_LABEL, px(TEXT_SIZE), FontWeightHint::Regular)
+            .min(settings.w);
+        cmds.push(RenderCommand::FillRect {
+            x: settings.x,
+            y: label_y + px(TEXT_SIZE) + px(1.0),
+            width: label_w,
+            height: px(1.0),
+            color: p.link,
+            corner_radii: CornerRadii::ZERO,
+        });
         cmds
     }
 }

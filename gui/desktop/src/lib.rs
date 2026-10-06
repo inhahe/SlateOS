@@ -6420,10 +6420,20 @@ impl DesktopShell {
                 let layout = self.volume_flyout_layout();
                 let reachable = self.volume.out_of_reach().is_none();
                 let level = self.notifications.volume();
-                if let Some(action) = self.volume_flyout.press(&layout, (x, y), level, reachable) {
-                    self.apply_volume_action(action);
+                match self.volume_flyout.press(&layout, (x, y), level, reachable) {
+                    // The window it opens is what the user asked to see:
+                    // the flyout closes, as the notification pane does for
+                    // its own Settings.
+                    Some(volume_flyout::Action::OpenSettings) => {
+                        self.volume_flyout.set_visible(false);
+                        ShellAction::Launch(launcher::settings_page(launcher::SOUND_PAGE))
+                    }
+                    Some(action) => {
+                        self.apply_volume_action(action);
+                        ShellAction::Consumed
+                    }
+                    None => ShellAction::Consumed,
                 }
-                ShellAction::Consumed
             }
             // Handled above the primary-button gate, along with the chevron
             // beside it, because a tray icon answers the right button too. Reaching here means the icon went
@@ -13006,13 +13016,16 @@ impl DesktopShell {
 
     /// Carry out what the flyout asked for, on the card: a level, which a
     /// user's change of it unmutes, as the slider in the pane does -- or a
-    /// mute turned over.
+    /// mute turned over. Opening Settings is not the card's: a press asks
+    /// for it, and the press answers with the launch (`Hit::VolumeFlyout`);
+    /// a drag or a key never does.
     fn apply_volume_action(&mut self, action: volume_flyout::Action) {
         match action {
             volume_flyout::Action::Level(level) => self.notifications.set_volume(level),
             volume_flyout::Action::ToggleMute => {
                 let _muted = self.notifications.toggle_mute();
             }
+            volume_flyout::Action::OpenSettings => return,
         }
         self.write_volume();
     }

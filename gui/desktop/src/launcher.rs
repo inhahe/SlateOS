@@ -43,6 +43,11 @@ pub const SETTINGS_PAGE_OPTION: &str = "--page";
 /// notification's menu opens.
 pub const NOTIFICATIONS_PAGE: &str = "notifications";
 
+/// Settings' Sound page, by the name it answers to: what the volume flyout's
+/// "Audio settings…" opens -- one page for output and input both, as the
+/// roadmap's popup asks (`roadmap-detailed.md` §3.4).
+pub const SOUND_PAGE: &str = "sound";
+
 /// Settings, asked to open on `page`.
 ///
 /// The option and the name are two arguments, never one string: a program
@@ -598,9 +603,10 @@ mod tests {
     }
 
     /// **Every Settings page the desktop asks for is one Settings answers
-    /// to**: a notification's menu's, and each `settings --page` line in
-    /// SlateOS's own programs' entries -- Settings' jump list of Display,
-    /// Network and Sound. And the desktop's own asks with two arguments.
+    /// to**: a notification's menu's, the volume flyout's, and each
+    /// `settings --page` line in SlateOS's own programs' entries -- Settings'
+    /// jump list of Display, Network and Sound. And the desktop's own asks
+    /// with two arguments.
     ///
     /// Settings refuses a page it does not know -- a message on its terminal
     /// and no window -- so a misspelt name is a row that opens nothing, with
@@ -637,7 +643,7 @@ mod tests {
             [SETTINGS_PAGE_OPTION, NOTIFICATIONS_PAGE]
         );
 
-        let mut asked = vec![notifications];
+        let mut asked = vec![notifications, settings_page(SOUND_PAGE)];
         for entry in builtin_app_database() {
             asked.push(entry.launch());
             for action in &entry.actions {

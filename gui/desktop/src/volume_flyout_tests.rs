@@ -49,6 +49,11 @@ fn everything_is_inside_the_panel() {
         assert!(inside(l.slider.hit()), "{scale}: {:?}", l.slider.hit());
         assert!(inside(l.level), "{scale}");
         assert!(inside(l.mute), "{scale}");
+        assert!(inside(l.settings), "{scale}: {:?}", l.settings);
+        assert!(
+            l.settings.y >= l.mute.y + l.mute.h,
+            "the settings row below the switch"
+        );
         assert!(
             l.level.x >= l.slider.track.x + l.slider.track.w,
             "the level right of it"
@@ -82,9 +87,9 @@ fn open_it_draws_the_level_and_the_switch() {
         "the panel first"
     );
     let t = texts(&cmds);
-    assert_eq!(t, ["Volume", "45%", "Mute"]);
+    assert_eq!(t, ["Volume", "45%", "Mute", SETTINGS_LABEL]);
     let muted = texts(&f.render(&p, &layout(), 45, true, None));
-    assert_eq!(muted, ["Volume", "Muted", "Mute"]);
+    assert_eq!(muted, ["Volume", "Muted", "Mute", SETTINGS_LABEL]);
 }
 
 /// **With the card out of reach it says why, and nothing in it moves.**
@@ -93,12 +98,18 @@ fn out_of_reach_it_says_why_and_nothing_moves() {
     let mut f = open();
     let p = Palette::for_mode(false);
     let cmds = f.render(&p, &layout(), 45, false, Some("No sound card reachable"));
-    assert_eq!(texts(&cmds), ["Volume", "No sound card reachable"]);
+    assert_eq!(
+        texts(&cmds),
+        ["Volume", "No sound card reachable", SETTINGS_LABEL]
+    );
     let fills = cmds
         .iter()
         .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
         .count();
-    assert_eq!(fills, 1, "the panel alone: no slider, no switch");
+    assert_eq!(
+        fills, 3,
+        "the panel, the line and the link's underline: no slider, no switch"
+    );
     let l = layout();
     let track = l.slider.track;
     assert_eq!(
@@ -176,4 +187,51 @@ fn the_keys_move_it() {
     assert_eq!(f.key(&key(Key::End), 41, true), Some(Action::Level(100)));
     assert_eq!(f.key(&key(Key::Home), 100, true), Some(Action::Level(0)));
     assert_eq!(f.key(&key(Key::Right), 40, false), None, "out of reach");
+}
+
+/// **"Audio settings…" is a link at the foot**: the link's colour,
+/// underlined, below a line, inside its row -- and a press anywhere on the
+/// row opens Settings, whether or not the card can be reached; closed, the
+/// flyout takes no press there.
+#[test]
+fn audio_settings_is_a_link_at_the_foot() {
+    let mut f = open();
+    let p = Palette::for_mode(false);
+    let l = layout();
+    for out_of_reach in [None, Some("No sound card reachable")] {
+        let cmds = f.render(&p, &l, 45, false, out_of_reach);
+        let (label_y, color) = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, y, color, .. } if text == SETTINGS_LABEL => {
+                    Some((*y, *color))
+                }
+                _ => None,
+            })
+            .expect("the link");
+        assert_eq!(color, p.link);
+        assert!(
+            label_y >= l.settings.y && label_y < l.settings.y + l.settings.h,
+            "{label_y} in {:?}",
+            l.settings
+        );
+        let underlined = cmds.iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { y, width, color, .. }
+                if *color == p.link && *y > label_y && *width > 0.0)
+        });
+        assert!(underlined, "underlined: {out_of_reach:?}");
+        let line = cmds.iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { y, color, .. }
+                if *color == p.surface1 && *y < l.settings.y && *y > l.mute.y + l.mute.h)
+        });
+        assert!(line, "a line above it: {out_of_reach:?}");
+    }
+    let (x, y) = (
+        l.settings.x + l.settings.w - 2.0,
+        l.settings.y + l.settings.h / 2.0,
+    );
+    assert_eq!(f.press(&l, (x, y), 45, true), Some(Action::OpenSettings));
+    assert_eq!(f.press(&l, (x, y), 45, false), Some(Action::OpenSettings));
+    f.set_visible(false);
+    assert_eq!(f.press(&l, (x, y), 45, true), None);
 }

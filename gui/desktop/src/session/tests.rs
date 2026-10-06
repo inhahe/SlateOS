@@ -4613,6 +4613,138 @@ fn with_motion_off_the_first_picture_is_the_background() {
     assert!(script.told.borrow().contains(&Told::Pause));
 }
 
+/// **A wallpaper chosen after a moving one stops the program that drew it,
+/// and gives its picture back**: nothing the program writes after goes up,
+/// and once the picture chosen is up the program's is released -- the room a
+/// link keeps for pictures is not left holding it.
+#[test]
+fn a_new_wallpaper_stops_the_background_program_before_it() {
+    use crate::background_program::tests::frame;
+    let (mut session, desktop, _turn) = session();
+    let (script, _started) = script_backgrounds(&mut session);
+    let background = session.background().window();
+    session.shell_mut().appearance.wallpaper =
+        Some(std::path::PathBuf::from("/home/u/Videos/waves.webm"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    let video = session.wallpaper_mut().current_image_id();
+    script
+        .frames
+        .borrow_mut()
+        .push_back(frame(2, 2, 0xFF00_0000));
+    session.pump().expect("pump");
+    let running = Rc::strong_count(&script.told);
+
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    assert_eq!(
+        Rc::strong_count(&script.told),
+        running - 1,
+        "the program was let go"
+    );
+    let before = uploads(&desktop).len();
+    script
+        .frames
+        .borrow_mut()
+        .push_back(frame(2, 2, 0xFF11_1111));
+    session.pump().expect("pump");
+    session.settle_pictures().expect("the picture went up");
+    assert!(
+        uploads(&desktop)[before..].iter().all(|u| u.1 != video),
+        "nothing more of the program went up: {:?}",
+        uploads(&desktop)
+    );
+    assert!(
+        all_drops(&desktop).contains(&(background, video)),
+        "the program's picture was not given back: {:?}",
+        all_drops(&desktop)
+    );
+}
+
+/// Where the background frame last sent draws the picture uploaded as `id`:
+/// its width and height.
+fn drawn_size(session: &Session, id: u64) -> Option<(f32, f32)> {
+    session.background_drawn.as_ref().and_then(|tree| {
+        tree.commands.iter().find_map(|c| match c {
+            RenderCommand::Image {
+                image_id,
+                width,
+                height,
+                ..
+            } if *image_id == id => Some((*width, *height)),
+            _ => None,
+        })
+    })
+}
+
+/// **A background program's picture of a new shape is placed by its new
+/// shape**: the wallpaper is told its size again, as for its first.
+#[test]
+fn a_background_picture_of_a_new_size_is_placed_by_it() {
+    use crate::background_program::tests::frame;
+    let (mut session, _desktop, _turn) = session();
+    let (script, _started) = script_backgrounds(&mut session);
+    session.shell_mut().appearance.wallpaper =
+        Some(std::path::PathBuf::from("/home/u/Videos/waves.webm"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    let id = session.wallpaper_mut().current_image_id();
+    script
+        .frames
+        .borrow_mut()
+        .push_back(frame(4, 2, 0xFF00_0000));
+    session.pump().expect("pump");
+    session.paint_background().expect("paint");
+    let (w, h) = drawn_size(&session, id).expect("drawn");
+    assert!((w / h - 2.0).abs() < 0.01, "{w}x{h}");
+    script
+        .frames
+        .borrow_mut()
+        .push_back(frame(2, 4, 0xFF00_0000));
+    session.pump().expect("pump");
+    session.paint_background().expect("paint");
+    let (w, h) = drawn_size(&session, id).expect("drawn");
+    assert!(
+        (h / w - 2.0).abs() < 0.01,
+        "placed by its new shape: {w}x{h}"
+    );
+}
+
+/// **A background program is told the desktop's look as it is**: dark when
+/// the desktop is drawn dark, light when light -- again when it changes.
+#[test]
+fn a_background_program_is_told_light_or_dark_as_it_is() {
+    use crate::background_program::Event as Told;
+    let (mut session, _desktop, _turn) = session();
+    let (script, _started) = script_backgrounds(&mut session);
+    session.shell_mut().appearance.wallpaper_program =
+        Some(std::path::PathBuf::from("/home/u/bin/stars"));
+    session.sync_wallpaper();
+    session.paint_background().expect("paint");
+    let dark_told = |script: &crate::background_program::tests::Scripted| {
+        script.told.borrow().iter().rev().find_map(|t| match t {
+            Told::Theme { dark, .. } => Some(*dark),
+            _ => None,
+        })
+    };
+    let light = session.shell().appearance.is_light();
+    assert_eq!(dark_told(&script), Some(!light));
+    let other = if light {
+        appearance::ThemeMode::Dark
+    } else {
+        appearance::ThemeMode::Light
+    };
+    session.shell_mut().appearance.theme_mode = other;
+    assert_eq!(
+        session.shell().appearance.is_light(),
+        !light,
+        "the mode changed"
+    );
+    session.pump().expect("pump");
+    assert_eq!(dark_told(&script), Some(light), "told again, the other way");
+}
+
 /// Whether the background frame last sent draws the picture uploaded as `id`.
 fn background_names(session: &Session, id: u64) -> bool {
     session.background_drawn.as_ref().is_some_and(|tree| {

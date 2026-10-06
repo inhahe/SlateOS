@@ -2051,6 +2051,19 @@ live.
   locked); the switch on the Settings page is lane E's
   (`requests/c-e-a-switch-for-locking-when-the-display-wakes.md`).
 
+- `[-]` `[C]` **Drag and drop between programs** (`design-decisions.md`
+  §1490) -- **lane C's half done 2026-10-06.** `guitk::dnd`'s drag manager,
+  the model a drag between programs is built on, is rewritten: it tells a
+  target it was left before the next is entered, keeps the source's effects
+  for the whole drag, works out copy, move or link from the target's
+  preference and the keys held (Ctrl, Shift, Ctrl+Shift or Alt), and keeps
+  both ends of a drag between programs -- one begun in the window and carried
+  out, and another program's brought over it -- with each format named by a
+  MIME type. **Waiting on lane F:** the window system carrying the drag
+  (`requests/c-f-carry-a-drag-from-one-program-to-another.md`); then lane C
+  wires the shell (a file from the file manager onto the desktop, a desktop
+  icon into a program).
+
 - `[C]` **A redo tree in the toolkit** -- done 2026-09-27 (§1416, §1420).
   `guitk::undo::UndoHistory<E>` keeps every step as a tree: typing after undoing
   starts a branch beside what was undone instead of discarding it. Ctrl+Z and

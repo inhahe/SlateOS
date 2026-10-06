@@ -1072,11 +1072,17 @@ mod tests {
             DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
             b"1:test".to_vec(),
         );
-        manager.begin_drag(1, 0.0, 0.0, data, vec![DropEffect::Move]);
+        let ended = manager.begin_drag(1, 0.0, 0.0, data, vec![DropEffect::Move]);
+        assert!(ended.is_empty(), "no drag was under way");
         // Move over the target area.
-        let event = manager.update_position(15.0, 25.0);
+        let events = manager.update_position(15.0, 25.0);
         // Should get a DragEnter since we're over the registered target.
-        assert!(matches!(event, Some(DragEvent::DragEnter { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, DragEvent::DragEnter { target_id: 42, .. })),
+            "{events:?}"
+        );
     }
 
     // ======================================================================

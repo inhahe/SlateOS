@@ -66,10 +66,59 @@ pub enum DataFormat {
     ImagePng,
     /// BMP-encoded image data.
     ImageBmp,
-    /// A URL string.
+    /// URLs, one to a line (`text/uri-list`).
     Url,
-    /// Application-defined format identified by a string key.
+    /// Application-defined format identified by a string key -- a MIME
+    /// type, so it can be named between programs as it is ([`Self::mime`]).
     Custom(String),
+}
+
+/// The name a list of [`DataFormat::FilePaths`] goes by between programs.
+///
+/// The toolkit's own: no MIME type is a list of paths as bytes, NUL between
+/// them. `text/uri-list` holds paths too, percent-encoded as `file:` URLs, and
+/// a source may offer that as well for a program ported from elsewhere; this
+/// is the form that needs no decoding to be exact.
+pub const FILE_PATHS_MIME: &str = "application/x-slateos-file-paths";
+
+impl DataFormat {
+    /// The format's name between programs: a MIME type, as every desktop's
+    /// clipboard and drags name theirs, so a drag can say what it offers to
+    /// a program that is not this one.
+    ///
+    /// [`from_mime`](Self::from_mime) gives back the format named -- except
+    /// a [`Custom`](Self::Custom) format named as one of the others, which
+    /// comes back as that one, since it is that one.
+    #[must_use]
+    pub fn mime(&self) -> &str {
+        match self {
+            Self::PlainText => "text/plain;charset=utf-8",
+            Self::RichText => "text/rtf",
+            Self::Html => "text/html",
+            Self::FilePaths => FILE_PATHS_MIME,
+            Self::ImagePng => "image/png",
+            Self::ImageBmp => "image/bmp",
+            Self::Url => "text/uri-list",
+            Self::Custom(name) => name,
+        }
+    }
+
+    /// The format a MIME type names: one of the toolkit's own when it is
+    /// one, [`Custom`](Self::Custom) when not. Exact: `text/plain` without
+    /// its charset is not taken for UTF-8, since it need not be.
+    #[must_use]
+    pub fn from_mime(name: &str) -> Self {
+        match name {
+            "text/plain;charset=utf-8" => Self::PlainText,
+            "text/rtf" => Self::RichText,
+            "text/html" => Self::Html,
+            FILE_PATHS_MIME => Self::FilePaths,
+            "image/png" => Self::ImagePng,
+            "image/bmp" => Self::ImageBmp,
+            "text/uri-list" => Self::Url,
+            other => Self::Custom(other.to_owned()),
+        }
+    }
 }
 
 /// A single piece of data in a specific format.
@@ -283,12 +332,14 @@ pub fn negotiate(source: &[DropEffect], target: &[DropEffect], keys: DragKeys) -
 /// Where a drag stands: [`DragDropManager::state`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DragState {
-    /// No drag: nothing pressed on a source.
+    /// No drag: nothing pressed on a source, and no other program's drag
+    /// over this window.
     Idle,
     /// Pressed on a source, the pointer not yet gone far enough for a drag:
     /// a click, so far.
     Pending,
-    /// Dragging, over nothing that takes the data.
+    /// Dragging, over nothing here that takes the data -- or, for a drag
+    /// begun here, over another window.
     Dragging,
     /// Dragging over a target that takes the data.
     OverTarget {
@@ -305,7 +356,7 @@ pub enum DragState {
 #[derive(Clone, Debug)]
 pub enum DragEvent {
     /// The pointer went far enough from the press for a drag: from here on,
-    /// letting go is a drop or a cancel, not a click.
+    /// letting go is a drop, not a click.
     DragStart {
         /// The source the drag began on.
         source_id: u64,
@@ -342,7 +393,8 @@ pub enum DragEvent {
         target_id: u64,
     },
     /// The data was let go on a target, to do `effect` -- never
-    /// [`DropEffect::None`].
+    /// [`DropEffect::None`]. For another program's drag, the data holds the
+    /// one format the target asked for.
     Drop {
         /// The target receiving the drop.
         target_id: u64,
@@ -351,9 +403,18 @@ pub enum DragEvent {
         /// What the drop does.
         effect: DropEffect,
     },
-    /// The drag ended with no drop: let go over nothing that takes the data,
-    /// or where the drop would do nothing, or given up (Escape).
-    DragCancelled,
+    /// The drag begun on `source_id` is over, the drop having done `effect`
+    /// -- [`DropEffect::None`] when nothing was dropped: let go over nothing
+    /// that takes the data, or where a drop does nothing, or given up. A
+    /// source whose data was moved removes its own now, and not before: for
+    /// a drop on another program, that is once the other program has said it
+    /// has the data ([`DragDropManager::outgoing_ended`]).
+    DragEnded {
+        /// The source the drag began on.
+        source_id: u64,
+        /// What the drop did.
+        effect: DropEffect,
+    },
 }
 
 /// A registered drop target area.
@@ -372,7 +433,8 @@ pub struct DropTarget {
     pub width: f32,
     /// Height of the target's bounding box.
     pub height: f32,
-    /// Formats this target can accept.
+    /// The formats this target takes, in the order it prefers them: a drop
+    /// of another program's data asks for the first the drag offers.
     pub accepted_formats: Vec<DataFormat>,
     /// The effects a drop here can have, in the order the target prefers
     /// them: the first the source allows is what a drop does when no key
@@ -387,14 +449,53 @@ impl DropTarget {
     }
 }
 
+/// A drag begun in this window, for the window system to carry to other
+/// programs: [`DragDropManager::take_outgoing`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outgoing {
+    /// The formats the data is offered in.
+    pub formats: Vec<DataFormat>,
+    /// The effects the source allows.
+    pub allowed: Vec<DropEffect>,
+}
+
+/// What a drag carries.
+#[derive(Debug)]
+enum Payload {
+    /// A drag begun here: the data itself.
+    Here(DataObject),
+    /// Another program's drag, through the window system: the formats its
+    /// data can be had in, one of them asked for once it is dropped here.
+    Offered(Vec<DataFormat>),
+}
+
+impl Payload {
+    /// Whether the data can be had in `format`.
+    fn has_format(&self, format: &DataFormat) -> bool {
+        match self {
+            Self::Here(data) => data.has_format(format),
+            Self::Offered(formats) => formats.contains(format),
+        }
+    }
+
+    /// The formats the data can be had in.
+    fn formats(&self) -> Vec<DataFormat> {
+        match self {
+            Self::Here(data) => data.available_formats().into_iter().cloned().collect(),
+            Self::Offered(formats) => formats.clone(),
+        }
+    }
+}
+
 /// A drag under way: [`DragDropManager`]'s whole state between a press and
-/// its release.
+/// its release -- or, for another program's drag, between its coming over
+/// this window and its leaving or dropping.
 #[derive(Debug)]
 struct Drag {
     /// What is dragged.
-    data: DataObject,
-    /// The source it was pressed on.
-    source_id: u64,
+    payload: Payload,
+    /// The source it was pressed on: `None` for another program's drag.
+    source_id: Option<u64>,
     /// The effects the source allows, kept for the whole drag: every target
     /// entered is negotiated against these.
     allowed: Vec<DropEffect>,
@@ -404,9 +505,27 @@ struct Drag {
     at: (f32, f32),
     /// Whether the pointer has gone past the threshold: until then a press.
     started: bool,
+    /// Whether the pointer is over this window. A drag the window system
+    /// carries goes out of the window and back; while out, no target here
+    /// is under it, whatever `at` last said.
+    inside: bool,
+    /// Whether the window system has been handed this drag to carry
+    /// ([`DragDropManager::take_outgoing`]).
+    handed: bool,
     /// The target under the pointer that takes the data, and what a drop on
     /// it would do.
     over: Option<(u64, DropEffect)>,
+}
+
+/// A drop of another program's drag, waiting for its data.
+#[derive(Debug)]
+struct Awaiting {
+    /// The target it was dropped on.
+    target_id: u64,
+    /// What the drop does.
+    effect: DropEffect,
+    /// The format the data was asked for in.
+    format: DataFormat,
 }
 
 /// Manages the drag-and-drop lifecycle.
@@ -414,9 +533,40 @@ struct Drag {
 /// Tracks the drag, the registered drop targets and the keys held, and
 /// produces [`DragEvent`]s as the drag progresses. The manager enforces a
 /// minimum movement threshold to prevent accidental drags from simple clicks.
+///
+/// # Between programs
+///
+/// A drag that leaves its window is the window system's to carry, since only
+/// the window system knows which window is under the pointer. The manager
+/// keeps both ends of that, so a window's code is the same for a drag from
+/// itself and one from another program:
+///
+/// - **A drag begun here**: once it starts,
+///   [`take_outgoing`](Self::take_outgoing) hands it to the window system,
+///   once. While the pointer is over this window its moves come back through
+///   [`update_position`](Self::update_position), and over another window
+///   this window's targets are left ([`pointer_left`](Self::pointer_left)).
+///   A drop here ends it here, as any drag; a drop elsewhere ends it when
+///   the window system says how it went
+///   ([`outgoing_ended`](Self::outgoing_ended)), the data having been read
+///   meanwhile with [`outgoing_data`](Self::outgoing_data). Given up here
+///   ([`cancel`](Self::cancel)), the window system is told to stop carrying
+///   it ([`take_withdrawn`](Self::take_withdrawn)).
+/// - **Another program's drag**: [`offer_entered`](Self::offer_entered) when
+///   it comes over this window, then moves and keys as for any drag,
+///   [`offer_status`](Self::offer_status) answering the window system after
+///   each; [`pointer_left`](Self::pointer_left) when it goes. A drop
+///   ([`offer_dropped`](Self::offer_dropped)) names the format to ask its
+///   program for, and the data, once it comes
+///   ([`offer_data`](Self::offer_data)), is the target's [`DragEvent::Drop`].
 pub struct DragDropManager {
-    /// The drag under way, from the press to the release.
+    /// The drag under way.
     drag: Option<Drag>,
+    /// A drop of another program's drag, waiting for its data.
+    awaiting: Option<Awaiting>,
+    /// Whether a drag the window system was carrying was given up here, and
+    /// the window system not yet told.
+    withdrawn: bool,
     /// Minimum pixels the pointer must move before a press is a drag.
     drag_threshold: f32,
     /// Registered drop targets, the last registered on top.
@@ -437,6 +587,8 @@ impl DragDropManager {
     pub fn with_threshold(threshold: f32) -> Self {
         Self {
             drag: None,
+            awaiting: None,
+            withdrawn: false,
             drag_threshold: threshold,
             targets: Vec::new(),
             keys: DragKeys::default(),
@@ -461,8 +613,9 @@ impl DragDropManager {
     ///
     /// Not a drag until the pointer moves past the threshold: a click on
     /// something draggable must stay a click. A drag already under way --
-    /// a caller's slip, as a press cannot come before the last release -- is
-    /// cancelled first, and its events returned.
+    /// a caller's slip, as a press cannot come before the last release, or
+    /// another program's drag this window was not told has gone -- is ended
+    /// first, as given up, and its events returned.
     pub fn begin_drag(
         &mut self,
         source_id: u64,
@@ -473,35 +626,38 @@ impl DragDropManager {
     ) -> Vec<DragEvent> {
         let ended = self.cancel();
         self.drag = Some(Drag {
-            data,
-            source_id,
+            payload: Payload::Here(data),
+            source_id: Some(source_id),
             allowed,
             start: (x, y),
             at: (x, y),
             started: false,
+            inside: true,
+            handed: false,
             over: None,
         });
         ended
     }
 
-    /// The pointer moved to (`x`, `y`): what that changed, in order -- the
-    /// drag starting, the target left, the target entered or its effect
-    /// changed, and the move itself.
+    /// The pointer moved to (`x`, `y`) over this window: what that changed,
+    /// in order -- the drag starting, the target left, the target entered
+    /// or its effect changed, and the move itself.
     pub fn update_position(&mut self, x: f32, y: f32) -> Vec<DragEvent> {
         let mut events = Vec::new();
         let Some(drag) = self.drag.as_mut() else {
             return events;
         };
         drag.at = (x, y);
+        drag.inside = true;
         if !drag.started {
             let (dx, dy) = (x - drag.start.0, y - drag.start.1);
             if dx * dx + dy * dy < self.drag_threshold * self.drag_threshold {
                 return events;
             }
             drag.started = true;
-            events.push(DragEvent::DragStart {
-                source_id: drag.source_id,
-            });
+            if let Some(source_id) = drag.source_id {
+                events.push(DragEvent::DragStart { source_id });
+            }
         }
         Self::retarget(drag, &self.targets, self.keys, &mut events);
         events.push(DragEvent::DragMove { x, y });
@@ -522,9 +678,13 @@ impl DragDropManager {
     }
 
     /// The pointer was let go at (`x`, `y`): the data dropped on the target
-    /// there, if a drop there does something, and the drag cancelled
-    /// otherwise -- after whatever the move to (`x`, `y`) changed. Nothing at
-    /// all for a press that never became a drag: that was a click.
+    /// there, if a drop there does something, and the drag ended either way
+    /// -- after whatever the move to (`x`, `y`) changed. Nothing at all for a
+    /// press that never became a drag: that was a click.
+    ///
+    /// For a drag begun here. Another program's drag is dropped with
+    /// [`offer_dropped`](Self::offer_dropped), since its data has to be asked
+    /// for; given here, it is left as if dropped where a drop does nothing.
     pub fn end_drag(&mut self, x: f32, y: f32) -> Vec<DragEvent> {
         let mut events = self.update_position(x, y);
         let Some(drag) = self.drag.take() else {
@@ -533,26 +693,43 @@ impl DragDropManager {
         if !drag.started {
             return events;
         }
-        match drag.over {
+        let Drag {
+            payload,
+            source_id,
+            over,
+            ..
+        } = drag;
+        let Payload::Here(data) = payload else {
+            if let Some((target_id, _)) = over {
+                events.push(DragEvent::DragLeave { target_id });
+            }
+            return events;
+        };
+        let effect = match over {
             Some((target_id, effect)) if effect != DropEffect::None => {
                 events.push(DragEvent::Drop {
                     target_id,
-                    data: drag.data,
+                    data,
                     effect,
                 });
+                effect
             }
             Some((target_id, _)) => {
                 events.push(DragEvent::DragLeave { target_id });
-                events.push(DragEvent::DragCancelled);
+                DropEffect::None
             }
-            None => events.push(DragEvent::DragCancelled),
+            None => DropEffect::None,
+        };
+        if let Some(source_id) = source_id {
+            events.push(DragEvent::DragEnded { source_id, effect });
         }
         events
     }
 
     /// Give the drag up (Escape): the target under the pointer is left and
-    /// the drag cancelled. Nothing for a press that never became a drag, or
-    /// with no drag at all.
+    /// the source told nothing was dropped. Nothing for a press that never
+    /// became a drag, or with no drag at all. A drag the window system was
+    /// carrying is withdrawn from it ([`take_withdrawn`](Self::take_withdrawn)).
     pub fn cancel(&mut self) -> Vec<DragEvent> {
         let Some(drag) = self.drag.take() else {
             return Vec::new();
@@ -564,13 +741,240 @@ impl DragDropManager {
         if let Some((target_id, _)) = drag.over {
             events.push(DragEvent::DragLeave { target_id });
         }
-        events.push(DragEvent::DragCancelled);
+        if let Some(source_id) = drag.source_id {
+            events.push(DragEvent::DragEnded {
+                source_id,
+                effect: DropEffect::None,
+            });
+        }
+        if drag.handed {
+            self.withdrawn = true;
+        }
         events
     }
 
-    /// Whether a drag is under way: pressed and moved past the threshold. A
-    /// press that has not moved that far is [`DragState::Pending`] and not a
-    /// drag yet.
+    /// The pointer left this window during a drag: the target under it is
+    /// left. A drag begun here goes on, over other windows; another
+    /// program's is over, as far as this window is concerned.
+    pub fn pointer_left(&mut self) -> Vec<DragEvent> {
+        let mut events = Vec::new();
+        let Some(drag) = self.drag.as_mut() else {
+            return events;
+        };
+        if let Some((target_id, _)) = drag.over.take() {
+            events.push(DragEvent::DragLeave { target_id });
+        }
+        drag.inside = false;
+        if matches!(drag.payload, Payload::Offered(_)) {
+            self.drag = None;
+        }
+        events
+    }
+
+    // ----------------------------------------------------------------------
+    // A drag begun here, carried to other programs by the window system
+    // ----------------------------------------------------------------------
+
+    /// A drag begun here that has started and that the window system has not
+    /// yet been handed to carry: once, the first time it is asked after the
+    /// drag starts. `None` with no such drag.
+    pub fn take_outgoing(&mut self) -> Option<Outgoing> {
+        let drag = self.drag.as_mut()?;
+        if !drag.started || drag.handed {
+            return None;
+        }
+        let Payload::Here(data) = &drag.payload else {
+            return None;
+        };
+        drag.handed = true;
+        Some(Outgoing {
+            formats: data.available_formats().into_iter().cloned().collect(),
+            allowed: drag.allowed.clone(),
+        })
+    }
+
+    /// Whether a drag the window system was carrying was given up here since
+    /// last asked: the window system is to be told to stop carrying it.
+    pub fn take_withdrawn(&mut self) -> bool {
+        core::mem::take(&mut self.withdrawn)
+    }
+
+    /// The data of the drag begun here, in `format`: what the window system
+    /// asks for on behalf of the program it was dropped on.
+    #[must_use]
+    pub fn outgoing_data(&self, format: &DataFormat) -> Option<&[u8]> {
+        match &self.drag.as_ref()?.payload {
+            Payload::Here(data) => data.get_data(format),
+            Payload::Offered(_) => None,
+        }
+    }
+
+    /// The window system says the drag it was carrying for this window is
+    /// over, the drop having done `effect` ([`DropEffect::None`]: nothing).
+    /// The source is told, and a target here still under the pointer left.
+    /// Nothing when the drag already ended here -- dropped on this window,
+    /// or given up -- since its source has been told then.
+    pub fn outgoing_ended(&mut self, effect: DropEffect) -> Vec<DragEvent> {
+        let mut events = Vec::new();
+        let carried = self
+            .drag
+            .as_ref()
+            .is_some_and(|drag| drag.handed && matches!(drag.payload, Payload::Here(_)));
+        if !carried {
+            return events;
+        }
+        let Some(drag) = self.drag.take() else {
+            return events;
+        };
+        if let Some((target_id, _)) = drag.over {
+            events.push(DragEvent::DragLeave { target_id });
+        }
+        if let Some(source_id) = drag.source_id {
+            events.push(DragEvent::DragEnded { source_id, effect });
+        }
+        events
+    }
+
+    // ----------------------------------------------------------------------
+    // Another program's drag, brought over this window by the window system
+    // ----------------------------------------------------------------------
+
+    /// Another program's drag came over this window at (`x`, `y`), its data
+    /// offered in `formats` and its source allowing `allowed`: what that
+    /// changed. Already started -- the other program's press was its own --
+    /// so no threshold and no [`DragEvent::DragStart`]. A drag begun here
+    /// and carried out comes back through
+    /// [`update_position`](Self::update_position) instead, since its data is
+    /// here.
+    ///
+    /// A drag begun here and still under way is ended first, as given up:
+    /// there is one drag at a time, so the window system has carried it off.
+    pub fn offer_entered(
+        &mut self,
+        formats: Vec<DataFormat>,
+        allowed: Vec<DropEffect>,
+        x: f32,
+        y: f32,
+    ) -> Vec<DragEvent> {
+        let mut events = self.cancel();
+        let drag = self.drag.insert(Drag {
+            payload: Payload::Offered(formats),
+            source_id: None,
+            allowed,
+            start: (x, y),
+            at: (x, y),
+            started: true,
+            inside: true,
+            handed: false,
+            over: None,
+        });
+        Self::retarget(drag, &self.targets, self.keys, &mut events);
+        events.push(DragEvent::DragMove { x, y });
+        events
+    }
+
+    /// What a drop where the pointer is would do, and the format the target
+    /// there would take the data in -- the answer the window system wants
+    /// after each enter, move and key of another program's drag. `None` for
+    /// the format when no target here takes the data.
+    #[must_use]
+    pub fn offer_status(&self) -> (DropEffect, Option<DataFormat>) {
+        let Some(drag) = self.drag.as_ref() else {
+            return (DropEffect::None, None);
+        };
+        let Some((target_id, effect)) = drag.over else {
+            return (DropEffect::None, None);
+        };
+        (effect, self.format_for(target_id, &drag.payload))
+    }
+
+    /// Another program's drag was let go at (`x`, `y`): what that changed,
+    /// and the format to ask the other program for when the drop does
+    /// something there -- `None` when it does nothing, the target then left
+    /// and the drag over for this window. The drop itself is the target's
+    /// once the data comes ([`offer_data`](Self::offer_data)).
+    pub fn offer_dropped(&mut self, x: f32, y: f32) -> (Vec<DragEvent>, Option<DataFormat>) {
+        if self
+            .drag
+            .as_ref()
+            .is_none_or(|drag| !matches!(drag.payload, Payload::Offered(_)))
+        {
+            return (Vec::new(), None);
+        }
+        let mut events = self.update_position(x, y);
+        let Some(drag) = self.drag.take() else {
+            return (events, None);
+        };
+        match drag.over {
+            Some((target_id, effect)) if effect != DropEffect::None => {
+                if let Some(format) = self.format_for(target_id, &drag.payload) {
+                    self.awaiting = Some(Awaiting {
+                        target_id,
+                        effect,
+                        format: format.clone(),
+                    });
+                    return (events, Some(format));
+                }
+                events.push(DragEvent::DragLeave { target_id });
+            }
+            Some((target_id, _)) => events.push(DragEvent::DragLeave { target_id }),
+            None => {}
+        }
+        (events, None)
+    }
+
+    /// The data of a drop of another program's drag, in `format`: the
+    /// target's [`DragEvent::Drop`]. Data in another format than the one
+    /// asked for is not the target's to read -- it said which it takes -- so
+    /// the drop then does nothing and the target is left.
+    pub fn offer_data(&mut self, format: DataFormat, bytes: Vec<u8>) -> Vec<DragEvent> {
+        let Some(awaiting) = self.awaiting.take() else {
+            return Vec::new();
+        };
+        if awaiting.format != format {
+            return vec![DragEvent::DragLeave {
+                target_id: awaiting.target_id,
+            }];
+        }
+        let mut data = DataObject::new();
+        data.set_data(format, bytes);
+        vec![DragEvent::Drop {
+            target_id: awaiting.target_id,
+            data,
+            effect: awaiting.effect,
+        }]
+    }
+
+    /// The data of a drop could not be had -- its program went away, or
+    /// would not give it: the target is left, as if the drop did nothing.
+    pub fn offer_failed(&mut self) -> Vec<DragEvent> {
+        self.awaiting
+            .take()
+            .map(|awaiting| DragEvent::DragLeave {
+                target_id: awaiting.target_id,
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// The first format `target_id` takes that `payload` can be had in.
+    fn format_for(&self, target_id: u64, payload: &Payload) -> Option<DataFormat> {
+        self.targets
+            .iter()
+            .find(|target| target.id == target_id)?
+            .accepted_formats
+            .iter()
+            .find(|format| payload.has_format(format))
+            .cloned()
+    }
+
+    // ----------------------------------------------------------------------
+    // What the drag is
+    // ----------------------------------------------------------------------
+
+    /// Whether a drag is under way: pressed and moved past the threshold, or
+    /// another program's over this window. A press that has not moved that
+    /// far is [`DragState::Pending`] and not a drag yet.
     #[must_use]
     pub fn is_dragging(&self) -> bool {
         self.drag.as_ref().is_some_and(|drag| drag.started)
@@ -593,16 +997,30 @@ impl DragDropManager {
         }
     }
 
-    /// What is being dragged, from the press to the release.
+    /// What is being dragged, from the press to the release -- for a drag
+    /// begun here; another program's data is not here until it is dropped.
     #[must_use]
     pub fn data(&self) -> Option<&DataObject> {
-        self.drag.as_ref().map(|drag| &drag.data)
+        match &self.drag.as_ref()?.payload {
+            Payload::Here(data) => Some(data),
+            Payload::Offered(_) => None,
+        }
     }
 
-    /// The source the drag began on.
+    /// The formats the drag's data can be had in, whichever program it is
+    /// from.
+    #[must_use]
+    pub fn formats(&self) -> Vec<DataFormat> {
+        self.drag
+            .as_ref()
+            .map_or_else(Vec::new, |drag| drag.payload.formats())
+    }
+
+    /// The source the drag began on: `None` for another program's drag, or
+    /// with none.
     #[must_use]
     pub fn source(&self) -> Option<u64> {
-        self.drag.as_ref().map(|drag| drag.source_id)
+        self.drag.as_ref().and_then(|drag| drag.source_id)
     }
 
     /// Where the pointer is in the drag.
@@ -624,7 +1042,8 @@ impl DragDropManager {
     ///
     /// The topmost target at the point decides. One that does not take the
     /// data hides any under it, as a window hides the windows behind it: a
-    /// drop must land on what the user sees under the pointer.
+    /// drop must land on what the user sees under the pointer. With the
+    /// pointer over another window, no target here is under it.
     fn retarget(
         drag: &mut Drag,
         targets: &[DropTarget],
@@ -635,12 +1054,12 @@ impl DragDropManager {
         let now = targets
             .iter()
             .rev()
-            .find(|target| target.contains(x, y))
+            .find(|target| drag.inside && target.contains(x, y))
             .filter(|target| {
                 target
                     .accepted_formats
                     .iter()
-                    .any(|format| drag.data.has_format(format))
+                    .any(|format| drag.payload.has_format(format))
             })
             .map(|target| {
                 (
@@ -661,7 +1080,7 @@ impl DragDropManager {
                 if let Some((target_id, effect)) = now {
                     events.push(DragEvent::DragEnter {
                         target_id,
-                        formats: drag.data.available_formats().into_iter().cloned().collect(),
+                        formats: drag.payload.formats(),
                         effect,
                     });
                 }
@@ -860,7 +1279,9 @@ mod tests {
                 DragEvent::Drop {
                     target_id, effect, ..
                 } => format!("drop {target_id} {effect:?}"),
-                DragEvent::DragCancelled => "cancelled".to_owned(),
+                DragEvent::DragEnded { source_id, effect } => {
+                    format!("ended {source_id} {effect:?}")
+                }
             })
             .collect()
     }
@@ -902,6 +1323,7 @@ mod tests {
         );
         assert!(ended.is_empty());
         assert_eq!(mgr.state(), DragState::Pending);
+        assert_eq!(mgr.take_outgoing(), None, "a press is not carried");
 
         assert!(mgr.update_position(53.0, 52.0).is_empty());
         assert!(!mgr.is_dragging());
@@ -920,7 +1342,7 @@ mod tests {
     }
 
     /// **A drag starts, enters its target and is dropped there**, with the
-    /// target's first effect the source allows.
+    /// target's first effect the source allows -- and the source is told.
     #[test]
     fn drag_manager_full_lifecycle_with_drop() {
         let mut mgr = DragDropManager::with_threshold(3.0);
@@ -946,6 +1368,7 @@ mod tests {
         assert_eq!(said(&mgr.update_position(60.0, 60.0)), ["start 1", "move"]);
         assert!(mgr.is_dragging());
         assert_eq!(mgr.state(), DragState::Dragging);
+        assert_eq!(mgr.formats(), [DataFormat::PlainText]);
 
         let events = mgr.update_position(150.0, 150.0);
         assert_eq!(said(&events), ["enter 42 Copy", "move"]);
@@ -962,8 +1385,8 @@ mod tests {
         );
 
         let events = mgr.end_drag(150.0, 150.0);
-        assert_eq!(said(&events), ["move", "drop 42 Copy"]);
-        let Some(DragEvent::Drop { data, .. }) = events.last() else {
+        assert_eq!(said(&events), ["move", "drop 42 Copy", "ended 1 Copy"]);
+        let DragEvent::Drop { data, .. } = &events[1] else {
             panic!("expected a drop: {events:?}");
         };
         assert_eq!(data.get_text(), Some("hello"));
@@ -1017,7 +1440,10 @@ mod tests {
             said(&mgr.update_position(110.0, 10.0)),
             ["enter 2 Move", "move"]
         );
-        assert_eq!(said(&mgr.end_drag(110.0, 10.0)), ["move", "drop 2 Move"]);
+        assert_eq!(
+            said(&mgr.end_drag(110.0, 10.0)),
+            ["move", "drop 2 Move", "ended 7 Move"]
+        );
     }
 
     /// **Keys ask for an effect**, and letting go of them gives the choice
@@ -1063,7 +1489,10 @@ mod tests {
             said(&mgr.set_keys(keys(true, false, false))),
             ["effect 1 Copy"]
         );
-        assert_eq!(said(&mgr.end_drag(10.0, 10.0)), ["move", "drop 1 Copy"]);
+        assert_eq!(
+            said(&mgr.end_drag(10.0, 10.0)),
+            ["move", "drop 1 Copy", "ended 7 Copy"]
+        );
     }
 
     /// **Keys held before the drag count from its first target**, and keys
@@ -1093,7 +1522,7 @@ mod tests {
 
     /// **Keys asking for what cannot be done make the drop do nothing**,
     /// rather than another effect than the one asked for: the target hears
-    /// it is left, and the drag is cancelled.
+    /// it is left, and the source that nothing was dropped.
     #[test]
     fn keys_asking_for_what_cannot_be_done_drop_nothing() {
         let mut mgr = dragging(
@@ -1124,7 +1553,7 @@ mod tests {
         );
         assert_eq!(
             said(&mgr.end_drag(10.0, 10.0)),
-            ["move", "leave 1", "cancelled"]
+            ["move", "leave 1", "ended 7 None"]
         );
     }
 
@@ -1142,7 +1571,7 @@ mod tests {
         );
         assert_eq!(
             said(&mgr.end_drag(10.0, 10.0)),
-            ["move", "leave 1", "cancelled"]
+            ["move", "leave 1", "ended 7 None"]
         );
     }
 
@@ -1158,13 +1587,17 @@ mod tests {
         );
         assert!(ended.is_empty());
         assert_eq!(said(&mgr.update_position(20.0, 20.0)), ["start 1", "move"]);
-        assert_eq!(said(&mgr.cancel()), ["cancelled"]);
+        assert_eq!(said(&mgr.cancel()), ["ended 1 None"]);
         assert!(!mgr.is_dragging());
         assert_eq!(mgr.state(), DragState::Idle);
+        assert!(
+            !mgr.take_withdrawn(),
+            "never carried, so nothing to withdraw"
+        );
     }
 
-    /// **Escape over a target leaves it, then cancels**; a press that never
-    /// became a drag, or no drag at all, cancels nothing.
+    /// **Escape over a target leaves it, then ends the drag**; a press that
+    /// never became a drag, or no drag at all, cancels nothing.
     #[test]
     fn a_cancel_over_a_target_leaves_it() {
         let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
@@ -1172,7 +1605,7 @@ mod tests {
             said(&mgr.update_position(10.0, 10.0)),
             ["enter 1 Copy", "move"]
         );
-        assert_eq!(said(&mgr.cancel()), ["leave 1", "cancelled"]);
+        assert_eq!(said(&mgr.cancel()), ["leave 1", "ended 7 None"]);
         assert!(mgr.cancel().is_empty(), "nothing left to cancel");
 
         let ended = mgr.begin_drag(2, 0.0, 0.0, DataObject::with_text("x"), ALL.to_vec());
@@ -1187,6 +1620,18 @@ mod tests {
         assert!(mgr.cancel().is_empty());
         assert!(mgr.end_drag(0.0, 0.0).is_empty());
         assert!(mgr.update_position(5.0, 5.0).is_empty());
+        assert!(mgr.pointer_left().is_empty());
+        assert_eq!(mgr.take_outgoing(), None);
+        assert!(mgr.outgoing_ended(DropEffect::Copy).is_empty());
+        assert_eq!(mgr.offer_status(), (DropEffect::None, None));
+        assert_eq!(mgr.offer_dropped(5.0, 5.0).1, None);
+        assert!(
+            mgr.offer_data(DataFormat::PlainText, b"x".to_vec())
+                .is_empty()
+        );
+        assert!(mgr.offer_failed().is_empty());
+        assert!(mgr.formats().is_empty());
+        assert_eq!(mgr.source(), None);
     }
 
     #[test]
@@ -1232,7 +1677,7 @@ mod tests {
         assert!(ended.is_empty());
         assert_eq!(said(&mgr.update_position(10.0, 10.0)), ["start 1", "move"]);
         assert_eq!(mgr.state(), DragState::Dragging);
-        assert_eq!(said(&mgr.end_drag(10.0, 10.0)), ["move", "cancelled"]);
+        assert_eq!(said(&mgr.end_drag(10.0, 10.0)), ["move", "ended 1 None"]);
     }
 
     /// **A target taken away under the drag is left** at the next move, and
@@ -1260,7 +1705,7 @@ mod tests {
         mgr.unregister_target(1);
         assert_eq!(
             said(&mgr.end_drag(13.0, 10.0)),
-            ["leave 1", "move", "cancelled"]
+            ["leave 1", "move", "ended 7 None"]
         );
     }
 
@@ -1274,7 +1719,13 @@ mod tests {
         assert!(ended.is_empty());
         assert_eq!(
             said(&mgr.end_drag(110.0, 110.0)),
-            ["start 9", "enter 4 Copy", "move", "drop 4 Copy"]
+            [
+                "start 9",
+                "enter 4 Copy",
+                "move",
+                "drop 4 Copy",
+                "ended 9 Copy"
+            ]
         );
     }
 
@@ -1287,7 +1738,7 @@ mod tests {
             ["enter 1 Copy", "move"]
         );
         let ended = mgr.begin_drag(8, 10.0, 10.0, DataObject::with_text("y"), ALL.to_vec());
-        assert_eq!(said(&ended), ["leave 1", "cancelled"]);
+        assert_eq!(said(&ended), ["leave 1", "ended 7 None"]);
         assert_eq!(mgr.source(), Some(8));
         assert_eq!(mgr.state(), DragState::Pending);
     }
@@ -1332,6 +1783,379 @@ mod tests {
                 "{ctrl} {shift} {alt}"
             );
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // Between programs: a drag begun here, carried by the window system
+    // ----------------------------------------------------------------------
+
+    /// **A drag begun here is handed to the window system once it starts,
+    /// and once**: what it offers, and what its source allows.
+    #[test]
+    fn a_started_drag_is_handed_on_once() {
+        let mut mgr = dragging(Vec::new(), &[DropEffect::Copy, DropEffect::Move]);
+        assert_eq!(
+            mgr.take_outgoing(),
+            Some(Outgoing {
+                formats: vec![DataFormat::PlainText],
+                allowed: vec![DropEffect::Copy, DropEffect::Move],
+            })
+        );
+        assert_eq!(mgr.take_outgoing(), None, "handed once");
+        assert_eq!(
+            mgr.outgoing_data(&DataFormat::PlainText),
+            Some(&b"dragged"[..])
+        );
+        assert_eq!(mgr.outgoing_data(&DataFormat::Html), None);
+    }
+
+    /// **Over another window, none of this window's targets is under the
+    /// drag** -- whatever its last position here said, and whatever keys are
+    /// pressed meanwhile -- and coming back finds them again.
+    #[test]
+    fn a_carried_drag_over_another_window_is_over_none_of_this_ones_targets() {
+        let mut mgr = dragging(
+            vec![text_target(
+                1,
+                0.0,
+                0.0,
+                &[DropEffect::Move, DropEffect::Copy],
+            )],
+            &ALL,
+        );
+        assert!(mgr.take_outgoing().is_some());
+        assert_eq!(
+            said(&mgr.update_position(10.0, 10.0)),
+            ["enter 1 Move", "move"]
+        );
+        assert_eq!(said(&mgr.pointer_left()), ["leave 1"]);
+        assert_eq!(mgr.state(), DragState::Dragging);
+        let ctrl = DragKeys {
+            ctrl: true,
+            ..DragKeys::default()
+        };
+        assert!(mgr.set_keys(ctrl).is_empty(), "no target here is under it");
+        assert_eq!(
+            said(&mgr.update_position(10.0, 10.0)),
+            ["enter 1 Copy", "move"]
+        );
+    }
+
+    /// **A carried drag dropped on another program ends when the window
+    /// system says how it went**: the source hears the effect then -- a
+    /// moved file is removed only once the other program has it -- and a
+    /// second word changes nothing.
+    #[test]
+    fn a_carried_drag_dropped_elsewhere_ends_when_the_window_system_says() {
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        assert!(mgr.take_outgoing().is_some());
+        assert_eq!(
+            said(&mgr.update_position(10.0, 10.0)),
+            ["enter 1 Copy", "move"]
+        );
+        assert_eq!(said(&mgr.pointer_left()), ["leave 1"]);
+        assert_eq!(
+            said(&mgr.outgoing_ended(DropEffect::Move)),
+            ["ended 7 Move"]
+        );
+        assert_eq!(mgr.state(), DragState::Idle);
+        assert!(mgr.outgoing_ended(DropEffect::Copy).is_empty());
+        assert!(!mgr.take_withdrawn());
+    }
+
+    /// **The window system ending a carried drag still over this window
+    /// leaves the target here first** -- given up by the user's Escape,
+    /// which the window system takes during a drag.
+    #[test]
+    fn a_carried_drag_ended_over_this_window_leaves_its_target() {
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        assert!(mgr.take_outgoing().is_some());
+        assert_eq!(
+            said(&mgr.update_position(10.0, 10.0)),
+            ["enter 1 Copy", "move"]
+        );
+        assert_eq!(
+            said(&mgr.outgoing_ended(DropEffect::None)),
+            ["leave 1", "ended 7 None"]
+        );
+    }
+
+    /// **A carried drag dropped here ends here**, as any drag: the window
+    /// system's word after it is about a drag that is already over.
+    #[test]
+    fn a_carried_drag_dropped_here_ends_here() {
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        assert!(mgr.take_outgoing().is_some());
+        assert_eq!(said(&mgr.pointer_left()), Vec::<String>::new());
+        assert_eq!(
+            said(&mgr.update_position(10.0, 10.0)),
+            ["enter 1 Copy", "move"]
+        );
+        assert_eq!(
+            said(&mgr.end_drag(10.0, 10.0)),
+            ["move", "drop 1 Copy", "ended 7 Copy"]
+        );
+        assert!(mgr.outgoing_ended(DropEffect::Copy).is_empty());
+        assert!(!mgr.take_withdrawn(), "the window system saw the drop");
+    }
+
+    /// **A carried drag given up here is withdrawn from the window system**,
+    /// once -- and a drag of this window's that only ever stayed in it is
+    /// not.
+    #[test]
+    fn a_carried_drag_given_up_here_is_withdrawn() {
+        let mut mgr = dragging(Vec::new(), &ALL);
+        assert!(mgr.take_outgoing().is_some());
+        assert_eq!(said(&mgr.cancel()), ["ended 7 None"]);
+        assert!(mgr.take_withdrawn());
+        assert!(!mgr.take_withdrawn(), "said once");
+        assert!(mgr.outgoing_ended(DropEffect::None).is_empty());
+    }
+
+    /// **A drag that has not been handed on is not ended by the window
+    /// system's word** -- a later drag of this window's, begun after the one
+    /// it is about.
+    #[test]
+    fn the_window_systems_word_ends_only_a_carried_drag() {
+        let mut mgr = dragging(Vec::new(), &ALL);
+        assert!(mgr.outgoing_ended(DropEffect::Copy).is_empty());
+        assert!(mgr.is_dragging());
+    }
+
+    // ----------------------------------------------------------------------
+    // Between programs: another program's drag over this window
+    // ----------------------------------------------------------------------
+
+    /// A manager with one target, 1, at (0, 0) and 50 pixels square, taking
+    /// HTML before text and copying before moving.
+    fn html_or_text() -> DragDropManager {
+        let mut mgr = DragDropManager::with_threshold(5.0);
+        mgr.register_target(DropTarget {
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            width: 50.0,
+            height: 50.0,
+            accepted_formats: vec![DataFormat::Html, DataFormat::PlainText],
+            allowed_effects: vec![DropEffect::Copy, DropEffect::Move],
+        });
+        mgr
+    }
+
+    /// **Another program's drag is entered, answered, and dropped once its
+    /// data comes**: no threshold, no start; the answer names the effect and
+    /// the format the target prefers among those offered; the drop asks for
+    /// that format, and the data is the target's.
+    #[test]
+    fn another_programs_drag_is_dropped_once_its_data_comes() {
+        let mut mgr = html_or_text();
+        let offered = vec![DataFormat::PlainText, DataFormat::Html];
+        assert_eq!(
+            said(&mgr.offer_entered(offered.clone(), vec![DropEffect::Move], 10.0, 10.0)),
+            ["enter 1 Move", "move"]
+        );
+        assert!(mgr.is_dragging());
+        assert_eq!(mgr.source(), None, "not this window's");
+        assert!(mgr.data().is_none(), "the data is not here yet");
+        assert_eq!(mgr.formats(), offered);
+        assert_eq!(mgr.take_outgoing(), None, "not this window's to hand on");
+        assert_eq!(
+            mgr.offer_status(),
+            (DropEffect::Move, Some(DataFormat::Html))
+        );
+
+        let (events, asked) = mgr.offer_dropped(12.0, 10.0);
+        assert_eq!(said(&events), ["move"]);
+        assert_eq!(asked, Some(DataFormat::Html));
+        assert_eq!(mgr.state(), DragState::Idle);
+
+        let events = mgr.offer_data(DataFormat::Html, b"<b>x</b>".to_vec());
+        assert_eq!(said(&events), ["drop 1 Move"]);
+        let DragEvent::Drop { data, .. } = &events[0] else {
+            panic!("expected a drop: {events:?}");
+        };
+        assert_eq!(data.get_data(&DataFormat::Html), Some(&b"<b>x</b>"[..]));
+        assert!(
+            mgr.offer_data(DataFormat::Html, b"again".to_vec())
+                .is_empty(),
+            "one drop, one delivery"
+        );
+    }
+
+    /// **Another program's drag follows the keys, and leaving is the end of
+    /// it here**: a drop after it left asks for nothing.
+    #[test]
+    fn another_programs_drag_follows_the_keys_and_ends_here_when_it_leaves() {
+        let mut mgr = html_or_text();
+        let entered = mgr.offer_entered(vec![DataFormat::PlainText], ALL.to_vec(), 10.0, 10.0);
+        assert_eq!(said(&entered), ["enter 1 Copy", "move"]);
+        let shift = DragKeys {
+            shift: true,
+            ..DragKeys::default()
+        };
+        assert_eq!(said(&mgr.set_keys(shift)), ["effect 1 Move"]);
+        assert_eq!(
+            mgr.offer_status(),
+            (DropEffect::Move, Some(DataFormat::PlainText))
+        );
+        assert_eq!(said(&mgr.update_position(60.0, 10.0)), ["leave 1", "move"]);
+        assert_eq!(mgr.offer_status(), (DropEffect::None, None));
+        assert_eq!(
+            said(&mgr.update_position(10.0, 10.0)),
+            ["enter 1 Move", "move"]
+        );
+        assert_eq!(said(&mgr.pointer_left()), ["leave 1"]);
+        assert_eq!(mgr.state(), DragState::Idle);
+        let (events, asked) = mgr.offer_dropped(10.0, 10.0);
+        assert!(events.is_empty());
+        assert_eq!(asked, None);
+    }
+
+    /// **A drop of another program's drag where it does nothing asks for
+    /// nothing**: the target sharing no effect with its source is left.
+    #[test]
+    fn a_drop_that_does_nothing_asks_for_nothing() {
+        let mut mgr = html_or_text();
+        let entered = mgr.offer_entered(
+            vec![DataFormat::PlainText],
+            vec![DropEffect::Link],
+            10.0,
+            10.0,
+        );
+        assert_eq!(said(&entered), ["enter 1 None", "move"]);
+        assert_eq!(mgr.offer_status().0, DropEffect::None);
+        let (events, asked) = mgr.offer_dropped(10.0, 10.0);
+        assert_eq!(said(&events), ["move", "leave 1"]);
+        assert_eq!(asked, None);
+        assert!(mgr.offer_failed().is_empty(), "nothing was asked for");
+    }
+
+    /// **Another program's drag over nothing here answers nothing and drops
+    /// nothing.**
+    #[test]
+    fn another_programs_drag_over_nothing_answers_nothing() {
+        let mut mgr = html_or_text();
+        let entered = mgr.offer_entered(vec![DataFormat::PlainText], ALL.to_vec(), 100.0, 100.0);
+        assert_eq!(said(&entered), ["move"]);
+        assert_eq!(mgr.offer_status(), (DropEffect::None, None));
+        let (events, asked) = mgr.offer_dropped(100.0, 100.0);
+        assert_eq!(said(&events), ["move"]);
+        assert_eq!(asked, None);
+    }
+
+    /// **Data that is not what was asked for, or that cannot be had, leaves
+    /// the target** as if the drop did nothing.
+    #[test]
+    fn data_not_as_asked_or_not_at_all_leaves_the_target() {
+        let mut mgr = html_or_text();
+        let offered = vec![DataFormat::PlainText, DataFormat::Html];
+        let _entered = mgr.offer_entered(offered.clone(), ALL.to_vec(), 10.0, 10.0);
+        assert_eq!(mgr.offer_dropped(10.0, 10.0).1, Some(DataFormat::Html));
+        assert_eq!(
+            said(&mgr.offer_data(DataFormat::PlainText, b"x".to_vec())),
+            ["leave 1"]
+        );
+        let _entered = mgr.offer_entered(offered, ALL.to_vec(), 10.0, 10.0);
+        assert_eq!(mgr.offer_dropped(10.0, 10.0).1, Some(DataFormat::Html));
+        assert_eq!(said(&mgr.offer_failed()), ["leave 1"]);
+        assert!(
+            mgr.offer_data(DataFormat::Html, b"late".to_vec())
+                .is_empty()
+        );
+    }
+
+    /// **Another program's drag of a format nothing here takes enters
+    /// nothing**, and answers that a drop would do nothing.
+    #[test]
+    fn another_programs_drag_of_a_format_nothing_takes_enters_nothing() {
+        let mut mgr = html_or_text();
+        let entered = mgr.offer_entered(vec![DataFormat::ImagePng], ALL.to_vec(), 10.0, 10.0);
+        assert_eq!(said(&entered), ["move"]);
+        assert_eq!(mgr.offer_status(), (DropEffect::None, None));
+    }
+
+    /// **This window's own drag is not dropped as another program's**: a
+    /// drop of it is `end_drag`'s, with its data here, so `offer_dropped`
+    /// leaves it under way.
+    #[test]
+    fn this_windows_own_drag_is_not_dropped_as_an_offer() {
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        assert_eq!(
+            said(&mgr.update_position(10.0, 10.0)),
+            ["enter 1 Copy", "move"]
+        );
+        let (events, asked) = mgr.offer_dropped(10.0, 10.0);
+        assert!(events.is_empty());
+        assert_eq!(asked, None);
+        assert!(mgr.is_dragging());
+        assert_eq!(
+            mgr.state(),
+            DragState::OverTarget {
+                target_id: 1,
+                effect: DropEffect::Copy
+            }
+        );
+    }
+
+    /// **Another program's drag let go through `end_drag` is left, not
+    /// dropped**: its data has to be asked for, which only
+    /// `offer_dropped` does.
+    #[test]
+    fn another_programs_drag_is_not_dropped_by_end_drag() {
+        let mut mgr = html_or_text();
+        let _entered = mgr.offer_entered(vec![DataFormat::PlainText], ALL.to_vec(), 10.0, 10.0);
+        assert_eq!(said(&mgr.end_drag(10.0, 10.0)), ["move", "leave 1"]);
+        assert_eq!(mgr.state(), DragState::Idle);
+    }
+
+    /// **Another program's drag ends a drag of this window's first** -- one
+    /// drag at a time, so the window system has carried this one off -- and
+    /// the window system is told this window gave its own up.
+    #[test]
+    fn another_programs_drag_ends_this_windows_first() {
+        let mut mgr = dragging(vec![text_target(1, 0.0, 0.0, &ALL)], &ALL);
+        assert!(mgr.take_outgoing().is_some());
+        assert_eq!(
+            said(&mgr.update_position(10.0, 10.0)),
+            ["enter 1 Copy", "move"]
+        );
+        let events = mgr.offer_entered(vec![DataFormat::PlainText], ALL.to_vec(), 20.0, 20.0);
+        assert_eq!(
+            said(&events),
+            ["leave 1", "ended 7 None", "enter 1 Copy", "move"]
+        );
+        assert!(mgr.take_withdrawn());
+        assert_eq!(mgr.source(), None);
+    }
+
+    /// **Every format has a name between programs, and the name gives the
+    /// format back** -- a custom format by what it holds.
+    #[test]
+    fn every_format_has_a_name_between_programs() {
+        for format in [
+            DataFormat::PlainText,
+            DataFormat::RichText,
+            DataFormat::Html,
+            DataFormat::FilePaths,
+            DataFormat::ImagePng,
+            DataFormat::ImageBmp,
+            DataFormat::Url,
+            DataFormat::Custom("application/x-my-widget".to_owned()),
+        ] {
+            assert_eq!(DataFormat::from_mime(format.mime()), format, "{format:?}");
+        }
+        assert_eq!(DataFormat::PlainText.mime(), "text/plain;charset=utf-8");
+        assert_eq!(DataFormat::FilePaths.mime(), FILE_PATHS_MIME);
+        assert_eq!(
+            DataFormat::from_mime("text/plain"),
+            DataFormat::Custom("text/plain".to_owned()),
+            "text with no charset is not taken for UTF-8"
+        );
+        assert_eq!(
+            DataFormat::from_mime(DataFormat::Custom("text/html".to_owned()).mime()),
+            DataFormat::Html,
+            "a custom format named as a known one is that one"
+        );
     }
 
     #[test]

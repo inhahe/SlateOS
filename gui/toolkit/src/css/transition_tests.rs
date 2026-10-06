@@ -483,3 +483,51 @@ fn a_percentage_moves_when_its_container_settles_it() {
     assert_eq!(settle(&mut t, &ten, 200.0).padding.left, 20.0);
     assert!(!t.is_moving());
 }
+
+/// **A size that becomes a percentage moves from where it was** to where
+/// its container settles it: unknown until then, it is not taken for
+/// `auto` -- which no value moves to or from -- and does not jump.
+#[test]
+fn a_size_that_becomes_a_percentage_moves_from_where_it_was() {
+    let units = Units {
+        em: 13.0,
+        rem: 13.0,
+        ch: 6.5,
+        viewport: (800.0, 600.0),
+        px_per_mm: 3.78,
+    };
+    let half = BoxLengths {
+        width: Some(Some(Length {
+            percent: 50.0,
+            ..Length::default()
+        })),
+        units: Some(units),
+        ..BoxLengths::default()
+    };
+    let spec = TransitionSpec {
+        properties: vec![TransitionTarget::All],
+        durations: vec![100.0],
+        timings: vec![Timing::Linear],
+        delays: vec![0.0],
+    };
+    let step = |t: &mut Transitions| {
+        // As computed: the width waits on the container, so it is not set.
+        let mut style = Style::default();
+        t.update(&mut style, &spec, &half, t.now_ms, linear());
+        half.apply(&mut style, 400.0, 100.0);
+        t.settle(&mut style, &spec, &half);
+        style
+    };
+    let mut t = Transitions::from_shown(&Style {
+        width: Some(100.0),
+        ..Style::default()
+    });
+    t.now_ms = 0.0;
+    assert_eq!(step(&mut t).width, Some(100.0), "from where it was");
+    assert!(t.moves(Animated::Width));
+    t.now_ms = 50.0;
+    assert_eq!(step(&mut t).width, Some(150.0), "half-way to 50% of 400");
+    t.now_ms = 100.0;
+    assert_eq!(step(&mut t).width, Some(200.0));
+    assert!(!t.is_moving());
+}

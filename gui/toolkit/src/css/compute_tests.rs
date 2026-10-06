@@ -302,6 +302,13 @@ fn a_percentage_waits_for_its_container() {
     c.lengths.apply(&mut style, 300.0, 0.0);
     assert_eq!(style.width, Some(280.0));
     assert!(!top("width: 20px").lengths.waits());
+    // A padding that comes out below nought once its container is known is
+    // nought -- CSS has no negative padding -- where a margin may be.
+    let c = top("padding-left: calc(10% - 20px); margin-left: calc(10% - 20px)");
+    let mut style = c.style.clone();
+    c.lengths.apply(&mut style, 100.0, 0.0);
+    assert_eq!(style.padding.left, 0.0);
+    assert_eq!(style.margin.left, -10.0);
 }
 
 /// **`bolder` and `lighter` step from the parent's weight**, as CSS Fonts
@@ -331,6 +338,18 @@ fn bolder_and_lighter_step_from_the_parent() {
         &parent.inherited,
     );
     assert_eq!(child.style.font_weight, FontWeight::Regular);
+    // A parent bold in code, not by a style: still the weight stepped from.
+    let bold_in_code = Style {
+        font_weight: FontWeight::Bold,
+        ..Style::default()
+    };
+    let child = computed(
+        "font-weight: bolder",
+        &Style::default(),
+        &bold_in_code,
+        &Inherited::default(),
+    );
+    assert_eq!(child.style.font_weight, FontWeight::ExtraBold);
 }
 
 /// **A line height is a multiple of the font size**: a length is taken as

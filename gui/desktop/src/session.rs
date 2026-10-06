@@ -694,17 +694,26 @@ impl<T: Transport> ShellSession<T> {
     /// [`load_appearance`]: Self::load_appearance
     pub fn start_for_user(events: EventLoop<T>) -> Result<Self, Error<T>> {
         let mut session = Self::start(events)?;
-        session.load_appearance();
-        session.repaint()?;
+        session.take_up_the_users_settings()?;
+        Ok(session)
+    }
+
+    /// What `start_for_user` does past `start`: the user's settings read, a
+    /// repaint in them, and the sign-in said aloud if someone is in. Apart
+    /// so a session started from an account list -- one with a login screen
+    /// up -- can be given it in a test.
+    fn take_up_the_users_settings(&mut self) -> Result<(), Error<T>> {
+        self.load_appearance();
+        self.repaint()?;
         // In already -- nobody to sign in as, or signed in by itself: say so
         // aloud, in the user's sound -- after their appearance is read, so it
         // is their theme's chime at their volume, and after the first frame,
         // so it is not heard over a black screen. A login screen up instead
         // is nobody in yet; a password accepted says it then (`answer_login`).
-        if !session.is_locked() {
-            session.sound_event("desktop-login");
+        if !self.is_locked() {
+            self.sound_event("desktop-login");
         }
-        Ok(session)
+        Ok(())
     }
 
     fn start_with(

@@ -7322,11 +7322,20 @@ fn a_login_picture_saved_over_under_the_same_name_is_read_again() {
         file.settings.login_background = appearance::LoginBackground::CustomImage(picture.clone());
         file.save().expect("save");
 
-        let (mut session, desktop, _dir, _turn) = session_with_login();
+        let (mut session, _desktop, _dir, _turn) = session_with_login();
         session.load_appearance();
         session.repaint().expect("paint");
         let asked = |session: &Session| session.login_image.as_ref().map(|(id, _)| *id);
         let first = asked(&session).expect("the greeter asked for its picture");
+
+        // An announcement with nothing saved over asks for nothing.
+        session.adopt_appearance_change();
+        session.repaint().expect("paint");
+        assert_eq!(
+            asked(&session),
+            Some(first),
+            "asked again with nothing changed"
+        );
 
         std::fs::write(&picture, b"a second picture, saved over the first").expect("save over it");
         session.adopt_appearance_change();
@@ -7608,6 +7617,8 @@ fn a_settings_change_while_the_login_screen_is_up_is_adopted() {
         let mut look = appearance::AppearanceFile::load();
         assert_ne!(look.settings.accent_color, AccentColor::Teal);
         look.settings.accent_color = AccentColor::Teal;
+        let colour = appearance::LoginBackground::SolidColor(guitk::color::Color::rgb(10, 20, 30));
+        look.settings.login_background = colour.clone();
         look.save().expect("save");
 
         announce(&desktop, session.panel(), SettingsGroup::Appearance);
@@ -7617,7 +7628,29 @@ fn a_settings_change_while_the_login_screen_is_up_is_adopted() {
             AccentColor::Teal,
             "the change stopped at the login screen"
         );
+        assert_eq!(
+            session.login().expect("a login screen").config.background,
+            colour,
+            "the login screen up kept its old background"
+        );
         assert!(session.is_locked(), "a settings change let someone in");
+    });
+}
+
+/// **A start with a login screen up says nothing until someone signs in**:
+/// the start's chime is for a desktop someone is in, and a login screen is
+/// nobody yet -- the password accepted says it.
+#[test]
+fn a_start_at_the_login_screen_says_nothing_until_someone_signs_in() {
+    settingsfile::testing::with_scratch_config("session-start-locked-sound", |_root| {
+        let (mut session, desktop, _dir, _turn) = session_with_login();
+        session
+            .take_up_the_users_settings()
+            .expect("the harness refused a frame");
+        assert!(session.is_locked());
+        assert!(heard(&session).is_empty(), "a sign-in heard with nobody in");
+        type_password(&desktop, &mut session, "password");
+        assert_eq!(heard(&session), ["desktop-login"]);
     });
 }
 

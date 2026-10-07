@@ -129,19 +129,31 @@ if [ -x mono/mini/mono-sgen ]; then
     # which gives a static executable a PT_DYNAMIC segment. readelf's Type is
     # the fact (EXEC), and the kernel takes a program for dynamic only by its
     # PT_INTERP (kernel/src/proc/elf.rs, interp_path), which this has none of.
-    if [ "$(readelf -l mono/mini/mono-sgen | grep -c INTERP)" -ne 0 ]; then
+    # Each tool's output goes to a file and is counted there: neither inside
+    # $(...) -- check-shell-callables.py requires a substitution's command to
+    # exist where the gate runs, and readelf and nm are this WSL image's -- nor
+    # as `... | grep -q`, which pipefail turns into a failure on a match
+    # (scripts/gdb-spike/slatelink.sh says how).
+    readelf -l mono/mini/mono-sgen >"$WORK/mono-segments.txt" 2>/dev/null
+    readelf -n mono/mini/mono-sgen >"$WORK/mono-notes.txt" 2>/dev/null
+    nm mono/mini/mono-sgen >"$WORK/mono-symbols.txt" 2>/dev/null
+    if [ "$(grep -c INTERP "$WORK/mono-segments.txt")" -ne 0 ]; then
         echo "MONO_HAS_AN_INTERPRETER -- linked dynamically; nothing here can load it"
         echo "NO_SLATE_MONO_BINARY"
         exit 1
     fi
     # The link must be against ours, not musl's: our libc.a is Rust, and
-    # brings its panic entry point; musl's would bring __syscall_cp. Counted
-    # over the whole symbol table, not `nm | grep -q`, which pipefail turns
-    # into a failure on a match (scripts/gdb-spike/slatelink.sh says how).
-    syms="$(nm mono/mini/mono-sgen 2>/dev/null)"
-    if [ "$(grep -c 'rust_begin_unwind' <<<"$syms")" -eq 0 ] \
-        || [ "$(grep -c '__syscall_cp' <<<"$syms")" -ne 0 ]; then
+    # brings its panic entry point; musl's would bring __syscall_cp.
+    if [ "$(grep -c 'rust_begin_unwind' "$WORK/mono-symbols.txt")" -eq 0 ] \
+        || [ "$(grep -c '__syscall_cp' "$WORK/mono-symbols.txt")" -ne 0 ]; then
         echo "MONO_NOT_OUR_LIBC -- the link did not take this library's libc.a"
+        echo "NO_SLATE_MONO_BINARY"
+        exit 1
+    fi
+    # And it must carry the SlateOS ABI note our crt adds: the kernel tells a
+    # native program from a Linux one by it (kernel/src/proc/elf.rs).
+    if [ "$(grep -c 'SlateOS' "$WORK/mono-notes.txt")" -eq 0 ]; then
+        echo "MONO_NO_SLATEOS_NOTE -- the kernel would run it as a Linux program"
         echo "NO_SLATE_MONO_BINARY"
         exit 1
     fi

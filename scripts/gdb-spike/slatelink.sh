@@ -81,17 +81,31 @@ link_one() {
     file "$dir/$bin"
     readelf -h "$dir/$bin" | grep -E "Type|Entry"
     # The link must be against ours, not musl's: our libc.a is Rust, and
-    # brings its panic entry point; musl's would bring __syscall_cp. Counted
-    # over the whole symbol table, not `nm | grep -q`: under pipefail, grep -q
-    # stopping at its first match leaves nm to die of SIGPIPE, and the pipe
-    # then reports failure for a match -- which is how this check's first
-    # version refused GDB's own correct link.
-    local syms rust musl
-    syms="$(nm "$dir/$bin" 2>/dev/null)"
-    rust="$(grep -c 'rust_begin_unwind' <<<"$syms")"
-    musl="$(grep -c '__syscall_cp' <<<"$syms")"
+    # brings its panic entry point; musl's would bring __syscall_cp. And the
+    # program must carry the SlateOS ABI note our crt adds, which is how the
+    # kernel knows a native program from a Linux one (kernel/src/proc/elf.rs)
+    # -- without it, it would be run under the Linux ABI.
+    #
+    # Written to files and counted there. Not `nm | grep -q`: under pipefail,
+    # grep -q stopping at its first match leaves nm to die of SIGPIPE, and the
+    # pipe then reports failure for a match -- which is how this check's first
+    # version refused GDB's own correct link. And not `$(nm ...)`: the
+    # boot test's check-shell-callables.py requires every command a
+    # substitution runs to exist where the gate runs, and nm and readelf are
+    # this WSL image's, not the Windows host's.
+    local rust musl note
+    nm "$dir/$bin" >"$WORK/$name-symbols.txt" 2>/dev/null
+    readelf -n "$dir/$bin" >"$WORK/$name-notes.txt" 2>/dev/null
+    rust="$(grep -c 'rust_begin_unwind' "$WORK/$name-symbols.txt")"
+    musl="$(grep -c '__syscall_cp' "$WORK/$name-symbols.txt")"
+    note="$(grep -c 'SlateOS' "$WORK/$name-notes.txt")"
     if [ "$rust" -eq 0 ] || [ "$musl" -ne 0 ]; then
         echo "${name}_NOT_OUR_LIBC -- the link did not take this library's libc.a"
+        echo "NO_SLATE_${name}_BINARY"
+        return
+    fi
+    if [ "$note" -eq 0 ]; then
+        echo "${name}_NO_SLATEOS_NOTE -- the kernel would run it as a Linux program"
         echo "NO_SLATE_${name}_BINARY"
         return
     fi

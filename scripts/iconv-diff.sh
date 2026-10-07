@@ -34,8 +34,8 @@ pass=0; fail=0; xfail=0; xpass=0
 # the case directory first, to make input files. `SHOW` names output files to
 # compare, as found afterwards (a missing one is shown as such).
 # `REDIR` is a redirection for iconv itself: `>&-`, `>/dev/full`, `<&-`.
-INPUT=; FILES=; SHOW=; ENVS=(); REDIR=
-reset_knobs() { INPUT=; FILES=; SHOW=; ENVS=(); REDIR=; }
+INPUT=; FILES=; SHOW=; REDIR=
+reset_knobs() { INPUT=; FILES=; SHOW=; REDIR=; }
 
 case_dir=$DIFF_TMP/case
 run_side() {
@@ -45,7 +45,7 @@ run_side() {
   # `eval` only for the redirection, which a variable cannot hold otherwise;
   # the arguments stay in "$@".
   ( cd "$case_dir" || exit 125
-    printf '%b' "$INPUT" | eval "env LC_ALL=C.UTF-8 \"\${ENVS[@]}\" \
+    printf '%b' "$INPUT" | eval "env LC_ALL=C.UTF-8 \
       PATH=\"\$bindir/\$side:\$PATH\" timeout -k 2 60 iconv \"\$@\" $REDIR" \
   ) >"$DIFF_TMP/$side.out" 2>"$DIFF_TMP/$side.err"
   printf '%s' "$?" >"$DIFF_TMP/$side.rc"

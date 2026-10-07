@@ -13,7 +13,7 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**468 programs; 309 on the image, 6 carried inside the kernel.**
+**482 programs; 323 on the image, 6 carried inside the kernel.**
 
 ## Userland utilities and services (`userspace/`, lane B) -- 297
 
@@ -499,7 +499,7 @@ two disagree.
 |---|---|---|---|---|
 | `kernel` | Kernel entry point. |  |  |  |
 
-## Ported programs (`scripts/`, the rootfs recipe's) -- 14
+## Ported programs (`scripts/`, the rootfs recipe's) -- 28
 
 Programs that are no cargo target, each built by its own scripts and
 staged by `scripts/create-ext4-rootfs.sh`: upstream C and C++ programs
@@ -509,17 +509,31 @@ when it has been built on the machine that makes it.
 
 | Program | What it does | On image | Built by | Other names |
 |---|---|---|---|---|
+| `addr2line` | GNU addr2line 2.47: a code address to the source file and line it came from. | yes | `scripts/binutils-spike/` |  |
+| `as` | GNU as 2.47, the assembler: assembly source to an object file. | yes | `scripts/binutils-spike/` |  |
 | `bash` | GNU bash 5.2, the shell. | yes | `scripts/bash-spike/` |  |
+| `c++filt` | GNU c++filt 2.47: turns mangled C++ symbol names back into C++. | yes | `scripts/binutils-spike/` |  |
 | `cmake` | CMake 4.4.3, the build-system generator. | yes | `scripts/cmake-spike/` |  |
+| `elfedit` | GNU elfedit 2.47: edits the header of an ELF file. | yes | `scripts/binutils-spike/` |  |
 | `espeak-ng` | eSpeak NG 1.52.0, the speech synthesizer. | yes | `scripts/espeak-spike/` |  |
 | `fastpy` | fastpy, which compiles a Python program into a native SlateOS program. | yes | `scripts/fastpy-slateos-bundle.py` |  |
 | `gdbserver` | GDB 18.1's remote stub, run beside the program being debugged; waits on the kernel as gdb does. | yes | `scripts/gdb-spike/` |  |
+| `gnu-ar` | GNU ar 2.47: makes, edits and lists static libraries. | yes | `scripts/binutils-spike/` |  |
 | `gnu-gdb` | GDB 18.1, the GNU debugger: examines a program's symbols and machine code; running one under it waits on the kernel. | yes | `scripts/gdb-spike/` |  |
+| `gnu-objdump` | GNU objdump 2.47: disassembles object files and describes their contents. | yes | `scripts/binutils-spike/` |  |
+| `gnu-ranlib` | GNU ranlib 2.47: writes a static library's symbol index. | yes | `scripts/binutils-spike/` |  |
+| `gnu-readelf` | GNU readelf 2.47: describes the contents of an ELF file. | yes | `scripts/binutils-spike/` |  |
+| `gnu-strings` | GNU strings 2.47: prints the runs of text in a file. | yes | `scripts/binutils-spike/` |  |
+| `gnu-strip` | GNU strip 2.47: removes symbols and debugging information from object files. | yes | `scripts/binutils-spike/` |  |
+| `ld.bfd` | GNU ld 2.47, the GNU linker. | yes | `scripts/binutils-spike/` |  |
 | `ld.lld` | LLVM 20.1.8's linker, lld. | yes | `scripts/llvm-spike/` |  |
 | `llc` | LLVM 20.1.8's code generator: LLVM IR to an object file. | yes | `scripts/llvm-spike/` |  |
 | `make` | GNU make 4.4.1, the build tool. | yes | `scripts/make-spike/` |  |
 | `mono` | Mono 6.14.1, the .NET runtime: runs .NET programs, JIT-compiled. | yes | `scripts/mono-spike/` |  |
+| `nm` | GNU nm 2.47: lists the symbols in object files. | yes | `scripts/binutils-spike/` |  |
+| `objcopy` | GNU objcopy 2.47: copies an object file, converting or editing it on the way. | yes | `scripts/binutils-spike/` |  |
 | `oils-for-unix` | Oils 0.38.0: OSH, which runs bash scripts, and YSH, its newer language. | yes | `scripts/oils-spike/` | `ysh` |
 | `opt` | LLVM 20.1.8's IR optimizer. | yes | `scripts/llvm-spike/` |  |
 | `pkgconf` | pkgconf 2.3.0: the compiler and linker flags an installed library needs. | yes | `scripts/pkgconf-spike/` | `pkg-config` |
 | `python3` | CPython 3.12.3, the Python interpreter. | yes | `scripts/cpython-spike/` |  |
+| `size` | GNU size 2.47: the sizes of an object file's sections. | yes | `scripts/binutils-spike/` |  |

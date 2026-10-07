@@ -106,6 +106,7 @@ will close them myself as each one goes on.
 | `ctest-string` | -- (filed with the SSE2 memory and string functions, 2026-10-06); sets strings against pages it takes away with `mprotect` | - | 60 |
 | `ctest-gdb-runs` | -- (filed with GDB 18.1 on the image, 2026-10-07; `scripts/gdb-spike/`); runs `/bin/gnu-gdb` and `/bin/gdbserver` -- start-up, `print 6*7`, a symbol read from another program's ELF -- the image's largest C++ program, and its first run here | file | 300 |
 | `ctest-mono-runs` | -- (filed with Mono 6.14.1 on the image, 2026-10-07; `scripts/mono-spike/`); runs `/bin/mono` on a .NET program: a JIT, faults turned into exceptions (`SIGSEGV`/`SIGFPE` with a context the handler rewrites -- the first native program here to need that), a collection, a thread, and C called by name (`dlsym`, design-decisions §1184) | file | 300 |
+| `ctest-binutils-runs` | -- (filed with GNU binutils 2.47 on the image, 2026-10-07; `scripts/binutils-spike/`); `/bin/as` and `/bin/ld.bfd` make a program from assembly source with the image's `libc.a` and run it, then the other twelve tools read or write what those two made; its scratch files are in `/tmp` | file | 300 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)

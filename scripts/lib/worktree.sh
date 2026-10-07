@@ -338,6 +338,22 @@ SLATE_MPC_SHA256="91204cd32f164bd3b7c992d4a6a8ce6519511aadab30f78b6982d0bf8d73e9
 # shellcheck disable=SC2034
 SLATE_MPC_TARBALL="$SLATE_ZIG_CACHE/mpc-$SLATE_MPC_VERSION.tar.xz"
 
+# GNU binutils, for scripts/binutils-spike/: the assembler GCC hands every
+# compile to, the linker, and the tools that read and edit object files.
+# 2.47 is the current release; the .tar.xz is 29,034,716 bytes. Recomputed
+# here and compared in full, 2026-10-07:
+#   Gentoo     sys-devel/binutils/Manifest, DIST binutils-2.47.tar.xz 29034716
+#              SHA512 3126a106...3e1d98 BLAKE2B 329cae87...0910ea -- two
+#              *different functions*.
+#   Buildroot  package/binutils/binutils.hash, sha512 3126a106...3e1d98.
+# (Homebrew is no attestation here: its formula pins the .tar.bz2,
+# 3068128c...4800e8, a different archive of the same release; Arch builds a
+# git snapshot; Void and Alpine are still at 2.44 and 2.45.1.)
+SLATE_BINUTILS_VERSION="2.47"
+SLATE_BINUTILS_SHA256="154ab23b60070e8f27013c22977f1129425d67d1e8acd6e13010e617811e4cff"
+# shellcheck disable=SC2034
+SLATE_BINUTILS_TARBALL="$SLATE_ZIG_CACHE/binutils-$SLATE_BINUTILS_VERSION.tar.xz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -727,6 +743,17 @@ slate_ensure_mpc_src() {
         "$SLATE_MPC_SHA256" \
         "https://ftp.gnu.org/gnu/mpc/mpc-$SLATE_MPC_VERSION.tar.xz" \
         "$SLATE_WORK/gcc-spike")" || return 1
+}
+
+# The binutils counterpart, for scripts/binutils-spike/.
+slate_ensure_binutils_src() {
+    # SLATE_BINUTILS_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/binutils-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_BINUTILS_TARBALL="$(slate_ensure_src binutils "$SLATE_BINUTILS_VERSION" \
+        "$SLATE_BINUTILS_SHA256" \
+        "https://ftp.gnu.org/gnu/binutils/binutils-$SLATE_BINUTILS_VERSION.tar.xz" \
+        "$SLATE_WORK/binutils-spike")" || return 1
 }
 
 slate_make_zig_wrappers() {

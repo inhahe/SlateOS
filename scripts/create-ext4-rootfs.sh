@@ -1176,6 +1176,11 @@ else
     # stands for the two, which are always linked and staged together.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/gdb-slateos.elf" \
         scripts/gdb-spike/slatelink.sh
+    # binutils' relink is seconds: slatelink.sh links the fourteen programs'
+    # objects against the new libc.a and stages them again. One stands for
+    # the fourteen, which are always linked and staged together.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/binutils/as" \
+        scripts/binutils-spike/slatelink.sh
     # Mono's relink is seconds: slatelink.sh links the runtime's objects
     # against the new libc.a and stages mono-sgen again. Its class libraries
     # are .NET bytecode, which no libc.a change makes stale.
@@ -1826,6 +1831,104 @@ else
     echo "[rootfs] NOTE: LLVM's tools are not in build/spike -- /bin/opt, /bin/llc and"
     echo "[rootfs]       /bin/ld.lld will be absent (build them with"
     echo "[rootfs]       wsl -d Ubuntu -- bash scripts/llvm-spike/run.sh)"
+fi
+
+# --- GNU binutils 2.47, linked against OUR OWN libc --------------------------
+# The assembler a C compiler hands its output to, GNU's linker, and the tools
+# that read and edit object files, built by scripts/binutils-spike/run.sh and
+# relinked against libc.a by its slatelink.sh -- all fourteen with nothing
+# missing and nothing duplicated. No assembler was on the image before: llc
+# writes object files itself, and GCC (scripts/gcc-spike/) cannot.
+#
+#   /bin/as, /bin/ld.bfd             the assembler, and GNU's linker
+#   /bin/nm, /bin/objcopy, /bin/size, /bin/addr2line, /bin/c++filt,
+#   /bin/elfedit                     the rest, under their own names
+#   /bin/gnu-ar, /bin/gnu-ranlib, /bin/gnu-strip, /bin/gnu-strings,
+#   /bin/gnu-objdump, /bin/gnu-readelf
+#                                    under gnu- names, below
+#   /usr/lib/x86_64-slateos/libc.a   the C library a program is linked with --
+#                                    the LLVM block's file, at its path, staged
+#                                    here too so that an assembler and a linker
+#                                    do not depend on LLVM's being built
+#
+# gnu-: /bin/ar (and ranlib and strip, the manifest's other names for it),
+# /bin/objdump, /bin/readelf and /bin/strings are lane B's own programs
+# (userspace/), staged as every workspace program is, and two programs at one
+# path would leave the image holding whichever was copied last -- which the
+# userland loop below refuses outright. GNU's take those names if lane B
+# agrees (requests/d-b-gnu-binutils-is-on-the-image-beside-lane-bs-tools.md),
+# as /bin/gnu-gdb waits on /bin/gdb. /bin/ld is left unset: ld.lld and
+# ld.bfd are both here, and which of them `ld` names is a choice for when a
+# compiler on the image calls it.
+#
+# Together or not at all: slatelink.sh links and stages the fourteen at once,
+# so some without the rest is a half-finished relink. Staleness as for every
+# port: absent is honest (NOTE), older than libc.a is a lie (fatal, below).
+# PROGRAM: /bin/as -- GNU as 2.47, the assembler: assembly source to an object file. (scripts/binutils-spike/)
+# PROGRAM: /bin/ld.bfd -- GNU ld 2.47, the GNU linker. (scripts/binutils-spike/)
+# PROGRAM: /bin/nm -- GNU nm 2.47: lists the symbols in object files. (scripts/binutils-spike/)
+# PROGRAM: /bin/objcopy -- GNU objcopy 2.47: copies an object file, converting or editing it on the way. (scripts/binutils-spike/)
+# PROGRAM: /bin/size -- GNU size 2.47: the sizes of an object file's sections. (scripts/binutils-spike/)
+# PROGRAM: /bin/addr2line -- GNU addr2line 2.47: a code address to the source file and line it came from. (scripts/binutils-spike/)
+# PROGRAM: /bin/c++filt -- GNU c++filt 2.47: turns mangled C++ symbol names back into C++. (scripts/binutils-spike/)
+# PROGRAM: /bin/elfedit -- GNU elfedit 2.47: edits the header of an ELF file. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-ar -- GNU ar 2.47: makes, edits and lists static libraries. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-ranlib -- GNU ranlib 2.47: writes a static library's symbol index. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-strip -- GNU strip 2.47: removes symbols and debugging information from object files. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-strings -- GNU strings 2.47: prints the runs of text in a file. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-objdump -- GNU objdump 2.47: disassembles object files and describes their contents. (scripts/binutils-spike/)
+# PROGRAM: /bin/gnu-readelf -- GNU readelf 2.47: describes the contents of an ELF file. (scripts/binutils-spike/)
+BINUTILS_DIR="$ROOT_DIR/build/spike/binutils"
+BINUTILS_NAMES="as ld.bfd nm objcopy size addr2line c++filt elfedit ar ranlib strip strings objdump readelf"
+BINUTILS_STALE=0
+binutils_present=0
+for b in $BINUTILS_NAMES; do
+    [ -e "$BINUTILS_DIR/$b" ] && binutils_present=$((binutils_present + 1))
+done
+if [ "$binutils_present" -eq 14 ]; then
+    # Each path written out, not built in a loop: the program catalogue
+    # checks every `# PROGRAM:` path above against the paths written here.
+    cp -L "$BINUTILS_DIR/as" "$STAGE/bin/as"
+    cp -L "$BINUTILS_DIR/ld.bfd" "$STAGE/bin/ld.bfd"
+    cp -L "$BINUTILS_DIR/nm" "$STAGE/bin/nm"
+    cp -L "$BINUTILS_DIR/objcopy" "$STAGE/bin/objcopy"
+    cp -L "$BINUTILS_DIR/size" "$STAGE/bin/size"
+    cp -L "$BINUTILS_DIR/addr2line" "$STAGE/bin/addr2line"
+    cp -L "$BINUTILS_DIR/c++filt" "$STAGE/bin/c++filt"
+    cp -L "$BINUTILS_DIR/elfedit" "$STAGE/bin/elfedit"
+    cp -L "$BINUTILS_DIR/ar" "$STAGE/bin/gnu-ar"
+    cp -L "$BINUTILS_DIR/ranlib" "$STAGE/bin/gnu-ranlib"
+    cp -L "$BINUTILS_DIR/strip" "$STAGE/bin/gnu-strip"
+    cp -L "$BINUTILS_DIR/strings" "$STAGE/bin/gnu-strings"
+    cp -L "$BINUTILS_DIR/objdump" "$STAGE/bin/gnu-objdump"
+    cp -L "$BINUTILS_DIR/readelf" "$STAGE/bin/gnu-readelf"
+    for b in as ld.bfd nm objcopy size addr2line c++filt elfedit gnu-ar gnu-ranlib \
+             gnu-strip gnu-strings gnu-objdump gnu-readelf; do
+        chmod 0755 "$STAGE/bin/$b"
+    done
+    mkdir -p "$STAGE/usr/lib/x86_64-slateos"
+    cp "$SYSROOT_LIBC" "$STAGE/usr/lib/x86_64-slateos/libc.a"
+    echo "[rootfs] staged GNU binutils 2.47 (linked against our libc.a): /bin/as, /bin/ld.bfd," \
+         "/bin/nm, /bin/objcopy, /bin/size, /bin/addr2line, /bin/c++filt, /bin/elfedit and" \
+         "/bin/gnu-{ar,ranlib,strip,strings,objdump,readelf}"
+    for b in $BINUTILS_NAMES; do
+        if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$BINUTILS_DIR/$b" ]; then
+            echo "[rootfs] WARNING: build/spike/binutils/$b is OLDER than the sysroot libc.a -- it"
+            echo "[rootfs]          links a stale libc. Relink all fourteen, seconds:"
+            echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/binutils-spike/slatelink.sh"
+            BINUTILS_STALE=1
+        fi
+    done
+elif [ "$binutils_present" -gt 0 ]; then
+    # Some without the rest is a half-finished relink, not a choice.
+    echo "[rootfs] ERROR: build/spike/binutils holds $binutils_present of binutils' fourteen"
+    echo "[rootfs]        programs; slatelink.sh stages all or none. Relink them:"
+    echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/binutils-spike/slatelink.sh"
+    exit 1
+else
+    echo "[rootfs] NOTE: GNU binutils is not in build/spike -- /bin/as, /bin/ld.bfd and the rest"
+    echo "[rootfs]       will be absent (build them with"
+    echo "[rootfs]       wsl -d Ubuntu --exec bash scripts/binutils-spike/run.sh)"
 fi
 
 # --- fastpy, lane B's Python compiler: built here, from its checkout ----------
@@ -2548,6 +2651,22 @@ if [ "$GDB_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/gnu-gdb and /bin/gdbserver on the image would be built"
         echo "[rootfs]        against a libc that is no longer in the build. Relink them:"
         echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/gdb-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$BINUTILS_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: a program in build/spike/binutils is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: a program in build/spike/binutils is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/as, /bin/ld.bfd and the rest on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink them:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/binutils-spike/slatelink.sh"
         echo "[rootfs]        (normally run for you -- this means that relink failed.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1

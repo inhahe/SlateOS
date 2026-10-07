@@ -125,6 +125,10 @@ pub enum VolumeStatus {
     /// Being encrypted in place (its master key in memory).
     Encrypting,
     /// Being decrypted in place.
+    // Entered by in-place decryption, which waits on the block layer
+    // (known-issues A-DISK-ENCRYPTION-HAS-NO-BLOCK-LAYER); `update_progress`
+    // already completes it, so the state is real API, just not yet reached.
+    #[allow(dead_code)]
     Decrypting,
 }
 
@@ -184,6 +188,10 @@ pub struct EncryptedVolume {
     /// is an ordinary directory.
     pub mount_point: PathBuf,
     /// Encryption progress percentage (0-100, for Encrypting/Decrypting).
+    // Read by nobody yet: `/proc/diskencrypt` and the shell report it once
+    // in-place encryption exists (known-issues
+    // A-DISK-ENCRYPTION-HAS-NO-BLOCK-LAYER).
+    #[allow(dead_code)]
     pub progress_pct: u8,
 }
 

@@ -13556,11 +13556,12 @@ DEFECTS = [
         ["desktop"],
         [
             # Re-anchored 2026-10-07: `EventMark::color`, which the month's dot,
-            # the card's bar and the widget's dot all read.
+            # the card's bar and the widget's dot all read. The widget's own
+            # test does not see it: its coloured event is on today, whose dot
+            # is `on_disc`'s, which keeps a chosen colour by itself.
             'every_month_view_site_draws_the_role_it_claims',
             'a_coloured_event_shows_the_users_colour_in_the_month_grid',
             'the_dot_and_the_detail_bar_resolve_a_colour_the_same_way',
-            'a_calendar_draws_its_month',
         ],
     ),
     (

@@ -444,15 +444,22 @@ def next_decision(root: Path, lane: str) -> str:
             (lane.lower() == "operator" and not ln))]
     if not mine:
         return f"lane {lane} has no open band in {D.DECISIONS_DIR}/README.md"
-    lo, hi = mine[0]
     used = [int(p.name[:4]) for p in (root / D.DECISIONS_DIR).glob("[0-9][0-9][0-9][0-9]-*.md")]
-    in_band = [n for n in used if lo <= n <= hi]
-    nxt = max(in_band) + 1 if in_band else lo
-    if nxt > hi:
-        return f"band §{lo}–§{hi} is full; ask for a new band (edit the table in {D.DECISIONS_DIR}/README.md)"
-    return (f"next number for lane {lane.upper()}: {nxt}\n"
-            f"create {D.DECISIONS_DIR}/{nxt:04d}-<short-slug>.md starting with `## {nxt}. <Title>`\n"
-            f"and put `**Lane:** {lane.upper()}` and `**Decided by:** ...` under it")
+    # The first of the lane's open bands with room, in the table's order. A
+    # band filled stays open while its newest entries are not yet on `main`
+    # (the D3 rule refuses an entry in a closed band unless the baseline holds
+    # it), so a lane can have a full band and the next one open together;
+    # looking at the first alone sent it to "ask for a new band" with the new
+    # one already in the table.
+    for lo, hi in mine:
+        in_band = [n for n in used if lo <= n <= hi]
+        nxt = max(in_band) + 1 if in_band else lo
+        if nxt <= hi:
+            return (f"next number for lane {lane.upper()}: {nxt}\n"
+                    f"create {D.DECISIONS_DIR}/{nxt:04d}-<short-slug>.md starting with `## {nxt}. <Title>`\n"
+                    f"and put `**Lane:** {lane.upper()}` and `**Decided by:** ...` under it")
+    lo, hi = mine[-1]
+    return f"band §{lo}–§{hi} is full; ask for a new band (edit the table in {D.DECISIONS_DIR}/README.md)"
 
 
 def next_question(root: Path, lane: str) -> str:

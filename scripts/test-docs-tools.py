@@ -108,6 +108,35 @@ def lanes() -> None:
     check("§217-§220 are lane C's whatever the table says", D.band_lane(218, [(200, 299, "A", "closed")]), "C")
 
 
+@case
+def the_next_decision_is_in_the_first_open_band_with_room() -> None:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_docs", HERE / "check-docs.py")
+    cd = importlib.util.module_from_spec(spec)
+    # Registered before it runs: its dataclasses look their module up there.
+    sys.modules["check_docs"] = cd
+    spec.loader.exec_module(cd)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        dd = root / D.DECISIONS_DIR
+        dd.mkdir(parents=True)
+        readme = dd / "README.md"
+        # A band full while its newest entries wait for `main` stays open,
+        # beside the next one the lane has opened.
+        readme.write_text("| §1400–§1402 | **lane C** | **open** — full at §1402 | x |\n"
+                          "| §1500–§1599 | **lane C** | **open** | y |\n",
+                          encoding="utf-8", newline="")
+        for n in (1400, 1401, 1402):
+            (dd / f"{n:04d}-x.md").write_text(f"## {n}. X\n", encoding="utf-8", newline="")
+        first = lambda: cd.next_decision(root, "C").splitlines()[0]  # noqa: E731
+        check("a full band gives way to the lane's next open one", first(), "next number for lane C: 1500")
+        (dd / "1500-y.md").write_text("## 1500. Y\n", encoding="utf-8", newline="")
+        check("...which counts on from its own newest", first(), "next number for lane C: 1501")
+        readme.write_text("| §1400–§1402 | **lane C** | **open** | x |\n", encoding="utf-8", newline="")
+        check("every open band full asks for a new one", first(),
+              "band §1400–§1402 is full; ask for a new band (edit the table in design-decisions/README.md)")
+
+
 # --- docs_layout ------------------------------------------------------------------------------
 
 KI = """# Known Issues

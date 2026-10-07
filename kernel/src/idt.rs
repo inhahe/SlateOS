@@ -437,40 +437,6 @@ pub struct InterruptStackFrame {
     pub ss: u64,
 }
 
-/// The general registers every interrupt and exception stub saves, in the
-/// order they sit on the stack: right below the [`InterruptStackFrame`], the
-/// error code (the CPU's, or the stub's dummy 0), and below it the fifteen
-/// pushed registers, `rax` first pushed and so highest. The stubs restore them
-/// from here on the way out, so a handler that changes them changes what the
-/// interrupted code resumes with -- which is how a signal handler is entered
-/// from an interrupt ([`deliver_signal_on_user_return`]).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SavedGprs {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub r11: u64,
-    pub r10: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rdi: u64,
-    pub rsi: u64,
-    pub rbp: u64,
-    pub rbx: u64,
-    pub rdx: u64,
-    pub rcx: u64,
-    pub rax: u64,
-    /// The error code, or the stub's dummy 0.
-    pub error_code: u64,
-}
-
-/// Bytes between the saved registers and the frame: 15 registers and the
-/// error code. Every stub's `lea rdi, [rsp + 128]` is this.
-const SAVED_GPRS_SIZE: usize = 128;
-const _: () = assert!(core::mem::size_of::<SavedGprs>() == SAVED_GPRS_SIZE);
-
 /// On an interrupt's way back to ring 3, deliver a pending signal to the
 /// interrupted thread, as Linux does on every return to user mode -- not only
 /// on a system call's, which until 2026-10-07 was the only place this kernel
@@ -487,11 +453,9 @@ fn deliver_signal_on_user_return(frame: *mut InterruptStackFrame) {
         return;
     }
     // SAFETY: every stub pushes the error code and the fifteen registers
-    // directly below the frame (see `SavedGprs`), on this same stack, and
-    // nothing else refers to them until the stub pops them.
-    // `SavedGprs` is exactly the SAVED_GPRS_SIZE bytes below the frame, so one
-    // element back from the frame, cast to it, is their start.
-    let gprs = unsafe { &mut *frame.cast::<SavedGprs>().sub(1) };
+    // directly below the frame (`saved_registers_from_frame`), on this same
+    // stack, and nothing else refers to them until the stub pops them.
+    let gprs = unsafe { &mut *saved_registers_from_frame(frame) };
     // SAFETY: as above; the frame is ours until the stub's `iretq`.
     let iret = unsafe { &mut *frame };
     crate::syscall::handlers::deliver_pending_signal_on_interrupt_exit(gprs, iret);
@@ -1166,23 +1130,28 @@ fn is_userspace_exception(frame: &InterruptStackFrame) -> bool {
 ///   rax, rcx, rdx, rbx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15
 /// low address ← RSP
 /// ```
+///
+/// The stubs restore these on the way out, so a handler that changes them
+/// changes what the interrupted code resumes with -- how a signal handler is
+/// entered from an interrupt or a fault.
 #[repr(C)]
-struct SavedRegisters {
-    r15: u64,
-    r14: u64,
-    r13: u64,
-    r12: u64,
-    r11: u64,
-    r10: u64,
-    r9: u64,
-    r8: u64,
-    rdi: u64,
-    rsi: u64,
-    rbp: u64,
-    rbx: u64,
-    rdx: u64,
-    rcx: u64,
-    rax: u64,
+#[allow(missing_docs)] // The registers' own names say what they are.
+pub struct SavedRegisters {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rax: u64,
 }
 
 /// Get a mutable pointer to the saved registers on the kernel stack.

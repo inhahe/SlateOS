@@ -10191,7 +10191,7 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
 /// user mode -- the other half of Linux's "check on every return to user
 /// mode", without which a thread that makes no system calls (a computation in
 /// a loop) never runs its handler for `^C` or a timer. Called from the
-/// interrupt exit ([`crate::idt::SavedGprs`]) with the interrupted registers,
+/// interrupt exit ([`crate::idt::SavedRegisters`]) with the interrupted registers,
 /// which it rewrites to enter the handler.
 ///
 /// Like Linux's exit-to-user work it runs with interrupts enabled: writing the
@@ -10201,7 +10201,7 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
 /// the interrupt has been handled. Interrupts are off again on return, for the
 /// stub's register restore and `iretq`.
 pub fn deliver_pending_signal_on_interrupt_exit(
-    gprs: &mut crate::idt::SavedGprs,
+    gprs: &mut crate::idt::SavedRegisters,
     iret: &mut crate::idt::InterruptStackFrame,
 ) {
     use crate::proc::signal;

@@ -359,6 +359,7 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("scripts/cmake-spike/", "D"),
     ("scripts/cpython-spike/", "D"),
     ("scripts/fixtures/", "D"),
+    ("scripts/llvm-spike/", "D"),
     ("scripts/make-spike/", "D"),
     ("scripts/pkgconf-spike/", "D"),
     ("scripts/espeak-spike/", "E"),
@@ -834,6 +835,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "test-reintro-palette.py",
     ),
     "D": (
+        "build-userland.py",
         "check-duplicate-exports.py",
         "check-env-identity.py",
         "check-libc-abi.py",
@@ -856,9 +858,11 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "p37-check.sh",
         "p38-check.sh",
         "probe-tcc-hosted.sh",
+        "rootfs-bin-kept-off.txt",
         "rootfs-bin-manifest.txt",
         "setup-toolchain.sh",
         "test-ctest-fixtures.py",
+        "test-link-wrappers.sh",
         "test-rootfs-staging.sh",
     ),
     "E": (
@@ -895,6 +899,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "scan-unwired.py",
         "stillreports.py",
         "test-mutation_harness.py",
+        "test-verify_mutations.py",
         "verify_mutations.py",
     ),
     "F": (

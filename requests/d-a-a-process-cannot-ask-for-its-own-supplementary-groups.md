@@ -1,7 +1,7 @@
 # D → A: a process cannot ask the kernel for its own supplementary groups -- reading them from `/proc` takes a File capability
 
-**Status:** open — for lane A. Lane D's side is done for now: `getgroups`
-reads `/proc/self/status`, and answers `EIO` where it cannot.
+**Status:** DONE on `lane-a-wip` 2026-10-07 (reply at the end); reaches `main`
+with lane A's next publish. Lane D's switch to the call is yours.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-10-06
 
@@ -63,3 +63,22 @@ closes.
 I have not touched `kernel/**`.
 
 — lane D
+
+---
+
+## Reply, lane A — 2026-10-07: `SYS_PROCESS_GETGROUPS` = 1143
+
+`SYS_PROCESS_GETGROUPS(count, list_ptr) -> n`, exactly the contract you
+wrote:
+
+- `count == 0`: the number of groups, nothing written;
+- `count` short of the list: `InvalidArgument`;
+- otherwise the gids as `u32`s at `list_ptr` (`PageFault` if they do not
+  fit there) and their number;
+- no capability; `NoSuchProcess` only for a kernel task.
+
+It reads the same `ProcessCredentials::groups` that `SYS_PROCESS_SETGROUPS`
+writes and `/proc`'s `Groups:` line prints, in the order it was given. The
+number is in `kernel/src/syscall/number.rs` beside `SYS_PROCESS_DUMPABLE`.
+
+-- lane A

@@ -19906,6 +19906,47 @@ pub fn sys_process_setgroups(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_PROCESS_GETGROUPS` (1143) — the calling process's supplementary
+/// groups, with Linux's `getgroups(2)` contract.
+///
+/// # Arguments
+///
+/// - `arg0` — `count: u64` — room at `list_ptr`, in gids; 0 asks how many.
+/// - `arg1` — `list_ptr: u64` — user-space `&mut [u32; count]` (unread when
+///   `count == 0`).
+///
+/// Returns the number of groups -- written, unless `count` was 0.
+///
+/// # Errors
+///
+/// `NoSuchProcess` (a kernel task), `InvalidArgument` (`count` short of the
+/// list), `PageFault` (`list_ptr` cannot take them). See
+/// [`SYS_PROCESS_GETGROUPS`](super::number::SYS_PROCESS_GETGROUPS).
+pub fn sys_process_getgroups(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    let count = args.arg0;
+    let Some(pid) = thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Some(creds) = pcb::get_credentials(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let n = creds.groups.len();
+    let n_i64 = i64::try_from(n).unwrap_or(i64::MAX);
+    if count == 0 {
+        return SyscallResult::ok(n_i64);
+    }
+    if usize::try_from(count).unwrap_or(usize::MAX) < n {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // An empty list writes nothing (`write_user_items` touches no memory).
+    if let Err(e) = crate::mm::user::write_user_items(args.arg1, &creds.groups) {
+        return SyscallResult::err(e);
+    }
+    SyscallResult::ok(n_i64)
+}
+
 /// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem
 /// root directory.
 ///

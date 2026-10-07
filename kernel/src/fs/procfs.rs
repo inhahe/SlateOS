@@ -2658,14 +2658,41 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let _ = writeln!(s, "nonvoluntary_ctxt_switches:\t{}", task.nivcsw);
 
     // `Name:` first, as Linux orders it, with the comm copied as bytes so a
-    // non-UTF-8 name survives instead of collapsing to a shared `???`.
-    let mut out =
-        alloc::vec::Vec::with_capacity(s.len().saturating_add(name.len()).saturating_add(8));
+    // non-UTF-8 name survives instead of collapsing to a shared `???` --
+    // escaped, though, as `push_status_name` says.
+    let mut out = alloc::vec::Vec::with_capacity(
+        s.len()
+            .saturating_add(name.len().saturating_mul(2))
+            .saturating_add(8),
+    );
     out.extend_from_slice(b"Name:\t");
-    out.extend_from_slice(name);
+    push_status_name(&mut out, name);
     out.push(b'\n');
     out.extend_from_slice(s.as_bytes());
     out
+}
+
+/// Append a task's name to `out` as Linux writes it on `/proc/<pid>/status`'s
+/// `Name:` line: `proc_task_name(.., escape = true)`, which is
+/// `seq_escape_str(.., ESCAPE_SPACE | ESCAPE_SPECIAL, "\n\\")` -- a newline as
+/// the two characters `\n`, a backslash as `\\`, every other byte as it is.
+///
+/// A task chooses its own name (`prctl(PR_SET_NAME)`, or its program file's
+/// name), and a raw newline in it would start a line of its own: a name of
+/// `a\nGroups:\t0` wrote a `Groups:` line ahead of the real one, which every
+/// parser that takes the first match -- `ps`, `htop` -- believed
+/// (requests/d-a-proc-status-writes-the-name-raw-so-a-newline-in-it-forges-lines.md).
+/// Escaping the backslash too keeps the escaping reversible. Only `status`
+/// escapes, as on Linux: `comm` is the name alone, and `stat` brackets it in
+/// parentheses that parsers find by the last `)`.
+fn push_status_name(out: &mut Vec<u8>, name: &[u8]) {
+    for &b in name {
+        match b {
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            _ => out.push(b),
+        }
+    }
 }
 
 /// `/proc/<pid>/cmdline` — full command line, Linux-exact format.
@@ -16765,6 +16792,36 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[procfs]   build_pid_status: Name truncated to 15 bytes OK");
+
+        // A name with a newline cannot forge a line: `a\nGroups:\t0` is
+        // written `a\\nGroups:\t0`, so `status` holds exactly one line that
+        // starts `Groups:` (the kernel's), and a backslash is doubled.
+        let forged = b"a\nGroups:\t0\\";
+        let mut fname = [0u8; 32];
+        for (to, from) in fname.iter_mut().zip(forged.iter()) {
+            *to = *from;
+        }
+        let forger = crate::sched::TaskInfo {
+            name: fname,
+            name_len: forged.len(),
+            ..synth.clone()
+        };
+        let fdata = build_pid_status(&forger, 999_999);
+        let ftext = core::str::from_utf8(&fdata).unwrap_or("");
+        let groups_lines = ftext.lines().filter(|l| l.starts_with("Groups:")).count();
+        let fline = ftext.lines().next().unwrap_or("");
+        if groups_lines != 1 || fline != "Name:\ta\\nGroups:\t0\\\\" {
+            serial_println!(
+                "[procfs]   FAIL: status of a task named {:?}: first line {:?}, {} Groups: line(s)",
+                core::str::from_utf8(forged).unwrap_or(""),
+                fline,
+                groups_lines
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!(
+            "[procfs]   build_pid_status: a newline or backslash in the name is escaped OK"
+        );
 
         // NoNewPrivs and Seccomp must be present (Linux always prints them) and,
         // for this synthetic proc_id with no PCB / no installed filter, both

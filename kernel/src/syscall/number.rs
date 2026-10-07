@@ -6669,6 +6669,18 @@ pub const DUMPABLE_GET: u64 = 0;
 /// [`SYS_PROCESS_DUMPABLE`] operation: set the flag.
 pub const DUMPABLE_SET: u64 = 1;
 
+/// `SYS_PROCESS_GETGROUPS(count, list_ptr) -> n` -- the calling process's
+/// supplementary groups, as [`SYS_PROCESS_SETGROUPS`] stored them, with
+/// Linux's `getgroups(2)` contract: `count == 0` answers how many and writes
+/// nothing; a `count` short of that is `InvalidArgument`; otherwise the gids
+/// go to `list_ptr` as `u32`s (`PageFault` if it faults) and their number is
+/// the answer. No capability: a process's own credentials are no secret from
+/// it, as [`SYS_PROCESS_GET_CREDENTIALS`] needs none. Until 2026-10-07 the C
+/// library read them off `/proc/self/status`, which takes a File capability
+/// and a `/proc` in the process's root
+/// (requests/d-a-a-process-cannot-ask-for-its-own-supplementary-groups.md).
+pub const SYS_PROCESS_GETGROUPS: u64 = 1143;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

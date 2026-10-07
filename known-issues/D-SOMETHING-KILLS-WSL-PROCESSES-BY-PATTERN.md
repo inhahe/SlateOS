@@ -35,9 +35,35 @@ kill above sat on a boot boundary, and lane D's pipeline keeps its `wsl.exe`
 attached for the whole step. `instanceIdleTimeout=-1` in `.wslconfig` would
 end that kind; it is the operator's file.
 
+**2026-10-07, again -- three workloads in one second.** At 16:03:49 the
+same SIGTERM ended, in one second: lane D's cross GCC build (`make
+all-target-libstdc++-v3`, inside libstdc++'s `configure`, exit 143), lane
+D's round-200 pipeline's CMake build (`gmake ... Terminated`; its retry ran
+it again), and `ratemyidea.service`'s gunicorn, which systemd restarted
+four seconds later. The bash scripts running those builds -- `cross.sh`,
+`cmake-spike/run.sh`, and the runner above them -- were *not* killed: the
+sender picks processes by what they are, not by user or session, and not
+with `kill -1`. WSL had been up since 14:32 (`/proc/uptime`), 30 GB of 32
+were free with swap untouched, and no out-of-memory daemon runs (earlyoom,
+systemd-oomd, nohang: all inactive), so it is neither a shutdown nor memory
+pressure. The journal shows the web services stopped the same way at 14:19,
+14:20, 14:22, 14:23 (WSL restarted after those), 15:21:50 (`stereogram` and
+`ratemyidea` together) and 16:03:49. No systemd timer or crontab entry
+matches those times.
+
 **What would close it:** finding the sender -- most likely a session or
 script that cleans up "its" WSL processes with `pkill -f <pattern>` or
 similar, which the operator's rules forbid ("kill only the exact process you
-started, by PID"). Until then, a long WSL step should survive one kill:
-lane D's pipeline script (`build/pipeline.sh`, local and not in the
-tree) runs the CMake step a second time when the first dies.
+started, by PID"). The way to name it is the kernel's own record of every
+SIGTERM sent, which needs root in WSL (`sudo` asks for a password, so it is
+the operator's step): `sudo apt install auditd`, then `sudo auditctl -a
+always,exit -F arch=b64 -S kill,tkill,tgkill -F a1=15 -k sigterm`; after the
+next occurrence, `sudo ausearch -k sigterm -i` gives the sending process,
+its parent and its command line.
+
+**Meanwhile, every long WSL step survives one kill:** lane D's pipeline
+script (`build/pipeline.sh`, local and not in the tree) runs the CMake step
+a second time when the first dies, and since 2026-10-07 the GCC spike runs
+each `make` through `slate_resume_once_if_killed` (`scripts/lib/worktree.sh`),
+which runs it again once after an outside SIGTERM -- make deletes a target a
+fatal signal interrupted, so the second run redoes only what was lost.

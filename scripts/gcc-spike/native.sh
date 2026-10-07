@@ -90,11 +90,11 @@ export CC_FOR_BUILD=gcc CXX_FOR_BUILD=g++
 echo "CONFIGURE_EXIT=$?"
 tail -5 conf.log
 
-make -j"$JOBS" all-gcc >make-gcc.log 2>&1
+slate_resume_once_if_killed make-gcc.log make -j"$JOBS" all-gcc
 echo "GCC_MAKE_EXIT=$?"
-make -j"$JOBS" all-target-libgcc >make-libgcc.log 2>&1
+slate_resume_once_if_killed make-libgcc.log make -j"$JOBS" all-target-libgcc
 echo "LIBGCC_MAKE_EXIT=$?"
-make -j"$JOBS" all-target-libstdc++-v3 >make-libstdcxx.log 2>&1
+slate_resume_once_if_killed make-libstdcxx.log make -j"$JOBS" all-target-libstdc++-v3
 echo "LIBSTDCXX_MAKE_EXIT=$?"
 for log in make-gcc make-libgcc make-libstdcxx; do
     grep -E ' error: |Error [0-9]' "$log.log" | head -10

@@ -127,9 +127,9 @@ mkdir build-binutils && cd build-binutils || exit 1
     --disable-gprofng --without-debuginfod --without-zstd --without-msgpack \
     --enable-deterministic-archives >conf.log 2>&1
 echo "BINUTILS_CONFIGURE_EXIT=$?"
-make -j"$JOBS" all-binutils all-gas all-ld >make.log 2>&1
+slate_resume_once_if_killed make.log make -j"$JOBS" all-binutils all-gas all-ld
 echo "BINUTILS_MAKE_EXIT=$?"
-make install-binutils install-gas install-ld >install.log 2>&1
+slate_resume_once_if_killed install.log make install-binutils install-gas install-ld
 echo "BINUTILS_INSTALL_EXIT=$?"
 cd "$WORK" || exit 1
 if [ ! -x "$PREFIX/bin/$TARGET-as" ] || [ ! -x "$PREFIX/bin/$TARGET-ld" ]; then
@@ -160,17 +160,17 @@ mkdir build-gcc && cd build-gcc || exit 1
     --disable-libquadmath --disable-libssp --disable-libvtv --disable-libatomic \
     >conf.log 2>&1
 echo "GCC_CONFIGURE_EXIT=$?"
-make -j"$JOBS" all-gcc >make-gcc.log 2>&1
+slate_resume_once_if_killed make-gcc.log make -j"$JOBS" all-gcc
 echo "GCC_MAKE_EXIT=$?"
-make install-gcc >install-gcc.log 2>&1
+slate_resume_once_if_killed install-gcc.log make install-gcc
 echo "GCC_INSTALL_EXIT=$?"
-make -j"$JOBS" all-target-libgcc >make-libgcc.log 2>&1
+slate_resume_once_if_killed make-libgcc.log make -j"$JOBS" all-target-libgcc
 echo "LIBGCC_MAKE_EXIT=$?"
-make install-target-libgcc >install-libgcc.log 2>&1
+slate_resume_once_if_killed install-libgcc.log make install-target-libgcc
 echo "LIBGCC_INSTALL_EXIT=$?"
-make -j"$JOBS" all-target-libstdc++-v3 >make-libstdcxx.log 2>&1
+slate_resume_once_if_killed make-libstdcxx.log make -j"$JOBS" all-target-libstdc++-v3
 echo "LIBSTDCXX_MAKE_EXIT=$?"
-make install-target-libstdc++-v3 >install-libstdcxx.log 2>&1
+slate_resume_once_if_killed install-libstdcxx.log make install-target-libstdc++-v3
 echo "LIBSTDCXX_INSTALL_EXIT=$?"
 cd "$WORK" || exit 1
 

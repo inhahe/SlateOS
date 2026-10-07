@@ -703,6 +703,29 @@ fn parse_hex_color(s: &str) -> Option<Color> {
     Color::from_hex_text(&format!("#{s}"))
 }
 
+/// A step of a series repeating `recurrence` from `anchor_start` that is at
+/// or before the first whose occurrence begins after `from` -- the first that
+/// can still end inside a range, `from` being the range's start less the
+/// event's length.
+///
+/// With `q` whole days from the anchor to `from`, the occurrence `k` steps on
+/// begins at most `k` periods of days after the anchor -- a month counted as
+/// 31 days and a year as 366, the most either can be -- so one whose `k`
+/// periods are `q` days or fewer begins at or before `from` and ends by the
+/// range's start. The first that can reach the range is past `q` days, which
+/// is a step past the one returned. A day is a day of these timestamps,
+/// which count wall-clock seconds.
+fn first_step(recurrence: Recurrence, anchor_start: u64, from: u64) -> i32 {
+    let days = from.saturating_sub(anchor_start) / SECS_PER_DAY;
+    let steps = match recurrence {
+        Recurrence::Daily => days,
+        Recurrence::Weekly => days / 7,
+        Recurrence::Monthly => days / 31,
+        Recurrence::Yearly => days / 366,
+    };
+    i32::try_from(steps).unwrap_or(i32::MAX)
+}
+
 /// Expand recurring event occurrences within a time range.
 ///
 /// Generates synthetic `CalendarEvent` copies with adjusted timestamps
@@ -723,9 +746,6 @@ fn expand_recurrence(
 
     let mut results = Vec::new();
 
-    // Walk forward from the event's original date, generating occurrences.
-    // Limit to a reasonable window to avoid infinite loops.
-    let max_iterations = 1000;
     // Every occurrence is a fixed step from the *original* date, not from the
     // one before it. That distinction is the whole reason the old walk needed
     // an unclamped `day` carried alongside a `clamped_day`: stepping
@@ -735,7 +755,19 @@ fn expand_recurrence(
     // without the series ever losing the day it was anchored on.
     let anchor = Date::from_ymd(orig_year, orig_month, orig_day);
 
-    for step in 0..max_iterations {
+    // Walked from the first step that can still reach the range -- no
+    // earlier one ends inside it -- and for at most `max_iterations` steps
+    // past it, against a series whose `repeat` names no end. Walked from the
+    // anchor, the bound cut a daily series off 1,000 days in, and every
+    // lookup paid for the series' whole life to reach its one day.
+    let max_iterations = 1000;
+    let first = first_step(
+        recurrence,
+        event.start_timestamp,
+        range_start.saturating_sub(duration),
+    );
+
+    for step in first..first.saturating_add(max_iterations) {
         let occurrence = match recurrence {
             Recurrence::Daily => anchor.add_days(step),
             // `saturating_mul`: `step` is bounded by `max_iterations`, but the
@@ -3586,6 +3618,107 @@ mod tests {
         // And the day cell that occurrence *does* belong to still shows it,
         // so the guard cannot be satisfied by dropping the occurrence entirely.
         assert_eq!(store.events_for_date(2024, 6, 6).len(), 1);
+    }
+
+    /// **A series older than a thousand steps is still found.** The walk ran
+    /// from the series' first date and stopped after 1,000 occurrences, so a
+    /// daily event begun 1,000 days before the day asked about -- under three
+    /// years -- had vanished from every day after; and each lookup walked the
+    /// whole life of the series to reach its day, 42 times over for a month
+    /// drawn. Each kind, anchored well past a thousand of its steps back, is
+    /// found once on the day it falls on, not on the day before, and with
+    /// the time of day it was set for. An occurrence that began the day
+    /// before and runs into the day asked about is found there too.
+    #[test]
+    fn a_series_older_than_a_thousand_steps_is_still_found() {
+        let at = |y, m, d, h| date_to_timestamp(y, m, d, h, 0, 0).expect("valid");
+        // Timestamps begin in 1970, so a monthly or yearly series a thousand
+        // steps old is asked about in the future.
+        for (repeat, anchored, asked, missed) in [
+            (
+                Recurrence::Daily,
+                (2018, 3, 1),
+                (2024, 6, 12),
+                (2024, 6, 11),
+            ),
+            // Both Wednesdays.
+            (
+                Recurrence::Weekly,
+                (1980, 1, 2),
+                (2024, 6, 12),
+                (2024, 6, 11),
+            ),
+            (
+                Recurrence::Monthly,
+                (1970, 1, 12),
+                (2060, 6, 12),
+                (2060, 6, 11),
+            ),
+            // Long enough that its leap days, counted as ordinary years,
+            // would have entered it a year late.
+            (
+                Recurrence::Yearly,
+                (1970, 6, 12),
+                (3600, 6, 12),
+                (3600, 6, 11),
+            ),
+        ] {
+            let mut store = EventStore::new();
+            let start = at(anchored.0, anchored.1, anchored.2, 9);
+            add(
+                &mut store,
+                CalendarEvent {
+                    id: 0,
+                    title: format!("{repeat:?}"),
+                    start_timestamp: start,
+                    end_timestamp: start + 1800,
+                    all_day: false,
+                    repeat: Some(repeat),
+                    color: None,
+                    description: String::new(),
+                },
+            );
+            let found = store.events_for_date(asked.0, asked.1, asked.2);
+            assert_eq!(found.len(), 1, "{repeat:?} on its day");
+            assert_eq!(
+                found[0].start_timestamp,
+                at(asked.0, asked.1, asked.2, 9),
+                "{repeat:?} at its hour"
+            );
+            // A daily series is on the day before as well, of course.
+            assert!(
+                repeat == Recurrence::Daily
+                    || store
+                        .events_for_date(missed.0, missed.1, missed.2)
+                        .is_empty(),
+                "{repeat:?} not on the day before"
+            );
+        }
+
+        // Sixty hours long, every day: each day holds its own occurrence and
+        // the ends of the two before -- the one begun two days earlier still
+        // running at nine in the evening.
+        let mut store = EventStore::new();
+        let start = at(2018, 3, 1, 9);
+        add(
+            &mut store,
+            CalendarEvent {
+                id: 0,
+                title: "Long".to_string(),
+                start_timestamp: start,
+                end_timestamp: start + 60 * 3600,
+                all_day: false,
+                repeat: Some(Recurrence::Daily),
+                color: None,
+                description: String::new(),
+            },
+        );
+        let found = store.events_for_date(2024, 6, 12);
+        let starts: Vec<u64> = found.iter().map(|e| e.start_timestamp).collect();
+        assert_eq!(
+            starts,
+            [at(2024, 6, 10, 9), at(2024, 6, 11, 9), at(2024, 6, 12, 9)]
+        );
     }
 
     /// The sort at the end of `events_for_range` had no test at all: every

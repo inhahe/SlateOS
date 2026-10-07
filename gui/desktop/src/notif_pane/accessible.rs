@@ -6,7 +6,10 @@
 //! cannot be used, and the volume and the brightness, each a slider from 0 to
 //! 100 -- and below them the notifications, newest first: each card named by
 //! its title and said to be from its program, when, whether it is unread,
-//! and what it says, holding the cross that dismisses it. While the
+//! and what it says, holding the cross that dismisses it. Grouped by
+//! program, each program's cards are held by its group, named by the
+//! program and said how many it has, with the cross on its heading that
+//! clears them and the row that shows the rest or puts them away. While the
 //! programs' switches show in the notifications' place, each program's card
 //! instead, named by the program and said to be how important it is and how
 //! it is shown, holding its switch; and below them the way to Settings.
@@ -24,8 +27,9 @@ use guitk::widget::automation::{Node, Role, Value};
 use notifsettings::Importance;
 
 use super::{
-    APP_CARD_HEIGHT, FULL_SETTINGS_LABEL, HeaderLink, NOTIF_CARD_HEIGHT, NotificationPane,
-    PANE_PADDING, PANE_WIDTH, QUICK_SETTINGS_HEIGHT, QuickSetting,
+    APP_CARD_HEIGHT, FULL_SETTINGS_LABEL, HeaderLink, MORE_ROW_HEIGHT, NOTIF_CARD_HEIGHT,
+    Notification, NotificationPane, PANE_PADDING, PANE_WIDTH, PROGRAM_HEADER_HEIGHT,
+    QUICK_SETTINGS_HEIGHT, QuickSetting, RowKind, more_label,
 };
 
 /// A part of the notification pane, as tools name it.
@@ -55,6 +59,16 @@ pub enum PanePart {
     Card(u64),
     /// The cross that dismisses the notification with this id.
     Dismiss(u64),
+    /// Grouped by program, the `n`th program's notifications, in the order
+    /// drawn -- the program heard from last first: its heading, holding its
+    /// cards.
+    Group(usize),
+    /// The cross on the `n`th program's heading: every notification from it
+    /// gone.
+    GroupClear(usize),
+    /// Under the `n`th program's newest cards: "Show N more", or "Show
+    /// fewer".
+    GroupMore(usize),
     /// The programs that have sent notifications, each with its switch.
     Programs,
     /// The card of the `n`th program in the list.
@@ -158,6 +172,23 @@ impl NotificationPane {
                 let top = self.card_top_of(id)?;
                 Some(Self::dismiss_rect(self.list_origin() + top))
             }
+            PanePart::Group(n) => {
+                let (top, bottom) = self.group_span(n)?;
+                Some(Rect::new(
+                    PANE_PADDING,
+                    self.list_origin() + top,
+                    Self::card_width(),
+                    bottom - top,
+                ))
+            }
+            PanePart::GroupClear(n) => {
+                let (top, _) = self.group_span(n)?;
+                Some(Self::program_clear_rect(self.list_origin() + top))
+            }
+            PanePart::GroupMore(n) => {
+                let top = self.group_more_top(n)?;
+                Some(Self::more_rect(self.list_origin() + top))
+            }
             PanePart::Program(index) => {
                 self.programs_index(index)?;
                 Some(Rect::new(
@@ -191,7 +222,46 @@ impl NotificationPane {
             return None;
         }
         let index = self.notifications.iter().position(|n| n.id == id)?;
-        self.card_tops().get(index).copied()
+        self.card_top(index)
+    }
+
+    /// The rows of the `n`th program's group, grouped by program: where its
+    /// heading begins and where its last row ends, in the list before
+    /// scrolling -- `None` where there is no `n`th program, the list is
+    /// grouped by time, or the programs show in its place.
+    fn group_span(&self, n: usize) -> Option<(f32, f32)> {
+        if self.show_settings {
+            return None;
+        }
+        let rows = self.rows();
+        let start = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row.kind, RowKind::Program { .. }))
+            .nth(n)
+            .map(|(at, _)| at)?;
+        let heading = rows.get(start)?;
+        // Its rows run to the next program's heading, or the list's end.
+        let last = rows
+            .iter()
+            .skip(start.saturating_add(1))
+            .take_while(|row| !matches!(row.kind, RowKind::Program { .. }))
+            .last()
+            .unwrap_or(heading);
+        Some((heading.top, last.top + last.kind.drawn_height()))
+    }
+
+    /// Where the "more" row under the `n`th program's newest cards begins,
+    /// before scrolling -- `None` for a program with none: no more than its
+    /// newest few.
+    fn group_more_top(&self, n: usize) -> Option<f32> {
+        let (top, bottom) = self.group_span(n)?;
+        self.rows()
+            .into_iter()
+            .find(|row| {
+                matches!(row.kind, RowKind::More { .. }) && row.top >= top && row.top < bottom
+            })
+            .map(|row| row.top)
     }
 
     /// `index`, where the programs show and there is a program there.
@@ -221,6 +291,9 @@ impl NotificationPane {
             part,
             PanePart::Card(_)
                 | PanePart::Dismiss(_)
+                | PanePart::Group(_)
+                | PanePart::GroupClear(_)
+                | PanePart::GroupMore(_)
                 | PanePart::Program(_)
                 | PanePart::ProgramSwitch(_)
                 | PanePart::FullSettings
@@ -242,6 +315,14 @@ impl NotificationPane {
             PanePart::Card(id) | PanePart::Dismiss(id) => self
                 .card_top_of(id)
                 .map(|top| (top, top + NOTIF_CARD_HEIGHT)),
+            // A group's heading, where its cross is: a press on the group
+            // is a press there.
+            PanePart::Group(n) | PanePart::GroupClear(n) => self
+                .group_span(n)
+                .map(|(top, _)| (top, top + PROGRAM_HEADER_HEIGHT)),
+            PanePart::GroupMore(n) => self
+                .group_more_top(n)
+                .map(|top| (top, top + MORE_ROW_HEIGHT)),
             PanePart::Program(index) | PanePart::ProgramSwitch(index) => {
                 self.programs_index(index).map(|index| {
                     let top = Self::app_card_top(index);
@@ -338,7 +419,12 @@ impl NotificationPane {
         block
     }
 
-    /// The notifications, newest first, each with its cross.
+    /// The notifications, as they are grouped. By time, each card in the
+    /// list, newest first. By program, each program's group -- the program
+    /// heard from last first -- named by the program and said how many it
+    /// has, holding the cross that clears them, its cards shown, and "Show N
+    /// more" or "Show fewer" where it has more than its newest few; a card
+    /// put away under them is not on the screen to be seen.
     fn notifications_node(&self, place: &impl Fn(PanePart) -> Rect) -> Node<PanePart> {
         let mut list = Node::new(
             PanePart::Notifications,
@@ -346,33 +432,89 @@ impl NotificationPane {
             "Notifications",
             place(PanePart::Notifications),
         );
-        for notif in &self.notifications {
-            let part = PanePart::Card(notif.id);
-            let name = if notif.title.is_empty() {
-                notif.app_name.clone()
-            } else {
-                notif.title.clone()
-            };
-            let mut card = Node::new(part, Role::ListItem, name, place(part));
-            let mut said = vec![
-                notif.app_name.clone(),
-                self.format_relative_time(notif.timestamp),
-            ];
-            if !notif.read {
-                said.push("unread".to_owned());
+        let mut group: Option<Node<PanePart>> = None;
+        let mut n = 0_usize;
+        for row in self.rows() {
+            match row.kind {
+                RowKind::Section(_) => {}
+                RowKind::Card(idx) => {
+                    let Some(notif) = self.notifications.get(idx) else {
+                        continue;
+                    };
+                    let card = self.card_node(notif, place);
+                    match group.as_mut() {
+                        Some(holder) => holder.children.push(card),
+                        None => list.children.push(card),
+                    }
+                }
+                RowKind::Program { app, count } => {
+                    if let Some(done) = group.take() {
+                        list.children.push(done);
+                    }
+                    let part = PanePart::Group(n);
+                    let mut heading = Node::new(part, Role::Group, app.clone(), place(part));
+                    heading.description = Some(if count == 1 {
+                        "1 notification".to_owned()
+                    } else {
+                        format!("{count} notifications")
+                    });
+                    let clear = PanePart::GroupClear(n);
+                    heading.children.push(Node::new(
+                        clear,
+                        Role::Button,
+                        format!("Clear notifications from {app}"),
+                        place(clear),
+                    ));
+                    group = Some(heading);
+                    n = n.saturating_add(1);
+                }
+                RowKind::More { hidden, .. } => {
+                    if let Some(holder) = group.as_mut() {
+                        let more = PanePart::GroupMore(n.saturating_sub(1));
+                        holder.children.push(Node::new(
+                            more,
+                            Role::Button,
+                            more_label(hidden),
+                            place(more),
+                        ));
+                    }
+                }
             }
-            let mut description = said.join(", ");
-            if !notif.body.is_empty() {
-                description.push_str(". ");
-                description.push_str(&notif.body);
-            }
-            card.description = Some(description);
-            let cross = PanePart::Dismiss(notif.id);
-            card.children
-                .push(Node::new(cross, Role::Button, "Dismiss", place(cross)));
-            list.children.push(card);
+        }
+        if let Some(done) = group {
+            list.children.push(done);
         }
         list
+    }
+
+    /// A notification's card, named by its title and said to be from its
+    /// program, when, whether it is unread, and what it says, holding the
+    /// cross that dismisses it.
+    fn card_node(&self, notif: &Notification, place: &impl Fn(PanePart) -> Rect) -> Node<PanePart> {
+        let part = PanePart::Card(notif.id);
+        let name = if notif.title.is_empty() {
+            notif.app_name.clone()
+        } else {
+            notif.title.clone()
+        };
+        let mut card = Node::new(part, Role::ListItem, name, place(part));
+        let mut said = vec![
+            notif.app_name.clone(),
+            self.format_relative_time(notif.timestamp),
+        ];
+        if !notif.read {
+            said.push("unread".to_owned());
+        }
+        let mut description = said.join(", ");
+        if !notif.body.is_empty() {
+            description.push_str(". ");
+            description.push_str(&notif.body);
+        }
+        card.description = Some(description);
+        let cross = PanePart::Dismiss(notif.id);
+        card.children
+            .push(Node::new(cross, Role::Button, "Dismiss", place(cross)));
+        card
     }
 
     /// The programs, each with its switch, and the way to Settings.

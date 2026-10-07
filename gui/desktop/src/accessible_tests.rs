@@ -487,6 +487,52 @@ fn a_notification_is_opened_and_dismissed_as_the_pointer_would() {
     });
 }
 
+/// **A program's group in the pane is used through the shell as the user
+/// uses it** -- grouped by program, the default: "Show 2 more" brings its
+/// older notifications into the list, its heading's cross clears them all,
+/// and the group itself is not a thing to press.
+#[test]
+fn a_programs_group_in_the_pane_is_used_as_the_user_uses_it() {
+    appearance::config::testing::with_scratch_config("acc-pane-groups", |_root| {
+        let mut shell = shell();
+        let mail: Vec<u64> = (0..5)
+            .map(|i| shell.notify(notif("Mail", &format!("M{i}"))))
+            .collect();
+        let chat = shell.notify(notif("Chat", "Lunch?"));
+        shell.toggle_notifications();
+        let group = node(&shell, ShellPart::Pane(PanePart::Group(1)));
+        assert_eq!((group.role, group.name.as_str()), (Role::Group, "Mail"));
+        assert_eq!(
+            press(&mut shell, ShellPart::Pane(PanePart::Group(1))),
+            Err(Refusal::NotApplicable {
+                role: Role::Group,
+                action: "press"
+            })
+        );
+        let oldest = ShellPart::Pane(PanePart::Card(mail[0]));
+        assert!(
+            tree(&shell).walk().all(|n| n.id != oldest),
+            "put away, seen"
+        );
+        assert_eq!(
+            press(&mut shell, ShellPart::Pane(PanePart::GroupMore(1))),
+            Ok(None)
+        );
+        assert_eq!(node(&shell, oldest).role, Role::ListItem);
+        assert_eq!(
+            press(&mut shell, ShellPart::Pane(PanePart::GroupClear(1))),
+            Ok(None)
+        );
+        let kept: Vec<u64> = shell
+            .notifications
+            .notifications()
+            .iter()
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(kept, [chat], "Mail's were not all cleared");
+    });
+}
+
 /// **The pane's levels are set as their sliders set them, its switches
 /// flip as a click flips them, and one with nothing behind it is out of
 /// use.**

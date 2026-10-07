@@ -19254,6 +19254,34 @@ DEFECTS = [
         ],
     ),
     (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a program's heading in the notification pane is named in Mocha's own text",
+        NOTIF_PANE,
+        [
+            ('            text: app.to_string(),\n            color: p.text,\n',
+             '            text: app.to_string(),\n            color: guitk::color::Color::from_hex(0xCDD6F4),\n'),
+        ],
+        ["desktop"],
+        [
+            'a_programs_heading_is_drawn_where_it_is_pressed',
+            # Its fixture, one notification from Mail, is grouped by
+            # program: a heading.
+            'every_colour_the_pane_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: \"Show N more\" in the notification pane is Mocha's own blue",
+        NOTIF_PANE,
+        [
+            ('                        text: more_label(*hidden),\n                        color: p.ink(p.accent),\n',
+             '                        text: more_label(*hidden),\n                        color: guitk::color::Color::from_hex(0x89B4FA),\n'),
+        ],
+        ["desktop"],
+        [
+            # The sweep's fixtures have one notification each: no "more" row.
+            'a_programs_heading_is_drawn_where_it_is_pressed',
+        ],
+    ),
+    (
         "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the action list's other entries are named in Mocha's own subtext1",
         SHORTCUT_ED,
         [

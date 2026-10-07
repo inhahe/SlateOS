@@ -1473,7 +1473,9 @@ impl DesktopShell {
                 | PanePart::Back
                 | PanePart::FullSettings
                 | PanePart::Card(_)
-                | PanePart::Dismiss(_),
+                | PanePart::Dismiss(_)
+                | PanePart::GroupClear(_)
+                | PanePart::GroupMore(_),
                 Action::Press,
             ) => None,
             _ => {

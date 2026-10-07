@@ -1,8 +1,15 @@
 //! Notification Pane — Action Center style slide-out panel.
 //!
-//! Slides in from the right edge of the screen, showing notification history
-//! grouped by time (Today, Yesterday, This Week, Older), quick settings toggles,
-//! and per-app notification configuration.
+//! Slides in from the right edge of the screen, showing notification history,
+//! quick settings toggles, and per-app notification configuration.
+//!
+//! The history is grouped as the user chooses (`notifsettings::Grouping`).
+//! By program, the default -- as Windows' pane, which `design.txt` points at,
+//! has it: each program's notifications under its name, the program heard
+//! from last first, its newest three shown and "Show N more" for the rest,
+//! with a cross on its heading that clears them all. By time: under Today,
+//! Yesterday, This Week and Older. Where each row is drawn and pressed is one
+//! walk (`NotificationPane::rows`).
 //!
 //! # Where the caller puts it
 //!
@@ -63,7 +70,7 @@ use guitk::slider::{Look, Placement, Response, Slider};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
-use notifsettings::Importance;
+use notifsettings::{Grouping, Importance};
 
 mod accessible;
 pub use accessible::PanePart;
@@ -155,6 +162,18 @@ const HEADER_HEIGHT: f32 = 44.0;
 
 /// Height of a time-group header ("Today", "Yesterday", etc.).
 const GROUP_HEADER_HEIGHT: f32 = 28.0;
+
+/// How many of a program's notifications show under its heading before the
+/// rest are asked for, grouped by program: its newest.
+const PROGRAM_SHOWN: usize = 3;
+
+/// Height of a program's heading, grouped by program: its name, how many
+/// notifications it has here, and the cross that clears them.
+const PROGRAM_HEADER_HEIGHT: f32 = 32.0;
+
+/// Height of the row under a program's newest cards that shows the rest of
+/// them, or puts them away again.
+const MORE_ROW_HEIGHT: f32 = 28.0;
 
 /// Height of the "Per-App Settings" caption above the first app card.
 const APP_HEADING_HEIGHT: f32 = 24.0;
@@ -278,6 +297,72 @@ impl TimeGroup {
         } else {
             Self::Older
         }
+    }
+}
+
+/// What a row of the notifications list is
+/// (`NotificationPane::rows`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowKind {
+    /// A time section's heading, grouped by time.
+    Section(TimeGroup),
+    /// A program's heading, grouped by program: its name, how many
+    /// notifications the pane has from it, and the cross that clears them.
+    Program {
+        /// The program.
+        app: String,
+        /// How many notifications the pane has from it, shown or not.
+        count: usize,
+    },
+    /// A notification's card, by its place among the notifications.
+    Card(usize),
+    /// Under a program's newest cards, where it has more: how many are not
+    /// shown, and a press shows them -- or, none hidden, puts all but the
+    /// newest away again.
+    More {
+        /// The program.
+        app: String,
+        /// How many of its notifications are not shown.
+        hidden: usize,
+    },
+}
+
+impl RowKind {
+    /// How far the next row starts below this one's top: a card's height
+    /// and the gap after it, a heading's or a "more" row's own height.
+    fn pitch(&self) -> f32 {
+        match self {
+            Self::Card(_) => NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING,
+            Self::Section(_) | Self::Program { .. } | Self::More { .. } => self.drawn_height(),
+        }
+    }
+
+    /// How tall what is drawn of this row is -- where a press on it lands.
+    fn drawn_height(&self) -> f32 {
+        match self {
+            Self::Section(_) => GROUP_HEADER_HEIGHT,
+            Self::Program { .. } => PROGRAM_HEADER_HEIGHT,
+            Self::Card(_) => NOTIF_CARD_HEIGHT,
+            Self::More { .. } => MORE_ROW_HEIGHT,
+        }
+    }
+}
+
+/// A row of the notifications list and its top, relative to the start of
+/// the list and before scrolling.
+#[derive(Clone, Debug, PartialEq)]
+struct Row {
+    kind: RowKind,
+    top: f32,
+}
+
+/// What the row under a program's newest cards says: how many more there
+/// are -- or, none hidden, that a press puts them away again.
+fn more_label(hidden: usize) -> String {
+    match hidden {
+        0 => "Show fewer".to_string(),
+        1 => "Show 1 more".to_string(),
+        n => format!("Show {n} more"),
     }
 }
 
@@ -727,6 +812,13 @@ pub struct NotificationPane {
     /// (`crate::notif_history`) can tell from a number whether there is
     /// anything new to write, without comparing the lists.
     revision: u64,
+    /// How the list is grouped: each program's together, or by when they
+    /// came -- the user's (`notifsettings::Grouping`).
+    grouping: Grouping,
+    /// The programs whose every notification shows, grouped by program,
+    /// rather than their newest [`PROGRAM_SHOWN`]: asked for with "Show N
+    /// more", until "Show fewer" or the pane closes.
+    expanded: Vec<String>,
 }
 
 impl NotificationPane {
@@ -750,7 +842,27 @@ impl NotificationPane {
             slide_from: 0.0,
             screen_height: DEFAULT_SCREEN_HEIGHT,
             revision: 0,
+            grouping: Grouping::default(),
+            expanded: Vec::new(),
         }
+    }
+
+    /// Group the list as `grouping` says from now on -- the user's
+    /// (`notifsettings::NotifSettings::grouping`). Every program's list goes
+    /// back to its newest few, and the list to its top.
+    pub fn set_grouping(&mut self, grouping: Grouping) {
+        if self.grouping != grouping {
+            self.grouping = grouping;
+            self.expanded.clear();
+            self.scroll_offset = 0.0;
+            self.hovered_notif = None;
+        }
+    }
+
+    /// How the list is grouped.
+    #[must_use]
+    pub fn grouping(&self) -> Grouping {
+        self.grouping
     }
 
     // ========================================================================
@@ -837,6 +949,9 @@ impl NotificationPane {
             self.state = PaneState::Hidden;
             self.events.push(NotifPaneEvent::Closed);
         }
+        // A program's whole list asked for is put away with the pane: opened
+        // again, each shows its newest few.
+        self.expanded.clear();
     }
 
     /// Toggle visibility, at once.
@@ -1707,27 +1822,91 @@ impl NotificationPane {
         )
     }
 
-    /// The top of each notification card, relative to the start of the list
-    /// and before scrolling, in the order the cards are drawn.
+    /// The rows of the notifications list, each with its top relative to the
+    /// start of the list and before scrolling, in the order they are drawn.
     ///
-    /// A card is not simply `idx * (height + spacing)`: a time-group header is
-    /// inserted wherever the group changes, so the offsets depend on the
-    /// timestamps. That is precisely the arithmetic the renderer and the two
-    /// hit tests each used to carry a copy of.
-    fn card_tops(&self) -> Vec<f32> {
-        let mut tops = Vec::with_capacity(self.notifications.len());
+    /// By time, a section's heading wherever the section changes and each
+    /// card under it. By program, each program's heading -- the program heard
+    /// from last first -- its newest [`PROGRAM_SHOWN`] cards, or all of them
+    /// where the user asked, and under them, where it has more, the row that
+    /// shows them or puts them away. A card is not simply `idx * (height +
+    /// spacing)`, so this is the one walk the renderer, the hit tests and
+    /// tools go by -- which is precisely the arithmetic each used to carry a
+    /// copy of.
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::with_capacity(self.notifications.len().saturating_mul(2));
         let mut y = 0.0_f32;
-        let mut current_group: Option<TimeGroup> = None;
-        for notif in &self.notifications {
-            let group = TimeGroup::classify(notif.timestamp, self.current_time);
-            if current_group != Some(group) {
-                current_group = Some(group);
-                y += GROUP_HEADER_HEIGHT;
+        let mut push = |kind: RowKind| {
+            let pitch = kind.pitch();
+            rows.push(Row { kind, top: y });
+            y += pitch;
+        };
+        match self.grouping {
+            Grouping::ByTime => {
+                let mut current_group: Option<TimeGroup> = None;
+                for (idx, notif) in self.notifications.iter().enumerate() {
+                    let group = TimeGroup::classify(notif.timestamp, self.current_time);
+                    if current_group != Some(group) {
+                        current_group = Some(group);
+                        push(RowKind::Section(group));
+                    }
+                    push(RowKind::Card(idx));
+                }
             }
-            tops.push(y);
-            y += NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING;
+            Grouping::ByProgram => {
+                for app in self.programs_heard() {
+                    let mine: Vec<usize> = self
+                        .notifications
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, n)| n.app_name == app)
+                        .map(|(idx, _)| idx)
+                        .collect();
+                    let open = self.expanded.contains(&app);
+                    let shown = if open {
+                        mine.len()
+                    } else {
+                        mine.len().min(PROGRAM_SHOWN)
+                    };
+                    push(RowKind::Program {
+                        app: app.clone(),
+                        count: mine.len(),
+                    });
+                    for &idx in mine.iter().take(shown) {
+                        push(RowKind::Card(idx));
+                    }
+                    if mine.len() > PROGRAM_SHOWN {
+                        push(RowKind::More {
+                            app,
+                            hidden: mine.len().saturating_sub(shown),
+                        });
+                    }
+                }
+            }
         }
-        tops
+        rows
+    }
+
+    /// The programs the pane has notifications from, the one heard from
+    /// last first: the order their newest notifications are in.
+    fn programs_heard(&self) -> Vec<String> {
+        let mut programs: Vec<String> = Vec::new();
+        for notif in &self.notifications {
+            if !programs.contains(&notif.app_name) {
+                programs.push(notif.app_name.clone());
+            }
+        }
+        programs
+    }
+
+    /// The top of notification `idx`'s card, relative to the start of the
+    /// list and before scrolling: `None` for one not drawn -- a program's
+    /// older notification, put away under its newest.
+    fn card_top(&self, idx: usize) -> Option<f32> {
+        self.rows()
+            .into_iter()
+            .find(|row| row.kind == RowKind::Card(idx))
+            .map(|row| row.top)
     }
 
     /// Total height of the list's contents: the notifications, headers
@@ -1737,24 +1916,84 @@ impl NotificationPane {
         if self.show_settings {
             return self.full_settings_rect().bottom();
         }
-        match self.card_tops().last() {
-            // The trailing spacing is not content: it would let the list scroll
-            // eight pixels past its own last card.
-            Some(&last) => last + NOTIF_CARD_HEIGHT,
-            None => 0.0,
+        // The trailing spacing under a card is not content: it would let the
+        // list scroll eight pixels past its own last card.
+        self.rows()
+            .last()
+            .map_or(0.0, |row| row.top + row.kind.drawn_height())
+    }
+
+    /// The row at `content_y`, measured from the start of the list with the
+    /// scroll offset already added back: `None` in the gap between two
+    /// cards, and past the last row.
+    fn row_at(&self, content_y: f32) -> Option<Row> {
+        self.rows()
+            .into_iter()
+            .find(|row| content_y >= row.top && content_y < row.top + row.kind.drawn_height())
+    }
+
+    /// The index of the card at `content_y`, measured from the start of the
+    /// list with the scroll offset already added back.
+    ///
+    /// `None` for a point in a heading, on a "more" row or in the gap between
+    /// two cards -- which is the honest answer, and the one the old walks
+    /// gave by falling out of their loops.
+    fn card_at(&self, content_y: f32) -> Option<usize> {
+        match self.row_at(content_y)?.kind {
+            RowKind::Card(idx) => Some(idx),
+            RowKind::Section(_) | RowKind::Program { .. } | RowKind::More { .. } => None,
         }
     }
 
-    /// The index of the card at `local_y`, measured from the start of the list
-    /// with the scroll offset already added back.
-    ///
-    /// `None` for a point in a group header or in the gap between two cards —
-    /// which is the honest answer, and the one the old walks gave by falling
-    /// out of their loops.
-    fn card_at(&self, content_y: f32) -> Option<usize> {
-        self.card_tops()
+    /// The cross on a program's heading at `top` that clears its
+    /// notifications: in the column the cards' crosses are in, across the
+    /// heading's middle.
+    fn program_clear_rect(top: f32) -> Rect {
+        Rect::new(
+            PANE_PADDING + Self::card_width() - DISMISS_BTN_SIZE - DISMISS_INSET,
+            top + (PROGRAM_HEADER_HEIGHT - DISMISS_BTN_SIZE) / 2.0,
+            DISMISS_BTN_SIZE,
+            DISMISS_BTN_SIZE,
+        )
+    }
+
+    /// The row at `top` under a program's newest cards, as a box a press is
+    /// taken in: the cards' width.
+    fn more_rect(top: f32) -> Rect {
+        Rect::new(PANE_PADDING, top, Self::card_width(), MORE_ROW_HEIGHT)
+    }
+
+    /// Every notification from `app` gone, as each card's cross takes its
+    /// own -- each said dismissed, so whoever keeps them on disk forgets
+    /// them too.
+    fn clear_program(&mut self, app: &str) {
+        let ids: Vec<u64> = self
+            .notifications
             .iter()
-            .position(|&top| content_y >= top && content_y < top + NOTIF_CARD_HEIGHT)
+            .filter(|n| n.app_name == app)
+            .map(|n| n.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.notifications.retain(|n| n.app_name != app);
+        self.expanded.retain(|a| a != app);
+        self.hovered_notif = None;
+        self.changed();
+        self.clamp_scroll();
+        self.events
+            .extend(ids.into_iter().map(NotifPaneEvent::NotificationDismissed));
+    }
+
+    /// Show all of `app`'s notifications, or put the older ones away again.
+    fn toggle_more(&mut self, app: &str) {
+        if let Some(at) = self.expanded.iter().position(|a| a == app) {
+            self.expanded.remove(at);
+            self.clamp_scroll();
+        } else {
+            self.expanded.push(app.to_owned());
+        }
+        self.hovered_notif = None;
     }
 
     /// The furthest the list can scroll and still end on its last card.
@@ -2144,24 +2383,24 @@ impl NotificationPane {
             return;
         }
 
-        // `card_tops` is the single definition of where each card sits; the
+        // `rows` is the single definition of where each row sits; the
         // renderer only turns those into screen coordinates.
-        let tops = self.card_tops();
         let origin = start_y - self.scroll_offset;
-        let mut current_group: Option<TimeGroup> = None;
-
-        for ((idx, notif), &top) in self.notifications.iter().enumerate().zip(&tops) {
-            let y = origin + top;
-            let group = TimeGroup::classify(notif.timestamp, self.current_time);
-
-            // Render group header if changed.
-            if current_group != Some(group) {
-                current_group = Some(group);
-                let header_y = y - GROUP_HEADER_HEIGHT;
-                if header_y + GROUP_HEADER_HEIGHT > start_y - 20.0 {
+        for row in self.rows() {
+            let y = origin + row.top;
+            // Skip rendering if above visible area.
+            if y + row.kind.drawn_height() < start_y {
+                continue;
+            }
+            // Stop rendering if below visible area.
+            if y > start_y + available_height {
+                break;
+            }
+            match &row.kind {
+                RowKind::Section(group) => {
                     cmds.push(RenderCommand::Text {
                         x: PANE_PADDING,
-                        y: header_y + 6.0,
+                        y: y + 6.0,
                         text: group.label().to_string(),
                         color: p.subtext0,
                         font_size: 11.0,
@@ -2170,21 +2409,85 @@ impl NotificationPane {
                         overflow: TextOverflow::Ellipsis,
                     });
                 }
+                RowKind::Program { app, count } => {
+                    Self::render_program_heading(p, cmds, app, *count, y);
+                }
+                RowKind::Card(idx) => {
+                    if let Some(notif) = self.notifications.get(*idx) {
+                        self.render_notification_card(p, cmds, *idx, notif, PANE_PADDING, y);
+                    }
+                }
+                RowKind::More { hidden, .. } => {
+                    cmds.push(RenderCommand::Text {
+                        x: PANE_PADDING + 12.0,
+                        y: y + 6.0,
+                        text: more_label(*hidden),
+                        color: p.ink(p.accent),
+                        font_size: 12.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(Self::card_width() - 24.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
             }
-
-            // Skip rendering if above visible area.
-            if y + NOTIF_CARD_HEIGHT < start_y {
-                continue;
-            }
-            // Stop rendering if below visible area.
-            if y > start_y + available_height {
-                break;
-            }
-
-            self.render_notification_card(p, cmds, idx, notif, PANE_PADDING, y);
         }
 
         cmds.push(RenderCommand::PopClip);
+    }
+
+    /// A program's heading, grouped by program, at `y` on the screen: its
+    /// name, how many notifications it has here, and the cross that clears
+    /// them -- always shown, unlike a card's, which waits for the pointer:
+    /// clearing a program is what its heading is for.
+    fn render_program_heading(
+        p: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        app: &str,
+        count: usize,
+        y: f32,
+    ) {
+        let cross = Self::program_clear_rect(y);
+        cmds.push(RenderCommand::Text {
+            x: PANE_PADDING,
+            y: y + 9.0,
+            text: app.to_string(),
+            color: p.text,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(Self::card_width() - 80.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let counted = count.to_string();
+        let wide = text::measure(&counted, 11.0, FontWeightHint::Regular);
+        cmds.push(RenderCommand::Text {
+            x: cross.x - 10.0 - wide,
+            y: y + 10.0,
+            text: counted,
+            color: p.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        p.push_surface(
+            cmds,
+            cross.x,
+            cross.y,
+            cross.w,
+            cross.h,
+            cross.w / 2.0,
+            Surface::Selected,
+        );
+        cmds.push(RenderCommand::Text {
+            x: cross.x + 5.0,
+            y: cross.y + 2.0,
+            text: "x".to_string(),
+            color: p.text,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
     }
 
     fn render_notification_card(
@@ -2515,17 +2818,21 @@ impl NotificationPane {
         }
     }
 
-    /// The program whose notification's card is at `ry` in the pane, or
-    /// `None` where there is no card: above the list (the header, the quick
-    /// settings), between cards, past the last, and anywhere while the pane
-    /// shows its per-program settings instead of the notifications.
+    /// The program whose notification's card, or whose heading, is at `ry`
+    /// in the pane, or `None` where there is neither: above the list (the
+    /// header, the quick settings), between cards, past the last, on a time
+    /// section's heading or a "more" row, and anywhere while the pane shows
+    /// its per-program settings instead of the notifications.
     fn card_app_at(&self, ry: f32) -> Option<String> {
         let list_top = Self::list_start_y();
         if self.show_settings || ry < list_top {
             return None;
         }
-        let idx = self.card_at(ry - list_top + self.scroll_offset)?;
-        self.notifications.get(idx).map(|n| n.app_name.clone())
+        match self.row_at(ry - list_top + self.scroll_offset)?.kind {
+            RowKind::Card(idx) => self.notifications.get(idx).map(|n| n.app_name.clone()),
+            RowKind::Program { app, .. } => Some(app),
+            RowKind::Section(_) | RowKind::More { .. } => None,
+        }
     }
 
     fn handle_notification_click(
@@ -2536,11 +2843,26 @@ impl NotificationPane {
         _screen_height: f32,
     ) {
         let adjusted_y = ry - content_start + self.scroll_offset;
-        let Some(idx) = self.card_at(adjusted_y) else {
+        let Some(row) = self.row_at(adjusted_y) else {
             return;
         };
-        let Some(&top) = self.card_tops().get(idx) else {
-            return;
+        let (idx, top) = match row.kind {
+            RowKind::Card(idx) => (idx, row.top),
+            // A program's heading: its cross clears the program's
+            // notifications; the rest of it is a label.
+            RowKind::Program { app, .. } => {
+                if Self::program_clear_rect(row.top).contains(rx, adjusted_y) {
+                    self.clear_program(&app);
+                }
+                return;
+            }
+            RowKind::More { app, .. } => {
+                if Self::more_rect(row.top).contains(rx, adjusted_y) {
+                    self.toggle_more(&app);
+                }
+                return;
+            }
+            RowKind::Section(_) => return,
         };
         let Some(id) = self.notifications.get(idx).map(|n| n.id) else {
             return;
@@ -2622,6 +2944,7 @@ impl NotificationPane {
 
     fn clear_all(&mut self) {
         self.notifications.clear();
+        self.expanded.clear();
         self.scroll_offset = 0.0;
         self.hovered_notif = None;
         self.events.push(NotifPaneEvent::ClearAll);
@@ -2630,7 +2953,16 @@ impl NotificationPane {
 
     fn dismiss_notification(&mut self, idx: usize) {
         if idx < self.notifications.len() {
-            self.notifications.remove(idx);
+            let gone = self.notifications.remove(idx);
+            // A program's last notification gone takes its whole list asked
+            // for with it: a program heard from again starts at its newest.
+            if !self
+                .notifications
+                .iter()
+                .any(|n| n.app_name == gone.app_name)
+            {
+                self.expanded.retain(|a| *a != gone.app_name);
+            }
             self.changed();
             // The list just got shorter, which can put the offset past its new
             // end -- dismissing the last few cards would otherwise leave the
@@ -2718,10 +3050,21 @@ mod tests {
         }
     }
 
+    /// The top of each card drawn, in the order of the notifications, from
+    /// the rows the list is drawn from: every card, grouped by time.
+    fn card_tops(pane: &NotificationPane) -> Vec<f32> {
+        (0..pane.notifications.len())
+            .filter_map(|idx| pane.card_top(idx))
+            .collect()
+    }
+
     /// A pane showing `n` notifications, all in one time group, on a screen
     /// short enough that the list genuinely overflows.
     fn scrollable_pane(n: usize) -> NotificationPane {
         let mut pane = NotificationPane::new();
+        // By time: one program's many cards, every one drawn, under one
+        // section heading. By program they would be its newest three.
+        pane.set_grouping(Grouping::ByTime);
         pane.show();
         pane.state = PaneState::Visible;
         for i in 0..n {
@@ -2912,7 +3255,7 @@ mod tests {
     /// cards are -- scrolled as the renderer scrolls them.
     fn click_index(pane: &NotificationPane, top: f32) -> usize {
         let content_y = top - NotificationPane::list_start_y() + pane.scroll_offset;
-        pane.card_tops()
+        card_tops(pane)
             .iter()
             .position(|&t| (t - content_y).abs() < 0.5)
             .expect("a painted card is one of the list's")
@@ -3307,7 +3650,7 @@ mod tests {
     #[test]
     fn hover_and_click_agree_on_which_card_is_under_the_pointer() {
         let mut pane = scrollable_pane(6);
-        let tops = pane.card_tops();
+        let tops = card_tops(&pane);
         for (idx, &top) in tops.iter().enumerate() {
             let y = NotificationPane::list_start_y() + top + NOTIF_CARD_HEIGHT / 2.0
                 - pane.scroll_offset;
@@ -3325,7 +3668,7 @@ mod tests {
     #[test]
     fn a_point_in_the_gap_between_cards_names_no_card() {
         let pane = scrollable_pane(3);
-        let tops = pane.card_tops();
+        let tops = card_tops(&pane);
         let gap = tops[0] + NOTIF_CARD_HEIGHT + NOTIF_CARD_SPACING / 2.0;
         assert_eq!(pane.card_at(gap), None);
     }
@@ -3799,7 +4142,7 @@ mod tests {
             "the fixture must actually overflow"
         );
         // The last card's bottom is exactly at the bottom of the viewport.
-        let last = *pane.card_tops().last().unwrap();
+        let last = *card_tops(&pane).last().unwrap();
         assert_eq!(
             last + NOTIF_CARD_HEIGHT - pane.scroll_offset,
             pane.list_height()
@@ -4924,5 +5267,242 @@ mod tests {
             accented(other_accent),
             "nothing followed the accent, so this test cannot be measuring anything"
         );
+    }
+
+    // ========================================================================
+    // Grouped by program
+    // ========================================================================
+
+    /// An open pane, grouped by program, holding six notifications from Mail
+    /// and one from Chat -- Mail heard from last -- and their ids, newest
+    /// first: Mail's, then Chat's.
+    fn grouped_pane() -> (NotificationPane, Vec<u64>, u64) {
+        let mut pane = NotificationPane::new();
+        assert_eq!(pane.grouping(), Grouping::ByProgram, "the default");
+        pane.show();
+        pane.state = PaneState::Visible;
+        pane.current_time = 2_000;
+        pane.set_screen_height(TEST_SCREEN_H);
+        let mut mail = Vec::new();
+        for i in 0..5 {
+            mail.push(pane.push_notification(make_notif("Mail", &format!("M{i}"), 1_000 + i)));
+        }
+        let chat = pane.push_notification(make_notif("Chat", "C", 1_005));
+        mail.push(pane.push_notification(make_notif("Mail", "M5", 1_006)));
+        mail.reverse();
+        (pane, mail, chat)
+    }
+
+    /// What the list's rows are, in order: a program's heading as its name
+    /// and count, a card as its notification's id, a "more" row as its
+    /// label.
+    fn rows_said(pane: &NotificationPane) -> Vec<String> {
+        pane.rows()
+            .into_iter()
+            .map(|row| match row.kind {
+                RowKind::Section(group) => group.label().to_owned(),
+                RowKind::Program { app, count } => format!("{app} ({count})"),
+                RowKind::Card(idx) => format!("#{}", pane.notifications[idx].id),
+                RowKind::More { hidden, .. } => more_label(hidden),
+            })
+            .collect()
+    }
+
+    /// The row of `pane`'s list `n`th of those `which` picks, scrolled as
+    /// drawn: its top on the screen.
+    fn row_top(pane: &NotificationPane, which: impl Fn(&RowKind) -> bool) -> f32 {
+        let row = pane
+            .rows()
+            .into_iter()
+            .find(|row| which(&row.kind))
+            .expect("such a row");
+        NotificationPane::list_start_y() + row.top - pane.scroll_offset
+    }
+
+    /// A left press at `(x, y)` in the pane's own coordinates.
+    fn press_in_pane(pane: &mut NotificationPane, x: f32, y: f32) -> Vec<NotifPaneEvent> {
+        pane.events.clear();
+        pane.handle_mouse_event(
+            &MouseEvent {
+                x: SCREEN_W - PANE_WIDTH + x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            },
+            SCREEN_W,
+            TEST_SCREEN_H,
+        );
+        pane.drain_events()
+    }
+
+    /// **Grouped by program, each program's notifications are under its
+    /// name -- the program heard from last first -- its newest three shown
+    /// and the rest a press away.**
+    #[test]
+    fn by_program_each_programs_newest_three_show_under_its_name() {
+        let (pane, mail, chat) = grouped_pane();
+        assert_eq!(
+            rows_said(&pane),
+            [
+                "Mail (6)".to_owned(),
+                format!("#{}", mail[0]),
+                format!("#{}", mail[1]),
+                format!("#{}", mail[2]),
+                "Show 3 more".to_owned(),
+                "Chat (1)".to_owned(),
+                format!("#{chat}"),
+            ]
+        );
+        // A card put away is drawn nowhere and pressed nowhere.
+        let hidden = pane
+            .notifications
+            .iter()
+            .position(|n| n.id == mail[5])
+            .expect("kept");
+        assert_eq!(pane.card_top(hidden), None);
+        // The heading and the row under the cards are no card.
+        let heading = pane.rows()[0].top;
+        assert_eq!(pane.card_at(heading + 1.0), None);
+        assert!(
+            pane.card_at(heading + PROGRAM_HEADER_HEIGHT + 1.0)
+                .is_some()
+        );
+    }
+
+    /// **"Show 3 more" shows them, "Show fewer" puts them away, and so does
+    /// closing the pane.**
+    #[test]
+    fn show_more_shows_a_programs_rest_until_it_is_put_away() {
+        let (mut pane, mail, _) = grouped_pane();
+        let more = row_top(&pane, |k| matches!(k, RowKind::More { .. }));
+        assert!(press_in_pane(&mut pane, PANE_PADDING + 30.0, more + 10.0).is_empty());
+        let said = rows_said(&pane);
+        for id in &mail {
+            assert!(said.contains(&format!("#{id}")), "{said:?}");
+        }
+        assert!(said.contains(&"Show fewer".to_owned()), "{said:?}");
+        let fewer = row_top(&pane, |k| matches!(k, RowKind::More { .. }));
+        let _ = press_in_pane(&mut pane, PANE_PADDING + 30.0, fewer + 10.0);
+        assert!(rows_said(&pane).contains(&"Show 3 more".to_owned()));
+
+        let more = row_top(&pane, |k| matches!(k, RowKind::More { .. }));
+        let _ = press_in_pane(&mut pane, PANE_PADDING + 30.0, more + 10.0);
+        pane.hide();
+        pane.show();
+        pane.state = PaneState::Visible;
+        assert!(
+            rows_said(&pane).contains(&"Show 3 more".to_owned()),
+            "the whole list asked for outlived the pane"
+        );
+    }
+
+    /// **The cross on a program's heading clears its notifications**, each
+    /// said dismissed so the history forgets it too; the others stay. The
+    /// rest of the heading is a label.
+    #[test]
+    fn the_cross_on_a_programs_heading_clears_its_notifications() {
+        let (mut pane, mail, chat) = grouped_pane();
+        let heading = row_top(&pane, |k| matches!(k, RowKind::Program { .. }));
+        assert!(
+            press_in_pane(&mut pane, PANE_PADDING + 10.0, heading + 10.0).is_empty(),
+            "the name cleared them"
+        );
+        let cross = NotificationPane::program_clear_rect(heading);
+        let said = press_in_pane(&mut pane, cross.x + cross.w / 2.0, cross.y + cross.h / 2.0);
+        let mut dismissed: Vec<u64> = said
+            .iter()
+            .filter_map(|e| match e {
+                NotifPaneEvent::NotificationDismissed(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        dismissed.sort_unstable();
+        let mut want = mail.clone();
+        want.sort_unstable();
+        assert_eq!(dismissed, want);
+        assert_eq!(
+            rows_said(&pane),
+            ["Chat (1)".to_owned(), format!("#{chat}")]
+        );
+    }
+
+    /// **A secondary press on a program's heading asks for the program's
+    /// menu**, as one on its card does.
+    #[test]
+    fn a_secondary_press_on_a_programs_heading_asks_for_its_menu() {
+        let (mut pane, _, _) = grouped_pane();
+        let heading = row_top(&pane, |k| matches!(k, RowKind::Program { .. }));
+        let said = secondary_press_at(&mut pane, heading + 10.0);
+        assert!(
+            matches!(said.as_slice(), [NotifPaneEvent::MenuAsked { app, .. }] if app == "Mail"),
+            "{said:?}"
+        );
+    }
+
+    /// **The grouping follows the setting**: by time, the section headings
+    /// and every card, newest first; back by program, each program's newest
+    /// few again.
+    #[test]
+    fn the_grouping_follows_the_setting() {
+        let (mut pane, mail, chat) = grouped_pane();
+        pane.set_grouping(Grouping::ByTime);
+        let said = rows_said(&pane);
+        assert_eq!(said.first().map(String::as_str), Some("Today"));
+        assert_eq!(said.len(), 1 + mail.len() + 1, "{said:?}");
+        assert_eq!(said.get(2), Some(&format!("#{chat}")));
+        pane.set_grouping(Grouping::ByProgram);
+        assert_eq!(
+            rows_said(&pane).first().map(String::as_str),
+            Some("Mail (6)")
+        );
+    }
+
+    /// **A program's heading is drawn where it is pressed**: its name and
+    /// count on its row, its cross where a press clears them; "Show 3 more"
+    /// on its row -- and every colour of them the palette's.
+    #[test]
+    fn a_programs_heading_is_drawn_where_it_is_pressed() {
+        let (pane, _, _) = grouped_pane();
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            // Drawn in the pane's own x, under a translate, and the screen's y.
+            let cmds = pane.render(&p, SCREEN_W, TEST_SCREEN_H);
+            let heading = row_top(&pane, |k| matches!(k, RowKind::Program { .. }));
+            let more = row_top(&pane, |k| matches!(k, RowKind::More { .. }));
+            let text_at = |want: &str| {
+                cmds.iter().find_map(|c| match c {
+                    RenderCommand::Text { text, y, .. } if text == want => Some(*y),
+                    _ => None,
+                })
+            };
+            let name = text_at("Mail").expect("the program's name");
+            assert!(
+                name > heading && name < heading + PROGRAM_HEADER_HEIGHT,
+                "{name}"
+            );
+            let count = text_at("6").expect("how many");
+            assert!(count > heading && count < heading + PROGRAM_HEADER_HEIGHT);
+            let shown = text_at("Show 3 more").expect("the row under its cards");
+            assert!(shown > more && shown < more + MORE_ROW_HEIGHT, "{shown}");
+            let cross = NotificationPane::program_clear_rect(heading);
+            assert!(
+                cmds.iter()
+                    .filter_map(appearance::painted_rect)
+                    .any(|(x, y, w, h, _)| Rect::new(x, y, w, h) == cross),
+                "the heading's cross is not drawn where it is pressed"
+            );
+            palette_check::assert_drawn_from(
+                &p,
+                &cmds,
+                &[
+                    readable_on(p.accent),
+                    readable_on(p.overlay0),
+                    readable_on(p.blue),
+                    readable_on(p.peach),
+                    readable_on(p.red),
+                    readable_on(p.surface2),
+                ],
+                "notif_pane by program",
+            );
+        }
     }
 }

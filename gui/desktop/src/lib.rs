@@ -3295,6 +3295,8 @@ impl DesktopShell {
             self.focus.set_quiet_hours(&self.notif.settings.quiet_hours);
             self.notifications
                 .adopt_app_rules(&self.notif.settings.apps);
+            self.notifications
+                .set_grouping(self.notif.settings.grouping);
         }
     }
 
@@ -3372,7 +3374,12 @@ impl DesktopShell {
         if file.settings.history != self.notif.settings.history {
             self.notif_history_saved = None;
         }
-        let changed = apps_changed || quiet_changed;
+        // The pane, open or not, groups as the file says from now on.
+        let grouping_changed = file.settings.grouping != self.notif.settings.grouping;
+        if grouping_changed {
+            self.notifications.set_grouping(file.settings.grouping);
+        }
+        let changed = apps_changed || quiet_changed || grouping_changed;
         // Adopted either way: the document is what a later save splices into,
         // so keeping the old one would write back a file stripped of whatever
         // comment or unknown key this read just brought in.
@@ -20400,6 +20407,9 @@ mod overview_wiring_tests {
     #[test]
     fn the_keyboard_reaches_the_last_notification_on_a_short_screen() {
         let mut s = DesktopShell::new(1024, 768);
+        // A long list: by time, one program's every card is in it.
+        s.notifications
+            .set_grouping(notifsettings::Grouping::ByTime);
         for i in 0..40u64 {
             let _ = s.notify(notif_pane::Notification {
                 id: i,
@@ -20434,6 +20444,37 @@ mod overview_wiring_tests {
             drawn(&s, "Notice 0"),
             "the keyboard could not reach the last notification"
         );
+    }
+
+    /// **The pane groups as the settings file says**: by program with no
+    /// file, by time once the file says so, and back -- picked up as a rule
+    /// is, and said to be a change worth drawing.
+    #[test]
+    fn the_pane_groups_as_the_settings_file_says() {
+        appearance::config::testing::with_scratch_config("shell-notif-grouping", |_root| {
+            let mut s = shell();
+            s.load_notification_rules();
+            assert_eq!(
+                s.notifications.grouping(),
+                notifsettings::Grouping::ByProgram,
+                "with no file"
+            );
+            let mut file = notifsettings::NotifFile::load();
+            file.settings.grouping = notifsettings::Grouping::ByTime;
+            file.save().expect("save the grouping");
+            assert!(
+                s.poll_notification_rules(),
+                "the grouping was not picked up"
+            );
+            assert_eq!(s.notifications.grouping(), notifsettings::Grouping::ByTime);
+            file.settings.grouping = notifsettings::Grouping::ByProgram;
+            file.save().expect("save the grouping");
+            assert!(s.poll_notification_rules());
+            assert_eq!(
+                s.notifications.grouping(),
+                notifsettings::Grouping::ByProgram
+            );
+        });
     }
 
     /// A rule saved on disk reaches the decision that suppresses a

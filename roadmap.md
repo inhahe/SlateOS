@@ -2268,6 +2268,18 @@ live.
   application's Notifications page, asked of lane E
   (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
 
+- `[x]` `[C]` **The notification pane groups by program**
+  (`design-decisions.md` §1495) -- done 2026-10-07. Each program's
+  notifications under its name, the program heard from last first: its
+  newest three shown, "Show N more" for the rest and "Show fewer" to put
+  them away, and a cross on the heading that clears the program's at once;
+  a right-click on the heading offers the program's menu, as on a card.
+  Grouping by time (Today, Yesterday, This Week, Older) stays as a choice,
+  `pane.grouping` in `notifications.yaml`, followed the moment it is saved;
+  tools see each program's group, its cross and its "more" row. **Next:**
+  the choice on the Settings application's Notifications page, asked of
+  lane E (`requests/c-e-a-choice-of-how-the-notification-pane-groups.md`).
+
 - `[x]` `[C]` **A theme is checked before it is installed or shared**
   (`design-decisions.md` §1469; `roadmap-detailed.md` §4.6, *Automated
   Validation*) -- done 2026-10-05. `themecheck FOLDER...` (and

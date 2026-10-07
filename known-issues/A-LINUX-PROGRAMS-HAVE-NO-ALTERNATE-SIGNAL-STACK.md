@@ -1,6 +1,7 @@
-### A-LINUX-PROGRAMS-HAVE-NO-ALTERNATE-SIGNAL-STACK -- 2026-10-07 -- FIXED the same day (lane A)
+### A-LINUX-PROGRAMS-HAVE-NO-ALTERNATE-SIGNAL-STACK -- 2026-10-07 -- OPEN until its fix (lane-a-wip, the same day) has a boot on main (lane A)
 
-**Status:** FIXED on lane-a-wip 2026-10-07, awaiting a boot. Noted until that
+**Status:** OPEN -- fixed on lane-a-wip 2026-10-07, awaiting a boot on main, after
+which it moves to known-issues-resolved/. Noted until that
 morning only in todo.txt and the doc comment of
 `syscall::linux::sys_sigaltstack`; written up when signal frames grew by the
 FPU image (design-decisions §1541), and fixed the same day.

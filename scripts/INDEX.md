@@ -27,6 +27,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/bashprobe.py` | Faithful transport to real bash, plus an arity-exact word probe. |
 | `scripts/bc-diff.sh` | Differential test: our bc against GNU bc. |
 | `scripts/bench-history.py` | Record and diff the kernel micro-benchmark scorecard across boots. |
+| `scripts/binutils-spike/run.sh` | Cross-compile GNU binutils (as, ld, ar, nm, objdump ...) and link them against SlateOS's libc.a. |
+| `scripts/binutils-spike/slatelink.sh` | Link binutils' built objects against the CURRENT libc.a, and stage its programs. |
 | `scripts/blkdiscard-diff.sh` | Differential test: our `blkdiscard` against util-linux 2.39.3's. |
 | `scripts/blkid-cli-diff.sh` | Differential test: our `blkid` and `findfs` against util-linux 2.39.3's. |
 | `scripts/blkid-diff.sh` | Differential test: `userspace/ulblkid`, the port of util-linux 2.39.3's |
@@ -516,4 +518,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_506 scripts._
+_508 scripts._

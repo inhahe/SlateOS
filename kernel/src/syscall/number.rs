@@ -6681,6 +6681,19 @@ pub const DUMPABLE_SET: u64 = 1;
 /// (requests/d-a-a-process-cannot-ask-for-its-own-supplementary-groups.md).
 pub const SYS_PROCESS_GETGROUPS: u64 = 1143;
 
+/// `SYS_MMAP_FILE(addr, length, prot, flags, handle, offset) -> address` --
+/// map part of an open file (a handle from `SYS_FS_OPEN`) into the caller,
+/// with Linux's `mmap(2)` values and answers: `prot` its `PROT_*`, `flags`
+/// its `MAP_SHARED`/`MAP_PRIVATE`/`MAP_FIXED`, `offset` 4 KiB-aligned, and
+/// Linux errnos as `-errno` (`EACCES` for a handle not open for reading,
+/// `EBADF` for one the caller does not hold, `ENOSYS` for a writable shared
+/// mapping, which nothing writes back yet). The same body as the Linux ABI's
+/// file `mmap`: a private mapping is demand-paged from the file, and the
+/// address space keeps its own reference to the file, so the handle may be
+/// closed after. Until 2026-10-07 a native program could not map a file at
+/// all (requests/d-a-a-native-program-cannot-map-a-file.md).
+pub const SYS_MMAP_FILE: u64 = 1144;
+
 /// Bytes [`SYS_UNIX_NAME`] writes: kind, length, 108 bytes of name.
 pub const UNIX_ADDR_LEN: usize = 116;
 /// Bytes [`SYS_UNIX_RECV`] writes at `info_ptr`.

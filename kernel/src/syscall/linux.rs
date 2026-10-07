@@ -13429,6 +13429,51 @@ fn linux_vma_overlap_bytes(pid: u64, start: u64, end: u64) -> u64 {
     total
 }
 
+/// Whether the open file description behind `entry` may be read and written
+/// -- Linux's `FMODE_READ` and `FMODE_WRITE`, which `do_mmap` checks before it
+/// asks whether the object can be mapped at all. A file's are its handle's
+/// open flags, the authoritative record; every other kind's are the
+/// descriptor's access mode (a pipe's read end is read-only, so it reaches
+/// `ENODEV`; its write end does not, so it is `EACCES`, as on Linux).
+///
+/// # Errors
+///
+/// `EBADF` for a file handle no longer open.
+fn mmap_access(entry: &FdEntry) -> Result<(bool, bool), i32> {
+    if entry.kind == HandleKind::File {
+        return crate::fs::handle::open_flags(entry.raw_handle)
+            .map(|f| (f.is_readable(), f.is_writable()))
+            .map_err(|_| errno::EBADF);
+    }
+    Ok(match entry.status_flags & oflags::O_ACCMODE {
+        oflags::O_RDONLY => (true, false),
+        oflags::O_WRONLY => (false, true),
+        _ => (true, true),
+    })
+}
+
+/// The native ABI's door to [`linux_file_mmap`]: `SYS_MMAP_FILE(addr, length,
+/// prot, flags, handle, offset)`, a file handle the caller holds mapped with
+/// Linux's `prot` and `flags` and answered in Linux errnos, as `mmap(2)`
+/// would answer for a descriptor of it. One body for both ABIs, so a native
+/// program's mapping is the Linux one: a private mapping demand-paged, a
+/// read-only shared one served as a copy, a writable shared one refused.
+/// The offset must be 4 KiB-aligned (`EINVAL`), as Linux's `mmap` opens with.
+///
+/// The caller has checked that it holds `handle`.
+pub(crate) fn native_file_mmap(handle: u64, args: &SyscallArgs) -> SyscallResult {
+    if args.arg5 & (crate::mm::page_table::HW_PAGE_SIZE as u64).wrapping_sub(1) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    let Some(pid) = caller_pid() else {
+        return linux_err(errno::EBADF);
+    };
+    let entry = FdEntry::file(handle, 0);
+    linux_file_mmap(
+        &entry, pid, args.arg0, args.arg1, args.arg2, args.arg3, args.arg5,
+    )
+}
+
 /// Map a regular file (or `memfd`) into the calling process — the
 /// file-backed `mmap(2)` path that backs `ld.so`'s shared-object loading
 /// (glibc `_dl_map_segments`) and `MAP_PRIVATE` data maps.
@@ -13483,18 +13528,32 @@ fn linux_file_mmap(
         return linux_err(errno::EINVAL);
     }
 
-    // Only regular files and memfds are mappable here.  Pipes, sockets,
-    // eventfds, etc. are not (Linux: ENODEV).
-    match entry.kind {
-        HandleKind::File | HandleKind::MemFd => {}
-        _ => return linux_err(errno::ENODEV),
-    }
-
     // Exactly one of MAP_SHARED / MAP_PRIVATE must be set.
     let shared = (flags & MAP_SHARED) != 0;
     let private = (flags & MAP_PRIVATE) != 0;
     if shared == private {
         return linux_err(errno::EINVAL);
+    }
+
+    // The open file description must allow what the mapping does, before
+    // anything asks whether the object can be mapped at all -- Linux's
+    // `do_mmap`: every file mapping needs `FMODE_READ`, a shared writable one
+    // `FMODE_WRITE` too, else EACCES. Until 2026-10-07 nothing here checked:
+    // a write-only descriptor mapped a file and, through the page cache,
+    // read every page another process had caused to be cached.
+    let (readable, writable) = match mmap_access(entry) {
+        Ok(rw) => rw,
+        Err(e) => return linux_err(e),
+    };
+    if !readable || (shared && (prot & PROT_WRITE) != 0 && !writable) {
+        return linux_err(errno::EACCES);
+    }
+
+    // Only regular files and memfds are mappable here.  Pipes, sockets,
+    // eventfds, etc. are not (Linux: ENODEV).
+    match entry.kind {
+        HandleKind::File | HandleKind::MemFd => {}
+        _ => return linux_err(errno::ENODEV),
     }
     // We don't write back, so a writable shared map can't honour its
     // contract.  Read-only shared maps are indistinguishable from a private
@@ -54856,6 +54915,41 @@ pub fn self_test_file_mmap() -> crate::error::KernelResult<()> {
             pcb::destroy(pid);
             let _ = crate::fs::Vfs::remove(PATH);
         }};
+    }
+
+    // A handle not open for reading cannot be mapped: EACCES, as Linux's
+    // do_mmap answers. It mapped, and read the file through the page cache,
+    // until 2026-10-07.
+    let write_only = match crate::fs::handle::open(PATH, crate::fs::handle::OpenFlags::WRITE) {
+        Ok(h) => h,
+        Err(e) => {
+            teardown!();
+            serial_println!(
+                "[syscall/linux]   FAIL: opening the file write-only: {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let refused = linux_file_mmap(
+        &FdEntry::file(write_only, 0),
+        pid,
+        0,
+        4096,
+        PROT_READ,
+        MAP_PRIVATE,
+        0,
+    )
+    .value;
+    // Closing a handle this test opened and did not map cannot fail usefully.
+    let _ = crate::fs::handle::close(write_only);
+    if refused != i64::from(errno::EACCES).wrapping_neg() {
+        teardown!();
+        serial_println!(
+            "[syscall/linux]   FAIL: mapping a write-only handle answered {}, want -EACCES",
+            refused
+        );
+        return Err(KernelError::InternalError);
     }
 
     // Map the whole file.  20 000 bytes rounds up to 5 × 4 KiB pages

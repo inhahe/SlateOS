@@ -61,9 +61,9 @@ use super::number::{
     SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
     SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
     SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
-    SYS_MEMORY_ADVISE, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
-    SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
-    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
+    SYS_MEMORY_ADVISE, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MMAP_FILE,
+    SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE,
+    SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
     SYS_NET_RAW_MCAST, SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD,
     SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH,
     SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL,
@@ -775,6 +775,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_POSIX_TIMER as usize] = Some(handlers::sys_posix_timer);
     handlers[SYS_PROCESS_DUMPABLE as usize] = Some(handlers::sys_process_dumpable);
     handlers[SYS_PROCESS_GETGROUPS as usize] = Some(handlers::sys_process_getgroups);
+    handlers[SYS_MMAP_FILE as usize] = Some(handlers::sys_mmap_file);
     handlers[SYS_ARP_TABLE as usize] = Some(handlers::sys_arp_table);
     handlers[SYS_DNS_CACHE_STATS as usize] = Some(handlers::sys_dns_cache_stats);
     handlers[SYS_TCP_POLL_STATUS as usize] = Some(handlers::sys_tcp_poll_status);
@@ -5402,6 +5403,26 @@ fn test_dispatch_getgroups() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[syscall]   SYS_PROCESS_GETGROUPS: OK");
+
+    // SYS_MMAP_FILE answers Linux errnos; a handle nobody holds -- every
+    // handle, from a kernel context -- is EBADF.
+    let map = SyscallArgs {
+        arg0: 0,
+        arg1: 4096,
+        arg2: 1,
+        arg3: 2,
+        arg4: 0xDEAD,
+        arg5: 0,
+    };
+    let got = dispatch(SYS_MMAP_FILE, &map).value;
+    if got != i64::from(super::linux::errno::EBADF).wrapping_neg() {
+        serial_println!(
+            "[syscall]   FAIL: SYS_MMAP_FILE of a handle not held answered {}",
+            got
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_MMAP_FILE: OK");
     Ok(())
 }
 

@@ -7038,6 +7038,15 @@ fn resolve_file_cached(
 ) -> bool {
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
 
+    // The mapping's handle must be one that may read the file. `mmap` checks
+    // this (EACCES), but the cache below runs the fill -- and with it
+    // `read_at_uncached`'s own check -- only on a miss: a page another process
+    // had cached would otherwise be handed to a mapping of a write-only
+    // handle. Checked here too, so no path round `mmap` can do that.
+    if !crate::fs::handle::open_flags(handle).is_ok_and(|f| f.is_readable()) {
+        return false;
+    }
+
     // Obtain the shared frame (filling it from the file on a cache miss).
     // The fill closure runs only on a miss; a short read past EOF leaves
     // the frame's tail zero, matching Linux's page zero-fill semantics.

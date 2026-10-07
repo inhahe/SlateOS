@@ -19947,6 +19947,20 @@ pub fn sys_process_getgroups(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(n_i64)
 }
 
+/// `SYS_MMAP_FILE` (1144) — map part of a file the caller holds open, with
+/// Linux's `mmap(2)` values and errnos. `arg4` is the file handle; the rest
+/// are `mmap`'s (`addr`, `length`, `prot`, `flags`, then `offset` in `arg5`).
+/// A handle the caller does not hold is `EBADF`. See
+/// [`SYS_MMAP_FILE`](super::number::SYS_MMAP_FILE).
+pub fn sys_mmap_file(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{errno, linux_err};
+    let handle = args.arg4;
+    if require_file_handle_owner(handle).is_err() {
+        return linux_err(errno::EBADF);
+    }
+    super::linux::native_file_mmap(handle, args)
+}
+
 /// `SYS_PROCESS_CHROOT` (1068) — change the calling process's filesystem
 /// root directory.
 ///

@@ -595,19 +595,25 @@ fn the_command_line_is_read() {
     let args = |a: &[&str]| parse_args(&a.iter().map(OsString::from).collect::<Vec<_>>());
     let d = args(&[]).expect("no arguments");
     assert_eq!(
-        (d.config, d.status, d.log, d.once),
-        (
-            PathBuf::from(CONFIG_PATH),
-            PathBuf::from(STATUS_PATH),
-            PathBuf::from(journalrec::MAIN_LOG_PATH),
-            false
-        )
+        d,
+        Options {
+            config: PathBuf::from(CONFIG_PATH),
+            status: PathBuf::from(STATUS_PATH),
+            forwards: PathBuf::from("/etc/portforwards.yaml"),
+            forwards_status: PathBuf::from("/run/portforwards.yaml"),
+            log: PathBuf::from(journalrec::MAIN_LOG_PATH),
+            once: false,
+        }
     );
     let o = args(&[
         "--config",
         "/tmp/c.yaml",
         "--status",
         "/tmp/s.yaml",
+        "--forwards",
+        "/tmp/f.yaml",
+        "--forwards-status",
+        "/tmp/fs.yaml",
         "--log",
         "/tmp/l",
         "--once",
@@ -618,10 +624,13 @@ fn the_command_line_is_read() {
         Options {
             config: PathBuf::from("/tmp/c.yaml"),
             status: PathBuf::from("/tmp/s.yaml"),
+            forwards: PathBuf::from("/tmp/f.yaml"),
+            forwards_status: PathBuf::from("/tmp/fs.yaml"),
             log: PathBuf::from("/tmp/l"),
             once: true,
         }
     );
+    assert!(args(&["--forwards"]).is_err());
     assert!(args(&["--config"]).is_err());
     assert!(args(&["--config", ""]).is_err());
     assert!(
@@ -659,4 +668,56 @@ fn a_secret_echoed_back_is_blanked() {
         "{}",
         note.text
     );
+}
+
+/// A custom URL that names `{ip}` takes the address the router says, waits
+/// while it has said none, and is checked again as soon as it does.
+#[test]
+fn a_custom_url_naming_the_address_takes_the_routers() {
+    let text = "entries:\n  Mine:\n    provider: custom\n    hostname: h.example.net\n    \
+                update_url: http://dns.example.net/u?h={hostname}&ip={ip}\n";
+    let mut s = service(text);
+    let mut net = Net::new();
+    let note = s.check("Mine", NOW, &Undecided, &mut net).expect("news");
+    net.finished();
+    assert_eq!(s.report("Mine").map(|r| r.state), Some(State::NoAddress));
+    assert!(
+        note.text.contains("the router has not been asked yet"),
+        "{}",
+        note.text
+    );
+    // Told while nothing is due, the entry is due at once.
+    let later = NOW + MINUTE;
+    s.set_router_address(RouterAddress::Known("81.2.69.142".parse().unwrap()), later);
+    assert_eq!(s.due(later), ["Mine"]);
+    let mut net = Net::new().then(
+        "http://dns.example.net/u?h=h.example.net&ip=81.2.69.142",
+        200,
+        "OK",
+    );
+    s.check("Mine", later, &Undecided, &mut net);
+    net.finished();
+    assert_eq!(
+        s.published("Mine").and_then(|p| p.address),
+        Some("81.2.69.142".parse().unwrap())
+    );
+    // The same address again changes nothing.
+    let next = s.due_at("Mine");
+    s.set_router_address(
+        RouterAddress::Known("81.2.69.142".parse().unwrap()),
+        later + 1,
+    );
+    assert_eq!(s.due_at("Mine"), next);
+}
+
+/// An entry of any other provider never waits on the router.
+#[test]
+fn other_providers_do_not_wait_on_the_router() {
+    let mut s = service(DUCK);
+    let next = s.due_at("Home");
+    s.set_router_address(
+        RouterAddress::Known("81.2.69.142".parse().unwrap()),
+        NOW + 5,
+    );
+    assert_eq!(s.due_at("Home"), next);
 }

@@ -170,16 +170,16 @@ mod gnu_group_member {
     use crate::types::GidT;
 
     /// `group_member` (GNU): 1 if `gid` is the process's effective group or
-    /// one of its supplementary groups, else 0.
+    /// one of its supplementary groups -- the kernel's list, as `getgroups`
+    /// reads it -- else 0. A list that cannot be read holds no group, as
+    /// gnulib's answers 0 when `getgroups` fails.
+    ///
+    /// Until 2026-10-06 it asked `getgroups` for at most 64 groups, so a
+    /// process in more than 64 was told it was in none of them (which
+    /// mattered only once `getgroups` reported any, the same day).
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn group_member(gid: GidT) -> i32 {
-        if gid == crate::unistd::getegid() {
-            return 1;
-        }
-        let mut groups = [0 as GidT; 64];
-        let n = crate::unistd::getgroups(groups.len() as i32, groups.as_mut_ptr());
-        let n = usize::try_from(n).unwrap_or(0).min(groups.len());
-        i32::from(groups.get(..n).is_some_and(|g| g.contains(&gid)))
+        i32::from(gid == crate::unistd::getegid() || crate::unistd::in_supplementary_groups(gid))
     }
 }
 pub use gnu_group_member::group_member;

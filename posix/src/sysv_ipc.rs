@@ -117,32 +117,47 @@ impl Perm {
     }
 }
 
-/// The caller's effective ids, as `ipcperms` reads them.
+/// The caller's ids, as `ipcperms` reads them.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Caller {
     pub(crate) euid: u32,
     pub(crate) egid: u32,
+    /// Whether a gid is one of the caller's supplementary groups: the
+    /// kernel's list in [`caller`], a stand-in in the tests.
+    pub(crate) in_supplementary: fn(u32) -> bool,
 }
 
 pub(crate) fn caller() -> Caller {
     Caller {
         euid: crate::unistd::geteuid(),
         egid: crate::unistd::getegid(),
+        in_supplementary: crate::unistd::in_supplementary_groups,
     }
 }
 
 /// The mode bits of `p` that apply to `who`: its owner's when `who` is the
-/// owner or the creator, else its group's when `who`'s group is either
-/// group, else the rest's -- in the low three bits.
+/// owner or the creator, else its group's when `who` is in either group,
+/// else the rest's -- in the low three bits.
+///
+/// "In a group" is Linux's `in_group_p`: the effective group or one of the
+/// supplementary groups. Those are read from the kernel (`getgroups`'s
+/// source), which costs a file read, so they are asked only when the answer
+/// could change the bits -- when the group's differ from the rest's -- and
+/// `semop` on an object whose group and other bits agree never reads them.
+/// They counted for nothing until 2026-10-06, when the comment here said
+/// `getgroups` reported none; it had stopped being so once `setgroups`
+/// reached the kernel.
 pub(crate) fn granted_bits(p: &Perm, who: Caller) -> u32 {
+    let group = (p.mode >> 3) & 0o7;
+    let other = p.mode & 0o7;
     if who.euid == p.cuid || who.euid == p.uid {
         (p.mode >> 6) & 0o7
     } else if who.egid == p.cgid || who.egid == p.gid {
-        // `in_group_p`: the caller has no supplementary groups here
-        // (`getgroups` reports none), so its group is its effective one.
-        (p.mode >> 3) & 0o7
+        group
+    } else if group != other && ((who.in_supplementary)(p.cgid) || (who.in_supplementary)(p.gid)) {
+        group
     } else {
-        p.mode & 0o7
+        other
     }
 }
 
@@ -187,9 +202,18 @@ mod tests {
         assert!(decode_id(0x0001_0000).is_none(), "slot field 0");
     }
 
+    /// A caller with no supplementary groups.
+    fn none(_: u32) -> bool {
+        false
+    }
+
     #[test]
     fn perm_update_refuses_no_user_and_keeps_the_permission_bits() {
-        let who = Caller { euid: 5, egid: 6 };
+        let who = Caller {
+            euid: 5,
+            egid: 6,
+            in_supplementary: none,
+        };
         let mut p = Perm::new(1, 0, 0o7640, who);
         assert_eq!((p.uid, p.cuid, p.gid, p.cgid, p.mode), (5, 5, 6, 6, 0o640));
         assert_eq!(p.update(u32::MAX, 1, 0), Err(errno::EINVAL));
@@ -247,7 +271,11 @@ mod tests {
             cgid: 21,
             ..Perm::EMPTY
         };
-        let who = |euid, egid| Caller { euid, egid };
+        let who = |euid, egid| Caller {
+            euid,
+            egid,
+            in_supplementary: none,
+        };
         assert_eq!(granted_bits(&p, who(10, 0)), 0o7, "the owner");
         assert_eq!(granted_bits(&p, who(11, 0)), 0o7, "the creator");
         assert_eq!(granted_bits(&p, who(1, 20)), 0o5, "the group");
@@ -256,6 +284,75 @@ mod tests {
         // The owner's bits apply to the owner even when the group's are wider.
         p.mode = 0o070;
         assert_eq!(granted_bits(&p, who(10, 20)), 0);
+    }
+
+    /// `in_group_p` counts the supplementary groups: a caller in either of
+    /// the object's groups that way has the group's bits.
+    #[test]
+    fn a_supplementary_group_is_a_group() {
+        fn in_20(g: u32) -> bool {
+            g == 20
+        }
+        fn in_21(g: u32) -> bool {
+            g == 21
+        }
+        fn in_99(g: u32) -> bool {
+            g == 99
+        }
+        let p = Perm {
+            mode: 0o751,
+            uid: 10,
+            cuid: 11,
+            gid: 20,
+            cgid: 21,
+            ..Perm::EMPTY
+        };
+        let who = |in_supplementary: fn(u32) -> bool| Caller {
+            euid: 1,
+            egid: 2,
+            in_supplementary,
+        };
+        assert_eq!(granted_bits(&p, who(in_20)), 0o5, "the group");
+        assert_eq!(granted_bits(&p, who(in_21)), 0o5, "the creator's group");
+        assert_eq!(granted_bits(&p, who(in_99)), 0o1, "neither");
+        // The owner's bits still come first.
+        let owner = Caller {
+            euid: 10,
+            egid: 2,
+            in_supplementary: in_20,
+        };
+        assert_eq!(granted_bits(&Perm { mode: 0o070, ..p }, owner), 0);
+        // A group that may do less than the rest holds its members to that,
+        // supplementary members too, as Linux's mode check does.
+        assert_eq!(granted_bits(&Perm { mode: 0o604, ..p }, who(in_20)), 0);
+    }
+
+    /// The supplementary groups cost a file read on SlateOS, so they are not
+    /// asked when the effective ids decide, or when the group's bits and the
+    /// rest's agree -- every `semop` on such an object would pay for it.
+    #[test]
+    fn the_supplementary_groups_are_asked_only_when_they_matter() {
+        #[allow(clippy::panic)] // the test's point: this must not be called
+        fn must_not_ask(_: u32) -> bool {
+            panic!("the supplementary groups were read");
+        }
+        let p = Perm {
+            mode: 0o755,
+            uid: 10,
+            cuid: 10,
+            gid: 20,
+            cgid: 20,
+            ..Perm::EMPTY
+        };
+        let who = |euid, egid| Caller {
+            euid,
+            egid,
+            in_supplementary: must_not_ask,
+        };
+        assert_eq!(granted_bits(&p, who(1, 2)), 0o5, "group and other agree");
+        let q = Perm { mode: 0o750, ..p };
+        assert_eq!(granted_bits(&q, who(10, 2)), 0o7, "the owner");
+        assert_eq!(granted_bits(&q, who(1, 20)), 0o5, "the effective group");
     }
 
     #[test]
@@ -269,9 +366,12 @@ mod tests {
             cgid: 20,
             ..Perm::EMPTY
         };
-        let owner = Caller { euid: 10, egid: 0 };
-        let group = Caller { euid: 1, egid: 20 };
-        let other = Caller { euid: 1, egid: 2 };
+        let who = |euid, egid| Caller {
+            euid,
+            egid,
+            in_supplementary: none,
+        };
+        let (owner, group, other) = (who(10, 0), who(1, 20), who(1, 2));
         assert!(permits(&p, owner, 0o666), "rw asked; the owner has rw");
         assert!(!permits(&p, group, 0o666), "the group has only r");
         assert!(permits(&p, group, S_IRUGO));
@@ -288,7 +388,11 @@ mod tests {
             cuid: 10,
             ..Perm::EMPTY
         };
-        let other = Caller { euid: 1, egid: 1 };
+        let other = Caller {
+            euid: 1,
+            egid: 1,
+            in_supplementary: none,
+        };
         assert!(
             permits(&p, other, S_IWUGO),
             "a test thread holds every capability"
@@ -302,7 +406,11 @@ mod tests {
             cuid: 11,
             ..Perm::EMPTY
         };
-        let who = |euid| Caller { euid, egid: 0 };
+        let who = |euid| Caller {
+            euid,
+            egid: 0,
+            in_supplementary: none,
+        };
         let caps = without(crate::sys_capability::CAP_SYS_ADMIN);
         assert!(may_control(&p, who(10)));
         assert!(may_control(&p, who(11)));

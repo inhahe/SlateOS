@@ -590,6 +590,90 @@ fn fs_stat(path: &[u8], out: &mut [u8; 80]) -> i64 {
     ret
 }
 
+/// The kernel's `NotFound`: a path names nothing.
+const ERR_NOT_FOUND: i64 = -500;
+
+/// [`with_whole_file`]'s own failure: the file changed size each time it
+/// was read.
+const ERR_KEPT_CHANGING: i64 = -1;
+
+/// Read the file at `path` whole, and hand its bytes to `use_it`.
+///
+/// `SYS_FS_READ_FILE` stops at the end of the buffer it is given, and says
+/// nothing about what it left: a buffer the size `fs_stat` gave is filled
+/// whether or not the file grew in between, and whatever lay past it is
+/// lost without a sign. So the buffer here is one byte longer than the file
+/// was, and a read that fills it means the file grew -- it is read again,
+/// three times at most, then [`ERR_KEPT_CHANGING`].  A file shorter than
+/// `STACK` bytes is read into a buffer on the stack; a longer one into a
+/// mapping of its own, unmapped before this returns.
+///
+/// Until 2026-10-06 init read `/etc/startup.conf` into 2 KiB and parsed
+/// whatever came back, so a longer file lost its last services -- the line
+/// it was cut in could start a service with a cut argument -- and it gave
+/// a service's ELF the size `fs_stat` had said, whatever the read returned.
+fn with_whole_file<const STACK: usize, R>(
+    path: &[u8],
+    use_it: impl FnOnce(&[u8]) -> R,
+) -> Result<R, i64> {
+    let mut use_it = Some(use_it);
+    for _ in 0..3 {
+        let mut stat_out = [0u8; 80];
+        let ret = fs_stat(path, &mut stat_out);
+        if ret < 0 {
+            return Err(ret);
+        }
+        let mut size = [0u8; 8];
+        size.copy_from_slice(&stat_out[..8]);
+        let cap = usize::try_from(u64::from_le_bytes(size))
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        let read = if cap <= STACK {
+            let mut buf = [0u8; STACK];
+            read_once(path, &mut buf[..cap], &mut use_it)
+        } else {
+            let mapped = mmap(cap as u64);
+            if mapped < 0 {
+                return Err(mapped);
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let addr = mapped as u64;
+            // SAFETY: `mmap` returned a fresh writable mapping of at least
+            // `cap` bytes, which nothing else refers to until the `munmap`
+            // below, after the last use of this slice.
+            let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, cap) };
+            let read = read_once(path, buf, &mut use_it);
+            munmap(addr, cap as u64);
+            read
+        };
+        match read {
+            Ok(Some(answer)) => return Ok(answer),
+            Ok(None) => {} // The file grew: read it again.
+            Err(e) => return Err(e),
+        }
+    }
+    Err(ERR_KEPT_CHANGING)
+}
+
+/// One read of `path` into `buf`: what `use_it` makes of the bytes, or
+/// `None` when they filled `buf` -- the file is longer than it was.
+fn read_once<F: FnOnce(&[u8]) -> R, R>(
+    path: &[u8],
+    buf: &mut [u8],
+    use_it: &mut Option<F>,
+) -> Result<Option<R>, i64> {
+    let n = fs_read_file(path, buf);
+    if n < 0 {
+        return Err(n);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let n = n as usize;
+    if n >= buf.len() {
+        return Ok(None);
+    }
+    Ok(use_it.take().map(|f| f(&buf[..n])))
+}
+
 // ---------------------------------------------------------------------------
 // Number formatting (no allocator — format into stack buffer)
 // ---------------------------------------------------------------------------
@@ -713,26 +797,13 @@ fn split_first_word(s: &[u8]) -> (&[u8], &[u8]) {
 /// Maximum number of managed services.
 const MAX_SERVICES: usize = 16;
 
-/// Maximum length of a service name.
-const MAX_SVC_NAME: usize = 32;
-
-/// Maximum length of a service path (filesystem path to ELF binary).
-const MAX_SVC_PATH: usize = 128;
-
-/// Maximum number of dependencies per service.
-const MAX_DEPS: usize = 4;
-
-/// Maximum number of extra arguments per service (argv[1..]).
-const MAX_SVC_ARGS: usize = 8;
-
-/// Maximum length of a single service argument.
-const MAX_SVC_ARG_LEN: usize = 64;
-
-/// Maximum number of per-service environment variables.
-const MAX_SVC_ENV: usize = 4;
-
-/// Maximum length of a single environment variable (KEY=VALUE).
-const MAX_SVC_ENV_LEN: usize = 128;
+// What a service's fields hold: `lib.rs`'s, where `/etc/startup.conf`'s
+// lines and `svc start`'s path are held to them before anything is stored,
+// so the registry below never has to cut anything to fit.
+use init::{
+    MAX_DEPS, MAX_SVC_ARG_LEN, MAX_SVC_ARGS, MAX_SVC_ENV, MAX_SVC_ENV_LEN, MAX_SVC_NAME,
+    MAX_SVC_PATH,
+};
 
 /// Initial restart delay in nanoseconds (1 second).
 const BACKOFF_INITIAL_NS: u64 = 1_000_000_000;
@@ -758,6 +829,9 @@ const MAX_WAIT_ERRORS: u32 = 5;
 
 /// Maximum size of packed argv/envp data for `process_spawn()`.
 const MAX_PACKED_ARGS: usize = 1024;
+
+/// The most words the `spawn` command passes as argv, its path included.
+const MAX_SPAWN_ARGS: usize = 32;
 
 /// Default environment passed to spawned processes.
 /// Packed null-terminated format: "PATH=/bin\0".
@@ -870,6 +944,17 @@ impl Service {
     }
 }
 
+/// Why [`ServiceRegistry::register`] would not take a service.
+#[derive(Clone, Copy)]
+enum Refusal<'a> {
+    /// The path is not one init can run.
+    Line(init::LineError<'a>),
+    /// A registered service has this name already.
+    Duplicate(&'a [u8]),
+    /// All [`MAX_SERVICES`] slots are taken.
+    Full,
+}
+
 /// The service registry.  Fixed-size, no heap.
 struct ServiceRegistry {
     services: [Service; MAX_SERVICES],
@@ -901,53 +986,30 @@ impl ServiceRegistry {
         }
     }
 
-    /// Register a new service by filesystem path.  Extracts the filename
-    /// as the service name.  Returns the slot index or `None` if full.
-    fn register(&mut self, path: &[u8]) -> Option<usize> {
-        if self.count >= MAX_SERVICES || path.is_empty() {
-            return None;
+    /// Register a new service by filesystem path; its name is the path's
+    /// last component.  Returns the slot index, or why not:
+    ///
+    /// - a path init cannot run ([`init::check_path`]) -- until 2026-10-06
+    ///   one too long was cut short, and a name too long cut to 32 bytes;
+    /// - a name another registered service has -- `depends:` and `svc` find
+    ///   a service by its name, and with two of one name they found
+    ///   whichever came first;
+    /// - no free slot.
+    fn register<'p>(&mut self, path: &'p [u8]) -> Result<usize, Refusal<'p>> {
+        init::check_path(path).map_err(Refusal::Line)?;
+        let name = init::service_name(path);
+        if self.find_by_name(name).is_some() {
+            return Err(Refusal::Duplicate(name));
         }
-
-        // Find a free slot (prefer the first unused).
-        let mut slot = None;
-        let mut i = 0;
-        while i < MAX_SERVICES {
-            if !self.services[i].active {
-                slot = Some(i);
-                break;
-            }
-            i += 1;
-        }
-        let idx = slot?;
+        let idx = (0..MAX_SERVICES)
+            .find(|&i| !self.services[i].active)
+            .ok_or(Refusal::Full)?;
 
         let svc = &mut self.services[idx];
-
-        // Copy path.
-        let plen = if path.len() > MAX_SVC_PATH {
-            MAX_SVC_PATH
-        } else {
-            path.len()
-        };
-        svc.path[..plen].copy_from_slice(&path[..plen]);
-        svc.path_len = plen;
-
-        // Extract filename from path as service name.
-        let mut last_slash = 0;
-        let mut j = 0;
-        while j < plen {
-            if path[j] == b'/' {
-                last_slash = j + 1;
-            }
-            j += 1;
-        }
-        let name_src = &path[last_slash..plen];
-        let nlen = if name_src.len() > MAX_SVC_NAME {
-            MAX_SVC_NAME
-        } else {
-            name_src.len()
-        };
-        svc.name[..nlen].copy_from_slice(&name_src[..nlen]);
-        svc.name_len = nlen;
+        svc.path[..path.len()].copy_from_slice(path);
+        svc.path_len = path.len();
+        svc.name[..name.len()].copy_from_slice(name);
+        svc.name_len = name.len();
 
         svc.active = true;
         svc.auto_restart = true;
@@ -956,6 +1018,7 @@ impl ServiceRegistry {
         svc.started_at_ns = 0;
         svc.restart_after_ns = 0;
         svc.crash_count = 0;
+        svc.wait_err_count = 0;
         svc.ready = false;
         svc.dep_count = 0;
         svc.waiting_on_deps = false;
@@ -964,7 +1027,7 @@ impl ServiceRegistry {
         svc.svc_cap_count = 0;
 
         self.count += 1;
-        Some(idx)
+        Ok(idx)
     }
 
     /// Set the capabilities a registered service gets beyond init's usual
@@ -1150,6 +1213,34 @@ impl ServiceRegistry {
         true // All deps ready.
     }
 
+    /// Say which waiting services wait on a name no registered service has,
+    /// or on themselves.  They go on waiting -- `svc start` may yet register
+    /// the one they need -- but until 2026-10-06 they waited without a word.
+    fn report_unmet_dependencies(&self) {
+        for svc in self
+            .services
+            .iter()
+            .filter(|s| s.active && s.waiting_on_deps)
+        {
+            let own = &svc.name[..svc.name_len];
+            for d in 0..svc.dep_count {
+                let dep = &svc.dep_names[d][..svc.dep_name_lens[d]];
+                let what = if bytes_eq(dep, own) {
+                    "`, which is itself; it never starts\n"
+                } else if self.find_by_name(dep).is_none() {
+                    "`, which no service is called; it starts once one is (svc start)\n"
+                } else {
+                    continue;
+                };
+                print("[init] ");
+                console_write(own);
+                print(" waits on `");
+                console_write(dep);
+                print(what);
+            }
+        }
+    }
+
     /// Find a service by name.  Returns the slot index or `None`.
     fn find_by_name(&self, name: &[u8]) -> Option<usize> {
         let mut i = 0;
@@ -1167,7 +1258,48 @@ impl ServiceRegistry {
 
     /// Start a service (read ELF from VFS, spawn process).
     /// Returns the child PID or a negative error code.
+    ///
+    /// A start that fails is tried again after the backoff, which doubles,
+    /// as after a crash (`schedule_retry`).  Until 2026-10-06 a failed
+    /// *restart* left the restart time in the past, so every poll -- ten or
+    /// twenty a second -- tried again and printed why it failed, for as long
+    /// as the cause lasted; and a failed *first* start was never tried again.
     fn start_service(&mut self, idx: usize) -> i64 {
+        let pid = self.spawn_service(idx);
+        if pid < 0 {
+            #[allow(clippy::cast_sign_loss)]
+            self.schedule_retry(idx, clock_monotonic() as u64);
+        }
+        pid
+    }
+
+    /// After a start of service `idx` that failed at `now_ns`: try again
+    /// after the backoff, and double the backoff (to its cap) for the next
+    /// time -- unless the service is not to be restarted.
+    fn schedule_retry(&mut self, idx: usize, now_ns: u64) {
+        let Some(svc) = self.services.get_mut(idx) else {
+            return;
+        };
+        if !svc.active || !svc.auto_restart || svc.pid != 0 {
+            return;
+        }
+        // Never 0, which means "no restart pending".
+        svc.restart_after_ns = now_ns.saturating_add(svc.backoff_ns).max(1);
+        print("[svc] Will try ");
+        console_write(&svc.name[..svc.name_len]);
+        print(" again in ");
+        print_u64(svc.backoff_ns / 1_000_000_000);
+        print("s\n");
+        svc.backoff_ns = svc
+            .backoff_ns
+            .checked_shl(BACKOFF_MULTIPLIER)
+            .unwrap_or(BACKOFF_MAX_NS)
+            .min(BACKOFF_MAX_NS);
+    }
+
+    /// [`start_service`](Self::start_service)'s work: read the ELF and
+    /// spawn it, saying why not.
+    fn spawn_service(&mut self, idx: usize) -> i64 {
         if idx >= MAX_SERVICES || !self.services[idx].active {
             return -1;
         }
@@ -1211,89 +1343,8 @@ impl ServiceRegistry {
         let path = &path_buf[..path_len];
         let name = &name_buf[..name_len];
 
-        // Stat the ELF binary to get its size.
-        let mut stat_out = [0u8; 80];
-        let stat_ret = fs_stat(path, &mut stat_out);
-        if stat_ret < 0 {
-            print("[svc] Failed to stat ");
-            console_write(path);
-            print(": error ");
-            print_i64(stat_ret);
-            print("\n");
-            return stat_ret;
-        }
-        let file_size = u64::from_le_bytes([
-            stat_out[0],
-            stat_out[1],
-            stat_out[2],
-            stat_out[3],
-            stat_out[4],
-            stat_out[5],
-            stat_out[6],
-            stat_out[7],
-        ]) as usize;
-
-        if file_size == 0 {
-            print("[svc] Empty ELF: ");
-            console_write(path);
-            print("\n");
-            return -1;
-        }
-
-        // Read the ELF binary.  For files ≤ 64 KiB, use a stack buffer
-        // to avoid the mmap/munmap overhead.  Larger files use mmap.
-        let mut stack_buf = [0u8; STACK_ELF_MAX];
-        let (elf_ptr, elf_mmap_addr, elf_mmap_size): (*const u8, u64, u64);
-
-        if file_size <= STACK_ELF_MAX {
-            let result = fs_read_file(path, &mut stack_buf);
-            if result < 0 {
-                print("[svc] Failed to read ");
-                console_write(path);
-                print(": error ");
-                print_i64(result);
-                print("\n");
-                return result;
-            }
-            elf_ptr = stack_buf.as_ptr();
-            elf_mmap_addr = 0;
-            elf_mmap_size = 0;
-        } else {
-            // Allocate a buffer via mmap for large ELFs.
-            let mapped = mmap(file_size as u64);
-            if mapped < 0 {
-                print("[svc] mmap failed for ");
-                console_write(path);
-                print(": error ");
-                print_i64(mapped);
-                print("\n");
-                return mapped;
-            }
-            #[allow(clippy::cast_sign_loss)]
-            let addr = mapped as u64;
-            // SAFETY: mmap returned a valid writable buffer of at least
-            // `file_size` bytes.  We use it as a &mut [u8] for reading.
-            let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, file_size) };
-            let result = fs_read_file(path, buf);
-            if result < 0 {
-                munmap(addr, file_size as u64);
-                print("[svc] Failed to read ");
-                console_write(path);
-                print(": error ");
-                print_i64(result);
-                print("\n");
-                return result;
-            }
-            elf_ptr = addr as *const u8;
-            elf_mmap_addr = addr;
-            elf_mmap_size = file_size as u64;
-        }
-
-        // SAFETY: elf_ptr points to `file_size` valid bytes (either
-        // stack_buf or mmap'd region).
-        let elf_data = unsafe { core::slice::from_raw_parts(elf_ptr, file_size) };
-
-        // Build packed argv: [path\0arg1\0arg2\0...]
+        // Build packed argv: [path\0arg1\0arg2\0...] -- before the ELF is
+        // read, so that its buffer is held no longer than the spawn.
         let mut argv_buf = [0u8; MAX_PACKED_ARGS];
         let mut argc: usize = 0;
 
@@ -1344,20 +1395,43 @@ impl ServiceRegistry {
             e += 1;
         }
 
-        let pid = process_spawn(
-            elf_data,
-            name,
-            &argv_buf[..argv_pos],
-            argc,
-            &envp_buf[..envp_pos],
-            envc,
-            &caps_copy[..cap_count],
-        );
-
-        // Free mmap'd buffer now that spawn has copied the ELF data.
-        if elf_mmap_addr != 0 {
-            munmap(elf_mmap_addr, elf_mmap_size);
-        }
+        // Read the ELF whole (`with_whole_file` says why `fs_stat`'s size
+        // alone is not trusted) and spawn it while it is held: the kernel
+        // copies it, and the buffer goes when the read returns.
+        let spawned = with_whole_file::<STACK_ELF_MAX, _>(path, |elf_data| {
+            if elf_data.is_empty() {
+                return None;
+            }
+            Some(process_spawn(
+                elf_data,
+                name,
+                &argv_buf[..argv_pos],
+                argc,
+                &envp_buf[..envp_pos],
+                envc,
+                &caps_copy[..cap_count],
+            ))
+        });
+        let pid = match spawned {
+            Ok(Some(pid)) => pid,
+            Ok(None) => {
+                print("[svc] Empty ELF: ");
+                console_write(path);
+                print("\n");
+                return -1;
+            }
+            Err(e) => {
+                print("[svc] Failed to read ");
+                console_write(path);
+                print(": error ");
+                print_i64(e);
+                if e == ERR_KEPT_CHANGING {
+                    print(" (it kept changing size while it was read)");
+                }
+                print("\n");
+                return e;
+            }
+        };
 
         if pid < 0 {
             print("[svc] Failed to spawn ");
@@ -1811,119 +1885,20 @@ fn cmd_spawn(args: &[u8]) {
 
     // First word is the ELF path, remaining words are arguments.
     let (path, remaining_args) = split_first_word(args);
+    let name = init::service_name(path);
 
-    // Stat the file to get its size.
-    let mut stat_out = [0u8; 80];
-    let stat_ret = fs_stat(path, &mut stat_out);
-    if stat_ret < 0 {
-        print("spawn: failed to stat ");
-        console_write(path);
-        print(": error ");
-        print_i64(stat_ret);
-        print("\n");
-        return;
-    }
-    let file_size = u64::from_le_bytes([
-        stat_out[0],
-        stat_out[1],
-        stat_out[2],
-        stat_out[3],
-        stat_out[4],
-        stat_out[5],
-        stat_out[6],
-        stat_out[7],
-    ]) as usize;
-    if file_size == 0 {
-        print("spawn: empty file\n");
-        return;
-    }
-
-    // Read the ELF binary.  Stack buffer for small files, mmap for large.
-    let mut stack_buf = [0u8; STACK_ELF_MAX];
-    let (elf_ptr, elf_mmap_addr, elf_mmap_size): (*const u8, u64, u64);
-
-    if file_size <= STACK_ELF_MAX {
-        let result = fs_read_file(path, &mut stack_buf);
-        if result < 0 {
-            print("spawn: failed to read ");
-            console_write(path);
-            print(": error ");
-            print_i64(result);
-            print("\n");
-            return;
-        }
-        elf_ptr = stack_buf.as_ptr();
-        elf_mmap_addr = 0;
-        elf_mmap_size = 0;
-    } else {
-        let mapped = mmap(file_size as u64);
-        if mapped < 0 {
-            print("spawn: mmap failed: error ");
-            print_i64(mapped);
-            print("\n");
-            return;
-        }
-        #[allow(clippy::cast_sign_loss)]
-        let addr = mapped as u64;
-        // SAFETY: mmap returned a valid writable buffer.
-        let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, file_size) };
-        let result = fs_read_file(path, buf);
-        if result < 0 {
-            munmap(addr, file_size as u64);
-            print("spawn: failed to read ");
-            console_write(path);
-            print(": error ");
-            print_i64(result);
-            print("\n");
-            return;
-        }
-        elf_ptr = addr as *const u8;
-        elf_mmap_addr = addr;
-        elf_mmap_size = file_size as u64;
-    }
-
-    // SAFETY: elf_ptr points to file_size valid bytes.
-    let elf_data = unsafe { core::slice::from_raw_parts(elf_ptr, file_size) };
-
-    // Extract filename from path for the process name.
-    let name = {
-        let mut last_slash = 0;
-        let mut i = 0;
-        while i < path.len() {
-            if path[i] == b'/' {
-                last_slash = i + 1;
-            }
-            i += 1;
-        }
-        &path[last_slash..]
-    };
-
-    // Build packed argv: [path\0arg1\0arg2\0...]
+    // Build packed argv: [path\0arg1\0arg2\0...] -- all of it, or nothing:
+    // a word that does not fit is refused, never dropped (until 2026-10-06
+    // a 33rd word was left off without a word, and so was a path of a
+    // kilobyte, which left the program no argv[0]).
     let mut argv_data = [0u8; MAX_PACKED_ARGS];
     let mut argv_pos: usize = 0;
     let mut argc: usize = 0;
-
-    // argv[0] = path.
-    if path.len() < MAX_PACKED_ARGS {
-        argv_data[argv_pos..argv_pos + path.len()].copy_from_slice(path);
-        argv_pos += path.len();
-        argv_data[argv_pos] = 0;
-        argv_pos += 1;
-        argc += 1;
-    }
-
-    // Parse remaining arguments (space-separated).
+    let mut word = path;
     let mut rest = remaining_args;
-    while !rest.is_empty() && argc < 32 {
-        let (word, next) = split_first_word(rest);
-        if word.is_empty() {
-            break;
-        }
-        if argv_pos + word.len() + 1 > MAX_PACKED_ARGS {
+    loop {
+        if argc >= MAX_SPAWN_ARGS || argv_pos + word.len() + 1 > MAX_PACKED_ARGS {
             print("spawn: argument list too long\n");
-            if elf_mmap_addr != 0 {
-                munmap(elf_mmap_addr, elf_mmap_size);
-            }
             return;
         }
         argv_data[argv_pos..argv_pos + word.len()].copy_from_slice(word);
@@ -1931,7 +1906,12 @@ fn cmd_spawn(args: &[u8]) {
         argv_data[argv_pos] = 0;
         argv_pos += 1;
         argc += 1;
-        rest = next;
+        let (next_word, next_rest) = split_first_word(rest);
+        if next_word.is_empty() {
+            break;
+        }
+        word = next_word;
+        rest = next_rest;
     }
 
     print("Spawning ");
@@ -1943,24 +1923,41 @@ fn cmd_spawn(args: &[u8]) {
         print_u64(extra);
         print(" arg(s)");
     }
-    print(" (");
-    print_u64(file_size as u64);
-    print(" bytes)...\n");
+    print("...\n");
 
-    let pid = process_spawn(
-        elf_data,
-        name,
-        &argv_data[..argv_pos],
-        argc,
-        DEFAULT_ENVP,
-        DEFAULT_ENVP_COUNT,
-        &[],
-    );
-
-    // Free mmap'd buffer after spawn has copied the ELF.
-    if elf_mmap_addr != 0 {
-        munmap(elf_mmap_addr, elf_mmap_size);
-    }
+    // Read the ELF whole and spawn it while it is held.
+    let spawned = with_whole_file::<STACK_ELF_MAX, _>(path, |elf_data| {
+        if elf_data.is_empty() {
+            return None;
+        }
+        Some(process_spawn(
+            elf_data,
+            name,
+            &argv_data[..argv_pos],
+            argc,
+            DEFAULT_ENVP,
+            DEFAULT_ENVP_COUNT,
+            &[],
+        ))
+    });
+    let pid = match spawned {
+        Ok(Some(pid)) => pid,
+        Ok(None) => {
+            print("spawn: empty file\n");
+            return;
+        }
+        Err(e) => {
+            print("spawn: failed to read ");
+            console_write(path);
+            print(": error ");
+            print_i64(e);
+            if e == ERR_KEPT_CHANGING {
+                print(" (it kept changing size while it was read)");
+            }
+            print("\n");
+            return;
+        }
+    };
 
     if pid < 0 {
         print("spawn: error ");
@@ -2031,10 +2028,14 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
             return;
         }
         match registry.register(rest) {
-            Some(idx) => {
+            Ok(idx) => {
                 registry.start_service(idx);
             }
-            None => print("svc start: registry full or invalid path\n"),
+            Err(refusal) => {
+                print("svc start: ");
+                print_refusal(refusal);
+                print("\n");
+            }
         }
     } else if bytes_eq(sub, b"stop") {
         if rest.is_empty() {
@@ -2493,44 +2494,48 @@ fn report_record_failure(path: &[u8], what: &[u8]) {
 ///
 /// If the file doesn't exist, this is a no-op.
 fn load_startup_services(registry: &mut ServiceRegistry) {
-    let mut buf = [0u8; 2048];
-    let result = fs_read_file(b"/etc/startup.conf", &mut buf);
-    if result < 0 {
-        // File not found or other error — silently skip.
-        return;
-    }
-
-    let data = &buf[..result as usize];
-    print("[init] Loading startup services from /etc/startup.conf\n");
-
-    // Parse line by line.  Lines are separated by '\n'.
-    let mut start = 0;
-    while start < data.len() {
-        // Find end of line.
-        let mut end = start;
-        while end < data.len() && data[end] != b'\n' {
-            end += 1;
-        }
-
-        let line = trim(&data[start..end]);
-
-        // Skip empty lines and comments.
-        if !line.is_empty() && line[0] != b'#' {
+    // The whole file, however long (`with_whole_file`): until 2026-10-06 it
+    // was read into 2 KiB, and the services past that were never started.
+    let read = with_whole_file::<STARTUP_CONF_STACK, _>(b"/etc/startup.conf", |data| {
+        print("[init] Loading startup services from /etc/startup.conf\n");
+        for line in data.split(|&b| b == b'\n') {
+            let line = trim(line);
+            // Skip empty lines and comments.
+            if line.is_empty() || line.first() == Some(&b'#') {
+                continue;
+            }
             match init::parse_service_line(line) {
                 Ok(parsed) => register_startup_service(registry, &parsed),
                 Err(e) => report_refused_line(line, e),
             }
         }
-
-        start = end + 1;
+        registry.report_unmet_dependencies();
+    });
+    match read {
+        // No file is no services, which is not worth a word.
+        Ok(()) | Err(ERR_NOT_FOUND) => {}
+        Err(e) => {
+            // Anything else is: until 2026-10-06 a file init could not read
+            // started nothing, and said nothing.
+            print("[init] /etc/startup.conf could not be read (error ");
+            print_i64(e);
+            if e == ERR_KEPT_CHANGING {
+                print(": it kept changing size while it was read");
+            }
+            print("); no service started from it\n");
+        }
     }
 }
+
+/// How much of `/etc/startup.conf` is read on the stack; a longer file is
+/// read into a mapping.
+const STARTUP_CONF_STACK: usize = 4096;
 
 /// Register one service `/etc/startup.conf` names, and start it unless it
 /// waits on others.
 fn register_startup_service(registry: &mut ServiceRegistry, parsed: &init::ServiceLine<'_>) {
     match registry.register(parsed.path) {
-        Some(idx) => {
+        Ok(idx) => {
             if !parsed.deps.is_empty() {
                 registry.set_dependencies(idx, parsed.deps);
             }
@@ -2553,10 +2558,12 @@ fn register_startup_service(registry: &mut ServiceRegistry, parsed: &init::Servi
                 registry.start_service(idx);
             }
         }
-        None => {
-            print("[init] Warning: could not register ");
+        Err(refusal) => {
+            print("[init] /etc/startup.conf: not starting `");
             console_write(parsed.path);
-            print(" (registry full?)\n");
+            print("`: ");
+            print_refusal(refusal);
+            print("\n");
         }
     }
 }
@@ -2566,6 +2573,37 @@ fn report_refused_line(line: &[u8], e: init::LineError<'_>) {
     print("[init] /etc/startup.conf: not starting `");
     console_write(line);
     print("`: ");
+    print_line_error(e);
+    print("\n");
+}
+
+/// Why [`ServiceRegistry::register`] took no service, after a prefix the
+/// caller printed.
+fn print_refusal(refusal: Refusal<'_>) {
+    match refusal {
+        Refusal::Line(e) => print_line_error(e),
+        Refusal::Duplicate(name) => {
+            print("a service named `");
+            console_write(name);
+            print("` is registered already -- services are known by their file's name");
+        }
+        Refusal::Full => {
+            print("init keeps ");
+            print_u64(MAX_SERVICES as u64);
+            print(" services, and has that many");
+        }
+    }
+}
+
+/// What is wrong with a line, or a path, init was given, after a prefix the
+/// caller printed.
+fn print_line_error(e: init::LineError<'_>) {
+    // The limit on one keyword's entries, and on each entry's bytes.
+    let limits = |keyword: &[u8]| match keyword {
+        b"args" => (MAX_SVC_ARGS, MAX_SVC_ARG_LEN),
+        b"env" => (MAX_SVC_ENV, MAX_SVC_ENV_LEN),
+        _ => (MAX_DEPS, MAX_SVC_NAME),
+    };
     match e {
         init::LineError::UnknownKeyword(word) => {
             print("no keyword init knows in `");
@@ -2594,8 +2632,42 @@ fn report_refused_line(line: &[u8], e: init::LineError<'_>) {
         init::LineError::TooManyCaps => {
             print("more caps: entries than init passes on to one service");
         }
+        init::LineError::BadPath(path) => {
+            print("`");
+            console_write(path);
+            print("` is not an absolute path to a program");
+        }
+        init::LineError::PathTooLong(_) => {
+            print("the program's path is longer than ");
+            print_u64(MAX_SVC_PATH as u64);
+            print(" bytes");
+        }
+        init::LineError::NameTooLong(name) => {
+            print("the program's name `");
+            console_write(name);
+            print("` is longer than ");
+            print_u64(MAX_SVC_NAME as u64);
+            print(" bytes");
+        }
+        init::LineError::TooMany(keyword) => {
+            console_write(keyword);
+            print(": names more than ");
+            print_u64(limits(keyword).0 as u64);
+        }
+        init::LineError::EntryTooLong(keyword, entry) => {
+            console_write(keyword);
+            print(": entry `");
+            console_write(entry);
+            print("` is longer than ");
+            print_u64(limits(keyword).1 as u64);
+            print(" bytes");
+        }
+        init::LineError::BadEnv(entry) => {
+            print("env: entry `");
+            console_write(entry);
+            print("` is not KEY=VALUE");
+        }
     }
-    print("\n");
 }
 
 /// Process entry point.  Called by the kernel via IRETQ to ring 3.

@@ -167,6 +167,86 @@ fn trim(s: &[u8]) -> &[u8] {
 /// The most capabilities one service's `caps:` may name.
 pub const MAX_SVC_CAPS: usize = 8;
 
+/// The most bytes a service's program path may have.
+pub const MAX_SVC_PATH: usize = 128;
+/// The most bytes a service's name -- its path's last component, which
+/// `depends:` and `svc` name it by -- may have.
+pub const MAX_SVC_NAME: usize = 32;
+/// The most services one `depends:` may name.
+pub const MAX_DEPS: usize = 4;
+/// The most arguments `args:` may give (argv[1..]).
+pub const MAX_SVC_ARGS: usize = 8;
+/// The most bytes one argument may have.
+pub const MAX_SVC_ARG_LEN: usize = 64;
+/// The most variables `env:` may set.
+pub const MAX_SVC_ENV: usize = 4;
+/// The most bytes one `KEY=VALUE` may have.
+pub const MAX_SVC_ENV_LEN: usize = 128;
+
+/// A service's name: the last component of its program's path.
+#[must_use]
+pub fn service_name(path: &[u8]) -> &[u8] {
+    path.rsplit(|&b| b == b'/').next().unwrap_or(path)
+}
+
+/// Whether init can run `path` as a service: an absolute path to a file, no
+/// longer than [`MAX_SVC_PATH`], whose name is no longer than
+/// [`MAX_SVC_NAME`]. `/etc/startup.conf`'s lines and `svc start` are both
+/// held to it.
+///
+/// # Errors
+///
+/// [`LineError::BadPath`], [`LineError::PathTooLong`] or
+/// [`LineError::NameTooLong`].
+pub fn check_path(path: &[u8]) -> Result<(), LineError<'_>> {
+    if path.len() > MAX_SVC_PATH {
+        return Err(LineError::PathTooLong(path));
+    }
+    let name = service_name(path);
+    if path.first() != Some(&b'/') || name.is_empty() {
+        return Err(LineError::BadPath(path));
+    }
+    if name.len() > MAX_SVC_NAME {
+        return Err(LineError::NameTooLong(name));
+    }
+    Ok(())
+}
+
+/// Hold a comma-separated list -- `args:`, `env:` or `depends:`, named by
+/// `keyword` -- to what init keeps of it: at most `max` entries of at most
+/// `max_len` bytes. Entries are trimmed and empty ones skipped, as init
+/// stores them; for `env:`, each must be `KEY=VALUE` with a key.
+fn check_list<'a>(
+    keyword: &'a [u8],
+    value: &'a [u8],
+    max: usize,
+    max_len: usize,
+) -> Result<(), LineError<'a>> {
+    let mut n = 0usize;
+    for entry in value
+        .split(|&b| b == b',')
+        .map(trim)
+        .filter(|e| !e.is_empty())
+    {
+        if entry.len() > max_len {
+            return Err(LineError::EntryTooLong(keyword, entry));
+        }
+        if keyword == b"env"
+            && entry
+                .iter()
+                .position(|&b| b == b'=')
+                .is_none_or(|at| at == 0)
+        {
+            return Err(LineError::BadEnv(entry));
+        }
+        n = n.saturating_add(1);
+        if n > max {
+            return Err(LineError::TooMany(keyword));
+        }
+    }
+    Ok(())
+}
+
 /// A capability a service's `caps:` names: the kernel's `ResourceType`
 /// discriminant, the resource's id -- 0 for the whole class -- and the
 /// rights, as the kernel's `Rights` bits.
@@ -234,6 +314,22 @@ pub enum LineError<'a> {
     BadCap(&'a [u8]),
     /// More than [`MAX_SVC_CAPS`] `caps:` entries.
     TooManyCaps,
+    /// The program is not an absolute path to a file: the path as written.
+    BadPath(&'a [u8]),
+    /// The program's path is longer than [`MAX_SVC_PATH`].
+    PathTooLong(&'a [u8]),
+    /// The program's name -- the last component, which `depends:` and `svc`
+    /// name it by -- is longer than [`MAX_SVC_NAME`].
+    NameTooLong(&'a [u8]),
+    /// `args:`, `env:` or `depends:` (the keyword) names more entries than
+    /// init keeps: [`MAX_SVC_ARGS`], [`MAX_SVC_ENV`], [`MAX_DEPS`].
+    TooMany(&'a [u8]),
+    /// One entry of `args:`, `env:` or `depends:` (the keyword, then the
+    /// entry) is longer than init keeps: [`MAX_SVC_ARG_LEN`],
+    /// [`MAX_SVC_ENV_LEN`], [`MAX_SVC_NAME`].
+    EntryTooLong(&'a [u8], &'a [u8]),
+    /// An `env:` entry that is not `KEY=VALUE` with a key.
+    BadEnv(&'a [u8]),
 }
 
 /// A line of `/etc/startup.conf`, read: the program's path, then each
@@ -268,6 +364,12 @@ impl ServiceLine<'_> {
 /// in any order. Until 2026-10-05 init found each keyword by searching the
 /// line and kept only what came before it, so a keyword after another one
 /// was lost: in the first line above, `env:` went with `args:`.
+///
+/// A line is held to what init keeps of it ([`check_path`], and
+/// [`MAX_SVC_ARGS`] and the other limits) and refused whole where it does
+/// not fit. Until 2026-10-06 init cut what did not fit and started the
+/// service anyway -- a path cut short, an argument cut mid-word, a ninth
+/// argument dropped -- so a service ran with a configuration nobody wrote.
 pub fn parse_service_line(line: &[u8]) -> Result<ServiceLine<'_>, LineError<'_>> {
     let mut words = line
         .split(|&b| b == b' ' || b == b'\t')
@@ -280,6 +382,7 @@ pub fn parse_service_line(line: &[u8]) -> Result<ServiceLine<'_>, LineError<'_>>
         caps: [CapGrant::NONE; MAX_SVC_CAPS],
         cap_count: 0,
     };
+    check_path(out.path)?;
     let mut seen = [false; 4];
     for word in words {
         let Some(colon) = word.iter().position(|&b| b == b':') else {
@@ -309,6 +412,9 @@ pub fn parse_service_line(line: &[u8]) -> Result<ServiceLine<'_>, LineError<'_>>
             _ => out.cap_count = parse_caps(value, &mut out.caps)?,
         }
     }
+    check_list(b"args", out.args, MAX_SVC_ARGS, MAX_SVC_ARG_LEN)?;
+    check_list(b"env", out.env, MAX_SVC_ENV, MAX_SVC_ENV_LEN)?;
+    check_list(b"depends", out.deps, MAX_DEPS, MAX_SVC_NAME)?;
     Ok(out)
 }
 
@@ -677,6 +783,97 @@ Service/6/r,Service/7/r,Service/8/r,Service/9/r",
                 core::str::from_utf8(text)
             );
         }
+    }
+
+    /// `n` copies of `b`, as text.
+    fn repeat(b: u8, n: usize) -> std::vec::Vec<u8> {
+        std::vec![b; n]
+    }
+
+    /// What does not fit what init keeps refuses the line, whole and with
+    /// the part that did not fit. Until 2026-10-06 init cut it to fit and
+    /// started the service with what was left.
+    #[test]
+    fn what_does_not_fit_refuses_the_line() {
+        use LineError::{BadEnv, BadPath, EntryTooLong, NameTooLong, PathTooLong, TooMany};
+        let long_path = [b"/".as_slice(), &repeat(b'd', 120), b"/x2345678"].concat();
+        let long_name = [b"/bin/".as_slice(), &repeat(b'n', 33)].concat();
+        let long_arg = [b"/bin/x args:".as_slice(), &repeat(b'a', 65)].concat();
+        let long_env = [b"/bin/x env:K=".as_slice(), &repeat(b'v', 127)].concat();
+        let long_dep = [b"/bin/x depends:".as_slice(), &repeat(b'd', 33)].concat();
+        let cases: &[(&[u8], LineError<'_>)] = &[
+            (b"x", BadPath(b"x")),
+            (b"bin/x", BadPath(b"bin/x")),
+            (b"/bin/", BadPath(b"/bin/")),
+            (b"args:-v", BadPath(b"args:-v")),
+            (&long_path, PathTooLong(&long_path)),
+            (&long_name, NameTooLong(&long_name[5..])),
+            (b"/bin/x args:1,2,3,4,5,6,7,8,9", TooMany(b"args")),
+            (&long_arg, EntryTooLong(b"args", &long_arg[12..])),
+            (b"/bin/x env:A=1,B=2,C=3,D=4,E=5", TooMany(b"env")),
+            (&long_env, EntryTooLong(b"env", &long_env[11..])),
+            (b"/bin/x env:PORT", BadEnv(b"PORT")),
+            (b"/bin/x env:=8080", BadEnv(b"=8080")),
+            (b"/bin/x env:A=1,,B", BadEnv(b"B")),
+            (b"/bin/x depends:a,b,c,d,e", TooMany(b"depends")),
+            (&long_dep, EntryTooLong(b"depends", &long_dep[15..])),
+        ];
+        for &(text, want) in cases {
+            assert_eq!(
+                parse_service_line(text),
+                Err(want),
+                "{:?}",
+                core::str::from_utf8(text)
+            );
+        }
+        assert_eq!(long_path.len(), 130);
+    }
+
+    /// Exactly the limits fit, and empty entries are skipped as init skips
+    /// them when it stores the list.
+    #[test]
+    fn exactly_the_limits_fit() {
+        let path = [b"/".as_slice(), &repeat(b'd', 94), b"/", &repeat(b'n', 32)].concat();
+        assert_eq!((path.len(), service_name(&path).len()), (128, 32));
+        let arg = repeat(b'a', 64);
+        let env = [b"K=".as_slice(), &repeat(b'v', 126)].concat();
+        let dep = repeat(b'd', 32);
+        let mut text = path.clone();
+        text.extend_from_slice(b" args:");
+        for i in 0..8 {
+            if i > 0 {
+                text.push(b',');
+            }
+            text.extend_from_slice(&arg);
+        }
+        text.extend_from_slice(b" env:");
+        for i in 0..4 {
+            if i > 0 {
+                text.push(b',');
+            }
+            text.extend_from_slice(&env);
+        }
+        text.extend_from_slice(b" depends:");
+        for i in 0..4 {
+            if i > 0 {
+                text.push(b',');
+            }
+            text.extend_from_slice(&dep);
+        }
+        let l = line(&text);
+        assert_eq!(l.path, &path[..]);
+        assert_eq!(l.args.split(|&b| b == b',').count(), 8);
+        // Empty entries are not entries: nine commas, two arguments.
+        assert!(parse_service_line(b"/bin/x args:a,,,,,,,,,b").is_ok());
+    }
+
+    #[test]
+    fn a_service_is_named_by_its_last_component() {
+        assert_eq!(service_name(b"/bin/webserver"), b"webserver");
+        assert_eq!(service_name(b"/webserver"), b"webserver");
+        assert_eq!(service_name(b"/bin/"), b"");
+        assert_eq!(check_path(b"/bin/ticker"), Ok(()));
+        assert_eq!(check_path(b"/"), Err(LineError::BadPath(b"/")));
     }
 
     fn entry(resource_type: u16, resource_id: u64, rights: u64) -> CapEntryInfo {

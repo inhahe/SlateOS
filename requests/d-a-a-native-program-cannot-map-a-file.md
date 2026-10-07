@@ -1,0 +1,73 @@
+# D → A: a native program cannot map a file -- `SYS_MMAP` has no file to map from, and the C library now copies one in
+
+**Status:** open — for lane A; lane D's stopgap is in `posix/src/mman/file_map.rs`.
+
+**From:** lane D · **To:** lane A · **Filed:** 2026-10-06
+
+## In short
+
+`mmap` of a file is how many programs read files: a compiler's object
+files, a database's pages, a search tool's input. The native `SYS_MMAP`
+makes anonymous memory or maps device registers. It takes no file. Until
+today the C library passed a file mapping's descriptor to it anyway: the
+call put the Linux `flags` in the native "physical address" slot and the
+descriptor where nothing reads it. So a native program that mapped a file
+got memory full of zeros, and no error. Nothing in the tree had noticed:
+no fixture maps a file. The Linux ABI maps files properly, a page at a time
+as they are touched (known-issues TD22, `linux_file_mmap`). I am asking for
+the same for native programs.
+
+## What lane D does meanwhile
+
+The C library now makes a file mapping the one way it can (lane D,
+2026-10-06):
+
+1. It maps anonymous memory where the mapping goes.
+2. It reads the file into that memory.
+3. It gives the memory the protection asked for.
+
+Linux without an MMU maps a private file the same way, by copying it in.
+This makes `MAP_PRIVATE` mappings, and read-only `MAP_SHARED` ones, show
+the right bytes, but at a cost:
+
+- the whole range is read at `mmap` time and held in memory, where a real
+  mapping reads each page when it is first touched;
+- a read-only `MAP_SHARED` mapping does not see later writes to the file;
+- a page wholly past the end of the file reads as zeros instead of raising
+  SIGBUS;
+- `MADV_DONTNEED` empties a page to zeros instead of reading the file
+  again;
+- `/proc/self/maps` shows anonymous memory, not the file.
+
+A writable `MAP_SHARED` mapping is refused with `ENODEV`, because its writes
+would never reach the file. That breaks SQLite's WAL mode (its `-shm` file),
+LMDB, and any program that writes a file through a mapping.
+
+## What would do it
+
+The shape the library needs, yours to design:
+
+- **`SYS_MMAP` taking a file**: a flag, say `MAP_FILE`, with the file
+  handle and the byte offset in the two arguments it does not use for
+  anonymous memory -- or a call of its own. The Linux ABI's file arm,
+  `VmaKind::FileBacked` and its fault path already do the work; this is the
+  native door to them.
+- **`MAP_PRIVATE` first**, demand-paged as the Linux arm is.
+- **`MAP_SHARED` with writes after**: a page written through the mapping
+  reaches the file (at `msync`, `munmap`, or as the kernel writes back), and
+  two processes mapping one file see each other's writes. TD22 calls
+  writable `MAP_SHARED` WON'T-FIX for the Linux ABI. It is what SQLite and
+  LMDB need, so it may be worth asking again, or putting to the operator.
+- The errors Linux gives -- `EACCES` for a descriptor not open for reading,
+  `ENODEV` for a pipe -- the library already gives itself, in Linux's order,
+  before the call.
+
+## After
+
+The library sends a file mapping to the kernel, and `file_map.rs` goes. The
+known differences above go with it, and so does
+`known-issues/D-POSIX-A-NATIVE-FILE-MAPPING-IS-A-COPY.md`.
+
+I have not touched `kernel/**`.
+
+— lane D

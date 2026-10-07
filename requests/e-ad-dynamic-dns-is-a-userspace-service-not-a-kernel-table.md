@@ -6,7 +6,10 @@ Settings) follows once the shape below is agreed. Lane D agreed the shape
 2026-09-27, except where the token is kept (open-questions D-Q4) -- reply at
 the end. **Lane D's half written 2026-10-06** -- `services/dyndns` and the
 provider crate `services/dyndns/providers`; `entries` became a mapping keyed
-by name (second reply at the end).
+by name (second reply at the end). **The router half too, the same day** --
+the router's internet address and the port forwards, over NAT-PMP or UPnP:
+`/etc/portforwards.yaml` in, `/run/portforwards.yaml` out (third reply at
+the end).
 
 **In short:** dynamic DNS keeps a hostname (`myhome.duckdns.org`) pointing at
 a home network whose address the internet provider keeps changing: every few
@@ -229,5 +232,80 @@ Nothing is ever sent in the clear in its place.
 (`kernel/src/fs/dyndns.rs`, `/proc/dyndns`). Nothing reads it any more once
 Settings reads `/run/dyndns.yaml`. The UPnP and NAT-PMP half comes to this
 service with the router query.
+
+— lane D
+
+---
+
+## Lane D — 2026-10-06, later: the router's address and the port forwards
+
+**The service now finds the router and keeps the forwards Settings lists**
+(design-decisions §1178). It asks the router -- the default gateway, and
+nothing else on the network -- over NAT-PMP, then UPnP. It learns the
+router's internet address, and asks for each forward in
+`/etc/portforwards.yaml`. A custom dynamic-DNS URL that names `{ip}` now
+takes that address. The protocols are a crate of their own,
+`services/dyndns/router` (`dyndnsrouter`); Settings need not link it.
+
+**The file Settings' Port Forwarding page writes:**
+
+```yaml
+# Port forwards: ask the router to pass these ports through to this computer.
+forwards:
+  SSH:
+    protocol: tcp          # tcp, udp, or both
+    port: 22               # this computer's port, or a range: 6881-6889
+    external_port: 2222    # the internet's side; the same as port when left out
+    enabled: true
+```
+
+- A mapping keyed by name, as `/etc/dyndns.yaml`'s entries are.
+- A range is at most 100 ports. `external_port` is then a range of the same
+  length, or its first port.
+- A port can be forwarded by one forward only. A second forward asking for
+  it is refused, naming the first, and so is one with a field missing or
+  wrong. The page can show `message` beside such a forward.
+
+**What it shows** (`/run/portforwards.yaml`):
+
+```yaml
+written_at: 2026-10-06T08:00:00Z
+router:
+  state: found           # found, none (no router answered), looking
+  address: 192.168.1.1   # the router: "can we detect what ip the router is at" (design.txt)
+  protocol: UPnP         # or NAT-PMP
+  name: OpenWrt Router, MiniUPnPd     # UPnP's only
+  internet_address: 81.2.69.142       # "show internet IP addresses" (design.txt)
+  public: true           # false: another router is in front of this one
+  message: a sentence to show as it is
+  checked_at: 2026-10-06T08:00:00Z
+forwards:
+  SSH:
+    protocol: tcp
+    port: "22"
+    external_port: "2222"
+    state: forwarded
+    message: the router forwards external port 2222 (TCP) to this computer's port 22
+    answer: the router's own words, when it refused (UPnP error 718, ...)
+    checked_at: 2026-10-06T08:00:00Z
+    next_check_at: 2026-10-06T08:30:00Z
+```
+
+`state` is one of:
+- `forwarded`: every port is forwarded;
+- `partial`: some are, and `message` says why the rest are not;
+- `pending`, `disabled`;
+- `refused`: asked again in 30 minutes, or at once when the forward is changed;
+- `unreachable`, `no-router`;
+- `misconfigured`: as written, it cannot be used.
+
+`router.address` is also what the design's "button to load that ip in the
+browser" opens. The page writes only the forwards file. A router that
+refuses because its owner turned UPnP off says so in `message`, and that
+is the sentence to show: turning it on is done on the router.
+
+**For lane A:** the kernel's `net/upnp.rs`, and the forwards half of
+`fs/dyndns.rs`, can go with the dynamic-DNS table once Settings reads these
+files (`requests/d-a-the-kernels-upnp-module-is-done-in-userspace-now.md`).
 
 — lane D

@@ -41,7 +41,9 @@
 //!    that is has not been decided (`open-questions/D-Q4.md`), so an entry
 //!    that needs one waits, and its status says why ([`Secrets`]).
 //! 3. The public address is learned the provider's way
-//!    (`dyndnsproviders::public_address`).
+//!    (`dyndnsproviders::public_address`) -- or, for a custom provider's URL
+//!    that names `{ip}`, from the router ([`Service::set_router_address`]),
+//!    no provider's page being the user's to ask.
 //! 4. The update is sent when the provider reads the address off the request
 //!    itself, when the address differs from the one last published, or when
 //!    that was [`REFRESH_DAYS`] ago -- an address published once and never
@@ -55,8 +57,11 @@
 //!
 //! This file is the part that touches no operating system -- the
 //! configuration, the checks, the status file, the journal's lines -- and is
-//! tested on the development host with a replayed network. `main.rs` is the
-//! rest: the clock, the files and the connections.
+//! tested on the development host with a replayed network. [`forwards`] is
+//! the same for the router's port forwards. `main.rs` is the rest: the
+//! clock, the files and the connections.
+
+pub mod forwards;
 
 use std::ffi::OsString;
 use std::net::IpAddr;
@@ -64,7 +69,8 @@ use std::path::{Path, PathBuf};
 
 use dyndnsproviders::encode::percent_encode;
 use dyndnsproviders::{
-    Address, Exchange, Outcome, Provider, Retry, Target, needs_secret, public_address, publish,
+    Address, Exchange, Outcome, Provider, Retry, Target, needs_router_address, needs_secret,
+    public_address, publish,
 };
 use yamldoc::Document;
 
@@ -434,11 +440,28 @@ enum Slot {
     Misconfigured(Misconfigured),
 }
 
+/// What the router says this network's internet address is, for the entries
+/// whose address only it can say (a custom provider's URL naming `{ip}`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RouterAddress {
+    /// It said this, and it is one the internet can reach.
+    Known(IpAddr),
+    /// It has not said: why, as a clause.
+    Unknown(String),
+}
+
+impl Default for RouterAddress {
+    fn default() -> Self {
+        Self::Unknown("the router has not been asked yet".to_owned())
+    }
+}
+
 /// Every entry and what the service knows of each.
 #[derive(Clone, Debug, Default)]
 pub struct Service {
     slots: Vec<Slot>,
     problem: Option<String>,
+    router_address: RouterAddress,
 }
 
 /// What a check did, before its outcome is recorded.
@@ -544,6 +567,24 @@ impl Service {
         self.tracked().filter_map(|t| t.due).min()
     }
 
+    /// Take what the router says this network's internet address is. When it
+    /// changes, every entry that asks the router for its address and is not
+    /// held is due at `now`: one waited for it, or published another.
+    pub fn set_router_address(&mut self, address: RouterAddress, now: u64) {
+        if address == self.router_address {
+            return;
+        }
+        self.router_address = address;
+        for slot in &mut self.slots {
+            if let Slot::Tracked(t) = slot
+                && t.due.is_some()
+                && needs_router_address(t.entry.provider, &t.entry.update_url)
+            {
+                t.due = Some(now);
+            }
+        }
+    }
+
     /// Make every enabled entry that is not held due at `now`: a run by hand
     /// (`--once`) checks them all.
     pub fn all_due(&mut self, now: u64) {
@@ -617,7 +658,14 @@ impl Service {
         if t.due.is_none_or(|d| d > now) {
             return None;
         }
-        let step = run(&t.entry, t.published, now, secrets, ex);
+        let step = run(
+            &t.entry,
+            t.published,
+            now,
+            secrets,
+            ex,
+            &self.router_address,
+        );
         apply(t, now, step)
     }
 
@@ -704,12 +752,15 @@ const STATUS_HEADER: &str = "\
 ";
 
 /// Do one check of `entry`: what happened, before it is recorded.
+/// `router` is what the router says the address is, for an entry that asks
+/// it.
 fn run(
     entry: &Entry,
     published: Option<Published>,
     now: u64,
     secrets: &dyn Secrets,
     ex: &mut dyn Exchange,
+    router: &RouterAddress,
 ) -> Step {
     let secret = if needs_secret(entry.provider, &entry.update_url) {
         match secrets.secret(&entry.secret) {
@@ -726,7 +777,17 @@ fn run(
         secret: &secret,
         update_url: &entry.update_url,
     };
-    let address = match public_address(&target, ex) {
+    let learned = if needs_router_address(entry.provider, &entry.update_url) {
+        match router {
+            RouterAddress::Known(ip) => Ok(Address::Known(*ip)),
+            RouterAddress::Unknown(why) => Err(Outcome::NoAddress {
+                why: format!("its update URL needs this network's address, and {why}"),
+            }),
+        }
+    } else {
+        public_address(&target, ex)
+    };
+    let address = match learned {
         Ok(a) => a,
         Err(outcome) => {
             return Step::Asked {
@@ -1036,14 +1097,19 @@ pub struct Options {
     pub config: PathBuf,
     /// The status file to write.
     pub status: PathBuf,
+    /// The port forwards to read.
+    pub forwards: PathBuf,
+    /// The port forwards' status file to write.
+    pub forwards_status: PathBuf,
     /// The journal to append to.
     pub log: PathBuf,
-    /// Check every entry once, then exit.
+    /// Check every entry and forward once, then exit.
     pub once: bool,
 }
 
 /// The usage line.
-pub const USAGE: &str = "usage: dyndns [--config FILE] [--status FILE] [--log FILE] [--once]";
+pub const USAGE: &str = "usage: dyndns [--config FILE] [--status FILE] [--forwards FILE] \
+                         [--forwards-status FILE] [--log FILE] [--once]";
 
 /// Read the command line (without the program's name). A file is the
 /// argument after its option, as the bytes it is: a path need not be text.
@@ -1055,6 +1121,8 @@ pub fn parse_args(args: &[OsString]) -> Result<Options, String> {
     let mut opts = Options {
         config: PathBuf::from(CONFIG_PATH),
         status: PathBuf::from(STATUS_PATH),
+        forwards: PathBuf::from(forwards::FORWARDS_PATH),
+        forwards_status: PathBuf::from(forwards::FORWARDS_STATUS_PATH),
         log: PathBuf::from(journalrec::MAIN_LOG_PATH),
         once: false,
     };
@@ -1069,6 +1137,8 @@ pub fn parse_args(args: &[OsString]) -> Result<Options, String> {
         match arg.to_str() {
             Some("--config") => opts.config = file("--config")?,
             Some("--status") => opts.status = file("--status")?,
+            Some("--forwards") => opts.forwards = file("--forwards")?,
+            Some("--forwards-status") => opts.forwards_status = file("--forwards-status")?,
             Some("--log") => opts.log = file("--log")?,
             Some("--once") => opts.once = true,
             Some("-h" | "--help") => return Err(USAGE.to_owned()),

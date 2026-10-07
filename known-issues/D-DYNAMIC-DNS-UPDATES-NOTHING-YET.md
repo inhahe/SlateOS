@@ -1,6 +1,6 @@
 ## D-DYNAMIC-DNS-UPDATES-NOTHING-YET — the dynamic-DNS service exists, but no hostname is updated on a SlateOS machine yet (lane D, 2026-10-06)
 
-**Status:** OPEN -- five pieces, four of them in other lanes' trees or the operator's hands.
+**Status:** OPEN -- four pieces, all in other lanes' trees or the operator's hands. The fifth, lane D's -- the router's address and the port forwards -- was written the same day (design-decisions §1178).
 
 **In short:** dynamic DNS keeps a name such as `myhome.duckdns.org`
 pointing at a home network whose address keeps changing. The service that
@@ -21,7 +21,8 @@ show, so nobody is told a hostname is being kept that is not.
 | A TLS client that checks certificates, and the root certificates on the image | lane A (or lane D, if lane A hands it over); the certificates are lane D's | `requests/d-a-nothing-in-userspace-can-make-an-https-connection.md` |
 | The service on the image and started at boot | lane A (what a boot starts); lane D builds and stages it | `requests/d-a-nothing-on-the-system-image-can-be-started-at-boot.md` |
 | Settings' editor over `/etc/dyndns.yaml`, its display of `/run/dyndns.yaml`, and its one call to hand the service a password | lane E (the call waits on D-Q4) | `requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md` |
-| Learning the address from the router (UPnP, NAT-PMP), which a custom URL naming `{ip}` needs, and the port forwards the kernel's table also claimed | lane D | here |
+| Settings' Port Forwarding page over `/etc/portforwards.yaml` and `/run/portforwards.yaml` | lane E | the same request, lane D's third reply |
+| ~~Learning the address from the router (UPnP, NAT-PMP), which a custom URL naming `{ip}` needs, and the port forwards the kernel's table also claimed~~ **Written 2026-10-06** (`services/dyndns/router`, `services/dyndns/src/forwards.rs`, design-decisions §1178), tested against a router simulated in memory. Not yet run against a real router: the boot test's network (QEMU's) has none that speaks either protocol, so on SlateOS today the status says "it answers neither NAT-PMP nor UPnP". | lane D | here |
 
 **Checked against the providers themselves: not yet.** The answers the tests
 replay are each provider's documented protocol:
@@ -42,6 +43,15 @@ compare each against `dyndnsproviders` before trusting a status.
   the startup file, and add a ring-3 rung that runs `dyndns --once` against
   a stand-in provider.
 
+**Checked against a real router: not yet.** The NAT-PMP datagrams the tests
+use are RFC 6886's, and the UPnP descriptions and SOAP answers are the IGD
+specification's, written in miniupnpd's and a FRITZ!Box's shapes from
+memory of them, not captured. The first run on a machine with a router
+should capture what it sends and compare it against `dyndnsrouter` before a
+status is trusted.
+
 **Where:** `services/dyndns/src/lib.rs` (`Undecided`, the checks, the status
-file), `services/dyndns/src/main.rs` (`Http`),
-`services/dyndns/providers/src/lib.rs` (each provider).
+file), `services/dyndns/src/forwards.rs` (the forwards),
+`services/dyndns/src/main.rs` (`Http`, `RouterNet`),
+`services/dyndns/providers/src/lib.rs` (each provider),
+`services/dyndns/router/src/` (NAT-PMP and UPnP).

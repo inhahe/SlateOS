@@ -3179,17 +3179,10 @@ pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: i32 = 1 << 6;
 /// gets EINVAL from the dispatch arm rather than the flag arm.
 pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: i32 = 1 << 7;
 
-/// Bitmask of operations supported by [`membarrier`] / reported by
-/// `MEMBARRIER_CMD_QUERY`.
-///
-/// We support every "regular" command except the rseq variants (no
-/// restartable-sequence infrastructure yet).  All supported commands
-/// reduce to a local `mfence` on x86_64; cross-CPU expedited semantics
-/// are best-effort because we have no userspace path to send IPIs to
-/// other cores.  In practice, each peer thread re-fences whenever it
-/// crosses a syscall boundary, so the visible ordering matches Linux
-/// for everything except code that aggressively spins in userspace
-/// without ever syscalling.
+/// Every command [`membarrier`] knows, except the rseq variant (there is no
+/// restartable-sequence infrastructure): what it answers `MEMBARRIER_CMD_QUERY`
+/// with when it can keep them all -- with one CPU online
+/// ([`membarrier_honoured`]).
 const MEMBARRIER_SUPPORTED: i32 = MEMBARRIER_CMD_GLOBAL
     | MEMBARRIER_CMD_GLOBAL_EXPEDITED
     | MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
@@ -3228,15 +3221,43 @@ fn local_mfence() {
     }
 }
 
+/// The commands this library can keep with `cpus` CPUs online.
+///
+/// Every barrier promises that each thread it covers has passed a full
+/// memory barrier before the call returns. With one CPU, the issuing
+/// thread's `mfence` is that barrier, and every other thread is off the
+/// CPU, where the context switch that took it off was its own: all of them
+/// are kept. With more, a thread running on another CPU has passed no
+/// barrier unless that CPU is interrupted, which the kernel cannot yet be
+/// asked to do (`requests/d-a-membarrier-needs-the-kernel-to-interrupt-the-other-cpus.md`):
+/// none is kept, and `MEMBARRIER_CMD_QUERY` says so, so that a program
+/// relying on one takes its fallback. Userspace RCU (liburcu's `memb`
+/// flavour) frees memory on the promise, and a JIT runs freshly written code
+/// on `SYNC_CORE`'s.
+///
+/// Until 2026-10-06 every command was answered 0 on any number of CPUs,
+/// with only the issuing CPU fenced.
+fn membarrier_honoured(cpus: usize) -> i32 {
+    if cpus <= 1 { MEMBARRIER_SUPPORTED } else { 0 }
+}
+
+crate::perprocess::process_global! {
+    /// The `MEMBARRIER_CMD_REGISTER_*` commands this process has issued.
+    /// Linux keeps them in the process's memory map: a `fork` inherits
+    /// them, and an `exec` starts without, as a new image's statics do.
+    /// Atomic: any of the process's threads may register at once.
+    fn membarrier_registered() -> core::sync::atomic::AtomicI32 =
+        core::sync::atomic::AtomicI32::new(0);
+}
+
 /// Perform a memory barrier operation across all threads of the
 /// process.
 ///
-/// On x86_64 the issuing CPU is fenced via `mfence`.  Linux's
-/// expedited variants additionally IPI peer CPUs to force them to
-/// fence; our kernel does not yet expose a userspace-triggered IPI, so
-/// peer-CPU fencing is implicit (each thread re-fences on its next
-/// syscall).  `MEMBARRIER_CMD_QUERY` returns the bitmask of supported
-/// commands.
+/// A command this library can keep ([`membarrier_honoured`]) is the
+/// issuing CPU's `mfence`; one it cannot is `EINVAL`, as Linux answers a
+/// command its architecture lacks. A private expedited barrier, plain or
+/// `SYNC_CORE`, is `EPERM` until the process has registered for it, as on
+/// Linux.  `MEMBARRIER_CMD_QUERY` answers the commands kept.
 ///
 /// Validation order matches Linux's `sys_membarrier`
 /// (`kernel/sched/membarrier.c`):
@@ -3257,6 +3278,11 @@ fn local_mfence() {
 ///    default `EINVAL` arm.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn membarrier(cmd: i32, flags: u32, cpu_id: i32) -> i32 {
+    membarrier_on(crate::sched::online_cpus(), cmd, flags, cpu_id)
+}
+
+/// [`membarrier`] with `cpus` online.
+fn membarrier_on(cpus: usize, cmd: i32, flags: u32, cpu_id: i32) -> i32 {
     // -- First switch: per-command flag validation ----------------------
     //
     // Linux's first switch has two arms: PRIVATE_EXPEDITED_RSEQ accepts
@@ -3290,27 +3316,49 @@ pub extern "C" fn membarrier(cmd: i32, flags: u32, cpu_id: i32) -> i32 {
     };
 
     // -- Second switch: exact-match command dispatch --------------------
-    match cmd {
-        MEMBARRIER_CMD_QUERY => MEMBARRIER_SUPPORTED,
+    let honoured = membarrier_honoured(cpus);
+    // The registration a private expedited barrier needs first.
+    let needs = match cmd {
+        MEMBARRIER_CMD_QUERY => return honoured,
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED => MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE => {
+            MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+        }
         MEMBARRIER_CMD_GLOBAL
         | MEMBARRIER_CMD_GLOBAL_EXPEDITED
         | MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
-        | MEMBARRIER_CMD_PRIVATE_EXPEDITED
         | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
-        | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
-        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => {
-            // For every supported command the visible effect is: drain
-            // the local store buffer.  Issue an mfence.
-            local_mfence();
-            0
-        }
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => 0,
         _ => {
             // Unknown commands (including OR-combined command bits and
             // unsupported variants like PRIVATE_EXPEDITED_RSEQ) → EINVAL.
             errno::set_errno(errno::EINVAL);
-            -1
+            return -1;
         }
+    };
+    // A command that cannot be kept with this many CPUs: as Linux answers
+    // one its architecture lacks.
+    if honoured & cmd == 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
     }
+    // SAFETY: this process's own word, which lives as long as the process
+    // and is only ever touched atomically.
+    let registered = unsafe { &*membarrier_registered() };
+    if needs != 0 && registered.load(core::sync::atomic::Ordering::Acquire) & needs == 0 {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    if matches!(
+        cmd,
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE
+    ) {
+        registered.fetch_or(cmd, core::sync::atomic::Ordering::AcqRel);
+    }
+    local_mfence();
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -8024,7 +8072,74 @@ mod tests {
 
     #[test]
     fn test_membarrier_private_expedited_succeeds() {
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0),
+            0
+        );
         assert_eq!(membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0), 0);
+    }
+
+    /// A private expedited barrier, plain or `SYNC_CORE`, needs its own
+    /// registration first: `EPERM` without, as Linux answers. (It answered
+    /// 0 unregistered until 2026-10-06.)
+    #[test]
+    fn membarrier_private_expedited_needs_its_registration() {
+        for cmd in [
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+        ] {
+            crate::errno::set_errno(0);
+            assert_eq!(membarrier(cmd, 0, 0), -1, "{cmd}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM, "{cmd}");
+        }
+        // The plain registration is not SYNC_CORE's.
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0),
+            0
+        );
+        assert_eq!(membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0), 0);
+        crate::errno::set_errno(0);
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        // The global ones need none.
+        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL_EXPEDITED, 0, 0), 0);
+    }
+
+    /// With more than one CPU, no barrier can be kept -- a thread running
+    /// on another CPU has passed no barrier unless that CPU is interrupted,
+    /// which the kernel cannot be asked to do -- so `QUERY` answers none,
+    /// and each command `EINVAL`, registered or not. Flag errors are still
+    /// the first switch's.
+    #[test]
+    fn membarrier_keeps_nothing_on_several_cpus() {
+        assert_eq!(
+            membarrier_on(1, MEMBARRIER_CMD_QUERY, 0, 0),
+            MEMBARRIER_SUPPORTED
+        );
+        assert_eq!(membarrier_on(4, MEMBARRIER_CMD_QUERY, 0, 0), 0);
+        assert_eq!(
+            membarrier_on(1, MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0),
+            0
+        );
+        for cmd in [
+            MEMBARRIER_CMD_GLOBAL,
+            MEMBARRIER_CMD_GLOBAL_EXPEDITED,
+            MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+            MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE,
+            MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+        ] {
+            crate::errno::set_errno(0);
+            assert_eq!(membarrier_on(2, cmd, 0, 0), -1, "{cmd}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "{cmd}");
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(membarrier_on(2, MEMBARRIER_CMD_QUERY, 1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -8045,6 +8160,10 @@ mod tests {
 
     #[test]
     fn test_membarrier_private_expedited_sync_core_succeeds() {
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0),
+            0,
+        );
         assert_eq!(
             membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0),
             0,
@@ -8272,7 +8391,7 @@ mod tests {
         assert_eq!(membarrier(combined, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
-        assert_eq!(membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0), 0,);
+        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL, 0, 0), 0,);
     }
 
     // -- Workflow ----------------------------------------------------------

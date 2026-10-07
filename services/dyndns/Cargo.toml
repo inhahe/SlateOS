@@ -14,6 +14,12 @@ workspace = true
 
 [dependencies]
 dyndnsproviders = { path = "providers" }
+dyndnsrouter = { path = "router" }
 httpclient = { path = "../../net/httpclient" }
 journalrec = { path = "../../userspace/journalrec" }
 yamldoc = { path = "../../yamldoc" }
+
+[dev-dependencies]
+# The simulated home network the router crate's own tests use, so the
+# service's forwards are tested against the same router the protocols are.
+dyndnsrouter = { path = "router", features = ["simulate"] }

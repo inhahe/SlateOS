@@ -36,3 +36,9 @@ journalrec = { path = "../userspace/journalrec" }
 
 [lints]
 workspace = true
+
+# The memory and string primitives' speed: `cargo bench -p posix --target
+# x86_64-pc-windows-gnu --bench mem`. A plain `main`, as sha2's rate bench.
+[[bench]]
+name = "mem"
+harness = false

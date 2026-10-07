@@ -284,6 +284,23 @@ fn duckdns_freedns_and_a_url_without_ip_let_the_provider_see_it() {
 }
 
 #[test]
+fn only_a_custom_url_naming_the_address_needs_the_router() {
+    assert!(needs_router_address(
+        Provider::Custom,
+        "https://x/u?ip={ip}"
+    ));
+    assert!(!needs_router_address(
+        Provider::Custom,
+        "https://x/u?h={hostname}"
+    ));
+    for p in Provider::ALL {
+        if p != Provider::Custom {
+            assert!(!needs_router_address(p, "https://x/u?ip={ip}"), "{p:?}");
+        }
+    }
+}
+
+#[test]
 fn a_page_that_gives_no_public_address_gives_none() {
     let t = target(Provider::NoIp, "h.ddns.net", "u", "p");
     for (status, body) in [

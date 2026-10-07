@@ -1,0 +1,23 @@
+[package]
+name = "dyndnsrouter"
+version = "0.1.0"
+edition = "2024"
+description = "Asking the home router for its internet address and for port forwards, over NAT-PMP or UPnP IGD, for the dyndns service"
+
+# The router half of lane E's
+# requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md: what
+# the kernel's `net/upnp.rs` and `fs/dyndns.rs` modelled and never sent, done
+# in userspace by the service that keeps this network reachable. No I/O of its
+# own -- the datagrams and HTTP requests leave through a `Net` the caller
+# supplies -- so the tests replay routers' answers without a network.
+
+[lints]
+workspace = true
+
+[features]
+# `simulate`: a home network simulated in memory -- a router speaking NAT-PMP
+# and UPnP, with a mapping table -- for other crates' tests (the dyndns
+# service's). This crate's own tests have it without the feature.
+simulate = []
+
+[dependencies]

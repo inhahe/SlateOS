@@ -503,6 +503,15 @@ const DYNU_CHECK: &str = "http://checkip.dynu.com/";
 /// Cloudflare's trace page: `key=value` lines, the address as `ip=`.
 const CLOUDFLARE_CHECK: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 
+/// Whether an entry's address has to come from the router: a custom
+/// provider's URL that names `{ip}`. No page of a provider's can say it -- the
+/// provider is the user's own, and an entry for one provider never asks
+/// another -- so the service asks the router (NAT-PMP or UPnP) instead.
+#[must_use]
+pub fn needs_router_address(provider: Provider, update_url: &str) -> bool {
+    provider == Provider::Custom && update_url.contains("{ip}")
+}
+
 /// Learn this network's public address the provider's way: from its own
 /// "what is my address" page, or [`Address::ProviderSees`] where the provider
 /// reads it off the update request (DuckDNS, FreeDNS, a custom URL that does
@@ -512,8 +521,9 @@ const CLOUDFLARE_CHECK: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 ///
 /// The [`Outcome`] to report when it cannot be learned: the page was out of
 /// reach ([`Outcome::Unreachable`]) or said no address
-/// ([`Outcome::NoAddress`]), or a custom URL needs the address and nothing can
-/// learn it for one yet.
+/// ([`Outcome::NoAddress`]), or a custom URL needs the address, which no
+/// provider's page can say for it: only the router can
+/// ([`needs_router_address`]), and the caller asks it.
 pub fn public_address(target: &Target<'_>, ex: &mut dyn Exchange) -> Result<Address, Outcome> {
     let (page, read): (&str, fn(&str) -> Option<IpAddr>) = match target.provider {
         Provider::NoIp => (NOIP_CHECK, first_address),
@@ -521,11 +531,12 @@ pub fn public_address(target: &Target<'_>, ex: &mut dyn Exchange) -> Result<Addr
         Provider::Cloudflare => (CLOUDFLARE_CHECK, trace_address),
         Provider::DuckDns | Provider::FreeDns => return Ok(Address::ProviderSees),
         Provider::Custom => {
-            if target.update_url.contains("{ip}") {
+            if needs_router_address(target.provider, target.update_url) {
                 return Err(Outcome::NoAddress {
-                    why: "its update URL needs this network's address, and nothing learns it for a custom \
-                          provider yet (asking the router, over UPnP or NAT-PMP, is still to be written)"
-                        .to_owned(),
+                    why:
+                        "its update URL needs this network's address, which for a custom provider \
+                          only the router can say"
+                            .to_owned(),
                 });
             }
             return Ok(Address::ProviderSees);

@@ -189,8 +189,10 @@ impl DriveInfo {
         ratio::percent_whole(self.used_bytes, self.total_bytes).unwrap_or(0)
     }
 
+    /// Whether it is low on space: as full as the disk usage widget calls
+    /// nearly full, one threshold for the two (`fs_space`).
     pub fn is_low_space(&self) -> bool {
-        self.used_pct() >= 90
+        self.used_pct() >= crate::fs_space::NEARLY_FULL_PERCENT
     }
 }
 

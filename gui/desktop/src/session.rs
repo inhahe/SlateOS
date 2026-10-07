@@ -4438,6 +4438,8 @@ impl<T: Transport> ShellSession<T> {
             {
                 let _ = self.shell.refresh_agenda();
             }
+            // And the disks, for a disk usage widget, at its own spacing.
+            self.shell.sample_disks(self.clock_ms);
             self.dirty = true;
         }
         if self.autohide.tick(self.clock_ms) {

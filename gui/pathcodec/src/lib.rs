@@ -74,7 +74,15 @@ use std::path::{Path, PathBuf};
 /// terminal. The rendering is for reading, not for parsing back.
 #[must_use]
 pub fn display_os(name: &OsStr) -> String {
-    quoting::escape_unprintable(name.as_encoded_bytes())
+    display_bytes(name.as_encoded_bytes())
+}
+
+/// [`display_os`] for a name that is bytes already -- read from a file the
+/// kernel wrote, as the mount table's points are, rather than from the
+/// file system as an `OsStr`.
+#[must_use]
+pub fn display_bytes(name: &[u8]) -> String {
+    quoting::escape_unprintable(name)
 }
 
 /// [`display_os`] for a whole path. `/` is printable, so the components
@@ -232,6 +240,18 @@ mod tests {
         let e8 = std::ffi::OsStr::from_bytes(b"caf\xE8.txt");
         assert_eq!(super::display_os(e9), r"caf\351.txt");
         assert_ne!(super::display_os(e9), super::display_os(e8));
+    }
+
+    /// A name that is bytes already is drawn as the same name as an `OsStr`
+    /// would be, on any host: each byte that is not text an octal escape.
+    #[test]
+    fn a_name_of_bytes_is_drawn_as_its_os_string_would_be() {
+        assert_eq!(super::display_bytes(b"/media/caf\xE9"), r"/media/caf\351");
+        assert_eq!(super::display_bytes(b"/mnt"), "/mnt");
+        assert_eq!(
+            super::display_bytes("café".as_bytes()),
+            super::display_os(std::ffi::OsStr::new("café"))
+        );
     }
 
     /// The host's own kind of name that is not text -- an unpaired

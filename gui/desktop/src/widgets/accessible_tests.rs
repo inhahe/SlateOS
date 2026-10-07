@@ -43,6 +43,7 @@ fn readings() -> LiveReadings {
         },
         upcoming: crate::calendar::Upcoming::default(),
         world_clocks: Vec::new(),
+        disks: crate::widgets::disks::Disks::default(),
     }
 }
 
@@ -321,8 +322,10 @@ fn a_photo_frame_names_its_picture_or_says_why_not() {
         (Role::Label, "No pictures in Pictures")
     );
 
-    // A picture in the folder by the end of its interval, when it looks again.
+    // A picture in the folder by the end of its interval, when it looks
+    // again: its first tick starts the interval, the next ends it.
     let beach = folder.join("beach.jpg");
+    layer.tick(0);
     layer.tick(u64::MAX);
     layer.step_frames(Some(&folder), &|_| vec![beach.clone()]);
     assert!(layer.frame_wants(id, &beach));
@@ -601,4 +604,108 @@ fn the_world_clock_is_a_list_of_the_other_clocks() {
         content,
         "the clock outside"
     );
+}
+
+/// **The disk usage widget shows tools a list of the disks**: each a
+/// progress bar named by where it is mounted, at how much of it is in use,
+/// described by what is free of what it holds -- and as nearly full past
+/// nine tenths -- one not measured with no value; where it is drawn inside
+/// the widget. In place of a list, why there is none.
+#[test]
+fn the_disk_usage_widget_is_a_list_of_the_disks() {
+    use crate::fs_space::{Disk, Space};
+    use crate::widgets::disks::{self, Disks};
+    /// A row as tools are told it: which part, its role, name, value and
+    /// description.
+    type Told<'a> = (
+        WidgetPart,
+        Role,
+        &'a str,
+        Option<&'a Value>,
+        Option<&'a str>,
+    );
+    let (layer, id) = one(WidgetKind::DiskUsage);
+    let said = |shown: Disks| {
+        let live = LiveReadings {
+            disks: shown,
+            ..readings()
+        };
+        node_of(&layer, &live, WidgetPart::Disks(id)).expect("seen")
+    };
+    let unlisted = said(Disks::Unlisted("permission denied".to_owned()));
+    assert_eq!(
+        (
+            unlisted.role,
+            unlisted.name.as_str(),
+            unlisted.description.as_deref()
+        ),
+        (
+            Role::List,
+            "Disk Usage",
+            Some("The disks could not be listed: permission denied")
+        )
+    );
+    assert_eq!(
+        said(Disks::Listed(Vec::new())).description.as_deref(),
+        Some(disks::NO_DISKS)
+    );
+    assert_eq!(said(Disks::Unread).description, None);
+
+    let disk = |point: &[u8], free: u64| Disk {
+        point: point.to_vec(),
+        space: Ok(Space {
+            block_size: 1024,
+            total_blocks: 1024 * 1024,
+            free_blocks: free,
+            read_only: false,
+        }),
+    };
+    let list = said(Disks::Listed(vec![
+        disks::reading(&disk(b"/", 1024 * 1024 / 16)),
+        disks::reading(&Disk {
+            point: b"/mnt".to_vec(),
+            space: Err(1),
+        }),
+    ]));
+    assert_eq!(list.description, None, "both fit a wide widget");
+    let rows: Vec<Told<'_>> = list
+        .children
+        .iter()
+        .map(|n| {
+            (
+                n.id,
+                n.role,
+                n.name.as_str(),
+                n.value.as_ref(),
+                n.description.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                WidgetPart::Disk(id, 0),
+                Role::ProgressBar,
+                "/",
+                Some(&Value::Progress {
+                    value: 93.75,
+                    max: 100.0
+                }),
+                Some("64.0 MiB free of 1.0 GiB, nearly full")
+            ),
+            (
+                WidgetPart::Disk(id, 1),
+                Role::ProgressBar,
+                "/mnt",
+                None,
+                Some(disks::NOT_MEASURED)
+            ),
+        ]
+    );
+    let (x, y, w, h) = layer.content_rect(id).expect("placed");
+    let content = Rect::new(x, y, w, h);
+    for row in &list.children {
+        assert_eq!(content.union(row.bounds), content, "{} outside", row.name);
+    }
 }

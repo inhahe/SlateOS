@@ -23,6 +23,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 
+use super::listing::more_text;
 use crate::Rect;
 use crate::calendar::Upcoming;
 
@@ -146,12 +147,6 @@ fn place(upcoming: &Upcoming, content: Rect, bottom: f32) -> Vec<Line> {
         }
     }
     lines
-}
-
-/// What the line saying how many more did not fit says: "2 more".
-#[must_use]
-pub fn more_text(more: usize) -> String {
-    format!("{more} more")
 }
 
 /// Draw `upcoming` in `content`, in `p` at `alpha`: each day's heading,

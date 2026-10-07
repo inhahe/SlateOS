@@ -2318,6 +2318,15 @@ live.
   day when it is another, and how far ahead or behind it is; with none, it
   says where they are added. Tools see a list of the clocks.
 
+- `[x]` `[C]` **A disk usage widget** (`design-decisions.md` §1501) -- done
+  2026-10-07. "Add widget > Disk usage": each disk the system has mounted --
+  the mount table's, less the kernel's own views and memory -- named by
+  where it is mounted, with how much of it is in use, a bar, and what is
+  free of what it holds; the bar red past nine tenths of a disk that can be
+  written, a disc mounted read-only saying what it holds instead. Read every
+  ten seconds while one is out; one the kernel will not measure is listed as
+  not measured. Tools see a list of progress bars.
+
 - `[x]` `[C]` **The desktop raises the calendar's reminders**
   (`design-decisions.md` §1498) -- done 2026-10-07. When an event's reminder
   is due, a notification from Calendar -- the event, when and where -- stays

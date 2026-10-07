@@ -3189,6 +3189,10 @@ fn a_clock_widget_is_woken_at_its_due_time_and_not_every_frame() {
         first
             .shell_mut()
             .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+        // Due at once when put out -- it has never been updated -- and from
+        // that first tick on, a second at a time.
+        assert_eq!(first.shell().widgets.next_due_in(0), Some(0));
+        assert!(first.shell_mut().widgets.tick(0));
 
         let due = first
             .shell()

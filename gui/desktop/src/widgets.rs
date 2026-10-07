@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
 mod accessible;
+pub mod disks;
+pub mod listing;
 pub mod monitor;
 pub mod upcoming;
 pub mod worldclock;
@@ -419,7 +421,7 @@ impl WidgetKind {
             Self::PhotoFrame => WidgetSize::LARGE,
             Self::WorldClock => WidgetSize::WIDE,
             Self::Reminders => WidgetSize::LARGE,
-            Self::DiskUsage => WidgetSize::SMALL,
+            Self::DiskUsage => WidgetSize::WIDE,
             Self::NetworkMonitor => WidgetSize::SMALL,
             Self::BatteryStatus => WidgetSize::SMALL,
             Self::Custom { .. } => WidgetSize::WIDE,
@@ -437,7 +439,9 @@ impl WidgetKind {
     /// pads. A system monitor is its three meters, or -- given two rows --
     /// its graphs of the last minute (`monitor`). The upcoming events are a
     /// list, a few lines high at the least and a cell and more across: in
-    /// one cell its titles would be cut to nothing.
+    /// one cell its titles would be cut to nothing. The disks are a list
+    /// too, two of them a cell high: a mount point and what is free of what
+    /// it holds want a cell and more across, or two cells down.
     #[must_use]
     pub const fn sizes(&self) -> &'static [WidgetSize] {
         match self {
@@ -451,6 +455,7 @@ impl WidgetKind {
                 WidgetSize::EXTRA_LARGE,
             ],
             Self::WorldClock => &[WidgetSize::WIDE, WidgetSize::LARGE],
+            Self::DiskUsage => &[WidgetSize::WIDE, WidgetSize::TALL, WidgetSize::LARGE],
             Self::Notes | Self::PhotoFrame => &WidgetSize::ALL,
             _ => &[],
         }
@@ -478,8 +483,13 @@ pub struct WidgetInstance {
     pub bg_opacity: u8,
     /// Custom title override.
     pub title_override: Option<String>,
-    /// Last updated timestamp (ms since epoch).
-    pub last_updated: u64,
+    /// When it last fell due, on the session's clock; `None` until it first
+    /// does. A widget that never has is due at once, so one put out -- or
+    /// restored at sign-in, while the session's clock is younger than its
+    /// interval -- shows its readings with its first frame, not an interval
+    /// after it appears: ten seconds of an empty disk usage widget, a whole
+    /// minute of a calendar's.
+    pub last_updated: Option<u64>,
     /// Update interval in ms (0 = static).
     pub update_interval_ms: u64,
     /// Widget-specific state (text for Notes, timezone list for WorldClock, etc.).
@@ -505,6 +515,8 @@ impl WidgetInstance {
             // And the upcoming events for an event's end as well: one over
             // drops away.
             WidgetKind::Calendar | WidgetKind::Reminders => 60_000,
+            // As often as the shell reads the disks: space moves slowly.
+            WidgetKind::DiskUsage => disks::SAMPLE_SPACING_MS,
             _ => 0,
         };
         Self {
@@ -515,7 +527,7 @@ impl WidgetInstance {
             visible: true,
             bg_opacity: 200,
             title_override: None,
-            last_updated: 0,
+            last_updated: None,
             update_interval_ms: update_interval,
             state_text: String::new(),
             dragging: false,
@@ -529,12 +541,14 @@ impl WidgetInstance {
             .unwrap_or_else(|| self.kind.label())
     }
 
-    /// Whether the widget needs an update tick.
+    /// Whether the widget needs an update tick: its interval is up, or it
+    /// has never had one.
     pub fn needs_update(&self, now_ms: u64) -> bool {
         if self.update_interval_ms == 0 {
             return false;
         }
-        now_ms.saturating_sub(self.last_updated) >= self.update_interval_ms
+        self.last_updated
+            .is_none_or(|last| now_ms.saturating_sub(last) >= self.update_interval_ms)
     }
 
     /// The block of grid cells this widget covers.
@@ -977,6 +991,10 @@ pub struct LiveReadings {
     /// shows them (`ClockDisplay::world_clocks`, from the Date & Time
     /// settings' additional clocks); empty while none is drawn.
     pub world_clocks: Vec<crate::calendar::WorldClockReading>,
+    /// The disks mounted and how full each is, as the disk usage widget
+    /// shows them -- the shell's last reading (`disks::Sampler`), taken
+    /// every ten seconds while one is out; unread while none is drawn.
+    pub disks: disks::Disks,
 }
 
 /// Manages all desktop widgets.
@@ -1950,9 +1968,10 @@ impl DesktopWidgetManager {
             .iter()
             .filter(|w| w.update_interval_ms > 0)
             .map(|w| {
-                w.last_updated
-                    .saturating_add(w.update_interval_ms)
-                    .saturating_sub(now_ms)
+                w.last_updated.map_or(0, |last| {
+                    last.saturating_add(w.update_interval_ms)
+                        .saturating_sub(now_ms)
+                })
             })
             .min()
     }
@@ -1965,10 +1984,15 @@ impl DesktopWidgetManager {
         let mut any = false;
         for w in &mut self.widgets {
             if w.needs_update(now_ms) {
-                w.last_updated = now_ms;
+                let first = w.last_updated.is_none();
+                w.last_updated = Some(now_ms);
                 // A photo frame's interval ending is its next picture being
                 // due, chosen by `step_frames` when the session next paints.
-                if matches!(w.kind, WidgetKind::PhotoFrame) {
+                // Not its first tick, which starts its first interval: its
+                // first picture is the one it looks for when it is placed,
+                // and marked due then it would be shown for a frame and
+                // passed over.
+                if matches!(w.kind, WidgetKind::PhotoFrame) && !first {
                     self.frames.entry(w.id).or_default().due = true;
                 }
                 any = true;
@@ -2286,6 +2310,13 @@ impl DesktopWidgetManager {
             ),
             WidgetKind::WorldClock => worldclock::render(
                 &live.world_clocks,
+                crate::Rect::new(x, y, width, height),
+                p,
+                alpha,
+                commands,
+            ),
+            WidgetKind::DiskUsage => disks::render(
+                &live.disks,
                 crate::Rect::new(x, y, width, height),
                 p,
                 alpha,
@@ -2619,7 +2650,30 @@ mod tests {
                 assert!(clock.add_timezone("London", "GMT0BST,M3.5.0/1,M10.5.0"));
                 clock.world_clocks(OCTOBER_NOON, &tzrules::Tz::UTC)
             },
+            // Two disks, one nearly full, so a disk usage widget the fixture
+            // shows draws a bar of each colour.
+            disks: disks::Disks::Listed(sample_disks()),
         }
+    }
+
+    /// Two disks as the disk usage widget is told them: the system's, nearly
+    /// full, and a data disk under half full.
+    fn sample_disks() -> Vec<disks::DiskReading> {
+        let disk = |point: &[u8], total: u64, free: u64| {
+            disks::reading(&crate::fs_space::Disk {
+                point: point.to_vec(),
+                space: Ok(crate::fs_space::Space {
+                    block_size: 4096,
+                    total_blocks: total,
+                    free_blocks: free,
+                    read_only: false,
+                }),
+            })
+        };
+        vec![
+            disk(b"/", 1_000_000, 40_000),
+            disk(b"/mnt", 4_000_000, 2_500_000),
+        ]
     }
 
     /// 12:00 UTC on 6 October 2026: the October fixture's now.
@@ -2993,13 +3047,17 @@ mod tests {
     }
 
     /// A calendar is due once a minute, so midnight moves today: one that
-    /// drew only when something else did would mark yesterday as today.
+    /// drew only when something else did would mark yesterday as today. And
+    /// at once when it is put out, before its first minute.
     #[test]
     fn a_calendar_is_due_each_minute() {
         let mut mgr = make_mgr();
         mgr.add_widget(WidgetKind::Calendar, GridPos::new(0, 0))
             .unwrap();
+        assert!(mgr.needs_tick(0));
+        assert!(mgr.tick(0));
         assert_eq!(mgr.next_due_in(0), Some(60_000));
+        assert!(!mgr.needs_tick(59_999));
         assert!(mgr.needs_tick(60_000));
     }
 
@@ -3225,7 +3283,26 @@ mod tests {
             .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
             .unwrap();
         mgr.tick(5000);
-        assert_eq!(mgr.get(id).unwrap().last_updated, 5000);
+        assert_eq!(mgr.get(id).unwrap().last_updated, Some(5000));
+    }
+
+    /// **A widget that has never ticked is due at once**, whatever the
+    /// session's clock says -- one restored at sign-in, while the clock is
+    /// younger than its interval, included -- and then not again until its
+    /// interval is up.
+    #[test]
+    fn a_widget_never_updated_is_due_at_once() {
+        let mut mgr = make_mgr();
+        let id = mgr
+            .add_widget(WidgetKind::Calendar, GridPos::new(0, 0))
+            .unwrap();
+        assert_eq!(mgr.next_due_in(0), Some(0));
+        assert!(mgr.tick(0));
+        assert_eq!(mgr.get(id).unwrap().last_updated, Some(0));
+        assert!(!mgr.tick(59_999));
+        assert_eq!(mgr.next_due_in(30_000), Some(30_000));
+        assert!(mgr.tick(60_000));
+        assert_eq!(mgr.get(id).unwrap().last_updated, Some(60_000));
     }
 
     // ---- Rendering ----
@@ -4220,6 +4297,7 @@ mod tests {
             graphs: monitor::Graphs::default(),
             upcoming: crate::calendar::Upcoming::default(),
             world_clocks: Vec::new(),
+            disks: disks::Disks::default(),
         };
         let cmds = full_mgr().render(&p, &blank);
         let bars = meter_rects(&cmds);
@@ -4283,6 +4361,7 @@ mod tests {
             graphs: monitor::Graphs::default(),
             upcoming: crate::calendar::Upcoming::default(),
             world_clocks: Vec::new(),
+            disks: disks::Disks::default(),
         };
         let cmds = full_mgr().render(&p, &mixed);
         let texts: Vec<String> = cmds
@@ -4728,8 +4807,10 @@ mod tests {
     }
 
     /// **A frame just placed looks at once, and wants its folder's first
-    /// picture**, to be fetched at its own size; it is due again only when
-    /// its interval ends, and then wants the next, wrapping past the last.
+    /// picture**, to be fetched at its own size; its first tick starts its
+    /// interval rather than passing the first picture over; it is due again
+    /// only when that interval ends, and then wants the next, wrapping past
+    /// the last.
     #[test]
     fn a_frame_shows_its_folders_pictures_in_turn() {
         let (mut mgr, id) = one_frame();
@@ -4761,6 +4842,10 @@ mod tests {
             mgr.frames_to_fetch().is_empty(),
             "the one shown is fetched again"
         );
+        // Its first tick starts the interval, and does not move it on.
+        assert!(mgr.tick(0));
+        assert!(!mgr.step_frames(Some(&folder()), &list));
+        assert_eq!(mgr.frame_state(id).unwrap().wanted, Some(picture("a.jpg")));
         // A moment short of the interval is not due; the interval is.
         assert!(!mgr.tick(FRAME_INTERVAL_MS - 1));
         let mut now = 0;
@@ -4816,6 +4901,8 @@ mod tests {
         mgr.step_frames(Some(&folder()), &listing(&["a.png"]));
         mgr.frame_picture_ready(id, up(picture("a.png"), 1));
         assert_eq!(mgr.frame_image_ids(), [FRAME_PICTURE_TAG | 1]);
+        // Its first tick starts its interval; the next, past it, is due.
+        mgr.tick(0);
         mgr.tick(u64::MAX / 2);
         mgr.step_frames(Some(&folder()), &listing(&[]));
         let state = mgr.frame_state(id).unwrap();
@@ -4887,6 +4974,8 @@ mod tests {
         assert!(x >= cx - 0.01 && y >= cy - 0.01 && y + h <= cy + ch + 0.01);
         assert!((y - (cy + (ch - h) / 2.0)).abs() < 0.01, "not centred");
 
+        // Its first tick starts its interval; the next, past it, is due.
+        mgr.tick(0);
         mgr.tick(u64::MAX / 2);
         mgr.step_frames(Some(&folder()), &listing(&["a.png", "b.png"]));
         mgr.frame_picture_failed(id, &picture("b.png"), "b.png: not a picture".to_owned());

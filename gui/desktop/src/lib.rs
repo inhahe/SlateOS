@@ -2042,6 +2042,9 @@ pub struct DesktopShell {
     /// The system monitor's graphs: the last minute of each, and the
     /// counters last read to difference the next against.
     monitor: crate::widgets::monitor::Sampler,
+    /// The disks mounted and how full each is, as last read for a disk
+    /// usage widget, and when.
+    disks: crate::widgets::disks::Sampler,
     /// All managed windows.
     pub windows: BTreeMap<WindowId, ManagedWindow>,
     /// Currently focused window.
@@ -2978,6 +2981,7 @@ impl DesktopShell {
             prev_cpu: None,
             sampled: crate::widgets::SystemSample::default(),
             monitor: crate::widgets::monitor::Sampler::new(),
+            disks: crate::widgets::disks::Sampler::default(),
             windows: BTreeMap::new(),
             focused_window: None,
             current_desktop: 0,
@@ -14105,6 +14109,7 @@ impl DesktopShell {
     const MENU_MOVE_WALLPAPER: u64 = 12;
     const MENU_ADD_UPCOMING: u64 = 13;
     const MENU_ADD_WORLD_CLOCK: u64 = 14;
+    const MENU_ADD_DISK_USAGE: u64 = 15;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
     // A widget's "Size", and its rows: the base plus the size's place in
@@ -14239,6 +14244,7 @@ impl DesktopShell {
                     item(Self::MENU_ADD_CALENDAR, "Calendar", None),
                     item(Self::MENU_ADD_UPCOMING, "Upcoming events", None),
                     item(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor", None),
+                    item(Self::MENU_ADD_DISK_USAGE, "Disk usage", None),
                     item(Self::MENU_ADD_NOTE, "Note", None),
                     item(Self::MENU_ADD_PHOTO_FRAME, "Photo frame", None),
                 ],
@@ -14808,6 +14814,31 @@ impl DesktopShell {
         );
     }
 
+    /// Read the disks mounted and how full each is, at `now_ms` on the
+    /// session's clock, for a disk usage widget to show -- while one is out,
+    /// and no oftener than every
+    /// [`SAMPLE_SPACING_MS`](crate::widgets::disks::SAMPLE_SPACING_MS) --
+    /// whichever widget fell due, a clock's every second included. With none
+    /// out nothing is read.
+    ///
+    /// Called from the widget-due tick, as
+    /// [`sample_system`](Self::sample_system) is and for its reason: a frame
+    /// asks what the disks are sixty times a second, and space moves by the
+    /// minute. A disk usage widget is due with its first frame (it has never
+    /// been updated), so it is never drawn a spacing empty.
+    pub fn sample_disks(&mut self, now_ms: u64) {
+        if self.widgets.draws(&WidgetKind::DiskUsage) {
+            self.disks.sample(now_ms);
+        }
+    }
+
+    /// Read the mount table at `table` for the disk usage widget, rather
+    /// than the kernel's: a test's own, so that what it lists is known.
+    #[cfg(test)]
+    pub(crate) fn read_mounts_from(&mut self, table: std::path::PathBuf) {
+        self.disks = crate::widgets::disks::Sampler::of_table(table);
+    }
+
     /// The readings the widget layer cannot derive for itself.
     ///
     /// The clock's strings come from the same `ClockDisplay` and time zone the
@@ -14873,10 +14904,16 @@ impl DesktopShell {
             } else {
                 Vec::new()
             },
+            // The disks as last read, copied only while a disk usage widget
+            // is out to draw them.
+            disks: if self.widgets.draws(&WidgetKind::DiskUsage) {
+                self.disks.disks().clone()
+            } else {
+                crate::widgets::disks::Disks::default()
+            },
         }
     }
 
-    /// The settings group the widget layout lives in.
     /// A rule's size in pixels, or `None` if this build cannot work it out.
     ///
     /// `RememberLast` never reaches here -- `resolve_remembered` has already
@@ -15338,6 +15375,7 @@ impl DesktopShell {
             Self::MENU_ADD_UPCOMING => Some(WidgetKind::Reminders),
             Self::MENU_ADD_WORLD_CLOCK => Some(WidgetKind::WorldClock),
             Self::MENU_ADD_SYSTEM_MONITOR => Some(WidgetKind::SystemMonitor),
+            Self::MENU_ADD_DISK_USAGE => Some(WidgetKind::DiskUsage),
             Self::MENU_ADD_NOTE => Some(WidgetKind::Notes),
             Self::MENU_ADD_PHOTO_FRAME => Some(WidgetKind::PhotoFrame),
             Self::MENU_REMOVE_ONE_WIDGET => {

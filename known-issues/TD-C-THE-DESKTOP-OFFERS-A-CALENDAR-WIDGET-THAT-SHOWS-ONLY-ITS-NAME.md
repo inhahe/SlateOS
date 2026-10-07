@@ -47,7 +47,7 @@ what it draws.
 | edit mode: the grid drawn, the chosen widget ringed in the accent | `edit_mode`, `selected_widget`, `render_grid` | nothing sets either but the tests; widgets are moved by dragging, with no grid shown |
 | resizing | `resize_widget` | reached only by `read_from`, from a layout file's `cols`/`rows` |
 | hiding one | `toggle_visibility` | reached by nothing; a layout file's `visible: false` hides one, and then nothing shows it again |
-| eight more kinds -- weather, RSS, music, world clock, reminders, disk use, network, custom | `WidgetKind` | draw their name, as the calendar does; not offered, so only a hand-written layout puts one out |
+| eight more kinds -- weather, RSS, music, world clock, reminders, disk use, network, custom | `WidgetKind` | draw their name, as the calendar does; not offered, so only a hand-written layout puts one out. *2026-10-07: three of them draw their content and are offered -- the upcoming events (reminders, §1499), the world clock (§1500) and the disk use (§1501). Weather, RSS, music and network still draw their names and are still not offered, each waiting on a source that does not exist (a weather service, a feed fetcher, a player that says what it plays, the kernel's network counters); a custom widget waits on a way for a program to supply one.* |
 | battery | `WidgetKind::BatteryStatus` | draws real content, and is rightly not offered: `live_readings` passes `BatteryInfo::default()` because no source is registered (`kernel/src/fs/battery.rs`), so on a laptop it would say "No battery" |
 
 **The proper fix, in order.** (1) The calendar draws a month: the shell's

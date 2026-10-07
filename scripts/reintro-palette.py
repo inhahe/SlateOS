@@ -113,6 +113,9 @@ LOGIN = "gui/desktop/src/login_screen.rs"
 TB = "gui/desktop/src/taskbar.rs"
 LANG = "gui/desktop/src/language_settings.rs"
 MON = "gui/desktop/src/widgets/monitor.rs"
+# The disk usage widget's drawing (design-decisions 1501): each disk's name and
+# share, its bar -- the disk's colour, red when nearly full -- and what is free.
+DISKS = "gui/desktop/src/widgets/disks.rs"
 HOTKEYS = "gui/desktop/src/hotkeys.rs"
 # The shortcut card's editor: its action list, and the card's foot -- the
 # line saying what the last edit did and the buttons that are its keys --
@@ -18333,6 +18336,80 @@ DEFECTS = [
         ["desktop"],
         [
             'the_graphs_are_drawn_under_the_widgets_veil',
+        ],
+    ),
+    # ---- widgets/disks.rs ---------------------------------------------------
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a disk's bar keeps Mocha's own peach, so a light theme still draws the dark one",
+        DISKS,
+        [
+            ('            let fill = if disk.nearly_full { p.red } else { p.peach };\n',
+             '            let fill = if disk.nearly_full { p.red } else { Color::from_hex(0xFAB387) };\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_it_draws_comes_from_its_palette',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a disk's bar follows the accent, which makes a measurement say what the user chose",
+        DISKS,
+        [
+            ('            let fill = if disk.nearly_full { p.red } else { p.peach };\n',
+             '            let fill = if disk.nearly_full { p.red } else { p.accent };\n'),
+        ],
+        ["desktop"],
+        [
+            'nothing_it_draws_follows_the_accent',
+            'each_disk_is_drawn_in_its_row',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a nearly full disk's bar is drawn in the disk's colour, so the warning is lost",
+        DISKS,
+        [
+            ('            let fill = if disk.nearly_full { p.red } else { p.peach };\n',
+             '            let fill = if disk.nearly_full { p.peach } else { p.peach };\n'),
+        ],
+        ["desktop"],
+        [
+            'each_disk_is_drawn_in_its_row',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a nearly full disk's share is drawn in a red not darkened to read on the widget",
+        DISKS,
+        [
+            ('            p.ink(p.red)\n',
+             '            p.red\n'),
+        ],
+        ["desktop"],
+        [
+            'each_disk_is_drawn_in_its_row',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the disks' bars are drawn opaque over a translucent widget",
+        DISKS,
+        [
+            ('                color: wash(fill),\n',
+             '                color: fill,\n'),
+        ],
+        ["desktop"],
+        [
+            'everything_it_draws_is_under_the_widgets_veil',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a disk's trough keeps Mocha's own surface1",
+        DISKS,
+        [
+            ('            color: wash(p.surface1),\n',
+             '            color: wash(Color::from_hex(0x45475A)),\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_it_draws_comes_from_its_palette',
         ],
     ),
 ]

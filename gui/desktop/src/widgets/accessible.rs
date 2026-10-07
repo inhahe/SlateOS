@@ -11,6 +11,7 @@
 //! | calendar | the month today is in, a grid named by the month and year, each day named by its date and said to be today, to have events, or to be another month's |
 //! | upcoming events | a list of the events it shows, each named by its title and described by its day and time, the list said to have nothing coming or how many more there are |
 //! | world clock | a list of the user's other clocks, each named by its label and described by its time, its day and how far ahead or behind it is, the list said to have none or how many more there are |
+//! | disk usage | a list of the disks mounted, each a progress bar named by where it is mounted, at how much of it is in use and described by what is free of what it holds -- and "nearly full" past nine tenths -- or, for one not measured, no value and "Not measured"; the list said to have none, that they could not be listed and why, or how many more there are |
 //! | the rest | the name they show where their content will be |
 //!
 //! A widget not drawn is not here: one hidden, and every one while the layer
@@ -24,6 +25,7 @@
 use guitk::render::FontWeightHint;
 use guitk::widget::automation::{Node, Role, Value};
 
+use super::disks::{self, Disks};
 use super::monitor::{Graph, Graphs, Panel};
 use super::{
     BATTERY_CHARGE, CLOCK_TIME, DesktopWidgetManager, LiveReadings, METER_HEIGHT, Meter,
@@ -31,7 +33,7 @@ use super::{
     calendar_cell, charge_text, clock_date, estimate_text, fit_within, monitor_layout,
     placeholder_line, problem_line,
 };
-use super::{upcoming, worldclock};
+use super::{listing, upcoming, worldclock};
 use crate::Rect;
 use crate::calendar::{MonthGlance, Upcoming, WorldClockReading};
 use crate::power::{BatteryInfo, BatteryState};
@@ -69,6 +71,10 @@ pub enum WidgetPart {
     WorldClocks(WidgetInstanceId),
     /// One of them, by its place in the list.
     OtherClock(WidgetInstanceId, usize),
+    /// A disk usage widget's list of the disks mounted.
+    Disks(WidgetInstanceId),
+    /// One of them, by its place in the list.
+    Disk(WidgetInstanceId, usize),
     /// The name a widget with no content of its own yet shows in its place.
     Placeholder(WidgetInstanceId),
 }
@@ -160,7 +166,7 @@ fn upcoming_node(
         }
     }
     if let Some((more, _)) = laid.more {
-        list.description = Some(format!("{} not shown", upcoming::more_text(more)));
+        list.description = Some(format!("{} not shown", listing::more_text(more)));
     }
     list
 }
@@ -200,7 +206,64 @@ fn world_clocks_node(
         }
     }
     if let Some((more, _)) = laid.more {
-        list.description = Some(format!("{} not shown", worldclock::more_text(more)));
+        list.description = Some(format!("{} not shown", listing::more_text(more)));
+    }
+    list
+}
+
+/// A disk usage widget's list in its content `(x, y, width, height)`: each
+/// disk it shows a progress bar, named by where it is mounted, at how much of
+/// it is in use, and described by what is free of what it holds -- and as
+/// nearly full when it is -- boxed where it is drawn ([`disks::rows`]); one
+/// not measured with no value, and described so. In place of a list, the
+/// list says why there is none -- with why, when the disks could not be
+/// listed -- and under one, how many more it does not show.
+fn disks_node(
+    id: WidgetInstanceId,
+    shown: &Disks,
+    (x, y, width, height): (f32, f32, f32, f32),
+) -> Node<WidgetPart> {
+    let content = Rect::new(x, y, width, height);
+    let mut list = Node::new(
+        WidgetPart::Disks(id),
+        Role::List,
+        WidgetKind::DiskUsage.label(),
+        content,
+    );
+    let listed = match shown {
+        Disks::Listed(listed) if !listed.is_empty() => listed,
+        Disks::Unlisted(why) => {
+            list.description = Some(format!("{}: {why}", disks::UNLISTED));
+            return list;
+        }
+        other => {
+            list.description = disks::in_place_of_a_list(other).map(str::to_owned);
+            return list;
+        }
+    };
+    let laid = disks::rows(listed, content);
+    for &(index, bounds) in &laid.rows {
+        if let Some(disk) = listed.get(index) {
+            let mut row = Node::new(
+                WidgetPart::Disk(id, index),
+                Role::ProgressBar,
+                disk.name.clone(),
+                bounds,
+            );
+            row.value = disk.fraction.map(|fraction| Value::Progress {
+                value: fraction.clamp(0.0, 1.0) * 100.0,
+                max: 100.0,
+            });
+            row.description = Some(if disk.nearly_full {
+                format!("{}, {}", disk.detail, disks::NEARLY_FULL)
+            } else {
+                disk.detail.clone()
+            });
+            list.children.push(row);
+        }
+    }
+    if let Some((more, _)) = laid.more {
+        list.description = Some(format!("{} not shown", listing::more_text(more)));
     }
     list
 }
@@ -350,6 +413,7 @@ impl DesktopWidgetManager {
             WidgetKind::WorldClock => {
                 vec![world_clocks_node(id, &live.world_clocks, (cx, cy, cw, ch))]
             }
+            WidgetKind::DiskUsage => vec![disks_node(id, &live.disks, (cx, cy, cw, ch))],
             WidgetKind::BatteryStatus => {
                 let mut charge = Node::new(
                     WidgetPart::Charge(id),

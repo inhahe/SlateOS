@@ -11,13 +11,15 @@
 //! # One layout
 //!
 //! [`rows`] places the clocks in the widget's content -- as many as fit, and
-//! a last line saying how many more -- and the drawing ([`render`]) and what
-//! tools are told (`widgets::accessible`) both read it.
+//! a last line saying how many more (`widgets::listing`) -- and the drawing
+//! ([`render`]) and what tools are told (`widgets::accessible`) both read
+//! it.
 
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 
+use super::listing::{self, Rows, more_text};
 use crate::Rect;
 use crate::calendar::WorldClockReading;
 
@@ -43,57 +45,17 @@ fn row_height() -> f32 {
     first_line_height() + guitk::text::line_height(DETAIL_SIZE, FontWeightHint::Regular)
 }
 
-/// The clocks as laid out in a widget's content.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Rows {
-    /// Each clock that fits, by its place in the list, and its box.
-    pub rows: Vec<(usize, Rect)>,
-    /// How many did not fit, and the box of the line that says so; `None`
-    /// when every one did.
-    pub more: Option<(usize, Rect)>,
-}
-
 /// The clocks of `clocks` placed in `content`, top to bottom: as many as
 /// fit, and -- when some do not -- a last line saying how many more.
 #[must_use]
 pub fn rows(clocks: &[WorldClockReading], content: Rect) -> Rows {
-    let place = |bottom: f32| -> Vec<(usize, Rect)> {
-        let mut placed = Vec::new();
-        let mut top = content.y;
-        for index in 0..clocks.len() {
-            let gap = if index == 0 { 0.0 } else { GAP };
-            if top + gap + row_height() > bottom {
-                break;
-            }
-            top += gap;
-            placed.push((index, Rect::new(content.x, top, content.w, row_height())));
-            top += row_height();
-        }
-        placed
-    };
-    let all = place(content.y + content.h);
-    if all.len() == clocks.len() {
-        return Rows {
-            rows: all,
-            more: None,
-        };
-    }
-    let more_h = guitk::text::line_height(DETAIL_SIZE, FontWeightHint::Regular);
-    let rows = place(content.y + content.h - more_h);
-    let top = rows.last().map_or(content.y, |(_, b)| b.y + b.h);
-    Rows {
-        more: Some((
-            clocks.len().saturating_sub(rows.len()),
-            Rect::new(content.x, top, content.w, more_h),
-        )),
-        rows,
-    }
-}
-
-/// What the line saying how many more did not fit says: "2 more".
-#[must_use]
-pub fn more_text(more: usize) -> String {
-    format!("{more} more")
+    listing::stack(
+        clocks.len(),
+        row_height(),
+        GAP,
+        guitk::text::line_height(DETAIL_SIZE, FontWeightHint::Regular),
+        content,
+    )
 }
 
 /// Draw `clocks` in `content`, in `p` at `alpha`: each clock's label and

@@ -2068,6 +2068,48 @@ fn a_world_clock_shows_the_settings_other_clocks() {
     assert_eq!(names, ["Tokyo"]);
 }
 
+/// **The desktop's menu adds a disk usage widget, which lists the disks
+/// mounted** -- the mount table's, less the kernel's own views -- read when
+/// the widget's tick comes and not before, and not while none is out.
+#[test]
+fn a_disk_usage_widget_lists_the_disks_mounted() {
+    let mut s = shell();
+    let dir = scratchdir::ScratchDir::new("shell-disks");
+    let table = dir.path("mounts");
+    std::fs::write(
+        &table,
+        b"none / ext4 rw 0 0\nnone /proc procfs rw 0 0\nnone /media/My\\040Disk fat32 rw 0 0\n",
+    )
+    .expect("written");
+    s.read_mounts_from(table);
+    s.sample_disks(1_000);
+    assert_eq!(
+        s.live_readings().disks,
+        crate::widgets::disks::Disks::Unread,
+        "disks read with no disk usage widget out"
+    );
+    s.open_desktop_menu(900.0, 500.0);
+    assert!(
+        s.activate_desktop_menu_item(DesktopShell::MENU_ADD_DISK_USAGE)
+            .changed()
+    );
+    s.dismiss_popups();
+    let id = s
+        .widgets
+        .all_widgets()
+        .iter()
+        .find(|w| w.kind == WidgetKind::DiskUsage)
+        .map(|w| w.id)
+        .expect("added");
+    let list = node(&s, ShellPart::Widget(WidgetPart::Disks(id)));
+    assert!(list.children.is_empty(), "listed before the widget's tick");
+    s.sample_disks(2_000);
+    let list = node(&s, ShellPart::Widget(WidgetPart::Disks(id)));
+    assert_eq!(list.name, "Disk Usage");
+    let names: Vec<&str> = list.children.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, ["/", "/media/My Disk"]);
+}
+
 /// **A note's text is set as the user would set it**: the note opened with
 /// a click on it, which gives it the keyboard, and the text pasted over all
 /// of it -- its layout to be saved, as after typing -- and what is typed next

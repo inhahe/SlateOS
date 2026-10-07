@@ -70,8 +70,8 @@ pub(crate) fn crypt(phrase: &[u8], setting: &[u8], out: &mut [u8]) -> Option<usi
     // 1022.
     let mut wide = [0u8; 2 * 512];
     let wide = wide.get_mut(..2 * phrase.len())?;
-    for (pair, &b) in wide.chunks_exact_mut(2).zip(phrase) {
-        pair[0] = b;
+    for (pair, &b) in wide.as_chunks_mut::<2>().0.iter_mut().zip(phrase) {
+        *pair = [b, 0];
     }
     let digest = pwhash::md4::digest(&[wide]);
     crate::crypt::wipe(wide);

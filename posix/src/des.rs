@@ -372,7 +372,7 @@ impl Schedule {
 /// eight -- the first byte the top bit.
 fn pack(bytes: &[u8; 64]) -> [u8; 8] {
     let mut bits = [0u8; 8];
-    for (byte, chunk) in bits.iter_mut().zip(bytes.chunks_exact(8)) {
+    for (byte, chunk) in bits.iter_mut().zip(bytes.as_chunks::<8>().0) {
         for &b in chunk {
             *byte = (*byte << 1) | (b & 1);
         }

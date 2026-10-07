@@ -267,10 +267,8 @@ fn encode_sha256(out: &mut OutBuf, a: &[u8]) {
 fn sha_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Option<Result<(), Refusal>> {
     let (is_512, rest) = if let Some(r) = setting.strip_prefix(b"$6$") {
         (true, r)
-    } else if let Some(r) = setting.strip_prefix(b"$5$") {
-        (false, r)
     } else {
-        return None;
+        (false, setting.strip_prefix(b"$5$")?)
     };
 
     // Optional "rounds=N$" prefix.

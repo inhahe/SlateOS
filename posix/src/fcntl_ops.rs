@@ -438,6 +438,7 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::UdpSocket
         | fdtable::HandleKind::Eventfd
         | fdtable::HandleKind::UnixStream
+        | fdtable::HandleKind::UnixSocket
         | fdtable::HandleKind::PtyMaster
         | fdtable::HandleKind::PtySlave => entry.handle,
         fdtable::HandleKind::Epoll
@@ -462,7 +463,8 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         match entry.kind {
             fdtable::HandleKind::TcpStream
             | fdtable::HandleKind::TcpListener
-            | fdtable::HandleKind::UdpSocket => {
+            | fdtable::HandleKind::UdpSocket
+            | fdtable::HandleKind::UnixSocket => {
                 crate::socket::copy_meta(oldfd, new_fd);
             }
             _ => {}

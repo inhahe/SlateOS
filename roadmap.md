@@ -3065,6 +3065,20 @@ D's to act on once answered).
     file mappings in the kernel
     (`requests/d-a-a-native-program-cannot-map-a-file.md`;
     `known-issues/D-POSIX-A-NATIVE-FILE-MAPPING-IS-A-COPY.md`).
+  - `[-]` **Unix sockets with names** (2026-10-07; lane A's
+    `requests/a-d-resource-type-33-is-unixsocket.md`).
+    `socket(AF_UNIX, ...)` was `EAFNOSUPPORT`; it is now built on the
+    kernel's `SYS_UNIX_*` calls (`posix/src/unix_socket.rs`): stream,
+    datagram and sequenced-packet sockets bound to a path or an abstract name,
+    `listen`/`accept`/`connect`, the sender's address and credentials
+    (`SO_PEERCRED`, `SO_PASSCRED` and `SCM_CREDENTIALS`), `SO_RCVTIMEO`/
+    `SO_SNDTIMEO`, autobind, `poll`, and datagram and sequenced-packet
+    `socketpair`. Lane B's syslog was waiting on it. Host-tested; the kernel
+    calls are on `lane-a` until lane A publishes, and
+    `services/ctest-unix-socket` checks the two together on SlateOS then. Not
+    inherited across `posix_spawn` or `exec` yet
+    (`known-issues/D-POSIX-NAMED-UNIX-SOCKETS-DO-NOT-CROSS-SPAWN-OR-EXEC.md`;
+    design-decisions 1186).
 
 - `[D]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
   - `[-]` **GNU binutils 2.47 on the image** (2026-10-07): the assembler and

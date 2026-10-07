@@ -611,6 +611,7 @@ pub mod ucontext;
 pub(crate) mod uio;
 pub mod ulimit;
 pub mod unistd;
+pub(crate) mod unix_socket;
 pub mod usershell;
 pub mod utime;
 pub mod utmpx;

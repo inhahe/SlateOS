@@ -218,7 +218,8 @@ pub(crate) fn link_target_of_kind(entry: &FdEntry, out: &mut [u8]) -> Option<usi
         HandleKind::TcpStream
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
-        | HandleKind::UnixStream => put_tagged(out, b"socket:[", entry.handle, b"]"),
+        | HandleKind::UnixStream
+        | HandleKind::UnixSocket => put_tagged(out, b"socket:[", entry.handle, b"]"),
         HandleKind::Console => put(out, b"/dev/console"),
         HandleKind::PtyMaster => put(out, b"/dev/ptmx"),
         HandleKind::PtySlave => match crate::ioctl::slave_id_of(entry.handle) {

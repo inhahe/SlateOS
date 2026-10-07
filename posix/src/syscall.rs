@@ -1041,6 +1041,72 @@ pub const SYS_SOCKETPAIR_POLL: u64 = 308;
 pub const SYS_SOCKETPAIR_READABLE_BYTES: u64 = 309;
 pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
 
+// Unix-domain sockets by name (1104-1118): the kernel's `ipc::unix_socket`,
+// which `crate::unix_socket` builds `socket(AF_UNIX, ...)` on. Mirrors
+// kernel/src/syscall/number.rs (lane A's `requests/a-d-resource-type-33-is-
+// unixsocket.md`). A socket is a handle the process holds: closed when it
+// exits, one more holder when it forks.
+/// `SYS_UNIX_SOCKET(kind)` -- a new socket: `kind` 1 stream, 2 datagram, 5
+/// sequenced packets. Returns its handle.
+pub const SYS_UNIX_SOCKET: u64 = 1104;
+/// `SYS_UNIX_PAIR(kind)` -- two connected sockets; both handles returned.
+pub const SYS_UNIX_PAIR: u64 = 1105;
+/// `SYS_UNIX_BIND(handle, name_ptr, name_len, mode, flags)` -- a path makes a
+/// socket node with permission bits `mode`, already umask-masked.
+pub const SYS_UNIX_BIND: u64 = 1106;
+/// `SYS_UNIX_LISTEN(handle, backlog)` -- `backlog` clamped to 1..=128.
+pub const SYS_UNIX_LISTEN: u64 = 1107;
+/// `SYS_UNIX_ACCEPT(handle, flags)` -- the next connection, as a new handle.
+pub const SYS_UNIX_ACCEPT: u64 = 1108;
+/// `SYS_UNIX_CONNECT(handle, name_ptr, name_len, flags)` -- connect a stream
+/// or sequenced-packet socket, or set a datagram socket's destination.
+pub const SYS_UNIX_CONNECT: u64 = 1109;
+/// `SYS_UNIX_SEND(handle, buf, len, name_ptr, name_len, flags)` -- with
+/// `name_ptr` 0, to the peer or the datagram destination; returns bytes sent.
+pub const SYS_UNIX_SEND: u64 = 1110;
+/// `SYS_UNIX_RECV(handle, buf, cap, info_ptr, flags)` -- returns bytes copied
+/// (0 is end of file); `info_ptr`, when not 0, receives a
+/// [`UNIX_RECV_INFO_LEN`]-byte record.
+pub const SYS_UNIX_RECV: u64 = 1111;
+/// `SYS_UNIX_NAME(handle, which, out_ptr)` -- the socket's own address
+/// (`which` 0) or its peer's (1), as a [`UNIX_ADDR_LEN`]-byte record.
+pub const SYS_UNIX_NAME: u64 = 1112;
+/// `SYS_UNIX_PEER_CRED(handle, out_ptr)` -- the peer's pid (u64), uid (u32)
+/// and gid (u32).
+pub const SYS_UNIX_PEER_CRED: u64 = 1113;
+/// `SYS_UNIX_SHUTDOWN(handle, how)` -- 0 receives, 1 sends, 2 both.
+pub const SYS_UNIX_SHUTDOWN: u64 = 1114;
+/// `SYS_UNIX_CLOSE(handle)`.
+pub const SYS_UNIX_CLOSE: u64 = 1115;
+/// `SYS_UNIX_POLL(handle)` -- 0x01 readable, 0x04 writable, 0x08 error,
+/// 0x10 hang-up.
+pub const SYS_UNIX_POLL: u64 = 1116;
+/// `SYS_UNIX_SET_OPTION(handle, option, value)` -- a `UNIX_OPT_*`.
+pub const SYS_UNIX_SET_OPTION: u64 = 1117;
+/// `SYS_UNIX_GET_OPTION(handle, option)` -- returns the option's value.
+pub const SYS_UNIX_GET_OPTION: u64 = 1118;
+/// Name flag: the name is abstract (what follows `sun_path[0] == 0`), not a
+/// path. Without it a name must be an absolute path.
+pub const UNIX_NAME_ABSTRACT: u64 = 1 << 0;
+/// Call flag: answer `WouldBlock` rather than wait.
+pub const UNIX_NONBLOCK: u64 = 1 << 1;
+/// Receive flag: leave what was read in place (`MSG_PEEK`).
+pub const UNIX_PEEK: u64 = 1 << 2;
+/// Option: hand back the sender's credentials (`SO_PASSCRED`), 0 or 1.
+pub const UNIX_OPT_PASSCRED: u64 = 1;
+/// Option: a blocking receive's or accept's limit (`SO_RCVTIMEO`), in
+/// nanoseconds; 0 for none.
+pub const UNIX_OPT_RCVTIMEO: u64 = 2;
+/// Option: the same for a blocking send or connect (`SO_SNDTIMEO`).
+pub const UNIX_OPT_SNDTIMEO: u64 = 3;
+/// An address record: kind (u32: 0 unnamed, 1 path, 2 abstract), length
+/// (u32), then 108 bytes, the unused ones zero.
+pub const UNIX_ADDR_LEN: usize = 116;
+/// `SYS_UNIX_RECV`'s info record: the message's whole length (u64), the
+/// sender's pid (u64), uid (u32), gid (u32), whether those are known (u32),
+/// then the sender's address as a [`UNIX_ADDR_LEN`]-byte record.
+pub const UNIX_RECV_INFO_LEN: usize = 144;
+
 // Futexes (IPC range 210-219)
 pub const SYS_FUTEX_WAIT: u64 = 210;
 pub const SYS_FUTEX_WAKE: u64 = 211;

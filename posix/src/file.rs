@@ -235,7 +235,10 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 
     // Read socket metadata BEFORE clearing (need it for SO_LINGER check).
     let socket_meta = match entry.kind {
-        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+        HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::UnixSocket => {
             let m = crate::socket::get_meta(fd);
             crate::socket::clear_meta(fd);
             m
@@ -257,6 +260,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
         HandleKind::Pipe => crate::pipe::pipe_kernel_close(entry.handle),
         HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, entry.handle),
+        HandleKind::UnixSocket => crate::unix_socket::close(entry.handle),
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
             if entry.handle == 0 {
@@ -452,6 +456,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
                 })
             }
+        }
+        HandleKind::UnixSocket => {
+            // Its own errno, already set: not through `translate` below.
+            // SAFETY: `buf` is writable for `count` bytes (read's contract).
+            return unsafe { crate::unix_socket::read(fd, entry.handle, buf, count) } as SsizeT;
         }
         HandleKind::Console => {
             // Console read goes through the kernel's line discipline
@@ -865,6 +874,11 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             }
             ret
         }
+        HandleKind::UnixSocket => {
+            // Its own errno (and SIGPIPE), already dealt with.
+            // SAFETY: `buf` is readable for `count` bytes (write's contract).
+            return unsafe { crate::unix_socket::write(fd, entry.handle, buf, count) } as SsizeT;
+        }
         HandleKind::Console => syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64),
         HandleKind::TcpStream => {
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
@@ -1086,6 +1100,7 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::UnixStream
+        | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave => {
             errno::set_errno(errno::ESPIPE);
@@ -1441,6 +1456,30 @@ fn vectored(
     if plan.nowait {
         return fail(errno::EAGAIN);
     }
+    if entry.kind == HandleKind::UnixSocket {
+        // A datagram or record is one message however many pieces carry it,
+        // as Linux's `sock_write_iter` and `sock_read_iter` make it: sendmsg
+        // and recvmsg with no name and no control data. (`At` was ESPIPE
+        // above.) `socket::Iovec` is this `Iovec`'s layout.
+        let mut msg = crate::socket::Msghdr {
+            msg_name: core::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: iov.cast::<crate::socket::Iovec>().cast_mut(),
+            msg_iovlen: usize::try_from(iovcnt).unwrap_or(0),
+            msg_control: core::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+        };
+        // SAFETY: `import_vector` accepted `iov` for `iovcnt` segments, and
+        // the message carries nothing else.
+        return unsafe {
+            if is_write {
+                crate::unix_socket::sendmsg(fd, entry.handle, &msg, 0)
+            } else {
+                crate::unix_socket::recvmsg(fd, entry.handle, &mut msg, 0)
+            }
+        };
+    }
     let run = || {
         // SAFETY: `import_vector` accepted `iov` for `iovcnt` segments.
         unsafe {
@@ -1668,6 +1707,7 @@ pub(crate) fn has_iter_ops(kind: HandleKind, is_write: bool) -> bool {
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
         | HandleKind::UnixStream
+        | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave => true,
     }
@@ -1820,7 +1860,10 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
-        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+        HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::UnixSocket => {
             // Share the handle (same refcounting as pipes).
             if let Some(new_fd) = fdtable::alloc_fd_with_flags(entry.kind, entry.handle, src_status)
             {
@@ -1951,6 +1994,7 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         | HandleKind::UdpSocket
         | HandleKind::Eventfd
         | HandleKind::UnixStream
+        | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave => entry.handle,
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
@@ -1973,7 +2017,10 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         // must be respected when closing the evicted handle, just like
         // close() does.
         let evicted_meta = match old.kind {
-            HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+            HandleKind::TcpStream
+            | HandleKind::TcpListener
+            | HandleKind::UdpSocket
+            | HandleKind::UnixSocket => {
                 let m = crate::socket::get_meta(newfd);
                 crate::socket::clear_meta(newfd);
                 m
@@ -2008,7 +2055,10 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
 
     // Copy socket metadata for dup'd socket fds.
     match entry.kind {
-        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+        HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::UnixSocket => {
             crate::socket::copy_meta(oldfd, newfd);
         }
         _ => {}
@@ -2337,7 +2387,8 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
         HandleKind::TcpStream
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
-        | HandleKind::UnixStream => {
+        | HandleKind::UnixStream
+        | HandleKind::UnixSocket => {
             // Return minimal stat for a socket.
             unsafe {
                 core::ptr::write_bytes(buf, 0, 1);
@@ -2691,6 +2742,7 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::UnixStream
+        | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave => {
             errno::set_errno(errno::EINVAL);
@@ -2737,6 +2789,7 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::UnixStream
+        | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave => {
             errno::set_errno(errno::EINVAL);
@@ -2860,6 +2913,7 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
         HandleKind::File => syscall1(SYS_FS_CLOSE, handle),
         HandleKind::Pipe => crate::pipe::pipe_kernel_close(handle),
         HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, handle),
+        HandleKind::UnixSocket => crate::unix_socket::close(handle),
         HandleKind::Console => 0, // Console handles are not closeable.
         HandleKind::TcpStream => syscall1(SYS_TCP_CLOSE, handle),
         HandleKind::TcpListener => syscall1(SYS_TCP_CLOSE_LISTENER, handle),
@@ -5421,6 +5475,7 @@ fn fallocate_on(
         | HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::UnixStream
+        | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave => return Err(errno::ENODEV),
     }

@@ -1493,6 +1493,9 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         // to FILE so the function is total; build_fd_map filters these
         // entries out before they reach this conversion.
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => fd_handle_type::FILE,
+        // Not transferable yet either (see `inheritable_fds`): filtered out
+        // before this conversion, and mapped only so that it is total.
+        HandleKind::UnixSocket => fd_handle_type::FILE,
     }
 }
 
@@ -1685,9 +1688,17 @@ fn inheritable_fds() -> ChildFds {
             // `CONSOLE`, which the kernel resolves through `current_tty()`, and
             // `login_tty` has already made the pty the child's controlling
             // terminal — so that mapping is exact rather than approximate.
+            //
+            // `UnixSocket` is skipped for the reason `PtyMaster` once was, and
+            // says so: it has a kernel identity, but no `fd_handle_type` names
+            // one yet, so the child does not get it. Asked of lane A in
+            // `requests/d-a-a-named-unix-socket-must-cross-spawn-and-count-
+            // its-bytes.md`; until then `socketpair(AF_UNIX, SOCK_STREAM)`
+            // stays `UnixStream`, which does cross.
             let transferable = entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
-                && entry.kind != fdtable::HandleKind::Inotify;
+                && entry.kind != fdtable::HandleKind::Inotify
+                && entry.kind != fdtable::HandleKind::UnixSocket;
             if transferable {
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
                 // Close-on-exec fds are not inherited unless an action says so.

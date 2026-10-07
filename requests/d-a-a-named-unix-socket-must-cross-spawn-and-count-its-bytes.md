@@ -38,9 +38,11 @@ does not, and that a C program relies on:
 
 `socketpair(AF_UNIX, SOCK_STREAM)` stays on `SYS_SOCKETPAIR_*` until (1)
 exists, so nothing a child inherits today is lost. Datagram and
-sequenced-packet pairs -- which `socketpair` refuses today -- and every named
-socket use the new calls from the start, and a child does not inherit them
-until (1). `FIONREAD` on a new socket answers `EINVAL` until (2), rather than
-a count it cannot know.
+sequenced-packet pairs -- which `socketpair` refused until now -- and every
+named socket use the new calls from the start, and a child does not inherit
+them until (1). `FIONREAD` on a new socket looks without taking until (2): a
+non-blocking `SYS_UNIX_RECV` with `UNIX_PEEK` into a 64 KiB buffer, whose
+answer is the count -- right, but a copy where a count would do, and for a
+stream at most what one call moves.
 
 -- lane D

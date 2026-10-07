@@ -157,6 +157,21 @@ pub enum HandleKind {
     /// endpoint refcount when it dups the handle into the child).
     UnixStream,
 
+    /// A Unix-domain socket of any kind -- stream, datagram or sequenced
+    /// packet -- that can have a name: `socket(AF_UNIX, ...)` and what
+    /// `accept` gives back (uses `SYS_UNIX_*`, [`crate::unix_socket`]).
+    ///
+    /// The `handle` is the kernel's socket handle. Its kind (`SOCK_STREAM`,
+    /// `SOCK_DGRAM`, `SOCK_SEQPACKET`) is in the socket's metadata
+    /// ([`crate::socket::get_meta`]); its name, peer, options and queues are
+    /// the kernel's. A `fork` gives the child one more holder. It does **not**
+    /// cross `posix_spawn` or `exec` yet: the kernel's spawn has no handle
+    /// type for it (`requests/d-a-a-named-unix-socket-must-cross-spawn-and-
+    /// count-its-bytes.md`), so `socketpair(AF_UNIX, SOCK_STREAM)` -- whose
+    /// ends a parent often hands a child -- stays [`Self::UnixStream`] until
+    /// it does.
+    UnixSocket,
+
     /// The **master** end of a pseudo-terminal (uses `SYS_PTY_*`).
     ///
     /// This is the end a terminal emulator, `script(1)`, `expect` or `sshd`

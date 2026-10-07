@@ -147,6 +147,17 @@ pub const SO_PROTOCOL: i32 = 38;
 pub const SO_RCVLOWAT: i32 = 18;
 /// Send low watermark (minimum space for writability).
 pub const SO_SNDLOWAT: i32 = 19;
+/// Receive the sender's credentials with each message (`SCM_CREDENTIALS`),
+/// on a Unix socket.
+pub const SO_PASSCRED: i32 = 16;
+/// A connected Unix socket's peer's credentials (`struct ucred`).
+pub const SO_PEERCRED: i32 = 17;
+
+// Control-message types at SOL_SOCKET (`cmsg_type`).
+/// Open descriptors passed with a message.
+pub const SCM_RIGHTS: i32 = 1;
+/// The sender's credentials, a `struct ucred`.
+pub const SCM_CREDENTIALS: i32 = 2;
 
 // TCP-level socket options (SOL_TCP).
 /// Disable Nagle's algorithm.
@@ -205,8 +216,13 @@ pub const MSG_OOB: i32 = 1;
 pub const MSG_PEEK: i32 = 2;
 /// Send without routing (ignored — we always route).
 pub const MSG_DONTROUTE: i32 = 4;
+/// Control data was truncated: the buffer had no room for it (returned by
+/// recvmsg).
+pub const MSG_CTRUNC: i32 = 0x8;
 /// Data was truncated (returned by recvmsg).
 pub const MSG_TRUNC: i32 = 0x20;
+/// Receive from the socket's error queue.
+pub const MSG_ERRQUEUE: i32 = 0x2000;
 /// Non-blocking operation.
 pub const MSG_DONTWAIT: i32 = 0x40;
 /// Terminate a record (ignored — TCP is byte-stream).
@@ -451,6 +467,80 @@ pub(crate) struct SocketMeta {
     /// doesn't support explicit corking yet, so this only affects
     /// getsockopt reporting).
     cork: bool,
+    /// A Unix socket ([`HandleKind::UnixSocket`]) is listening: what
+    /// `SO_ACCEPTCONN` reports. A TCP listener is its own kind instead.
+    pub(crate) unix_listening: bool,
+}
+
+impl SocketMeta {
+    /// A new socket's metadata: every option at its default.
+    fn new(sock_type: i32) -> Self {
+        Self {
+            sock_type,
+            bound_port: 0,
+            peer_addr: 0,
+            peer_port: 0,
+            local_addr: 0,
+            local_from_connect: false,
+            keepalive: false,
+            nodelay: false,
+            reuseaddr: false,
+            rcvbuf: 65536,
+            sndbuf: 65536,
+            broadcast: false,
+            linger_onoff: false,
+            linger_secs: 0,
+            keepidle: 75,
+            keepintvl: 10,
+            keepcnt: 9,
+            udp_shut_rd: false,
+            udp_shut_wr: false,
+            rcvtimeo_ms: 0,
+            sndtimeo_ms: 0,
+            cork: false,
+            unix_listening: false,
+        }
+    }
+}
+
+/// A new Unix socket `fd`'s metadata ([`crate::unix_socket`]).
+pub(crate) fn set_unix_meta(fd: i32, sock_type: i32) {
+    set_meta(fd, SocketMeta::new(sock_type));
+}
+
+/// Record that Unix socket `fd` listens.
+pub(crate) fn set_unix_listening(fd: i32) {
+    if let Some(mut meta) = get_meta(fd) {
+        meta.unix_listening = true;
+        set_meta(fd, meta);
+    }
+}
+
+/// Remember Unix socket `fd`'s receive (or send) timeout, `ns` nanoseconds
+/// (0 for none), which the kernel keeps: [`wait_rule`] reads it to decide
+/// whether a signal restarts a wait.
+pub(crate) fn set_unix_timeout(fd: i32, receiving: bool, ns: u64) {
+    if let Some(mut meta) = get_meta(fd) {
+        // Milliseconds, rounded up, so that a limit under a millisecond still
+        // reads as a limit.
+        let ms = ns.div_ceil(1_000_000);
+        if receiving {
+            meta.rcvtimeo_ms = ms;
+        } else {
+            meta.sndtimeo_ms = ms;
+        }
+        set_meta(fd, meta);
+    }
+}
+
+/// Give accepted Unix socket `dst` listener `src`'s remembered timeouts, as
+/// the kernel gives the connection the listener's.
+pub(crate) fn copy_unix_timeouts(src: i32, dst: i32) {
+    if let (Some(from), Some(mut to)) = (get_meta(src), get_meta(dst)) {
+        to.rcvtimeo_ms = from.rcvtimeo_ms;
+        to.sndtimeo_ms = from.sndtimeo_ms;
+        set_meta(dst, to);
+    }
 }
 
 /// Backing storage for the per-fd socket metadata table.
@@ -542,12 +632,22 @@ fn socket_fd_is_valid(fd: i32) -> bool {
         HandleKind::TcpStream
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
-        | HandleKind::UnixStream => true,
+        | HandleKind::UnixStream
+        | HandleKind::UnixSocket => true,
         _ => {
             errno::set_errno(errno::ENOTSOCK);
             false
         }
     }
+}
+
+/// The kernel handle of `fd` when it is a Unix socket that can have a name
+/// ([`crate::unix_socket`]): the entry points below hand such a descriptor
+/// to that module once they have checked it is a socket at all.
+fn unix_handle(fd: i32) -> Option<u64> {
+    fdtable::get_fd(fd)
+        .filter(|e| e.kind == HandleKind::UnixSocket)
+        .map(|e| e.handle)
 }
 
 /// Store metadata for a socket fd.
@@ -674,6 +774,17 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         return -1;
     }
 
+    // Unix-domain sockets are their own module's, on the kernel's
+    // `SYS_UNIX_*` calls.
+    if domain == AF_UNIX {
+        return crate::unix_socket::socket(
+            sock_type & SOCK_TYPE_MASK,
+            flags & SOCK_NONBLOCK != 0,
+            flags & SOCK_CLOEXEC != 0,
+            protocol,
+        );
+    }
+
     // Validate domain.
     if domain != AF_INET {
         errno::set_errno(errno::EAFNOSUPPORT);
@@ -744,33 +855,7 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
     }
 
     // Store socket metadata for later use by connect/bind/listen.
-    set_meta(
-        fd,
-        SocketMeta {
-            sock_type: base_type,
-            bound_port: 0,
-            peer_addr: 0,
-            peer_port: 0,
-            local_addr: 0,
-            local_from_connect: false,
-            keepalive: false,
-            nodelay: false,
-            reuseaddr: false,
-            rcvbuf: 65536,
-            sndbuf: 65536,
-            broadcast: false,
-            linger_onoff: false,
-            linger_secs: 0,
-            keepidle: 75,
-            keepintvl: 10,
-            keepcnt: 9,
-            udp_shut_rd: false,
-            udp_shut_wr: false,
-            rcvtimeo_ms: 0,
-            sndtimeo_ms: 0,
-            cork: false,
-        },
-    );
+    set_meta(fd, SocketMeta::new(base_type));
 
     fd
 }
@@ -818,6 +903,12 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
         errno::set_errno(errno::ENOTSOCK);
         return -1;
     };
+
+    // A Unix socket's protocol handler is its own module's.
+    if entry.kind == HandleKind::UnixSocket {
+        // SAFETY: forwarded from the caller.
+        return unsafe { crate::unix_socket::connect(fd, entry.handle, addr, addrlen) };
+    }
 
     // Last, the protocol handler's own length test (`inet_stream_connect` →
     // `__inet_stream_connect`, net/ipv4/af_inet.c).
@@ -937,6 +1028,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                     rcvtimeo_ms: meta.rcvtimeo_ms,
                     sndtimeo_ms: meta.sndtimeo_ms,
                     cork: meta.cork,
+                    unix_listening: false,
                 },
             );
 
@@ -1086,6 +1178,12 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
         return -1;
     }
 
+    // A Unix socket's protocol handler is its own module's.
+    if entry.kind == HandleKind::UnixSocket {
+        // SAFETY: forwarded from the caller.
+        return unsafe { crate::unix_socket::bind(entry.handle, addr, addrlen) };
+    }
+
     // Last, the protocol handler's own length test (`inet_bind` →
     // `__inet_bind`, net/ipv4/af_inet.c).
     if (addrlen as usize) < core::mem::size_of::<SockaddrIn>() {
@@ -1182,7 +1280,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
+pub extern "C" fn listen(fd: i32, backlog: i32) -> i32 {
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1192,6 +1290,14 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
         errno::set_errno(errno::ENOTSOCK);
         return -1;
     };
+
+    // A Unix socket's: a sequenced-packet socket listens as a stream does,
+    // and the kernel refuses a datagram one.
+    if entry.kind == HandleKind::UnixSocket {
+        return crate::unix_socket::listen(fd, entry.handle, backlog);
+    }
+    // TCP takes no backlog: the kernel's listener queue is its own size.
+    let _ = backlog;
 
     if meta.sock_type != SOCK_STREAM {
         errno::set_errno(errno::EOPNOTSUPP);
@@ -1272,6 +1378,13 @@ pub unsafe extern "C" fn accept(fd: i32, addr: *mut Sockaddr, addrlen: *mut Sock
             // Connected TCP or UDP — accept is not supported.
             errno::set_errno(errno::EOPNOTSUPP);
             return -1;
+        }
+        HandleKind::UnixSocket => {
+            // The kernel answers a socket that is not listening.
+            // SAFETY: forwarded from the caller.
+            return unsafe {
+                crate::unix_socket::accept(fd, entry.handle, addr, addrlen, false, false)
+            };
         }
         _ => {
             // File, Pipe, Console — not a socket.
@@ -1425,6 +1538,7 @@ unsafe fn finish_accept(
             rcvtimeo_ms: 0,
             sndtimeo_ms: 0,
             cork: false,
+            unix_listening: false,
         },
     );
 
@@ -1534,6 +1648,13 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
         errno::set_errno(errno::EBADF);
         return -1;
     };
+
+    // A Unix socket's own, ahead of the zero-length shortcut below: an empty
+    // datagram or record is a message to send.
+    if entry.kind == HandleKind::UnixSocket {
+        // SAFETY: forwarded from the caller.
+        return unsafe { crate::unix_socket::send(fd, entry.handle, buf, len, flags, None) };
+    }
 
     // POSIX: send with len==0 succeeds with 0 bytes (no-op) — but only on a
     // *valid* descriptor.  `__sys_sendto` (net/socket.c:2161) always runs
@@ -1684,6 +1805,15 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
         errno::set_errno(errno::EBADF);
         return -1;
     };
+
+    // A Unix socket's own, ahead of the zero-length shortcut below: a
+    // datagram socket's zero-length receive still takes a datagram.
+    if entry.kind == HandleKind::UnixSocket {
+        // SAFETY: forwarded from the caller.
+        return unsafe {
+            crate::unix_socket::recv(fd, entry.handle, buf, len, flags, core::ptr::null_mut())
+        };
+    }
 
     // POSIX: recv with len==0 succeeds immediately with 0 bytes.
     // This is NOT an EOF indicator — it's a no-op.  It still requires a valid
@@ -2209,6 +2339,14 @@ pub unsafe extern "C" fn sendto(
         return -1;
     };
 
+    // A Unix socket's own: the destination is a path or an abstract name.
+    if entry.kind == HandleKind::UnixSocket {
+        // SAFETY: forwarded from the caller.
+        return unsafe {
+            crate::unix_socket::sendto(fd, entry.handle, buf, len, flags, dest_addr, addrlen)
+        };
+    }
+
     // MSG_NOSIGNAL (0x4000): a broken connection is EPIPE without SIGPIPE.
     let nosignal = wants_no_signal(flags);
 
@@ -2384,6 +2522,14 @@ pub unsafe extern "C" fn recvfrom(
         errno::set_errno(errno::EBADF);
         return -1;
     };
+
+    // A Unix socket's own, ahead of the zero-length shortcut (as `recv`).
+    if entry.kind == HandleKind::UnixSocket {
+        // SAFETY: forwarded from the caller.
+        return unsafe {
+            crate::unix_socket::recvfrom(fd, entry.handle, buf, len, flags, src_addr, addrlen)
+        };
+    }
 
     // POSIX: recvfrom with len==0 succeeds immediately with 0 bytes.
     // Without this, a zero-length TCP recv returns 0 from the kernel
@@ -2634,6 +2780,7 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
     };
 
     match entry.kind {
+        HandleKind::UnixSocket => crate::unix_socket::shutdown(entry.handle, how),
         HandleKind::TcpStream => {
             if entry.handle == 0 {
                 errno::set_errno(errno::ENOTCONN);
@@ -2736,10 +2883,25 @@ pub extern "C" fn setsockopt(
     };
 
     match entry.kind {
-        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {}
+        HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::UnixSocket => {}
         _ => {
             errno::set_errno(errno::ENOTSOCK);
             return -1;
+        }
+    }
+
+    // A Unix socket's options the kernel keeps; the rest are stored below,
+    // as for every socket.
+    if entry.kind == HandleKind::UnixSocket && level == SOL_SOCKET {
+        // SAFETY: `optval` is readable for `optlen` bytes (the caller's
+        // contract).
+        if let Some(answer) =
+            unsafe { crate::unix_socket::setsockopt(fd, entry.handle, optname, optval, optlen) }
+        {
+            return answer;
         }
     }
 
@@ -2973,10 +3135,25 @@ pub unsafe extern "C" fn getsockopt(
     };
 
     match entry.kind {
-        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {}
+        HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::UnixSocket => {}
         _ => {
             errno::set_errno(errno::ENOTSOCK);
             return -1;
+        }
+    }
+
+    // A Unix socket's own answers (its peer's credentials, the options the
+    // kernel keeps, its family); the rest are answered below, as for every
+    // socket.
+    if entry.kind == HandleKind::UnixSocket && level == SOL_SOCKET {
+        // SAFETY: forwarded from the caller.
+        if let Some(answer) =
+            unsafe { crate::unix_socket::getsockopt(fd, entry.handle, optname, optval, optlen) }
+        {
+            return answer;
         }
     }
 
@@ -3166,6 +3343,12 @@ pub unsafe extern "C" fn getpeername(fd: i32, addr: *mut Sockaddr, addrlen: *mut
         return -1;
     };
 
+    // A Unix socket's peer is the kernel's to name.
+    if entry.kind == HandleKind::UnixSocket {
+        // SAFETY: forwarded from the caller.
+        return unsafe { crate::unix_socket::name(entry.handle, 1, addr, addrlen) };
+    }
+
     let (peer_ip, peer_port) = if meta.peer_addr != 0 || meta.peer_port != 0 {
         // Cached metadata available.
         (meta.peer_addr, meta.peer_port)
@@ -3234,6 +3417,12 @@ pub unsafe extern "C" fn getsockname(fd: i32, addr: *mut Sockaddr, addrlen: *mut
         errno::set_errno(errno::ENOTSOCK);
         return -1;
     };
+
+    // A Unix socket's own name is the kernel's to give.
+    if let Some(handle) = unix_handle(fd) {
+        // SAFETY: forwarded from the caller.
+        return unsafe { crate::unix_socket::name(handle, 0, addr, addrlen) };
+    }
 
     // Determine the local port.  If the metadata has an explicit bound port
     // (from bind()), use it.  Otherwise query the kernel for the ephemeral
@@ -3545,16 +3734,27 @@ pub extern "C" fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv: *mu
         errno::set_errno(errno::EAFNOSUPPORT);
         return -1;
     }
-    // Only stream sockets are implemented.  SOCK_DGRAM / SOCK_SEQPACKET
-    // would need datagram-framed kernel objects (not yet built).
-    if base_type != SOCK_STREAM {
-        errno::set_errno(errno::EOPNOTSUPP);
-        return -1;
-    }
-    // PF_UNIX defines no protocols; only 0 is valid.
-    if protocol != 0 {
+    // PF_UNIX defines no protocols of its own: 0, or PF_UNIX itself, as
+    // Linux's `unix_create` takes -- which tests the protocol before the type.
+    if protocol != 0 && protocol != PF_UNIX {
         errno::set_errno(errno::EPROTONOSUPPORT);
         return -1;
+    }
+    // A datagram or sequenced-packet pair is a pair of the sockets that can
+    // have names ([`crate::unix_socket`]). A stream pair stays the older kind
+    // below, which crosses `posix_spawn` and `exec` and those do not yet
+    // (`fdtable::HandleKind::UnixSocket` says why).
+    if base_type != SOCK_STREAM {
+        // SAFETY: `sv` is non-null (checked above) and, by the caller's
+        // contract, writable for two ints.
+        return unsafe {
+            crate::unix_socket::socketpair(
+                base_type,
+                type_flags & SOCK_NONBLOCK != 0,
+                type_flags & SOCK_CLOEXEC != 0,
+                sv,
+            )
+        };
     }
 
     // ---- Create the kernel endpoint pair ----
@@ -3680,6 +3880,13 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
     if msg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
+    }
+
+    // A Unix socket's own, ahead of the empty-message shortcut: an empty
+    // datagram is a message to send.
+    if let Some(handle) = unix_handle(fd) {
+        // SAFETY: msg is non-null and valid (caller guarantee).
+        return unsafe { crate::unix_socket::sendmsg(fd, handle, &*msg, flags) };
     }
 
     // SAFETY: msg is non-null and valid (caller guarantee).
@@ -3908,6 +4115,13 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
     if msg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
+    }
+
+    // A Unix socket's own, ahead of the empty-message shortcut: a receive
+    // into nothing still takes a datagram, and its credentials.
+    if let Some(handle) = unix_handle(fd) {
+        // SAFETY: msg is non-null and valid (caller guarantee).
+        return unsafe { crate::unix_socket::recvmsg(fd, handle, &mut *msg, flags) };
     }
 
     // SAFETY: msg is non-null and valid (caller guarantee).
@@ -5638,12 +5852,21 @@ mod tests {
     }
 
     #[test]
-    fn test_socketpair_dgram_eopnotsupp() {
+    fn test_socketpair_dgram_and_seqpacket_reach_the_kernel() {
+        // Since 2026-10-07 a datagram or sequenced-packet pair is the kernel's
+        // `SYS_UNIX_PAIR` (`crate::unix_socket`). The host has no kernel, so
+        // the call answers `HOST_ENOSYS`: reaching it is what is tested.
+        let reached = crate::errno::errno_for(crate::syscall::HOST_ENOSYS);
+        for kind in [SOCK_DGRAM, SOCK_SEQPACKET] {
+            let mut sv = [0i32; 2];
+            assert_eq!(socketpair(AF_UNIX, kind, 0, &mut sv), -1);
+            assert_eq!(errno::get_errno(), reached, "type {kind}");
+        }
+        // A type Unix sockets do not have (SOCK_RDM) is refused before any
+        // call, as Linux's `unix_create` refuses it.
         let mut sv = [0i32; 2];
-        // SOCK_DGRAM pairs are not implemented yet.
-        let ret = socketpair(AF_UNIX, SOCK_DGRAM, 0, &mut sv);
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
+        assert_eq!(socketpair(AF_UNIX, 4, 0, &mut sv), -1);
+        assert_eq!(errno::get_errno(), errno::ESOCKTNOSUPPORT);
     }
 
     #[test]
@@ -6227,11 +6450,33 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_socket_unsupported_domain_unix() {
+    fn test_socket_af_unix_reaches_the_kernel() {
+        // Since 2026-10-07 AF_UNIX is supported (`crate::unix_socket`): every
+        // check passes and the kernel's `SYS_UNIX_SOCKET` is called, which the
+        // host, having no kernel, answers `HOST_ENOSYS`. SOCK_RAW is a
+        // datagram socket and PF_UNIX a protocol, as Linux's `unix_create`
+        // takes them.
+        let reached = crate::errno::errno_for(crate::syscall::HOST_ENOSYS);
+        for (kind, protocol) in [
+            (SOCK_STREAM, 0),
+            (SOCK_DGRAM, 0),
+            (SOCK_SEQPACKET, PF_UNIX),
+            (SOCK_RAW, 0),
+        ] {
+            crate::errno::set_errno(0);
+            assert_eq!(socket(AF_UNIX, kind, protocol), -1);
+            assert_eq!(
+                crate::errno::get_errno(),
+                reached,
+                "type {kind} protocol {protocol}"
+            );
+        }
         crate::errno::set_errno(0);
-        let ret = socket(AF_UNIX, SOCK_STREAM, 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EAFNOSUPPORT);
+        assert_eq!(socket(AF_UNIX, SOCK_STREAM, 99), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPROTONOSUPPORT);
+        crate::errno::set_errno(0);
+        assert_eq!(socket(AF_UNIX, 4, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESOCKTNOSUPPORT);
     }
 
     #[test]
@@ -7190,7 +7435,9 @@ mod tests {
         let _g = phase205_cap::CapGuard::snapshot();
         phase205_cap::drop_cap_net_raw();
         crate::errno::set_errno(0);
-        let ret = socket(AF_UNIX, SOCK_RAW, 0);
+        // 46 is Linux's AF_MAX, one past every family, which `__sock_create`
+        // refuses outright. (AF_UNIX served here until it was supported.)
+        let ret = socket(46, SOCK_RAW, 0);
         assert_eq!(ret, -1);
         assert_eq!(
             crate::errno::get_errno(),

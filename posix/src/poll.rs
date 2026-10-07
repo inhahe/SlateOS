@@ -567,6 +567,10 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
             (readable, writable, hangup, error)
         }
 
+        // A Unix socket that can have a name: `SYS_UNIX_POLL`, the same bit
+        // layout (a listener is readable when a connection waits).
+        HandleKind::UnixSocket => crate::unix_socket::readiness(handle),
+
         // TCP stream: query kernel for actual rx/tx readiness.
         HandleKind::TcpStream => {
             if handle == 0 {

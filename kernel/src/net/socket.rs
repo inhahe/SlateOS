@@ -1638,28 +1638,54 @@ pub fn self_test_wait_until() -> KernelResult<()> {
 
     // Twelve would-blocks sleep 1+2+4+8 ms and then 10 ms each: about 0.1 s.
     // Unbounded doubling would be about 4 s.
-    asks = 0;
-    let start = crate::hrtimer::now_ns();
-    let got = wait_until(sock, false, || {
-        asks = asks.saturating_add(1);
-        if asks <= 12 {
-            Err(KernelError::WouldBlock)
-        } else {
-            Ok(1)
+    //
+    // The two bounds are not alike. Under load a sleep cannot return early, so
+    // finishing in under 50 ms is a defect on the attempt that shows it. But
+    // the guest clock is the host's wall clock under TCG, and a host that does
+    // not schedule QEMU for two seconds moves it two seconds at once, so the
+    // 2 s ceiling can be crossed by a correct backoff. A stall does not repeat
+    // on demand and unbounded doubling overshoots every time, so an overshoot
+    // is measured again, and only three in a row fail (known-issues
+    // A-TIMING-SELF-TESTS-READ-A-HOST-STALL-AS-A-KERNEL-BUG).
+    let mut overshoots_ms = [0u64; 3];
+    for slot in &mut overshoots_ms {
+        asks = 0;
+        let start = crate::hrtimer::now_ns();
+        let got = wait_until(sock, false, || {
+            asks = asks.saturating_add(1);
+            if asks <= 12 {
+                Err(KernelError::WouldBlock)
+            } else {
+                Ok(1)
+            }
+        });
+        let elapsed_ms = crate::hrtimer::now_ns().saturating_sub(start) / 1_000_000;
+        if got != Ok(1) || asks != 13 {
+            return fail("lost count of a long wait");
         }
-    });
-    let elapsed_ms = crate::hrtimer::now_ns().saturating_sub(start) / 1_000_000;
-    if got != Ok(1) || asks != 13 {
-        return fail("lost count of a long wait");
-    }
-    if elapsed_ms < 50 || elapsed_ms > 2_000 {
+        if elapsed_ms < 50 {
+            crate::serial_println!(
+                "[netsock]   FAIL: wait_until: twelve backoff sleeps took {} ms (want about 100)",
+                elapsed_ms
+            );
+            return Err(KernelError::InternalError);
+        }
+        if elapsed_ms <= 2_000 {
+            return Ok(());
+        }
         crate::serial_println!(
-            "[netsock]   FAIL: wait_until: twelve backoff sleeps took {} ms (want about 100)",
+            "[netsock]   wait_until: twelve backoff sleeps took {} ms (want about 100) -- \
+             measuring again",
             elapsed_ms
         );
-        return Err(KernelError::InternalError);
+        *slot = elapsed_ms;
     }
-    Ok(())
+    crate::serial_println!(
+        "[netsock]   FAIL: wait_until: twelve backoff sleeps overshot 2 s on every attempt: {:?} ms \
+         (want about 100)",
+        overshoots_ms
+    );
+    Err(KernelError::InternalError)
 }
 
 /// Port for [`self_test_dgram_blocking_recv`] -- distinct from the other

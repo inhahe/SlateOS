@@ -960,78 +960,324 @@ fn test_timeout_fast_path() -> KernelResult<()> {
     Ok(())
 }
 
-/// Atomic for the signaled-before-timeout test.
-static EVENTFD_TIMEOUT_RESULT: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+// ---------------------------------------------------------------------------
+// Timeout test 3: a reader blocked with a timeout is signaled before expiry.
+//
+// WHY THIS TEST IS SHAPED THE WAY IT IS. It used to spawn a reader with a
+// 500 ms timeout, sleep 5 ms and write; then, with a 5 s timeout, the same.
+// Both failed under host load (known-issues-resolved/B-EVENTFD-TOTEST-
+// SHORTTIMEOUT.md, July; recurred on lane C 2026-10-05 on a kernel
+// byte-identical to one that passed): under TCG the guest clock is the host's,
+// so a host that does not schedule QEMU for five seconds moves the guest clock
+// five seconds at once. The writer's 5 ms sleep and the reader's 5 s deadline
+// then expire together, the reader may run first, and it correctly reports
+// `TimedOut` -- the test called that a kernel bug. No wall-clock bound fixes
+// that, because the stall can be longer than any bound.
+//
+// So nothing here is judged against guest time alone:
+//
+// - The write happens only once the reader is observed *parked* on the
+//   eventfd, so the attempt exercises the blocked-reader path and not the
+//   fast path.
+// - A lost wakeup is judged by state, not time: `sched::wake` moves a Blocked
+//   task to Ready before `write()` returns, so a reader still Blocked after
+//   the write was never woken.
+// - `TimedOut` is a failure only when the write provably completed before the
+//   reader's deadline (timestamps, below). Otherwise the host starved the
+//   guest across the deadline, the attempt proves nothing, and it is retried.
+// - Every wait for the other task is bounded in scheduling rounds, which a
+//   host stall cannot use up, not in guest milliseconds, which it can.
+// ---------------------------------------------------------------------------
 
-/// Task that reads with a generous timeout (should be signaled long before).
-///
-/// The timeout is deliberately large (5 s) relative to the ~5 ms the driver
-/// takes to signal: this test verifies the *signaled-before-expiry* path, so
-/// the timeout must never fire under normal — or even momentarily starved —
-/// boot-time scheduling. A short (500 ms) timeout here made the test flaky:
-/// under transient scheduler contention during the busy boot self-test phase
-/// the driver task could be delayed past the reader's deadline, so the reader
-/// legitimately timed out (returning the `u64::MAX` error sentinel) even though
-/// the signal path itself was correct. See known-issues.md (2026-07-15 eventfd
-/// timeout self-test flake).
+/// The reader's timeout. Generous, so that an attempt is only ever
+/// inconclusive when the host stalled the guest for this long in the
+/// microseconds between the reader parking and the write landing.
+const SIGNALED_TIMEOUT_NS: u64 = 5_000_000_000;
+
+/// Attempts before the test gives up. A stall long enough to make one attempt
+/// inconclusive is rare; one in every attempt means something in the kernel
+/// keeps the write from landing in time, which is a failure.
+const SIGNALED_ATTEMPTS: u32 = 5;
+
+/// How close to the reader's deadline the write may land and still count as
+/// "before" it: room for any skew between two CPUs' readings of
+/// `hrtimer::now_ns`, so a write that straddles the deadline is never called
+/// a kernel bug.
+const SIGNALED_SKEW_NS: u64 = 1_000_000;
+
+/// Scheduling rounds (a yield and a 1 ms sleep each) the driver allows the
+/// reader to park, or, once the reader's deadline has passed, to report.
+const SIGNALED_ROUNDS: u32 = 5_000;
+
+/// Reader outcome codes, stored last by the reader (see `TO_OUTCOME`).
+const OUTCOME_PENDING: u64 = 0;
+const OUTCOME_OK: u64 = 1;
+const OUTCOME_TIMED_OUT: u64 = 2;
+const OUTCOME_CLOSED: u64 = 3;
+const OUTCOME_INVALID_HANDLE: u64 = 4;
+const OUTCOME_INTERRUPTED: u64 = 5;
+const OUTCOME_OTHER_ERROR: u64 = 6;
+
+/// What the reader's `read_timeout` returned (an `OUTCOME_*` code). Written
+/// last, after the other `TO_*` slots, so a driver that sees it non-pending
+/// sees the rest of the attempt's record.
+static TO_OUTCOME: AtomicU64 = AtomicU64::new(OUTCOME_PENDING);
+/// The value read, when `TO_OUTCOME` is `OUTCOME_OK`.
+static TO_VALUE: AtomicU64 = AtomicU64::new(0);
+/// A lower bound on the reader's deadline: `now_ns()` taken *before*
+/// `read_timeout` takes its own, plus the timeout.
+static TO_DEADLINE: AtomicU64 = AtomicU64::new(u64::MAX);
+/// `now_ns()` when the reader's `read_timeout` returned (diagnostic).
+static TO_DONE_AT: AtomicU64 = AtomicU64::new(0);
+
+/// The reader: one `read_timeout` with the generous timeout, its outcome
+/// recorded for the driver.
 extern "C" fn eventfd_timeout_reader_task(handle_raw: u64) {
     let handle = EventFdHandle::from_raw(handle_raw);
-    match read_timeout(handle, 5_000_000_000) {
+    let started = crate::hrtimer::now_ns();
+    TO_DEADLINE.store(
+        started.saturating_add(SIGNALED_TIMEOUT_NS),
+        Ordering::SeqCst,
+    );
+    let result = read_timeout(handle, SIGNALED_TIMEOUT_NS);
+    TO_DONE_AT.store(crate::hrtimer::now_ns(), Ordering::SeqCst);
+    let outcome = match result {
         Ok(val) => {
-            EVENTFD_TIMEOUT_RESULT.store(val, core::sync::atomic::Ordering::SeqCst);
+            TO_VALUE.store(val, Ordering::SeqCst);
+            OUTCOME_OK
         }
-        _ => {
-            EVENTFD_TIMEOUT_RESULT.store(u64::MAX, core::sync::atomic::Ordering::SeqCst);
+        Err(KernelError::TimedOut) => OUTCOME_TIMED_OUT,
+        Err(KernelError::ChannelClosed) => OUTCOME_CLOSED,
+        Err(KernelError::InvalidHandle) => OUTCOME_INVALID_HANDLE,
+        Err(KernelError::Interrupted) => OUTCOME_INTERRUPTED,
+        Err(_) => OUTCOME_OTHER_ERROR,
+    };
+    TO_OUTCOME.store(outcome, Ordering::SeqCst);
+}
+
+/// Tasks registered as parked readers of `handle`; 0 if it does not exist.
+fn reader_waiter_count(handle: EventFdHandle) -> usize {
+    EVENTFD_TABLE
+        .lock()
+        .get(&handle.id())
+        .map_or(0, |efd| efd.reader_waiters.count())
+}
+
+/// Wait for the reader to record its outcome, giving it [`SIGNALED_ROUNDS`]
+/// scheduling rounds once its deadline has passed (before that, its own
+/// timer is still due to wake it) -- or from the start, if it has not begun
+/// its read at all. `false` if it never reported.
+fn await_reader_outcome() -> bool {
+    let mut rounds_past_deadline = 0u32;
+    while TO_OUTCOME.load(Ordering::SeqCst) == OUTCOME_PENDING {
+        let deadline = TO_DEADLINE.load(Ordering::SeqCst);
+        let not_started = deadline == u64::MAX;
+        if not_started || crate::hrtimer::now_ns() >= deadline.saturating_add(SIGNALED_SKEW_NS) {
+            rounds_past_deadline = rounds_past_deadline.saturating_add(1);
+            if rounds_past_deadline > SIGNALED_ROUNDS {
+                return false;
+            }
+        }
+        sched::yield_now();
+        sched::sleep_ms(1);
+    }
+    true
+}
+
+/// Close the attempt's eventfd and make sure its reader has finished with the
+/// shared `TO_*` slots before anything reuses them: closing wakes a parked
+/// reader, which then records `ChannelClosed`/`InvalidHandle`.
+fn end_signaled_attempt(handle: EventFdHandle, reader: TaskId) -> KernelResult<()> {
+    close(handle);
+    if await_reader_outcome() {
+        return Ok(());
+    }
+    serial_println!(
+        "[eventfd]   FAIL: timeout_signaled: the reader did not return after its eventfd \
+         was closed and its deadline passed (task state {:?})",
+        sched::task_state(reader)
+    );
+    Err(KernelError::InternalError)
+}
+
+/// What one attempt of the signaled-before-expiry test established.
+enum SignaledAttempt {
+    /// The write landed while the reader was parked, before its deadline,
+    /// and the reader returned the value.
+    Passed,
+    /// The host starved the guest across the reader's deadline, so this
+    /// attempt cannot tell a working path from a broken one.
+    Inconclusive,
+}
+
+/// One attempt; `Err` is a test failure (already reported on serial).
+fn timeout_signaled_attempt(attempt: u32) -> KernelResult<SignaledAttempt> {
+    TO_OUTCOME.store(OUTCOME_PENDING, Ordering::SeqCst);
+    TO_VALUE.store(0, Ordering::SeqCst);
+    TO_DEADLINE.store(u64::MAX, Ordering::SeqCst);
+    TO_DONE_AT.store(0, Ordering::SeqCst);
+
+    let handle = create(0);
+    let reader = match sched::spawn(
+        b"efd-to-test",
+        16,
+        eventfd_timeout_reader_task,
+        handle.raw(),
+        0,
+    ) {
+        Ok(tid) => tid,
+        Err(e) => {
+            close(handle);
+            return Err(e);
+        }
+    };
+
+    // Wait until the reader is parked on the eventfd: registered as a waiter
+    // *and* Blocked. Registration alone precedes the park by a few
+    // instructions; a write in that gap is absorbed by the pending-wake flag,
+    // which is correct but is not the path this test is for.
+    let mut parked = false;
+    for _ in 0..SIGNALED_ROUNDS {
+        if reader_waiter_count(handle) > 0
+            && sched::task_state(reader) == Some(sched::task::TaskState::Blocked)
+        {
+            parked = true;
+            break;
+        }
+        if TO_OUTCOME.load(Ordering::SeqCst) != OUTCOME_PENDING {
+            break;
+        }
+        sched::yield_now();
+        sched::sleep_ms(1);
+    }
+    if !parked {
+        let outcome = TO_OUTCOME.load(Ordering::SeqCst);
+        let state = sched::task_state(reader);
+        end_signaled_attempt(handle, reader)?;
+        if outcome == OUTCOME_TIMED_OUT {
+            // It parked and its deadline passed between two of our looks:
+            // the guest was starved for the whole timeout.
+            serial_println!(
+                "[eventfd]   timeout_signaled attempt {}: inconclusive -- the reader timed out \
+                 before it was seen parked (host starved the guest)",
+                attempt
+            );
+            return Ok(SignaledAttempt::Inconclusive);
+        }
+        serial_println!(
+            "[eventfd]   FAIL: timeout_signaled: the reader never parked on an empty eventfd \
+             (outcome code {}, task state {:?})",
+            outcome,
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if let Err(e) = write(handle, 42) {
+        serial_println!("[eventfd]   FAIL: timeout_signaled: write: {:?}", e);
+        end_signaled_attempt(handle, reader)?;
+        return Err(KernelError::InternalError);
+    }
+    let written_at = crate::hrtimer::now_ns();
+
+    // The wake is synchronous: `sched::wake` makes a Blocked task Ready
+    // before returning, and the reader blocks on nothing but this eventfd.
+    let state_after_write = sched::task_state(reader);
+    if state_after_write == Some(sched::task::TaskState::Blocked) {
+        serial_println!(
+            "[eventfd]   FAIL: timeout_signaled: the reader is still blocked after the write \
+             (lost wakeup)"
+        );
+        end_signaled_attempt(handle, reader)?;
+        return Err(KernelError::InternalError);
+    }
+
+    if !await_reader_outcome() {
+        serial_println!(
+            "[eventfd]   FAIL: timeout_signaled: the reader never returned (task state {:?})",
+            sched::task_state(reader)
+        );
+        end_signaled_attempt(handle, reader)?;
+        return Err(KernelError::InternalError);
+    }
+    let outcome = TO_OUTCOME.load(Ordering::SeqCst);
+    let value = TO_VALUE.load(Ordering::SeqCst);
+    let deadline = TO_DEADLINE.load(Ordering::SeqCst);
+    let done_at = TO_DONE_AT.load(Ordering::SeqCst);
+    end_signaled_attempt(handle, reader)?;
+
+    // `deadline` is a lower bound on the reader's real one, so a write that
+    // completed before it (less the skew allowance) completed before the
+    // reader's expiry check could have run: the reader re-checks the counter
+    // before the clock on every wake.
+    let wrote_in_time = written_at.saturating_add(SIGNALED_SKEW_NS) < deadline;
+    match outcome {
+        OUTCOME_OK if value == 42 && wrote_in_time => Ok(SignaledAttempt::Passed),
+        OUTCOME_OK if value == 42 => {
+            serial_println!(
+                "[eventfd]   timeout_signaled attempt {}: inconclusive -- the write landed at \
+                 {} ns, not before the reader's deadline {} ns (host starved the guest)",
+                attempt,
+                written_at,
+                deadline
+            );
+            Ok(SignaledAttempt::Inconclusive)
+        }
+        OUTCOME_OK => {
+            serial_println!(
+                "[eventfd]   FAIL: timeout_signaled: read {}, expected 42",
+                value
+            );
+            Err(KernelError::InternalError)
+        }
+        OUTCOME_TIMED_OUT if wrote_in_time => {
+            serial_println!(
+                "[eventfd]   FAIL: timeout_signaled: TimedOut although the write completed at \
+                 {} ns, before the reader's deadline {} ns (reader returned at {} ns)",
+                written_at,
+                deadline,
+                done_at
+            );
+            Err(KernelError::InternalError)
+        }
+        OUTCOME_TIMED_OUT => {
+            serial_println!(
+                "[eventfd]   timeout_signaled attempt {}: inconclusive -- the reader timed out \
+                 and the write landed at {} ns, after its deadline {} ns (host starved the guest)",
+                attempt,
+                written_at,
+                deadline
+            );
+            Ok(SignaledAttempt::Inconclusive)
+        }
+        other => {
+            serial_println!(
+                "[eventfd]   FAIL: timeout_signaled: read_timeout failed (outcome code {})",
+                other
+            );
+            Err(KernelError::InternalError)
         }
     }
 }
 
 /// Timeout test 3: reader blocks with timeout, signaled before expiry.
 fn test_timeout_signaled() -> KernelResult<()> {
-    EVENTFD_TIMEOUT_RESULT.store(0, core::sync::atomic::Ordering::SeqCst);
-
-    let handle = create(0);
-
-    // Spawn reader that will block with a generous 5 s timeout.
-    sched::spawn(
-        b"efd-to-test",
-        16,
-        eventfd_timeout_reader_task,
-        handle.raw(),
-        0,
-    )?;
-
-    // Let reader run and block.
-    sched::yield_now();
-
-    // Signal after a tiny delay (many orders below the 5 s timeout).
-    sched::sleep_ms(5);
-    write(handle, 42)?;
-
-    // Poll for the reader to wake and store its result, rather than assuming a
-    // fixed number of yields/sleeps is enough — the reader may not be scheduled
-    // promptly under boot-time contention. Bounded so a genuine signal-path bug
-    // still fails the test in ~1 s instead of hanging.
-    let mut result = 0u64;
-    for _ in 0..200 {
-        sched::yield_now();
-        sched::sleep_ms(5);
-        result = EVENTFD_TIMEOUT_RESULT.load(core::sync::atomic::Ordering::SeqCst);
-        if result != 0 {
-            break;
+    for attempt in 1..=SIGNALED_ATTEMPTS {
+        if let SignaledAttempt::Passed = timeout_signaled_attempt(attempt)? {
+            if attempt == 1 {
+                serial_println!("[eventfd]   Timeout signaled: OK");
+            } else {
+                serial_println!("[eventfd]   Timeout signaled: OK (attempt {})", attempt);
+            }
+            return Ok(());
         }
     }
-
-    if result != 42 {
-        serial_println!("[eventfd]   FAIL: timeout_signaled: got {}", result);
-        close(handle);
-        return Err(KernelError::InternalError);
-    }
-
-    close(handle);
-    serial_println!("[eventfd]   Timeout signaled: OK");
-    Ok(())
+    serial_println!(
+        "[eventfd]   FAIL: timeout_signaled: all {} attempts inconclusive -- the write never \
+         landed before the reader's deadline",
+        SIGNALED_ATTEMPTS
+    );
+    Err(KernelError::InternalError)
 }
 
 /// Result counter for blocking test.

@@ -438,8 +438,10 @@ where
 // Boot self-test
 // ---------------------------------------------------------------------------
 
-/// Set by [`mw_pipe_writer_task`] once it has written, so a failing run can
-/// tell "the writer never ran" from "the writer ran and the wake was lost".
+/// Counted up by each self-test helper task once its action has succeeded, so
+/// a failing run can tell "the helper never acted" from "it acted and the wake
+/// was lost". Read only after [`join_helper`]: a helper counts *after* acting,
+/// so the wait its action released can return before the count moves.
 static MW_WROTE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Helper task: sleep, then write one byte to the pipe write handle in `raw`.
@@ -521,7 +523,127 @@ extern "C" fn mw_timerfd_armer_task(raw: u64) {
     let t = super::timerfd::TimerFdHandle::from_raw(raw);
     // One-shot 5 ms out. Deliberately *not* periodic: a periodic timer would
     // paper over a lost expiry by firing again.
-    let _ = super::timerfd::settime(t, false, 5_000_000, 0, false);
+    if super::timerfd::settime(t, false, 5_000_000, 0, false).is_ok() {
+        MW_WROTE.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timed phases: what host load can and cannot explain.
+//
+// Under TCG the guest clock is the host's wall clock (`boot-test.sh` passes
+// neither `-icount` nor `-rtc clock=vm`), so a host too busy to schedule QEMU
+// for two seconds moves the guest clock two seconds at once. A wait that was
+// released on time then *reads* as late, and a helper task whose 20 ms sleep
+// expired in the same jump may not get the CPU before the wait's own timeout
+// does. Lane C's boot of 993280872 died that way, 2026-10-05: "timerfd expiry
+// returned n=1 after 2003606600ns", the host compiling the toolkit.
+//
+// A stall like that does not repeat on demand; a lost wake, or a park whose
+// cap was dropped, is late on every attempt. So a phase that came back late
+// is run again, and only lateness on every one of [`PHASE_ATTEMPTS`] fails --
+// the treatment `sched::sleep_ns`'s self-test got for the same cause
+// (known-issues-resolved/A-a-timing-self-test-panicked-the-kernel-over-a-
+// 988ms-sleep-...). A result host load cannot produce -- a wait that came back
+// early, or empty before its own timeout, or ready on the wrong object, or
+// ready without its helper having acted -- fails on the attempt that saw it.
+// Every attempt reports its number, because passing first time and passing on
+// a retry are different facts.
+// ---------------------------------------------------------------------------
+
+/// Attempts a timed phase gets before lateness counts as a failure.
+const PHASE_ATTEMPTS: u32 = 3;
+
+/// The own timeout of a wait a helper task is meant to release.
+const WAKE_TIMEOUT_NS: u64 = 2_000_000_000;
+
+/// How soon such a wait must be released to count as released by the wake
+/// rather than by its own timeout. The helper acts after 20 ms.
+const WAKE_CEILING_NS: u64 = 1_000_000_000;
+
+/// Scheduling rounds (a yield and a 1 ms sleep each) a phase allows its helper
+/// task to finish. Counted in rounds, not guest time, so that a host stall
+/// cannot use the allowance up.
+const HELPER_JOIN_ROUNDS: u32 = 5_000;
+
+/// How one attempt at a timed phase came out. A failure host load cannot
+/// explain is not a variant: it is the `Err` the phase returns, already
+/// reported on serial.
+enum Attempt {
+    /// Behaved as specified; the phase printed its OK line.
+    Passed,
+    /// Missed only a bound host load can miss; the phase printed what it saw.
+    Late,
+}
+
+/// Run `phase` until it passes, at most [`PHASE_ATTEMPTS`] times.
+fn timed_phase(name: &str, phase: fn(u32) -> KernelResult<Attempt>) -> KernelResult<()> {
+    for attempt in 1..=PHASE_ATTEMPTS {
+        if let Attempt::Passed = phase(attempt)? {
+            return Ok(());
+        }
+    }
+    serial_println!(
+        "[multiwait]   FAIL: {name}: late on all {PHASE_ATTEMPTS} attempts (each printed above) -- \
+         a host stall does not repeat like that"
+    );
+    Err(KernelError::InternalError)
+}
+
+/// Wait for the helper task `tid` to exit.
+///
+/// Read a helper's `MW_WROTE` count only after this: the helper counts *after*
+/// its action, so a wait its action released can return before the count
+/// moves. It also keeps a slow helper from one attempt acting during the next.
+fn join_helper(name: &str, tid: TaskId) -> KernelResult<()> {
+    for _ in 0..HELPER_JOIN_ROUNDS {
+        match sched::task_state(tid) {
+            None | Some(sched::task::TaskState::Dead) => return Ok(()),
+            Some(_) => {}
+        }
+        sched::yield_now();
+        sched::sleep_ms(1);
+    }
+    serial_println!(
+        "[multiwait]   FAIL: {name}: the helper task never finished (state {:?})",
+        sched::task_state(tid)
+    );
+    Err(KernelError::InternalError)
+}
+
+/// Judge one attempt at a wait that a helper's action should release: `n`
+/// ready objects after `elapsed` ns, with the helper's action counted `acted`
+/// times. `ok` describes the phase for its OK line.
+fn judge_wake(
+    name: &str,
+    ok: &str,
+    attempt: u32,
+    n: usize,
+    acted: u32,
+    elapsed: u64,
+) -> KernelResult<Attempt> {
+    if n == 1 && acted == 1 && elapsed <= WAKE_CEILING_NS {
+        serial_println!(
+            "[multiwait]   {ok} ({elapsed}ns, attempt {attempt} of {PHASE_ATTEMPTS}): OK"
+        );
+        return Ok(Attempt::Passed);
+    }
+    // Released by the helper but read late, or timed out empty: the helper may
+    // not have had the CPU in time. A lost wake looks the same once -- and
+    // then again on every attempt, which is what fails it.
+    if (n == 1 && acted == 1) || (n == 0 && elapsed >= WAKE_TIMEOUT_NS) {
+        serial_println!(
+            "[multiwait]   {name}: attempt {attempt} of {PHASE_ATTEMPTS} late -- n={n} after \
+             {elapsed}ns (helper acted: {acted})"
+        );
+        return Ok(Attempt::Late);
+    }
+    // Ready without the helper's action, empty before its own timeout, or more
+    // ready than there are objects.
+    serial_println!(
+        "[multiwait]   FAIL: {name} returned n={n} after {elapsed}ns (helper acted: {acted})"
+    );
+    Err(KernelError::InternalError)
 }
 
 /// Boot self-test for multi-object waiting.
@@ -538,13 +660,34 @@ extern "C" fn mw_timerfd_armer_task(raw: u64) {
 /// # Errors
 ///
 /// [`KernelError::InternalError`] if any phase does not behave as described.
-#[allow(clippy::too_many_lines)]
 pub fn self_test() -> KernelResult<()> {
-    use core::sync::atomic::Ordering::SeqCst;
-
     serial_println!("[multiwait] Running multi-object wait self-test...");
 
-    // --- Phase 1: a ready object returns immediately, without parking. ---
+    timed_phase("ready pipe", phase_ready_object)?;
+    timed_phase("poll-only timeout", phase_poll_only_timeout)?;
+    timed_phase("pipe wake", phase_pipe_wake)?;
+    timed_phase("timerfd expiry", phase_timerfd_expiry)?;
+    // Phases 5-7: the other three blockable families each release a park.
+    // Phases 3 and 4 proved the mechanism on a pipe and on a timerfd; these
+    // three prove the *fan-out* -- that each family's `register_waiter` joins a
+    // set that family's own wakes actually drain. Each is the same shape as
+    // phase 3 (helper acts after 20 ms, so the wait is genuinely parked when
+    // the wake arrives) and each is currently the only test its pair has, since
+    // nothing outside this module calls them yet.
+    timed_phase("eventfd wake", phase_eventfd_wake)?;
+    timed_phase("socketpair wake", phase_socketpair_wake)?;
+    timed_phase("pty wake", phase_pty_wake)?;
+    phase_registration_swept()?;
+    timed_phase("mixed set", phase_mixed_set)?;
+    timed_phase("PollOnly cap", phase_poll_only_caps)?;
+    timed_phase("epoll_ctl wake", phase_epoll_ctl_wake)?;
+
+    serial_println!("[multiwait] multiwait::self_test PASSED");
+    Ok(())
+}
+
+/// Phase 1: a ready object returns immediately, without parking.
+fn phase_ready_object(attempt: u32) -> KernelResult<Attempt> {
     let (rh, wh) = super::pipe::create();
     if super::pipe::try_write(wh, b"hello").is_err() {
         serial_println!("[multiwait]   FAIL: could not prime the pipe");
@@ -554,33 +697,41 @@ pub fn self_test() -> KernelResult<()> {
     }
     let started = crate::hrtimer::now_ns();
     let targets = [WaitTarget::Pipe(rh.raw())];
-    let n = match wait_multiple(&targets, Some(1_000_000_000), || {
+    let r = wait_multiple(&targets, Some(1_000_000_000), || {
         usize::from(super::pipe::poll_status(rh) & 0x01 != 0)
-    }) {
-        Ok(n) => n,
-        Err(e) => {
-            serial_println!("[multiwait]   FAIL: ready-pipe wait errored: {e}");
-            super::pipe::close(rh);
-            super::pipe::close(wh);
-            return Err(e);
-        }
-    };
+    });
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
-    if n != 1 || elapsed > 100_000_000 {
-        serial_println!("[multiwait]   FAIL: ready pipe returned n={n} after {elapsed}ns");
-        super::pipe::close(rh);
-        super::pipe::close(wh);
-        return Err(KernelError::InternalError);
-    }
     super::pipe::close(rh);
     super::pipe::close(wh);
-    serial_println!("[multiwait]   Ready object returns without parking: OK");
+    let n =
+        r.inspect_err(|e| serial_println!("[multiwait]   FAIL: ready-pipe wait errored: {e}"))?;
+    // The pipe was readable before the wait began, so its first scan must see
+    // it: no host stall explains a miss.
+    if n != 1 {
+        serial_println!("[multiwait]   FAIL: ready pipe returned n={n} after {elapsed}ns");
+        return Err(KernelError::InternalError);
+    }
+    if elapsed > 100_000_000 {
+        serial_println!(
+            "[multiwait]   ready pipe: attempt {attempt} of {PHASE_ATTEMPTS} late -- returned \
+             after {elapsed}ns"
+        );
+        return Ok(Attempt::Late);
+    }
+    serial_println!(
+        "[multiwait]   Ready object returns without parking (attempt {attempt} of \
+         {PHASE_ATTEMPTS}): OK"
+    );
+    Ok(Attempt::Passed)
+}
 
-    // --- Phase 2: nothing ready, poll-only set, timeout is honoured. ---
-    // A poll-only target has no waiter set, so nothing can wake this wait: it
-    // must come back from the adaptive backoff on its own, and not before the
-    // timeout. Both halves matter — returning early would be a spurious-wake
-    // bug, returning late a backoff that overshoots its own cap.
+/// Phase 2: nothing ready, poll-only set, timeout is honoured.
+///
+/// A poll-only target has no waiter set, so nothing can wake this wait: it
+/// must come back from the adaptive backoff on its own, and not before the
+/// timeout. Both halves matter -- returning early would be a spurious-wake
+/// bug, returning late a backoff that overshoots its own cap.
+fn phase_poll_only_timeout(attempt: u32) -> KernelResult<Attempt> {
     let started = crate::hrtimer::now_ns();
     let targets = [WaitTarget::PollOnly];
     let n = wait_multiple(&targets, Some(50_000_000), || 0)?; // holds no handle
@@ -593,188 +744,238 @@ pub fn self_test() -> KernelResult<()> {
     // says nothing about this code. Do not tighten it toward the nominal: a
     // ceiling close enough to 50 ms to detect a slow wakeup is close enough
     // to be hit by whatever else the host is running, and would then redden
-    // the tree while naming the wrong subsystem.
-    if n != 0 || elapsed < 50_000_000 || elapsed > 500_000_000 {
+    // the tree while naming the wrong subsystem. Even at 10x a host stall can
+    // reach it, which is why it is retried rather than failed outright.
+    if n != 0 || elapsed < 50_000_000 {
         serial_println!("[multiwait]   FAIL: poll-only timeout returned n={n} after {elapsed}ns");
         return Err(KernelError::InternalError);
     }
-    serial_println!("[multiwait]   Capped path honours the timeout ({elapsed}ns): OK");
+    if elapsed > 500_000_000 {
+        serial_println!(
+            "[multiwait]   poll-only timeout: attempt {attempt} of {PHASE_ATTEMPTS} late -- \
+             returned after {elapsed}ns"
+        );
+        return Ok(Attempt::Late);
+    }
+    serial_println!(
+        "[multiwait]   Capped path honours the timeout ({elapsed}ns, attempt {attempt} of \
+         {PHASE_ATTEMPTS}): OK"
+    );
+    Ok(Attempt::Passed)
+}
 
-    // --- Phase 3: a blocked wait is released by the object's own wake. ---
-    // The discriminating phase. Nothing here is on a timer that could rescue a
-    // lost wake: the pipe is the only target, so the park has no cap, and the
-    // 2 s timeout is far outside the window the assertion allows.
+/// Phase 3: a blocked wait is released by the object's own wake.
+///
+/// The discriminating phase. Nothing here is on a timer that could rescue a
+/// lost wake: the pipe is the only target, so the park has no cap, and the
+/// 2 s timeout is far outside the window the assertion allows.
+fn phase_pipe_wake(attempt: u32) -> KernelResult<Attempt> {
+    use core::sync::atomic::Ordering::SeqCst;
     MW_WROTE.store(0, SeqCst);
     let (rh, wh) = super::pipe::create();
-    if let Err(e) = sched::spawn(b"mw-writer", 16, mw_pipe_writer_task, wh.raw(), 0) {
-        serial_println!("[multiwait]   FAIL: could not spawn the writer task: {e}");
-        super::pipe::close(rh);
-        super::pipe::close(wh);
-        return Err(e);
-    }
-    let started = crate::hrtimer::now_ns();
-    let targets = [WaitTarget::Pipe(rh.raw())];
-    let n = match wait_multiple(&targets, Some(2_000_000_000), || {
-        usize::from(super::pipe::poll_status(rh) & 0x01 != 0)
-    }) {
-        Ok(n) => n,
+    let helper = match sched::spawn(b"mw-writer", 16, mw_pipe_writer_task, wh.raw(), 0) {
+        Ok(tid) => tid,
         Err(e) => {
-            serial_println!("[multiwait]   FAIL: pipe-wake wait errored: {e}");
+            serial_println!("[multiwait]   FAIL: could not spawn the writer task: {e}");
             super::pipe::close(rh);
             super::pipe::close(wh);
             return Err(e);
         }
     };
+    let started = crate::hrtimer::now_ns();
+    let targets = [WaitTarget::Pipe(rh.raw())];
+    let r = wait_multiple(&targets, Some(WAKE_TIMEOUT_NS), || {
+        usize::from(super::pipe::poll_status(rh) & 0x01 != 0)
+    });
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    let joined = join_helper("pipe wake", helper);
     let wrote = MW_WROTE.load(SeqCst);
-    if n != 1 || wrote != 1 || elapsed > 1_000_000_000 {
-        serial_println!(
-            "[multiwait]   FAIL: pipe wake returned n={n} after {elapsed}ns (writer ran: {wrote})"
-        );
-        super::pipe::close(rh);
-        super::pipe::close(wh);
-        return Err(KernelError::InternalError);
-    }
     super::pipe::close(rh);
     super::pipe::close(wh);
-    serial_println!("[multiwait]   Parked wait released by a pipe write ({elapsed}ns): OK");
+    joined?;
+    let n =
+        r.inspect_err(|e| serial_println!("[multiwait]   FAIL: pipe-wake wait errored: {e}"))?;
+    judge_wake(
+        "pipe wake",
+        "Parked wait released by a pipe write",
+        attempt,
+        n,
+        wrote,
+        elapsed,
+    )
+}
 
-    // --- Phase 4: a timerfd expiry ends the wait even though it wakes nobody.
-    // The §4b hazard in one assertion. The wait starts on a *disarmed* timer
-    // (no deadline, so an uncapped indefinite park), is woken by `settime`,
-    // and must then bound its next park by `next_deadline_ns` — because the
-    // one-shot expiry 5 ms later broadcasts to no waiter set at all. Drop
-    // `next_deadline_ns` and this phase hangs until its timeout.
+/// Phase 4: a timerfd expiry ends the wait even though it wakes nobody.
+///
+/// The §4b hazard in one assertion. The wait starts on a *disarmed* timer
+/// (no deadline, so an uncapped indefinite park), is woken by `settime`, and
+/// must then bound its next park by `next_deadline_ns` -- because the one-shot
+/// expiry 5 ms later broadcasts to no waiter set at all. Drop
+/// `next_deadline_ns` and every attempt of this phase runs to its timeout.
+fn phase_timerfd_expiry(attempt: u32) -> KernelResult<Attempt> {
+    use core::sync::atomic::Ordering::SeqCst;
+    MW_WROTE.store(0, SeqCst);
     let t = super::timerfd::create(super::timerfd::CLOCK_MONOTONIC);
-    if let Err(e) = sched::spawn(b"mw-armer", 16, mw_timerfd_armer_task, t.raw(), 0) {
-        serial_println!("[multiwait]   FAIL: could not spawn the armer task: {e}");
-        super::timerfd::close(t);
-        return Err(e);
-    }
-    let started = crate::hrtimer::now_ns();
-    let targets = [WaitTarget::TimerFd(t.raw())];
-    let n = match wait_multiple(&targets, Some(2_000_000_000), || {
-        usize::from(super::timerfd::is_readable(t))
-    }) {
-        Ok(n) => n,
+    let helper = match sched::spawn(b"mw-armer", 16, mw_timerfd_armer_task, t.raw(), 0) {
+        Ok(tid) => tid,
         Err(e) => {
-            serial_println!("[multiwait]   FAIL: timerfd-expiry wait errored: {e}");
+            serial_println!("[multiwait]   FAIL: could not spawn the armer task: {e}");
             super::timerfd::close(t);
             return Err(e);
         }
     };
+    let started = crate::hrtimer::now_ns();
+    let targets = [WaitTarget::TimerFd(t.raw())];
+    let r = wait_multiple(&targets, Some(WAKE_TIMEOUT_NS), || {
+        usize::from(super::timerfd::is_readable(t))
+    });
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
-    if n != 1 || elapsed > 1_000_000_000 {
-        serial_println!("[multiwait]   FAIL: timerfd expiry returned n={n} after {elapsed}ns");
-        super::timerfd::close(t);
-        return Err(KernelError::InternalError);
-    }
+    let joined = join_helper("timerfd expiry", helper);
+    let armed = MW_WROTE.load(SeqCst);
     super::timerfd::close(t);
-    serial_println!("[multiwait]   Silent timerfd expiry ends the wait ({elapsed}ns): OK");
+    joined?;
+    let n = r.inspect_err(|e| {
+        serial_println!("[multiwait]   FAIL: timerfd-expiry wait errored: {e}");
+    })?;
+    judge_wake(
+        "timerfd expiry",
+        "Silent timerfd expiry ends the wait",
+        attempt,
+        n,
+        armed,
+        elapsed,
+    )
+}
 
-    // --- Phases 5-7: the other three blockable families each release a park.
-    // Phases 3 and 4 proved the mechanism on a pipe and on a timerfd; these
-    // three prove the *fan-out* — that each family's `register_waiter` joins a
-    // set that family's own wakes actually drain. Each is the same shape as
-    // phase 3 (helper acts after 20 ms, so the wait is genuinely parked when
-    // the wake arrives) and each is currently the only test its pair has, since
-    // nothing outside this module calls them yet.
-
-    // --- Phase 5: eventfd. ---
+/// Phase 5: an eventfd post releases a park.
+fn phase_eventfd_wake(attempt: u32) -> KernelResult<Attempt> {
+    use core::sync::atomic::Ordering::SeqCst;
     MW_WROTE.store(0, SeqCst);
     let efd = super::eventfd::create(0);
-    if let Err(e) = sched::spawn(b"mw-efd", 16, mw_eventfd_writer_task, efd.raw(), 0) {
-        serial_println!("[multiwait]   FAIL: could not spawn the eventfd writer: {e}");
-        super::eventfd::close(efd);
-        return Err(e);
-    }
+    let helper = match sched::spawn(b"mw-efd", 16, mw_eventfd_writer_task, efd.raw(), 0) {
+        Ok(tid) => tid,
+        Err(e) => {
+            serial_println!("[multiwait]   FAIL: could not spawn the eventfd writer: {e}");
+            super::eventfd::close(efd);
+            return Err(e);
+        }
+    };
     let started = crate::hrtimer::now_ns();
     let targets = [WaitTarget::EventFd(efd.raw())];
-    let r = wait_multiple(&targets, Some(2_000_000_000), || {
+    let r = wait_multiple(&targets, Some(WAKE_TIMEOUT_NS), || {
         usize::from(super::eventfd::has_value(efd))
     });
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    let joined = join_helper("eventfd wake", helper);
     let wrote = MW_WROTE.load(SeqCst);
     super::eventfd::close(efd);
+    joined?;
     let n = r?;
-    if n != 1 || wrote != 1 || elapsed > 1_000_000_000 {
-        serial_println!(
-            "[multiwait]   FAIL: eventfd wake returned n={n} after {elapsed}ns (writer ran: {wrote})"
-        );
-        return Err(KernelError::InternalError);
-    }
-    serial_println!("[multiwait]   Parked wait released by an eventfd post ({elapsed}ns): OK");
+    judge_wake(
+        "eventfd wake",
+        "Parked wait released by an eventfd post",
+        attempt,
+        n,
+        wrote,
+        elapsed,
+    )
+}
 
-    // --- Phase 6: socketpair. ---
-    // The wait is on `b` and the send is from `a`: a send wakes the *peer's*
-    // reader set, so this also checks that `register_waiter` joined the right
-    // endpoint's sets rather than the sender's.
+/// Phase 6: a socketpair send releases a park.
+///
+/// The wait is on `b` and the send is from `a`: a send wakes the *peer's*
+/// reader set, so this also checks that `register_waiter` joined the right
+/// endpoint's sets rather than the sender's.
+fn phase_socketpair_wake(attempt: u32) -> KernelResult<Attempt> {
+    use core::sync::atomic::Ordering::SeqCst;
     MW_WROTE.store(0, SeqCst);
     let (sa, sb) = super::stream_socket::create();
-    if let Err(e) = sched::spawn(b"mw-sock", 16, mw_socket_sender_task, sa.raw(), 0) {
-        serial_println!("[multiwait]   FAIL: could not spawn the socket sender: {e}");
-        super::stream_socket::close(sa);
-        super::stream_socket::close(sb);
-        return Err(e);
-    }
+    let helper = match sched::spawn(b"mw-sock", 16, mw_socket_sender_task, sa.raw(), 0) {
+        Ok(tid) => tid,
+        Err(e) => {
+            serial_println!("[multiwait]   FAIL: could not spawn the socket sender: {e}");
+            super::stream_socket::close(sa);
+            super::stream_socket::close(sb);
+            return Err(e);
+        }
+    };
     let started = crate::hrtimer::now_ns();
     let targets = [WaitTarget::StreamSocket(sb.raw())];
-    let r = wait_multiple(&targets, Some(2_000_000_000), || {
+    let r = wait_multiple(&targets, Some(WAKE_TIMEOUT_NS), || {
         usize::from(super::stream_socket::readable_bytes(sb) > 0)
     });
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    let joined = join_helper("socketpair wake", helper);
     let wrote = MW_WROTE.load(SeqCst);
     super::stream_socket::close(sa);
     super::stream_socket::close(sb);
+    joined?;
     let n = r?;
-    if n != 1 || wrote != 1 || elapsed > 1_000_000_000 {
-        serial_println!(
-            "[multiwait]   FAIL: socketpair wake returned n={n} after {elapsed}ns (sender ran: \
-             {wrote})"
-        );
-        return Err(KernelError::InternalError);
-    }
-    serial_println!("[multiwait]   Parked wait released by a socketpair send ({elapsed}ns): OK");
+    judge_wake(
+        "socketpair wake",
+        "Parked wait released by a socketpair send",
+        attempt,
+        n,
+        wrote,
+        elapsed,
+    )
+}
 
-    // --- Phase 7: pty. ---
-    // The wait is on the master and the write is from the slave, so the set
-    // that fires is `output_waiters` — named for the ring, not the end. A
-    // registration that had guessed "master ⇒ input_waiters" would hang here.
+/// Phase 7: a pty slave write releases a park on the master.
+///
+/// The wait is on the master and the write is from the slave, so the set
+/// that fires is `output_waiters` -- named for the ring, not the end. A
+/// registration that had guessed "master => input_waiters" would hang here.
+fn phase_pty_wake(attempt: u32) -> KernelResult<Attempt> {
+    use core::sync::atomic::Ordering::SeqCst;
     MW_WROTE.store(0, SeqCst);
     let (pm, ps) = crate::tty::pty::create()?;
-    if let Err(e) = sched::spawn(b"mw-pty", 16, mw_pty_writer_task, ps.raw(), 0) {
-        serial_println!("[multiwait]   FAIL: could not spawn the pty writer: {e}");
-        // Hangup tells a caller whether the peer went away; nothing to do with
-        // it on a teardown path that is closing both ends anyway.
-        let _ = crate::tty::pty::close(pm);
-        let _ = crate::tty::pty::close(ps);
-        return Err(e);
-    }
+    let helper = match sched::spawn(b"mw-pty", 16, mw_pty_writer_task, ps.raw(), 0) {
+        Ok(tid) => tid,
+        Err(e) => {
+            serial_println!("[multiwait]   FAIL: could not spawn the pty writer: {e}");
+            // Hangup tells a caller whether the peer went away; nothing to do
+            // with it on a teardown path that is closing both ends anyway.
+            let _ = crate::tty::pty::close(pm);
+            let _ = crate::tty::pty::close(ps);
+            return Err(e);
+        }
+    };
     let started = crate::hrtimer::now_ns();
     let targets = [WaitTarget::Pty(pm.raw())];
-    let r = wait_multiple(&targets, Some(2_000_000_000), || {
+    let r = wait_multiple(&targets, Some(WAKE_TIMEOUT_NS), || {
         usize::from(crate::tty::pty::readable(pm))
     });
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    let joined = join_helper("pty wake", helper);
     let wrote = MW_WROTE.load(SeqCst);
+    // As above: the hangup indication is meaningless on a closing teardown.
     let _ = crate::tty::pty::close(pm);
     let _ = crate::tty::pty::close(ps);
+    joined?;
     let n = r?;
-    if n != 1 || wrote != 1 || elapsed > 1_000_000_000 {
-        serial_println!(
-            "[multiwait]   FAIL: pty wake returned n={n} after {elapsed}ns (writer ran: {wrote})"
-        );
-        return Err(KernelError::InternalError);
-    }
-    serial_println!("[multiwait]   Parked wait released by a pty slave write ({elapsed}ns): OK");
+    judge_wake(
+        "pty wake",
+        "Parked wait released by a pty slave write",
+        attempt,
+        n,
+        wrote,
+        elapsed,
+    )
+}
 
-    // --- Phase 8: registration leaves nothing behind. ---
-    // A leaked entry is invisible from outside the waiter set, so this asserts
-    // its *consequence* instead: after a wait over a set of objects has
-    // returned, a state change on one of those objects must not disturb the
-    // task that waited. If the registration had leaked, the write below would
-    // set this task's `pending_wake`, and the very next park — the 30 ms sleep —
-    // would return at once instead of sleeping.
+/// Phase 8: registration leaves nothing behind.
+///
+/// A leaked entry is invisible from outside the waiter set, so this asserts
+/// its *consequence* instead: after a wait over a set of objects has returned,
+/// a state change on one of those objects must not disturb the task that
+/// waited. If the registration had leaked, the write below would set this
+/// task's `pending_wake`, and the very next park -- the 30 ms sleep -- would
+/// return at once instead of sleeping.
+///
+/// Not retried: its one timing assertion is a lower bound, and host load
+/// cannot make a sleep return early.
+fn phase_registration_swept() -> KernelResult<()> {
     let (rh, wh) = super::pipe::create();
     let targets = [WaitTarget::Pipe(rh.raw()), WaitTarget::PollOnly];
     let n = match wait_multiple(&targets, Some(10_000_000), || 0) {
@@ -812,41 +1013,48 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[multiwait]   Registration is swept on every exit: OK");
+    Ok(())
+}
 
-    // --- Phase 9: a mixed set — two families in one wait, and the ready one
-    // is named. ---
-    //
-    // Every phase above waits on exactly one *blockable* target (phase 8's
-    // second member is a `PollOnly` that never becomes ready), so nothing yet
-    // tests the property the whole feature exists for: N objects of different
-    // families in one wait. A fan-out that only took effect for the last member
-    // of `targets` would pass phases 1-8 and hang here.
-    //
-    // The second member is a **disarmed** timerfd, chosen so it contributes no
-    // deadline: if the pipe's own wake is lost, there is no timer quietly
-    // standing by to rescue the park, and the 2 s timeout is far outside the
-    // window the assertion allows.
-    //
-    // Readiness is computed through `revents_for_handle` — the same fifteen-arm
-    // table `poll` and `SYS_WAIT_MULTIPLE` share — masked by `POLLIN` exactly as
-    // the syscall masks by the caller's `events`. A bespoke scan here would test
-    // the test; this way the phase also pins that the shared table answers for a
-    // *native* handle, which is how `SYS_WAIT_MULTIPLE` calls it.
+/// Phase 9: a mixed set -- two families in one wait, and the ready one is
+/// named.
+///
+/// Every phase above waits on exactly one *blockable* target (phase 8's
+/// second member is a `PollOnly` that never becomes ready), so nothing yet
+/// tests the property the whole feature exists for: N objects of different
+/// families in one wait. A fan-out that only took effect for the last member
+/// of `targets` would pass phases 1-8 and hang here.
+///
+/// The second member is a **disarmed** timerfd, chosen so it contributes no
+/// deadline: if the pipe's own wake is lost, there is no timer quietly
+/// standing by to rescue the park, and the 2 s timeout is far outside the
+/// window the assertion allows.
+///
+/// Readiness is computed through `revents_for_handle` -- the same fifteen-arm
+/// table `poll` and `SYS_WAIT_MULTIPLE` share -- masked by `POLLIN` exactly as
+/// the syscall masks by the caller's `events`. A bespoke scan here would test
+/// the test; this way the phase also pins that the shared table answers for a
+/// *native* handle, which is how `SYS_WAIT_MULTIPLE` calls it.
+fn phase_mixed_set(attempt: u32) -> KernelResult<Attempt> {
+    use core::sync::atomic::Ordering::SeqCst;
     MW_WROTE.store(0, SeqCst);
     let (rh, wh) = super::pipe::create();
     let t = super::timerfd::create(super::timerfd::CLOCK_MONOTONIC);
-    if let Err(e) = sched::spawn(b"mw-mixed", 16, mw_pipe_writer_task, wh.raw(), 0) {
-        serial_println!("[multiwait]   FAIL: could not spawn the mixed-set writer: {e}");
-        super::pipe::close(rh);
-        super::pipe::close(wh);
-        super::timerfd::close(t);
-        return Err(e);
-    }
+    let helper = match sched::spawn(b"mw-mixed", 16, mw_pipe_writer_task, wh.raw(), 0) {
+        Ok(tid) => tid,
+        Err(e) => {
+            serial_println!("[multiwait]   FAIL: could not spawn the mixed-set writer: {e}");
+            super::pipe::close(rh);
+            super::pipe::close(wh);
+            super::timerfd::close(t);
+            return Err(e);
+        }
+    };
     let mut pipe_revents = 0u16;
     let mut timer_revents = 0u16;
     let started = crate::hrtimer::now_ns();
     let targets = [WaitTarget::Pipe(rh.raw()), WaitTarget::TimerFd(t.raw())];
-    let r = wait_multiple(&targets, Some(2_000_000_000), || {
+    let r = wait_multiple(&targets, Some(WAKE_TIMEOUT_NS), || {
         use crate::proc::linux_fd::HandleKind;
         use crate::syscall::linux::{poll_bits, revents_for_handle};
         // POLLERR/POLLHUP are unrequestable and always reported, per poll(2);
@@ -858,16 +1066,17 @@ pub fn self_test() -> KernelResult<()> {
         usize::from(pipe_revents != 0).saturating_add(usize::from(timer_revents != 0))
     });
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    let joined = join_helper("mixed set", helper);
     let wrote = MW_WROTE.load(SeqCst);
     super::pipe::close(rh);
     super::pipe::close(wh);
     super::timerfd::close(t);
+    joined?;
     let n = r?;
-    if n != 1
-        || wrote != 1
-        || elapsed > 1_000_000_000
-        || pipe_revents & crate::syscall::linux::poll_bits::POLLIN == 0
-        || timer_revents != 0
+    // Which object is ready is not a timing question: a wait released with
+    // the wrong one named is wrong however busy the host was.
+    if n == 1
+        && (pipe_revents & crate::syscall::linux::poll_bits::POLLIN == 0 || timer_revents != 0)
     {
         serial_println!(
             "[multiwait]   FAIL: mixed set returned n={n} after {elapsed}ns (writer ran: {wrote}, \
@@ -875,55 +1084,57 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!(
-        "[multiwait]   Mixed pipe+timerfd set wakes on the pipe alone ({elapsed}ns): OK"
-    );
+    judge_wake(
+        "mixed set",
+        "Mixed pipe+timerfd set wakes on the pipe alone",
+        attempt,
+        n,
+        wrote,
+        elapsed,
+    )
+}
 
-    // --- Phase 10: a `PollOnly` member caps the whole wait. ---
-    //
-    // This is the row a TCP socket lands in — testable but not blockable — and
-    // the reason readiness and blockability are two dispatches rather than one.
-    // The assertion has to be a *contrast*, because "it eventually returned"
-    // is true either way and would not prove the backoff ran at all: the same
-    // readiness change, one that announces itself to no waiter set, is seen
-    // promptly when a `PollOnly` is in the set and only at the timeout when it
-    // is not.
-    //
-    // The blockable member is a pipe nobody ever writes to. It is there so the
-    // two waits differ in exactly one thing — the presence of the `PollOnly` —
-    // rather than in whether they had anything to register on at all.
+/// Phase 10: a `PollOnly` member caps the whole wait.
+///
+/// This is the row a TCP socket lands in -- testable but not blockable -- and
+/// the reason readiness and blockability are two dispatches rather than one.
+/// The assertion has to be a *contrast*, because "it eventually returned" is
+/// true either way and would not prove the backoff ran at all: the same
+/// readiness change, one that announces itself to no waiter set, is seen
+/// promptly when a `PollOnly` is in the set and only at the timeout when it
+/// is not.
+///
+/// The blockable member is a pipe nobody ever writes to. It is there so the
+/// two waits differ in exactly one thing -- the presence of the `PollOnly` --
+/// rather than in whether they had anything to register on at all.
+fn phase_poll_only_caps(attempt: u32) -> KernelResult<Attempt> {
+    const CAPPED_TIMEOUT_NS: u64 = 300_000_000;
     let (rh, wh) = super::pipe::create();
 
     let silent_at = crate::hrtimer::now_ns().saturating_add(40_000_000);
     let started = crate::hrtimer::now_ns();
     let capped = wait_multiple(
         &[WaitTarget::Pipe(rh.raw()), WaitTarget::PollOnly],
-        Some(300_000_000),
+        Some(CAPPED_TIMEOUT_NS),
         || usize::from(crate::hrtimer::now_ns() >= silent_at),
     );
     let capped_elapsed = crate::hrtimer::now_ns().saturating_sub(started);
 
     let silent_at = crate::hrtimer::now_ns().saturating_add(40_000_000);
     let started = crate::hrtimer::now_ns();
-    let uncapped = wait_multiple(&[WaitTarget::Pipe(rh.raw())], Some(300_000_000), || {
-        usize::from(crate::hrtimer::now_ns() >= silent_at)
-    });
+    let uncapped = wait_multiple(
+        &[WaitTarget::Pipe(rh.raw())],
+        Some(CAPPED_TIMEOUT_NS),
+        || usize::from(crate::hrtimer::now_ns() >= silent_at),
+    );
     let uncapped_elapsed = crate::hrtimer::now_ns().saturating_sub(started);
 
     super::pipe::close(rh);
     super::pipe::close(wh);
     let capped_n = capped?;
     uncapped?;
-    // 40 ms until ready plus at most one 20 ms backoff step, against a 300 ms
-    // timeout: the two outcomes are an order of magnitude apart, so the bounds
-    // do not need to be tight to be decisive.
-    if capped_n != 1 || capped_elapsed >= 200_000_000 {
-        serial_println!(
-            "[multiwait]   FAIL: capped wait returned n={capped_n} after {capped_elapsed}ns — a \
-             PollOnly member did not put the wait on the backoff path"
-        );
-        return Err(KernelError::InternalError);
-    }
+    // A wait with nothing to wake it that comes back before its timeout is
+    // the defect this contrast exists to rule out; load cannot cause it.
     if uncapped_elapsed < 250_000_000 {
         serial_println!(
             "[multiwait]   FAIL: blockable-only wait returned after {uncapped_elapsed}ns — it \
@@ -931,25 +1142,46 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
+    // 40 ms until ready plus at most one 20 ms backoff step, against a 300 ms
+    // timeout: the two outcomes are an order of magnitude apart, so the bounds
+    // do not need to be tight to be decisive.
+    if capped_n == 1 && capped_elapsed < 200_000_000 {
+        serial_println!(
+            "[multiwait]   PollOnly member caps the wait ({capped_elapsed}ns vs \
+             {uncapped_elapsed}ns without one, attempt {attempt} of {PHASE_ATTEMPTS}): OK"
+        );
+        return Ok(Attempt::Passed);
+    }
+    if capped_n == 1 || (capped_n == 0 && capped_elapsed >= CAPPED_TIMEOUT_NS) {
+        serial_println!(
+            "[multiwait]   PollOnly cap: attempt {attempt} of {PHASE_ATTEMPTS} late -- capped wait \
+             returned n={capped_n} after {capped_elapsed}ns"
+        );
+        return Ok(Attempt::Late);
+    }
     serial_println!(
-        "[multiwait]   PollOnly member caps the wait ({capped_elapsed}ns vs {uncapped_elapsed}ns \
-         without one): OK"
+        "[multiwait]   FAIL: capped wait returned n={capped_n} after {capped_elapsed}ns — a \
+         PollOnly member did not put the wait on the backoff path"
     );
+    Err(KernelError::InternalError)
+}
 
-    // --- Phase 11: an `epoll_ctl` releases a park on `WaitTarget::EpollCtl`. ---
-    //
-    // The one target whose wake does not mean "something you are waiting for is
-    // ready" but "the set of things you are waiting for has changed". It is what
-    // stops `epoll_wait` blocking on a target list another thread has already
-    // invalidated, and nothing else in the tree exercises it: `epoll`'s own
-    // self-test can assert that the generation counter *moves*, but not that a
-    // task parked on the instance is actually woken when it does.
-    //
-    // Same discriminating shape as phase 3 — `EpollCtl` is the only target, so
-    // the park is uncapped and no timer can rescue a lost wake, and the 2 s
-    // timeout is far outside the window the assertion allows. The closure is
-    // deliberately the same generation comparison `epoll_wait_core` uses, so a
-    // wake that fired without the counter moving would still fail here.
+/// Phase 11: an `epoll_ctl` releases a park on `WaitTarget::EpollCtl`.
+///
+/// The one target whose wake does not mean "something you are waiting for is
+/// ready" but "the set of things you are waiting for has changed". It is what
+/// stops `epoll_wait` blocking on a target list another thread has already
+/// invalidated, and nothing else in the tree exercises it: `epoll`'s own
+/// self-test can assert that the generation counter *moves*, but not that a
+/// task parked on the instance is actually woken when it does.
+///
+/// Same discriminating shape as phase 3 -- `EpollCtl` is the only target, so
+/// the park is uncapped and no timer can rescue a lost wake, and the 2 s
+/// timeout is far outside the window the assertion allows. The closure is
+/// deliberately the same generation comparison `epoll_wait_core` uses, so a
+/// wake that fired without the counter moving would still fail here.
+fn phase_epoll_ctl_wake(attempt: u32) -> KernelResult<Attempt> {
+    use core::sync::atomic::Ordering::SeqCst;
     MW_WROTE.store(0, SeqCst);
     let ep = super::epoll::create();
     let Some(g0) = super::epoll::generation(ep) else {
@@ -959,36 +1191,32 @@ pub fn self_test() -> KernelResult<()> {
         super::epoll::close(ep);
         return Err(KernelError::InternalError);
     };
-    if let Err(e) = sched::spawn(b"mw-epctl", 16, mw_epoll_ctl_task, ep.raw(), 0) {
-        serial_println!("[multiwait]   FAIL: could not spawn the epoll_ctl task: {e}");
-        super::epoll::close(ep);
-        return Err(e);
-    }
-    let started = crate::hrtimer::now_ns();
-    let targets = [WaitTarget::EpollCtl(ep.raw())];
-    let n = match wait_multiple(&targets, Some(2_000_000_000), || {
-        usize::from(super::epoll::generation(ep) != Some(g0))
-    }) {
-        Ok(n) => n,
+    let helper = match sched::spawn(b"mw-epctl", 16, mw_epoll_ctl_task, ep.raw(), 0) {
+        Ok(tid) => tid,
         Err(e) => {
-            serial_println!("[multiwait]   FAIL: epoll-ctl wait errored: {e}");
+            serial_println!("[multiwait]   FAIL: could not spawn the epoll_ctl task: {e}");
             super::epoll::close(ep);
             return Err(e);
         }
     };
+    let started = crate::hrtimer::now_ns();
+    let targets = [WaitTarget::EpollCtl(ep.raw())];
+    let r = wait_multiple(&targets, Some(WAKE_TIMEOUT_NS), || {
+        usize::from(super::epoll::generation(ep) != Some(g0))
+    });
     let elapsed = crate::hrtimer::now_ns().saturating_sub(started);
+    let joined = join_helper("epoll_ctl wake", helper);
     let ctled = MW_WROTE.load(SeqCst);
-    if n != 1 || ctled != 1 || elapsed > 1_000_000_000 {
-        serial_println!(
-            "[multiwait]   FAIL: epoll_ctl wake returned n={n} after {elapsed}ns (ctl ran: \
-             {ctled})"
-        );
-        super::epoll::close(ep);
-        return Err(KernelError::InternalError);
-    }
     super::epoll::close(ep);
-    serial_println!("[multiwait]   Parked wait released by an epoll_ctl ({elapsed}ns): OK");
-
-    serial_println!("[multiwait] multiwait::self_test PASSED");
-    Ok(())
+    joined?;
+    let n =
+        r.inspect_err(|e| serial_println!("[multiwait]   FAIL: epoll-ctl wait errored: {e}"))?;
+    judge_wake(
+        "epoll_ctl wake",
+        "Parked wait released by an epoll_ctl",
+        attempt,
+        n,
+        ctled,
+        elapsed,
+    )
 }

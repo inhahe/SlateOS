@@ -67,13 +67,11 @@ nobody could see; `EOPNOTSUPP` is what Linux answers for a clock it cannot
 time, and the id is still checked first (`EINVAL` for a process or thread that
 does not exist), as Linux would.
 
-**Choice 6 -- `SIGEV_THREAD_ID` is accepted and its thread checked, and the
-signal goes to the process.** Signals have no per-thread state here: `tgkill`
-and `pthread_kill` already reach the process, not the thread. Refusing
-`SIGEV_THREAD_ID` would make glibc's `SIGEV_THREAD` timers fail outright;
-accepting it makes them work in the cases that also work for `pthread_kill`,
-and the thread is recorded for the day signals gain per-thread state
-(known-issues `A-SIGNALS-HAVE-NO-PER-THREAD-STATE`).
+**Choice 6 -- `SIGEV_THREAD_ID` is accepted and its thread checked.** At
+first the signal went to the process, as every signal then did; the same day
+signals gained per-thread state (§1542), and a `SIGEV_THREAD_ID` timer's
+signal now waits on its thread's own queue. Refusing `SIGEV_THREAD_ID` would
+have made glibc's `SIGEV_THREAD` timers fail outright.
 
 **Choice 7 -- one native call with an operation argument, taking Linux's
 structures and answering Linux's errnos.** Lane D asked for either. One call

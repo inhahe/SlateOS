@@ -22865,6 +22865,84 @@ pub fn self_test_linux_dev_stdin() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of per-thread signal state with a real second thread:
+/// [`elf::build_linux_thread_signals_test_elf`] checks a new thread inherits
+/// its creator's mask and that changing it is the thread's own business, that
+/// a `kill` reaches the one thread not blocking it, and that `tgkill` waits
+/// for its thread alone. Exits `0x2A` on success.
+pub fn self_test_linux_thread_signals() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux per-thread signals (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_thread_signals_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-thread-signals"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-thread-signals",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: per-thread signals spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: per-thread signals (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x35) => "setting up the mailbox, handlers, mask or the worker failed",
+            Some(0x40) => "the worker did not start with its creator's mask",
+            Some(0x41) => "the worker unblocking for itself changed the main thread's mask",
+            Some(0x42 | 0x43) => "a kill did not run the handler on the one thread not blocking it",
+            Some(0x44 | 0x45) => "a tgkill to the main thread was taken by the worker",
+            Some(0x46) => "the main thread's sigpending did not show its own signal",
+            Some(0x47) => "the main thread could not take its own signal with sigtimedwait",
+            Some(0x48 | 0x49) => "a tgkill to the worker did not run the handler there",
+            Some(0x4A) => "the worker could not be joined",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: per-thread signals (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux per-thread signals (ring 3: a thread inherits and then changes its \
+         own mask, kill reaches the thread not blocking it, tgkill waits for its thread): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

@@ -8315,6 +8315,29 @@ pub fn sys_signal_send_with_info(
     si_code: i32,
     value: u64,
 ) -> super::dispatch::SyscallResult {
+    signal_send_to(args, si_code, value, None)
+}
+
+/// [`sys_signal_send_with_info`] for a signal to thread `thread` of the
+/// target alone -- the Linux ABI's `tkill`, `tgkill` and
+/// `rt_tgsigqueueinfo`, whose callers have checked that the thread is the
+/// target's: pending on that thread's queue, taken by it alone.
+pub fn sys_signal_send_to_thread(
+    args: &super::dispatch::SyscallArgs,
+    si_code: i32,
+    value: u64,
+    thread: crate::sched::task::TaskId,
+) -> super::dispatch::SyscallResult {
+    signal_send_to(args, si_code, value, Some(thread))
+}
+
+/// The body of [`sys_signal_send_with_info`] and [`sys_signal_send_to_thread`].
+fn signal_send_to(
+    args: &super::dispatch::SyscallArgs,
+    si_code: i32,
+    value: u64,
+    to_thread: Option<crate::sched::task::TaskId>,
+) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
     use crate::proc::thread;
 
@@ -8345,7 +8368,13 @@ pub fn sys_signal_send_with_info(
     // cannot forge -- so an SA_SIGINFO handler on the target sees a faithful
     // siginfo_t. `value` is the queued `si_value` (0 for kill/tkill/tgkill).
     let info = sender_info(caller, si_code, value);
-    match post_signal(target, sig, info, (target == caller).then_some(task_id)) {
+    match post_signal(
+        target,
+        to_thread,
+        sig,
+        info,
+        (target == caller).then_some(task_id),
+    ) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -8419,7 +8448,10 @@ fn sender_info(
 
 /// Post `sig` to `target` with `info` as its record, and carry out what the
 /// kernel decides for it ([`classify_post_info`]): leave it pending for the
-/// target's handler, or terminate, stop or continue the target.
+/// target's handler, or terminate, stop or continue the target. With
+/// `thread`, the signal is for that thread of `target` alone
+/// ([`classify_post_thread_info`]): pending on its queue, blocked when it
+/// blocks it; terminate, stop and continue still act on the whole process.
 ///
 /// `self_task` is the posting thread when it belongs to `target`: a stop then
 /// parks it last, after its siblings (`stop_process_for_signal`), and this
@@ -8429,15 +8461,21 @@ fn sender_info(
 /// signal the kernel raises needs none ([`post_kernel_signal`]).
 ///
 /// [`classify_post_info`]: crate::proc::signal::classify_post_info
+/// [`classify_post_thread_info`]: crate::proc::signal::classify_post_thread_info
 fn post_signal(
     target: crate::proc::pcb::ProcessId,
+    thread_target: Option<crate::sched::task::TaskId>,
     sig: u32,
     info: crate::proc::signal::SigInfo,
     self_task: Option<crate::sched::task::TaskId>,
 ) -> KernelResult<()> {
     use crate::proc::{pcb, signal, thread};
 
-    match signal::classify_post_info(target, sig, info) {
+    let decision = match thread_target {
+        Some(tid) => signal::classify_post_thread_info(target, tid, sig, info),
+        None => signal::classify_post_info(target, sig, info),
+    };
+    match decision {
         signal::PostDecision::Deliver | signal::PostDecision::Drop => {}
         signal::PostDecision::Terminate(fatal) => {
             // No userspace handler (or SIGKILL): terminate, recorded as a
@@ -8504,7 +8542,13 @@ pub fn sys_signal_queue(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     let info = sender_info(caller, signal::si_code::SI_QUEUE, args.arg2);
-    match post_signal(target, sig, info, (target == caller).then_some(task_id)) {
+    match post_signal(
+        target,
+        None,
+        sig,
+        info,
+        (target == caller).then_some(task_id),
+    ) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -8517,7 +8561,9 @@ pub fn sys_signal_queue(args: &SyscallArgs) -> SyscallResult {
 /// The thread check and the post are one step, so a thread id given since to
 /// another process cannot carry the signal there, and the check needs no
 /// capability (libc's, through `/proc/<tgid>/task/<tid>`, needed a File
-/// capability). The signal goes to the process, as every signal does here.
+/// capability). The signal is for that thread alone: pending on its queue,
+/// taken by it, blocked when it blocks it (until 2026-10-07 it went to the
+/// process, as every signal did).
 /// Errors in Linux's order (`do_send_specific`): `InvalidArgument` for an id
 /// not above zero, `NoSuchProcess` for a thread that is not `tgid`'s, then
 /// [`check_signal_target`]'s. See
@@ -8545,7 +8591,13 @@ pub fn sys_signal_tgkill(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     let info = sender_info(caller, signal::si_code::SI_TKILL, 0);
-    match post_signal(tgid, sig, info, (tgid == caller).then_some(task_id)) {
+    match post_signal(
+        tgid,
+        Some(args.arg1),
+        sig,
+        info,
+        (tgid == caller).then_some(task_id),
+    ) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -8664,7 +8716,7 @@ pub fn signal_send_to_group(
     }
 }
 
-/// `SYS_SIGNAL_MASK` — set the calling process's blocked-signal mask.
+/// `SYS_SIGNAL_MASK` — set the calling thread's blocked-signal mask.
 ///
 /// `arg0`: new blocked mask. `arg1`: out-pointer for the old mask (0 to
 /// discard).
@@ -9990,7 +10042,7 @@ pub fn post_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) -> KernelR
     }
     let current = sched::current_task_id();
     let self_task = (thread::owner_process(current) == Some(pid)).then_some(current);
-    post_signal(pid, sig, signal::SigInfo::kernel(), self_task)
+    post_signal(pid, None, sig, signal::SigInfo::kernel(), self_task)
 }
 
 /// [`post_kernel_signal`] for a caller with nothing to do about a failure:

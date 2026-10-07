@@ -2450,8 +2450,14 @@ const RLIMIT_SIGPENDING: u32 = 11;
 /// stores; a native process's handler table is its libc's (design-decisions
 /// §1512), so it reports none, which `SigCgt` then says. All empty for a
 /// kernel thread.
-fn proc_signal_sets(proc_id: u64) -> (crate::proc::signal::SignalSets, u64) {
-    let sets = crate::proc::signal::sets(proc_id);
+fn proc_signal_sets(proc_id: u64, task_id: u64) -> (crate::proc::signal::SignalSets, u64) {
+    // `/proc/<pid>` describes the process's main thread (the caller passes
+    // the pid as the task); `/proc/<pid>/task/<tid>` that thread.
+    let sets = if task_id == proc_id {
+        crate::proc::signal::sets(proc_id)
+    } else {
+        crate::proc::signal::thread_sets(proc_id, task_id)
+    };
     let caught =
         if crate::proc::pcb::get_abi_mode(proc_id) == Some(crate::proc::pcb::AbiMode::Linux) {
             crate::syscall::linux::linux_sigaction_caught(proc_id)
@@ -2561,22 +2567,20 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let _ = writeln!(s, "Threads:\t{num_threads}");
     // Signals, in Linux's order and format (fs/proc/array.c task_sig()):
     // SigQ is the signals queued for the process's real user against its
-    // RLIMIT_SIGPENDING; SigPnd is the thread's own pending set and ShdPnd
-    // the process's -- every signal here is sent to a process, so the
-    // thread's is empty -- then the blocked, ignored and caught sets, each as
-    // 16 hex digits. All were missing until 2026-10-01, when the kernel began
-    // keeping the ignored set (design-decisions §1512).
-    let (sig, caught) = proc_signal_sets(proc_id);
+    // RLIMIT_SIGPENDING; SigPnd is the thread's own pending set (tgkill,
+    // pthread_kill, a SIGEV_THREAD_ID timer) and ShdPnd the process's; then
+    // the thread's blocked set and the process's ignored and caught sets,
+    // each as 16 hex digits. All were missing until 2026-10-01, when the
+    // kernel began keeping the ignored set (design-decisions §1512); SigPnd
+    // read 0 until signals gained per-thread state on 2026-10-07.
+    let (sig, caught) = proc_signal_sets(proc_id, task.id);
     // A POSIX timer counts too: Linux charges each timer's preallocated
     // signal against the limit when the timer is created.
     let queued: u32 = crate::proc::pcb::pids_of_user(uid)
         .into_iter()
         .map(|pid| {
             let timers = u32::try_from(crate::proc::posix_timer::count(pid)).unwrap_or(u32::MAX);
-            crate::proc::signal::sets(pid)
-                .pending
-                .count_ones()
-                .saturating_add(timers)
+            crate::proc::signal::sets(pid).queued.saturating_add(timers)
         })
         .fold(0, u32::saturating_add);
     let queue_limit = crate::proc::pcb::get_rlimit(proc_id, RLIMIT_SIGPENDING).map_or(
@@ -2586,7 +2590,7 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         |(soft, _)| soft,
     );
     let _ = writeln!(s, "SigQ:\t{queued}/{queue_limit}");
-    let _ = writeln!(s, "SigPnd:\t{:016x}", 0u64);
+    let _ = writeln!(s, "SigPnd:\t{:016x}", sig.thread_pending);
     let _ = writeln!(s, "ShdPnd:\t{:016x}", sig.pending);
     let _ = writeln!(s, "SigBlk:\t{:016x}", sig.blocked);
     let _ = writeln!(s, "SigIgn:\t{:016x}", sig.ignored);
@@ -3038,11 +3042,10 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     // signal, blocked, sigignore, sigcatch (fields 31-34): decimal, and only
     // the low 31 signals, as Linux prints them (`& 0x7fffffff`; proc(5) calls
     // them obsolete in favour of `status`'s Sig* lines). `signal` is the
-    // thread's own pending set, and every signal here is sent to a process,
-    // so it is 0 -- the process's is `status`'s ShdPnd. Zeros until
-    // 2026-10-01.
+    // thread's own pending set -- the process's is `status`'s ShdPnd. Zeros
+    // until 2026-10-01; `signal` 0 until 2026-10-07.
     const OLD_SIGNALS: u64 = 0x7fff_ffff;
-    let (sig, caught) = proc_signal_sets(proc_id);
+    let (sig, caught) = proc_signal_sets(proc_id, task.id);
     let (blocked, sigignore, sigcatch) = (
         sig.blocked & OLD_SIGNALS,
         sig.ignored & OLD_SIGNALS,
@@ -3069,7 +3072,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     // Placeholders left-to-right: pid comm state ppid pgrp session
     // tty_nr tpgid <flags=0> <minflt..cmajflt=0> utime stime
     // cutime cstime priority nice num_threads itrealvalue=0
-    // starttime vsize rss rsslim <startcode..kstkeip=0> signal=0 blocked
+    // starttime vsize rss rsslim <startcode..kstkeip=0> signal blocked
     // sigignore sigcatch wchan <nswap/cnswap=0> exit_signal=17 processor
     // <rt_priority..env_end=0> exit_code.
     // Split around the comm so the name can be raw bytes. Field 2 is
@@ -3082,7 +3085,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
     out.extend_from_slice(name);
     let text = format!(
         ") {} {} {} {} {} {} 0 {} {} {} {} {} {} {} {} {} {} {} 0 {} {} {} {} \
-         0 0 0 0 0 0 {} {} {} {} 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
+         0 0 0 0 0 {} {} {} {} {} 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         state_char,
         ppid,
         pgrp,
@@ -3104,6 +3107,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64, inspect: bool) ->
         vsize,
         rss_pages,
         rsslim,
+        sig.thread_pending & OLD_SIGNALS,
         blocked,
         sigignore,
         sigcatch,

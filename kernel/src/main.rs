@@ -3499,6 +3499,14 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_signal_from_interrupt(),
     );
 
+    // Ring-3 test of per-thread signal state: a second thread's own mask, a
+    // kill reaching the thread that does not block it, tgkill aimed at one.
+    selftest::dispatch_debug(
+        "Linux per-thread signals (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_thread_signals(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

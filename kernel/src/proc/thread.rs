@@ -372,6 +372,10 @@ pub fn spawn_suspended_with_tls(
         owners.insert(task_id, pid);
     }
 
+    // The thread's own signal state -- its creator's blocked mask, nothing
+    // pending -- in place before it can run and ask for it.
+    crate::proc::signal::on_thread_start(pid, task_id);
+
     // Transition process from Creating to Running on first thread.
     if proc_state == ProcessState::Creating {
         // Ignore error — race with another thread doing the same.
@@ -431,6 +435,7 @@ pub fn admit(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
             let mut owners = THREAD_OWNERS.lock();
             owners.remove(&task_id);
         }
+        crate::proc::signal::on_thread_exit(pid, task_id);
         // Detach the thread we just registered.  The task never ran, so it
         // accrued no CPU time / faults — zero accounting is exact.  Ignore
         // the return: on this unwinding path there are no join waiters to
@@ -913,6 +918,9 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
         let mut owners = THREAD_OWNERS.lock();
         owners.remove(&task_id)?
     };
+
+    // Its signal state, and the signals sent to it alone.
+    crate::proc::signal::on_thread_exit(pid, task_id);
 
     // Clean up any IRQ registrations owned by this task.
     // This prevents dangling registrations when a driver process crashes.

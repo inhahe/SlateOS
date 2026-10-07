@@ -163,10 +163,9 @@ impl TimerClock {
 pub enum Notify {
     /// `SIGEV_NONE`: nothing.
     None,
-    /// Queue signal `signo` carrying `value` (`sigev_value`). `thread` is
-    /// `SIGEV_THREAD_ID`'s target, recorded; the signal goes to the process
-    /// as every signal does here until signals have per-thread state
-    /// (`known-issues/A-SIGNALS-HAVE-NO-PER-THREAD-STATE.md`).
+    /// Queue signal `signo` carrying `value` (`sigev_value`) -- on the
+    /// process, or with `thread` (`SIGEV_THREAD_ID`) on that thread's own
+    /// queue, for it alone.
     Signal {
         /// The signal (1..=64).
         signo: u32,
@@ -459,7 +458,12 @@ fn fire(arg: u64) {
             arm_hr(idx, hr_gen, timer, now);
             return;
         }
-        let Notify::Signal { signo, value, .. } = timer.notify else {
+        let Notify::Signal {
+            signo,
+            value,
+            thread,
+        } = timer.notify
+        else {
             // SIGEV_NONE arms no hrtimer.
             return;
         };
@@ -470,7 +474,7 @@ fn fire(arg: u64) {
             Status::Disarmed
         };
         let info = SigInfo::timer(timer.id, value);
-        match signal::post_timer_signal(timer.pid, signo, timer.id, timer.arm_gen, info) {
+        match signal::post_timer_signal(timer.pid, signo, timer.id, timer.arm_gen, thread, info) {
             TimerPost::Queued | TimerPost::AlreadyQueued => {}
             TimerPost::Ignored => {
                 if periodic {
@@ -543,7 +547,7 @@ fn charge_fits(pid: ProcessId) -> bool {
     let pids = pcb::pids_of_user(uid);
     let queued: u64 = pids
         .iter()
-        .map(|&p| u64::from(signal::sets(p).pending.count_ones()))
+        .map(|&p| u64::from(signal::sets(p).queued))
         .fold(0, u64::saturating_add);
     let timers = with_table(|t| {
         pids.iter()
@@ -1270,6 +1274,42 @@ pub fn self_test() -> KernelResult<()> {
     )?;
     serial_println!("[posix_timer]   absolute wall-clock arming: OK");
 
+    // --- SIGEV_THREAD_ID: the signal waits for that thread alone ---
+    let worker: TaskId = 0x7B1;
+    signal::on_thread_start(p, worker);
+    let tt = create(
+        p,
+        TimerClock::Monotonic,
+        Notify::Signal {
+            signo: SIGUSR2,
+            value: 9,
+            thread: Some(worker),
+        },
+    )
+    .map_err(|_| KernelError::InternalError)?;
+    check(
+        settime(p, tt, false, 1000 * SEC, 0).is_ok(),
+        "arm the thread's timer",
+    )?;
+    check(expire_for_test(p, tt), "the thread's timer expires")?;
+    check(
+        signal::take_pending_info_in_mask(p, mask2).is_none(),
+        "another thread cannot take it",
+    )?;
+    let got = signal::take_pending_info_in_mask_as(p, worker, mask2);
+    check(
+        got.is_some_and(|(s, i)| s == SIGUSR2 && is_timer_record(&i, tt, 9)),
+        "its thread takes it",
+    )?;
+    check(settime(p, tt, false, 1000 * SEC, 0).is_ok(), "re-arm")?;
+    check(expire_for_test(p, tt), "expires again")?;
+    signal::on_thread_exit(p, worker);
+    check(
+        signal::take_pending_info_in_mask_as(p, worker, mask2).is_none(),
+        "the thread's exit took its timer signal",
+    )?;
+    serial_println!("[posix_timer]   SIGEV_THREAD_ID aims at its thread: OK");
+
     // --- exec deletes them all and keeps the id counter; exit forgets all ---
     check(
         settime(p, a, false, 1000 * SEC, 0).is_ok() && expire_for_test(p, a),
@@ -1287,6 +1327,6 @@ pub fn self_test() -> KernelResult<()> {
     signal::remove(p);
     serial_println!("[posix_timer]   exec / exit teardown: OK");
 
-    serial_println!("[posix_timer] POSIX timer self-test PASSED (9 groups)");
+    serial_println!("[posix_timer] POSIX timer self-test PASSED (10 groups)");
     Ok(())
 }

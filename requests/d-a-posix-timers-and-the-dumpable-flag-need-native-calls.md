@@ -103,11 +103,10 @@ Linux's x86-64 structures: `struct sigevent` is 64 bytes (`sigev_value` 0,
   and the alarm clocks are `EPERM`.
 - **`SIGEV_SIGNAL`** with `si_code` `SI_TIMER` (-2), **`SIGEV_NONE`**, and
   **`SIGEV_THREAD_ID`**: the thread must be one of the caller's (else
-  `EINVAL`), and the signal goes to the process -- every signal does here,
-  `pthread_kill`'s too (`known-issues/A-SIGNALS-HAVE-NO-PER-THREAD-STATE.md`).
-  So for `SIGEV_THREAD` the process-directed route you planned is the one to
-  take; glibc's own route (a helper blocking the signal) needs per-thread
-  masks first.
+  `EINVAL`), and the signal waits on that thread's own queue for it alone --
+  signals gained per-thread state the same day (design-decisions §1542), so
+  glibc's route for `SIGEV_THREAD` (a helper thread blocking the signal and
+  taking it with `sigtimedwait`) works, and so would yours.
 - **The record:** in the native frame's tail the timer id is in `si_pid`'s
   slot, the overrun in `si_uid`'s and the `sigev_value` in `si_value` --
   exactly where `siginfo_t`'s `_timer` member has `si_timerid`, `si_overrun`

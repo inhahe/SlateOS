@@ -9027,6 +9027,19 @@ fn kill_common(args: &SyscallArgs, si_code: i32) -> SyscallResult {
 /// gate ordering (target resolution → ESRCH-before-EINVAL → authority) is
 /// shared with `kill_common`; only the final post stamps the payload.
 fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallResult {
+    kill_common_value_to(args, si_code, value, None)
+}
+
+/// [`kill_common_value`], aimed at thread `thread` of the target when given
+/// (`tkill`, `tgkill`, `rt_tgsigqueueinfo`, whose callers have checked the
+/// thread is the target's): the signal then waits on that thread's queue
+/// alone, as Linux's `do_send_specific` queues it.
+fn kill_common_value_to(
+    args: &SyscallArgs,
+    si_code: i32,
+    value: u64,
+    thread: Option<u64>,
+) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)`.
     // Both `pid` and `sig` are `int`, so the x86_64 syscall ABI
     // truncates args.arg0/arg1 to their low 32 bits before the body
@@ -9129,9 +9142,10 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
         arg4: 0,
         arg5: 0,
     };
-    linux_from_native_signal_send(handlers::sys_signal_send_with_info(
-        &send_args, si_code, value,
-    ))
+    linux_from_native_signal_send(match thread {
+        Some(tid) => handlers::sys_signal_send_to_thread(&send_args, si_code, value, tid),
+        None => handlers::sys_signal_send_with_info(&send_args, si_code, value),
+    })
 }
 
 /// A native signal-send answer in the errno terms `kill(2)`, `tgkill(2)` and
@@ -9317,8 +9331,14 @@ fn sys_tkill(args: &SyscallArgs) -> SyscallResult {
         arg4: 0,
         arg5: 0,
     };
-    // tkill is thread-directed: deliver SI_TKILL, matching Linux's do_tkill.
-    kill_common(&kill_args, crate::proc::signal::si_code::SI_TKILL)
+    // tkill is thread-directed: SI_TKILL, to that thread's queue, matching
+    // Linux's do_tkill.
+    kill_common_value_to(
+        &kill_args,
+        crate::proc::signal::si_code::SI_TKILL,
+        0,
+        Some(tid_u),
+    )
 }
 
 /// `tgkill(tgid, tid, sig)` — send `sig` to thread `tid` in thread-
@@ -9331,8 +9351,8 @@ fn sys_tkill(args: &SyscallArgs) -> SyscallResult {
 ///   - If `tid` does not exist, or does not belong to `tgid`,
 ///     `-ESRCH`.  Linux mandates this — `tgkill` is the race-free
 ///     `pthread_kill` because it can detect tid reuse across a fork.
-///   - Otherwise, behaves exactly like [`sys_tkill`] (and thus like
-///     `kill(tgid, sig)` for now).
+///   - Otherwise, behaves exactly like [`sys_tkill`]: the signal waits on
+///     thread `tid`'s own queue, for it alone to take.
 fn sys_tgkill(args: &SyscallArgs) -> SyscallResult {
     // tgkill is thread-directed: deliver SI_TKILL with no si_value payload.
     tgkill_common_value(args, crate::proc::signal::si_code::SI_TKILL, 0)
@@ -9386,8 +9406,9 @@ fn tgkill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallR
         arg4: 0,
         arg5: 0,
     };
-    // tgkill is thread-directed: deliver SI_TKILL, matching Linux's do_tkill.
-    kill_common_value(&kill_args, si_code, value)
+    // tgkill is thread-directed: to that thread's queue, matching Linux's
+    // do_send_specific.
+    kill_common_value_to(&kill_args, si_code, value, Some(tid_u))
 }
 
 /// `umask(mask)` — set the process file-mode creation mask, returning

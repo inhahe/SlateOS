@@ -18,8 +18,9 @@ nothing; `emit_linux_rt_frame` always builds on the interrupted stack
 (`linux_sigframe::compute_layout(regs.rsp, ..)`) and writes `uc_stack` as
 disabled; `proc::linux_stack` builds no `AT_MINSIGSTKSZ` (51) entry.
 
-**Proper fix:** keep `sigaltstack`'s stack (per thread, with
-`A-SIGNALS-HAVE-NO-PER-THREAD-STATE`), build the frame at its top when the
+**Proper fix:** keep `sigaltstack`'s stack in the calling thread's state
+(`signal::ThreadSignals` already has the fields the native call sets), build
+the frame at its top when the
 handler has `SA_ONSTACK` and the thread is not already on it (Linux's
 `get_sigframe` and `sas_ss_flags`, `SS_AUTODISARM` included), report it in
 `uc_stack`, and restore it from `uc_stack` at `rt_sigreturn`; put

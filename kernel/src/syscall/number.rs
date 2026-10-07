@@ -2190,7 +2190,12 @@ pub const SYS_SIGNAL_SEND: u64 = 523;
 /// return to the caller.
 pub const SYS_SIGNAL_RETURN: u64 = 524;
 
-/// Set the calling process's blocked-signal mask.
+/// Set the calling thread's blocked-signal mask.
+///
+/// The mask is the calling thread's own, as Linux's `sigprocmask` and
+/// `pthread_sigmask` both set the caller's: another thread's is untouched, and
+/// a new thread starts with its creator's. (Until 2026-10-07 there was one
+/// mask per process.)
 ///
 /// `arg0`: new 64-bit blocked mask (bit `n-1` blocks signal `n`).
 /// `arg1`: pointer to a `u64` that receives the previous mask, or 0 if
@@ -2205,7 +2210,8 @@ pub const SYS_SIGNAL_RETURN: u64 = 524;
 /// Returns: 0 on success, negative `KernelError` code on failure.
 pub const SYS_SIGNAL_MASK: u64 = 525;
 
-/// Query the calling process's pending-signal set.
+/// Query the signals pending for the calling thread: those sent to its
+/// process and those sent to it alone.
 ///
 /// `arg0`: pointer to a `u64` that receives the pending set (bit `n-1`
 ///         set means signal `n` is pending), observed without clearing
@@ -5500,6 +5506,8 @@ pub const SYS_ITIMER_GET: u64 = 1070;
 /// `sigaltstack`, the mask from `sigaction` -- and a kernel holding one without
 /// the other can decide nothing.
 ///
+/// The stack is the calling thread's, as `sigaltstack(2)`'s is: a new thread
+/// starts with none, the thread that forks passes its own to the child.
 /// Inherited across `fork` and cleared by `execve`, matching `sigaltstack(2)`.
 /// The clear is not tidiness: after `execve` the address named a buffer in an
 /// address space that no longer exists, so keeping it would put the next signal
@@ -5795,9 +5803,11 @@ pub const SYS_SIGNAL_QUEUE: u64 = 1086;
 /// Checks that thread `tid` belongs to process `tgid` and posts in the same
 /// step, so that a thread id reused since the caller learnt it cannot carry
 /// the signal into another process. The target receives `si_code = SI_TKILL`
-/// and the caller's pid and real uid. The signal goes to the process, as
-/// every signal does here -- whichever of its threads next returns to
-/// userspace runs it; per-thread pending sets are a later step.
+/// and the caller's pid and real uid. The signal is for that thread alone:
+/// it waits on the thread's own queue, is taken by it, and is blocked when it
+/// blocks it (until 2026-10-07 it went to the process, whichever thread
+/// returned to userspace first). A fatal, stop or continue default still acts
+/// on the whole process, as Linux's does.
 ///
 /// Errors in Linux's order: `InvalidArgument` for a `tgid` or `tid` not above
 /// zero; `NoSuchProcess` when `tid` is not a thread of `tgid`; then as
@@ -6625,8 +6635,8 @@ pub const SYS_MEMORY_ADVISE: u64 = 1140;
 /// and `CLOCK_TAI` (`TIMER_ABSTIME` on the wall clocks follows clock steps);
 /// the CPU-time clocks are `-EOPNOTSUPP` here, the alarm clocks `-EPERM`.
 /// `SIGEV_SIGNAL`, `SIGEV_NONE`, and `SIGEV_THREAD_ID` naming one of the
-/// caller's threads (the signal goes to the process, as every signal does
-/// here). An expiry's signal is delivered with `si_code` `SI_TIMER` (-2), and
+/// caller's threads (the signal then waits for that thread alone). An
+/// expiry's signal is delivered with `si_code` `SI_TIMER` (-2), and
 /// the frame's `si_pid`, `si_uid` and `si_value` slots hold the timer id, the
 /// overrun count and the `sigev_value` -- the offsets `siginfo_t`'s `_timer`
 /// member gives `si_timerid`, `si_overrun` and `si_value`. Two timers on one

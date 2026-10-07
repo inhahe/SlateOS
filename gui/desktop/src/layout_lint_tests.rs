@@ -106,6 +106,7 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
     let mut found = Vec::new();
     let mut roomy = 0;
     let mut taskbar_menus = 0;
+    let mut hidden_icons = 0;
     for (width, height) in [(1920, 1080), (1024, 768), (800, 600)] {
         let size = format!("{width}x{height}");
         let mut shell = lived_in(width, height);
@@ -188,6 +189,29 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
         let (mid_x, mid_y) = (width as f32 / 2.0, height as f32 / 2.0);
         shell.open_desktop_menu(mid_x, mid_y);
         check(&shell, &format!("{size} desktop menu"), &mut found);
+        // Its submenus, each pressed open as a click on its row opens it.
+        for (submenu, name) in [
+            (DesktopShell::MENU_VIEW_SUBMENU, "View"),
+            (DesktopShell::MENU_ADD_WIDGET_SUBMENU, "Add widget"),
+        ] {
+            shell
+                .invoke(
+                    &ShellPart::Menu(ShellMenu::Desktop, MenuPart::Item(submenu)),
+                    Action::Press,
+                    0.0,
+                    0.0,
+                )
+                .expect("the submenu opened");
+            assert!(
+                has_menu(&shell, ShellMenu::Desktop, true),
+                "{size}: no {name} submenu"
+            );
+            check(
+                &shell,
+                &format!("{size} the desktop menu's {name}"),
+                &mut found,
+            );
+        }
         let _ = shell.dismiss_popups();
 
         shell.toggle_shortcut_card();
@@ -196,6 +220,37 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
 
         shell.toggle_run_dialog();
         check(&shell, &format!("{size} run box"), &mut found);
+        // The character picker over its line, as its key or menu puts it up.
+        shell.open_char_picker(crate::MenuField::RunBox);
+        assert!(shell.char_picker.is_some(), "{size}: no character picker");
+        check(
+            &shell,
+            &format!("{size} the character picker over the run box"),
+            &mut found,
+        );
+        let _ = shell.dismiss_popups();
+        // And the file chooser its Browse... puts up over it.
+        shell.toggle_run_dialog();
+        shell
+            .invoke(
+                &ShellPart::RunBox(crate::run_dialog::RunPart::Browse),
+                Action::Press,
+                0.0,
+                0.0,
+            )
+            .expect("browsed");
+        assert!(
+            shell
+                .automation(0.0, 0.0)
+                .walk()
+                .any(|n| matches!(n.id, ShellPart::Chooser(_))),
+            "{size}: no file chooser"
+        );
+        check(
+            &shell,
+            &format!("{size} the file chooser over the run box"),
+            &mut found,
+        );
         let _ = shell.dismiss_popups();
 
         shell.start_alt_tab();
@@ -413,10 +468,50 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
             "{size}: {tiles} of a dozen windows on the bar, so this checks little"
         );
         check(&shell, &format!("{size} a dozen windows"), &mut found);
+
+        // Programs' icons enough to fill the tray, and the menu of the ones
+        // the bar has no room for, its chevron pressed.
+        let icons: Vec<guiremote::tray::TrayIcon> = (1..=24_u32)
+            .map(|i| {
+                guiremote::tray::TrayIcon::new(100 + u64::from(i), 1, "T", format!("Program {i}"))
+            })
+            .collect();
+        let _ = shell.apply_tray_icons(icons);
+        check(&shell, &format!("{size} a full tray"), &mut found);
+        if let Some(chevron) = shell.tray_overflow_rect() {
+            let _ = shell.handle_press(
+                chevron.x + chevron.w / 2.0,
+                chevron.y + chevron.h / 2.0,
+                MouseButton::Left,
+            );
+            assert!(
+                has_menu(&shell, ShellMenu::HiddenIcons, false),
+                "{size}: no hidden icons"
+            );
+            hidden_icons += 1;
+            check(&shell, &format!("{size} the hidden icons"), &mut found);
+            let _ = shell.dismiss_popups();
+        }
+
+        // Shutting down with windows open: past the grace, the programs the
+        // shut down waits on, listed with its two buttons. Last, since it
+        // ends the session this check has been walking.
+        let _ = shell.choose_power(crate::power::PowerChoice::ShutDown);
+        shell.advance_osd(crate::ENDING_GRACE_MS);
+        assert!(shell.tick_ending(), "{size}: the list did not go up");
+        check(
+            &shell,
+            &format!("{size} the programs a shut down waits on"),
+            &mut found,
+        );
     }
     assert!(
         roomy > 0,
         "no display had room for a monitor's graphs, so they were never checked"
+    );
+    assert!(
+        hidden_icons > 0,
+        "no display's tray ran out of room, so its hidden icons were never checked"
     );
     assert!(
         taskbar_menus > 0,

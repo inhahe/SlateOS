@@ -34,6 +34,7 @@ fn readings() -> LiveReadings {
         memory_fraction: Some(0.73),
         disk_fraction: None,
         battery: BatteryInfo::default(),
+        month: crate::calendar::MonthGlance::default(),
     }
 }
 
@@ -294,6 +295,74 @@ fn a_photo_frame_names_its_picture_or_says_why_not() {
     assert!((picture.bounds.w / picture.bounds.h - 4.0).abs() < 0.01);
 }
 
+/// A calendar shows tools its month: a grid named by the month and year,
+/// each day a cell named by its date and described as the popup's days are,
+/// seven to a row, top to bottom, inside the widget -- and no grid while it
+/// has no month to show.
+#[test]
+fn a_calendar_shows_its_month() {
+    use crate::calendar::{CalendarConfig, CalendarEvent, CalendarView, EventStore};
+    let (layer, id) = one(WidgetKind::Calendar);
+    let empty = node_of(&layer, &readings(), WidgetPart::Widget(id)).expect("seen");
+    assert!(empty.children.is_empty(), "a month of nothing is seen");
+
+    // 12:00 UTC on 6 October 2026, with an event then.
+    let noon = 1_791_288_000;
+    let mut store = EventStore::new();
+    store
+        .add_event(CalendarEvent {
+            id: 0,
+            title: "Dentist".to_owned(),
+            start_timestamp: noon,
+            end_timestamp: noon + 3_600,
+            all_day: false,
+            repeat: None,
+            color: None,
+            description: String::new(),
+        })
+        .expect("an id");
+    let live = LiveReadings {
+        month: CalendarView::new(CalendarConfig::default()).month_glance(
+            noon,
+            &tzrules::Tz::UTC,
+            &store,
+        ),
+        ..readings()
+    };
+    let month = node_of(&layer, &live, WidgetPart::Month(id)).expect("seen");
+    assert_eq!(
+        (month.role, month.name.as_str()),
+        (Role::Grid, "October 2026")
+    );
+    assert_eq!(month.children.len(), 42);
+    let first = &month.children[0];
+    assert_eq!(
+        (first.id, first.role, first.name.as_str()),
+        (
+            WidgetPart::Day(id, 0),
+            Role::GridCell,
+            "Sunday 27 September 2026"
+        )
+    );
+    assert_eq!(first.description.as_deref(), Some("another month"));
+    let today = &month.children[9];
+    assert_eq!(today.name, "Tuesday 6 October 2026");
+    assert_eq!(today.description.as_deref(), Some("today, 1 event"));
+
+    let (x, y, w, h) = layer.content_rect(id).expect("placed");
+    let content = Rect::new(x, y, w, h);
+    assert!(month.children.iter().all(|day| within(day.bounds, content)));
+    for week in month.children.chunks(7) {
+        for pair in week.windows(2) {
+            assert!(pair[0].bounds.right() <= pair[1].bounds.x + 0.01);
+        }
+    }
+    for column in 0..7 {
+        let (above, below) = (&month.children[column], &month.children[column + 7]);
+        assert!(above.bounds.bottom() <= below.bounds.y + 0.01);
+    }
+}
+
 /// The battery widget says its charge -- or that there is no battery, which
 /// is not a flat one -- and what its icon shows of it, and the time left
 /// where something says.
@@ -346,12 +415,12 @@ fn the_battery_says_its_charge() {
 /// content will be, and is named by its own title, which may be the user's.
 #[test]
 fn a_widget_with_nothing_to_show_says_what_it_is() {
-    let (mut layer, id) = one(WidgetKind::Calendar);
-    layer.get_mut(id).expect("placed").title_override = Some("Dentist".to_owned());
+    let (mut layer, id) = one(WidgetKind::Weather);
+    layer.get_mut(id).expect("placed").title_override = Some("Outside".to_owned());
     let live = readings();
     let widget = node_of(&layer, &live, WidgetPart::Widget(id)).expect("seen");
-    assert_eq!(widget.name, "Dentist");
+    assert_eq!(widget.name, "Outside");
     let shown = node_of(&layer, &live, WidgetPart::Placeholder(id)).expect("seen");
-    assert_eq!((shown.role, shown.name.as_str()), (Role::Label, "Calendar"));
+    assert_eq!((shown.role, shown.name.as_str()), (Role::Label, "Weather"));
     assert!(within(shown.bounds, widget.bounds));
 }

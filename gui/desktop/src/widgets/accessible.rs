@@ -8,6 +8,7 @@
 //! | note | a text area holding its text, the one being written in having the keyboard |
 //! | photo frame | the picture up on it, named by its file, or what it says in a picture's place |
 //! | battery | its charge, or "No battery", described by what its icon shows and the time left |
+//! | calendar | the month today is in, a grid named by the month and year, each day named by its date and said to be today, to have events, or to be another month's |
 //! | the rest | the name they show where their content will be |
 //!
 //! A widget not drawn is not here: one hidden, and every one while the layer
@@ -24,10 +25,11 @@ use guitk::widget::automation::{Node, Role, Value};
 use super::{
     BATTERY_CHARGE, CLOCK_TIME, DesktopWidgetManager, LiveReadings, METER_PITCH,
     METER_TROUGH_HEIGHT, METER_TROUGH_TOP, Meter, NOT_MEASURED, PLACEHOLDER_SIZE, PROBLEM_SIZE,
-    WidgetInstance, WidgetInstanceId, WidgetKind, charge_text, clock_date, estimate_text,
-    fit_within, placeholder_line, problem_line,
+    WidgetInstance, WidgetInstanceId, WidgetKind, calendar_cell, charge_text, clock_date,
+    estimate_text, fit_within, placeholder_line, problem_line,
 };
 use crate::Rect;
+use crate::calendar::MonthGlance;
 use crate::power::{BatteryInfo, BatteryState};
 
 /// A part of the widget layer, as tools name it.
@@ -49,6 +51,10 @@ pub enum WidgetPart {
     Picture(WidgetInstanceId),
     /// A battery widget's charge.
     Charge(WidgetInstanceId),
+    /// A calendar's month: its days, named by the month and year.
+    Month(WidgetInstanceId),
+    /// A day of a calendar's month, by its place in the six weeks.
+    Day(WidgetInstanceId, usize),
     /// The name a widget with no content of its own yet shows in its place.
     Placeholder(WidgetInstanceId),
 }
@@ -61,6 +67,39 @@ fn line_box(x: f32, y: f32, width: f32, size: f32) -> Rect {
         width.max(0.0),
         guitk::text::line_height(size, FontWeightHint::Regular),
     )
+}
+
+/// A calendar's month in its content `(x, y, width, height)`, as tools see
+/// it: a grid named by the month and year, each day a cell named by its date
+/// and described as the popup's days are -- today, its events, another
+/// month's -- boxed where it is drawn. `None` for an empty glance, which
+/// draws nothing.
+fn month_node(
+    id: WidgetInstanceId,
+    month: &MonthGlance,
+    (x, y, width, height): (f32, f32, f32, f32),
+) -> Option<Node<WidgetPart>> {
+    let cells: Vec<Rect> = (0..month.days.len())
+        .map(|index| calendar_cell(index, x, y, width, height))
+        .collect();
+    let bounds = cells.iter().copied().reduce(Rect::union)?;
+    let mut grid = Node::new(
+        WidgetPart::Month(id),
+        Role::Grid,
+        month.title.clone(),
+        bounds,
+    );
+    for (index, (day, cell)) in month.days.iter().zip(cells).enumerate() {
+        let mut node = Node::new(
+            WidgetPart::Day(id, index),
+            Role::GridCell,
+            day.name.clone(),
+            cell,
+        );
+        node.description = day.description();
+        grid.children.push(node);
+    }
+    Some(grid)
 }
 
 /// What else the battery widget says of the charge: what its icon shows --
@@ -166,6 +205,9 @@ impl DesktopWidgetManager {
             }
             WidgetKind::PhotoFrame => self
                 .picture_node(id, (cx, cy, cw, ch))
+                .into_iter()
+                .collect(),
+            WidgetKind::Calendar => month_node(id, &live.month, (cx, cy, cw, ch))
                 .into_iter()
                 .collect(),
             WidgetKind::BatteryStatus => {

@@ -19,8 +19,8 @@ use crate::Rect;
 
 use super::{
     CalendarHit, CalendarView, CalendarViewMode, EVENT_HEADER_HEIGHT, EVENT_ROW_HEIGHT, EventStore,
-    GRID_CELLS, MAX_VISIBLE_EVENTS, MonthLayout, YearLayout, day_of_week, day_of_week_name,
-    month_name, timestamp_to_date,
+    GRID_CELLS, MAX_VISIBLE_EVENTS, MonthLayout, YearLayout, day_description, day_name, month_name,
+    timestamp_to_date,
 };
 
 /// A part of the calendar popup, as tools name it.
@@ -37,24 +37,6 @@ pub enum CalendarPart {
     /// A control the popup's hit test names: an arrow, the title, "Today",
     /// a day, a month.
     Control(CalendarHit),
-}
-
-/// What a day is said to be, beside its date: today, its events, another
-/// month's.
-fn day_description(today: bool, events: usize, this_month: bool) -> Option<String> {
-    let mut said = Vec::new();
-    if today {
-        said.push("today".to_owned());
-    }
-    match events {
-        0 => {}
-        1 => said.push("1 event".to_owned()),
-        n => said.push(format!("{n} events")),
-    }
-    if !this_month {
-        said.push("another month".to_owned());
-    }
-    (!said.is_empty()).then(|| said.join(", "))
 }
 
 impl CalendarView {
@@ -144,13 +126,7 @@ impl CalendarView {
                 let mut grid = Node::new(CalendarPart::Grid, Role::Grid, title, grid_box);
                 for (index, cell) in self.generate_grid().into_iter().enumerate() {
                     let date = (cell.year, cell.month, cell.day);
-                    let name = format!(
-                        "{} {} {} {}",
-                        day_of_week_name(day_of_week(cell.year, cell.month, cell.day)),
-                        cell.day,
-                        month_name(cell.month),
-                        cell.year
-                    );
+                    let name = day_name(cell.year, cell.month, cell.day);
                     let mut day = control(CalendarHit::Day(index), Role::GridCell, name);
                     let events = store.events_for_date(cell.year, cell.month, cell.day).len();
                     day.description =

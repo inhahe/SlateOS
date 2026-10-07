@@ -14305,6 +14305,15 @@ impl DesktopShell {
             // one does, this is the line that changes, and everything
             // downstream of it already works.
             battery: crate::power::BatteryInfo::default(),
+            // From the popup's calendar and its events, with the clock's
+            // zone, so the widget and the popup agree about today. Made only
+            // while a calendar is drawn: it looks up forty-two days' events,
+            // as the popup does when it is open.
+            month: if self.widgets.draws(&WidgetKind::Calendar) {
+                self.calendar.month_glance(secs, &zone, &self.events)
+            } else {
+                calendar::MonthGlance::default()
+            },
         }
     }
 

@@ -3846,6 +3846,97 @@ DEFECTS = [
             'a_hidden_widget_layer_draws_nothing',
         ],
     ),
+    # The calendar widget's month, drawn since 2026-10-06 (it drew its name).
+    # Its own sweep (`every_colour_the_calendar_draws_comes_from_its_palette`)
+    # and its drawing test name these; the fixture's calendar is hidden, so
+    # the layer's sweeps do not see it.
+    (
+        "VVVVVVVVVVVVVVVVVV: the calendar's today disc keeps Mocha's blue",
+        WID,
+        [
+            ('                    color: wash(p.accent),\n                    corner_radii: CornerRadii::all(r),\n',
+             '                    color: wash(Color::from_hex(0x89B4FA)),\n                    corner_radii: CornerRadii::all(r),\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'a_calendar_draws_its_month',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWW: the calendar's month is dimmed to secondary ink",
+        WID,
+        [
+            ('            color: wash(p.text),\n            font_weight: CALENDAR_TITLE.weight,\n',
+             '            color: wash(p.subtext0),\n            font_weight: CALENDAR_TITLE.weight,\n'),
+        ],
+        ["desktop"],
+        [
+            'a_calendar_draws_its_month',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXX: the calendar's weekdays keep Mocha's subtext0",
+        WID,
+        [
+            ('                color: wash(p.subtext0),\n                font_weight: weekdays.weight,\n',
+             '                color: wash(Color::from_hex(0xA6ADC8)),\n                font_weight: weekdays.weight,\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'a_calendar_draws_its_month',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYY: another month's days are drawn as this month's",
+        WID,
+        [
+            ('                (p.subtext0, FontWeightHint::Regular)\n            };\n',
+             '                (p.text, FontWeightHint::Regular)\n            };\n'),
+        ],
+        ["desktop"],
+        [
+            'a_calendar_draws_its_month',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZ: today's number is named rather than read on its disc",
+        WID,
+        [
+            ('                (on_accent, FontWeightHint::Bold)\n',
+             '                (p.text, FontWeightHint::Bold)\n'),
+        ],
+        ["desktop"],
+        [
+            'a_calendar_draws_its_month',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAA: an uncoloured event's dot keeps Mocha's lavender",
+        WID,
+        [
+            ('.unwrap_or(if day.today { on_accent } else { p.lavender });\n',
+             '.unwrap_or(if day.today { on_accent } else { Color::from_hex(0xB4BEFE) });\n'),
+        ],
+        ["desktop"],
+        [
+            'every_colour_the_calendar_draws_comes_from_its_palette',
+            'a_calendar_draws_its_month',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBB: the calendar is drawn opaque over a translucent panel",
+        WID,
+        [
+            ('        let wash = |c: Color| Color::rgba(c.r, c.g, c.b, alpha);\n        let centred =',
+             '        let wash = |c: Color| Color::rgba(c.r, c.g, c.b, 255);\n        let centred ='),
+        ],
+        ["desktop"],
+        [
+            'a_calendar_draws_its_month',
+        ],
+    ),
     # ---- sound_settings.rs (module 23 of 49) -- RETIRED 2026-10-05 ---------
     # The module was deleted (design-decisions 1477): nothing in the desktop
     # used it, and the shell's sounds are `event_sounds.rs`, which draws

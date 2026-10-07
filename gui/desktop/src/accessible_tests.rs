@@ -1514,6 +1514,51 @@ fn the_desktops_widgets_are_seen_over_its_icons() {
     assert!(!written.focused);
 }
 
+/// **A calendar widget shows the month today is in**, made by the shell's
+/// own calendar, the popup's -- and the month is made only while a calendar
+/// is out.
+#[test]
+fn a_calendar_widget_shows_this_month() {
+    let mut s = shell();
+    assert!(
+        s.live_readings().month.days.is_empty(),
+        "a month made with no calendar out"
+    );
+    s.open_desktop_menu(900.0, 500.0);
+    assert!(
+        s.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR)
+            .changed()
+    );
+    s.dismiss_popups();
+    let id = s
+        .widgets
+        .all_widgets()
+        .iter()
+        .find(|w| w.kind == WidgetKind::Calendar)
+        .map(|w| w.id)
+        .expect("added");
+    // Either side of a month turning over between the two.
+    let before = s.live_readings().month.title;
+    let month = node(&s, ShellPart::Widget(WidgetPart::Month(id)));
+    let after = s.live_readings().month.title;
+    assert!(
+        month.name == before || month.name == after,
+        "{:?}",
+        month.name
+    );
+    assert_eq!(month.children.len(), 42);
+    let today = month
+        .children
+        .iter()
+        .filter(|day| {
+            day.description
+                .as_deref()
+                .is_some_and(|said| said.starts_with("today"))
+        })
+        .count();
+    assert_eq!(today, 1, "today marked once");
+}
+
 /// **A note's text is set as the user would set it**: the note opened with
 /// a click on it, which gives it the keyboard, and the text pasted over all
 /// of it -- its layout to be saved, as after typing -- and what is typed next

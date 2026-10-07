@@ -10,6 +10,7 @@
 
 use appearance::Palette;
 use appearance::Surface;
+use appearance::readable_on;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::idseq::IdSeq;
@@ -77,6 +78,13 @@ pub use accessible::WidgetPart;
 // saying nothing about any particular row -- and it would cost the accent the
 // one job it has in this module, which is to say which widget is selected.
 // Within a single render the accent has to mean one thing.
+//
+// *Today on the calendar sits on the accent's disc*, as on the clock's popup,
+// which marks it so for the ring's reason: today is the one day the user is
+// pointed at -- a position, "here", which is the one thing the accent says in
+// this module, of a widget or of a day. Its number is in whatever reads on
+// that disc (`readable_on`), and a day's events' dot in the colour the user
+// gave the event, which is their data, or else the palette's lavender.
 
 // ============================================================================
 // Widget types
@@ -449,6 +457,9 @@ impl WidgetInstance {
             WidgetKind::RssFeed => 300_000,
             WidgetKind::BatteryStatus => 30_000,
             WidgetKind::PhotoFrame => FRAME_INTERVAL_MS,
+            // Once a minute, for midnight: a calendar that drew only when
+            // something else did would mark yesterday as today until then.
+            WidgetKind::Calendar => 60_000,
             _ => 0,
         };
         Self {
@@ -741,6 +752,47 @@ fn battery_estimate() -> TextLine {
     BATTERY_CHARGE.below(11.0, FontWeightHint::Regular)
 }
 
+/// A calendar's month and year, across the top of its content.
+const CALENDAR_TITLE: TextLine = TextLine {
+    top: 0.0,
+    size: 14.0,
+    weight: FontWeightHint::Bold,
+};
+
+/// A calendar's weekdays, below its title.
+fn calendar_weekdays() -> TextLine {
+    CALENDAR_TITLE.below(10.0, FontWeightHint::Bold)
+}
+
+/// The size a calendar's day is written at, where its row has room.
+const CALENDAR_DAY_SIZE: f32 = 12.0;
+/// The most today's disc is across, half of it: the popup's size, in a
+/// widget whose cells may be larger than the popup's.
+const CALENDAR_TODAY_RADIUS: f32 = 13.0;
+/// How big a day's events' dot is, half across.
+const CALENDAR_DOT_RADIUS: f32 = 2.0;
+
+/// A small count as a coordinate: a grid's row or column, at most a few
+/// dozen, which `f32` holds exactly.
+fn count_f32(n: usize) -> f32 {
+    f32::from(u16::try_from(n).unwrap_or(u16::MAX))
+}
+
+/// Where day `index` of a calendar's six weeks is, in content at `(x, y)`,
+/// `width` by `height`: seven columns across it, six rows below the
+/// weekdays -- the weekdays' columns being the first row's.
+fn calendar_cell(index: usize, x: f32, y: f32, width: f32, height: f32) -> crate::Rect {
+    let weekdays = calendar_weekdays();
+    let top = weekdays.top + weekdays.height();
+    let (w, h) = (width / 7.0, ((height - top) / 6.0).max(0.0));
+    crate::Rect::new(
+        x + count_f32(index % 7) * w,
+        y + top + count_f32(index / 7) * h,
+        w,
+        h,
+    )
+}
+
 /// How a battery's time left reads: "2h 05m remaining".
 fn estimate_text(secs: u32) -> String {
     format!("{}h {:02}m remaining", secs / 3600, (secs % 3600) / 60)
@@ -826,6 +878,11 @@ pub struct LiveReadings {
     /// already honest, and already what production code constructs. The widget
     /// reached past it to invent numbers.
     pub battery: crate::power::BatteryInfo,
+    /// The month today is in, as the calendar widget shows it -- made by the
+    /// shell's calendar (`CalendarView::month_glance`), as the clock's text is
+    /// formatted by the shell, so the widget and the taskbar's popup cannot
+    /// disagree about what day it is. Empty while no calendar is drawn.
+    pub month: crate::calendar::MonthGlance,
 }
 
 /// Manages all desktop widgets.
@@ -1571,6 +1628,13 @@ impl DesktopWidgetManager {
         self.widgets.iter().filter(|w| w.visible).collect()
     }
 
+    /// Whether a widget of `kind` is drawn: out, shown, on a shown layer --
+    /// for a reading worth making only then, as the calendar's month is.
+    #[must_use]
+    pub fn draws(&self, kind: &WidgetKind) -> bool {
+        self.layer_visible && self.widgets.iter().any(|w| w.visible && w.kind == *kind)
+    }
+
     /// Count.
     pub fn count(&self) -> usize {
         self.widgets.len()
@@ -2138,6 +2202,9 @@ impl DesktopWidgetManager {
                     });
                 }
             }
+            WidgetKind::Calendar => {
+                Self::render_calendar(&live.month, p, (x, y, width, height), alpha, commands);
+            }
             WidgetKind::BatteryStatus => {
                 let b = &live.battery;
                 // The battery as it is: missing, charging, nearly flat, or
@@ -2217,6 +2284,113 @@ impl DesktopWidgetManager {
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_width),
                     overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
+    }
+
+    /// A calendar's month, `month`, in its content `(x, y, width, height)`:
+    /// the month and year, the weekdays, and six weeks of days -- today on
+    /// the accent's disc, as the clock's popup marks it, the days of the
+    /// months either side in the secondary ink, and a day with events dotted
+    /// in its first event's colour, the palette's lavender for one given
+    /// none. Nothing for an empty glance, which the shell makes only while
+    /// no calendar is drawn.
+    fn render_calendar(
+        month: &crate::calendar::MonthGlance,
+        p: &Palette,
+        (x, y, width, height): (f32, f32, f32, f32),
+        alpha: u8,
+        commands: &mut Vec<RenderCommand>,
+    ) {
+        if month.days.is_empty() {
+            return;
+        }
+        let wash = |c: Color| Color::rgba(c.r, c.g, c.b, alpha);
+        let centred = |text: &str, centre: f32, size: f32, weight: FontWeightHint| {
+            guitk::text::center_x(text, centre, size, weight)
+        };
+        commands.push(RenderCommand::Text {
+            x: centred(
+                &month.title,
+                x + width / 2.0,
+                CALENDAR_TITLE.size,
+                CALENDAR_TITLE.weight,
+            )
+            .max(x),
+            y: y + CALENDAR_TITLE.top,
+            text: month.title.clone(),
+            font_size: CALENDAR_TITLE.size,
+            color: wash(p.text),
+            font_weight: CALENDAR_TITLE.weight,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let weekdays = calendar_weekdays();
+        for (column, name) in month.weekdays.iter().enumerate() {
+            let cell = calendar_cell(column, x, y, width, height);
+            commands.push(RenderCommand::Text {
+                x: centred(name, cell.x + cell.w / 2.0, weekdays.size, weekdays.weight),
+                y: y + weekdays.top,
+                text: (*name).to_owned(),
+                font_size: weekdays.size,
+                color: wash(p.subtext0),
+                font_weight: weekdays.weight,
+                max_width: Some(cell.w),
+                overflow: TextOverflow::Clip,
+            });
+        }
+        // Today's ink is whatever reads on the accent the user chose, as on
+        // the popup: a function of that fill, not a role.
+        let on_accent = readable_on(p.accent);
+        for (index, day) in month.days.iter().enumerate() {
+            let cell = calendar_cell(index, x, y, width, height);
+            let (cx, cy) = cell.centre();
+            if day.today {
+                let r = (cell.w.min(cell.h) / 2.0 - 1.0).clamp(0.0, CALENDAR_TODAY_RADIUS);
+                commands.push(RenderCommand::FillRect {
+                    x: cx - r,
+                    y: cy - r,
+                    width: r * 2.0,
+                    height: r * 2.0,
+                    color: wash(p.accent),
+                    corner_radii: CornerRadii::all(r),
+                });
+            }
+            let (ink, weight) = if day.today {
+                (on_accent, FontWeightHint::Bold)
+            } else if day.current_month {
+                (p.text, FontWeightHint::Regular)
+            } else {
+                (p.subtext0, FontWeightHint::Regular)
+            };
+            let size = CALENDAR_DAY_SIZE.min(cell.h * 0.6);
+            let label = day.day.to_string();
+            commands.push(RenderCommand::Text {
+                x: centred(&label, cx, size, weight),
+                y: cy - guitk::text::line_height(size, weight) / 2.0,
+                text: label,
+                font_size: size,
+                color: wash(ink),
+                font_weight: weight,
+                max_width: Some(cell.w),
+                overflow: TextOverflow::Clip,
+            });
+            if day.events > 0 {
+                // The user's colour where they gave the event one -- their
+                // data, which the calendar does not overrule -- else what
+                // reads where the dot sits.
+                let dot = day
+                    .event_color
+                    .unwrap_or(if day.today { on_accent } else { p.lavender });
+                let r = CALENDAR_DOT_RADIUS;
+                commands.push(RenderCommand::FillRect {
+                    x: cx - r,
+                    y: (cell.bottom() - 2.0 * r - 1.0).max(cy),
+                    width: r * 2.0,
+                    height: r * 2.0,
+                    color: wash(dot),
+                    corner_radii: CornerRadii::all(r),
                 });
             }
         }
@@ -2353,8 +2527,40 @@ mod tests {
                 time_remaining_secs: Some(9_000),
                 ..crate::power::BatteryInfo::default()
             },
+            // A real month, so a calendar the fixture shows draws one.
+            month: october_glance(),
         }
     }
+
+    /// October 2026 at a glance, today the 6th, with an event on the 6th
+    /// the user coloured and one on the 20th they did not.
+    fn october_glance() -> crate::calendar::MonthGlance {
+        use crate::calendar::{CalendarConfig, CalendarEvent, CalendarView, EventStore};
+        // 12:00 UTC on 6 October 2026.
+        let noon = 1_791_288_000;
+        let mut store = EventStore::new();
+        for (start, color) in [
+            (noon, Some(OCTOBER_EVENT_COLOR)),
+            (noon + 14 * 86_400, None),
+        ] {
+            store
+                .add_event(CalendarEvent {
+                    id: 0,
+                    title: "Meeting".to_string(),
+                    start_timestamp: start,
+                    end_timestamp: start + 3_600,
+                    all_day: false,
+                    repeat: None,
+                    color,
+                    description: String::new(),
+                })
+                .unwrap();
+        }
+        CalendarView::new(CalendarConfig::default()).month_glance(noon, &tzrules::Tz::UTC, &store)
+    }
+
+    /// The colour the user gave the October fixture's first event.
+    const OCTOBER_EVENT_COLOR: Color = Color::rgb(200, 40, 40);
     use appearance::palette_check::assert_drawn_from;
 
     fn make_mgr() -> DesktopWidgetManager {
@@ -2604,6 +2810,17 @@ mod tests {
         assert!(w.update_interval_ms > 0);
         assert!(w.needs_update(2000));
         assert!(!WidgetInstance::new(2, WidgetKind::Notes, GridPos::new(0, 0)).needs_update(1000));
+    }
+
+    /// A calendar is due once a minute, so midnight moves today: one that
+    /// drew only when something else did would mark yesterday as today.
+    #[test]
+    fn a_calendar_is_due_each_minute() {
+        let mut mgr = make_mgr();
+        mgr.add_widget(WidgetKind::Calendar, GridPos::new(0, 0))
+            .unwrap();
+        assert_eq!(mgr.next_due_in(0), Some(60_000));
+        assert!(mgr.needs_tick(60_000));
     }
 
     #[test]
@@ -2856,6 +3073,125 @@ mod tests {
                 "{lower:?} begins inside {upper:?}'s line"
             );
         }
+    }
+
+    /// A calendar draws its month -- it drew its kind's name in a box: the
+    /// month and year, the weekdays, and the six weeks -- today's number on
+    /// the accent's disc in the ink that reads on it, this month's days in
+    /// the text's ink and the months either side's in the secondary one, and
+    /// a dot under a day with events, in the colour the user gave its event
+    /// or else the palette's lavender.
+    #[test]
+    fn a_calendar_draws_its_month() {
+        let mut mgr = make_mgr();
+        let id = mgr
+            .add_widget(WidgetKind::Calendar, GridPos::new(0, 0))
+            .unwrap();
+        let p = Palette::for_mode(false);
+        let cmds = mgr.render(&p, &sample_readings());
+        let alpha = mgr.get(id).unwrap().bg_opacity;
+        let wash = |c: Color| Color::rgba(c.r, c.g, c.b, alpha);
+        assert!(
+            texts_saying(&cmds, WidgetKind::Calendar.label(), PLACEHOLDER_SIZE).is_empty(),
+            "the placeholder is still drawn"
+        );
+        assert_eq!(texts_saying(&cmds, "October 2026", 14.0), [wash(p.text)]);
+        for day in ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"] {
+            assert_eq!(texts_saying(&cmds, day, 10.0), [wash(p.subtext0)], "{day}");
+        }
+        // Six weeks from 27 September: the 6th of October is today, and
+        // November's 6th another month's; the 27th is September's, then
+        // October's.
+        assert_eq!(
+            texts_saying(&cmds, "6", CALENDAR_DAY_SIZE),
+            [wash(readable_on(p.accent)), wash(p.subtext0)]
+        );
+        assert_eq!(
+            texts_saying(&cmds, "27", CALENDAR_DAY_SIZE),
+            [wash(p.subtext0), wash(p.text)]
+        );
+        assert_eq!(fills_exactly(&cmds, wash(p.accent)), 1, "today's disc");
+        assert_eq!(
+            fills_exactly(&cmds, wash(OCTOBER_EVENT_COLOR)),
+            1,
+            "the 6th's dot"
+        );
+        assert_eq!(fills_exactly(&cmds, wash(p.lavender)), 1, "the 20th's dot");
+        // The first week below the weekdays' line, not over it.
+        let top = |want: &str, size: f32| {
+            cmds.iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text {
+                        text, y, font_size, ..
+                    } if text == want && (font_size - size).abs() < 0.01 => Some(*y),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{want:?} is not drawn"))
+        };
+        let weekdays_end = top("Su", 10.0) + guitk::text::line_height(10.0, FontWeightHint::Bold);
+        assert!(
+            top("27", CALENDAR_DAY_SIZE) >= weekdays_end - 0.01,
+            "the first week is drawn over the weekdays"
+        );
+    }
+
+    /// With no month to show -- the shell makes one only while a calendar is
+    /// drawn -- a calendar draws no days, rather than a month of blanks.
+    #[test]
+    fn a_calendar_with_no_month_draws_no_days() {
+        let mut mgr = make_mgr();
+        mgr.add_widget(WidgetKind::Calendar, GridPos::new(0, 0))
+            .unwrap();
+        let live = LiveReadings {
+            month: crate::calendar::MonthGlance::default(),
+            ..sample_readings()
+        };
+        let cmds = mgr.render(&Palette::for_mode(false), &live);
+        assert!(texts_saying(&cmds, "1", CALENDAR_DAY_SIZE).is_empty());
+        assert!(texts_saying(&cmds, "Su", 10.0).is_empty());
+    }
+
+    /// Every colour the calendar draws is one its palette accounts for: the
+    /// user's accent and what reads on it, and the colour the user gave an
+    /// event -- the three the popup declares too.
+    #[test]
+    fn every_colour_the_calendar_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            for accent in SAFE_ACCENTS {
+                let mut p = Palette::for_mode(light);
+                p.accent = accent;
+                let mut mgr = make_mgr();
+                mgr.add_widget(WidgetKind::Calendar, GridPos::new(0, 0))
+                    .unwrap();
+                let cmds = render_named(&mgr, &p, &sample_readings());
+                assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &[p.accent, readable_on(p.accent), OCTOBER_EVENT_COLOR],
+                    &format!("calendar widget (light={light}, accent={:?})", rgb(accent)),
+                );
+            }
+        }
+    }
+
+    /// The shell makes a calendar's month only while one is drawn: out,
+    /// shown, on a shown layer.
+    #[test]
+    fn a_kind_is_drawn_only_while_one_is_out_and_shown() {
+        let mut mgr = make_mgr();
+        assert!(!mgr.draws(&WidgetKind::Calendar));
+        let id = mgr
+            .add_widget(WidgetKind::Calendar, GridPos::new(0, 0))
+            .unwrap();
+        mgr.add_widget(WidgetKind::Clock, GridPos::new(3, 0))
+            .unwrap();
+        assert!(mgr.draws(&WidgetKind::Calendar));
+        mgr.layer_visible = false;
+        assert!(!mgr.draws(&WidgetKind::Calendar), "the layer is hidden");
+        mgr.layer_visible = true;
+        mgr.get_mut(id).unwrap().visible = false;
+        assert!(!mgr.draws(&WidgetKind::Calendar), "the calendar is hidden");
+        assert!(mgr.draws(&WidgetKind::Clock));
     }
 
     /// A widget not drawn takes no press: with the layer hidden, nothing is
@@ -3608,6 +3944,7 @@ mod tests {
             memory_fraction: None,
             disk_fraction: None,
             battery: crate::power::BatteryInfo::default(),
+            month: crate::calendar::MonthGlance::default(),
         };
         let cmds = full_mgr().render(&p, &blank);
         let bars = meter_rects(&cmds);
@@ -3667,6 +4004,7 @@ mod tests {
             memory_fraction: Some(0.73),
             disk_fraction: None,
             battery: crate::power::BatteryInfo::default(),
+            month: crate::calendar::MonthGlance::default(),
         };
         let cmds = full_mgr().render(&p, &mixed);
         let texts: Vec<String> = cmds

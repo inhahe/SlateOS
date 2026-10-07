@@ -1,5 +1,13 @@
 ## TD-C-THE-DESKTOP-OFFERS-A-CALENDAR-WIDGET-THAT-SHOWS-ONLY-ITS-NAME (lane C, 2026-10-06) — OPEN
-**Status:** OPEN
+**Status:** OPEN -- (1) done 2026-10-06; (2) to (4) open.
+
+**2026-10-06, later: the calendar shows a month.** The month today is in,
+made by the popup's calendar (`CalendarView::month_glance`) and handed to the
+layer in `LiveReadings::month`, so the two agree about today; laid out from
+the user's first weekday, today on the accent's disc as on the popup, days
+with events dotted; each day named and described to tools as the popup's
+are. It is made only while a calendar is drawn, and the widget is due once a
+minute so that midnight moves today. The rest of the table stands.
 
 **In short:** right-click the desktop, choose "Add widget > Calendar", and
 what appears is a box with a calendar icon and the word "Calendar" in it --

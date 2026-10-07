@@ -1366,6 +1366,78 @@ pub struct GridCell {
     pub month: u32,
 }
 
+/// A month at a glance, as the desktop's calendar widget shows it: the month
+/// today is in, laid out as the popup lays its months out -- six weeks from
+/// the one holding the 1st, starting on the day the user's week starts on --
+/// today marked, and each day named and described as the popup's days are
+/// to tools ([`CalendarView::month_glance`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MonthGlance {
+    /// The month and its year: "October 2026".
+    pub title: String,
+    /// The weekdays' abbreviations, from the first day of the week.
+    pub weekdays: [&'static str; 7],
+    /// Six weeks of seven days, the days of the months either side among
+    /// them; empty for a glance nobody asked for.
+    pub days: Vec<GlanceDay>,
+}
+
+/// A day of a [`MonthGlance`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct GlanceDay {
+    /// Its number in its month.
+    pub day: u32,
+    /// Its date in words, as tools are told a day: "Tuesday 6 October 2026".
+    pub name: String,
+    /// Whether it is in the month the glance is of.
+    pub current_month: bool,
+    /// Whether it is today.
+    pub today: bool,
+    /// How many events it has.
+    pub events: usize,
+    /// The colour its first event was given, if it has an event and that one
+    /// was given a colour: its dot's colour, as on the popup.
+    pub event_color: Option<Color>,
+}
+
+impl GlanceDay {
+    /// What it is said to be beside its date -- today, its events, another
+    /// month's -- as the popup's days are said to be.
+    #[must_use]
+    pub fn description(&self) -> Option<String> {
+        day_description(self.today, self.events, self.current_month)
+    }
+}
+
+/// A day's date in words, as tools are told a day: "Tuesday 6 October 2026".
+fn day_name(year: i32, month: u32, day: u32) -> String {
+    format!(
+        "{} {} {} {}",
+        day_of_week_name(day_of_week(year, month, day)),
+        day,
+        month_name(month),
+        year
+    )
+}
+
+/// What a day is said to be, beside its date: today, its events, another
+/// month's.
+fn day_description(today: bool, events: usize, this_month: bool) -> Option<String> {
+    let mut said = Vec::new();
+    if today {
+        said.push("today".to_owned());
+    }
+    match events {
+        0 => {}
+        1 => said.push("1 event".to_owned()),
+        n => said.push(format!("{n} events")),
+    }
+    if !this_month {
+        said.push("another month".to_owned());
+    }
+    (!said.is_empty()).then(|| said.join(", "))
+}
+
 /// The clock band drawn across the head of the popup.
 ///
 /// Held on the view rather than passed to `render`, because the band's *height*
@@ -2078,6 +2150,37 @@ impl CalendarView {
                 }
             })
             .collect()
+    }
+
+    /// The month today is in -- today as it is at `utc_now` in `tz` -- at a
+    /// glance, its days' events from `store`: what the desktop's calendar
+    /// widget shows. Laid out as [`generate_grid`](Self::generate_grid) lays
+    /// out the popup's month, from the same week start, so the two cannot
+    /// disagree about which day is where; the popup's own month, today and
+    /// choice are left as they are.
+    #[must_use]
+    pub fn month_glance(&self, utc_now: u64, tz: &Tz, store: &EventStore) -> MonthGlance {
+        let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_now, tz));
+        let days = Date::from_ymd(year, month, 1)
+            .month_grid(self.week_start())
+            .map(|date| {
+                let (y, m, d) = date.ymd();
+                let events = store.events_for_date(y, m, d);
+                GlanceDay {
+                    day: d,
+                    name: day_name(y, m, d),
+                    current_month: (y, m) == (year, month),
+                    today: (y, m, d) == (year, month, day),
+                    events: events.len(),
+                    event_color: events.first().and_then(|event| event.color),
+                }
+            })
+            .collect();
+        MonthGlance {
+            title: format!("{} {}", month_name(month), year),
+            weekdays: dow_headers(self.config.first_day_of_week),
+            days,
+        }
     }
 
     /// The 1st of the month on display.
@@ -3887,6 +3990,87 @@ mod tests {
     /// test nothing.
     fn tz(s: &str) -> Tz {
         Tz::parse(s.as_bytes()).expect("test TZ string should parse")
+    }
+
+    /// **The calendar widget's month is the one today is in, laid out as the
+    /// popup lays it out** -- six weeks from the week holding the 1st, today
+    /// marked, each day named and described as the popup's are -- whatever
+    /// month the popup was left on, which it leaves as it was.
+    #[test]
+    fn a_glance_is_todays_month_laid_out_as_the_popup_lays_it_out() {
+        let mut cal = CalendarView::new(CalendarConfig::default());
+        cal.set_today(2020, 2, 1);
+        cal.go_to_today();
+        let now = date_to_timestamp(2026, 10, 6, 12, 0, 0).expect("valid");
+        let mut store = EventStore::new();
+        let mut dentist = make_event("Dentist", now, now + 3600);
+        dentist.color = Some(Color::from_hex(0xC82828));
+        add(&mut store, dentist);
+
+        let glance = cal.month_glance(now, &Tz::UTC, &store);
+        assert_eq!(glance.title, "October 2026");
+        assert_eq!(glance.weekdays, ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]);
+        let mut popup = CalendarView::new(CalendarConfig::default());
+        popup.set_today(2026, 10, 6);
+        popup.go_to_today();
+        let grid = popup.generate_grid();
+        assert_eq!(glance.days.len(), grid.len());
+        for (day, cell) in glance.days.iter().zip(&grid) {
+            assert_eq!((day.day, day.current_month), (cell.day, cell.current_month));
+        }
+        assert_eq!(glance.days[0].name, "Sunday 27 September 2026");
+        assert_eq!(
+            glance.days[0].description().as_deref(),
+            Some("another month")
+        );
+        let today: Vec<&GlanceDay> = glance.days.iter().filter(|day| day.today).collect();
+        assert_eq!(today.len(), 1, "one today");
+        assert_eq!(today[0].name, "Tuesday 6 October 2026");
+        assert_eq!(
+            (today[0].events, today[0].event_color),
+            (1, Some(Color::from_hex(0xC82828)))
+        );
+        assert_eq!(today[0].description().as_deref(), Some("today, 1 event"));
+        assert_eq!(
+            (cal.view_year, cal.view_month, cal.today),
+            (2020, 2, (2020, 2, 1)),
+            "the popup's month was moved"
+        );
+    }
+
+    /// **A glance's today is the zone's**: half past eleven at night on the
+    /// last of October, in UTC, is already November in Tokyo.
+    #[test]
+    fn a_glances_today_is_the_zones() {
+        let cal = CalendarView::new(CalendarConfig::default());
+        let now = date_to_timestamp(2026, 10, 31, 23, 30, 0).expect("valid");
+        let store = EventStore::new();
+        assert_eq!(
+            cal.month_glance(now, &Tz::UTC, &store).title,
+            "October 2026"
+        );
+        let tokyo = cal.month_glance(now, &tz("JST-9"), &store);
+        assert_eq!(tokyo.title, "November 2026");
+        let today: Vec<&str> = tokyo
+            .days
+            .iter()
+            .filter(|day| day.today)
+            .map(|day| day.name.as_str())
+            .collect();
+        assert_eq!(today, ["Sunday 1 November 2026"]);
+    }
+
+    /// A glance's week starts on the day the user's does.
+    #[test]
+    fn a_glances_week_starts_where_the_users_does() {
+        let cal = CalendarView::new(CalendarConfig {
+            first_day_of_week: FirstDayOfWeek::Monday,
+            ..CalendarConfig::default()
+        });
+        let now = date_to_timestamp(2026, 10, 6, 12, 0, 0).expect("valid");
+        let glance = cal.month_glance(now, &Tz::UTC, &EventStore::new());
+        assert_eq!(glance.weekdays[0], "Mo");
+        assert_eq!(glance.days[0].name, "Monday 28 September 2026");
     }
 
     #[test]

@@ -2365,20 +2365,6 @@ unsafe fn spawn_loaded(
     0
 }
 
-/// Spawn a new process, searching the PATH for the executable.
-///
-/// Like `posix_spawn` but `file` is searched for in the directories
-/// listed in the `PATH` environment variable.  If `file` contains a
-/// `/`, it is used directly without PATH search.
-///
-/// The search follows glibc's `posix_spawnp`: each candidate is *loaded*,
-/// failures in [`search_continues_after`]'s set move on to the next
-/// directory, `EACCES` is remembered and reported if nothing is found, and
-/// there is no shell fallback for a file that is not a program — that is
-/// `execvp`'s rule, not this one's. The file actions run once, against the
-/// program that was found (see [`spawn_loaded`] for why that matters).
-///
-/// Returns 0 on success, or an error number on failure.
 /// `posix_spawn`, answering a pidfd for the child in `*pidfd` rather than
 /// its pid (glibc 2.39).
 ///
@@ -2415,6 +2401,20 @@ pub extern "C" fn pidfd_spawnp(
     errno::ENOSYS
 }
 
+/// Spawn a new process, searching the PATH for the executable.
+///
+/// Like `posix_spawn` but `file` is searched for in the directories
+/// listed in the `PATH` environment variable.  If `file` contains a
+/// `/`, it is used directly without PATH search.
+///
+/// The search follows glibc's `posix_spawnp`: each candidate is *loaded*,
+/// failures in [`search_continues_after`]'s set move on to the next
+/// directory, `EACCES` is remembered and reported if nothing is found, and
+/// there is no shell fallback for a file that is not a program — that is
+/// `execvp`'s rule, not this one's. The file actions run once, against the
+/// program that was found (see [`spawn_loaded`] for why that matters).
+///
+/// Returns 0 on success, or an error number on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnp(
     pid: *mut PidT,

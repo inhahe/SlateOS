@@ -83,7 +83,9 @@
 //! did not happen. It buffers the way stdio does (line-buffered to a terminal,
 //! block-buffered otherwise, unbuffered on stderr), so the interleaving of a
 //! utility's output with its diagnostics matches what the same program does
-//! under glibc.
+//! under glibc — and by glibc's own arithmetic ([`crate::stdio::xsputn`]), so
+//! that what is still held when the stream is closed is what glibc would hold,
+//! which decides whether a full disk's last word has a reason in it.
 //!
 //! ## The same question about descriptor 2: [`crate::diag!`] and [`close_stderr`]
 //!
@@ -1308,23 +1310,18 @@ pub fn exit_now(earned: u8, failure: u8) -> ! {
     std::process::exit(i32::from(status))
 }
 
-/// How much a [`Stream`] holds before it goes to the descriptor.
-///
-/// stdio picks this from the destination's `st_blksize`; 4096 is what that is
-/// on every filesystem these utilities are run on, and the only thing the size
-/// decides is how often `write(2)` is called.
-const BUFFER: usize = 4096;
-
 /// Whether output accumulates, and for how long.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Buffering {
     /// Every write goes straight out. What stdio does for stderr, so that a
     /// diagnostic survives whatever happens next.
     None,
-    /// Flushed at each newline. What stdio does for a stream on a terminal,
-    /// and the reason a prompt appears before the thing it is prompting for.
+    /// Written through each newline, and when full. What stdio does for a
+    /// stream on a terminal, and the reason a prompt appears before the thing
+    /// it is prompting for.
     Line,
-    /// Flushed when full. What stdio does for a stream on a file or a pipe.
+    /// Written when a write finds the buffer full. What stdio does for a
+    /// stream on a file or a pipe.
     Block,
 }
 
@@ -1336,6 +1333,13 @@ enum Buffering {
 struct Inner {
     buf: Vec<u8>,
     mode: Buffering,
+    /// The buffer's size, chosen at the first write as stdio chooses it, from
+    /// the descriptor's `st_blksize` ([`crate::stdio::buffer_size`]): 4096 for
+    /// a file, a pipe or `/dev/full` on Linux, 1024 for a terminal. `None`
+    /// until then, which matters as much as the size does: the first write
+    /// finds no buffer to put anything in, so its whole blocks go straight
+    /// out ([`crate::stdio::xsputn`]).
+    size: Option<usize>,
     /// The first delivery failure. Sticky: a later success does not clear it,
     /// because the bytes lost to the first one are still lost.
     error: Option<io::Error>,
@@ -1346,6 +1350,7 @@ impl Inner {
         Self {
             buf: Vec::new(),
             mode,
+            size: None,
             error: None,
         }
     }
@@ -1379,31 +1384,54 @@ impl Inner {
         }
     }
 
-    /// One `write`, honouring the buffering mode. Never fails; see [`Stream`].
+    /// One `write`, honouring the buffering mode: stdio's `fwrite`, through
+    /// glibc's own arithmetic ([`crate::stdio::xsputn`]). Never fails; see
+    /// [`Stream`].
+    ///
+    /// The arithmetic is not a detail. It decides what is still held when the
+    /// stream is closed, and so whether [`Stream::finish`] after a failure has
+    /// a reason to give. Measured against glibc 2.39 onto `/dev/full`: four
+    /// writes of 1024 bytes leave a full buffer for the close to fail on
+    /// (`write error: No space left on device`) where five leave nothing (a
+    /// bare `write error`), and a line-buffered `x\nxxx` loses its `xxx` with
+    /// the failed line. Draining everything once 4096 bytes had accumulated,
+    /// as this did until 2026-10-07, got all three backwards -- and on a disk
+    /// that fills part-way it wrote out the remainder glibc keeps for the
+    /// close. The `glibc_measured` test holds the table.
     fn put(&mut self, fd: i32, bytes: &[u8]) {
         before_diagnostic(fd);
-        match self.mode {
+        if bytes.is_empty() {
+            // Nothing to write allocates nothing, as `fwrite` of nothing does
+            // not: the first real write is still the first.
+            return;
+        }
+        let line = match self.mode {
             Buffering::None => {
                 if let Err(e) = imp::write_all(fd, bytes) {
                     self.record(fd, e);
                 }
+                return;
             }
-            Buffering::Line => {
-                self.buf.extend_from_slice(bytes);
-                // Everything up to and including the last newline goes now;
-                // a partial line waits for the rest of itself.
-                if let Some(end) = self.buf.iter().rposition(|&b| b == b'\n') {
-                    let rest = self.buf.split_off(end.saturating_add(1));
-                    self.drain(fd);
-                    self.buf = rest;
-                }
-            }
-            Buffering::Block => {
-                self.buf.extend_from_slice(bytes);
-                if self.buf.len() >= BUFFER {
-                    self.drain(fd);
-                }
-            }
+            Buffering::Line => true,
+            Buffering::Block => false,
+        };
+        let first = self.size.is_none();
+        // An `fstat` that fails is not a failure to report: glibc's
+        // `_IO_file_doallocate` asks the same question, takes no answer as
+        // `BUFSIZ`, and the write goes on to meet the descriptor itself.
+        let size = *self
+            .size
+            .get_or_insert_with(|| crate::stdio::buffer_size(imp::metadata(fd).ok().as_ref()));
+        let mut held = std::mem::take(&mut self.buf);
+        if first {
+            held.reserve(size);
+        }
+        let result = crate::stdio::xsputn(&mut held, size, first, line, bytes, &mut |b| {
+            imp::write_all(fd, b)
+        });
+        self.buf = held;
+        if let Err(e) = result {
+            self.record(fd, e);
         }
     }
 }
@@ -1566,22 +1594,15 @@ impl Stream {
         if fd == 1 {
             // A handle onto the shared state. The mode is (re)applied because
             // it is this call that knows whether descriptor 1 is a terminal;
-            // the buffer and the error flag are deliberately left alone, since
-            // an earlier handle's pending bytes and earlier handle's failure
-            // both still belong to the stream.
-            with_stdout(|inner| {
-                inner.mode = mode;
-                inner.buf.reserve(BUFFER.saturating_sub(inner.buf.len()));
-            });
+            // the buffer, its size and the error flag are deliberately left
+            // alone, since an earlier handle's pending bytes, its first write
+            // and its failure all still belong to the stream.
+            with_stdout(|inner| inner.mode = mode);
             return Self { fd, own: None };
-        }
-        let mut inner = Inner::new(mode);
-        if mode != Buffering::None {
-            inner.buf.reserve(BUFFER);
         }
         Self {
             fd,
-            own: Some(inner),
+            own: Some(Inner::new(mode)),
         }
     }
 
@@ -1750,7 +1771,7 @@ impl Drop for Stream {
     clippy::arithmetic_side_effects
 )]
 mod tests {
-    use super::{BUFFER, Buffering, Inner, Stream};
+    use super::{Buffering, Inner, Stream};
     use std::io::Write;
     use std::sync::{Mutex, PoisonError};
 
@@ -1807,13 +1828,45 @@ mod tests {
         assert!(s.errored(), "an unbuffered write is attempted at once");
     }
 
+    /// What a stream on a descriptor nothing can be asked about chooses as its
+    /// buffer: glibc's `BUFSIZ`, which is where a failed `fstat` leaves it.
+    const UNKNOWN: usize = 8192;
+
     #[test]
-    fn block_buffered_holds_until_full() {
+    fn block_buffered_holds_until_a_write_finds_it_full() {
         let mut s = broken(Buffering::Block);
+        assert_eq!(inner(&s).size, None, "no buffer before the first write");
         let _ = s.write(b"x");
         assert!(!s.errored(), "one byte does not reach the descriptor yet");
-        let _ = s.write(&vec![b'y'; BUFFER]);
-        assert!(s.errored(), "crossing the buffer size does");
+        assert_eq!(inner(&s).size, Some(UNKNOWN), "the first write chose it");
+        // Exactly full is still held: stdio writes the buffer only when a
+        // byte needs room in it.
+        let _ = s.write(&vec![b'y'; UNKNOWN - 1]);
+        assert!(!s.errored(), "a full buffer waits for the next write");
+        let _ = s.write(b"z");
+        assert!(s.errored(), "which writes it");
+        assert!(
+            inner(&s).buf.is_empty(),
+            "and loses the byte that needed the room, as fwrite does"
+        );
+    }
+
+    #[test]
+    fn a_first_write_of_a_whole_buffer_goes_straight_out() {
+        // No buffer exists before the first write, so nothing fits in it:
+        // its whole blocks are written at once, and a failure there leaves
+        // nothing held.
+        let mut s = broken(Buffering::Block);
+        let _ = s.write(&vec![b'a'; UNKNOWN + 5]);
+        assert!(s.errored());
+        assert!(inner(&s).buf.is_empty());
+    }
+
+    #[test]
+    fn nothing_written_chooses_no_buffer() {
+        let mut s = broken(Buffering::Block);
+        let _ = s.write(b"");
+        assert_eq!(inner(&s).size, None, "the next write is still the first");
     }
 
     #[test]
@@ -1826,14 +1879,97 @@ mod tests {
     }
 
     #[test]
-    fn line_buffered_keeps_the_tail_after_the_last_newline() {
+    fn a_failed_line_takes_the_rest_of_its_write_with_it() {
         let mut s = broken(Buffering::Line);
         let _ = s.write(b"a\nb");
+        assert!(s.errored());
+        assert!(
+            inner(&s).buf.is_empty(),
+            "fwrite stops at the failure, so nothing is left for the close"
+        );
+    }
+
+    /// A stream on a descriptor that takes everything: `/dev/null`, whose
+    /// block size is 4096. Linux only -- the host has no descriptor to write
+    /// to but the runner's own.
+    #[cfg(target_os = "linux")]
+    fn null(mode: Buffering) -> (Stream, std::fs::File) {
+        use std::os::fd::AsRawFd;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        (Stream::new(f.as_raw_fd(), mode), f)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn line_buffered_keeps_the_tail_after_the_last_newline() {
+        let (mut s, _keep) = null(Buffering::Line);
+        let _ = s.write(b"a\nb");
+        assert!(!s.errored());
         assert_eq!(
             inner(&s).buf,
             b"b",
             "the tail is held back, not sent or dropped"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn block_buffered_keeps_the_remainder_past_the_last_whole_block() {
+        let (mut s, _keep) = null(Buffering::Block);
+        let _ = s.write(b"x");
+        assert_eq!(inner(&s).size, Some(4096), "/dev/null's st_blksize");
+        // 4095 fill the buffer, which goes; 4096 of the 4106 left go
+        // directly; 10 are held.
+        let _ = s.write(&[b'y'; 4095 + 4096 + 10]);
+        assert_eq!(inner(&s).buf.len(), 10);
+    }
+
+    /// The writes the probe measured, made through a `Stream` onto
+    /// `/dev/full`, against what glibc 2.39's stdout held at `fclose`,
+    /// whether `ferror` was set by then, and so which of gnulib's two
+    /// sentences `close_stdout` ends with: the reason (the close had
+    /// something to write, and failed) or none (an earlier write failed and
+    /// nothing was left). Measured on 2026-10-07 with a C program doing the
+    /// same `fwrite`s, `setvbuf (stdout, NULL, _IOLBF, 0)` for the
+    /// line-buffered rows.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn glibc_measured() {
+        // (what is written, how many times, line-buffered,
+        //  glibc's pending bytes at the close, ferror then, close has a reason)
+        let rows: &[(&[u8], usize, bool, usize, bool, bool)] = &[
+            (&[b'x'; 5000], 1, false, 0, true, false),
+            (&[b'x'; 4096], 1, false, 0, true, false),
+            (&[b'x'; 100], 50, false, 900, true, true),
+            (&[b'x'; 1024], 4, false, 4096, false, true),
+            (&[b'x'; 1024], 5, false, 0, true, false),
+            (b"x\nxxx", 1, true, 0, true, false),
+            (b"x\nxxx", 2, true, 0, true, false),
+            (&[b'x'; 5000], 1, true, 0, true, false),
+        ];
+        for &(piece, times, line, pending, ferror, reason) in rows {
+            let mode = if line {
+                Buffering::Line
+            } else {
+                Buffering::Block
+            };
+            let (mut s, _keep) = full(mode);
+            for _ in 0..times {
+                let _ = s.write(piece);
+            }
+            let row = format!("{} x {times}, line {line}", piece.len());
+            assert_eq!(inner(&s).buf.len(), pending, "pending: {row}");
+            assert_eq!(s.errored(), ferror, "ferror: {row}");
+            let e = s.finish().unwrap_err();
+            assert_eq!(
+                !super::is_earlier_failure(&e),
+                reason,
+                "reason: {row}, got {e}"
+            );
+        }
     }
 
     #[test]
@@ -1905,8 +2041,11 @@ mod tests {
         // descriptor -1 fails without an errno -- and not the sentinel.
         assert!(!super::is_earlier_failure(&e));
 
+        // Two writes: one, `first\nsecond`, would lose `second` with the
+        // failed line, as glibc's does, and leave the close nothing.
         let mut s = broken(Buffering::Line);
-        let _ = s.write(b"first\nsecond, pending");
+        let _ = s.write(b"first\n");
+        let _ = s.write(b"second, pending");
         let e = s.finish().unwrap_err();
         assert!(
             !super::is_earlier_failure(&e),

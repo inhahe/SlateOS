@@ -23,6 +23,22 @@ refuses. Both binaries carry this library's Rust machinery (2,606 Rust
 symbols in `gdb`, `rust_begin_unwind` among them) and none of musl's own,
 so the link is against ours.
 
+## On the image
+
+`scripts/create-ext4-rootfs.sh` stages the two as **`/bin/gnu-gdb`** and
+**`/bin/gdbserver`**, each with its symbol table and without its DWARF. The
+debugger is not `/bin/gdb`: that name belongs to lane B's hand-written
+debugger (`userspace/gdb`) until lane B decides otherwise
+(`requests/d-b-gnu-gdb-is-on-the-image-and-could-take-bin-gdb.md`).
+`slatelink.sh` is the link step on its own: it relinks the compiled objects
+against the current `libc.a`, checks the link took ours, and stages the
+stripped copies in `build/spike/`. The recipe runs it whenever `libc.a` is
+newer than they are, as it does for Oils' and LLVM's. `run.sh` ends by
+running it. `services/ctest-gdb-runs/` runs both programs on SlateOS. It
+waits on lane A's generic rung (`requests/d-a-one-rung-for-every-c-fixture.md`).
+
+## Reproducing
+
 Run `./run.sh` from WSL to reproduce. It is the "try the port before you write
 a line" step from `roadmap-detailed.md`'s *Porting vs. Reimplementing* policy,
 applied to the debugger the operator asked for in design-decisions.md 1050

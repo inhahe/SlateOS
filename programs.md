@@ -13,7 +13,7 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**465 programs; 306 on the image, 6 carried inside the kernel.**
+**467 programs; 308 on the image, 6 carried inside the kernel.**
 
 ## Userland utilities and services (`userspace/`, lane B) -- 297
 
@@ -499,7 +499,7 @@ two disagree.
 |---|---|---|---|---|
 | `kernel` | Kernel entry point. |  |  |  |
 
-## Ported programs (`scripts/`, the rootfs recipe's) -- 11
+## Ported programs (`scripts/`, the rootfs recipe's) -- 13
 
 Programs that are no cargo target, each built by its own scripts and
 staged by `scripts/create-ext4-rootfs.sh`: upstream C and C++ programs
@@ -513,6 +513,8 @@ when it has been built on the machine that makes it.
 | `cmake` | CMake 4.4.3, the build-system generator. | yes | `scripts/cmake-spike/` |  |
 | `espeak-ng` | eSpeak NG 1.52.0, the speech synthesizer. | yes | `scripts/espeak-spike/` |  |
 | `fastpy` | fastpy, which compiles a Python program into a native SlateOS program. | yes | `scripts/fastpy-slateos-bundle.py` |  |
+| `gdbserver` | GDB 18.1's remote stub, run beside the program being debugged; waits on the kernel as gdb does. | yes | `scripts/gdb-spike/` |  |
+| `gnu-gdb` | GDB 18.1, the GNU debugger: examines a program's symbols and machine code; running one under it waits on the kernel. | yes | `scripts/gdb-spike/` |  |
 | `ld.lld` | LLVM 20.1.8's linker, lld. | yes | `scripts/llvm-spike/` |  |
 | `llc` | LLVM 20.1.8's code generator: LLVM IR to an object file. | yes | `scripts/llvm-spike/` |  |
 | `make` | GNU make 4.4.1, the build tool. | yes | `scripts/make-spike/` |  |

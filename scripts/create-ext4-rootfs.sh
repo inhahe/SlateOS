@@ -1171,6 +1171,11 @@ else
     # against the new libc.a and stages the stripped binary again.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/oils-for-unix-slateos.elf" \
         scripts/oils-spike/slatelink.sh
+    # GDB's relink is seconds: slatelink.sh links the objects run.sh compiled
+    # against the new libc.a and stages gdb and gdbserver again. One artifact
+    # stands for the two, which are always linked and staged together.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/gdb-slateos.elf" \
+        scripts/gdb-spike/slatelink.sh
     # Oils' spec tests are behind when the harness they carry is not the
     # tree's (oils_spec_current). Rebuilding records the Linux expectations
     # again, about seven minutes, which is the point: expectations recorded by
@@ -1466,6 +1471,63 @@ elif [ -f "$OILS_SPEC/usr/share/oils-spec/run_all.py" ]; then
 else
     echo "[rootfs] NOTE: $OILS_SPEC not found — Oils' spec tests will be absent"
     echo "[rootfs]       (build them with: wsl -d Ubuntu --exec bash scripts/oils-spec/bundle.sh)"
+fi
+
+# --- GDB 18.1, the GNU debugger, linked against OUR OWN libc -----------------
+# The debugger the operator asked for (design-decisions.md §1050), built by
+# scripts/gdb-spike/run.sh with GMP and MPFR and relinked against libc.a by its
+# slatelink.sh -- nothing missing and nothing duplicated (its README). Staged
+# with each program's symbol table and without its DWARF, which slatelink.sh
+# strips: about 14 MB for gdb and 3 MB for gdbserver.
+#
+# What it can do here today: examine a program without running it -- its
+# symbols, its machine code, its types where they were kept -- and debug a
+# remote target as a client. It cannot yet run a program under its control:
+# that needs the kernel's ptrace and /proc/<pid>/mem, asked of lane A in
+# requests/d-a-a-debugger-needs-ptrace-for-native-programs.md. gdbserver, the
+# half that runs beside the program being debugged, waits on the same.
+#
+# Staleness: the rule bash's has -- absent is honest (NOTE), older than libc.a
+# is a lie (fatal); the relink pass above is what normally keeps it fresh. The
+# two are linked and staged together, so they are judged together.
+#
+# /bin/gnu-gdb, not /bin/gdb: that name is lane B's hand-written debugger
+# (userspace/gdb, a workspace program, staged as every one is), and two
+# programs staged at one path leave the image holding whichever was copied
+# last. The port takes /bin/gdb when lane B agrees
+# (requests/d-b-gnu-gdb-is-on-the-image-and-could-take-bin-gdb.md), as genuine
+# Oils takes /bin/osh only once the Rust OSH is renamed. /bin/gdbserver is
+# nobody else's.
+# PROGRAM: /bin/gnu-gdb -- GDB 18.1, the GNU debugger: examines a program's symbols and machine code; running one under it waits on the kernel. (scripts/gdb-spike/)
+# PROGRAM: /bin/gdbserver -- GDB 18.1's remote stub, run beside the program being debugged; waits on the kernel as gdb does. (scripts/gdb-spike/)
+GDB_SLATE="$ROOT_DIR/build/spike/gdb-slateos.elf"
+GDBSERVER_SLATE="$ROOT_DIR/build/spike/gdbserver-slateos.elf"
+GDB_STALE=0
+if [ -e "$GDB_SLATE" ] && [ -e "$GDBSERVER_SLATE" ]; then
+    cp -L "$GDB_SLATE" "$STAGE/bin/gnu-gdb"
+    cp -L "$GDBSERVER_SLATE" "$STAGE/bin/gdbserver"
+    chmod 0755 "$STAGE/bin/gnu-gdb" "$STAGE/bin/gdbserver"
+    echo "[rootfs] staged GDB 18.1 (linked against our libc.a): /bin/gnu-gdb" \
+         "($(stat -c %s "$STAGE/bin/gnu-gdb") bytes), /bin/gdbserver" \
+         "($(stat -c %s "$STAGE/bin/gdbserver") bytes)"
+    for f in "$GDB_SLATE" "$GDBSERVER_SLATE"; do
+        if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+           && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$f" ]; then
+            echo "[rootfs] WARNING: $(basename "$f") is OLDER than the sysroot libc.a — it links a"
+            echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+            echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/gdb-spike/slatelink.sh"
+            GDB_STALE=1
+        fi
+    done
+elif [ -e "$GDB_SLATE" ] || [ -e "$GDBSERVER_SLATE" ]; then
+    # One without the other is a half-finished relink, not a choice.
+    echo "[rootfs] ERROR: build/spike has one of gdb-slateos.elf and gdbserver-slateos.elf"
+    echo "[rootfs]        without the other; slatelink.sh stages both or neither. Relink them:"
+    echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/gdb-spike/slatelink.sh"
+    exit 1
+else
+    echo "[rootfs] NOTE: $GDB_SLATE not found — /bin/gnu-gdb and /bin/gdbserver will be absent"
+    echo "[rootfs]       (build them with: wsl -d Ubuntu --exec bash scripts/gdb-spike/run.sh)"
 fi
 
 # --- eSpeak NG 1.52, likewise linked against OUR OWN libc --------------------
@@ -2397,6 +2459,22 @@ if [ "$OILS_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/oils-for-unix and /bin/ysh on the image would be built"
         echo "[rootfs]        against a libc that is no longer in the build. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/oils-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed.)"
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
+if [ "$GDB_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: gdb-slateos.elf or gdbserver-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike's gdb-slateos.elf or gdbserver-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/gnu-gdb and /bin/gdbserver on the image would be built"
+        echo "[rootfs]        against a libc that is no longer in the build. Relink them:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/gdb-spike/slatelink.sh"
         echo "[rootfs]        (normally run for you -- this means that relink failed.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1

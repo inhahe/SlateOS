@@ -104,6 +104,7 @@ will close them myself as each one goes on.
 | `ctest-groups` | -- (filed with `getgroups`, 2026-10-06); installs groups, reads them back, and runs a copy of itself from `/tmp` under a name that forges a `Groups:` line | file,creds | 30 |
 | `ctest-fallocate` | -- (filed with `fallocate`, 2026-10-06); grows a file in `/tmp` by 200 KB of zeros | file | 30 |
 | `ctest-string` | -- (filed with the SSE2 memory and string functions, 2026-10-06); sets strings against pages it takes away with `mprotect` | - | 60 |
+| `ctest-gdb-runs` | -- (filed with GDB 18.1 on the image, 2026-10-07; `scripts/gdb-spike/`); runs `/bin/gnu-gdb` and `/bin/gdbserver` -- start-up, `print 6*7`, a symbol read from another program's ELF -- the image's largest C++ program, and its first run here | file | 300 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)

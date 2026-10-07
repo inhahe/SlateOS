@@ -34,7 +34,11 @@
 set -uo pipefail
 set -x
 
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
+# Absolute, before any cd: slatelink.sh is run from here at the end, after
+# the build has moved into the work tree, and the recipe runs this by a path
+# relative to the tree's root.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+. "$HERE/../lib/worktree.sh" || exit 1
 
 SYSROOT="$SLATE_SYSROOT"
 WORK="$SLATE_WORK/gdb-spike"
@@ -150,47 +154,7 @@ make -k -j"$JOBS" all-gdb all-gdbserver >make.log 2>&1
 echo "MAKE_EXIT=$?"
 grep -E ' error: |Error [0-9]' make.log | grep -v 'undefined symbol' | head -30
 
-# The decisive step: each program's link on its own, so its counts can be
-# read. The build above linked through the same wrapper; the objects exist
-# now, so make does only the link again (or nothing, if it succeeded).
-built=0
-measure() {
-    local name="$1" dir="$2" bin="$3"
-    rm -f "$dir/$bin"
-    make -C "$dir" "$bin" >"$name-link.log" 2>&1
-    echo "${name}_LINK_EXIT=$?"
-    # A link make never reached -- an object that did not compile -- has no
-    # undefined symbols to count, and a count of 0 beside it would read as
-    # "nothing is missing". Said instead, with the reason. Reached means the
-    # linker ran: it made the program, or wrote why not. (Not "the log names
-    # ld.lld" alone: a link that succeeds prints only make's CXXLD line, and
-    # the first version of this test called GDB's clean link unreached.)
-    if [ ! -x "$dir/$bin" ] && ! grep -q "ld\.lld" "$name-link.log"; then
-        echo "${name}_LINK_NOT_REACHED -- the build of its objects failed:"
-        grep -E ' error: |Error [0-9]|No rule to make' "$name-link.log" | head -10
-        echo "NO_SLATE_${name}_BINARY"
-        return
-    fi
-    grep -oP "undefined symbol: \K.*" "$name-link.log" | sort -u >"$name-missing.txt"
-    echo "${name}_MISSING_COUNT=$(wc -l <"$name-missing.txt")"
-    cat "$name-missing.txt"
-    # Counted apart, and printed even at zero: a link can fail by a symbol
-    # defined twice as surely as by one defined nowhere (make-spike's note).
-    grep -oP "duplicate symbol: \K.*" "$name-link.log" | sort -u >"$name-dupes.txt"
-    echo "${name}_DUPLICATE_COUNT=$(wc -l <"$name-dupes.txt")"
-    cat "$name-dupes.txt"
-    if [ -x "$dir/$bin" ]; then
-        file "$dir/$bin"
-        readelf -h "$dir/$bin" | grep -E "Type|Entry"
-        cp "$dir/$bin" "$SLATE_SPIKE/$bin-slateos.elf"
-        ls -l "$SLATE_SPIKE/$bin-slateos.elf"
-        echo "SLATE_${name}_BUILT"
-        built=$((built + 1))
-    else
-        echo "NO_SLATE_${name}_BINARY"
-    fi
-}
-measure GDB gdb gdb
-measure GDBSERVER gdbserver gdbserver
-# Success is both programs linked, and nothing less.
-[ "$built" -eq 2 ] || exit 1
+# The decisive step, each program's link against our libc.a on its own so
+# its counts can be read, and the stripped copies for the image: the same
+# step the rootfs recipe runs alone when libc.a has moved on since.
+exec bash "$HERE/slatelink.sh"

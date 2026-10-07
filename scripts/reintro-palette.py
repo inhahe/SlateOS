@@ -3410,12 +3410,13 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPP: the clock's time keeps Mocha's text",
         WID,
         [
-            ('                    text: live.clock_time.clone(),\n                    font_size: 36.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n',
-             '                    text: live.clock_time.clone(),\n                    font_size: 36.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),\n'),
+            ('                    text: live.clock_time.clone(),\n                    font_size: CLOCK_TIME.size,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n',
+             '                    text: live.clock_time.clone(),\n                    font_size: CLOCK_TIME.size,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),\n'),
         ],
         ["desktop"],
         [
             # Re-derived 2026-09-27 against the code as it now reads. The clock draws the live reading now.
+            # Re-derived 2026-10-06: its size is the `CLOCK_TIME` line's, which tools are told too.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -3424,12 +3425,13 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQ: the clock's date is dimmed to a placeholder",
         WID,
         [
-            ('                    text: live.clock_date.clone(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
-             '                    text: live.clock_date.clone(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),\n'),
+            ('                    text: live.clock_date.clone(),\n                    font_size: date.size,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                    text: live.clock_date.clone(),\n                    font_size: date.size,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),\n'),
         ],
         ["desktop"],
         [
             # Re-derived 2026-09-27 against the code as it now reads. The clock draws the live reading now.
+            # Re-derived 2026-10-06: the date is the line below the time's (`clock_date`).
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -3452,13 +3454,14 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSS: the CPU meter's track steps up a surface",
         WID,
         [
-            ('                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
-             '                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),\n'),
+            ('                        y: row + METER_TROUGH_TOP,\n                        width,\n                        height: METER_TROUGH_HEIGHT,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
+             '                        y: row + METER_TROUGH_TOP,\n                        width,\n                        height: METER_TROUGH_HEIGHT,\n                        color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),\n'),
         ],
         ["desktop"],
         [
             # Re-derived 2026-09-27 against the code as it now reads. The three meters share one
             # trough now, so this steps all three up.
+            # Re-derived 2026-10-06: the trough's place is named (`METER_TROUGH_TOP`), as tools are told it.
             'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
@@ -3466,11 +3469,12 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTT: the CPU meter follows the accent",
         WID,
         [
-            ('                    ("CPU", live.cpu_fraction, p.blue),\n',
-             '                    ("CPU", live.cpu_fraction, p.accent),\n'),
+            ('                        Meter::Cpu => p.blue,\n',
+             '                        Meter::Cpu => p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: the loop walks `Meter::ALL`, each meter's role chosen by a match.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The system monitor draws its three meters in one loop now, each with its own role.
             # This is module 19's slider rule applied to something that is not a
@@ -3499,13 +3503,14 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWW: the Memory meter's track keeps Mocha's surface1",
         WID,
         [
-            ('                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
-             '                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(0x45, 0x47, 0x5A, alpha),\n'),
+            ('                        y: row + METER_TROUGH_TOP,\n                        width,\n                        height: METER_TROUGH_HEIGHT,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
+             '                        y: row + METER_TROUGH_TOP,\n                        width,\n                        height: METER_TROUGH_HEIGHT,\n                        color: Color::rgba(0x45, 0x47, 0x5A, alpha),\n'),
         ],
         ["desktop"],
         [
             # Re-derived 2026-09-27 against the code as it now reads. The three meters share one
             # trough now, so this is every meter's track.
+            # Re-derived 2026-10-06: the trough's place is named (`METER_TROUGH_TOP`), as tools are told it.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'nothing_that_reports_a_measurement_follows_the_accent',
         ],
@@ -3514,11 +3519,12 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXX: the Memory meter is the same colour as the CPU meter",
         WID,
         [
-            ('                    ("Memory", live.memory_fraction, p.green),\n',
-             '                    ("Memory", live.memory_fraction, p.blue),\n'),
+            ('                        Meter::Memory => p.green,\n',
+             '                        Meter::Memory => p.blue,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: the loop walks `Meter::ALL`, each meter's role chosen by a match.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The system monitor draws its three meters in one loop now, each with its own role.
             'nothing_that_reports_a_measurement_follows_the_accent',
@@ -3546,11 +3552,12 @@ DEFECTS = [
         "AAAAAAAAAAAAAAAAAA: the Disk meter follows the accent",
         WID,
         [
-            ('                    ("Disk", live.disk_fraction, p.peach),\n',
-             '                    ("Disk", live.disk_fraction, p.accent),\n'),
+            ('                        Meter::Disk => p.peach,\n',
+             '                        Meter::Disk => p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: the loop walks `Meter::ALL`, each meter's role chosen by a match.
             # Re-derived 2026-09-27 against the code as it now reads.
             # The system monitor draws its three meters in one loop now, each with its own role.
             'nothing_that_reports_a_measurement_follows_the_accent',
@@ -3638,12 +3645,13 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGG: the battery's reading keeps Mocha's text",
         WID,
         [
-            ('                    text: headline,\n                    font_size: 20.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n',
-             '                    text: headline,\n                    font_size: 20.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),\n'),
+            ('                    text: charge_text(b),\n                    font_size: BATTERY_CHARGE.size,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n',
+             '                    text: charge_text(b),\n                    font_size: BATTERY_CHARGE.size,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),\n'),
         ],
         ["desktop"],
         [
             # Re-derived 2026-09-27 against the code as it now reads. The reading is the live charge now.
+            # Re-derived 2026-10-06: the words are `charge_text`'s, which tools are told too.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -3652,12 +3660,13 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHH: the battery's estimate is promoted to body text",
         WID,
         [
-            ('                        font_size: 11.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
-             '                        font_size: 11.0,\n                        color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n'),
+            ('                        font_size: estimate.size,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                        font_size: estimate.size,\n                        color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n'),
         ],
         ["desktop"],
         [
             # Re-derived 2026-09-27 against the code as it now reads. The estimate is drawn only when one is known.
+            # Re-derived 2026-10-06: the estimate is the line below the charge's (`battery_estimate`).
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -3680,11 +3689,12 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJ: the generic widget's label is dimmed to a placeholder",
         WID,
         [
-            ('font_size: 13.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'font_size: 13.0,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),'),
+            ('font_size: PLACEHOLDER_SIZE,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
+             'font_size: PLACEHOLDER_SIZE,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: the label's size is named (`PLACEHOLDER_SIZE`), as tools are told its box.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -6610,11 +6620,13 @@ DEFECTS = [
         'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a row name is frozen back to Mocha text',
         LOGIN,
         [
-            ('                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.text,',
-             '                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: Color::from_hex(0xCDD6F4),'),
+            ('                text: user.shown_name().to_owned(),\n                font_size: 16.0,\n                color: p.text,',
+             '                text: user.shown_name().to_owned(),\n                font_size: 16.0,\n                color: Color::from_hex(0xCDD6F4),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06 against the code as it now reads. A row
+            # shows the account's name or, where it gives none, its login.
             'every_colour_the_login_screen_draws_comes_from_its_palette',
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
@@ -6624,11 +6636,13 @@ DEFECTS = [
         'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: a row name takes the accent',
         LOGIN,
         [
-            ('                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.text,',
-             '                text: user.display_name.clone(),\n                font_size: 16.0,\n                color: p.accent,'),
+            ('                text: user.shown_name().to_owned(),\n                font_size: 16.0,\n                color: p.text,',
+             '                text: user.shown_name().to_owned(),\n                font_size: 16.0,\n                color: p.accent,'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06 against the code as it now reads. A row
+            # shows the account's name or, where it gives none, its login.
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -6863,11 +6877,14 @@ DEFECTS = [
         'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Sign In fill is frozen back to Mocha blue',
         LOGIN,
         [
-            ('                width: 100.0,\n                height: 32.0,\n                color: p.accent,',
-             '                width: 100.0,\n                height: 32.0,\n                color: Color::from_hex(0x89B4FA),'),
+            ('                width: button.w,\n                height: button.h,\n                color: p.accent,',
+             '                width: button.w,\n                height: button.h,\n                color: Color::from_hex(0x89B4FA),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06 against the code as it now reads. The
+            # button is drawn in the box its click is taken in
+            # (`sign_in_rect`).
             'every_colour_the_login_screen_draws_comes_from_its_palette',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
@@ -6878,11 +6895,14 @@ DEFECTS = [
         'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Sign In fill drops to a surface, so the default action stops inviting',
         LOGIN,
         [
-            ('                width: 100.0,\n                height: 32.0,\n                color: p.accent,',
-             '                width: 100.0,\n                height: 32.0,\n                color: p.surface0,'),
+            ('                width: button.w,\n                height: button.h,\n                color: p.accent,',
+             '                width: button.w,\n                height: button.h,\n                color: p.surface0,'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06 against the code as it now reads. The
+            # button is drawn in the box its click is taken in
+            # (`sign_in_rect`).
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -7012,11 +7032,13 @@ DEFECTS = [
         'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the greeting takes panel ink on the background',
         LOGIN,
         [
-            ('                    text: format!("Welcome, {}!", user.display_name),\n                    font_size: 20.0,\n                    color: p.on_wallpaper(),',
-             '                    text: format!("Welcome, {}!", user.display_name),\n                    font_size: 20.0,\n                    color: p.text,'),
+            ('                    text: format!("Welcome, {}!", user.shown_name()),\n                    font_size: 20.0,\n                    color: p.on_wallpaper(),',
+             '                    text: format!("Welcome, {}!", user.shown_name()),\n                    font_size: 20.0,\n                    color: p.text,'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06 against the code as it now reads. The
+            # greeting names an account with no display name by its login.
             'the_clock_and_the_status_lines_are_wallpaper_ink',
         ],
     ),

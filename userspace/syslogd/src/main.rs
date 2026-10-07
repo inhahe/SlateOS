@@ -15,7 +15,8 @@
 //! # Commands
 //!
 //! ```text
-//! syslogd daemon              Run as log collection daemon
+//! syslogd daemon [--socket PATH] [--journal FILE]
+//!                             Receive /dev/log's messages into the journal
 //! syslogd log <svc> <msg>     Write a log entry (for scripts/services)
 //! syslogd query [filters]     Search log entries
 //! syslogd tail [n]            Show last N entries (default 20)
@@ -24,9 +25,26 @@
 //! syslogd rotate              Force log rotation
 //! syslogd clean [days]        Remove logs older than N days (default 30)
 //! ```
+//!
+//! `daemon` is the system log in the POSIX sense: it binds `/dev/log`, where
+//! the C library's `syslog()` and `logger` send their messages, and files each
+//! as systemd-journald would (design-decisions §1063) -- see [`daemon`],
+//! [`frame`] and [`record`].
+
+#[cfg(target_os = "linux")]
+mod daemon;
+// Built everywhere, so that the host runs their tests; used only by the
+// daemon, which exists only where a Unix-domain socket can.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod frame;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod record;
+#[cfg(target_os = "linux")]
+mod sys;
 
 use quoting::{quoteaf_os, quotef_os};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,7 +57,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOG_DIR: &str = "/var/log";
 const MAIN_LOG: &str = "syslog.jsonl";
-const PID_PATH: &str = "/var/run/syslogd.pid";
+/// Where the system's programs send their log messages.
+#[cfg(target_os = "linux")]
+const DEV_LOG: &str = "/dev/log";
 /// Maximum log file size before rotation (5 MiB).
 const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
 /// Maximum number of rotated log files to keep.
@@ -296,7 +316,15 @@ fn log_file_path() -> PathBuf {
 }
 
 fn rotated_path(n: u32) -> PathBuf {
-    PathBuf::from(LOG_DIR).join(format!("{MAIN_LOG}.{n}"))
+    rotated_path_of(&log_file_path(), n)
+}
+
+/// The `n`th rotated copy of the journal at `journal`: its name with `.n`
+/// after it.
+fn rotated_path_of(journal: &Path, n: u32) -> PathBuf {
+    let mut name = journal.as_os_str().to_os_string();
+    name.push(format!(".{n}"));
+    PathBuf::from(name)
 }
 
 fn write_log_entry(entry: &LogEntry) -> io::Result<()> {
@@ -329,21 +357,28 @@ fn write_log_entry(entry: &LogEntry) -> io::Result<()> {
 /// log keeps growing until the next rotation tries again -- which is why
 /// each result is not looked at.
 fn rotate_logs() {
+    rotate_journal(&log_file_path());
+}
+
+/// [`rotate_logs`] for the journal at `journal`, whichever file that is:
+/// the daemon's `--journal` rotates where it writes.
+fn rotate_journal(journal: &Path) {
     // Delete the oldest file.
-    if let Ok(Some(oldest)) = journalio::Locked::open(&rotated_path(MAX_ROTATED_FILES)) {
+    if let Ok(Some(oldest)) = journalio::Locked::open(&rotated_path_of(journal, MAX_ROTATED_FILES))
+    {
         let _ = oldest.remove();
     }
 
     // Shift N-1 → N, N-2 → N-1, etc.
     for i in (1..MAX_ROTATED_FILES).rev() {
-        if let Ok(Some(held)) = journalio::Locked::open(&rotated_path(i)) {
-            let _ = held.rename_to(&rotated_path(i + 1));
+        if let Ok(Some(held)) = journalio::Locked::open(&rotated_path_of(journal, i)) {
+            let _ = held.rename_to(&rotated_path_of(journal, i + 1));
         }
     }
 
     // Move current → .1
-    if let Ok(Some(held)) = journalio::Locked::open(&log_file_path()) {
-        let _ = held.rename_to(&rotated_path(1));
+    if let Ok(Some(held)) = journalio::Locked::open(journal) {
+        let _ = held.rename_to(&rotated_path_of(journal, 1));
     }
 }
 
@@ -379,44 +414,73 @@ fn count_all_entries() -> (usize, u64) {
 // Commands
 // ============================================================================
 
-fn cmd_daemon() {
-    println!("syslogd: starting daemon");
+/// `syslogd daemon [--socket PATH] [--journal FILE]`: receive the messages
+/// sent to `/dev/log` (or PATH) into the journal (or FILE) until killed. See
+/// [`daemon`]. Each option may also be written `--socket=PATH`.
+///
+/// It writes no PID file and no record of its own starting, which the idle
+/// loop this replaced did: nothing read the PID file, and journald, whose
+/// part this plays, writes neither.
+#[cfg(target_os = "linux")]
+fn cmd_daemon(args: &[OsString]) -> process::ExitCode {
+    use std::os::unix::ffi::OsStrExt;
 
-    // Write PID file.
-    if let Some(parent) = Path::new(PID_PATH).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(PID_PATH, format!("{}", process::id()));
-
-    // Log startup.
-    let startup = LogEntry {
-        timestamp: now_secs(),
-        level: "info".to_string(),
-        service: "syslogd".to_string(),
-        message: "daemon started".to_string(),
-        extra: vec![("pid".to_string(), process::id().to_string())],
-    };
-    let _ = write_log_entry(&startup);
-
-    // In a real implementation, we'd listen on a socket or pipe for log
-    // messages from other services. For now, the daemon sits idle and
-    // services use `syslogd log` to write entries directly.
-    //
-    // Future: listen on a Unix domain socket or IPC channel for structured
-    // log ingestion from all services.
-    println!("syslogd: listening for log messages (write via 'syslogd log')");
-
-    loop {
-        // Periodic maintenance: check file size, rotate if needed.
-        if let Ok(meta) = fs::metadata(log_file_path())
-            && meta.len() > MAX_LOG_SIZE
-        {
-            println!("syslogd: rotating logs (size {})", meta.len());
-            rotate_logs();
+    let mut socket = PathBuf::from(DEV_LOG);
+    let mut journal = log_file_path();
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        let bytes = word.as_bytes();
+        let (name, inline) = match bytes.iter().position(|&b| b == b'=') {
+            Some(at) if bytes.starts_with(b"--") => (
+                bytes.get(..at).unwrap_or_default(),
+                Some(std::ffi::OsStr::from_bytes(
+                    bytes.get(at.saturating_add(1)..).unwrap_or_default(),
+                )),
+            ),
+            _ => (bytes, None),
+        };
+        let target = match name {
+            b"--socket" => &mut socket,
+            b"--journal" => &mut journal,
+            _ => {
+                eprintln_safe(&format!(
+                    "syslogd: unknown daemon option {}",
+                    quoteaf_os(word)
+                ));
+                return process::ExitCode::FAILURE;
+            }
+        };
+        match inline.or_else(|| words.next().map(OsString::as_os_str)) {
+            Some(value) => *target = PathBuf::from(value),
+            None => {
+                eprintln_safe(&format!(
+                    "syslogd: option {} needs a value",
+                    quoteaf_os(word)
+                ));
+                return process::ExitCode::FAILURE;
+            }
         }
-
-        std::thread::sleep(std::time::Duration::from_secs(60));
     }
+    daemon::run(
+        &daemon::Options { socket, journal },
+        MAX_LOG_SIZE,
+        &rotate_journal,
+    )
+}
+
+/// Elsewhere there are no Unix-domain sockets for `/dev/log` to be.
+#[cfg(not(target_os = "linux"))]
+fn cmd_daemon(_args: &[OsString]) -> process::ExitCode {
+    eprintln_safe("syslogd: the daemon needs Unix-domain sockets, which this system lacks");
+    process::ExitCode::FAILURE
+}
+
+/// A line on standard error that does not panic when it cannot be written,
+/// as `eprintln!` does.
+fn eprintln_safe(line: &str) {
+    use std::io::Write;
+    // Nowhere left to report a failure to report.
+    let _ = writeln!(io::stderr().lock(), "{line}");
 }
 
 fn cmd_log(level: &str, service: &str, message: &str, extra: &[(String, String)]) {
@@ -790,7 +854,8 @@ fn print_usage() {
     println!("  syslogd <command> [arguments]");
     println!();
     println!("COMMANDS:");
-    println!("  daemon                         Run as log collection daemon");
+    println!("  daemon [--socket PATH] [--journal FILE]");
+    println!("                                 Receive /dev/log's messages into the journal");
     println!("  log <level> <service> <msg>    Write a log entry");
     println!("  tail [n]                       Show last N entries (default: 20)");
     println!("  follow                         Live-tail the log file");
@@ -818,8 +883,27 @@ fn print_usage() {
     println!("  syslogd follow");
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
+fn main() -> process::ExitCode {
+    // `args_os`: `env::args` panics on an argument that is not UTF-8. The
+    // daemon takes its paths as they are; the other commands still want
+    // text, and refuse an argument that is not, rather than panicking.
+    let raw: Vec<OsString> = env::args_os().collect();
+    if raw.get(1).is_some_and(|w| w.as_os_str() == "daemon") {
+        return cmd_daemon(raw.get(2..).unwrap_or_default());
+    }
+    let mut args: Vec<String> = Vec::with_capacity(raw.len());
+    for word in raw {
+        match word.into_string() {
+            Ok(text) => args.push(text),
+            Err(word) => {
+                eprintln_safe(&format!(
+                    "syslogd: argument {} is not text",
+                    quoteaf_os(&word)
+                ));
+                return process::ExitCode::FAILURE;
+            }
+        }
+    }
 
     if args.len() < 2 {
         print_usage();
@@ -827,7 +911,6 @@ fn main() {
     }
 
     match args[1].as_str() {
-        "daemon" => cmd_daemon(),
         "log" => {
             if args.len() < 5 {
                 eprintln!("usage: syslogd log <level> <service> <message>");
@@ -870,6 +953,7 @@ fn main() {
             process::exit(1);
         }
     }
+    process::ExitCode::SUCCESS
 }
 
 #[cfg(test)]

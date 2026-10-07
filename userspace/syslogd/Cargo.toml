@@ -18,6 +18,9 @@ journalio = { path = "../journalio" }
 # That value is an argv word, so it is whatever the user typed and not text
 # this program chose.
 quoting = { path = "../quoting" }
+# `strerror`'s words for the daemon's reports: a socket it cannot bind, a
+# journal it cannot write.
+errmsg = { path = "../errmsg" }
 
 # Tests only. `clean_file` rewrites the file it reads, so its tests need a real
 # path -- and a scratch directory that is removed on an unwind out of a failed

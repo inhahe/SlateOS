@@ -4164,6 +4164,7 @@ dependencies = [
 name = "syslogd"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "journalio",
  "journalrec",
  "quoting",

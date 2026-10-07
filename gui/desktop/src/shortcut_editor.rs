@@ -1512,10 +1512,10 @@ impl CardButton {
     }
 }
 
-/// Every button the list's card shows in any of its modes, the most it
-/// shows at once: its foot is laid out for these whatever the card is
-/// doing, so the card keeps its size while keys are recorded or a question
-/// is asked.
+/// The buttons of the list's card in its fullest mode, the list's five --
+/// the most it shows at once: its foot is laid out for these whatever the
+/// card is doing, so the card keeps its size while keys are recorded or a
+/// question is asked, each of which shows fewer.
 const LIST_BUTTONS: [CardButton; 5] = [
     CardButton::NewKeys,
     CardButton::ChangeAction,

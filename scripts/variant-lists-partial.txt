@@ -62,6 +62,8 @@ gui/toolkit/src/shortcut.rs	Key::FUNCTION_KEYS	the 12 function keys, one group o
 # --- the rest of the enum is drawn from somewhere else -----------------------
 apps/screenshot/src/main.rs	PreviewButton::PREVIEW_ACTIONS	the main toolbar row only; `Tool` is drawn once per tool from PREVIEW_TOOLS and `Undo` has its own rect
 apps/sudoku/src/main.rs	Target::KEYPAD	the keypad strip; Cell, Pause, Difficulty and NewGame are drawn elsewhere on the board
+gui/desktop/src/shortcut_editor.rs	CardButton::LIST_BUTTONS	the shortcut card's foot is sized for its fullest mode, the list's five; recording (Cancel), a taken chord's question (Move, Keep) and a program to run (OK, Cancel) show fewer, and Choose is the action list's card's
+gui/desktop/src/shortcut_editor.rs	CardButton::PICKER_BUTTONS	the action list's card shows Choose and Cancel and nothing else; the other eight are the list card's
 apps/wordle/src/main.rs	Target::HEADER_BUTTONS	the header row; Key, Enter and Backspace belong to the on-screen keyboard below it
 gui/remote/src/control.rs	ShellControlAction::ZONELESS	`SnapToZone` is generated from `SnapSlot::all`, and listing it here is the stale hand-written list this array exists to avoid
 

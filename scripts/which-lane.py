@@ -240,6 +240,11 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("toolchain/stubs/", "D"),
     ("toolchain/build-sysroot.ps1", "D"),
     ("scripts/create-ext4-rootfs.sh", "D"),
+    # The TLS client for userspace programs (rustls over vendored crypto), a
+    # carve-out of lane A's net/: lane D offered to build it and lane A handed
+    # it over on 2026-10-07 (requests/d-a-nothing-in-userspace-can-make-an-
+    # https-connection.md). Reserved before its first file, as gui/video/ was.
+    ("net/tls/", "D"),
     # --- E: applications --------------------------------------------------
     ("apps/", "E"),
     # `randrange` is a root leaf crate.  It is listed because it is the one

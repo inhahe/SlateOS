@@ -197,14 +197,14 @@ day. Prune on the schedule above from the start, not once the volume is tight.
 | **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh`; since §973 also the gate machinery (`scripts/hooks/**`, `scripts/run-checker.sh`, `scripts/which-lane.py`, the gates that judge every lane) and the kernel's scripts, the hash and crypto crates (`sha1`, `sha2`, `md5`, `pwkdf`, `blockbuf`, `crc32`), and the boot and repository configuration (`esp/**`, `limine.conf`, `.gitignore`, `.gitattributes`, `clippy.toml`, `.cargo/**`) |
 | **B** | `Lane B` | **Userland** | `userspace/**`, `init/**`; since §973 also the differential harnesses and userland checkers in `scripts/`, and ten root crates (`procinfo`, `libcall`, `optionalfile`, …) |
 | **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's crates (`gui/compositor`, `window`, `remote`, `font`, `imagecodec`, `vulkan`, `video`); since §973 also the GUI gates and gui/ reintroduction harnesses in `scripts/` |
-| **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh`; since §973 also the libc checkers, fixtures, rootfs manifest, toolchain setup and port spikes in `scripts/`, `build-env.md`, `posix-blockers.md` |
+| **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `net/tls/**` (the userspace TLS client, handed over by lane A 2026-10-07), `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh`; since §973 also the libc checkers, fixtures, rootfs manifest, toolchain setup and port spikes in `scripts/`, `build-env.md`, `posix-blockers.md` |
 | **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**`; since §973 also the app gates and surveys in `scripts/`, and seven root crates (`deflate`, `tzrules`, `yamldoc`, `textfmt`, …) |
 | **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**`, `gui/video/**`; since §973 also four scripts (`check-generated-tables.py`, `reintro-evdev.py`, the `q45_*` pair) |
 
 **Never writes** is simply everything another row owns. Where two rows
 overlap, the **longer path wins**: `gui/compositor/` is lane F's although
-`gui/` is lane C's, and `services/netstack/` is lane A's although `services/`
-is lane D's. `python scripts/which-lane.py --owner <path>` applies exactly
+`gui/` is lane C's, `services/netstack/` is lane A's although `services/`
+is lane D's, and `net/tls/` is lane D's although `net/` is lane A's. `python scripts/which-lane.py --owner <path>` applies exactly
 that rule, from the machine-readable copy of this table in
 `scripts/which-lane.py` — which every script that needs ownership reads, so
 **when this table changes, that one changes in the same commit.**

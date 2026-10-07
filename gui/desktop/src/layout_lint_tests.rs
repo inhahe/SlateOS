@@ -22,11 +22,26 @@
     clippy::arithmetic_side_effects
 )]
 
-use guitk::widget::automation::Accessible;
+use guitk::menu::MenuPart;
+use guitk::widget::automation::{Accessible, Action};
 
-use crate::accessible::ShellPart;
+use crate::accessible::{ShellMenu, ShellPart};
+use crate::notif_pane::PanePart;
+use crate::overview::OverviewMode;
 use crate::widgets::{WidgetKind, WidgetSize};
-use crate::{DesktopShell, WindowInfo, WindowList};
+use crate::{DesktopShell, Hit, MouseButton, MouseEvent, MouseEventKind, WindowInfo, WindowList};
+
+/// Whether `shell` has `menu` open -- and, asked for `submenu`, one of its
+/// submenus too: so a state the check is asked about is one it reached,
+/// rather than the desktop it was meant to be over.
+fn has_menu(shell: &DesktopShell, menu: ShellMenu, submenu: bool) -> bool {
+    shell.automation(0.0, 0.0).walk().any(|n| match n.id {
+        ShellPart::Menu(open, part) => {
+            open == menu && (!submenu || matches!(part, MenuPart::Submenu(_)))
+        }
+        _ => false,
+    })
+}
 
 /// Note every two parts of `shell`'s drawn over each other -- the toolkit's
 /// rule (`Node::overlapping_siblings`): siblings a person presses or reads
@@ -90,10 +105,30 @@ fn lived_in(width: u32, height: u32) -> DesktopShell {
 fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
     let mut found = Vec::new();
     let mut roomy = 0;
+    let mut taskbar_menus = 0;
     for (width, height) in [(1920, 1080), (1024, 768), (800, 600)] {
         let size = format!("{width}x{height}");
         let mut shell = lived_in(width, height);
         check(&shell, &format!("{size} desktop"), &mut found);
+
+        // A notification's menu, its pop-up right-clicked.
+        let toast = shell
+            .toasts
+            .placed()
+            .first()
+            .map(|placed| placed.rect)
+            .expect("a pop-up shown");
+        let _ = shell.handle_toast_mouse(&MouseEvent {
+            x: toast.x + 40.0,
+            y: toast.y + toast.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        assert!(
+            has_menu(&shell, ShellMenu::Notification, false),
+            "{size}: no notification's menu"
+        );
+        check(&shell, &format!("{size} a notification's menu"), &mut found);
+        let _ = shell.dismiss_popups();
 
         // The on-screen display with a tall overlay and short ones after it:
         // placed each by its own height, the short reached back over the tall.
@@ -177,6 +212,118 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
         check(&shell, &format!("{size} tiling overlay"), &mut found);
         let _ = shell.dismiss_popups();
 
+        // A window's menu, its tile on the bar right-clicked; and the bar's
+        // own, the bar between its tiles and its tray right-clicked.
+        let pins = shell.taskbar.pinned_apps().len();
+        let tiles = shell.taskbar_layout();
+        let tile = tiles[pins];
+        let _ = shell.handle_press(
+            tile.x + tile.w / 2.0,
+            tile.y + tile.h / 2.0,
+            MouseButton::Right,
+        );
+        assert!(
+            shell.render_pin_menu().is_some(),
+            "{size}: no window's menu, so this checks nothing"
+        );
+        check(&shell, &format!("{size} a window's menu"), &mut found);
+        let _ = shell.dismiss_popups();
+        let bar = shell.taskbar_rect();
+        let (bx, by) = (
+            tiles.last().map_or(bar.x, |t| t.right()) + 24.0,
+            bar.y + bar.h / 2.0,
+        );
+        if shell.hit_test(bx, by) == Hit::TaskbarPanel {
+            let _ = shell.handle_press(bx, by, MouseButton::Right);
+            assert!(
+                has_menu(&shell, ShellMenu::Taskbar, false),
+                "{size}: no taskbar menu"
+            );
+            taskbar_menus += 1;
+            check(&shell, &format!("{size} the taskbar's menu"), &mut found);
+            let _ = shell.dismiss_popups();
+        }
+
+        // The start menu searching, and a program's menu in it.
+        shell.toggle_start_menu();
+        shell
+            .invoke(
+                &ShellPart::StartSearch,
+                Action::SetText("e".to_owned()),
+                0.0,
+                0.0,
+            )
+            .expect("the search typed into");
+        check(&shell, &format!("{size} start menu searching"), &mut found);
+        let search = shell.start_search_rect();
+        let _ = shell.handle_press(
+            search.x + 10.0,
+            search.y + search.h / 2.0,
+            MouseButton::Right,
+        );
+        assert!(
+            has_menu(&shell, ShellMenu::Field, false),
+            "{size}: no search field's menu"
+        );
+        check(
+            &shell,
+            &format!("{size} the search field's menu"),
+            &mut found,
+        );
+        let _ = shell.dismiss_popups();
+        shell.toggle_start_menu();
+        let row = shell
+            .start_row_of_program(0)
+            .expect("a program in the start menu");
+        let r = shell.start_menu_row_rect(row);
+        let _ = shell.handle_press(r.x + r.w / 2.0, r.y + r.h / 2.0, MouseButton::Right);
+        assert!(
+            shell.render_pin_menu().is_some(),
+            "{size}: no program's menu"
+        );
+        check(&shell, &format!("{size} a program's menu"), &mut found);
+        let _ = shell.dismiss_popups();
+
+        // An icon's menu.
+        let icon = shell.icons.icon_ids().first().copied().expect("icons out");
+        let placed = shell.icons.get_icon(icon).expect("the icon is out");
+        #[allow(clippy::cast_precision_loss, reason = "a place on the screen")]
+        let (ix, iy) = (placed.x as f32 + 10.0, placed.y as f32 + 10.0);
+        shell.open_desktop_menu(ix, iy);
+        assert!(
+            has_menu(&shell, ShellMenu::Desktop, false),
+            "{size}: no icon's menu"
+        );
+        check(&shell, &format!("{size} an icon's menu"), &mut found);
+        let _ = shell.dismiss_popups();
+
+        // A program's notifications all shown: Mail's, past its three --
+        // grouped by program again, as the pane above was left by time.
+        shell
+            .notifications
+            .set_grouping(notifsettings::Grouping::ByProgram);
+        shell.toggle_notifications();
+        let more = shell
+            .automation(0.0, 0.0)
+            .walk()
+            .find(|n| matches!(n.id, ShellPart::Pane(PanePart::GroupMore(_))))
+            .map(|n| n.id)
+            .expect("Mail's rest behind \"Show N more\"");
+        shell
+            .invoke(&more, Action::Press, 0.0, 0.0)
+            .expect("shown as pressed");
+        check(
+            &shell,
+            &format!("{size} a program's notifications all shown"),
+            &mut found,
+        );
+        let _ = shell.dismiss_popups();
+
+        // Every desktop's windows, in the overview.
+        shell.overview.show(OverviewMode::AllDesktops);
+        check(&shell, &format!("{size} every desktop"), &mut found);
+        let _ = shell.dismiss_popups();
+
         // Widgets out on the desktop, added as the user adds them -- the
         // desktop menu's rows -- each where the grid has room.
         for row in [
@@ -194,6 +341,40 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
             "{size}: the widgets were not put out, so this checks nothing"
         );
         check(&shell, &format!("{size} widgets"), &mut found);
+
+        // A widget's menu, and the sizes it offers.
+        let clock = shell
+            .widgets
+            .all_widgets()
+            .iter()
+            .find(|w| w.kind == WidgetKind::Clock)
+            .map(|w| w.id)
+            .expect("a clock out");
+        let (cx, cy, _, _) = shell.widgets.content_rect(clock).expect("placed");
+        shell.open_desktop_menu(cx + 4.0, cy + 4.0);
+        assert!(
+            has_menu(&shell, ShellMenu::Desktop, false),
+            "{size}: no widget's menu"
+        );
+        check(&shell, &format!("{size} a widget's menu"), &mut found);
+        // "Size" pressed, as a click on its row opens it.
+        shell
+            .invoke(
+                &ShellPart::Menu(
+                    ShellMenu::Desktop,
+                    MenuPart::Item(DesktopShell::MENU_WIDGET_SIZE_SUBMENU),
+                ),
+                Action::Press,
+                0.0,
+                0.0,
+            )
+            .expect("the sizes opened");
+        assert!(
+            has_menu(&shell, ShellMenu::Desktop, true),
+            "{size}: no widget's sizes"
+        );
+        check(&shell, &format!("{size} a widget's sizes"), &mut found);
+        let _ = shell.dismiss_popups();
 
         // The system monitor given two rows, where the grid has them: its
         // graphs of the last minute, and the disk's meter at their foot.
@@ -236,6 +417,10 @@ fn no_two_controls_of_the_shell_are_drawn_over_each_other() {
     assert!(
         roomy > 0,
         "no display had room for a monitor's graphs, so they were never checked"
+    );
+    assert!(
+        taskbar_menus > 0,
+        "no display had a free stretch of taskbar to right-click, so its menu was never checked"
     );
     assert!(
         found.is_empty(),

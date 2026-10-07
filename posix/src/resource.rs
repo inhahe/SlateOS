@@ -10,15 +10,17 @@
 //!   kernel does not enforce them.
 //! - getrusage returns zeroes for all fields except user/system time
 //!   (which also return zero — no kernel support yet).
-//! - nice/getpriority/setpriority are **real**: they issue
-//!   `SYS_PROCESS_GET_NICE`/`SYS_PROCESS_SET_NICE` (via `kernel_get_nice`/
-//!   `kernel_set_nice`), which write the process's kernel nice value *and*
-//!   re-prioritise its tasks in the scheduler (`thread::set_process_nice` →
-//!   `sched::set_priority`).  The CAP_SYS_NICE policy for a priority *raise*
-//!   is enforced here in userspace before the syscall (the kernel primitive
-//!   trusts the wrapper, mirroring the setuid/setgid model).  On the host
-//!   (non-`target_os = "none"`) build these fall back to a process-local
-//!   static so unit tests remain self-contained.
+//! - nice/getpriority/setpriority are **real**: they ask lane A's
+//!   `SYS_PROCESS_GET_PRIORITY`/`SYS_PROCESS_SET_PRIORITY`, which name a
+//!   process, a group or a user as Linux's do, and decide who may change
+//!   whose nice ([`native_priority`]); the kernel records it *and*
+//!   re-prioritises the tasks in the scheduler (`thread::set_process_nice` →
+//!   `sched::set_priority`).  A kernel without those calls has only
+//!   `SYS_PROCESS_GET_NICE`/`SYS_PROCESS_SET_NICE`, which reach the caller
+//!   alone, so there the caller is the one target and a priority *raise* is
+//!   checked here first, as such a kernel may not ([`set_own_priority`]).  On
+//!   the host (non-`target_os = "none"`) build there is no kernel: these fall
+//!   back to a process-local static so unit tests remain self-contained.
 
 use crate::errno;
 
@@ -817,14 +819,12 @@ pub const PRIO_USER: i32 = 2;
 fn kernel_get_nice() -> i32 {
     #[cfg(target_os = "none")]
     {
-        let biased = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_GET_NICE);
-        // The kernel returns the nice value biased by +20, i.e. 0..=39.  Clamp
-        // to that range before narrowing so a malformed (or error-coded)
-        // return can neither truncate into a nonsense value nor overflow the
-        // subtraction; the clamp then makes the cast exact.
-        #[allow(clippy::cast_possible_truncation)]
-        let biased = biased.clamp(0, 39) as i32;
-        biased.saturating_sub(20)
+        // Its only refusal is `NoSuchProcess`, for a caller with no process,
+        // which no program is; `nice_from_biased` clamps it to nice -20 rather
+        // than misread it.
+        nice_from_biased(crate::syscall::syscall0(
+            crate::syscall::SYS_PROCESS_GET_NICE,
+        ))
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -835,46 +835,58 @@ fn kernel_get_nice() -> i32 {
     }
 }
 
+/// A nice as the kernel answers one, biased by +20 (`0..=39`), as a signed
+/// nice. Clamped to that range first, so a malformed answer can neither
+/// truncate into a nonsense value nor overflow the subtraction; the clamp
+/// then makes the cast exact.
+fn nice_from_biased(biased: i64) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let biased = biased.clamp(0, 39) as i32;
+    biased.saturating_sub(20)
+}
+
+/// A clamped nice (`-20..=19`) as the kernel takes one, biased by +20.
+fn biased_nice(nice: i32) -> u64 {
+    u64::from(nice.saturating_add(20).clamp(0, 39).unsigned_abs())
+}
+
 /// Install the calling process's nice value in the kernel (and apply it to
-/// the scheduler).
+/// the scheduler): `Ok` with the previous nice, or `Err` with the errno.
 ///
-/// `nice` must already be clamped to `[-20, 19]`; the caller performs the
-/// `CAP_SYS_NICE` policy check *before* calling this (the kernel trusts the
-/// wrapper, exactly like `setuid`).  On bare metal this issues
-/// `SYS_PROCESS_SET_NICE` with the value biased by +20, returning the previous
-/// logical nice.  In host tests it writes the process-local static.
-fn kernel_set_nice(nice: i32) -> i32 {
+/// `nice` must already be clamped to `[-20, 19]`.  On bare metal this issues
+/// `SYS_PROCESS_SET_NICE` with the value biased by +20.  Kernels before lane
+/// A's of 2026-10-01 trusted the wrapper to have checked a raise, as
+/// [`set_own_priority`] does; lane A's checks it too, and refuses one beyond
+/// `RLIMIT_NICE` with `ResourceExhausted` -- `EACCES` ([`priority_errno`]),
+/// Linux's answer.  Until 2026-10-07 the answer was not read at all, so such
+/// a refusal was reported as a change made.  In host tests it writes the
+/// process-local static.
+// The host stand-in cannot fail; the target's call can, which is what the
+// `Result` is for.
+#[cfg_attr(not(target_os = "none"), allow(clippy::unnecessary_wraps))]
+fn kernel_set_nice(nice: i32) -> Result<i32, i32> {
     #[cfg(target_os = "none")]
     {
-        // The caller has already clamped `nice` to [-20, 19]; bias by +20 for
-        // the kernel's unsigned 0..=39 encoding.  Clamping again makes the
-        // cast provably sign-loss-free rather than relying on the caller.
-        #[allow(clippy::cast_sign_loss)]
-        let biased = nice.saturating_add(20).clamp(0, 39) as u64;
-        let old_biased = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_SET_NICE, biased);
-        // Same clamp-then-narrow reasoning as `kernel_get_nice`.
-        #[allow(clippy::cast_possible_truncation)]
-        let old_biased = old_biased.clamp(0, 39) as i32;
-        old_biased.saturating_sub(20)
+        let old_biased =
+            crate::syscall::syscall1(crate::syscall::SYS_PROCESS_SET_NICE, biased_nice(nice));
+        if old_biased < 0 {
+            return Err(priority_errno(old_biased));
+        }
+        Ok(nice_from_biased(old_biased))
     }
     #[cfg(not(target_os = "none"))]
     {
         // Host stand-in for the kernel's store; see `kernel_get_nice`.
         let old = limit_store::nice();
         limit_store::set_nice(nice);
-        old
+        Ok(old)
     }
 }
 
-/// Adjust the nice value of the calling process.
-///
-/// Returns the new nice value on success.  On SlateOS this issues the real
-/// `SYS_PROCESS_GET_NICE`/`SYS_PROCESS_SET_NICE` syscalls: the kernel records
-/// the value AND maps it to a scheduler priority level, so the change actually
-/// affects scheduling (previously this only mutated a userspace-local static).
-///
-/// Linux's `can_nice()` (`kernel/sched/core.c`), evaluated against our own
-/// `RLIMIT_NICE`:
+/// Whether the caller may raise its own priority to `target_nice` -- Linux's
+/// `can_nice()` (`kernel/sched/core.c`), evaluated against our own
+/// `RLIMIT_NICE`.  Asked only on a kernel without lane A's priority calls
+/// ([`set_own_priority`]); a kernel with them decides a raise itself.
 ///
 /// ```c
 /// static bool is_nice_reduction(const struct task_struct *task, int niceval)
@@ -929,35 +941,129 @@ fn can_nice(target_nice: i32) -> bool {
     crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
 }
 
-/// Phase 168 / §314: Linux's `kernel/sys.c::sys_nice` gates negative
-/// increments on `can_nice()` — "the target nice is within `RLIMIT_NICE`
-/// **or** the caller holds `CAP_SYS_NICE`".  Positive increments (lowering
-/// priority) are always allowed.  On `EPERM` we return `-1` and set errno —
-/// callers must clear errno before calling and re-check it after, since `-1`
-/// is also a legitimate nice value.
+/// Adjust the nice value of the calling process by `inc`, and answer the new
+/// one -- glibc's and musl's `nice`, which are `setpriority` on the caller:
+/// the sum is clamped to `-20..=19`, and a refused raise, which `setpriority`
+/// answers `EACCES`, is `EPERM`, as POSIX specifies for `nice`.
+///
+/// So the test is the one `setpriority` makes: a raise is a nice *below the
+/// current one*.  Until 2026-10-07 this followed the Linux system call
+/// `nice(2)` instead, which tests the increment, so `nice(-1)` at nice -20
+/// was refused without the right to raise, where glibc's answers -20.  The
+/// change is real: the kernel re-prioritises the process's tasks.
+///
+/// `-1` is also a nice, so a caller tells an error by clearing errno first.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn nice(inc: i32) -> i32 {
-    let current = kernel_get_nice();
-    // Clamp to [-20, 19] per POSIX.  Linux clamps the increment to [-40, 40]
-    // first and then clamps the sum; `saturating_add` + `clamp` reaches the
-    // same value for every input.
-    let new_val = current.saturating_add(inc).clamp(-20, 19);
-    // Only a priority *raise* is gated, and Linux evaluates can_nice against
-    // the clamped target — not the requested increment — so the clamp must
-    // happen first.  It is pure: nothing is stored until the gate passes.
-    if inc < 0 && !can_nice(new_val) {
-        errno::set_errno(errno::EPERM);
-        return -1;
+    let result = get_priority(PRIO_PROCESS, 0).and_then(|current| {
+        let target = current.saturating_add(inc).clamp(-20, 19);
+        set_priority(PRIO_PROCESS, 0, target).map(|()| target)
+    });
+    match result {
+        Ok(new_nice) => new_nice,
+        Err(e) => {
+            errno::set_errno(if e == errno::EACCES { errno::EPERM } else { e });
+            -1
+        }
     }
-    kernel_set_nice(new_val);
-    new_val
+}
+
+/// The errno for a priority call's refusal `ret`, told apart as Linux's
+/// `set_one_prio` tells them: no authority over the target (`PermissionDenied`,
+/// which the shared mapping makes `EACCES`) is `EPERM`, and a raise beyond its
+/// `RLIMIT_NICE` (`ResourceExhausted`, which it makes `ENOMEM`) is `EACCES`.
+/// Lane A's priority calls and `SYS_PROCESS_SET_NICE` answer both so.
+fn priority_errno(ret: i64) -> i32 {
+    match ret {
+        errno::native::PERMISSION_DENIED => errno::EPERM,
+        errno::native::RESOURCE_EXHAUSTED => errno::EACCES,
+        _ => errno::errno_for(ret),
+    }
+}
+
+/// Lane A's priority call's answer `ret`, read: `None` for a kernel without
+/// the call (every kernel before 1088/1089) or, in the host build, no kernel;
+/// else `Ok` with the nice read (`is_read`) or 0 for a set, or `Err` with the
+/// errno.
+fn priority_answer(ret: i64, is_read: bool) -> Option<Result<i32, i32>> {
+    if ret == errno::native::NO_SUCH_SYSCALL
+        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+    {
+        return None;
+    }
+    if ret < 0 {
+        return Some(Err(priority_errno(ret)));
+    }
+    Some(Ok(if is_read { nice_from_biased(ret) } else { 0 }))
+}
+
+/// Ask the kernel about the processes `which` (`PRIO_PROCESS`, `PRIO_PGRP` or
+/// `PRIO_USER`, already checked) and `who` name: their nice, with `nice`
+/// `None` (`SYS_PROCESS_GET_PRIORITY`), or set it to `nice`, already clamped
+/// (`SYS_PROCESS_SET_PRIORITY`).  `None` for a kernel without the calls.
+///
+/// These are lane A's (1088/1089), and they are what lets a native program
+/// name another process at all
+/// (`requests/e-ad-renicing-another-process-renices-the-caller.md`).  The
+/// kernel decides who may (`kernel/src/proc/priority.rs`, design-decisions
+/// §1503): the caller, its child, or a holder of a `Process` capability with
+/// `DELETE` rights for the target -- else `EPERM`; and a raise only within
+/// the target's `RLIMIT_NICE` or with a Thread capability carrying `IO_REALTIME`
+/// -- else `EACCES`.  A group or a user reads as its most favoured member, the
+/// lowest nice, and a set folds its members' outcomes as Linux's does.
+fn native_priority(which: i32, who: u32, nice: Option<i32>) -> Option<Result<i32, i32>> {
+    let which = u64::from(which.unsigned_abs());
+    let ret = match nice {
+        None => crate::syscall::syscall2(
+            crate::syscall::SYS_PROCESS_GET_PRIORITY,
+            which,
+            u64::from(who),
+        ),
+        Some(nice) => crate::syscall::syscall3(
+            crate::syscall::SYS_PROCESS_SET_PRIORITY,
+            which,
+            u64::from(who),
+            biased_nice(nice),
+        ),
+    };
+    priority_answer(ret, nice.is_none())
+}
+
+/// The nice of the processes `which` and `who` name (`which` already
+/// checked): the kernel's answer ([`native_priority`]), or on a kernel without
+/// the calls the caller's own, the one process it can read.
+fn get_priority(which: i32, who: u32) -> Result<i32, i32> {
+    native_priority(which, who, None)
+        .unwrap_or_else(|| prio_target_is_caller(which, who).map(|()| kernel_get_nice()))
+}
+
+/// Set the nice of the processes `which` and `who` name to `nice` (`which`
+/// checked, `nice` clamped): the kernel's calls ([`native_priority`]), or on a
+/// kernel without them [`set_own_priority`].
+fn set_priority(which: i32, who: u32, nice: i32) -> Result<(), i32> {
+    native_priority(which, who, Some(nice))
+        .unwrap_or_else(|| set_own_priority(which, who, nice))
+        .map(|_| ())
+}
+
+/// `setpriority` on a kernel without lane A's priority calls, whose only
+/// native call sets the caller's own nice (`SYS_PROCESS_SET_NICE`): the
+/// caller is the one target ([`prio_target_is_caller`]), and a raise -- a nice
+/// below the current one -- is checked here, Linux's `can_nice` ([`can_nice`]),
+/// since such a kernel may not check it.  `EACCES` for a refused raise, as
+/// Linux's `set_one_prio` answers.
+fn set_own_priority(which: i32, who: u32, nice: i32) -> Result<i32, i32> {
+    prio_target_is_caller(which, who)?;
+    if nice < kernel_get_nice() && !can_nice(nice) {
+        return Err(errno::EACCES);
+    }
+    kernel_set_nice(nice).map(|_| 0)
 }
 
 /// Whether `which`/`who` names exactly the calling process -- the one target
-/// the native nice calls reach: `SYS_PROCESS_GET_NICE` and
-/// `SYS_PROCESS_SET_NICE` take no process argument and act on the caller
-/// alone.
+/// a kernel without lane A's priority calls can reach: its
+/// `SYS_PROCESS_GET_NICE` and `SYS_PROCESS_SET_NICE` take no process argument
+/// and act on the caller alone.
 ///
 /// Anything else is `Err(errno)`, because acting on the caller instead -- what
 /// these functions did until 2026-09-27 -- reported a change to one process
@@ -1015,71 +1121,62 @@ fn target_exists_errno(probe: i32) -> i32 {
     }
 }
 
-/// Get the scheduling priority of a process, process group, or user.
+/// Get the scheduling priority of a process, process group, or user: its
+/// nice, or for a group or a user its most favoured member's (the lowest).
 ///
-/// Returns the nice value (which can be negative), so callers must
-/// clear errno before calling and check it after.  On SlateOS this reads the
-/// caller's real kernel nice via `SYS_PROCESS_GET_NICE`, which is the only
-/// process it can read: any other target fails, as [`prio_target_is_caller`]
-/// says.
+/// The nice can be -1, so a caller tells an error by clearing errno before
+/// the call and checking it after.  This leaves errno alone on success, as
+/// POSIX requires of every function and glibc does; until 2026-10-07 it
+/// cleared it.
+///
+/// On SlateOS the kernel answers for any process, group or user, and reading
+/// needs no right, as on Linux ([`native_priority`]).  A kernel without lane
+/// A's priority calls can read the caller alone, and any other target fails,
+/// as [`prio_target_is_caller`] says.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpriority(which: i32, who: u32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if let Err(e) = prio_target_is_caller(which, who) {
-        errno::set_errno(e);
-        return -1;
+    match get_priority(which, who) {
+        Ok(nice) => nice,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
     }
-    errno::set_errno(0); // Clear errno — return value can be negative.
-    kernel_get_nice()
 }
 
-/// Set the scheduling priority of a process, process group, or user.
+/// Set the scheduling priority of a process, process group, or user, to
+/// `prio` clamped to `-20..=19`.  Returns 0 on success, -1 on error.
 ///
-/// On SlateOS this installs the nice value in the kernel via
-/// `SYS_PROCESS_SET_NICE`, which re-prioritises the process's tasks — the
-/// change is real, not merely stored.  That call reaches the caller only, so
-/// any other target fails (`ESRCH` or `EPERM`, [`prio_target_is_caller`])
-/// rather than renicing the caller in its place.  Returns 0 on success, -1 on
-/// error.
+/// Linux's `sys_setpriority` calls `set_one_prio` on each process in scope,
+/// and the errnos are its: no authority over one is `EPERM`, and a raise
+/// (a nice below its current one) beyond its `RLIMIT_NICE` without
+/// `CAP_SYS_NICE` is `EACCES` -- not `EPERM`, a distinction callers that
+/// switch on errno can see.  Equivalent or higher nice values (lowering
+/// priority) need only the authority.
 ///
-/// Phase 169 / §314: Linux's `sys_setpriority` calls `set_one_prio` on each
-/// task in scope.  After clamping `niceval` to `[MIN_NICE, MAX_NICE]`,
-/// `set_one_prio` does:
-///   - cross-uid permission check → `EPERM` (collapses in our
-///     single-user model);
-///   - `if (niceval < task_nice(p) && !can_nice(p, niceval)) error =
-///     -EACCES;` — i.e. lowering the nice value (raising priority) is
-///     permitted when the target is within `RLIMIT_NICE` **or** the caller
-///     holds `CAP_SYS_NICE`.  See [`can_nice`] for why the rlimit half is
-///     not optional.
-/// Note the errno is `EACCES`, not `EPERM` — that distinction is
-/// observable by callers that switch on errno.  Equivalent or higher
-/// nice values (lowering priority) are always allowed.
+/// On SlateOS the kernel makes both decisions, for any process, group or user
+/// ([`native_priority`]): the authority is the caller itself, its child, or a
+/// `Process` capability with `DELETE` rights for the target, and the right to
+/// raise is a Thread capability carrying `IO_REALTIME`.  A kernel without lane
+/// A's priority calls reaches the caller alone ([`set_own_priority`]), and
+/// any other target fails rather than renicing the caller in its place.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setpriority(which: i32, who: u32, prio: i32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if let Err(e) = prio_target_is_caller(which, who) {
-        errno::set_errno(e);
-        return -1;
+    match set_priority(which, who, prio.clamp(-20, 19)) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
     }
-    let val = prio.clamp(-20, 19);
-    let current = kernel_get_nice();
-    // Phase 169 / §314: a priority-raise (new nice < current nice) needs
-    // can_nice() — RLIMIT_NICE or CAP_SYS_NICE — evaluated against the
-    // clamped target, as in Linux.  Linux returns EACCES from set_one_prio
-    // here (distinct from the cross-uid EPERM path).
-    if val < current && !can_nice(val) {
-        errno::set_errno(errno::EACCES);
-        return -1;
-    }
-    kernel_set_nice(val);
-    0
 }
 
 /// Linux-specific: get and/or set resource limits for any process.
@@ -1666,7 +1763,68 @@ mod tests {
         nice(5);
         let val = getpriority(PRIO_PROCESS, 0);
         assert_eq!(val, 5);
-        assert_eq!(errno::get_errno(), 0, "errno should be cleared on success");
+    }
+
+    /// A success leaves errno as it was: POSIX lets no function set it to 0,
+    /// and glibc's does not.  It used to be cleared, which a caller that had
+    /// set it for its own reasons would see change under it.
+    #[test]
+    fn getpriority_leaves_errno_alone_on_success() {
+        reset_global_state();
+        errno::set_errno(errno::ENOENT);
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 0);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+        errno::set_errno(errno::ENOENT);
+        assert_eq!(setpriority(PRIO_PROCESS, 0, 3), 0);
+        assert_eq!(nice(1), 4);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ENOENT,
+            "nor do setpriority or nice"
+        );
+    }
+
+    /// The kernel's two refusals are Linux's two errnos, not the shared
+    /// mapping's: no authority is `EPERM`, a raise beyond `RLIMIT_NICE` is
+    /// `EACCES`.
+    #[test]
+    fn priority_errno_tells_the_two_refusals_apart() {
+        assert_eq!(
+            priority_errno(errno::native::PERMISSION_DENIED),
+            errno::EPERM
+        );
+        assert_eq!(
+            priority_errno(errno::native::RESOURCE_EXHAUSTED),
+            errno::EACCES
+        );
+        assert_eq!(priority_errno(errno::native::NO_SUCH_PROCESS), errno::ESRCH);
+        assert_eq!(
+            priority_errno(errno::native::INVALID_ARGUMENT),
+            errno::EINVAL
+        );
+    }
+
+    /// The kernel's answers read: a nice unbiased, a set as 0, a refusal as
+    /// its errno, and no call at all as the fallback (`None`).
+    #[test]
+    fn priority_answers_read_as_linux_does() {
+        assert_eq!(priority_answer(30, true), Some(Ok(10)));
+        assert_eq!(priority_answer(0, true), Some(Ok(-20)));
+        assert_eq!(priority_answer(39, true), Some(Ok(19)));
+        assert_eq!(priority_answer(0, false), Some(Ok(0)));
+        assert_eq!(
+            priority_answer(errno::native::PERMISSION_DENIED, false),
+            Some(Err(errno::EPERM))
+        );
+        assert_eq!(
+            priority_answer(errno::native::RESOURCE_EXHAUSTED, false),
+            Some(Err(errno::EACCES))
+        );
+        assert_eq!(priority_answer(errno::native::NO_SUCH_SYSCALL, true), None);
+        assert_eq!(priority_answer(crate::syscall::HOST_ENOSYS, false), None);
+        assert_eq!(biased_nice(-20), 0);
+        assert_eq!(biased_nice(10), 30);
+        assert_eq!(biased_nice(19), 39);
     }
 
     #[test]
@@ -1682,6 +1840,7 @@ mod tests {
     #[test]
     fn priority_calls_reach_the_caller_by_zero_or_by_pid() {
         reset_global_state();
+        errno::set_errno(0);
         let me = u32::try_from(crate::process::getpid()).expect("a pid is positive");
         assert_eq!(setpriority(PRIO_PROCESS, me, 6), 0);
         assert_eq!(getpriority(PRIO_PROCESS, 0), 6);
@@ -3040,6 +3199,26 @@ mod tests {
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(nice(-100), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `nice` is `setpriority` on the caller, as glibc's and musl's are,
+        /// so a raise is a nice below the current one: at the floor, -1 is
+        /// none, and succeeds without the capability.  The Linux system call
+        /// `nice(2)`, which this followed until 2026-10-07, tests the
+        /// increment instead and refuses it.
+        #[test]
+        fn test_nice_at_the_floor_is_no_raise() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            assert_eq!(nice(-20), -20, "reached with the capability");
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-1), -20);
+            assert_eq!(errno::get_errno(), 0);
+            assert_eq!(nice(-5), -20, "however far below");
+            assert_eq!(nice(1), -19, "and a lowering is always allowed");
+            assert_eq!(nice(-1), -1, "from which -20 is a raise again");
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 

@@ -3,7 +3,7 @@
 **Filed:** 2026-09-26 by lane E. **For:** lane D (`posix/src/resource.rs`,
 `setpriority` / `getpriority`) and lane A (a native syscall that can name
 another process; `kernel/src/fs/procfs.rs`, `/proc/<pid>/stat` field 19).
-**Status:** OPEN for lane A. Lane D's interim half (step 2's refusal) landed 2026-09-27 -- reply at the end.
+**Status:** OPEN until lane A's kernel is on `main`: lane A's calls are on `lane-a`, and lane D's route to them is written (2026-10-07) -- replies at the end.
 
 **In short:** "nice" is a process's scheduling politeness, -20 (greediest) to
 19 (most yielding). The C library's `setpriority(PRIO_PROCESS, pid, n)` --
@@ -111,5 +111,38 @@ When lane A's native call exists, `prio_target_is_caller` is where the route
 to it goes: the pid form first, and the group and user forms if the call
 takes them the way `sys_setpriority` does. `known-issues.md` →
 `D-POSIX-SETPRIORITY-RENICED-THE-CALLER` has the detail.
+
+— lane D
+
+---
+
+## Lane D's reply — 2026-10-07: they reach the process they name
+
+Lane A's `SYS_PROCESS_GET_PRIORITY` and `SYS_PROCESS_SET_PRIORITY` (1088/1089,
+on `lane-a`) take `which` and `who` as Linux does, and `getpriority` /
+`setpriority` ask them now (`posix/src/resource.rs`, `native_priority`):
+
+| Call | Answer |
+|---|---|
+| `setpriority(PRIO_PROCESS, pid, n)` | the process named, if the caller may: it is the caller, its child, or the caller holds a `Process` capability with `DELETE` rights for it -- else `EPERM` |
+| a raise (below the target's current nice) | allowed within the target's `RLIMIT_NICE`, or with a Thread capability carrying IO_REALTIME -- else `EACCES` |
+| `PRIO_PGRP` / `PRIO_USER` | every member, each as above; Linux's fold of the outcomes |
+| `getpriority(which, who)` | anyone's, with no right needed; a group or user reads as its most favoured member (the lowest nice) |
+| no such process | `ESRCH` |
+
+The kernel decides who may, so the library's own `CAP_SYS_NICE` test is no
+longer in the way. `nice()` is now glibc's and musl's: `setpriority` on the
+caller, a refused raise reported as `EPERM`. On a kernel without the calls --
+`main`'s today -- the 2026-09-27 refusals above still hold.
+
+`services/ctest-renice` checks what a program sees, and passes on Linux run as
+an ordinary user.
+
+**Lane E:** `libcall::set_nice(pid, nice)` and `get_nice(pid)` can be wired
+once lane A's kernel is on `main`. A task manager may lower the priority of
+its own children and of any process whose `Process` capability with `DELETE`
+rights it holds; anything else is `EPERM`, which is the honest answer to show.
+Raising a priority (a lower nice) needs a raised `RLIMIT_NICE` on the target or
+IO_REALTIME, and is `EACCES` without.
 
 — lane D

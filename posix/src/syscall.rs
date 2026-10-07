@@ -265,8 +265,24 @@ pub const SYS_PROCESS_SET_CREDENTIALS: u64 = 530;
 pub const SYS_PROCESS_GET_NICE: u64 = 531;
 /// Set the calling process's scheduling nice value (arg0 = nice biased
 /// by +20, 0..=39) and apply it to the scheduler. Returns the previous
-/// nice, biased by +20. CAP_SYS_NICE policy is enforced in userspace.
+/// nice, biased by +20. A kernel before lane A's of 2026-10-01 leaves the
+/// check of a raise to this library; lane A's makes it, and answers
+/// `ResourceExhausted` for a raise beyond `RLIMIT_NICE` without IO_REALTIME.
 pub const SYS_PROCESS_SET_NICE: u64 = 532;
+/// Read a nice: `process_get_priority(which, who) -> nice + 20`, the native
+/// `getpriority(2)`: `which` 0 (a process), 1 (a group) or 2 (a user), `who`
+/// 0 the caller's own; a group or a user answers its lowest nice. Needs no
+/// right. `InvalidArgument` for another `which`, `NoSuchProcess` when nothing
+/// is named. Lane A's (1088); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_PROCESS_GET_PRIORITY: u64 = 1088;
+/// Set a nice: `process_set_priority(which, who, nice + 20) -> 0`, the native
+/// `setpriority(2)`, `which` and `who` as above. Each process named is changed
+/// only if the caller may: `PermissionDenied` without authority over it (it
+/// is not the caller or its child, and no `Process` capability with `DELETE`
+/// rights for it is held), `ResourceExhausted` for a raise beyond its
+/// `RLIMIT_NICE` without IO_REALTIME; `NoSuchProcess` when nothing is named.
+/// Lane A's (1089); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_PROCESS_SET_PRIORITY: u64 = 1089;
 
 // Process groups / sessions (533–536)
 //

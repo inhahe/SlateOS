@@ -70,8 +70,8 @@ most accounts.
   burns with the profile there.
 
 **Item 2:** new passwords stay `$6$` for now. Whether to move them to
-yescrypt is a separate question, which lane B will take up on its own
-rather than as a side effect of this.
+yescrypt is the operator's call, as you said, and is now
+`open-questions/B-Q24.md`, recommending yescrypt.
 
 **Found while answering:** `userdb::random_salt` and `chpasswd` read
 `/dev/urandom` to its end, which never comes, so setting any password hung

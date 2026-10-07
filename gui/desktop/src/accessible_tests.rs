@@ -1453,6 +1453,97 @@ fn a_popped_up_notification_a_click_cannot_reach_is_refused() {
     });
 }
 
+/// **The on-screen display is seen while it is up, to be read and not
+/// used** -- a level by what it measures -- and so is the card saying how
+/// to move the wallpaper, while it is being moved.
+#[test]
+fn the_on_screen_display_and_the_wallpaper_card_are_read() {
+    let mut s = shell();
+    assert!(
+        tree(&s)
+            .walk()
+            .all(|n| !matches!(n.id, ShellPart::Osd(_) | ShellPart::WallpaperMove)),
+        "read with nothing up"
+    );
+    s.osd.show(crate::osd::OsdKind::Brightness { level: 70 }, 0);
+    let display = node(&s, ShellPart::Osd(OsdPart::Display));
+    let level = display.children[0].clone();
+    assert_eq!(
+        (level.role, level.name.as_str()),
+        (Role::ProgressBar, "Brightness")
+    );
+    assert_eq!(
+        level.value,
+        Some(Value::Progress {
+            value: 70.0,
+            max: 100.0
+        })
+    );
+    assert_eq!(
+        press(&mut s, level.id),
+        Err(Refusal::NotApplicable {
+            role: Role::ProgressBar,
+            action: "press"
+        })
+    );
+    assert_eq!(
+        press(&mut s, ShellPart::Osd(OsdPart::Overlay(u64::MAX))),
+        Err(Refusal::NoSuchWidget)
+    );
+
+    assert_eq!(
+        press(&mut s, ShellPart::WallpaperMove),
+        Err(Refusal::NoSuchWidget),
+        "the card refused as there with the wallpaper not being moved"
+    );
+    s.wallpaper_room = Some((-1000.0, 0.0));
+    assert_eq!(
+        s.activate_desktop_menu_item(DesktopShell::MENU_MOVE_WALLPAPER),
+        ShellAction::Consumed
+    );
+    let card = node(&s, ShellPart::WallpaperMove);
+    assert_eq!(
+        (card.role, card.name.as_str()),
+        (Role::Dialog, "Move the wallpaper")
+    );
+    assert_eq!(
+        card.description.as_deref(),
+        Some(
+            "Drag the picture, or use the arrow keys, to choose the part that shows. \
+             Enter keeps it here -- Esc puts it back."
+        )
+    );
+    // Where it is drawn: the card's panel, centred across the screen.
+    let drawn = s
+        .render_wallpaper_move()
+        .expect("the card is drawn")
+        .commands
+        .into_iter()
+        .find_map(|c| match c {
+            guitk::render::RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => Some(Rect::new(x, y, width, height)),
+            _ => None,
+        })
+        .expect("the card's panel");
+    assert_eq!(card.bounds, drawn);
+    assert!(
+        (drawn.x + drawn.w / 2.0 - 960.0).abs() < 0.5,
+        "the card is not centred: {drawn:?}"
+    );
+    assert_eq!(
+        press(&mut s, ShellPart::WallpaperMove),
+        Err(Refusal::NotApplicable {
+            role: Role::Dialog,
+            action: "press"
+        })
+    );
+}
+
 /// A shell with a clock and a note out on its desktop, added as the user
 /// adds them -- the desktop menu's rows -- and their ids, its layout saved.
 fn with_widgets() -> (DesktopShell, WidgetInstanceId, WidgetInstanceId) {

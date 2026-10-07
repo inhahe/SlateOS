@@ -13,6 +13,7 @@ use guitk::motion::Motion;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::widget::automation::{Node, Role, Value};
 
 // ============================================================================
 // Colour
@@ -63,6 +64,16 @@ use guitk::text;
 // OSD types
 // ============================================================================
 
+/// A part of the on-screen display, as tools name it
+/// ([`OsdManager::automation`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OsdPart {
+    /// The overlays on show, together.
+    Display,
+    /// One of them, by its id.
+    Overlay(u64),
+}
+
 /// The kind of information an OSD overlay shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OsdKind {
@@ -107,11 +118,64 @@ const OSD_LABEL_SIZE: f32 = 14.0;
 const OSD_LABEL_WEIGHT: FontWeightHint = FontWeightHint::Bold;
 /// Padding from the overlay's edge to its content.
 const OSD_PADDING: f32 = 16.0;
+/// Space between two overlays on show at once, stacked.
+const STACK_GAP: f32 = 8.0;
 
 /// Room the icon+text OSD's label has, given the overlay's width.
 fn osd_label_width(osd_w: f32) -> f32 {
     (osd_w - OSD_PADDING * 2.0 - 36.0).max(0.0)
 }
+
+/// What an overlay of `kind` says, in full: the words it draws -- one answer
+/// for the drawing and for tools -- but for a screenshot's path, which the
+/// drawing shortens from its start to fit (`render_content`), and for a
+/// track, whose artist and album are lines of their own.
+fn words_of(kind: &OsdKind) -> String {
+    match kind {
+        OsdKind::Volume { muted: true, .. } => "Muted".to_owned(),
+        OsdKind::Volume { .. } => "Volume".to_owned(),
+        OsdKind::Brightness { .. } => "Brightness".to_owned(),
+        OsdKind::MediaTrack { title, .. } => title.clone(),
+        OsdKind::MediaPlayPause { playing } => {
+            if *playing { "Playing" } else { "Paused" }.to_owned()
+        }
+        OsdKind::KeyboardLock { lock_type, active } => {
+            let name = match lock_type {
+                LockType::CapsLock => "Caps Lock",
+                LockType::NumLock => "Num Lock",
+                LockType::ScrollLock => "Scroll Lock",
+            };
+            let status = if *active { "ON" } else { "OFF" };
+            format!("{name}: {status}")
+        }
+        OsdKind::DeviceEvent {
+            device_name,
+            ejected,
+        } => {
+            if *ejected {
+                format!("{device_name} ejected")
+            } else {
+                format!("{device_name} connected")
+            }
+        }
+        OsdKind::ScreenshotTaken { path } => format!("{SCREENSHOT_PREFIX}{path}"),
+        OsdKind::Microphone { muted } => {
+            if *muted { "Mic: Muted" } else { "Mic: Active" }.to_owned()
+        }
+        OsdKind::NetworkStatus { connected, name } => {
+            if *connected {
+                format!("Connected: {name}")
+            } else {
+                format!("Disconnected: {name}")
+            }
+        }
+        OsdKind::BatteryLow { percent } => format!("Battery Low: {percent}%"),
+        OsdKind::Custom { message, .. } => message.clone(),
+    }
+}
+
+/// What a screenshot's overlay says before the file's path.
+const SCREENSHOT_PREFIX: &str = "Screenshot: ";
 
 /// Keyboard lock types.
 // Variants share the `Lock` postfix because the keys themselves are named
@@ -530,26 +594,10 @@ impl OsdManager {
         let mut commands = Vec::new();
         let osd_w = self.config.width;
 
-        for (i, overlay) in self.overlays.iter().enumerate() {
-            let osd_h = self.height_for_kind(&overlay.kind);
+        for (overlay, place) in self.placed() {
             let base_alpha = (overlay.opacity * self.config.bg_opacity as f32) as u8;
             let text_alpha = (overlay.opacity * 255.0) as u8;
-
-            // Stack overlays vertically from the position anchor.
-            let stack_offset = i as f32 * (osd_h + 8.0);
-            let (base_x, base_y) = self.config.position.compute_origin(
-                self.screen_width,
-                self.screen_height,
-                osd_w,
-                osd_h,
-                self.config.margin,
-            );
-            let (ox, oy) = match self.config.position {
-                OsdPosition::BottomCenter | OsdPosition::BottomRight => {
-                    (base_x, base_y - stack_offset)
-                }
-                _ => (base_x, base_y + stack_offset),
-            };
+            let (ox, oy, osd_h) = (place.x, place.y, place.h);
 
             // Background shadow.
             commands.push(RenderCommand::BoxShadow {
@@ -593,9 +641,110 @@ impl OsdManager {
         commands
     }
 
+    /// The overlays on show, as tools see them, each where it is drawn: a
+    /// level's a progress bar named by what it measures, holding the level,
+    /// said muted where it is; a track's a label named by its title and
+    /// described by its artist and album; the rest labels saying what they
+    /// say, in full. `None` with none on show.
+    ///
+    /// Only to be read: the overlays are drawn on a surface that declines
+    /// the pointer, and nothing in one is to be used.
+    #[must_use]
+    pub fn automation(&self) -> Option<Node<OsdPart>> {
+        let overlays: Vec<Node<OsdPart>> = self
+            .placed()
+            .map(|(overlay, bounds)| {
+                let part = OsdPart::Overlay(overlay.id);
+                match &overlay.kind {
+                    OsdKind::Volume { level, muted } => {
+                        let mut node = Node::new(part, Role::ProgressBar, "Volume", bounds);
+                        node.value = Some(Value::Progress {
+                            value: f32::from(*level),
+                            max: 100.0,
+                        });
+                        node.description = muted.then(|| "muted".to_owned());
+                        node
+                    }
+                    OsdKind::Brightness { level } => {
+                        let mut node = Node::new(part, Role::ProgressBar, "Brightness", bounds);
+                        node.value = Some(Value::Progress {
+                            value: f32::from(*level),
+                            max: 100.0,
+                        });
+                        node
+                    }
+                    OsdKind::MediaTrack { artist, album, .. } => {
+                        let mut node =
+                            Node::new(part, Role::Label, words_of(&overlay.kind), bounds);
+                        let said: Vec<&str> = [artist.as_str(), album.as_str()]
+                            .into_iter()
+                            .filter(|line| !line.is_empty())
+                            .collect();
+                        node.description = (!said.is_empty()).then(|| said.join(", "));
+                        node
+                    }
+                    kind => Node::new(part, Role::Label, words_of(kind), bounds),
+                }
+            })
+            .collect();
+        let bounds = overlays
+            .iter()
+            .map(|node| node.bounds)
+            .reduce(crate::Rect::union)?;
+        let mut display = Node::new(OsdPart::Display, Role::Group, "On-screen display", bounds);
+        display.children = overlays;
+        Some(display)
+    }
+
     // ========================================================================
     // Private helpers
     // ========================================================================
+
+    /// Each overlay on show with where it is drawn. The first is where the
+    /// position puts it; the rest stack away from it -- upward from one at
+    /// the bottom, downward from one at the top or the centre -- each
+    /// [`STACK_GAP`] clear of the one before, whatever their heights.
+    ///
+    /// The stack grows from the first overlay's edge, each overlay a gap on
+    /// from the one before, not its place in the stack times its own height
+    /// on from where the position would put it alone: that way a short
+    /// overlay after a tall one reached back over it, and a tall one after
+    /// a short one stood off from it.
+    fn placed(&self) -> impl Iterator<Item = (&OsdOverlay, crate::Rect)> + '_ {
+        let osd_w = self.config.width;
+        let upward = matches!(
+            self.config.position,
+            OsdPosition::BottomCenter | OsdPosition::BottomRight
+        );
+        let origin = move |osd_h: f32| {
+            self.config.position.compute_origin(
+                self.screen_width,
+                self.screen_height,
+                osd_w,
+                osd_h,
+                self.config.margin,
+            )
+        };
+        // The edge the stack grows from: the first overlay's bottom when it
+        // grows upward, its top otherwise.
+        let edge = self.overlays.first().map_or(0.0, |first| {
+            let first_h = self.height_for_kind(&first.kind);
+            let (_, y) = origin(first_h);
+            if upward { y + first_h } else { y }
+        });
+        let mut stacked = 0.0_f32;
+        self.overlays.iter().map(move |overlay| {
+            let osd_h = self.height_for_kind(&overlay.kind);
+            let (x, _) = origin(osd_h);
+            let y = if upward {
+                edge - stacked - osd_h
+            } else {
+                edge + stacked
+            };
+            stacked += osd_h + STACK_GAP;
+            (overlay, crate::Rect::new(x, y, osd_w, osd_h))
+        })
+    }
 
     fn is_kind_enabled(&self, kind: &OsdKind) -> bool {
         match kind {
@@ -650,7 +799,7 @@ impl OsdManager {
                     oy,
                     osd_w,
                     text_alpha,
-                    if *muted { "Muted" } else { "Volume" },
+                    &words_of(&overlay.kind),
                     if *muted {
                         volume_muted_icon()
                     } else {
@@ -668,7 +817,7 @@ impl OsdManager {
                     oy,
                     osd_w,
                     text_alpha,
-                    "Brightness",
+                    &words_of(&overlay.kind),
                     brightness_icon(*level),
                     *level,
                     p.yellow,
@@ -683,24 +832,25 @@ impl OsdManager {
                 self.render_media_osd(p, ox, oy, osd_w, text_alpha, title, artist, album, commands);
             }
             OsdKind::MediaPlayPause { playing } => {
-                let label = if *playing { "Playing" } else { "Paused" };
                 let icon = if *playing {
                     "media-playback-start"
                 } else {
                     "media-playback-pause"
                 };
                 self.render_icon_text_osd(
-                    p, ox, oy, osd_w, text_alpha, icon, label, p.lavender, commands,
+                    p,
+                    ox,
+                    oy,
+                    osd_w,
+                    text_alpha,
+                    icon,
+                    &words_of(&overlay.kind),
+                    p.lavender,
+                    commands,
                 );
             }
-            OsdKind::KeyboardLock { lock_type, active } => {
-                let name = match lock_type {
-                    LockType::CapsLock => "Caps Lock",
-                    LockType::NumLock => "Num Lock",
-                    LockType::ScrollLock => "Scroll Lock",
-                };
-                let status = if *active { "ON" } else { "OFF" };
-                let label = format!("{name}: {status}");
+            OsdKind::KeyboardLock { active, .. } => {
+                let label = words_of(&overlay.kind);
                 let color = if *active { p.green } else { p.subtext0 };
                 self.render_icon_text_osd(
                     p,
@@ -714,15 +864,8 @@ impl OsdManager {
                     commands,
                 );
             }
-            OsdKind::DeviceEvent {
-                device_name,
-                ejected,
-            } => {
-                let label = if *ejected {
-                    format!("{device_name} ejected")
-                } else {
-                    format!("{device_name} connected")
-                };
+            OsdKind::DeviceEvent { ejected, .. } => {
+                let label = words_of(&overlay.kind);
                 let color = if *ejected { p.subtext0 } else { p.green };
                 let icon = if *ejected {
                     "media-eject"
@@ -744,13 +887,12 @@ impl OsdManager {
                 // directory, so any account named in a non-Latin script took
                 // the desktop shell down on every screenshot. The 27 was also a
                 // count with no relation to the width beside it.
-                let prefix = "Screenshot: ";
                 let room = (osd_label_width(osd_w)
-                    - text::measure(prefix, OSD_LABEL_SIZE, OSD_LABEL_WEIGHT))
+                    - text::measure(SCREENSHOT_PREFIX, OSD_LABEL_SIZE, OSD_LABEL_WEIGHT))
                 .max(0.0);
                 let display_path =
                     text::elide_start(path, room, "\u{2026}", OSD_LABEL_SIZE, OSD_LABEL_WEIGHT);
-                let label = format!("{prefix}{display_path}");
+                let label = format!("{SCREENSHOT_PREFIX}{display_path}");
                 self.render_icon_text_osd(
                     p,
                     ox,
@@ -764,7 +906,6 @@ impl OsdManager {
                 );
             }
             OsdKind::Microphone { muted } => {
-                let label = if *muted { "Mic: Muted" } else { "Mic: Active" };
                 let color = if *muted { p.red } else { p.green };
                 let icon = if *muted {
                     "audio-input-microphone-muted"
@@ -772,15 +913,19 @@ impl OsdManager {
                     "audio-input-microphone"
                 };
                 self.render_icon_text_osd(
-                    p, ox, oy, osd_w, text_alpha, icon, label, color, commands,
+                    p,
+                    ox,
+                    oy,
+                    osd_w,
+                    text_alpha,
+                    icon,
+                    &words_of(&overlay.kind),
+                    color,
+                    commands,
                 );
             }
-            OsdKind::NetworkStatus { connected, name } => {
-                let label = if *connected {
-                    format!("Connected: {name}")
-                } else {
-                    format!("Disconnected: {name}")
-                };
+            OsdKind::NetworkStatus { connected, .. } => {
+                let label = words_of(&overlay.kind);
                 let color = if *connected { p.green } else { p.red };
                 let icon = if *connected {
                     "network-idle"
@@ -791,8 +936,8 @@ impl OsdManager {
                     p, ox, oy, osd_w, text_alpha, icon, &label, color, commands,
                 );
             }
-            OsdKind::BatteryLow { percent } => {
-                let label = format!("Battery Low: {percent}%");
+            OsdKind::BatteryLow { .. } => {
+                let label = words_of(&overlay.kind);
                 self.render_icon_text_osd(
                     p,
                     ox,
@@ -1370,6 +1515,108 @@ mod tests {
     // Helper: create a default manager.
     fn make_manager() -> OsdManager {
         OsdManager::new(1920.0, 1080.0)
+    }
+
+    // ---- as tools see it ----
+
+    /// **Tools see the overlays on show**: a level as a progress bar named
+    /// by what it measures, holding it, said muted where it is; a lock key
+    /// by what it says -- each where it is drawn, the two apart -- and
+    /// nothing with none up.
+    #[test]
+    fn tools_see_the_overlays_on_show() {
+        let mut mgr = make_manager();
+        assert_eq!(mgr.automation(), None);
+        mgr.show(
+            OsdKind::Volume {
+                level: 40,
+                muted: true,
+            },
+            0,
+        );
+        mgr.show(
+            OsdKind::KeyboardLock {
+                lock_type: LockType::CapsLock,
+                active: true,
+            },
+            0,
+        );
+        let display = mgr.automation().expect("two up");
+        assert_eq!(
+            (display.id, display.role, display.name.as_str()),
+            (OsdPart::Display, Role::Group, "On-screen display")
+        );
+        let volume = &display.children[0];
+        assert_eq!(
+            (volume.role, volume.name.as_str()),
+            (Role::ProgressBar, "Volume")
+        );
+        assert_eq!(
+            volume.value,
+            Some(Value::Progress {
+                value: 40.0,
+                max: 100.0
+            })
+        );
+        assert_eq!(volume.description.as_deref(), Some("muted"));
+        let caps = &display.children[1];
+        assert_eq!(
+            (caps.role, caps.name.as_str()),
+            (Role::Label, "Caps Lock: ON")
+        );
+        assert!(
+            volume.bounds.intersect(caps.bounds).is_none(),
+            "two overlays told over each other"
+        );
+        assert_eq!(display.bounds, volume.bounds.union(caps.bounds));
+    }
+
+    /// **A track is named by its title and described by its artist and
+    /// album** -- an album it has none of left out -- and a screenshot by
+    /// its whole path, which the overlay shortens to fit.
+    #[test]
+    fn tools_are_told_a_track_and_a_screenshot_in_full() {
+        let mut mgr = make_manager();
+        mgr.show(
+            OsdKind::MediaTrack {
+                title: "Song".to_owned(),
+                artist: "Band".to_owned(),
+                album: String::new(),
+            },
+            0,
+        );
+        let track = mgr.automation().expect("up").children[0].clone();
+        assert_eq!(
+            (
+                track.role,
+                track.name.as_str(),
+                track.description.as_deref()
+            ),
+            (Role::Label, "Song", Some("Band"))
+        );
+
+        let mut mgr = make_manager();
+        let path = "/home/someone/Pictures/Screenshots/a-long-name-for-a-screenshot-taken-on-a-tuesday.png";
+        mgr.show(
+            OsdKind::ScreenshotTaken {
+                path: path.to_owned(),
+            },
+            0,
+        );
+        let shot = mgr.automation().expect("up").children[0].clone();
+        assert_eq!(shot.name, format!("Screenshot: {path}"));
+        let drawn: Vec<String> = mgr
+            .render(&Palette::for_mode(false))
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.iter().any(|t| t.starts_with("Screenshot: \u{2026}")),
+            "the overlay did not shorten the path: {drawn:?}"
+        );
     }
 
     // ---- OsdPosition ----
@@ -2331,6 +2578,115 @@ mod tests {
         let cmds = mgr.render(&mocha());
         // Should have commands for both overlays (at least 6 each: shadow + bg + border + content).
         assert!(cmds.len() >= 10);
+    }
+
+    /// **Overlays on show at once are drawn apart, whatever their
+    /// heights**: at every position the first is where the position puts
+    /// it and each after it a gap clear of the one before, stacked away
+    /// from it, all on the screen -- and tools are told the same places.
+    /// Short, tall, middling: placed by its place in the stack times its own
+    /// height, the tall one stood off from the short one before it, and the
+    /// middling one reached back over the tall.
+    #[test]
+    fn stacked_overlays_of_different_heights_are_drawn_apart() {
+        for position in [
+            OsdPosition::TopCenter,
+            OsdPosition::BottomCenter,
+            OsdPosition::Center,
+            OsdPosition::TopRight,
+            OsdPosition::BottomRight,
+        ] {
+            let mut mgr = make_manager();
+            mgr.config.position = position;
+            mgr.config.fade_in_ms = 0;
+            let kinds = [
+                OsdKind::KeyboardLock {
+                    lock_type: LockType::CapsLock,
+                    active: true,
+                },
+                OsdKind::MediaTrack {
+                    title: "Song".to_owned(),
+                    artist: String::new(),
+                    album: String::new(),
+                },
+                OsdKind::Volume {
+                    level: 50,
+                    muted: false,
+                },
+            ];
+            let heights: Vec<f32> = kinds.iter().map(|k| mgr.height_for_kind(k)).collect();
+            assert!(
+                heights[0] < heights[2] && heights[2] < heights[1],
+                "short, tall, middling: {heights:?}"
+            );
+            for kind in kinds {
+                mgr.show(kind, 0);
+            }
+            mgr.tick(0);
+            let panels: Vec<crate::Rect> = mgr
+                .render(&mocha())
+                .into_iter()
+                .filter_map(|c| match c {
+                    RenderCommand::BoxShadow {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => Some(crate::Rect::new(x, y, width, height)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(panels.len(), 3, "{position:?}");
+            let (x, y) = position.compute_origin(
+                1920.0,
+                1080.0,
+                mgr.config.width,
+                heights[0],
+                mgr.config.margin,
+            );
+            assert_eq!(
+                (panels[0].x, panels[0].y),
+                (x, y),
+                "{position:?}: the first is not where the position puts it"
+            );
+            let upward = matches!(
+                position,
+                OsdPosition::BottomCenter | OsdPosition::BottomRight
+            );
+            for pair in panels.windows(2) {
+                let (before, next) = (pair[0], pair[1]);
+                assert!(
+                    (next.x - before.x).abs() < 0.01,
+                    "{position:?}: not one column"
+                );
+                let gap = if upward {
+                    before.y - (next.y + next.h)
+                } else {
+                    next.y - (before.y + before.h)
+                };
+                assert!(
+                    (gap - STACK_GAP).abs() < 0.01,
+                    "{position:?}: {gap} between {before:?} and {next:?}"
+                );
+            }
+            let screen = crate::Rect::new(0.0, 0.0, 1920.0, 1080.0);
+            for panel in &panels {
+                assert_eq!(
+                    panel.intersect(screen),
+                    Some(*panel),
+                    "{position:?}: {panel:?} is off the screen"
+                );
+            }
+            let told: Vec<crate::Rect> = mgr
+                .automation()
+                .expect("three up")
+                .children
+                .iter()
+                .map(|node| node.bounds)
+                .collect();
+            assert_eq!(told, panels, "{position:?}");
+        }
     }
 
     // ---- Muted volume rendering ----

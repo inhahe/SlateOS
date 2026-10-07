@@ -41,7 +41,10 @@
 //! (`guitk::dialog::DialogTarget`), whose choice goes where it was put up
 //! for -- the Run box's line, a folder frame -- and the character picker
 //! over a field (`charpicker::Target`), whose pick is typed into the field:
-//! each the component's own parts, where the shell draws it.
+//! each the component's own parts, where the shell draws it. And, only to be
+//! read, the on-screen display while it is up (`osd::OsdPart`) -- a level, a
+//! lock key, a track, each saying what it says -- and the card saying how to
+//! move the wallpaper while it is being moved.
 //!
 //! # As the user would
 //!
@@ -65,6 +68,7 @@ use guitk::widget::automation::{Accessible, Action, Node, Refusal, Role, Value};
 
 use crate::calendar::{CalendarHit, CalendarPart, CalendarViewMode};
 use crate::notif_pane::PanePart;
+use crate::osd::OsdPart;
 use crate::overview::{self, OverviewPart};
 use crate::run_dialog::RunPart;
 use crate::snap::{SnapLayoutPreset, ZoneId};
@@ -160,6 +164,12 @@ pub enum ShellPart {
     /// Its close button: pressed, the pop-up goes and the notification
     /// stays in the pane, unread.
     ToastClose(u64),
+    /// A part of the on-screen display -- the volume's or brightness's
+    /// level, a lock key, a track -- while one is up: only to be read.
+    Osd(OsdPart),
+    /// The card saying how to move the wallpaper, while it is being moved:
+    /// the keys and the pointer move it, Enter keeps it, Escape puts it back.
+    WallpaperMove,
 }
 
 /// A menu the shell opens over everything.
@@ -1476,6 +1486,29 @@ impl Accessible for DesktopShell {
         if let Some(toasts) = self.toasts_node() {
             root.children.push(toasts);
         }
+        // The on-screen display, on the overlay surface, which takes no
+        // press: what a key just did, to be read.
+        if let Some(osd) = self.osd.automation() {
+            root.children.push(osd.map(&ShellPart::Osd));
+        }
+        // How to move the wallpaper, while it is being moved: the keys and
+        // the pointer do it, so the card is only to be read.
+        if self.wallpaper_move.is_some() {
+            let [(title, _), rest @ ..] = Self::WALLPAPER_MOVE_LINES;
+            let mut card = Node::new(
+                ShellPart::WallpaperMove,
+                Role::Dialog,
+                title,
+                self.wallpaper_move_card(),
+            );
+            card.description = Some(
+                rest.iter()
+                    .map(|(words, _)| *words)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            root.children.push(card);
+        }
         // The menus last, as they are drawn over everything else -- the one
         // a press reaches first last of all.
         for which in ShellMenu::IN_PRESS_ORDER.into_iter().rev() {
@@ -1654,6 +1687,22 @@ impl Accessible for DesktopShell {
             (ShellPart::ToastClose(id), Action::Press) => self.press_toast(id, true),
             (ShellPart::Toast(_), _) => Err(not_for(Role::ListItem)),
             (ShellPart::ToastClose(_), _) => Err(not_for(Role::Button)),
+            // Only to be read: what the role of the part is, or that it went.
+            (ShellPart::Osd(part), _) => Err(self
+                .osd
+                .automation()
+                .and_then(|tree| {
+                    tree.walk()
+                        .find(|node| node.id == part)
+                        .map(|node| node.role)
+                })
+                .map_or(Refusal::NoSuchWidget, not_for)),
+            (ShellPart::WallpaperMove, _) => {
+                if self.wallpaper_move.is_none() {
+                    return Err(Refusal::NoSuchWidget);
+                }
+                Err(not_for(Role::Dialog))
+            }
             (ShellPart::StartList | ShellPart::PowerMenu | ShellPart::Toasts, _) => {
                 Err(not_for(Role::List))
             }

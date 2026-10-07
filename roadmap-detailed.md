@@ -2713,7 +2713,9 @@ authors never wrote a single automation handler.
   (`desktop::notif_pane::PanePart`: its links, its switches and levels,
   each notification with its cross, and each program's switch), the
   notifications popped up in its corner (each named and described as its
-  card is, opened or closed as clicked) and every
+  card is, opened or closed as clicked), the on-screen display and the card
+  saying how to move the wallpaper (both only to be read: a level as a
+  progress bar, a lock key or a track by what it says) and every
   menu open over everything (`desktop::accessible::ShellMenu`); a part
   pressed is the shell's own click on it, and one the click would not
   reach is refused (`design-decisions.md` §1491). The toolkit's context

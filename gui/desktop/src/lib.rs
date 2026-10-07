@@ -11875,6 +11875,38 @@ impl DesktopShell {
         HotkeyOutcome::consumed()
     }
 
+    /// What the card says while the wallpaper is being moved, line by line,
+    /// and how heavily each is drawn: one answer for the card and for tools.
+    pub(crate) const WALLPAPER_MOVE_LINES: [(&'static str, guitk::render::FontWeightHint); 3] = [
+        ("Move the wallpaper", guitk::render::FontWeightHint::Bold),
+        (
+            "Drag the picture, or use the arrow keys, to choose the part that shows.",
+            guitk::render::FontWeightHint::Regular,
+        ),
+        (
+            "Enter keeps it here -- Esc puts it back.",
+            guitk::render::FontWeightHint::Regular,
+        ),
+    ];
+
+    /// Where the card is while the wallpaper is being moved: at the top of
+    /// the screen, centred, as wide as its longest line.
+    pub(crate) fn wallpaper_move_card(&self) -> Rect {
+        let size = self.font_size(TextRole::Body);
+        let line = text::line_height(size, guitk::render::FontWeightHint::Regular);
+        let pad = self.scale(14.0);
+        let wide = Self::WALLPAPER_MOVE_LINES
+            .iter()
+            .map(|(words, weight)| text::measure(words, size, *weight))
+            .fold(0.0_f32, f32::max);
+        #[allow(clippy::cast_precision_loss, reason = "three lines")]
+        let tall = line * Self::WALLPAPER_MOVE_LINES.len() as f32;
+        let (w, h) = (wide + pad * 2.0, tall + pad * 2.0);
+        #[allow(clippy::cast_precision_loss, reason = "a screen's width")]
+        let x = ((self.screen_width as f32 - w) / 2.0).max(0.0);
+        Rect::new(x, self.scale(24.0), w, h)
+    }
+
     /// What the screen says while the wallpaper is being moved -- how to move
     /// it and how to finish -- on a card at the top of the screen; `None`
     /// when it is not being moved.
@@ -11885,33 +11917,14 @@ impl DesktopShell {
         let size = self.font_size(TextRole::Body);
         let line = text::line_height(size, guitk::render::FontWeightHint::Regular);
         let pad = self.scale(14.0);
-        let lines = [
-            (
-                "Move the wallpaper",
-                guitk::render::FontWeightHint::Bold,
-                p.text,
-            ),
-            (
-                "Drag the picture, or use the arrow keys, to choose the part that shows.",
-                guitk::render::FontWeightHint::Regular,
-                p.text,
-            ),
-            (
-                "Enter keeps it here -- Esc puts it back.",
-                guitk::render::FontWeightHint::Regular,
-                p.subtext0,
-            ),
-        ];
-        let wide = lines
+        let card = self.wallpaper_move_card();
+        let (x, y, w, h) = (card.x, card.y, card.w, card.h);
+        let wide = (w - pad * 2.0).max(0.0);
+        let inks = [p.text, p.text, p.subtext0];
+        let lines = Self::WALLPAPER_MOVE_LINES
             .iter()
-            .map(|(words, weight, _)| text::measure(words, size, *weight))
-            .fold(0.0_f32, f32::max);
-        #[allow(clippy::cast_precision_loss, reason = "three lines")]
-        let tall = line * lines.len() as f32;
-        let (w, h) = (wide + pad * 2.0, tall + pad * 2.0);
-        #[allow(clippy::cast_precision_loss, reason = "a screen's width")]
-        let x = ((self.screen_width as f32 - w) / 2.0).max(0.0);
-        let y = self.scale(24.0);
+            .zip(inks)
+            .map(|((words, weight), ink)| (*words, *weight, ink));
         let mut tree = RenderTree::new();
         let radius = CornerRadii::all(self.scale(8.0));
         tree.push(guitk::render::RenderCommand::FillRect {
@@ -11931,16 +11944,16 @@ impl DesktopShell {
             line_width: 1.0,
             corner_radii: radius,
         });
-        for (i, (words, weight, color)) in lines.iter().enumerate() {
+        for (i, (words, weight, color)) in lines.enumerate() {
             #[allow(clippy::cast_precision_loss, reason = "three lines")]
             let row = i as f32;
             tree.push(guitk::render::RenderCommand::Text {
                 x: x + pad,
                 y: y + pad + row * line,
-                text: (*words).to_owned(),
-                color: *color,
+                text: words.to_owned(),
+                color,
                 font_size: size,
-                font_weight: *weight,
+                font_weight: weight,
                 max_width: Some(wide),
                 overflow: guitk::render::TextOverflow::Ellipsis,
             });

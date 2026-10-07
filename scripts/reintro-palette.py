@@ -4341,11 +4341,13 @@ DEFECTS = [
         'OOOOOOOOOOOOOOOOOOOOOOO: play/pause loses its own colour to plain text',
         OSD,
         [
-            ('p, ox, oy, osd_w, text_alpha, icon, label, p.lavender, commands,',
-             'p, ox, oy, osd_w, text_alpha, icon, label, p.text, commands,'),
+            ('                    &words_of(&overlay.kind),\n                    p.lavender,\n',
+             '                    &words_of(&overlay.kind),\n                    p.text,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-10-06: the label is `words_of`'s, which tools
+            # are told too, and the call is laid out a line per argument.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),

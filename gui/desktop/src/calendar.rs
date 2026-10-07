@@ -715,6 +715,73 @@ fn event_time_label(event: &calendarstore::CalendarEvent) -> String {
 // ClockDisplay
 // ============================================================================
 
+/// Seconds in a day, for the day a local reading falls on.
+const SECS_PER_DAY_U64: u64 = 86_400;
+
+/// One of the world clock widget's other zones as it reads now
+/// ([`ClockDisplay::world_clocks`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorldClockReading {
+    /// Its label: "Tokyo".
+    pub label: String,
+    /// The time there, to the minute: "09:30".
+    pub time: String,
+    /// "Tomorrow" or "Yesterday" where it is another day there than here;
+    /// `None` on the same day.
+    pub day: Option<&'static str>,
+    /// How far ahead or behind here it is: "13 hours ahead", "same time".
+    pub offset: String,
+}
+
+impl WorldClockReading {
+    /// Its second line: the day where it is another, then the offset --
+    /// "Tomorrow, 13 hours ahead", "4 hours behind".
+    #[must_use]
+    pub fn detail(&self) -> String {
+        match self.day {
+            Some(day) => format!("{day}, {}", self.offset),
+            None => capitalised(&self.offset),
+        }
+    }
+}
+
+/// `text` with its first letter a capital.
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// How far ahead or behind a zone `seconds` from here is, in words: "13
+/// hours ahead", "5 hours 30 minutes behind", "45 minutes ahead", "same
+/// time".
+fn offset_words(seconds: i32) -> String {
+    if seconds == 0 {
+        return "same time".to_owned();
+    }
+    let side = if seconds > 0 { "ahead" } else { "behind" };
+    let total = seconds.unsigned_abs();
+    let (hours, minutes) = (total / 3600, (total % 3600) / 60);
+    let unit = |n: u32, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    let span = match (hours, minutes) {
+        (0, m) => unit(m, "minute", "minutes"),
+        (h, 0) => unit(h, "hour", "hours"),
+        (h, m) => format!(
+            "{} {}",
+            unit(h, "hour", "hours"),
+            unit(m, "minute", "minutes")
+        ),
+    };
+    format!("{span} {side}")
+}
+
 /// Timezone display entry.
 #[derive(Clone, Debug)]
 pub struct TimezoneEntry {
@@ -820,6 +887,38 @@ impl ClockDisplay {
             tz,
         });
         true
+    }
+
+    /// What the world clock widget shows of each of its other zones at
+    /// `utc_timestamp`, beside the clock's own `local` zone: the time there,
+    /// to the minute in the clock's 12- or 24-hour form, which day that is
+    /// against the local one, and how far ahead or behind it is.
+    #[must_use]
+    pub fn world_clocks(&self, utc_timestamp: u64, local: &Tz) -> Vec<WorldClockReading> {
+        let minutes_only = Self {
+            show_seconds: false,
+            extra_timezones: Vec::new(),
+            ..self.clone()
+        };
+        let utc = i64::try_from(utc_timestamp).unwrap_or(i64::MAX);
+        let here = local.lookup(utc).gmtoff;
+        let today = local_secs(utc_timestamp, local) / SECS_PER_DAY_U64;
+        self.extra_timezones
+            .iter()
+            .map(|zone| {
+                let day = local_secs(utc_timestamp, &zone.tz) / SECS_PER_DAY_U64;
+                WorldClockReading {
+                    label: zone.label.clone(),
+                    time: minutes_only.format_time(utc_timestamp, &zone.tz),
+                    day: match day.cmp(&today) {
+                        std::cmp::Ordering::Greater => Some("Tomorrow"),
+                        std::cmp::Ordering::Less => Some("Yesterday"),
+                        std::cmp::Ordering::Equal => None,
+                    },
+                    offset: offset_words(zone.tz.lookup(utc).gmtoff.saturating_sub(here)),
+                }
+            })
+            .collect()
     }
 
     /// Format a UTC timestamp as a wall clock reading in `tz`.
@@ -3509,6 +3608,65 @@ mod tests {
             Agenda::default().upcoming(now, &Tz::UTC),
             Upcoming::default()
         );
+    }
+
+    /// **Each other clock says its time, its day and how far it is from
+    /// here**, by the rules of both zones at the moment asked.
+    #[test]
+    fn the_world_clocks_read_each_zone_against_this_one() {
+        let mut clock = ClockDisplay::new();
+        clock.show_seconds = true;
+        assert!(clock.add_timezone("Tokyo", "JST-9"));
+        assert!(clock.add_timezone("Honolulu", "HST10"));
+        assert!(clock.add_timezone("Kathmandu", "NPT-5:45"));
+        let new_york = tz("EST5EDT,M3.2.0,M11.1.0");
+        let said = |utc: u64| -> Vec<(String, String, String)> {
+            clock
+                .world_clocks(utc, &new_york)
+                .into_iter()
+                .map(|c| (c.label.clone(), c.time.clone(), c.detail()))
+                .collect()
+        };
+        // 14:00 UTC on 8 October: 10:00 in New York, in daylight time.
+        let two = date_to_timestamp(2026, 10, 8, 14, 0, 0).expect("valid");
+        let s = |a: &str, b: &str, c: &str| (a.to_owned(), b.to_owned(), c.to_owned());
+        assert_eq!(
+            said(two),
+            [
+                s("Tokyo", "23:00", "13 hours ahead"),
+                s("Honolulu", "04:00", "6 hours behind"),
+                s("Kathmandu", "19:45", "9 hours 45 minutes ahead"),
+            ],
+            "the seconds the taskbar shows are not the widget's"
+        );
+        // Two hours on it is the 9th in Tokyo; in January New York is an
+        // hour further behind.
+        assert_eq!(
+            said(two + 2 * 3600)[0],
+            s("Tokyo", "01:00", "Tomorrow, 13 hours ahead")
+        );
+        let january = date_to_timestamp(2026, 1, 15, 14, 0, 0).expect("valid");
+        assert_eq!(said(january)[0], s("Tokyo", "23:00", "14 hours ahead"));
+
+        // From Tokyo, New York in the evening before is yesterday.
+        let mut from_tokyo = ClockDisplay::new();
+        assert!(from_tokyo.add_timezone("New York", "EST5EDT,M3.2.0,M11.1.0"));
+        assert!(from_tokyo.add_timezone("Here too", "JST-9"));
+        let readings = from_tokyo.world_clocks(two + 9 * 3600, &tz("JST-9"));
+        assert_eq!(readings[0].detail(), "Yesterday, 13 hours behind");
+        assert_eq!(readings[1].detail(), "Same time");
+    }
+
+    /// An offset said in words, to the minute.
+    #[test]
+    fn an_offset_is_said_in_words() {
+        assert_eq!(offset_words(0), "same time");
+        assert_eq!(offset_words(60), "1 minute ahead");
+        assert_eq!(offset_words(-1800), "30 minutes behind");
+        assert_eq!(offset_words(3600), "1 hour ahead");
+        assert_eq!(offset_words(-7200), "2 hours behind");
+        assert_eq!(offset_words(19_800), "5 hours 30 minutes ahead");
+        assert_eq!(offset_words(-3660), "1 hour 1 minute behind");
     }
 
     /// **The week is the zone's**: half past eleven at night in UTC on the

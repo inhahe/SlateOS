@@ -2024,9 +2024,48 @@ fn an_upcoming_events_widget_lists_the_calendars_week() {
         .map(|w| w.id)
         .expect("added");
     let list = node(&s, ShellPart::Widget(WidgetPart::Upcoming(id)));
-    assert_eq!(list.name, "Upcoming events");
+    assert_eq!(list.name, "Upcoming Events");
     let names: Vec<&str> = list.children.iter().map(|n| n.name.as_str()).collect();
     assert_eq!(names, ["Dentist"]);
+}
+
+/// **The desktop's menu adds a world clock, which shows the Date & Time
+/// settings' other clocks** -- a hidden one not, and one in a zone the
+/// table does not know not, as on the popup -- read only while one is out.
+#[test]
+fn a_world_clock_shows_the_settings_other_clocks() {
+    let mut s = shell();
+    let clock = |tz_id: &str, label: &str, visible: bool| datetimesettings::AdditionalClock {
+        tz_id: tz_id.to_owned(),
+        label: label.to_owned(),
+        visible,
+    };
+    s.datetime.additional_clocks = vec![
+        clock("Asia/Tokyo", "Tokyo", true),
+        clock("Europe/London", "London", false),
+        clock("Atlantis/Lost_City", "Atlantis", true),
+    ];
+    assert!(
+        s.live_readings().world_clocks.is_empty(),
+        "clocks read with no world clock out"
+    );
+    s.open_desktop_menu(900.0, 500.0);
+    assert!(
+        s.activate_desktop_menu_item(DesktopShell::MENU_ADD_WORLD_CLOCK)
+            .changed()
+    );
+    s.dismiss_popups();
+    let id = s
+        .widgets
+        .all_widgets()
+        .iter()
+        .find(|w| w.kind == WidgetKind::WorldClock)
+        .map(|w| w.id)
+        .expect("added");
+    let list = node(&s, ShellPart::Widget(WidgetPart::WorldClocks(id)));
+    assert_eq!(list.name, "World Clock");
+    let names: Vec<&str> = list.children.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, ["Tokyo"]);
 }
 
 /// **A note's text is set as the user would set it**: the note opened with

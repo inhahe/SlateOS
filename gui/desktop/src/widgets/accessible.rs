@@ -10,6 +10,7 @@
 //! | battery | its charge, or "No battery", described by what its icon shows and the time left |
 //! | calendar | the month today is in, a grid named by the month and year, each day named by its date and said to be today, to have events, or to be another month's |
 //! | upcoming events | a list of the events it shows, each named by its title and described by its day and time, the list said to have nothing coming or how many more there are |
+//! | world clock | a list of the user's other clocks, each named by its label and described by its time, its day and how far ahead or behind it is, the list said to have none or how many more there are |
 //! | the rest | the name they show where their content will be |
 //!
 //! A widget not drawn is not here: one hidden, and every one while the layer
@@ -24,15 +25,15 @@ use guitk::render::FontWeightHint;
 use guitk::widget::automation::{Node, Role, Value};
 
 use super::monitor::{Graph, Graphs, Panel};
-use super::upcoming;
 use super::{
     BATTERY_CHARGE, CLOCK_TIME, DesktopWidgetManager, LiveReadings, METER_HEIGHT, Meter,
     NOT_MEASURED, PLACEHOLDER_SIZE, PROBLEM_SIZE, WidgetInstance, WidgetInstanceId, WidgetKind,
     calendar_cell, charge_text, clock_date, estimate_text, fit_within, monitor_layout,
     placeholder_line, problem_line,
 };
+use super::{upcoming, worldclock};
 use crate::Rect;
-use crate::calendar::{MonthGlance, Upcoming};
+use crate::calendar::{MonthGlance, Upcoming, WorldClockReading};
 use crate::power::{BatteryInfo, BatteryState};
 
 /// A part of the widget layer, as tools name it.
@@ -64,6 +65,10 @@ pub enum WidgetPart {
     Upcoming(WidgetInstanceId),
     /// One of the events it lists, by its place among them.
     UpcomingEvent(WidgetInstanceId, usize),
+    /// A world clock widget's list of the user's other clocks.
+    WorldClocks(WidgetInstanceId),
+    /// One of them, by its place in the list.
+    OtherClock(WidgetInstanceId, usize),
     /// The name a widget with no content of its own yet shows in its place.
     Placeholder(WidgetInstanceId),
 }
@@ -156,6 +161,46 @@ fn upcoming_node(
     }
     if let Some((more, _)) = laid.more {
         list.description = Some(format!("{} not shown", upcoming::more_text(more)));
+    }
+    list
+}
+
+/// A world clock widget's list in its content `(x, y, width, height)`: each
+/// clock it shows, named by its label and described by its time, its day and
+/// its offset -- "09:30, Tomorrow, 13 hours ahead" -- boxed where it is drawn
+/// ([`worldclock::rows`]); the list said to have no clocks, or how many more
+/// it does not show.
+fn world_clocks_node(
+    id: WidgetInstanceId,
+    clocks: &[WorldClockReading],
+    (x, y, width, height): (f32, f32, f32, f32),
+) -> Node<WidgetPart> {
+    let content = Rect::new(x, y, width, height);
+    let mut list = Node::new(
+        WidgetPart::WorldClocks(id),
+        Role::List,
+        WidgetKind::WorldClock.label(),
+        content,
+    );
+    if clocks.is_empty() {
+        list.description = Some(worldclock::NO_CLOCKS.to_owned());
+        return list;
+    }
+    let laid = worldclock::rows(clocks, content);
+    for &(index, bounds) in &laid.rows {
+        if let Some(clock) = clocks.get(index) {
+            let mut row = Node::new(
+                WidgetPart::OtherClock(id, index),
+                Role::ListItem,
+                clock.label.clone(),
+                bounds,
+            );
+            row.description = Some(format!("{}, {}", clock.time, clock.detail()));
+            list.children.push(row);
+        }
+    }
+    if let Some((more, _)) = laid.more {
+        list.description = Some(format!("{} not shown", worldclock::more_text(more)));
     }
     list
 }
@@ -302,6 +347,9 @@ impl DesktopWidgetManager {
                 .into_iter()
                 .collect(),
             WidgetKind::Reminders => vec![upcoming_node(id, &live.upcoming, (cx, cy, cw, ch))],
+            WidgetKind::WorldClock => {
+                vec![world_clocks_node(id, &live.world_clocks, (cx, cy, cw, ch))]
+            }
             WidgetKind::BatteryStatus => {
                 let mut charge = Node::new(
                     WidgetPart::Charge(id),

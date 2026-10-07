@@ -42,6 +42,7 @@ fn readings() -> LiveReadings {
             ..Graphs::default()
         },
         upcoming: crate::calendar::Upcoming::default(),
+        world_clocks: Vec::new(),
     }
 }
 
@@ -490,7 +491,7 @@ fn the_upcoming_events_are_a_list_of_whats_coming() {
         ),
         (
             Role::List,
-            "Upcoming events",
+            "Upcoming Events",
             Some(super::upcoming::NOTHING_COMING)
         )
     );
@@ -547,4 +548,57 @@ fn the_upcoming_events_are_a_list_of_whats_coming() {
     for row in &list.children {
         assert_eq!(content.union(row.bounds), content, "{} outside", row.name);
     }
+}
+
+/// **The world clock shows tools a list of the other clocks**: each named
+/// by its label and described by its time, day and offset, where it is
+/// drawn inside the widget -- and, with none, a list saying where they are
+/// added.
+#[test]
+fn the_world_clock_is_a_list_of_the_other_clocks() {
+    let (layer, id) = one(WidgetKind::WorldClock);
+    let empty = node_of(&layer, &readings(), WidgetPart::WorldClocks(id)).expect("seen");
+    assert_eq!(
+        (
+            empty.role,
+            empty.name.as_str(),
+            empty.description.as_deref()
+        ),
+        (
+            Role::List,
+            "World Clock",
+            Some(super::worldclock::NO_CLOCKS)
+        )
+    );
+    assert!(empty.children.is_empty());
+
+    let mut clock = crate::calendar::ClockDisplay::new();
+    assert!(clock.add_timezone("Tokyo", "JST-9"));
+    // 14:00 UTC on 8 October 2026.
+    let live = LiveReadings {
+        world_clocks: clock.world_clocks(1_791_468_000, &tzrules::Tz::UTC),
+        ..readings()
+    };
+    let list = node_of(&layer, &live, WidgetPart::WorldClocks(id)).expect("seen");
+    let rows: Vec<(WidgetPart, Role, &str, Option<&str>)> = list
+        .children
+        .iter()
+        .map(|n| (n.id, n.role, n.name.as_str(), n.description.as_deref()))
+        .collect();
+    assert_eq!(
+        rows,
+        [(
+            WidgetPart::OtherClock(id, 0),
+            Role::ListItem,
+            "Tokyo",
+            Some("23:00, 9 hours ahead")
+        )]
+    );
+    let (x, y, w, h) = layer.content_rect(id).expect("placed");
+    let content = Rect::new(x, y, w, h);
+    assert_eq!(
+        content.union(list.children[0].bounds),
+        content,
+        "the clock outside"
+    );
 }

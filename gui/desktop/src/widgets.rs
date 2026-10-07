@@ -24,6 +24,7 @@ use yamldoc::Document;
 mod accessible;
 pub mod monitor;
 pub mod upcoming;
+pub mod worldclock;
 
 pub use accessible::WidgetPart;
 
@@ -373,7 +374,7 @@ impl WidgetKind {
             Self::MusicPlayer => "Music Player",
             Self::PhotoFrame => "Photo Frame",
             Self::WorldClock => "World Clock",
-            Self::Reminders => "Upcoming events",
+            Self::Reminders => "Upcoming Events",
             Self::DiskUsage => "Disk Usage",
             Self::NetworkMonitor => "Network",
             Self::BatteryStatus => "Battery",
@@ -449,6 +450,7 @@ impl WidgetKind {
                 WidgetSize::LARGE,
                 WidgetSize::EXTRA_LARGE,
             ],
+            Self::WorldClock => &[WidgetSize::WIDE, WidgetSize::LARGE],
             Self::Notes | Self::PhotoFrame => &WidgetSize::ALL,
             _ => &[],
         }
@@ -490,7 +492,10 @@ impl WidgetInstance {
     pub fn new(id: WidgetInstanceId, kind: WidgetKind, position: GridPos) -> Self {
         let size = kind.default_size();
         let update_interval = match &kind {
-            WidgetKind::Clock | WidgetKind::SystemMonitor | WidgetKind::NetworkMonitor => 1000,
+            WidgetKind::Clock
+            | WidgetKind::WorldClock
+            | WidgetKind::SystemMonitor
+            | WidgetKind::NetworkMonitor => 1000,
             WidgetKind::Weather => 600_000,
             WidgetKind::RssFeed => 300_000,
             WidgetKind::BatteryStatus => 30_000,
@@ -968,6 +973,10 @@ pub struct LiveReadings {
     /// widget lists them -- gathered by the shell from the user's calendar
     /// (`Agenda::upcoming`) in the clock's zone; empty while none is drawn.
     pub upcoming: crate::calendar::Upcoming,
+    /// The user's other clocks as they read now, as the world clock widget
+    /// shows them (`ClockDisplay::world_clocks`, from the Date & Time
+    /// settings' additional clocks); empty while none is drawn.
+    pub world_clocks: Vec<crate::calendar::WorldClockReading>,
 }
 
 /// Manages all desktop widgets.
@@ -2275,6 +2284,13 @@ impl DesktopWidgetManager {
                 alpha,
                 commands,
             ),
+            WidgetKind::WorldClock => worldclock::render(
+                &live.world_clocks,
+                crate::Rect::new(x, y, width, height),
+                p,
+                alpha,
+                commands,
+            ),
             WidgetKind::BatteryStatus => {
                 let b = &live.battery;
                 // The battery as it is: missing, charging, nearly flat, or
@@ -2596,6 +2612,13 @@ mod tests {
             // upcoming-events widget the fixture shows lists the coloured
             // event and the day it is on.
             upcoming: october_agenda().upcoming(OCTOBER_NOON - 3 * 3600, &tzrules::Tz::UTC),
+            // Two other clocks, so a world clock the fixture shows draws them.
+            world_clocks: {
+                let mut clock = crate::calendar::ClockDisplay::new();
+                assert!(clock.add_timezone("Tokyo", "JST-9"));
+                assert!(clock.add_timezone("London", "GMT0BST,M3.5.0/1,M10.5.0"));
+                clock.world_clocks(OCTOBER_NOON, &tzrules::Tz::UTC)
+            },
         }
     }
 
@@ -4196,6 +4219,7 @@ mod tests {
             month: crate::calendar::MonthGlance::default(),
             graphs: monitor::Graphs::default(),
             upcoming: crate::calendar::Upcoming::default(),
+            world_clocks: Vec::new(),
         };
         let cmds = full_mgr().render(&p, &blank);
         let bars = meter_rects(&cmds);
@@ -4258,6 +4282,7 @@ mod tests {
             month: crate::calendar::MonthGlance::default(),
             graphs: monitor::Graphs::default(),
             upcoming: crate::calendar::Upcoming::default(),
+            world_clocks: Vec::new(),
         };
         let cmds = full_mgr().render(&p, &mixed);
         let texts: Vec<String> = cmds

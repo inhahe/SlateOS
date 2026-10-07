@@ -14104,6 +14104,7 @@ impl DesktopShell {
     const MENU_FRAME_FOLDER: u64 = 11;
     const MENU_MOVE_WALLPAPER: u64 = 12;
     const MENU_ADD_UPCOMING: u64 = 13;
+    const MENU_ADD_WORLD_CLOCK: u64 = 14;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
     // A widget's "Size", and its rows: the base plus the size's place in
@@ -14234,6 +14235,7 @@ impl DesktopShell {
                 enabled: true,
                 children: vec![
                     item(Self::MENU_ADD_CLOCK, "Clock", None),
+                    item(Self::MENU_ADD_WORLD_CLOCK, "World clock", None),
                     item(Self::MENU_ADD_CALENDAR, "Calendar", None),
                     item(Self::MENU_ADD_UPCOMING, "Upcoming events", None),
                     item(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor", None),
@@ -14864,6 +14866,13 @@ impl DesktopShell {
             } else {
                 calendar::Upcoming::default()
             },
+            // The Date & Time settings' other clocks, as the popup's clock
+            // band shows them, while a world clock is drawn.
+            world_clocks: if self.widgets.draws(&WidgetKind::WorldClock) {
+                self.popup_clock().world_clocks(secs, &zone)
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -15327,6 +15336,7 @@ impl DesktopShell {
             Self::MENU_ADD_CLOCK => Some(WidgetKind::Clock),
             Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),
             Self::MENU_ADD_UPCOMING => Some(WidgetKind::Reminders),
+            Self::MENU_ADD_WORLD_CLOCK => Some(WidgetKind::WorldClock),
             Self::MENU_ADD_SYSTEM_MONITOR => Some(WidgetKind::SystemMonitor),
             Self::MENU_ADD_NOTE => Some(WidgetKind::Notes),
             Self::MENU_ADD_PHOTO_FRAME => Some(WidgetKind::PhotoFrame),

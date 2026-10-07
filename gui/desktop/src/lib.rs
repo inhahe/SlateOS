@@ -103,6 +103,7 @@ pub mod draw_check;
 pub mod event_sounds;
 pub mod file_drop;
 pub mod focus_assist;
+pub mod fs_space;
 pub mod hotkeys;
 pub mod icons;
 pub mod idle_lock;
@@ -14528,6 +14529,12 @@ impl DesktopShell {
         if let Some(now) = now {
             self.prev_cpu = Some(now);
         }
+        // The file system the system runs from. Refused -- no right to read
+        // metadata, or no such call off SlateOS -- the meter says it is not
+        // measured rather than show a share it does not have.
+        self.sampled.disk_fraction = fs_space::of(b"/")
+            .ok()
+            .and_then(|space| space.used_fraction());
     }
 
     /// The readings the widget layer cannot derive for itself.
@@ -14556,12 +14563,10 @@ impl DesktopShell {
             // answer. `sample_system` is called from the widget-due tick.
             cpu_fraction: self.sampled.cpu_fraction,
             memory_fraction: self.sampled.memory_fraction,
-            // **No source anywhere in this tree.**
-            // `/sys/devices/block/<name>/{sector_count,sector_size}` gives a
-            // disk's CAPACITY; nothing reports how much of it is in use, and
-            // `procinfo` has no `statfs`. The meter says so rather than
-            // showing a plausible fraction of a number we do have.
-            disk_fraction: None,
+            // From the kernel's own account of the root file system
+            // (`fs_space`, `SYS_FS_STATVFS`) -- not `/sys/devices/block`,
+            // which gives a disk's capacity and nothing of what is in use.
+            disk_fraction: self.sampled.disk_fraction,
             // `Default`, which is `present: false, state: NoBattery` -- and
             // that is the true answer, not a placeholder. `/proc/battery`
             // reports zero sources because `kernel/src/fs/battery.rs` starts

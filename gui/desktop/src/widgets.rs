@@ -582,6 +582,9 @@ pub struct SystemSample {
     pub cpu_fraction: Option<f32>,
     /// Memory in use, 0.0 to 1.0.
     pub memory_fraction: Option<f32>,
+    /// The file system the system runs from in use, 0.0 to 1.0
+    /// (`crate::fs_space`).
+    pub disk_fraction: Option<f32>,
 }
 
 impl SystemSample {
@@ -885,9 +888,11 @@ pub struct LiveReadings {
     /// Processor and memory are measured: the shell reads `/proc/stat` and
     /// `/proc/meminfo` once a second (`DesktopShell::sample_system`, through
     /// `procinfo`), and the first second reports `None` -- a fraction is a
-    /// ratio over an interval, and there is no interval yet. Disk has no
-    /// source anywhere in the tree (`DesktopShell::live_readings` says why),
-    /// so it stays `None` and the meter says it is not measuring.
+    /// ratio over an interval, and there is no interval yet. The disk is the
+    /// root file system's share in use, as the kernel accounts it
+    /// (`crate::fs_space`); where the kernel will not say -- off SlateOS, or
+    /// without the right to read metadata -- it stays `None` and the meter
+    /// says it is not measuring.
     pub cpu_fraction: Option<f32>,
     /// Memory in use, 0.0 to 1.0. `None` when nothing has measured it.
     pub memory_fraction: Option<f32>,

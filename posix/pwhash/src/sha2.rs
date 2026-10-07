@@ -219,13 +219,19 @@ impl Digest for Sha256 {
 
     fn finalize_into(mut self, out: &mut [u8]) {
         let bit_len = self.total_len.wrapping_mul(8);
-        // Append 0x80, then zero-pad to leave room for the 8-byte length.
-        self.update(&[0x80]);
-        while self.block_len != 56 {
-            self.update(&[0x00]);
+        // 0x80, then zeros leaving room for the 8-byte length, then the
+        // length (FIPS 180-4 section 5.1.1), written in place: a byte at a
+        // time through `update` cost SHA-crypt, which finalizes 5000 times
+        // a hash, more than its compressions did.
+        self.block[self.block_len] = 0x80;
+        self.block[self.block_len + 1..].fill(0);
+        if self.block_len >= 56 {
+            // No room left for the length: it goes in a block of its own.
+            self.compress();
+            self.block.fill(0);
         }
-        self.update(&bit_len.to_be_bytes());
-        debug_assert_eq!(self.block_len, 0);
+        self.block[56..].copy_from_slice(&bit_len.to_be_bytes());
+        self.compress();
         for (i, word) in self.state.iter().enumerate() {
             out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
         }
@@ -431,14 +437,17 @@ impl Digest for Sha512 {
 
     fn finalize_into(mut self, out: &mut [u8]) {
         let bit_len = self.total_len.wrapping_mul(8);
-        self.update(&[0x80]);
-        while self.block_len != 112 {
-            self.update(&[0x00]);
+        // As SHA-256's, with a 16-byte length.
+        self.block[self.block_len] = 0x80;
+        self.block[self.block_len + 1..].fill(0);
+        if self.block_len >= 112 {
+            self.compress();
+            self.block.fill(0);
         }
-        // 128-bit big-endian length: high 64 bits are zero for our inputs.
-        self.update(&[0u8; 8]);
-        self.update(&bit_len.to_be_bytes());
-        debug_assert_eq!(self.block_len, 0);
+        // 128-bit big-endian length: its high 64 bits, at 112, are zero for
+        // our inputs, and the fill left them so.
+        self.block[120..].copy_from_slice(&bit_len.to_be_bytes());
+        self.compress();
         for (i, word) in self.state.iter().enumerate() {
             out[i * 8..i * 8 + 8].copy_from_slice(&word.to_be_bytes());
         }
@@ -476,6 +485,34 @@ mod tests {
             let _ = write!(s, "{b:02x}");
         }
         s
+    }
+
+    /// Every length from 0 to 260 bytes -- each side of the padding's
+    /// boundaries (55, 56 and 64 for SHA-256; 111, 112 and 128 for SHA-512)
+    /// over several blocks -- folded into one digest: the hash of the 261
+    /// hashes of `"a" * n`, as Python's `hashlib` gives it.
+    #[test]
+    fn every_length_pads_as_fips_180_4() {
+        let mut all256 = Sha256::new();
+        let mut all512 = Sha512::new();
+        for n in 0..=260 {
+            let data = std::vec![b'a'; n];
+            all256.update(&sha256(&data));
+            all512.update(&sha512(&data));
+        }
+        let mut out256 = [0u8; 32];
+        all256.finalize_into(&mut out256);
+        assert_eq!(
+            hex(&out256),
+            "bb1d6350a010747691407a8d005ae593c312035fffd871290fbf5832f7c828ef"
+        );
+        let mut out512 = [0u8; 64];
+        all512.finalize_into(&mut out512);
+        assert_eq!(
+            hex(&out512),
+            "f468bca9f4a756dcf44c686a6ac7b40fbcd67a1aa503c67f4a84364b5c14e3ce\
+             65b08933a1e0e41cd3e0d938d3ac343f4c73a664788df895ce09bd3de0f9c50a"
+        );
     }
 
     #[test]

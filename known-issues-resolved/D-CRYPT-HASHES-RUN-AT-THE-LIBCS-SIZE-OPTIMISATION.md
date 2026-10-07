@@ -60,18 +60,27 @@ non-generic `sha256` and `sha512`; and the first move, the hashes alone,
 left SHA-512 crypt at 7.6 ms, its 5000-round loop still `posix`'s, until
 that loop moved too.
 
-Measured afterwards, ms a hash, two runs of ours either side of one of
-libxcrypt's, with a QEMU boot test running beside them (so treat each as
-good to perhaps ±25%):
+Measured afterwards, ms a hash, with a QEMU boot test running beside them
+(so treat each as good to perhaps ±25%), the target looked met everywhere:
+SHA-512 crypt 3.97 and 4.62 against libxcrypt's 4.80.  It was not.  On a
+quiet machine libxcrypt's SHA-512 crypt took 1.87 ms, and ours, 4.3 to 4.8,
+was still twice it -- the load had slowed libxcrypt more than ours.  The
+second cause was SHA-256's, SHA-512's and MD5's `finalize`, which padded a
+byte at a time through `update`: up to 111 calls a digest, and SHA-crypt
+takes 5000 digests a hash.  Padding in place (a fill, and a second block
+only when the length does not fit) halved it.  Quiet, ours and libxcrypt's
+back to back:
 
 | setting | ours | libxcrypt 4.4.36 |
 |---|---|---|
-| `$y$j9T$` | 25.1, 24.4 | 56.7 |
-| `$y$j75$` | 0.95, 1.40 | 1.95 |
-| `$7$CU..../....` | 201, 210 | 242 |
-| `$7$66..../....` | 0.63, 0.58 | 0.77 |
-| `$6$` | 3.97, 4.62 | 4.80 |
+| `$y$j9T$` | 16.1 | 21.8 |
+| `$y$j75$` | 0.88 | 1.19 |
+| `$7$CU..../....` | 151 | 123 |
+| `$7$66..../....` | 0.57 | 0.49 |
+| `$6$` | 2.50 | 1.87 |
 
-Ours at or below libxcrypt's time everywhere: the target is met.  That ours
-is faster at 16 MiB says more about libxcrypt's memory under WSL's virtual
-machine than about either library.
+At most 1.34x libxcrypt's time (SHA-512 crypt), and below it for yescrypt:
+the target, 1.5x, is met.  That ours is faster at 16 MiB says more about
+libxcrypt's memory under WSL's virtual machine than about either library.
+The lesson is in the method: a comparison under load, of libraries the
+load slows unequally, can pass what a quiet one fails.

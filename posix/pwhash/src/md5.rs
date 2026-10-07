@@ -173,12 +173,17 @@ impl Md5 {
     #[must_use]
     pub fn finalize(mut self) -> [u8; 16] {
         let bit_len = self.total_len.wrapping_mul(8);
-        self.update(&[0x80]);
-        while self.block_len != 56 {
-            self.update(&[0x00]);
+        // 0x80, then zeros leaving room for the 8-byte length, then the
+        // length, little-endian (RFC 1321 section 3.1), written in place
+        // rather than a byte at a time through `update`.
+        self.block[self.block_len] = 0x80;
+        self.block[self.block_len + 1..].fill(0);
+        if self.block_len >= 56 {
+            self.compress();
+            self.block.fill(0);
         }
-        self.update(&bit_len.to_le_bytes());
-        debug_assert_eq!(self.block_len, 0);
+        self.block[56..].copy_from_slice(&bit_len.to_le_bytes());
+        self.compress();
         let mut out = [0u8; 16];
         for (i, word) in self.state.iter().enumerate() {
             out[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
@@ -265,6 +270,19 @@ mod tests {
             )),
             "57edf4a22be3c955ac49da2e2107b67a"
         );
+    }
+
+    /// Every length from 0 to 260 bytes -- each side of the padding's
+    /// boundaries, 55, 56 and 64, over four blocks -- folded into one
+    /// digest: MD5 of the 261 digests of `"a" * n`, as Python's `hashlib`
+    /// gives it.
+    #[test]
+    fn every_length_pads_as_rfc_1321() {
+        let mut all = Md5::new();
+        for n in 0..=260 {
+            all.update(&md5(&std::vec![b'a'; n]));
+        }
+        assert_eq!(hex(&all.finalize()), "1b67605e9f10c2bd22131ac2df1de453");
     }
 
     #[test]

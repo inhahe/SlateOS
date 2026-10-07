@@ -211,12 +211,24 @@ mod tests {
     use guitk::palette::Palette;
     use guitk::widget::automation::Query;
 
+    /// The picker as tools see it, with no two of its parts drawn over
+    /// each other (`Node::overlapping_siblings`): asked of every state
+    /// these tests put it in.
+    fn apart<Id: std::fmt::Debug>(tree: Node<Id>) -> Node<Id> {
+        let over: Vec<String> = tree
+            .overlapping_siblings()
+            .iter()
+            .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+            .collect();
+        assert!(over.is_empty(), "drawn over each other: {over:?}");
+        tree
+    }
+
     const W: f32 = 560.0;
     const H: f32 = 460.0;
 
     fn part(picker: &CharPicker, target: &Target) -> Node<Target> {
-        picker
-            .automation(W, H)
+        apart(picker.automation(W, H))
             .walk()
             .find(|n| n.id == *target)
             .cloned()
@@ -229,7 +241,7 @@ mod tests {
     #[test]
     fn the_picker_shows_tools_its_parts() {
         let picker = CharPicker::new();
-        let tree = picker.automation(W, H);
+        let tree = apart(picker.automation(W, H));
         assert_eq!((tree.role, tree.name.as_str()), (Role::Dialog, TITLE));
         let roles: Vec<Role> = tree.children.iter().map(|n| n.role).collect();
         assert_eq!(
@@ -290,7 +302,7 @@ mod tests {
             .invoke(&Target::Grid, Action::ScrollTo { x: 0.0, y: 200.0 }, W, H)
             .unwrap();
         let frame = picker.frame(&Palette::for_mode(false), W, H);
-        let tree = picker.automation(W, H);
+        let tree = apart(picker.automation(W, H));
         let mut checked = 0;
         for node in tree.walk() {
             if !matches!(
@@ -327,7 +339,7 @@ mod tests {
         picker
             .invoke(&Target::Search, Action::SetText("waving hand".into()), W, H)
             .unwrap();
-        let tree = picker.automation(W, H);
+        let tree = apart(picker.automation(W, H));
         assert_eq!(tree.children[2].name, "Search results");
         // While a search shows, no category is: the sidebar marks none
         // chosen, as it draws none lit.

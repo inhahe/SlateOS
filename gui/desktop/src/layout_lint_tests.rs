@@ -22,70 +22,21 @@
     clippy::arithmetic_side_effects
 )]
 
-use guitk::widget::automation::{Accessible, Node, Role};
+use guitk::widget::automation::Accessible;
 
 use crate::accessible::ShellPart;
 use crate::{DesktopShell, WindowInfo, WindowList};
 
-/// Whether a press on a part of `role` does something: what this check is
-/// about.
-const fn pressed(role: Role) -> bool {
-    matches!(
-        role,
-        Role::Button
-            | Role::CheckBox
-            | Role::RadioButton
-            | Role::TextField
-            | Role::TextArea
-            | Role::Slider
-            | Role::ListItem
-            | Role::MenuItem
-            | Role::Tab
-            | Role::TreeItem
-            | Role::ComboBox
-            | Role::Link
-            | Role::GridCell
-            // Read rather than pressed, and drawn as much: two overlays
-            // of the on-screen display drawn over each other were the
-            // overlap that started this.
-            | Role::Label
-            | Role::ProgressBar
-            | Role::Image
-    )
-}
-
-/// Every pair of siblings a press does something to whose boxes overlap by
-/// more than half a pixel each way, said as "a over b".
-fn overlaps(root: &Node<ShellPart>) -> Vec<String> {
-    let mut found = Vec::new();
-    for parent in root.walk() {
-        let kids: Vec<&Node<ShellPart>> = parent
-            .children
-            .iter()
-            .filter(|n| pressed(n.role) && n.shown && n.bounds.w > 0.0 && n.bounds.h > 0.0)
-            .collect();
-        for (i, a) in kids.iter().enumerate() {
-            for b in kids.iter().skip(i + 1) {
-                if let Some(both) = a.bounds.intersect(b.bounds)
-                    && both.w > 0.5
-                    && both.h > 0.5
-                {
-                    found.push(format!(
-                        "{:?} \"{}\" {:?} over {:?} \"{}\" {:?}",
-                        a.id, a.name, a.bounds, b.id, b.name, b.bounds
-                    ));
-                }
-            }
-        }
-    }
-    found
-}
-
-/// Assert no two controls of `shell`'s are drawn over each other, saying
-/// which state it is in.
+/// Note every two parts of `shell`'s drawn over each other -- the toolkit's
+/// rule (`Node::overlapping_siblings`): siblings a person presses or reads
+/// -- saying which state it is in.
 fn check(shell: &DesktopShell, what: &str, found: &mut Vec<String>) {
-    for overlap in overlaps(&shell.automation(0.0, 0.0)) {
-        found.push(format!("{what}: {overlap}"));
+    let tree = shell.automation(0.0, 0.0);
+    for (a, b) in tree.overlapping_siblings() {
+        found.push(format!(
+            "{what}: {:?} \"{}\" {:?} over {:?} \"{}\" {:?}",
+            a.id, a.name, a.bounds, b.id, b.name, b.bounds
+        ));
     }
 }
 

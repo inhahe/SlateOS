@@ -12,6 +12,21 @@
 
 use super::*;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 /// Where the host draws the field.
 const FIELD: Rect = Rect {
     x: 100.0,
@@ -54,7 +69,7 @@ fn act(
 fn a_dropdown_is_opened_and_an_option_chosen() {
     let mut dropdown = colours();
     let mut tool = access(&mut dropdown, (800.0, 600.0), true);
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     assert_eq!((root.role, root.name.as_str()), (Role::ComboBox, "Colour"));
     assert_eq!(root.value, Some(Value::Text("Green".to_owned())));
     assert_eq!(root.bounds, FIELD);
@@ -69,7 +84,7 @@ fn a_dropdown_is_opened_and_an_option_chosen() {
         act(&mut tool, DropdownPart::Field, Action::Press),
         Ok(Some(DropdownEvent::Opened))
     );
-    let list = tool.automation(0.0, 0.0).children[0].clone();
+    let list = apart(tool.automation(0.0, 0.0)).children[0].clone();
     assert_eq!((list.role, list.id), (Role::List, DropdownPart::List));
     let options: Vec<(&str, Option<Value>, bool)> = list
         .children
@@ -119,12 +134,12 @@ fn an_option_out_of_a_long_list_is_scrolled_in_and_chosen() {
     let mut dropdown = Dropdown::new((0..40).map(|n| format!("Option {n}")).collect(), None)
         .with_placeholder("Pick one");
     let mut tool = access(&mut dropdown, (800.0, 300.0), true);
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     assert_eq!(root.value, None, "nothing chosen");
     assert_eq!(root.description.as_deref(), Some("Pick one"));
 
     act(&mut tool, DropdownPart::Field, Action::Press).unwrap();
-    let list = tool.automation(0.0, 0.0).children[0].clone();
+    let list = apart(tool.automation(0.0, 0.0)).children[0].clone();
     assert_eq!(list.children.len(), 40, "every option, shown or not");
     let last = &list.children[39];
     assert!(
@@ -145,7 +160,7 @@ fn an_option_out_of_a_long_list_is_scrolled_in_and_chosen() {
 fn a_disabled_dropdown_refuses() {
     let mut dropdown = colours();
     let mut tool = access(&mut dropdown, (800.0, 600.0), false);
-    assert!(!tool.automation(0.0, 0.0).enabled);
+    assert!(!apart(tool.automation(0.0, 0.0)).enabled);
     assert_eq!(
         act(&mut tool, DropdownPart::Field, Action::Press),
         Err(Refusal::Disabled)

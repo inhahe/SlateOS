@@ -11,6 +11,21 @@
 
 use super::*;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: guitk::widget::automation::Node<Id>,
+) -> guitk::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 /// The box up in the middle of a 1920 x 1080 screen.
 fn shown() -> RunDialog {
     let mut dialog = RunDialog::new();
@@ -28,7 +43,7 @@ fn act(
 }
 
 fn tree(dialog: &RunDialog) -> Node<RunPart> {
-    dialog.automation(0.0, 0.0)
+    apart(dialog.automation(0.0, 0.0))
 }
 
 /// **The Run box shows tools its line, named by its label, and its buttons,

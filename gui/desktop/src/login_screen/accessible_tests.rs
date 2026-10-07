@@ -13,6 +13,21 @@
 use super::*;
 use crate::login_screen::{LoginPowerAction, LoginUser};
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: guitk::widget::automation::Node<Id>,
+) -> guitk::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 /// Alice, an administrator who signed in last, and Bob, who gives no
 /// display name.
 fn screen() -> LoginScreen {
@@ -37,7 +52,7 @@ fn act(
 }
 
 fn node(s: &LoginScreen, part: LoginPart) -> Option<Node<LoginPart>> {
-    s.automation(0.0, 0.0)
+    apart(s.automation(0.0, 0.0))
         .walk()
         .find(|n| n.id == part)
         .cloned()
@@ -50,7 +65,7 @@ fn node(s: &LoginScreen, part: LoginPart) -> Option<Node<LoginPart>> {
 #[test]
 fn the_accounts_are_a_list_chosen_as_clicked() {
     let mut s = screen();
-    let root = s.automation(0.0, 0.0);
+    let root = apart(s.automation(0.0, 0.0));
     assert_eq!((root.role, root.name.as_str()), (Role::Dialog, "Sign in"));
     let accounts = node(&s, LoginPart::Accounts).expect("the list");
     let rows: Vec<(&str, Option<&str>, Option<Value>)> = accounts
@@ -108,7 +123,7 @@ fn the_password_is_typed_and_signed_in_with() {
     );
     assert_eq!(s.password(), "s3cret");
     assert!(
-        s.automation(0.0, 0.0)
+        apart(s.automation(0.0, 0.0))
             .walk()
             .all(|n| !n.name.contains("s3cret")
                 && !matches!(&n.value, Some(Value::Text(t)) if t.contains("s3cret"))),

@@ -21,6 +21,21 @@ use crate::notif_pane::{
     AppSettingKind, NotifPaneEvent, NotifPriority, Notification, PaneState, SettingValue,
 };
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: guitk::widget::automation::Node<Id>,
+) -> guitk::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 const SCREEN_W: f32 = 1920.0;
 const SCREEN_H: f32 = 800.0;
 
@@ -60,7 +75,7 @@ fn pane(n: usize, apps: usize) -> NotificationPane {
 
 /// The pane as tools see it.
 fn tree(pane: &NotificationPane) -> Node<PanePart> {
-    pane.automation(SCREEN_W, SCREEN_H)
+    apart(pane.automation(SCREEN_W, SCREEN_H))
 }
 
 /// The node of `part`.

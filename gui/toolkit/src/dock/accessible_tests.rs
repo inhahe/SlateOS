@@ -12,6 +12,21 @@
 
 use super::*;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 fn id(name: &str) -> PanelId {
     PanelId::new(name).expect("a panel name")
 }
@@ -45,7 +60,7 @@ fn act(
 }
 
 fn node(tool: &DockAccess<'_>, part: &DockPart) -> Node<DockPart> {
-    tool.automation(0.0, 0.0)
+    apart(tool.automation(0.0, 0.0))
         .walk()
         .find(|n| n.id == *part)
         .unwrap_or_else(|| panic!("no {part:?}"))
@@ -65,7 +80,7 @@ fn a_dock_shows_tools_its_groups_tabs_and_dividers() {
         area: AREA,
         kinds: &kinds,
     };
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     let groups: Vec<&Node<DockPart>> = root
         .children
         .iter()
@@ -173,7 +188,7 @@ fn a_tab_past_the_end_of_its_bar_is_refused() {
         area: Rect::new(0.0, 0.0, 120.0, 400.0),
         kinds: &kinds,
     };
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     let group = &root.children[0];
     let past = group
         .children

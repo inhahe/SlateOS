@@ -17,6 +17,21 @@
 use super::*;
 use crate::menubar::MenuBarItem;
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 fn action(id: MenuItemId, label: &str, shortcut: Option<&str>, enabled: bool) -> MenuBarEntry {
     MenuBarEntry::Action {
         label: label.to_owned(),
@@ -70,7 +85,7 @@ fn press(bar: &mut MenuBar, part: MenuBarPart) -> Result<Option<MenuBarEvent>, R
 }
 
 fn node(bar: &MenuBar, part: &MenuBarPart) -> Node<MenuBarPart> {
-    bar.automation(800.0, 0.0)
+    apart(bar.automation(800.0, 0.0))
         .walk()
         .find(|node| node.id == *part)
         .unwrap_or_else(|| panic!("no {part:?}"))
@@ -87,7 +102,7 @@ fn names(node: &Node<MenuBarPart>) -> Vec<&str> {
 #[test]
 fn a_menu_bar_shows_tools_its_menus() {
     let mut bar = file_and_edit();
-    let root = bar.automation(800.0, 0.0);
+    let root = apart(bar.automation(800.0, 0.0));
     assert_eq!((root.role, root.name.as_str()), (Role::MenuBar, "Menu bar"));
     assert_eq!(names(&root), ["File", "Edit"]);
     assert!(root.children[0].children.is_empty(), "no menu open");
@@ -215,7 +230,7 @@ fn submenus_open_where_their_rows_are() {
         "it hangs beside its row"
     );
     assert!(
-        !bar.automation(800.0, 0.0)
+        !apart(bar.automation(800.0, 0.0))
             .walk()
             .any(|node| node.id == MenuBarPart::Menu(vec![0, 1, 1])),
         "More gave way to Older"

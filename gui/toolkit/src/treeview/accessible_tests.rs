@@ -60,13 +60,22 @@ fn act(
     .invoke(&part, action, 0.0, 0.0)
 }
 
-/// The tree as tools see it.
+/// The tree as tools see it -- with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`), asked of every state these tests
+/// put it in.
 fn seen(view: &mut TreeView<&'static str>) -> Node<TreePart<&'static str>> {
-    TreeAccess {
+    let tree = TreeAccess {
         view,
         source: &Files,
     }
-    .automation(0.0, 0.0)
+    .automation(0.0, 0.0);
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
 }
 
 /// The node of `part`.

@@ -15,6 +15,21 @@ use super::super::{ButtonSize, Choice, Command, Group, RibbonTab};
 use super::*;
 use crate::menu::{MenuItem, MenuItemId};
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 const PASTE: CommandId = 1;
 const PASTE_SPECIAL: MenuItemId = 101;
 const PASTE_TEXT: MenuItemId = 102;
@@ -120,7 +135,7 @@ fn act(
 }
 
 fn node(tool: &RibbonAccess<'_>, part: RibbonPart) -> Node<RibbonPart> {
-    tool.automation(0.0, 0.0)
+    apart(tool.automation(0.0, 0.0))
         .walk()
         .find(|n| n.id == part)
         .unwrap_or_else(|| panic!("no {part:?}"))
@@ -128,7 +143,7 @@ fn node(tool: &RibbonAccess<'_>, part: RibbonPart) -> Node<RibbonPart> {
 }
 
 fn named(tool: &RibbonAccess<'_>, name: &str) -> Node<RibbonPart> {
-    tool.automation(0.0, 0.0)
+    apart(tool.automation(0.0, 0.0))
         .walk()
         .find(|n| n.name == name)
         .unwrap_or_else(|| panic!("nothing named {name:?}"))
@@ -143,7 +158,7 @@ fn named(tool: &RibbonAccess<'_>, name: &str) -> Node<RibbonPart> {
 fn a_ribbon_shows_tools_its_tabs_groups_and_controls() {
     let mut ribbon = ribbon();
     let tool = access(&mut ribbon, 2000.0);
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     let tabs: Vec<(&str, Option<Value>)> = root.children[0]
         .children
         .iter()
@@ -342,7 +357,7 @@ fn a_folded_group_opens_as_a_panel() {
         ("Styles", Some("folded"))
     );
     assert!(
-        tool.automation(0.0, 0.0)
+        apart(tool.automation(0.0, 0.0))
             .walk()
             .any(|n| n.id == RibbonPart::Group(0)),
         "the premise: Clipboard is not folded"
@@ -399,7 +414,7 @@ fn the_customize_dialog_is_seen_while_it_is_open() {
     {
         let tool = access(&mut ribbon, 2000.0);
         assert!(
-            tool.automation(0.0, 0.0)
+            apart(tool.automation(0.0, 0.0))
                 .walk()
                 .all(|n| n.id != RibbonPart::Customize),
             "a closed dialog is seen"
@@ -407,7 +422,7 @@ fn the_customize_dialog_is_seen_while_it_is_open() {
     }
     ribbon.open_customize();
     let mut tool = access(&mut ribbon, 2000.0);
-    let root = tool.automation(0.0, 0.0);
+    let root = apart(tool.automation(0.0, 0.0));
     let dialog = root.children.last().expect("children");
     assert_eq!(
         (dialog.id, dialog.role, dialog.name.as_str()),

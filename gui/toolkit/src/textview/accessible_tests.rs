@@ -15,6 +15,21 @@
 use super::*;
 use crate::textview::{HeadingLevel, ListKind, RichFontWeight, RichSpanStyle, RichTextViewConfig};
 
+/// The tree as tools see it, with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`): asked of every state these tests
+/// put it in.
+fn apart<Id: std::fmt::Debug>(
+    tree: crate::widget::automation::Node<Id>,
+) -> crate::widget::automation::Node<Id> {
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
+}
+
 /// A plain view 300 by 100 holding `lines` lines, "line 0" on.
 fn plain(lines: usize) -> SimpleTextView {
     let mut view = SimpleTextView::new(300.0, 100.0);
@@ -61,7 +76,7 @@ fn act(
 }
 
 fn node(view: &RichTextView, part: RichTextPart) -> Node<RichTextPart> {
-    view.automation(0.0, 0.0)
+    apart(view.automation(0.0, 0.0))
         .walk()
         .find(|n| n.id == part)
         .unwrap_or_else(|| panic!("no {part:?}"))
@@ -74,7 +89,7 @@ fn node(view: &RichTextView, part: RichTextPart) -> Node<RichTextPart> {
 #[test]
 fn a_plain_view_is_a_document_holding_its_text() {
     let mut view = plain(3);
-    let root = view.automation(0.0, 0.0);
+    let root = apart(view.automation(0.0, 0.0));
     assert_eq!((root.role, root.name.as_str()), (Role::Document, "Text"));
     assert_eq!(
         root.value,
@@ -85,7 +100,7 @@ fn a_plain_view_is_a_document_holding_its_text() {
 
     view.set_text("\u{1b}[31mred\u{1b}[0m and plain");
     assert_eq!(
-        view.automation(0.0, 0.0).value,
+        apart(view.automation(0.0, 0.0)).value,
         Some(Value::Text("red and plain".to_owned()))
     );
 }
@@ -173,7 +188,7 @@ fn rich() -> RichTextView {
 #[test]
 fn a_rich_view_shows_its_blocks_as_what_they_are() {
     let view = rich();
-    let root = view.automation(0.0, 0.0);
+    let root = apart(view.automation(0.0, 0.0));
     assert_eq!(
         (root.role, root.name.as_str()),
         (Role::Document, "Document")
@@ -278,7 +293,7 @@ fn a_link_is_named_by_its_words_and_holds_where_it_goes() {
 fn a_block_scrolled_out_of_sight_is_not_shown() {
     let mut view = RichTextView::new(400.0, 100.0);
     view.set_blocks(paragraphs(30));
-    let root = view.automation(0.0, 0.0);
+    let root = apart(view.automation(0.0, 0.0));
     assert!(root.children[0].shown && !root.children[29].shown);
     assert!(root.children[29].bounds.y >= 100.0, "below the view");
 
@@ -287,7 +302,7 @@ fn a_block_scrolled_out_of_sight_is_not_shown() {
         act(&mut view, to, Action::ScrollTo { x: 0.0, y: 1.0e9 }),
         Ok(None)
     );
-    let root = view.automation(0.0, 0.0);
+    let root = apart(view.automation(0.0, 0.0));
     assert!(!root.children[0].shown && root.children[29].shown);
     assert!(root.children[29].bounds.bottom() <= 100.0 + 0.01);
     assert_eq!(

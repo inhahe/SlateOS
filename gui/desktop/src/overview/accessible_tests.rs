@@ -53,8 +53,18 @@ fn overview(mode: OverviewMode) -> OverviewState {
     state
 }
 
+/// The overview as tools see it -- with no two of its parts drawn over each
+/// other (`Node::overlapping_siblings`), asked of every state these tests
+/// put it in.
 fn tree(state: &OverviewState) -> Node<OverviewPart> {
-    automation(state, &OverviewConfig::default(), SW, SH)
+    let tree = automation(state, &OverviewConfig::default(), SW, SH);
+    let over: Vec<String> = tree
+        .overlapping_siblings()
+        .iter()
+        .map(|(a, b)| format!("{:?} {:?} over {:?} {:?}", a.id, a.bounds, b.id, b.bounds))
+        .collect();
+    assert!(over.is_empty(), "drawn over each other: {over:?}");
+    tree
 }
 
 fn node(state: &OverviewState, part: OverviewPart) -> Node<OverviewPart> {

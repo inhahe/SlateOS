@@ -307,6 +307,37 @@ SLATE_MONO_SHA256="3024c97c0bc8cbcd611c401d5f994528704108ceb31f31b28dea4783004d0
 # shellcheck disable=SC2034
 SLATE_MONO_TARBALL="$SLATE_ZIG_CACHE/mono-$SLATE_MONO_VERSION.tar.xz"
 
+# GCC, for scripts/gcc-spike/: the last quarter of roadmap.md's "gcc, cmake,
+# make, pkg-config via the POSIX layer", waiting only on GMP, MPFR and MPC
+# (pinned above and below). 16.2.0 is the current release; the tarball is
+# 107,200,820 bytes. Compared in full, 2026-10-07:
+#
+#   Gentoo        sys-devel/gcc/Manifest, DIST gcc-16.2.0.tar.xz 107200820
+#                 SHA512 c51c30ca...f8648d1 BLAKE2B ab3ffe16...5a98ef0 --
+#                 two *different functions*.
+#   OpenEmbedded  meta/recipes-devtools/gcc/gcc-16.2.inc, SRC_URI[sha256sum]
+#                 = the hex below.
+#   Homebrew      Formula/g/gcc.rb, sha256 the hex below.
+#
+# (Arch is no attestation here: its gcc PKGBUILD builds a git snapshot,
+# 16.2.1+r23, not this file.)
+SLATE_GCC_VERSION="16.2.0"
+SLATE_GCC_SHA256="e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e"
+# shellcheck disable=SC2034
+SLATE_GCC_TARBALL="$SLATE_ZIG_CACHE/gcc-$SLATE_GCC_VERSION.tar.xz"
+
+# MPC 1.4.1, GCC's third mathematical library, the .tar.xz. Compared in full,
+# 2026-10-07:
+#   Gentoo  dev-libs/mpc/Manifest, DIST mpc-1.4.1.tar.xz 531992 SHA512
+#           cdfbe64e...a1305b9 BLAKE2B 793b4cf3...83acff1.
+#   Void    srcpkgs/libmpc/template, version=1.4.1, checksum= the hex below.
+#   Arch    packaging/packages/libmpc PKGBUILD, pkgver=1.4.1, sha256sums the
+#           hex below.
+SLATE_MPC_VERSION="1.4.1"
+SLATE_MPC_SHA256="91204cd32f164bd3b7c992d4a6a8ce6519511aadab30f78b6982d0bf8d73e931"
+# shellcheck disable=SC2034
+SLATE_MPC_TARBALL="$SLATE_ZIG_CACHE/mpc-$SLATE_MPC_VERSION.tar.xz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -675,6 +706,27 @@ slate_ensure_mono_src() {
         "$SLATE_MONO_SHA256" \
         "https://dl.winehq.org/mono/sources/mono/mono-$SLATE_MONO_VERSION.tar.xz" \
         "$SLATE_WORK/mono-spike")" || return 1
+}
+
+# The GCC and MPC counterparts, for scripts/gcc-spike/.
+slate_ensure_gcc_src() {
+    # SLATE_GCC_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gcc-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_GCC_TARBALL="$(slate_ensure_src gcc "$SLATE_GCC_VERSION" \
+        "$SLATE_GCC_SHA256" \
+        "https://ftp.gnu.org/gnu/gcc/gcc-$SLATE_GCC_VERSION/gcc-$SLATE_GCC_VERSION.tar.xz" \
+        "$SLATE_WORK/gcc-spike")" || return 1
+}
+
+slate_ensure_mpc_src() {
+    # SLATE_MPC_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gcc-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_MPC_TARBALL="$(slate_ensure_src mpc "$SLATE_MPC_VERSION" \
+        "$SLATE_MPC_SHA256" \
+        "https://ftp.gnu.org/gnu/mpc/mpc-$SLATE_MPC_VERSION.tar.xz" \
+        "$SLATE_WORK/gcc-spike")" || return 1
 }
 
 slate_make_zig_wrappers() {

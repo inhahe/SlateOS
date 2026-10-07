@@ -36,6 +36,9 @@ int main(void)
         { "$6$saltstring", 200 },
         { "$2b$05$CCCCCCCCCCCCCCCCCCCCC.", 100 },
         { "$2b$10$CCCCCCCCCCCCCCCCCCCCC.", 5 },
+        { "ab", 2000 },
+        { "ab..............", 2000 },
+        { "_J9..CCCC", 200 },
     };
     static struct crypt_data data;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {

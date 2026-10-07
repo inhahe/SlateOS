@@ -4,14 +4,15 @@
 //! the shadow suite's — following Ulrich Drepper's specification ("Unix
 //! crypt using SHA-256 and SHA-512"); legacy MD5 crypt (`$1$`, Poul-Henning
 //! Kamp's algorithm); yescrypt (`$y$`) and scrypt (`$7$`), which Ubuntu,
-//! Debian and Fedora hash new passwords with; and bcrypt (`$2a$`, `$2b$`,
-//! `$2x$`, `$2y$`), OpenBSD's -- the last two ported from libxcrypt
-//! (`yescrypt.rs` and `bcrypt.rs` read their settings).  The hashing itself
-//! -- SHA-2, MD5, the SHA-crypt and md5crypt rounds, yescrypt's KDF,
-//! Eksblowfish -- is the `pwhash` crate's, compiled for speed where this
-//! one is compiled for size (its crate docs); this module implements the
-//! settings' parsing, the crypt base-64 encoding, the C ABI, and the
-//! dispatch of a setting to its method.
+//! Debian and Fedora hash new passwords with; bcrypt (`$2a$`, `$2b$`,
+//! `$2x$`, `$2y$`), OpenBSD's; and the DES methods -- traditional DES (no
+//! prefix), bigcrypt and BSDi's extended DES (`_`) -- the last three
+//! families ported from libxcrypt (`yescrypt.rs`, `bcrypt.rs` and `des.rs`
+//! read their settings).  The hashing itself -- SHA-2, MD5, the SHA-crypt
+//! and md5crypt rounds, yescrypt's KDF, Eksblowfish, DES -- is the `pwhash`
+//! crate's, compiled for speed where this one is compiled for size (its
+//! crate docs); this module implements the settings' parsing, the crypt
+//! base-64 encoding, the C ABI, and the dispatch of a setting to its method.
 //!
 //! Previously `crypt()` returned `"$0$<key>"` — i.e. the password in
 //! cleartext with a marker prefix.  Any program that hashed a password
@@ -56,6 +57,7 @@
 //! | a `$y$` or `$7$` setting is 212 bytes or longer (see below) | `ERANGE` |
 //! | a `$y$` or `$7$` setting the method refuses, or no memory for its hash | `EINVAL` |
 //! | a bcrypt setting the method refuses (a cost below 04), or its self-test failing | `EINVAL` |
+//! | a DES setting with a character outside the salt alphabet where it reads one, or a `_` setting shorter than nine | `EINVAL` |
 //!
 //! Until 2026-09-26 a NULL argument was `EFAULT` and every failure returned
 //! NULL, which a program ported from Linux does not expect.
@@ -78,13 +80,12 @@
 //!
 //! ## Unsupported methods
 //!
-//! Legacy DES (two-character salt), BSDi DES, gost-yescrypt and libxcrypt's
-//! other methods are **not** implemented: their settings fail with the
-//! token and `EINVAL`, never with a fabricated hash.  (See `todo.txt` for
-//! the follow-ups.)
+//! gost-yescrypt (`$gy$`), sha1crypt (`$sha1$`), SunMD5 (`$md5`) and NT
+//! (`$3$`), libxcrypt's remaining methods, are **not** implemented: their
+//! settings fail with the token and `EINVAL`, never with a fabricated hash.
+//! (See `todo.txt` for the follow-ups.)
 //!
-//! `encrypt`/`setkey` (raw DES block cipher) remain unimplemented and
-//! answer `ENOSYS`.
+//! `encrypt` and `setkey`, POSIX's DES block cipher, are `des.rs`'s.
 
 #![allow(clippy::arithmetic_side_effects)] // Bounded counters / modular round arithmetic.
 #![allow(clippy::indexing_slicing)] // Fixed-size digest arrays indexed by compile-time constants.
@@ -382,10 +383,19 @@ fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Ref
         return Ok(());
     }
     if md5_crypt(key, setting, out) || sha_crypt(key, setting, out) {
-        Ok(())
-    } else {
-        Err(Refusal::Invalid)
+        return Ok(());
     }
+    // Last, as libxcrypt matches them: traditional DES and bigcrypt have no
+    // prefix, and take what begins with two salt characters -- which no
+    // method above begins with.
+    if crate::des::names_method(setting) {
+        // bigcrypt's longest, 178 characters, is within the room.
+        let len = crate::des::crypt(key, setting, &mut out.buf).ok_or(Refusal::Invalid)?;
+        out.len = len;
+        out.push(0);
+        return Ok(());
+    }
+    Err(Refusal::Invalid)
 }
 
 /// libxcrypt's `check_badsalt_chars`: a setting may hold only printable ASCII
@@ -483,7 +493,8 @@ pub(crate) unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 /// `crypt` — one-way password hashing.
 ///
 /// Supports `$1$` (MD5), `$5$` (SHA-256), `$6$` (SHA-512), `$y$` (yescrypt),
-/// `$7$` (scrypt) and `$2a$`/`$2b$`/`$2x$`/`$2y$` (bcrypt) settings; the
+/// `$7$` (scrypt), `$2a$`/`$2b$`/`$2x$`/`$2y$` (bcrypt), `_` (BSDi's DES)
+/// and two salt characters (traditional DES and bigcrypt) settings; the
 /// SHA methods accept an optional `rounds=N$`, and the others carry their
 /// own parameters.  `crypt_gensalt` (`gensalt.rs`) makes new ones.  A
 /// yescrypt hash takes as much memory as its setting asks for -- 16 MiB for
@@ -631,35 +642,6 @@ pub extern "C" fn crypt_ra(
     }
 }
 
-/// `encrypt` — encrypt/decrypt a 64-bit block using DES.
-///
-/// Stub: DES is not implemented, so the answer is `ENOSYS`, POSIX's one
-/// error for this function.  libxcrypt treats any non-zero `edflag` as
-/// "decrypt" and refuses none, so neither does this (it said `EINVAL` for
-/// one other than 0 or 1 until 2026-09-26).  A NULL `block` is `EFAULT`,
-/// where libxcrypt would fault reading it.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn encrypt(block: *mut u8, _edflag: i32) {
-    if block.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return;
-    }
-    errno::set_errno(errno::ENOSYS);
-}
-
-/// `setkey` — set the DES encryption key.
-///
-/// Stub: DES is not implemented, so the answer is `ENOSYS`.  A NULL `key` is
-/// `EFAULT`, where libxcrypt would fault reading it.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setkey(key: *const u8) {
-    if key.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return;
-    }
-    errno::set_errno(errno::ENOSYS);
-}
-
 // ---------------------------------------------------------------------------
 // Safe Rust API
 // ---------------------------------------------------------------------------
@@ -717,10 +699,21 @@ pub enum Method {
     /// of Eksblowfish's key setup.  Stored `$2a$`, `$2x$` and `$2y$` entries
     /// are bcrypt too, each its own history of the algorithm (`bcrypt.rs`).
     Bcrypt,
+    /// Traditional DES, with no prefix: a two-character salt and eight
+    /// characters of password -- and bigcrypt, its extension to longer
+    /// passwords, eleven characters more of hash for each eight more of
+    /// password, up to 128 (`des.rs`).  For verifying entries from before
+    /// MD5 crypt; never for a new password, a DES key being 56 bits, so
+    /// [`setting_into`] makes no setting for it.
+    Des,
+    /// `_` — BSDi's extended DES: a count of encryptions, a 24-bit salt and
+    /// the whole password.  For verifying, as [`Method::Des`].
+    BsdiDes,
 }
 
 impl Method {
-    /// The crypt(3) identifier that names this method in `/etc/shadow`.
+    /// The crypt(3) identifier that names this method in `/etc/shadow`:
+    /// for traditional DES, none.
     #[must_use]
     pub fn prefix(self) -> &'static str {
         match self {
@@ -730,12 +723,15 @@ impl Method {
             Self::Yescrypt => "$y$",
             Self::Scrypt => "$7$",
             Self::Bcrypt => "$2b$",
+            Self::Des => "",
+            Self::BsdiDes => "_",
         }
     }
 
     /// What a new setting for this method holds before its salt: the
     /// identifier and, for yescrypt and scrypt, their parameters --
-    /// libxcrypt's defaults (`crypt_gensalt` with a count of 0).
+    /// libxcrypt's defaults (`crypt_gensalt` with a count of 0).  (The DES
+    /// methods make no new setting: [`Method::takes_salt`] refuses them.)
     fn setting_head(self) -> &'static str {
         match self {
             Self::Yescrypt => "$y$j9T$",
@@ -743,7 +739,7 @@ impl Method {
             Self::Scrypt => "$7$CU..../....",
             // Cost 5, in two digits.
             Self::Bcrypt => "$2b$05$",
-            Self::Md5 | Self::Sha256 | Self::Sha512 => self.prefix(),
+            Self::Md5 | Self::Sha256 | Self::Sha512 | Self::Des | Self::BsdiDes => self.prefix(),
         }
     }
 
@@ -751,8 +747,9 @@ impl Method {
     ///
     /// A fixed number, because the digest is a fixed size: 16 bytes for MD5
     /// (22 characters), 23 for bcrypt (31), 32 for SHA-256, yescrypt and
-    /// scrypt (43), 64 for SHA-512 (86).  This is what [`stored_method`]
-    /// checks, and it is how
+    /// scrypt (43), 64 for SHA-512 (86), and a DES block (11) -- for a
+    /// bigcrypt entry, each of its one to sixteen.  This is what
+    /// [`stored_method`] checks, and it is how
     /// an entry this tree wrote before the safe API existed — 64 *hex*
     /// digits under a `$5$` label — is told apart from a genuine one, with
     /// no ambiguity in either direction.
@@ -763,6 +760,7 @@ impl Method {
             Self::Sha256 | Self::Yescrypt | Self::Scrypt => 43,
             Self::Bcrypt => 31,
             Self::Sha512 => 86,
+            Self::Des | Self::BsdiDes => 11,
         }
     }
 
@@ -772,7 +770,9 @@ impl Method {
     /// is truncated when hashing, so an entry carrying one can never be
     /// reproduced.  For yescrypt and scrypt it is libxcrypt's: 64 bytes of
     /// randomness, in 86 characters.  For bcrypt it is also the shortest: a
-    /// salt is always 16 bytes, 22 characters.
+    /// salt is always 16 bytes, 22 characters.  For the DES methods it is
+    /// what an entry carries -- two characters, or BSDi's eight of count and
+    /// salt -- though they make no new setting.
     #[must_use]
     pub fn salt_max(self) -> usize {
         match self {
@@ -780,6 +780,8 @@ impl Method {
             Self::Sha256 | Self::Sha512 => SALT_MAX,
             Self::Yescrypt | Self::Scrypt => YESCRYPT_SALT_MAX,
             Self::Bcrypt => BCRYPT_SALT_LEN,
+            Self::Des => 2,
+            Self::BsdiDes => 8,
         }
     }
 
@@ -787,17 +789,28 @@ impl Method {
     /// non-empty, no longer than [`Method::salt_max`] -- and, for yescrypt,
     /// whose salt is the bytes the characters decode to, characters that
     /// decode; for bcrypt, exactly 22 characters, the last as bcrypt writes
-    /// it (it holds two bits, so `crypt` would rewrite any other).
+    /// it (it holds two bits, so `crypt` would rewrite any other).  None,
+    /// for the DES methods: no new password should be hashed with them.
     fn takes_salt(self, salt: &[u8]) -> bool {
-        !salt.is_empty()
+        !matches!(self, Self::Des | Self::BsdiDes)
+            && !salt.is_empty()
             && salt.len() <= self.salt_max()
             && salt.iter().copied().all(is_b64)
             && (self != Self::Yescrypt || crate::yescrypt::is_yescrypt_salt(salt))
             && (self != Self::Bcrypt || crate::bcrypt::is_salt(salt))
     }
 
-    /// The method named by a `$N$` prefix, if it is one we implement.
+    /// The method a setting or a stored entry names, if it is one we
+    /// implement: by its `$N$` prefix -- or `_`, BSDi's -- and, with none,
+    /// by two salt characters first, traditional DES's.
     fn from_prefix(setting: &[u8]) -> Option<Self> {
+        if !setting.is_empty() && crate::des::names_method(setting) {
+            return Some(if setting[0] == b'_' {
+                Self::BsdiDes
+            } else {
+                Self::Des
+            });
+        }
         match setting.get(..3)? {
             b"$1$" => Some(Self::Md5),
             b"$5$" => Some(Self::Sha256),
@@ -994,7 +1007,10 @@ pub fn verify(key: &[u8], stored: &[u8]) -> bool {
 /// exactly [`Method::hash_len`] characters of crypt base-64.  A yescrypt or
 /// scrypt entry carries its parameters, so for those it reads them as
 /// `crypt` would and requires ones it accepts -- whether the memory they
-/// ask for will be there is the one thing it cannot tell.
+/// ask for will be there is the one thing it cannot tell.  A DES entry has
+/// no `$`: two salt characters and one to sixteen blocks of eleven
+/// (traditional DES's one, bigcrypt's more), or BSDi's `_`, eight
+/// characters of count and salt, and one block.
 ///
 /// It exists to tell a genuine entry from one this tree wrote before the
 /// safe API existed.  `chpasswd` labelled its output `$5$` while computing
@@ -1005,6 +1021,9 @@ pub fn verify(key: &[u8], stored: &[u8]) -> bool {
 #[must_use]
 pub fn stored_method(stored: &[u8]) -> Option<Method> {
     let method = Method::from_prefix(stored)?;
+    if matches!(method, Method::Des | Method::BsdiDes) {
+        return crate::des::stored_kind(stored).is_some().then_some(method);
+    }
     if matches!(method, Method::Yescrypt | Method::Scrypt) {
         return crate::yescrypt::is_stored_hash(stored, CRYPT_OUTPUT_LEN).then_some(method);
     }
@@ -1172,19 +1191,27 @@ mod tests {
             let named = Method::from_prefix(result.as_bytes());
             assert!(named.is_some(), "{line}");
             assert_eq!(stored_method(result.as_bytes()), named, "{line}");
-            // A stored yescrypt, scrypt or bcrypt hash is its own setting --
-            // yescrypt's salt read to the last `$`, bcrypt's 22 characters
-            // and nothing after: new here, so each is verified too.  (A
-            // second hash each; the SHA and MD5 entries' verification has
-            // tests of its own, and would double this test's time.)
+            // A stored yescrypt, scrypt, bcrypt or DES hash is its own
+            // setting -- yescrypt's salt read to the last `$`, bcrypt's 22
+            // characters and nothing after, DES's two characters (and its
+            // length, which tells a bigcrypt hash's blocks from one), BSDi's
+            // nine: new here, so each is verified too.  (A second hash each;
+            // the SHA and MD5 entries' verification has tests of its own,
+            // and would double this test's time.)
             if matches!(
                 named,
-                Some(Method::Yescrypt | Method::Scrypt | Method::Bcrypt)
+                Some(
+                    Method::Yescrypt
+                        | Method::Scrypt
+                        | Method::Bcrypt
+                        | Method::Des
+                        | Method::BsdiDes
+                )
             ) {
                 assert!(verify(&password, result.as_bytes()), "{line}");
             }
         }
-        assert_eq!(lines, 3517, "the oracle's every line");
+        assert_eq!(lines, 4399, "the oracle's every line");
     }
 
     // -----------------------------------------------------------------------
@@ -1366,11 +1393,30 @@ mod tests {
 
     #[test]
     fn unsupported_method_is_the_token_and_einval() {
-        // Legacy DES (2-char salt) and unknown markers are rejected, never
-        // silently turned into a fake hash.
+        // libxcrypt's methods this module lacks -- gost-yescrypt, NT,
+        // SunMD5, sha1crypt -- and unknown markers are rejected, never
+        // silently turned into a fake hash; and so is what begins with a salt
+        // character and then another character, which is no DES setting.
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for setting in [
+            &b"$gy$j9T$abc\0"[..],
+            b"$3$$\0",
+            b"$md5$x\0",
+            b"$sha1$1$x\0",
+            b"$9$x\0",
+            b"a{\0",
+        ] {
+            let got = crypt_raw(b"password\0".as_ptr(), setting.as_ptr());
+            assert_eq!(got, ("*0".into(), crate::errno::EINVAL), "{setting:?}");
+        }
+    }
+
+    /// Traditional DES's best-known answer, which every Unix gave.
+    #[test]
+    fn des_password_ab() {
         let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let got = crypt_raw(b"password\0".as_ptr(), b"ab\0".as_ptr());
-        assert_eq!(got, ("*0".into(), crate::errno::EINVAL));
+        assert_eq!(got.0, "abJnggxhB/yWI");
     }
 
     #[test]
@@ -1451,7 +1497,7 @@ mod tests {
         assert_eq!(c_bytes(&data), want.as_bytes());
 
         for (key, setting, token, why) in [
-            (&b"pw\0"[..], &b"ab\0"[..], "*0", crate::errno::EINVAL),
+            (&b"pw\0"[..], &b"a{\0"[..], "*0", crate::errno::EINVAL),
             (b"pw\0", b"*0\0", "*1", crate::errno::EINVAL),
             (b"pw\0", b"$6$a:b$\0", "*0", crate::errno::EINVAL),
         ] {
@@ -1740,7 +1786,7 @@ mod tests {
     #[test]
     fn crypt_r_failures_leave_the_token_in_data() {
         for (key, salt, want) in [
-            (b"key\0".as_ptr(), b"ab\0".as_ptr(), crate::errno::EINVAL),
+            (b"key\0".as_ptr(), b"$9$x\0".as_ptr(), crate::errno::EINVAL),
             (
                 core::ptr::null(),
                 b"$6$salt\0".as_ptr(),
@@ -1844,52 +1890,6 @@ mod tests {
         assert!(!r.contains("rounds=abc$salt$")); // salt capped at 16: "rounds=abc" (10)
     }
 
-    // -----------------------------------------------------------------------
-    // encrypt / setkey
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn encrypt_valid_reaches_enosys() {
-        crate::errno::set_errno(0);
-        let mut block = [0u8; 64];
-        encrypt(block.as_mut_ptr(), 0);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn encrypt_null_block_efault() {
-        crate::errno::set_errno(0);
-        encrypt(core::ptr::null_mut(), 0);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn encrypt_any_edflag_is_accepted() {
-        // libxcrypt reads a non-zero edflag as "decrypt" and refuses none,
-        // so the answer is the stub's ENOSYS, not EINVAL.
-        for edflag in [2, 7, -1] {
-            crate::errno::set_errno(0);
-            let mut block = [0u8; 64];
-            encrypt(block.as_mut_ptr(), edflag);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS, "{edflag}");
-        }
-    }
-
-    #[test]
-    fn setkey_valid_reaches_enosys() {
-        crate::errno::set_errno(0);
-        let key = [0u8; 64];
-        setkey(key.as_ptr());
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn setkey_null_efault() {
-        crate::errno::set_errno(0);
-        setkey(core::ptr::null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
     /// 256: the most `crypt_r` may write into a `struct crypt_data` as
     /// musl's `<crypt.h>` declares it (an `int` and 256 bytes), and enough
     /// for the longest `$y$` hash.
@@ -1925,8 +1925,25 @@ mod tests {
     fn hash_into_rejects_an_unsupported_setting() {
         let mut b = buf();
         assert_eq!(hash_into(b"pw", b"$sha256$0123456789abcdef", &mut b), None);
-        assert_eq!(hash_into(b"pw", b"plain", &mut b), None);
+        assert_eq!(hash_into(b"pw", b"p", &mut b), None);
+        assert_eq!(hash_into(b"pw", b"p-lain", &mut b), None);
         assert_eq!(hash_into(b"pw", b"", &mut b), None);
+    }
+
+    /// A word of two salt characters and more is a DES setting -- `crypt`
+    /// hashes by its first two -- but no stored DES entry unless it has a
+    /// DES hash's shape: a cleartext password in `/etc/shadow` is still no
+    /// password (`authlib`'s `check_stored` asks this before verifying).
+    #[test]
+    fn a_word_is_no_stored_des_hash() {
+        let mut b = buf();
+        assert!(hash_into(b"pw", b"plain", &mut b).is_some());
+        assert_eq!(stored_method(b"plain"), None);
+        assert!(!verify(b"plain", b"plain"));
+        let des = hash_into(b"pw", b"pl", &mut b).unwrap().to_owned();
+        assert_eq!(stored_method(des.as_bytes()), Some(Method::Des));
+        assert!(verify(b"pw", des.as_bytes()));
+        assert!(!verify(b"px", des.as_bytes()));
     }
 
     #[test]

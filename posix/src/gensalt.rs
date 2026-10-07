@@ -9,10 +9,11 @@
 //! `lib/crypt-gensalt-static.c`, `lib/util-gensalt-sha.c` and each method's
 //! gensalt), held to it by `posix/tools/oracle/crypt_harness.py`, for the
 //! methods `crypt` here can hash: yescrypt, scrypt, bcrypt, SHA-512,
-//! SHA-256 and MD5 crypt.
+//! SHA-256, MD5 crypt, BSDi's DES (`_`) and traditional DES (an empty
+//! prefix, or any two salt characters, as libxcrypt matches it).
 //!
-//! For the methods it cannot -- DES, gost-yescrypt, sha1crypt, SunMD5, NT
-//! -- `crypt_gensalt` fails with `EINVAL` and `crypt_checksalt` answers
+//! For the methods it cannot -- gost-yescrypt, sha1crypt, SunMD5, NT --
+//! `crypt_gensalt` fails with `EINVAL` and `crypt_checksalt` answers
 //! `CRYPT_SALT_INVALID`, where libxcrypt, which has them, would make one
 //! and answer `CRYPT_SALT_OK` or `CRYPT_SALT_METHOD_LEGACY`: a setting this
 //! `crypt` cannot hash is no setting here.
@@ -41,7 +42,8 @@ pub const CRYPT_SALT_INVALID: i32 = 1;
 /// `crypt_checksalt`: never answered (libxcrypt's own "not implemented").
 pub const CRYPT_SALT_METHOD_DISABLED: i32 = 2;
 /// `crypt_checksalt`: a setting for a method libxcrypt counts weak --
-/// SHA-256, MD5, bcrypt's `$2x$`.  It hashes; a new password should not.
+/// SHA-256, MD5, bcrypt's `$2x$`, the DES methods.  It hashes; a new
+/// password should not.
 pub const CRYPT_SALT_METHOD_LEGACY: i32 = 3;
 /// `crypt_checksalt`: never answered (libxcrypt's own "not implemented").
 pub const CRYPT_SALT_TOO_CHEAP: i32 = 4;
@@ -108,8 +110,9 @@ fn md5(count: u64, rbytes: &[u8], out: &mut [u8]) -> Result<usize, Refused> {
     gensalt_sha(b'1', 8, 1000, 1000, 1000, 1000, rbytes, out)
 }
 
-/// The methods, in `hashes.conf`'s order: a prefix is matched in it.
-const METHODS: [Method; 9] = [
+/// The methods, in `hashes.conf`'s order: a prefix is matched in it, and
+/// the one with none -- bigcrypt's, which is traditional DES's too -- last.
+const METHODS: [Method; 11] = [
     Method {
         prefix: b"$y$",
         nrbytes: 16,
@@ -164,11 +167,33 @@ const METHODS: [Method; 9] = [
         strong: false,
         gensalt: md5,
     },
+    Method {
+        prefix: b"_",
+        nrbytes: 3,
+        strong: false,
+        gensalt: crate::des::gensalt_bsdi,
+    },
+    // bigcrypt's row, which libxcrypt matches before traditional DES's: its
+    // gensalt is DES's, and so it is the one either is asked for by.
+    Method {
+        prefix: b"",
+        nrbytes: 2,
+        strong: false,
+        gensalt: crate::des::gensalt,
+    },
 ];
 
-/// `get_hashfn`: the method whose prefix `setting` begins with.
+/// `get_hashfn`: the method whose prefix `setting` begins with -- or, for
+/// the one with none, whose rule it meets: empty, or two salt characters
+/// first.
 fn method(setting: &[u8]) -> Option<&'static Method> {
-    METHODS.iter().find(|m| setting.starts_with(m.prefix))
+    METHODS.iter().find(|m| {
+        if m.prefix.is_empty() {
+            crate::des::names_unprefixed(setting)
+        } else {
+            setting.starts_with(m.prefix)
+        }
+    })
 }
 
 /// The crypt base-64 alphabet the SHA and MD5 salts are written in.
@@ -431,7 +456,7 @@ pub(crate) fn checksalt(setting: Option<&[u8]>) -> i32 {
 
 /// `crypt_checksalt` -- whether `setting` names a method this library
 /// hashes, and whether it is one for new passwords: `CRYPT_SALT_OK`,
-/// `CRYPT_SALT_METHOD_LEGACY` (SHA-256, MD5, `$2x$`), or
+/// `CRYPT_SALT_METHOD_LEGACY` (SHA-256, MD5, `$2x$`, the DES methods), or
 /// `CRYPT_SALT_INVALID` (NULL, empty, a character no setting has, or no
 /// method).  It reads the prefix only, as libxcrypt's does: the rest is
 /// `crypt`'s to judge.
@@ -473,20 +498,26 @@ mod tests {
     #[test]
     fn each_method_makes_a_setting_crypt_takes() {
         let bytes: std::vec::Vec<u8> = (1..=64).collect();
-        for (prefix, count) in [
-            (&b"$y$"[..], 0),
-            (b"$y$", 1),
-            (b"$7$", 6),
-            (b"$2b$", 4),
-            (b"$2y$", 4),
-            (b"$2a$", 4),
-            (b"$6$", 0),
-            (b"$6$", 1000),
-            (b"$5$", 5000),
-            (b"$1$", 0),
+        // The prefix, and what the setting begins with: for traditional DES,
+        // which any two salt characters ask for, its salt, from the bytes.
+        for (prefix, count, begins) in [
+            (&b"$y$"[..], 0, &b"$y$"[..]),
+            (b"$y$", 1, b"$y$"),
+            (b"$7$", 6, b"$7$"),
+            (b"$2b$", 4, b"$2b$"),
+            (b"$2y$", 4, b"$2y$"),
+            (b"$2a$", 4, b"$2a$"),
+            (b"$6$", 0, b"$6$"),
+            (b"$6$", 1000, b"$6$"),
+            (b"$5$", 5000, b"$5$"),
+            (b"$1$", 0, b"$1$"),
+            (b"_", 0, b"_J9.."),
+            (b"_", 5000, b"_7C/."),
+            (b"", 0, b"/0"),
+            (b"ab", 0, b"/0"),
         ] {
             let setting = made(Some(prefix), count, Some(&bytes)).unwrap();
-            assert!(setting.as_bytes().starts_with(prefix), "{setting}");
+            assert!(setting.as_bytes().starts_with(begins), "{setting}");
             let mut out = crate::crypt::buf();
             let hashed = crate::crypt::hash_into(b"pw", setting.as_bytes(), &mut out);
             assert!(hashed.is_some(), "{setting} hashes");
@@ -522,9 +553,11 @@ mod tests {
             (b"$2b$", 5, 15),
             (b"$6$", 0, 2),
             (b"$gy$", 0, 16),
-            (b"_", 0, 16),
-            (b"", 0, 16),
-            (b"ab", 0, 16),
+            (b"_", 0, 2),
+            (b"", 1, 16),
+            (b"ab", 0, 1),
+            (b"a", 0, 16),
+            (b"a$", 0, 16),
         ] {
             assert_eq!(
                 made(Some(prefix), count, Some(&bytes[..n])),
@@ -569,8 +602,8 @@ mod tests {
     /// `crypt_gensalt_rn` at every method, cost, count of random bytes and
     /// room -- the setting, `errno`, and what the buffer held after --
     /// `crypt_checksalt` and `crypt_preferred_method`.  For the methods this
-    /// library has not (DES, BSDi DES, gost-yescrypt, NT, SunMD5, sha1crypt)
-    /// the answer is [`no_method`]'s, or `CRYPT_SALT_INVALID`, where
+    /// library has not (gost-yescrypt, NT, SunMD5, sha1crypt) the answer
+    /// is [`no_method`]'s, or `CRYPT_SALT_INVALID`, where
     /// libxcrypt's may be a setting.  (The probes that make libxcrypt abort
     /// are left out of the oracle; `where_libxcrypt_aborts` has this
     /// library's answer to them.)
@@ -671,7 +704,7 @@ mod tests {
                 other => panic!("a probe this test does not know: {other}"),
             }
         }
-        assert_eq!(lines, 696, "the oracle's every line");
+        assert_eq!(lines, 836, "the oracle's every line");
     }
 
     /// Where libxcrypt aborts -- a buffer exactly the length its room check
@@ -808,8 +841,12 @@ mod tests {
             checksalt(Some(b"$2x$05$whatever")),
             CRYPT_SALT_METHOD_LEGACY
         );
+        assert_eq!(checksalt(Some(b"ab")), CRYPT_SALT_METHOD_LEGACY);
+        assert_eq!(checksalt(Some(b"abHashHashHas")), CRYPT_SALT_METHOD_LEGACY);
+        assert_eq!(checksalt(Some(b"_J9..abcd")), CRYPT_SALT_METHOD_LEGACY);
         assert_eq!(checksalt(Some(b"$gy$j9T$abc")), CRYPT_SALT_INVALID);
-        assert_eq!(checksalt(Some(b"ab")), CRYPT_SALT_INVALID);
+        assert_eq!(checksalt(Some(b"a")), CRYPT_SALT_INVALID);
+        assert_eq!(checksalt(Some(b"a$")), CRYPT_SALT_INVALID);
         assert_eq!(checksalt(Some(b"")), CRYPT_SALT_INVALID);
         assert_eq!(checksalt(Some(b"$6$a b")), CRYPT_SALT_INVALID);
         assert_eq!(checksalt(None), CRYPT_SALT_INVALID);

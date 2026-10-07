@@ -81,9 +81,11 @@
 //! - **System V IPC** (stubs): `msgget`/`msgsnd`/`msgrcv`/`msgctl`,
 //!   `semget`/`semop`/`semtimedop`/`semctl`,
 //!   `shmget`/`shmat`/`shmdt`/`shmctl`
-//! - **Password Hashing**: `crypt`, `crypt_r` (MD5, SHA-256, SHA-512,
-//!   yescrypt and scrypt, answering as libxcrypt does; the hashes themselves
-//!   in the `pwhash` crate), `encrypt`, `setkey` (DES stubs — ENOSYS)
+//! - **Password Hashing**: `crypt`, `crypt_r`, `crypt_rn`, `crypt_ra`
+//!   (yescrypt, scrypt, bcrypt, SHA-512, SHA-256, MD5 and the DES methods,
+//!   answering as libxcrypt does; the hashes themselves in the `pwhash`
+//!   crate), `crypt_gensalt` and its `_rn` and `_ra` forms,
+//!   `crypt_checksalt`, `crypt_preferred_method`; `encrypt`, `setkey` (DES)
 //! - **Language Information**: `nl_langinfo`, `nl_langinfo_l`
 //!   (C locale date/time formats, day/month names, codeset, etc.)
 //! - **Monetary Formatting**: `strfmon`, `strfmon_l` (glibc's in the C
@@ -372,6 +374,10 @@ pub mod crt;
 pub mod crypt;
 pub mod ctype;
 pub(crate) mod decfloat;
+// The DES-based crypt methods -- traditional DES, bigcrypt, BSDi's -- over
+// `pwhash::des`, reached through `crypt.rs` and `gensalt.rs`; and POSIX's
+// `encrypt` and `setkey`.
+pub mod des;
 pub mod dirent;
 pub mod dlfcn;
 // Ed25519 lives here, next to `crypt` and `sha2`, because this crate is

@@ -1,8 +1,11 @@
 """libxcrypt 4.4.36's crypt -- Ubuntu 24.04's libcrypt.so.1 -- as the oracle
-for posix/src/crypt.rs and posix/src/yescrypt.rs, and the hashing behind
-them in posix/pwhash.
+for posix/src/crypt.rs, yescrypt.rs, bcrypt.rs and des.rs, and the hashing
+behind them in posix/pwhash; and its crypt_gensalt, crypt_checksalt,
+crypt_preferred_method (gensalt.rs), encrypt and setkey (des.rs).
 
-    python posix/tools/oracle/crypt_harness.py   # writes posix/src/crypt_oracle.txt
+    python posix/tools/oracle/crypt_harness.py
+        # writes posix/src/crypt_oracle.txt, gensalt_oracle.txt and
+        # encrypt_oracle.txt
 
 glibc 2.39 has no crypt of its own; Ubuntu's comes from libxcrypt, which is
 the library posix's `crypt` answers as (`crypt.rs`'s module docs). So the
@@ -17,7 +20,12 @@ The cases:
 
 - libxcrypt's own known-answer table's 92 passwords (test/ka-table.inc in
   its source) under that table's settings for the methods posix implements
-  -- MD5, SHA-256, SHA-512, scrypt, yescrypt and bcrypt's four variants;
+  -- MD5, SHA-256, SHA-512, scrypt, yescrypt, bcrypt's four variants,
+  traditional DES, bigcrypt and BSDi's DES;
+- the DES methods over salts at each end of the alphabet, passwords around
+  the eight characters each block reads, to bigcrypt's sixteen blocks and
+  past them, under traditional and bigcrypt settings, BSDi's counts, salts
+  and folding, and what each refuses;
 - bcrypt's variants over keys built for their key setup, its 72-byte key,
   its salt's last character and the settings it refuses;
 - yescrypt and scrypt settings that reach each parameter -- flavour, N, r,
@@ -176,6 +184,14 @@ KA_SETTINGS = [
     "$2y$04$abcdefghijklmnopqrstuu",
     "$2y$05$CCCCCCCCCCCCCCCCCCCCC.",
     "$2y$05$abcdefghijklmnopqrstuu",
+    "CC..............",
+    "ab..............",
+    "_/...CCCC",
+    "_/...abcd",
+    "_B...CCCC",
+    "_B...abcd",
+    "CC",
+    "ab",
 ]
 
 # bcrypt's own base-64 alphabet: crypt's characters, in another order.
@@ -358,6 +374,40 @@ def generated():
               f"$2b$04${salt[:21]}", "$2b$04$abcdefghij-lmnopqrstuu", "$2", "$2b", "$2b$",
               "$2b$04", "$2b$04$", "$2b$04x" + salt]:
         cases.append((pw, s))
+
+    # Traditional DES and bigcrypt: salts reaching each end of the alphabet
+    # in each place, and what follows a salt.
+    for s in ["..", "./", "/.", "//", "09", "9A", "AZ", "Za", "az", "zz", "z.", ".z",
+              "ab$", "ab$cd", "ab-x", "abJnggxhB/yWI", "abJnggxhB/yWIjunk"]:
+        cases.append((pw, s))
+    cases.append((b"password", "ab"))
+    # Each character's top bit, which the key loses.
+    for word in [b"\x80", b"\xff" * 8, b"\xe1\xe2\xe3", b"\xc3\xa9t\xc3\xa9", bytes(range(128, 140))]:
+        cases.append((word, "ab"))
+        cases.append((word, "ab" + "." * 12))
+    # Passwords around the eight characters traditional DES reads and
+    # bigcrypt's blocks of eight, to its sixteen and past them; under a
+    # traditional setting (two characters, or thirteen), which truncates,
+    # and under bigcrypt's (fourteen or more).
+    for n in [1, 7, 8, 9, 15, 16, 17, 24, 25, 64, 120, 127, 128, 129, 200, 511]:
+        word = bytes((i * 11) % 94 + 33 for i in range(n))
+        for s in ["ab", "ab" + "." * 11, "ab" + "." * 12, "ab" + "." * 22, "zz" + "." * 175]:
+            cases.append((word, s))
+    # BSDi's: counts, salts, the characters after the nine, and passwords
+    # folded at each length around its blocks.
+    for s in ["_J9..abcd", "_J9..abcdXYZ", "_....abcd", "_/...abcd", "_0...abcd", "_zz..abcd",
+              "_zzz.abcd", "_..0.abcd", "_J9......", "_J9..zzzz", "_J9../...", "_J9.....z"]:
+        cases.append((pw, s))
+    for n in [0, 1, 7, 8, 9, 15, 16, 17, 64, 200, 511]:
+        word = bytes((i * 13) % 94 + 33 for i in range(n))
+        cases.append((word, "_J9..abcd"))
+    for word in [b"\x80", b"\xff" * 9, b"\xc3\xa9t\xc3\xa9"]:
+        cases.append((word, "_J9..abcd"))
+    # What the three refuse: no salt character, too short, a character
+    # outside the alphabet where one is read.
+    for s in ["", "a", "a{", "{a", "a$", ".", "_", "_J9..abc", "_J9.-abcd", "_J9..abc-",
+              "_J9..ab{d", "_-9..abcd"]:
+        cases.append((pw, s))
     return cases
 
 
@@ -515,7 +565,8 @@ def gensalt_cases():
         return not written + 5 < size
 
     lines = []
-    prefixes = ["$y$", "$7$", "$2b$", "$2y$", "$2a$", "$2x$", "$6$", "$5$", "$1$"]
+    # Every method's prefix: BSDi's DES's `_`, and traditional DES's none.
+    prefixes = ["$y$", "$7$", "$2b$", "$2y$", "$2a$", "$2x$", "$6$", "$5$", "$1$", "_", "-"]
     counts = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 31, 32, 999, 1000, 4999, 5000,
               5001, 999999999, 1000000000, 4294967296, 18446744073709551615]
     # Every method at every cost, with the bytes it takes by default.
@@ -576,8 +627,126 @@ def gensalt_main() -> None:
     print(f"{GENSALT_OUT.name}: {len(lines)} lines")
 
 
+ENCRYPT_OUT = POSIX_SRC / "encrypt_oracle.txt"
+
+# encrypt and setkey -- libxcrypt keeps them only as compatibility symbols,
+# which a program cannot link to, so they are looked up by version. A probe
+# a line in, in order, since setkey's schedule is the process's: `setkey
+# <key>` or `encrypt <block> <edflag>`, each 64 bytes in hex; an answer a
+# line out, the probe, " = ", the block after (encrypt), and errno's name.
+ENCRYPT_PROGRAM = r'''
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+
+static const char *en(int e)
+{
+    static char buf[16];
+    switch (e) {
+    case 0: return "0";
+    case EINVAL: return "EINVAL";
+    case ENOSYS: return "ENOSYS";
+    }
+    snprintf(buf, sizeof buf, "%d", e);
+    return buf;
+}
+
+static void unhex(const char *h, char *out)
+{
+    for (int i = 0; i < 64; i++) {
+        unsigned v;
+        sscanf(h + 2 * i, "%2x", &v);
+        out[i] = (char)v;
+    }
+}
+
+int main(void)
+{
+    void *lib = dlopen("libcrypt.so.1", RTLD_NOW);
+    if (!lib)
+        return 3;
+    void (*enc)(char *, int) = (void (*)(char *, int))dlvsym(lib, "encrypt", "GLIBC_2.2.5");
+    void (*sk)(const char *) = (void (*)(const char *))dlvsym(lib, "setkey", "GLIBC_2.2.5");
+    if (!enc || !sk)
+        return 4;
+    static char line[4096];
+    while (fgets(line, sizeof line, stdin)) {
+        line[strcspn(line, "\n")] = 0;
+        char hex[256], block[64];
+        int edflag;
+        if (sscanf(line, "setkey %255s", hex) == 1 && strlen(hex) == 128) {
+            unhex(hex, block);
+            errno = 0;
+            sk(block);
+            printf("%s = %s\n", line, en(errno));
+        } else if (sscanf(line, "encrypt %255s %d", hex, &edflag) == 2 && strlen(hex) == 128) {
+            unhex(hex, block);
+            errno = 0;
+            enc(block, edflag);
+            int e = errno;
+            printf("%s = ", line);
+            for (int i = 0; i < 64; i++)
+                printf("%02x", (unsigned char)block[i]);
+            printf(" %s\n", en(e));
+        } else {
+            return 2;
+        }
+    }
+    return 0;
+}
+'''
+
+
+def encrypt_cases():
+    """The probes for encrypt and setkey: blocks before any key, then keys
+    each followed by blocks. A bit stands as a byte whose lowest bit it is,
+    and the bytes vary above it, to show that only that bit is read."""
+    def bits(value: int, high: int = 0) -> str:
+        out = bytearray()
+        for i in range(64):
+            out.append((high * (i + 1) * 37 & 0xFE) | ((value >> (63 - i)) & 1))
+        return out.hex()
+
+    blocks = [(0, 0), (0x0123456789ABCDEF, 0), (0x4E6F772069732074, 0x55),
+              (0xFFFFFFFFFFFFFFFF, 0), (0x8000000000000000, 0xAA), (0x0123456789ABCDEF, 0xFF)]
+    lines = []
+    for value, high in blocks[:3]:
+        for edflag in (0, 1):
+            lines.append(f"encrypt {bits(value, high)} {edflag}")
+    keys = [(0x133457799BBCDFF1, 0), (0x0123456789ABCDEF, 0x3C), (0x0101010101010101, 0),
+            (0xFEFEFEFEFEFEFEFE, 0x81), (0x0000000000000000, 0), (0x8001020304050607, 0xFF)]
+    for key, khigh in keys:
+        lines.append(f"setkey {bits(key, khigh)}")
+        for value, high in blocks:
+            for edflag in (0, 1, 2, -1):
+                lines.append(f"encrypt {bits(value, high)} {edflag}")
+    return lines
+
+
+def encrypt_main() -> None:
+    lines = encrypt_cases()
+    with workdir() as t:
+        d = Path(t)
+        (d / "en.c").write_text(ENCRYPT_PROGRAM, encoding="utf-8", newline="\n")
+        (d / "cases.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+        r = run(f"cd {wsl_path(d)} && gcc -O2 -Wall -Werror -o en en.c -ldl && ./en < cases.txt")
+        if r.returncode != 0:
+            sys.exit(f"the encrypt harness failed ({r.returncode}):\n{r.stderr}\n{r.stdout[-2000:]}")
+        body = r.stdout
+    if body.count("\n") != len(lines):
+        sys.exit(f"{len(lines)} encrypt probes but {body.count(chr(10))} answers")
+    head = ("# libxcrypt 4.4.36's encrypt and setkey (Ubuntu 24.04's libcrypt.so.1, by their\n"
+            "# GLIBC_2.2.5 versions), in order, for posix/src/des.rs. Generated by\n"
+            "# posix/tools/oracle/crypt_harness.py; do not edit.\n")
+    ENCRYPT_OUT.write_text(head + body, encoding="utf-8", newline="\n")
+    print(f"{ENCRYPT_OUT.name}: {len(lines)} lines")
+
+
 def main() -> None:
     gensalt_main()
+    encrypt_main()
     cases = [(p, s) for s in KA_SETTINGS for p in KA_PASSWORDS] + generated()
     lines = []
     for word, setting in cases:

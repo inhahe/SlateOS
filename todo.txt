@@ -59094,36 +59094,32 @@ is already waiting, not whether the setter exists.
   `get_properties_by_udev`.
 ## Lane D — POSIX, libc & toolchain
 
-- **crypt: libxcrypt's other methods** (posix/src/crypt.rs).  $1$, $5$,
-  $6$ and, since 2026-10-06, yescrypt ($y$), scrypt ($7$) and bcrypt ($2a$,
-  $2b$, $2x$, $2y$) hash (posix/src/yescrypt.rs, posix/src/bcrypt.rs and
-  posix/pwhash, ported from libxcrypt 4.4.36 and held to it by
-  posix/tools/oracle/crypt_harness.py's 3517 answers); every other setting
-  gets the failure token "*0" with EINVAL, as libxcrypt answers for a method
-  it lacks.  Ubuntu 24.04's libxcrypt also has, probed 2026-09-26:
-  traditional DES (two-character salt), BSDi DES ("_"), bigcrypt,
-  gost-yescrypt ($gy$), sha1crypt ($sha1$), SunMD5 ($md5$) and NT ($3$),
-  and real DES behind encrypt/setkey (compat symbols there; ours answer
-  ENOSYS).  Next: traditional and BSDi DES together with encrypt/setkey,
-  which share the cipher -- the last methods a Linux /etc/shadow from
-  before 2005 may hold -- then gost-yescrypt (ALT Linux's; GOST R
-  34.11-2012).  Port from D:\refsrc\libxcrypt-4.4.36, per
-  design-decisions.md §539: primitives ported, not written -- the hashing
-  into posix/pwhash, compiled for speed (§1183), the setting's parsing
-  into posix; extend crypt_harness.py's KA_SETTINGS with the method's rows
-  of ka-table.inc.  (Replaces the DES follow-up of the 2026-05-29 crypt
-  entry, deleted as done.)
-  Each method ported also gets its crypt_gensalt (posix/src/gensalt.rs,
-  since 2026-10-06 with crypt_rn, crypt_ra, crypt_checksalt,
-  crypt_preferred_method and posix/include/crypt.h): a row in METHODS with
-  hashes.conf's nrbytes and STRONG, and its gensalt function, from the
-  method's crypt-*.c.  Until then gensalt.rs refuses its prefix (EINVAL)
-  and crypt_checksalt calls its settings CRYPT_SALT_INVALID, which
-  gensalt.rs's libxcrypt_answers test allows for exactly the prefixes
-  METHODS lacks -- so the row is what makes the oracle's answers for it
-  binding.  DES needs more than a row: its prefix is empty, and libxcrypt's
-  get_hashfn matches it by the setting's first two characters being salt
-  characters (or the setting being empty), not by starts_with.
+- **crypt: libxcrypt's last four methods** (posix/src/crypt.rs).  $1$,
+  $5$, $6$ and, since 2026-10-06, yescrypt ($y$), scrypt ($7$), bcrypt
+  ($2a$, $2b$, $2x$, $2y$), traditional DES, bigcrypt and BSDi's DES ("_")
+  hash (posix/src/yescrypt.rs, bcrypt.rs, des.rs and posix/pwhash, ported
+  from libxcrypt 4.4.36 and held to it by
+  posix/tools/oracle/crypt_harness.py's 4399 answers), and encrypt/setkey
+  are real DES (its 156); every other setting gets the failure token "*0"
+  with EINVAL, as libxcrypt answers for a method it lacks.  Ubuntu 24.04's
+  libxcrypt also has, probed 2026-09-26: gost-yescrypt ($gy$, ALT Linux's
+  default; yescrypt with GOST R 34.11-2012 Streebog around it), sha1crypt
+  ($sha1$, NetBSD's), SunMD5 ($md5, Solaris's) and NT ($3$, FreeBSD's
+  MD4 of the UTF-16 password).  Next: gost-yescrypt, which reuses the
+  yescrypt port and needs Streebog in posix/pwhash; then sha1crypt, SunMD5
+  and NT.  Port from D:\refsrc\libxcrypt-4.4.36, per design-decisions.md
+  §539: primitives ported, not written -- the hashing into posix/pwhash,
+  compiled for speed (§1183), the setting's parsing into posix; extend
+  crypt_harness.py's KA_SETTINGS with the method's rows of ka-table.inc.
+  Each method ported also gets its crypt_gensalt (posix/src/gensalt.rs):
+  a row in METHODS with hashes.conf's nrbytes and STRONG, and its gensalt
+  function, from the method's crypt-*.c.  Until then gensalt.rs refuses
+  its prefix (EINVAL) and crypt_checksalt calls its settings
+  CRYPT_SALT_INVALID, which gensalt.rs's libxcrypt_answers test allows for
+  exactly the prefixes METHODS lacks -- so the row is what makes the
+  oracle's answers for it binding; and crypt.rs's Method a variant, so
+  that stored_method names its entries (authlib refuses an entry it does
+  not name before verifying it).
 
 - **iconv: glibc's other character sets** (posix/src/iconv.rs).  UTF-8,
   ASCII, ISO-8859-1, UTF-16, UTF-32, UCS-2, UCS-4, UNICODE, WCHAR_T, UTF-7

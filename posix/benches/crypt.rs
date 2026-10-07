@@ -47,7 +47,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 fn main() {
-    let cases: [(&str, u32); 7] = [
+    let cases: [(&str, u32); 10] = [
         ("$y$j9T$PKXc3hCOSyMqdaEQArI62/", 20),
         ("$y$j75$LdJMENpBABJJ3hIHjB1Bi.", 100),
         ("$7$CU..../....SodiumChloride", 10),
@@ -55,6 +55,11 @@ fn main() {
         ("$6$saltstring", 200),
         ("$2b$05$CCCCCCCCCCCCCCCCCCCCC.", 100),
         ("$2b$10$CCCCCCCCCCCCCCCCCCCCC.", 5),
+        // Traditional DES (the password's first eight characters), bigcrypt
+        // (its two blocks) and BSDi's at gensalt's default count, 725.
+        ("ab", 2000),
+        ("ab..............", 2000),
+        ("_J9..CCCC", 200),
     ];
     for (setting, reps) in cases {
         let mut out = posix::crypt::buf();

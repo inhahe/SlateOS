@@ -465,6 +465,26 @@ def generated():
     for total in [210, 211]:
         cases.append((pw, head + "." * (total - len(head))))
 
+    # SHA-crypt's rounds= field: libxcrypt takes it only as [1-9] digits, a
+    # `$` and a count within 1000 to 999999999 -- no clamping, and nothing
+    # malformed taken as salt, as glibc's old crypt did.
+    for tag in ["5", "6"]:
+        # (The largest count taken, 999999999, is a billion rounds: its
+        # neighbour past it, refused at once, stands for the boundary.)
+        for field in ["rounds=1000$salt", "rounds=1001$s", "rounds=100$salt",
+                      "rounds=999$salt", "rounds=1000000000$salt", "rounds=0$salt",
+                      "rounds=01000$salt", "rounds=+1000$salt", "rounds=$salt",
+                      "rounds=abc$salt", "rounds=1000x$salt", "rounds=1000", "rounds=100",
+                      "rounds=4294967296$salt", "rounds=18446744073709551616$salt",
+                      "rounds=5000$salt", "rounds=1000$", "rounds=1000$$", "rounds=",
+                      "roundsx=1000$salt", "Rounds=1000$salt", "salt$rounds=1000$x",
+                      "sa$lt", "saltsaltsaltsaltsalt$", "", "$"]:
+            cases.append((pw, f"${tag}${field}"))
+    # MD5 crypt's salt: up to eight characters, to a `$` or the end.
+    for s in ["$1$", "$1$$", "$1$a", "$1$abcdefgh", "$1$abcdefghi", "$1$abc$def", "$1$a-b",
+              "$1$rounds=1000$salt"]:
+        cases.append((pw, s))
+
     # sha1crypt: counts as strtoul reads them (a sign, leading zeros, none
     # at all), salts to 100 characters and what may follow them, keys
     # longer than HMAC-SHA1's block, which it hashes first, and refusals.

@@ -55,6 +55,7 @@
 //! | the passphrase is 512 bytes or longer | `ERANGE` |
 //! | the setting has a space, a control or non-ASCII byte, or one of `! * : ; \` | `EINVAL` |
 //! | the setting names no method this module implements | `EINVAL` |
+//! | a `$5$` or `$6$` setting whose `rounds=` is not 1000 to 999999999 written plainly (no sign, no leading zero) and followed by `$` | `EINVAL` |
 //! | a `$y$`, `$gy$` or `$7$` setting is 212 bytes or longer (see below) | `ERANGE` |
 //! | a `$y$`, `$gy$` or `$7$` setting the method refuses, or no memory for its hash | `EINVAL` |
 //! | a bcrypt setting the method refuses (a cost below 04), or its self-test failing | `EINVAL` |
@@ -120,9 +121,9 @@ const B64_ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh
 
 /// Default SHA-crypt rounds when no `rounds=` field is given.
 const ROUNDS_DEFAULT: u32 = 5000;
-/// Minimum permitted rounds (values below are clamped up).
+/// The fewest rounds a `rounds=` field may ask for: one below is refused.
 const ROUNDS_MIN: u32 = 1000;
-/// Maximum permitted rounds (values above are clamped down).
+/// The most rounds a `rounds=` field may ask for: one above is refused.
 const ROUNDS_MAX: u32 = 999_999_999;
 /// Maximum salt length in bytes for SHA-crypt (longer salts truncated).
 const SALT_MAX: usize = 16;
@@ -260,16 +261,16 @@ fn encode_sha256(out: &mut OutBuf, a: &[u8]) {
 /// Parse a SHA-crypt `setting` string and, if recognised, compute the
 /// full result (`"$N$[rounds=R$]salt$hash"`) into `out`.
 ///
-/// Returns `true` if `setting` selected a supported method (`$5$`/`$6$`)
-/// and the result was written; `false` if `setting` is not a SHA-crypt
-/// setting (caller should report `EINVAL`).
-fn sha_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
+/// `None` if `setting` is not a SHA-crypt one (`$5$`/`$6$`); otherwise
+/// whether it was hashed -- refused (`EINVAL`) for a `rounds=` field
+/// libxcrypt refuses ([`sha_rounds`]).
+fn sha_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Option<Result<(), Refusal>> {
     let (is_512, rest) = if let Some(r) = setting.strip_prefix(b"$6$") {
         (true, r)
     } else if let Some(r) = setting.strip_prefix(b"$5$") {
         (false, r)
     } else {
-        return false;
+        return None;
     };
 
     // Optional "rounds=N$" prefix.
@@ -277,23 +278,12 @@ fn sha_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
     let mut rounds_custom = false;
     let mut salt_part = rest;
     if let Some(after) = rest.strip_prefix(b"rounds=") {
-        let mut val: u64 = 0;
-        let mut i = 0;
-        while i < after.len() && after[i].is_ascii_digit() {
-            val = val
-                .saturating_mul(10)
-                .saturating_add(u64::from(after[i] - b'0'));
-            i += 1;
-        }
-        // Accept only if at least one digit was consumed and the next
-        // byte is '$' (mirrors glibc's strtoul + "*endp == '$'" check).
-        if i > 0 && i < after.len() && after[i] == b'$' {
-            rounds_custom = true;
-            rounds = val.clamp(u64::from(ROUNDS_MIN), u64::from(ROUNDS_MAX)) as u32;
-            salt_part = &after[i + 1..];
-        }
-        // Otherwise leave salt_part == rest: the malformed "rounds=..."
-        // text becomes the salt (truncated below), exactly as glibc does.
+        let Some(count) = sha_rounds(after) else {
+            return Some(Err(Refusal::Invalid));
+        };
+        rounds_custom = true;
+        rounds = count;
+        salt_part = &after[count_digits(after) + 1..];
     }
 
     // Salt = bytes up to the first '$', capped at SALT_MAX.
@@ -323,7 +313,36 @@ fn sha_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
         encode_sha256(out, &alt);
     }
     out.push(0); // NUL terminator
-    true
+    Some(Ok(()))
+}
+
+/// The digits a `rounds=` field's count runs to.
+fn count_digits(field: &[u8]) -> usize {
+    field.iter().take_while(|b| b.is_ascii_digit()).count()
+}
+
+/// A SHA-crypt `rounds=` field's count, `field` being what follows
+/// `rounds=` -- or `None` for one libxcrypt refuses (`EINVAL`): a count
+/// that does not begin with a digit 1-9 (no zero, no leading zero, no
+/// sign), one outside [`ROUNDS_MIN`]..=[`ROUNDS_MAX`] -- refused, not
+/// clamped -- or one not followed by `$`.  (glibc's crypt, before it had
+/// none, clamped a count outside the bounds and took a malformed field as
+/// the salt's beginning; this library did too until 2026-10-07.)
+fn sha_rounds(field: &[u8]) -> Option<u32> {
+    if !matches!(field.first(), Some(b'1'..=b'9')) {
+        return None;
+    }
+    let digits = count_digits(field);
+    if field.get(digits) != Some(&b'$') {
+        return None;
+    }
+    let mut count: u64 = 0;
+    for &d in field.get(..digits)? {
+        // Past u64, strtoul's overflow: refused all the same.
+        count = count.checked_mul(10)?.checked_add(u64::from(d - b'0'))?;
+    }
+    let count = u32::try_from(count).ok()?;
+    (ROUNDS_MIN..=ROUNDS_MAX).contains(&count).then_some(count)
 }
 
 /// Parse an MD5-crypt (`$1$`) `setting` and, if recognised, compute the
@@ -387,8 +406,11 @@ fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Ref
         out.push(0);
         return Ok(());
     }
-    if md5_crypt(key, setting, out) || sha_crypt(key, setting, out) {
+    if md5_crypt(key, setting, out) {
         return Ok(());
+    }
+    if let Some(result) = sha_crypt(key, setting, out) {
+        return result;
     }
     if crate::sha1crypt::names_method(setting) {
         let len = crate::sha1crypt::crypt(key, setting, &mut out.buf).map_err(|r| match r {
@@ -979,11 +1001,12 @@ pub fn setting_into<'o>(method: Method, salt: &[u8], out: &'o mut HashBuf) -> Op
 /// even sized for `"$6$rounds=999999999$"` -- the capability was there and
 /// the way to ask for it was not.
 ///
-/// `rounds` IS CLAMPED HERE, to the same bounds `hash_into` applies when it
-/// parses the field. That is the load-bearing part rather than a detail: if
-/// this wrote `rounds=10` and the hash was then computed with 1000, the
-/// stored entry would state a cost it was not produced at, and re-deriving
-/// from the entry's own text would give a different answer. This file already
+/// `rounds` IS CLAMPED HERE, to the bounds `hash_into` takes a field within
+/// -- it refuses one outside them, as libxcrypt does (until 2026-10-07 it
+/// clamped, as glibc's crypt did). That is the load-bearing part rather
+/// than a detail: a setting stating `rounds=10` would be no setting at all,
+/// and one hashed at a cost other than the one it states would not
+/// reproduce from its own text. This file already
 /// carries one such defect in its history -- a label and an algorithm
 /// declared in different places, and disagreeing -- and the rule that came
 /// out of it applies here too.
@@ -1034,7 +1057,8 @@ pub const fn rounds_default() -> u32 {
     ROUNDS_DEFAULT
 }
 
-/// The bounds `rounds` is clamped to, low then high.
+/// The bounds a `rounds=` field must be within, low then high: `crypt`
+/// refuses one outside them, and [`setting_rounds_into`] clamps to them.
 #[must_use]
 pub const fn rounds_bounds() -> (u32, u32) {
     (ROUNDS_MIN, ROUNDS_MAX)
@@ -1122,15 +1146,13 @@ pub fn stored_method(stored: &[u8]) -> Option<Method> {
     }
     let mut rest = stored.get(3..)?;
 
-    // An explicit rounds field, which only the SHA methods accept.  A
-    // malformed one is deliberately not skipped: `sha_crypt` lets it become
-    // part of the salt, so the shape check has to agree.
+    // An explicit rounds field, which only the SHA methods accept -- and
+    // only as `sha_crypt` reads it: one it refuses makes the entry one that
+    // can never verify.
     if method != Method::Md5 {
         if let Some(after) = rest.strip_prefix(b"rounds=") {
-            let digits = after.iter().take_while(|b| b.is_ascii_digit()).count();
-            if digits > 0 && after.get(digits) == Some(&b'$') {
-                rest = after.get(digits.checked_add(1)?..)?;
-            }
+            sha_rounds(after)?;
+            rest = after.get(count_digits(after).checked_add(1)?..)?;
         }
     }
 
@@ -1305,7 +1327,7 @@ mod tests {
                 assert!(verify(&password, result.as_bytes()), "{line}");
             }
         }
-        assert_eq!(lines, 6909, "the oracle's every line");
+        assert_eq!(lines, 6969, "the oracle's every line");
     }
 
     // -----------------------------------------------------------------------
@@ -1967,23 +1989,34 @@ mod tests {
         assert!(setting_rounds_into(Method::Sha512, 5000, b"has$dollar", &mut out).is_none());
     }
 
+    /// A `rounds=` field outside the bounds, or malformed, is refused, as
+    /// libxcrypt refuses it -- not clamped, nor taken as the salt, as glibc's
+    /// old crypt did and this one did until 2026-10-07.  (The oracle,
+    /// `libxcrypt_answers`, has every case; these say what the rule is.)
     #[test]
-    fn rounds_below_min_are_clamped() {
-        // rounds=10 -> clamped to ROUNDS_MIN (1000); the echoed field
-        // must show the clamped value.
+    fn rounds_fields_libxcrypt_refuses_are_refused() {
         let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let r = crypt_str(b"x\0", b"$6$rounds=10$salt\0").unwrap();
-        assert!(r.starts_with("$6$rounds=1000$salt$"));
-    }
-
-    #[test]
-    fn malformed_rounds_becomes_salt() {
-        // "rounds=abc" has no valid number -> treated as the salt
-        // (truncated to 16 chars), no rounds field echoed.
-        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let r = crypt_str(b"x\0", b"$6$rounds=abc$salt\0").unwrap();
-        assert!(r.starts_with("$6$rounds=abc$"));
-        assert!(!r.contains("rounds=abc$salt$")); // salt capped at 16: "rounds=abc" (10)
+        for setting in [
+            &b"$6$rounds=10$salt\0"[..],
+            b"$6$rounds=999$salt\0",
+            b"$5$rounds=1000000000$salt\0",
+            b"$6$rounds=abc$salt\0",
+            b"$6$rounds=01000$salt\0",
+            b"$5$rounds=+1000$salt\0",
+            b"$6$rounds=1000\0",
+            b"$6$rounds=\0",
+            b"$5$rounds=18446744073709551616$salt\0",
+        ] {
+            let got = crypt_raw(b"x\0".as_ptr(), setting.as_ptr());
+            assert_eq!(got, ("*0".into(), crate::errno::EINVAL), "{setting:?}");
+            assert_eq!(stored_method(&setting[..setting.len() - 1]), None);
+        }
+        // The bounds themselves are taken, and stated as given.
+        let r = crypt_str(b"x\0", b"$6$rounds=1000$salt\0").unwrap();
+        assert!(r.starts_with("$6$rounds=1000$salt$"), "{r}");
+        // A field that is not `rounds=` is the salt's.
+        let r = crypt_str(b"x\0", b"$6$roundsx=1000$salt\0").unwrap();
+        assert!(r.starts_with("$6$roundsx=1000$"), "{r}");
     }
 
     /// 256: the most `crypt_r` may write into a `struct crypt_data` as

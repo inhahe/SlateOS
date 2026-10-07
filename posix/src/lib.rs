@@ -387,6 +387,10 @@ pub mod dlfcn;
 mod nthash;
 mod sha1crypt;
 mod sunmd5;
+// Hostile input for all of the above: mutated settings and gensalt
+// arguments, which must be survived.
+#[cfg(test)]
+mod crypt_fuzz;
 // Ed25519 lives here, next to `crypt` and `sha2`, because this crate is
 // already where lane B's cryptographic primitives are written once and shared:
 // `sshd`, `ssh` and `ftpd` each had their own fake of it. See the module doc.

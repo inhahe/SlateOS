@@ -1,509 +1,1148 @@
-// Slate OS chpasswd — batch password change utility
-//
-// Multi-personality binary:
-//   chpasswd — batch change user passwords (from stdin or file)
-//   passwd   — interactive single-user password change
-//
-// Usage:
-//   chpasswd [OPTIONS] < password-list
-//   passwd [OPTIONS] [username]
+//! `chpasswd` — set many passwords at once, from standard input.
+//!
+//! shadow-utils 4.13's `chpasswd` (`src/chpasswd.c`), as Ubuntu 24.04 builds
+//! it, over SlateOS's account database. It reads `user:password` lines, and
+//! checks every line before it writes anything: one bad line leaves every
+//! account as it was.
+//!
+//! ```text
+//! $ printf 'alice:s3cret\nnobody-here:x\n' | chpasswd -c SHA512
+//! chpasswd: line 2: user 'nobody-here' does not exist
+//! chpasswd: error detected, changes ignored
+//! ```
+//!
+//! # Where the passwords go
+//!
+//! Into `/etc/users.yaml`, the account database (design-decisions §353).
+//! `/etc/passwd` and `/etc/shadow` are regenerated from it when it is saved.
+//! Upstream edits those two directly. Here they are copies, and an edit to a
+//! copy would be undone by the next change any other tool makes -- which is
+//! what this program did until 2026-10-07: it wrote `/etc/shadow`, nothing
+//! that checks a password reads it, and every password it set was ignored.
+//!
+//! The database is held (`userdb::Lock`) from before it is read until after it
+//! is saved, so two account tools run at once cannot erase each other's
+//! changes.
+//!
+//! # Deliberate differences from shadow-utils 4.13
+//!
+//! 1. **The database**, above. Every diagnostic that names the database
+//!    names `/etc/users.yaml` where upstream's names `/etc/passwd` or
+//!    `/etc/shadow`.
+//! 2. **No PAM.** SlateOS has none, so every run takes the path upstream
+//!    takes when `-c`, `-e` or `-m` is given. A run with none of them is
+//!    where Ubuntu's `chpasswd` asks PAM instead, and where the two can
+//!    differ: PAM's own messages, and its own choice of method.
+//! 3. **No `/etc/login.defs`.** SlateOS does not have one (`useradd`'s notes
+//!    say why). A password with no `-c` therefore gets the method every new
+//!    password here gets, `userdb::PASSWORD_METHOD` (SHA-512). Upstream with
+//!    no `login.defs` falls back to DES, whose eight-character, 56-bit key a
+//!    laptop recovers. The rounds the `login.defs` variables would choose are
+//!    upstream's defaults.
+//! 4. **A fresh salt for every password.** Upstream draws one salt when it
+//!    starts and gives it to every password in the run. So two accounts given
+//!    the same password in one run get the same hash, and one precomputed
+//!    table covers the whole batch. Each setting here is otherwise exactly
+//!    upstream's: libxcrypt's `crypt_gensalt`, as `posix` answers it, given
+//!    the prefix and the cost shadow-utils gives it.
+//! 5. **A locked account stays locked.** Upstream's lock is a `!` in front of
+//!    the password field, so writing a new password over the field unlocks
+//!    the account as a side effect. The database here keeps the lock apart
+//!    from the password, and design-decisions §1003 keeps it: after a run
+//!    that saved, a note is printed for each such account, in `passwd`'s
+//!    words.
+//! 6. **A value that is not UTF-8**, which the database cannot hold, fails on
+//!    its own line, with upstream's per-line "failed to prepare" message.
+//!    Upstream writes it. (A value with a `:` in it fails the save, `failure
+//!    while writing changes to ...`, as upstream's does: that one is not a
+//!    difference.)
+//! 7. **A lock refused for any reason but another holder** -- the caller is
+//!    not privileged -- fails at once. Upstream retries it fifteen times, a
+//!    second apart, and then says the same thing.
+//! 8. **Names in diagnostics are quoted for the terminal** (`quoting`), so a
+//!    line of input cannot put escape sequences on the operator's terminal
+//!    through an error message. An ordinary name prints as upstream's does.
+//! 9. **A value that is not a hash** -- plain text given to `-e`, the password
+//!    `-c NONE` stores, the `*0` a passphrase of 512 bytes leaves under DES --
+//!    is kept in the database as given. `/etc/shadow`, generated from it,
+//!    shows `*` there (`userdb`'s `shadow_entry`, design-decisions §329),
+//!    because written through, `crypt` would read it as a DES setting.
+//!    Upstream writes it into `/etc/shadow` itself. No password matches
+//!    either.
 
 #![cfg_attr(not(test), no_main)]
 
-#[cfg(not(test))]
-use std::env;
 use std::ffi::OsString;
-use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::io::{self, BufReader, Read, Write};
+use std::path::Path;
 
-use quoting::quoteaf_os;
+use getoptlong::{Opt, Program, Takes};
+use quoting::{os_bytes, quoteaf};
+use userdb::UserDb;
+
+/// shadow-utils' `E_USAGE`: a command line that cannot be run.
+const E_USAGE: i32 = 2;
+
+/// shadow-utils' `E_BAD_ARG`, which `--root`'s own failures exit with.
+const E_BAD_ARG: i32 = 3;
+
+/// `fail_exit (1)`, and `EXIT_FAILURE`.
+const FAILURE: i32 = 1;
+
+/// `BUFSIZ`: the buffer upstream reads each line into with `fgets`. A line of
+/// `BUFSIZ - 1` bytes or more, before its newline, is "too long".
+const BUFSIZ: usize = 8192;
+
+/// SHA-crypt's rounds, as shadow-utils clamps them (`libmisc/salt.c`).
+const SHA_ROUNDS_MIN: i64 = 1000;
+const SHA_ROUNDS_MAX: i64 = 999_999_999;
+const SHA_ROUNDS_DEFAULT: i64 = 5000;
+
+/// yescrypt's cost factor, as shadow-utils clamps it.
+const Y_COST_MIN: i64 = 1;
+const Y_COST_MAX: i64 = 11;
+const Y_COST_DEFAULT: i64 = 5;
+
+/// `GENSALT_SETTING_SIZE`. For DES shadow-utils hands `crypt_gensalt` a
+/// "prefix" of this many dots less one, which libxcrypt reads as a DES
+/// setting.
+const GENSALT_SETTING_SIZE: usize = 100;
+
+/// Ubuntu's build has SHA-crypt and yescrypt but not bcrypt, so these are the
+/// methods `-c` takes -- spelled exactly, in capitals: upstream compares with
+/// `strcmp`.
+const METHODS: &[&str] = &["DES", "MD5", "NONE", "SHA256", "SHA512", "YESCRYPT"];
+
+/// For a getopt error: the walk's sentences, and its status.
+const CHPASSWD: Program = Program::new("chpasswd", E_USAGE);
+
+/// The short options, as upstream's `getopt_long` is given them.
+const SHORTS: &str = "c:ehmR:s:";
+
+/// The long options.
+const LONGS: &[(&str, Takes)] = &[
+    ("crypt-method", Takes::Required),
+    ("encrypted", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("md5", Takes::Nothing),
+    ("root", Takes::Required),
+    ("sha-rounds", Takes::Required),
+];
 
 // ---------------------------------------------------------------------------
-// Configuration
+// The command line
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+/// What the command line asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
-    /// The account named on the command line, still as the bytes the caller
-    /// gave. Not a `String`: `env::args()` *panics* on an argument that is not
-    /// valid UTF-8, which on this OS is legal input. See `known-issues.md` ->
-    /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
-    encrypted: bool, // -e: passwords are already encrypted
-    hash_method: HashMethod,
-    min_length: usize,
-    shadow_file: PathBuf,
-    show_help: bool,
-    show_version: bool,
-    /// `-s, --sha-rounds <n>`: the SHA-crypt cost.
-    ///
-    /// `None` leaves the setting without a `rounds=` field, which is what
-    /// every entry this tool has ever written looks like.
-    sha_rounds: Option<u32>,
+    /// `-e`: the passwords are hashes already, stored as given.
+    encrypted: bool,
+    /// `-m`: MD5, which `-c MD5` also asks for.
+    md5: bool,
+    /// `-c`: the method, exactly as typed. `None` without `-c`.
+    method: Option<String>,
+    /// `-s` was given, whatever became of its value. See [`parse`].
+    sflg: bool,
+    /// `-s`'s value for SHA-crypt, or upstream's starting value.
+    sha_rounds: i64,
+    /// `-s`'s value for yescrypt, or upstream's starting value.
+    yescrypt_cost: i64,
 }
-
-/// The hashing method, which is the libc's enum rather than one of ours.
-///
-/// This file used to define its own three-variant copy with its own
-/// `prefix()` table returning `"$5$"`, `"$6$"` and `"$1$"` — the standard
-/// crypt(3) identifiers — while the hashing beneath them was a made-up
-/// mixing function that was the same for all three.  So an `/etc/shadow`
-/// this tool wrote was mislabelled at the format level: a reader that
-/// followed the standard would apply 5000 rounds of real SHA-256 to a `$5$`
-/// entry and get a different answer.
-///
-/// The label and the algorithm cannot disagree if they are not declared in
-/// different places, so the name of the method and the code that implements
-/// it are now the same item.  See
-/// `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
-type HashMethod = posix::crypt::Method;
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             encrypted: false,
-            hash_method: HashMethod::Sha512,
-            min_length: 6,
-            shadow_file: PathBuf::from("/etc/shadow"),
-            show_help: false,
-            show_version: false,
-            sha_rounds: None,
+            md5: false,
+            method: None,
+            sflg: false,
+            sha_rounds: SHA_ROUNDS_DEFAULT,
+            yescrypt_cost: Y_COST_DEFAULT,
         }
     }
 }
 
-/// The value that follows an option, as text.
+/// Why the command line ends the run before any line is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Stop {
+    /// `--help`: the usage text on standard output, status 0.
+    Help,
+    /// A diagnostic, then the usage text, both on standard error: upstream's
+    /// `usage (E_USAGE)` after the message.
+    Usage(String),
+}
+
+impl Config {
+    /// Upstream's `IS_CRYPT_METHOD`: `-c` given, and exactly `name`.
+    fn method_is(&self, name: &str) -> bool {
+        self.method.as_deref() == Some(name)
+    }
+}
+
+/// Upstream's `process_flags` and `check_flags`.
 ///
-/// Both callers want a number or a method name, neither of which can be
-/// non-UTF-8 -- so a value that does not decode is refused with the bytes
-/// shown rather than silently becoming the empty string. The parse loop uses
-/// `unwrap_or_default()` when matching OPTION NAMES, which is right there
-/// (undecodable bytes match no option), and wrong here.
-fn value_at<'a>(args: &'a [OsString], i: usize, need: &'static str) -> Result<&'a str, String> {
-    let raw = args.get(i).ok_or_else(|| need.to_string())?;
-    raw.to_str()
-        .ok_or_else(|| format!("{need}, and {} is not one", quoting::quoteaf_os(raw)))
-}
-
-fn parse_args(args: &[OsString]) -> Result<Config, String> {
-    // `argv[0]` is a path, and one that cannot be decoded is not either of the
-    // two names this binary answers to -- so it takes the default, which is
-    // the same answer any other unrecognised name gets.
+/// `-s` is read when it is met, against whatever `-c` said *before* it. So
+/// `-c SHA512 -s 9000` asks for 9000 rounds, and `-s 9000 -c SHA512` takes
+/// the default and never looks at `9000` -- not even to refuse `-s banana`.
+/// That is upstream's, measured, and kept: the order is part of the command
+/// line's meaning.
+///
+/// `argv0` is the program as it was invoked, for getopt's sentences, which
+/// glibc prefixes with `argv[0]` whole; `prog` is its last component, for
+/// everything upstream says itself.
+fn parse(args: &[OsString], argv0: &[u8], prog: &[u8]) -> Result<Config, Stop> {
     let mut cfg = Config::default();
-
-    let mut i = 1;
-
-    // An argument that is not valid UTF-8 matches no option, so it falls to
-    // the positional arm -- which is what it would have to be.
-    while i < args.len() {
-        let Some(raw) = args.get(i) else { break };
-        let arg = raw.to_str().unwrap_or_default();
-        match arg {
-            "-e" | "--encrypted" => cfg.encrypted = true,
-            "-m" | "--md5" => cfg.hash_method = HashMethod::Md5,
-            // `-s` is `--sha-rounds <number>` in the shadow suite and
-            // CONSUMES AN ARGUMENT; the method is chosen with
-            // `-c, --crypt-method`. Bound here to `--sha256` as a flag, so
-            // `chpasswd -s 5000 < file` selected SHA-256 and left `5000` to
-            // be read as a positional -- the count silently discarded, and
-            // the method changed without being asked for.
-            "-s" | "--sha-rounds" => {
-                i += 1;
-                let text = value_at(args, i, "-s requires a number of rounds")?;
-                cfg.sha_rounds = Some(
-                    text.parse::<u32>()
-                        .map_err(|e| format!("-s requires a number of rounds: {text}: {e}"))?,
-                );
-            }
-            "-c" | "--crypt-method" => {
-                i += 1;
-                let text = value_at(args, i, "-c requires a method")?;
-                cfg.hash_method = match text.to_ascii_uppercase().as_str() {
-                    "MD5" => HashMethod::Md5,
-                    "SHA256" => HashMethod::Sha256,
-                    "SHA512" => HashMethod::Sha512,
-                    // NONE, DES and YESCRYPT are named by the shadow suite
-                    // and not implemented here. Refused rather than mapped
-                    // to something near it: a password stored under a
-                    // weaker scheme than the operator named is the one
-                    // outcome worse than failing.
-                    other => {
-                        return Err(format!(
-                            "-c {other}: unsupported crypt method (this build has MD5, SHA256, SHA512)"
-                        ));
-                    }
+    for item in CHPASSWD.parse(args, SHORTS, LONGS) {
+        let item = item.map_err(|e| {
+            Stop::Usage(format!(
+                "{}: {}",
+                String::from_utf8_lossy(argv0),
+                e.sentence
+            ))
+        })?;
+        let (letter, value) = match &item {
+            // Operands are not looked at: upstream never reads past `optind`.
+            Opt::Operand(_) => continue,
+            Opt::Short(c, v) => (*c, v.as_ref()),
+            Opt::Long(name, v) => (long_letter(name), v.as_ref()),
+        };
+        let value = value.map(|v| os_bytes(v).into_owned()).unwrap_or_default();
+        match letter {
+            b'c' => cfg.method = Some(String::from_utf8_lossy(&value).into_owned()),
+            b'e' => cfg.encrypted = true,
+            b'h' => return Err(Stop::Help),
+            b'm' => cfg.md5 = true,
+            // Handled by `root_flag`, after the rest: upstream's no-op here.
+            b'R' => {}
+            b's' => {
+                cfg.sflg = true;
+                let target = if cfg.method_is("SHA256") || cfg.method_is("SHA512") {
+                    Some(&mut cfg.sha_rounds)
+                } else if cfg.method_is("YESCRYPT") {
+                    Some(&mut cfg.yescrypt_cost)
+                } else {
+                    None
                 };
+                if let Some(target) = target {
+                    let Some(n) = getlong(&value) else {
+                        return Err(Stop::Usage(format!(
+                            "{}: invalid numeric argument '{}'",
+                            String::from_utf8_lossy(prog),
+                            String::from_utf8_lossy(&value)
+                        )));
+                    };
+                    *target = n;
+                }
             }
-            "-S" | "--sha512" => cfg.hash_method = HashMethod::Sha512,
-            "-h" | "--help" => cfg.show_help = true,
-            "-V" | "--version" => cfg.show_version = true,
-            other if other.starts_with('-') => {
-                return Err(format!("chpasswd: unknown option: {other}"));
-            }
-            _ => {} // positional args ignored
+            _ => {}
         }
-        i += 1;
     }
-
+    check_flags(&cfg, prog)?;
     Ok(cfg)
 }
 
-// ---------------------------------------------------------------------------
-// Password hashing
-// ---------------------------------------------------------------------------
-
-/// Generate a random salt of `len` crypt base-64 characters.
-///
-/// Drawn from `/dev/urandom`.  The version this replaces seeded a linear
-/// congruential generator with the literal 42, mixed in `/proc/uptime` and
-/// the process id, and called the result a salt: on a system without
-/// `/proc` — which is every system this OS has booted — two accounts given
-/// passwords by the same process got the same salt, and the salt space was
-/// the pid space.
-///
-/// `& 0x3f` is an unbiased reduction, not the usual modulo mistake: 256 is
-/// exactly four times 64, so each alphabet character is the image of
-/// exactly four byte values.
-///
-/// Returns `None` if there is no entropy source, because a salt that is not
-/// random is worse than no password change: it silently makes every entry
-/// this tool writes share a precomputable table.  A caller that cannot
-/// produce a salt must fail rather than write a weak entry.
-///
-/// Exactly `len` bytes are read: `/dev/urandom` never ends, so the read to end
-/// of file this used to make (`std::fs::read`) never returned, and every run
-/// that hashed a password hung there until 2026-10-07.
-fn generate_salt(len: usize) -> Option<String> {
-    use std::io::Read;
-    const CHARS: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let mut bytes = vec![0u8; len];
-    std::fs::File::open("/dev/urandom")
-        .ok()?
-        .read_exact(&mut bytes)
-        .ok()?;
-    Some(
-        bytes
-            .iter()
-            .map(|b| char::from(CHARS[usize::from(*b & 0x3f)]))
-            .collect(),
-    )
-}
-
-/// Hash a password under `method` with the given salt, using the libc's
-/// `crypt(3)`.
-///
-/// The salt is a parameter rather than generated here so that the entry
-/// this tool writes can be checked against a published vector: a function
-/// that draws its own randomness can only be tested for self-consistency,
-/// which is exactly the test that let a made-up hash live in this file.
-///
-/// Returns `None` if the libc rejects the setting — which cannot happen for
-/// a salt from [`generate_salt`], since that draws from crypt's own
-/// alphabet at the method's own maximum length.
-fn hash_password(
-    password: &str,
-    method: HashMethod,
-    salt: &str,
-    rounds: Option<u32>,
-) -> Option<String> {
-    let mut setting_buf = posix::crypt::buf();
-    // `None` keeps the setting free of a `rounds=` field, which is what every
-    // entry this tool has written so far looks like -- so an unchanged
-    // invocation produces an unchanged entry.
-    let setting = match rounds {
-        Some(r) => posix::crypt::setting_rounds_into(method, r, salt.as_bytes(), &mut setting_buf)?,
-        None => posix::crypt::setting_into(method, salt.as_bytes(), &mut setting_buf)?,
-    };
-    let mut hash_buf = posix::crypt::buf();
-    Some(
-        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)?
-            .to_string(),
-    )
-}
-
-/// Generate a salt and hash `password` with it — the whole of what a
-/// caller changing a password needs.
-///
-/// `None` means no password should be written; the callers report why.
-fn hash_new_password(password: &str, method: HashMethod, rounds: Option<u32>) -> Option<String> {
-    let salt = generate_salt(method.salt_max())?;
-    hash_password(password, method, &salt, rounds)
-}
-
-/// Validate password strength
-fn validate_password(password: &str, min_length: usize) -> Result<(), String> {
-    if password.len() < min_length {
-        return Err(format!(
-            "password is too short (minimum {min_length} characters)"
-        ));
+/// The short letter a long option stands for.
+fn long_letter(name: &str) -> u8 {
+    match name {
+        "crypt-method" => b'c',
+        "encrypted" => b'e',
+        "help" => b'h',
+        "md5" => b'm',
+        "root" => b'R',
+        "sha-rounds" => b's',
+        _ => 0,
     }
-    if password.chars().all(|c| c.is_ascii_lowercase()) {
-        return Err("password is too simple (use mixed case, numbers, or symbols)".to_string());
+}
+
+/// Upstream's `check_flags`.
+fn check_flags(cfg: &Config, prog: &[u8]) -> Result<(), Stop> {
+    let prog = String::from_utf8_lossy(prog);
+    let cflg = cfg.method.is_some();
+    if cfg.sflg && !cflg {
+        return Err(Stop::Usage(format!(
+            "{prog}: -s flag is only allowed with the -c flag"
+        )));
+    }
+    if (cfg.encrypted && (cfg.md5 || cflg)) || (cfg.md5 && cflg) {
+        return Err(Stop::Usage(format!(
+            "{prog}: the -c, -e, and -m flags are exclusive"
+        )));
+    }
+    if let Some(method) = &cfg.method
+        && !METHODS.contains(&method.as_str())
+    {
+        return Err(Stop::Usage(format!(
+            "{prog}: unsupported crypt method: {method}"
+        )));
     }
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Shadow file operations
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct ShadowEntry {
-    username: String,
-    password_hash: String,
-    last_changed: String,
-    min_days: String,
-    max_days: String,
-    warn_days: String,
-    inactive_days: String,
-    expire_date: String,
-    reserved: String,
-}
-
-fn parse_shadow_line(line: &str) -> Option<ShadowEntry> {
-    let fields: Vec<&str> = line.split(':').collect();
-    if fields.len() < 9 {
+/// shadow-utils' `getlong`: `strtol (numstr, &end, 0)`, refused if it read
+/// nothing, stopped before the end, or overflowed.
+///
+/// Base 0, so `0x10` is sixteen and `010` is eight, and `08` is refused --
+/// `strtol` reads the `0` as octal and stops at the `8`. Leading blanks and a
+/// sign are `strtol`'s to take.
+fn getlong(text: &[u8]) -> Option<i64> {
+    let mut at = text
+        .iter()
+        .position(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r'))
+        .unwrap_or(text.len());
+    let negative = match text.get(at) {
+        Some(b'-') => {
+            at = at.saturating_add(1);
+            true
+        }
+        Some(b'+') => {
+            at = at.saturating_add(1);
+            false
+        }
+        _ => false,
+    };
+    let rest = text.get(at..).unwrap_or_default();
+    let (base, digits): (u32, &[u8]) = match rest {
+        [b'0', b'x' | b'X', next, ..] if next.is_ascii_hexdigit() => {
+            (16, rest.get(2..).unwrap_or_default())
+        }
+        [b'0', ..] => (8, rest),
+        _ => (10, rest),
+    };
+    let len = digits
+        .iter()
+        .take_while(|&&b| char::from(b).is_digit(base))
+        .count();
+    if len == 0 || len != digits.len() {
         return None;
     }
-    Some(ShadowEntry {
-        username: fields[0].to_string(),
-        password_hash: fields[1].to_string(),
-        last_changed: fields[2].to_string(),
-        min_days: fields[3].to_string(),
-        max_days: fields[4].to_string(),
-        warn_days: fields[5].to_string(),
-        inactive_days: fields[6].to_string(),
-        expire_date: fields[7].to_string(),
-        reserved: fields[8].to_string(),
+    let mut magnitude: i128 = 0;
+    for &b in digits {
+        let d = char::from(b).to_digit(base)?;
+        magnitude = magnitude
+            .checked_mul(i128::from(base))?
+            .checked_add(i128::from(d))?;
+        // Past `LONG_MIN`'s magnitude is `ERANGE` whichever the sign.
+        if magnitude > i128::from(i64::MAX).checked_add(1)? {
+            return None;
+        }
+    }
+    let value = if negative {
+        magnitude.checked_neg()?
+    } else {
+        magnitude
+    };
+    i64::try_from(value).ok()
+}
+
+/// Upstream's `usage`.
+///
+/// The method list is Ubuntu's build's (no bcrypt), while the `-s` line names
+/// bcrypt anyway: upstream prints that line whenever any of the three is
+/// built.
+fn usage_text(prog: &[u8]) -> String {
+    format!(
+        "Usage: {} [options]\n\
+         \n\
+         Options:\n\
+         \x20 -c, --crypt-method METHOD     the crypt method (one of NONE DES MD5 SHA256 SHA512 YESCRYPT)\n\
+         \x20 -e, --encrypted               supplied passwords are encrypted\n\
+         \x20 -h, --help                    display this help message and exit\n\
+         \x20 -m, --md5                     encrypt the clear text password using\n\
+         \x20                               the MD5 algorithm\n\
+         \x20 -R, --root CHROOT_DIR         directory to chroot into\n\
+         \x20 -s, --sha-rounds              number of rounds for the SHA, BCRYPT\n\
+         \x20                               or YESCRYPT crypt algorithms\n\
+         \n",
+        String::from_utf8_lossy(prog)
+    )
+}
+
+/// shadow-utils' `Basename`: everything after the last `/`, which is nothing
+/// for a name that ends in one.
+fn basename(argv0: &[u8]) -> &[u8] {
+    match argv0.iter().rposition(|&b| b == b'/') {
+        Some(slash) => argv0.get(slash.saturating_add(1)..).unwrap_or_default(),
+        None => argv0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --root
+// ---------------------------------------------------------------------------
+
+/// Why `--root` ends the run: the message, and `E_BAD_ARG` or `FAILURE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootFailure {
+    message: String,
+    status: i32,
+}
+
+/// The directory `--root` names, found as upstream's `process_root_flag`
+/// finds it: by its own scan of argv, after getopt has run.
+///
+/// The scan matches `--root`, `--root=DIR` and `-R` *exactly*, so the
+/// spellings getopt also accepts -- `--ro DIR`, `-RDIR`, `-eR DIR` -- reach
+/// getopt and are ignored there, and the run does not change root. It also
+/// reads every word, `argv[0]` and those after `--` included. All of that is
+/// upstream's, and kept for the same reason as `-s`'s order.
+fn root_flag(args: &[OsString], prog: &[u8]) -> Result<Option<Vec<u8>>, RootFailure> {
+    let prog = String::from_utf8_lossy(prog);
+    let mut newroot: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        let arg = os_bytes(arg);
+        let value = arg.strip_prefix(b"--root=".as_slice());
+        if arg.as_ref() == b"--root" || value.is_some() || arg.as_ref() == b"-R" {
+            if newroot.is_some() {
+                return Err(RootFailure {
+                    message: format!("{prog}: multiple --root options"),
+                    status: E_BAD_ARG,
+                });
+            }
+            if let Some(value) = value {
+                newroot = Some(value.to_vec());
+            } else {
+                i = i.saturating_add(1);
+                let Some(next) = args.get(i) else {
+                    return Err(RootFailure {
+                        message: format!(
+                            "{prog}: option '{}' requires an argument",
+                            String::from_utf8_lossy(&arg)
+                        ),
+                        status: E_BAD_ARG,
+                    });
+                };
+                newroot = Some(os_bytes(next).into_owned());
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    Ok(newroot)
+}
+
+/// Upstream's `change_root`: drop privileges, then enter `newroot`.
+#[cfg(unix)]
+fn change_root(newroot: &[u8], prog: &[u8]) -> Result<(), RootFailure> {
+    use std::os::unix::ffi::OsStrExt as _;
+    unsafe extern "C" {
+        fn getuid() -> u32;
+        fn getgid() -> u32;
+        fn setreuid(ruid: u32, euid: u32) -> i32;
+        fn setregid(rgid: u32, egid: u32) -> i32;
+    }
+    let prog = String::from_utf8_lossy(prog);
+    let shown = String::from_utf8_lossy(newroot);
+    let bad_arg = |message: String| RootFailure {
+        message,
+        status: E_BAD_ARG,
+    };
+    // SAFETY: the four calls take and return plain integers and touch no
+    // memory of this process's; `setre[ug]id` to the real ids gives up a
+    // set-id program's privilege and is a no-op otherwise.
+    let dropped = unsafe { setregid(getgid(), getgid()) == 0 && setreuid(getuid(), getuid()) == 0 };
+    if !dropped {
+        return Err(RootFailure {
+            message: format!(
+                "{prog}: failed to drop privileges ({})",
+                errmsg::strerror(&io::Error::last_os_error())
+            ),
+            status: FAILURE,
+        });
+    }
+    if newroot.first() != Some(&b'/') {
+        return Err(bad_arg(format!(
+            "{prog}: invalid chroot path '{shown}', only absolute paths are supported."
+        )));
+    }
+    let path = Path::new(std::ffi::OsStr::from_bytes(newroot));
+    // `access (newroot, F_OK)`: whether it can be reached, through links.
+    if let Err(e) = std::fs::metadata(path) {
+        return Err(bad_arg(format!(
+            "{prog}: cannot access chroot directory {shown}: {}",
+            errmsg::strerror(&e)
+        )));
+    }
+    if let Err(e) = std::env::set_current_dir(path) {
+        return Err(bad_arg(format!(
+            "{prog}: cannot chdir to chroot directory {shown}: {}",
+            errmsg::strerror(&e)
+        )));
+    }
+    if let Err(e) = std::os::unix::fs::chroot(path) {
+        return Err(bad_arg(format!(
+            "{prog}: unable to chroot to directory {shown}: {}",
+            errmsg::strerror(&e)
+        )));
+    }
+    Ok(())
+}
+
+/// The development host has no `chroot`; the command is SlateOS's and Linux's.
+#[cfg(not(unix))]
+fn change_root(newroot: &[u8], prog: &[u8]) -> Result<(), RootFailure> {
+    Err(RootFailure {
+        message: format!(
+            "{}: unable to chroot to directory {}: Function not implemented",
+            String::from_utf8_lossy(prog),
+            String::from_utf8_lossy(newroot)
+        ),
+        status: E_BAD_ARG,
     })
 }
 
-fn format_shadow_entry(entry: &ShadowEntry) -> String {
-    format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}:{}",
-        entry.username,
-        entry.password_hash,
-        entry.last_changed,
-        entry.min_days,
-        entry.max_days,
-        entry.warn_days,
-        entry.inactive_days,
-        entry.expire_date,
-        entry.reserved
+// ---------------------------------------------------------------------------
+// The setting a new password is hashed under
+// ---------------------------------------------------------------------------
+
+/// What `crypt_gensalt` is asked for: shadow-utils' `crypt_make_salt`, before
+/// it calls it. `None` stores the password as given (`-e`, `-c NONE`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SettingRequest {
+    /// The prefix shadow-utils builds, rounds and cost included.
+    prefix: Vec<u8>,
+    /// The `count` it passes beside it.
+    count: u64,
+    /// libxcrypt's own random-byte count for the method, so that a salt here
+    /// is as long as one libxcrypt draws for itself.
+    nrbytes: usize,
+}
+
+/// Upstream's `get_salt` and `crypt_make_salt`, up to the `crypt_gensalt`
+/// call.
+fn setting_request(cfg: &Config) -> Option<SettingRequest> {
+    if cfg.encrypted || cfg.method_is("NONE") {
+        return None;
+    }
+    let method = if cfg.md5 {
+        "MD5"
+    } else {
+        // No `-c`: see deliberate difference 3.
+        cfg.method
+            .as_deref()
+            .unwrap_or(match userdb::PASSWORD_METHOD {
+                posix::crypt::Method::Sha256 => "SHA256",
+                posix::crypt::Method::Yescrypt => "YESCRYPT",
+                posix::crypt::Method::Md5 => "MD5",
+                _ => "SHA512",
+            })
+    };
+    // `-s`'s value is given only with `-s`, and read as an `int` through a
+    // pointer to the `long` it was stored in: on x86-64 that is the low 32
+    // bits, so `-s 4294967297` asks for one round. Reproduced as `as i32`.
+    #[allow(clippy::cast_possible_truncation)]
+    let preferred = |value: i64| cfg.sflg.then_some(i64::from(value as i32));
+    match method {
+        "MD5" => Some(SettingRequest {
+            prefix: b"$1$".to_vec(),
+            count: 0,
+            nrbytes: 9,
+        }),
+        "SHA256" | "SHA512" => {
+            let rounds = sha_rounds(preferred(cfg.sha_rounds));
+            let mut prefix = if method == "SHA256" {
+                b"$5$".to_vec()
+            } else {
+                b"$6$".to_vec()
+            };
+            if rounds != SHA_ROUNDS_DEFAULT {
+                prefix.extend_from_slice(format!("rounds={rounds}$").as_bytes());
+            }
+            Some(SettingRequest {
+                prefix,
+                count: u64::try_from(rounds).unwrap_or(0),
+                nrbytes: 15,
+            })
+        }
+        "YESCRYPT" => {
+            let cost = yescrypt_cost(preferred(cfg.yescrypt_cost));
+            let mut prefix = b"$y$".to_vec();
+            prefix.extend_from_slice(&yescrypt_cost_text(cost));
+            Some(SettingRequest {
+                prefix,
+                count: u64::try_from(cost).unwrap_or(0),
+                nrbytes: 16,
+            })
+        }
+        // DES, which upstream also reaches from a method it does not know --
+        // unreachable here, since `check_flags` refused it.
+        _ => Some(SettingRequest {
+            prefix: vec![b'.'; GENSALT_SETTING_SIZE.saturating_sub(1)],
+            count: 0,
+            nrbytes: 2,
+        }),
+    }
+}
+
+/// `SHA_get_salt_rounds`: `-s`'s value, 0 meaning the default, clamped; or
+/// the default with no `-s` and no `login.defs`.
+///
+/// Upstream holds the count in an `unsigned long`, so a negative one is a huge
+/// one and is clamped to the *most* rounds: `-s -5` hashes with 999,999,999,
+/// which takes minutes. Measured, and kept.
+fn sha_rounds(preferred: Option<i64>) -> i64 {
+    clamp_as_unsigned(
+        preferred,
+        SHA_ROUNDS_DEFAULT,
+        SHA_ROUNDS_MIN,
+        SHA_ROUNDS_MAX,
     )
 }
 
-fn read_shadow_file(path: &std::path::Path) -> io::Result<Vec<ShadowEntry>> {
-    let content = std::fs::read_to_string(path)?;
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(entry) = parse_shadow_line(line) {
-            entries.push(entry);
-        }
-    }
-    Ok(entries)
+/// `YESCRYPT_get_salt_cost`, as [`sha_rounds`]: a negative cost is the
+/// highest.
+fn yescrypt_cost(preferred: Option<i64>) -> i64 {
+    clamp_as_unsigned(preferred, Y_COST_DEFAULT, Y_COST_MIN, Y_COST_MAX)
 }
 
-fn write_shadow_file(path: &std::path::Path, entries: &[ShadowEntry]) -> io::Result<()> {
-    let mut content = String::new();
-    for entry in entries {
-        content.push_str(&format_shadow_entry(entry));
-        content.push('\n');
+/// `value`, read as the `unsigned long` upstream assigns it to (0 meaning
+/// `default`), clamped to `min..=max`.
+fn clamp_as_unsigned(value: Option<i64>, default: i64, min: i64, max: i64) -> i64 {
+    match value {
+        None | Some(0) => default,
+        Some(n) if n < 0 => max,
+        Some(n) => n.clamp(min, max),
     }
-    std::fs::write(path, content)
 }
 
-fn update_password(
-    shadow_path: &std::path::Path,
-    username: &str,
-    new_hash: &str,
-) -> Result<(), String> {
-    let mut entries = read_shadow_file(shadow_path)
-        .map_err(|e| format!("cannot read {}: {e}", shadow_path.display()))?;
+/// `YESCRYPT_salt_cost_to_buf`: `j`, a letter for the cost, `T` or `5`, `$`.
+fn yescrypt_cost_text(cost: i64) -> [u8; 4] {
+    // The cost is clamped to 1..=11 before this, so each sum is a letter.
+    let offset = u8::try_from(cost).unwrap_or(5);
+    let middle = if offset < 3 {
+        0x36_u8.saturating_add(offset)
+    } else if offset < 6 {
+        0x34_u8.saturating_add(offset)
+    } else {
+        0x3b_u8.saturating_add(offset)
+    };
+    [b'j', middle, if offset >= 3 { b'T' } else { b'5' }, b'$']
+}
 
-    let mut found = false;
-    for entry in &mut entries {
-        if entry.username == username {
-            entry.password_hash = new_hash.to_string();
-            // Update last_changed to "today" (days since epoch)
-            entry.last_changed = "19800".to_string();
-            found = true;
-            break;
+/// libxcrypt's `crypt_gensalt_rn`, as `posix` answers it: the setting
+/// `request` names, salted with `random`. `None` if it is refused.
+fn gensalt(request: &SettingRequest, random: &[u8]) -> Option<Vec<u8>> {
+    let mut prefix = request.prefix.clone();
+    prefix.push(0);
+    let mut out = [0u8; posix::gensalt::CRYPT_GENSALT_OUTPUT_SIZE];
+    let nrbytes = i32::try_from(random.len()).ok()?;
+    let room = i32::try_from(out.len()).ok()?;
+    // SAFETY: `prefix` is NUL-terminated; `random` is readable for its
+    // `nrbytes` bytes; `out` is writable for its `room` bytes, and nothing
+    // else refers to any of the three while this runs.
+    let made = unsafe {
+        posix::gensalt::crypt_gensalt_rn(
+            prefix.as_ptr(),
+            request.count,
+            random.as_ptr(),
+            nrbytes,
+            out.as_mut_ptr(),
+            room,
+        )
+    };
+    if made.is_null() {
+        return None;
+    }
+    let len = out.iter().position(|&b| b == 0)?;
+    out.get(..len).map(<[u8]>::to_vec)
+}
+
+/// Fill `out` from the kernel's random source, or say it could not.
+///
+/// `getrandom`, as upstream's `read_random_bytes` prefers, rather than a read
+/// of `/dev/urandom`: under `--root` the new root need not have one, and
+/// upstream draws its salt before it changes root.
+#[cfg(unix)]
+fn random_bytes(out: &mut [u8]) -> bool {
+    unsafe extern "C" {
+        fn getrandom(buf: *mut u8, len: usize, flags: u32) -> isize;
+    }
+    let mut filled = 0;
+    while let Some(rest) = out.get_mut(filled..) {
+        if rest.is_empty() {
+            return true;
+        }
+        // SAFETY: `rest` is writable for its length, and `getrandom` writes
+        // at most that many bytes into it.
+        let got = unsafe { getrandom(rest.as_mut_ptr(), rest.len(), 0) };
+        match usize::try_from(got) {
+            Ok(n) => filled = filled.saturating_add(n),
+            Err(_) if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
         }
     }
+    true
+}
 
-    if !found {
+/// The development host draws none, and says so.
+#[cfg(not(unix))]
+fn random_bytes(_out: &mut [u8]) -> bool {
+    false
+}
+
+/// Hash `password` under a fresh setting for `request`, as upstream's
+/// `pw_encrypt` does, or say why not.
+fn hash_new(
+    password: &[u8],
+    request: &SettingRequest,
+    random: &mut dyn FnMut(&mut [u8]) -> bool,
+) -> Result<Vec<u8>, String> {
+    // Ubuntu's shadow-utils leaves the random bytes to libxcrypt's
+    // `crypt_gensalt`, so a source that fails is that call failing, and is
+    // reported as one: no program name, and the run ends.
+    let mut rbytes = vec![0u8; request.nrbytes];
+    let made = if random(&mut rbytes) {
+        gensalt(request, &rbytes)
+    } else {
+        None
+    };
+    let Some(setting) = made else {
         return Err(format!(
-            "user {} not found in shadow file",
-            quoteaf_os(username)
+            "Unable to generate a salt from setting \"{}\", check your settings in \
+             ENCRYPT_METHOD and the corresponding configuration for your selected hash method.",
+            String::from_utf8_lossy(&request.prefix)
+        ));
+    };
+    let mut hash_buf = posix::crypt::buf();
+    let Some(hashed) = posix::crypt::hash_into(password, &setting, &mut hash_buf) else {
+        return crypt_failed(&setting);
+    };
+    Ok(hashed.as_bytes().to_vec())
+}
+
+/// What upstream does when `crypt` fails -- a passphrase over libxcrypt's 512
+/// bytes, say.
+///
+/// libxcrypt's `crypt` does not return NULL, so `pw_encrypt`'s "failed to
+/// crypt password" is never reached. It returns a failure token, `*0` (`*1`
+/// when the setting itself begins `*0`), and `pw_encrypt` judges that by its
+/// length. Under a `$` setting a result of thirteen bytes or fewer means the
+/// method is missing, and the run ends saying so, with no program name.
+/// Under DES thirteen bytes is a hash, so the token is not caught and is
+/// returned -- and stored as the password, which nothing can match.
+fn crypt_failed(setting: &[u8]) -> Result<Vec<u8>, String> {
+    if setting.first() == Some(&b'$') {
+        let method = match setting.get(1) {
+            Some(b'1') => "MD5".to_string(),
+            Some(b'2') => "BCRYPT".to_string(),
+            Some(b'5') => "SHA256".to_string(),
+            Some(b'6') => "SHA512".to_string(),
+            Some(b'y') => "YESCRYPT".to_string(),
+            Some(&other) => format!("${}$", char::from(other)),
+            None => "$$".to_string(),
+        };
+        return Err(format!(
+            "crypt method not supported by libcrypt? ({method})"
         ));
     }
-
-    write_shadow_file(shadow_path, &entries)
-        .map_err(|e| format!("cannot write {}: {e}", shadow_path.display()))?;
-
-    Ok(())
+    Ok(if setting.starts_with(b"*0") {
+        b"*1".to_vec()
+    } else {
+        b"*0".to_vec()
+    })
 }
 
 // ---------------------------------------------------------------------------
-// Password status display
+// The day a password changed
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// chpasswd mode
-// ---------------------------------------------------------------------------
+/// shadow-utils' `gettime`: now, or `$SOURCE_DATE_EPOCH` when it holds a time
+/// no later than now. A value that does not is reported, on standard error and
+/// with no program name, and now is used instead.
+fn gettime(now: u64, epoch_var: Option<&[u8]>, err: &mut dyn Write) -> u64 {
+    let Some(text) = epoch_var else {
+        return now;
+    };
+    let complain = |err: &mut dyn Write, what: String| {
+        // Unchecked: a diagnostic that cannot be written cannot be reported.
+        let _ = writeln!(err, "Environment variable $SOURCE_DATE_EPOCH: {what}");
+    };
+    match strtoull(text) {
+        Strtoull::Overflow => complain(err, "strtoull: Numerical result out of range".to_string()),
+        Strtoull::NoDigits => complain(
+            err,
+            format!("No digits were found: {}", String::from_utf8_lossy(text)),
+        ),
+        Strtoull::Trailing(rest) => complain(
+            err,
+            format!("Trailing garbage: {}", String::from_utf8_lossy(rest)),
+        ),
+        Strtoull::Value(epoch) if epoch > now => complain(
+            err,
+            format!(
+                "value must be smaller than or equal to the current time ({now}) but was found to be: {epoch}"
+            ),
+        ),
+        Strtoull::Value(epoch) => return epoch,
+    }
+    now
+}
 
-fn run_chpasswd(
-    cfg: &Config,
-    reader: &mut dyn BufRead,
-    writer: &mut dyn Write,
-    err_writer: &mut dyn Write,
-) -> i32 {
-    let mut errors = 0;
-    let mut line = String::new();
-    let mut line_num = 0u64;
+/// What `strtoull (text, &end, 10)` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Strtoull<'a> {
+    /// No digits: `end` is `text`.
+    NoDigits,
+    /// More than `ULLONG_MAX`: `ERANGE`.
+    Overflow,
+    /// A number, then these bytes.
+    Trailing(&'a [u8]),
+    /// A number and nothing after it -- negated modulo 2^64 after a `-`, as
+    /// `strtoull` negates.
+    Value(u64),
+}
 
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) => {
-                let _ = writeln!(err_writer, "chpasswd: read error: {e}");
-                return 1;
-            }
-        }
-
-        line_num = line_num.saturating_add(1);
-        let line_trimmed = line.trim();
-        if line_trimmed.is_empty() || line_trimmed.starts_with('#') {
-            continue;
-        }
-
-        // Format: username:password
-        let parts: Vec<&str> = line_trimmed.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            let _ = writeln!(
-                err_writer,
-                "chpasswd: line {line_num}: invalid format (expected user:password)"
-            );
-            errors += 1;
-            continue;
-        }
-
-        let username = parts[0].trim();
-        let password = parts[1].trim();
-
-        if username.is_empty() {
-            let _ = writeln!(err_writer, "chpasswd: line {line_num}: empty username");
-            errors += 1;
-            continue;
-        }
-
-        let hash = if cfg.encrypted {
-            password.to_string()
-        } else {
-            if let Err(e) = validate_password(password, cfg.min_length) {
-                let _ = writeln!(err_writer, "chpasswd: {username}: {e}");
-                errors += 1;
-                continue;
-            }
-            let Some(hashed) = hash_new_password(password, cfg.hash_method, cfg.sha_rounds) else {
-                let _ = writeln!(
-                    err_writer,
-                    "chpasswd: {username}: cannot read `/dev/urandom', so no salt can be \
-                     generated; refusing to write a password without one"
-                );
-                errors += 1;
-                continue;
-            };
-            hashed
+/// `strtoull` in base 10: blanks, a sign, digits.
+fn strtoull(text: &[u8]) -> Strtoull<'_> {
+    let start = text
+        .iter()
+        .position(|&b| !matches!(b, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r'))
+        .unwrap_or(text.len());
+    let (negative, digits_at) = match text.get(start) {
+        Some(b'-') => (true, start.saturating_add(1)),
+        Some(b'+') => (false, start.saturating_add(1)),
+        _ => (false, start),
+    };
+    let rest = text.get(digits_at..).unwrap_or_default();
+    let len = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    if len == 0 {
+        return Strtoull::NoDigits;
+    }
+    let mut value: u64 = 0;
+    for &b in rest.get(..len).unwrap_or_default() {
+        let Some(next) = value
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u64::from(b.wrapping_sub(b'0'))))
+        else {
+            return Strtoull::Overflow;
         };
+        value = next;
+    }
+    if negative {
+        value = value.wrapping_neg();
+    }
+    match rest.get(len..) {
+        Some(tail) if !tail.is_empty() => Strtoull::Trailing(tail),
+        _ => Strtoull::Value(value),
+    }
+}
 
-        match update_password(&cfg.shadow_file, username, &hash) {
-            Ok(()) => {
-                let _ = writeln!(writer, "password changed for {username}");
-            }
-            Err(e) => {
-                let _ = writeln!(err_writer, "chpasswd: {username}: {e}");
-                errors += 1;
-            }
+/// Seconds since the epoch, now.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+// ---------------------------------------------------------------------------
+// Standard input, as `fgets` reads it
+// ---------------------------------------------------------------------------
+
+/// Standard input read the way upstream's loop reads it: `fgets` into a
+/// `BUFSIZ` buffer, with `feof` beside it.
+///
+/// Both halves of `fgets`' behaviour show in the output. A piece ends at a
+/// newline or at `BUFSIZ - 1` bytes, whichever comes first, which is what
+/// makes a line "too long". And the program looks at each piece as a C
+/// string, so a NUL byte ends the line there: the newline after it goes
+/// unseen, the line is "too long", and the drain that skips the rest of a
+/// long line runs on into the line after it. That last part is upstream's
+/// accident, and is reproduced because it decides which lines get changed.
+struct Fgets<R> {
+    inner: BufReader<R>,
+    eof: bool,
+}
+
+impl<R: Read> Fgets<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner: BufReader::new(inner),
+            eof: false,
         }
     }
 
-    if errors > 0 { 1 } else { 0 }
+    /// The next piece into `buf`, or `false` where `fgets` returns NULL:
+    /// end of input, or a read error, before a byte.
+    fn next_piece(&mut self, buf: &mut Vec<u8>) -> bool {
+        buf.clear();
+        while buf.len() < BUFSIZ.saturating_sub(1) {
+            let mut byte = [0u8; 1];
+            match self.inner.read(&mut byte) {
+                Ok(0) => {
+                    self.eof = true;
+                    break;
+                }
+                Ok(_) => {
+                    buf.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    // glibc's `fgets` returns NULL on an error, whatever it
+                    // read first; the loop then ends as it does at the end.
+                    self.eof = true;
+                    return false;
+                }
+            }
+        }
+        !buf.is_empty()
+    }
+}
+
+/// `buf` as C sees it: up to its first NUL.
+fn c_string(buf: &[u8]) -> &[u8] {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.get(..end).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
-// passwd mode (interactive)
+// The run
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Help / version
-// ---------------------------------------------------------------------------
-
-#[cfg(not(test))]
-fn print_help() {
-    println!("Usage: chpasswd [OPTIONS]");
-    println!();
-    println!("Update passwords in batch mode. Read user:password pairs from stdin.");
-    println!();
-    println!("Options:");
-    println!("  -e, --encrypted  Passwords are already encrypted");
-    println!("  -m, --md5        Use MD5 hash method");
-    println!("  -c, --crypt-method METHOD  MD5, SHA256 or SHA512");
-    println!("  -s, --sha-rounds N         Rounds for SHA-crypt");
-    println!("  -S, --sha512     Use SHA-512 hash method (default)");
-    println!("  -h, --help       Show this help");
-    println!("  -V, --version    Show version");
+/// Everything a run needs from outside itself, so that a test can supply it.
+struct World<'a> {
+    /// The account database.
+    db_path: &'a Path,
+    /// `gettime`'s two inputs.
+    now: u64,
+    source_date_epoch: Option<Vec<u8>>,
+    /// The random source settings are salted from.
+    random: &'a mut dyn FnMut(&mut [u8]) -> bool,
 }
 
-#[cfg(not(test))]
-fn print_version() {
-    let name = "chpasswd";
-    println!("{name} (Slate OS) 0.1.0");
+/// Upstream's `main`, from `open_files` to the end: read the lines, change
+/// the database in memory, and save it only if every line was good.
+fn run(
+    cfg: &Config,
+    prog: &[u8],
+    input: impl Read,
+    err: &mut dyn Write,
+    world: &mut World<'_>,
+) -> i32 {
+    let prog_text = String::from_utf8_lossy(prog).into_owned();
+    let db_name = world.db_path.display().to_string();
+    let request = setting_request(cfg);
+
+    // `open_files`: hold the database, then read it.
+    let _lock = match UserDb::lock(world.db_path) {
+        Ok(lock) => lock,
+        Err(_) => {
+            let _ = writeln!(err, "{prog_text}: cannot lock {db_name}; try again later.");
+            return FAILURE;
+        }
+    };
+    let Ok(mut db) = UserDb::load(world.db_path) else {
+        let _ = writeln!(err, "{prog_text}: cannot open {db_name}");
+        return FAILURE;
+    };
+
+    let mut errors: u32 = 0;
+    let mut line: u64 = 0;
+    let mut still_locked: Vec<String> = Vec::new();
+    // Whether a stored value holds a byte upstream's `shadow_put` refuses
+    // (`valid_field (sp_pwdp, ":\n")`): it accepts the line, and the write of
+    // the whole file fails. See the save below.
+    let mut unwritable = false;
+    let mut lines = Fgets::new(input);
+    let mut buf = Vec::with_capacity(BUFSIZ);
+    // Upstream's diagnostics say "line %d", an `int`: the count is printed as
+    // one, wrapping as C's does, though no input is that long.
+    #[allow(clippy::cast_possible_truncation)]
+    let line_no = |line: u64| line as i32;
+
+    while lines.next_piece(&mut buf) {
+        line = line.saturating_add(1);
+        let piece = c_string(&buf);
+        let text = if let Some(newline) = piece.iter().rposition(|&b| b == b'\n') {
+            piece.get(..newline).unwrap_or_default().to_vec()
+        } else if !lines.eof {
+            // Drop the rest of this line, piece by piece, until one holds a
+            // newline -- as C sees it.
+            let mut rest = Vec::new();
+            while lines.next_piece(&mut rest) && !c_string(&rest).contains(&b'\n') {}
+            let _ = writeln!(err, "{prog_text}: line {}: line too long", line_no(line));
+            errors = errors.saturating_add(1);
+            continue;
+        } else {
+            piece.to_vec()
+        };
+
+        let Some(colon) = text.iter().position(|&b| b == b':') else {
+            let _ = writeln!(
+                err,
+                "{prog_text}: line {}: missing new password",
+                line_no(line)
+            );
+            errors = errors.saturating_add(1);
+            continue;
+        };
+        let name = text.get(..colon).unwrap_or_default();
+        let newpwd = text.get(colon.saturating_add(1)..).unwrap_or_default();
+
+        // The hash comes before the lookup, as upstream's does: a name that
+        // does not exist costs what one that does costs.
+        let stored = match &request {
+            Some(request) => match hash_new(newpwd, request, world.random) {
+                Ok(hash) => hash,
+                Err(message) => {
+                    let _ = writeln!(err, "{message}");
+                    return FAILURE;
+                }
+            },
+            None => newpwd.to_vec(),
+        };
+
+        let found = std::str::from_utf8(name).ok().and_then(|n| db.find_mut(n));
+        let Some(record) = found else {
+            let _ = writeln!(
+                err,
+                "{prog_text}: line {}: user {} does not exist",
+                line_no(line),
+                quoteaf(name)
+            );
+            errors = errors.saturating_add(1);
+            continue;
+        };
+
+        // `sp_lstchg = gettime () / SCALE`, and a day of 0 is "disable aging"
+        // rather than "change it at once": upstream's -1, an empty field.
+        // Before the entry is prepared, as upstream's is, so a complaint
+        // about `$SOURCE_DATE_EPOCH` comes first.
+        let day = gettime(world.now, world.source_date_epoch.as_deref(), err) / 86_400;
+
+        // See deliberate difference 6: a value with a `:` or a control byte
+        // is taken here and fails the save, as upstream's does; one the
+        // database cannot hold at all fails here.
+        let Ok(stored) = std::str::from_utf8(&stored) else {
+            let _ = writeln!(
+                err,
+                "{prog_text}: line {}: failed to prepare the new {db_name} entry {}",
+                line_no(line),
+                quoteaf(name)
+            );
+            errors = errors.saturating_add(1);
+            continue;
+        };
+
+        unwritable |= stored.contains([':', '\n']);
+        record.set(userdb::field::PASSWORD_HASH, stored);
+        let aging = userdb::Aging {
+            changed: i64::try_from(day).ok().filter(|&d| d != 0),
+            ..record.aging()
+        };
+        record.set_aging(&aging);
+        // The `locked: true` flag, which the new password leaves standing
+        // (§1003) -- not `is_locked`, which also reads a `!` or `*` in front
+        // of the entry: a `!` there went with the old entry, as upstream's
+        // does, and a `*` is what the new one is.
+        if record
+            .get(userdb::field::LOCKED)
+            .is_some_and(|v| v.trim() == "true")
+        {
+            still_locked.push(String::from_utf8_lossy(name).into_owned());
+        }
+    }
+
+    if errors != 0 {
+        let _ = writeln!(err, "{prog_text}: error detected, changes ignored");
+        return FAILURE;
+    }
+
+    // Upstream's `close_files`, where a `:` in a stored value fails the
+    // write of `/etc/shadow` and nothing is changed. The generated file here
+    // would show `*` for such a value (deliberate difference 9) and could be
+    // written, so the refusal is made here, upstream's way.
+    if unwritable {
+        let _ = writeln!(
+            err,
+            "{prog_text}: failure while writing changes to {db_name}"
+        );
+        return FAILURE;
+    }
+
+    // `close_files`: the save, which also writes `/etc/passwd` and
+    // `/etc/shadow` from the database.
+    if db.save(world.db_path).is_err() {
+        let _ = writeln!(
+            err,
+            "{prog_text}: failure while writing changes to {db_name}"
+        );
+        return FAILURE;
+    }
+
+    // See deliberate difference 5: `passwd`'s note, once the change is real.
+    for name in still_locked {
+        let _ = writeln!(
+            err,
+            "{prog_text}: note: `{name}' is still locked and will refuse this password; \
+             run `passwd -u' to unlock it"
+        );
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
-pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    // `args_os`, not `args`: the latter's iterator is a literal `unwrap` and
-    // panics on an argument that is not valid UTF-8.
-    let args: Vec<OsString> = env::args_os().collect();
+/// The whole program, from argv to the status: the part of `main` a test can
+/// reach.
+fn chpasswd(argv: &[OsString], input: impl Read, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let argv0 = argv
+        .first()
+        .map(|a| os_bytes(a).into_owned())
+        .unwrap_or_default();
+    let prog = basename(&argv0).to_vec();
+    let args = argv.get(1..).unwrap_or_default();
 
-    let cfg = match parse_args(&args) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
+    let cfg = match parse(args, &argv0, &prog) {
+        Ok(cfg) => cfg,
+        Err(Stop::Help) => {
+            let _ = out.write_all(usage_text(&prog).as_bytes());
+            return 0;
+        }
+        Err(Stop::Usage(message)) => {
+            let _ = writeln!(err, "{message}");
+            let _ = err.write_all(usage_text(&prog).as_bytes());
+            return E_USAGE;
         }
     };
 
-    if cfg.show_help {
-        print_help();
-        return 0;
+    match root_flag(argv, &prog) {
+        Ok(Some(newroot)) => {
+            if let Err(failure) = change_root(&newroot, &prog) {
+                let _ = writeln!(err, "{}", failure.message);
+                return failure.status;
+            }
+        }
+        Ok(None) => {}
+        Err(failure) => {
+            let _ = writeln!(err, "{}", failure.message);
+            return failure.status;
+        }
     }
 
-    if cfg.show_version {
-        print_version();
-        return 0;
-    }
+    let mut random = random_bytes;
+    let mut world = World {
+        db_path: Path::new(userdb::DEFAULT_PATH),
+        now: now_secs(),
+        source_date_epoch: std::env::var_os("SOURCE_DATE_EPOCH").map(|v| os_bytes(&v).into_owned()),
+        random: &mut random,
+    };
+    run(&cfg, &prog, input, err, &mut world)
+}
 
-    let stdin = io::stdin();
-    let mut reader = stdin.lock();
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
+    // `args_os`, not `args`: the latter panics on an argument that is not
+    // valid UTF-8.
+    let argv: Vec<OsString> = std::env::args_os().collect();
     let stdout = io::stdout();
-    let mut writer = stdout.lock();
     let stderr = io::stderr();
-    let mut err_writer = stderr.lock();
-
-    run_chpasswd(&cfg, &mut reader, &mut writer, &mut err_writer)
+    chpasswd(&argv, io::stdin(), &mut stdout.lock(), &mut stderr.lock())
 }
 
 // ---------------------------------------------------------------------------
@@ -511,348 +1150,4 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    /// The command line, as `env::args_os` would deliver it.
-    fn argv(parts: &[&str]) -> Vec<OsString> {
-        parts.iter().map(OsString::from).collect()
-    }
-
-    /// A username that is not text is a name, not a crash. `env::args()`
-    /// would have panicked before `main` ran a line of this file.
-    #[test]
-    fn test_parse_args_chpasswd_basic() {
-        let args = argv(&["chpasswd"]);
-        let cfg = parse_args(&args).unwrap();
-        assert!(!cfg.encrypted);
-    }
-
-    #[test]
-    fn test_parse_args_chpasswd_encrypted() {
-        let args = argv(&["chpasswd", "-e"]);
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.encrypted);
-    }
-
-    #[test]
-    fn test_parse_args_chpasswd_md5() {
-        let args = argv(&["chpasswd", "-m"]);
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.hash_method, HashMethod::Md5);
-    }
-
-    /// `-s` is a ROUNDS COUNT and takes an argument.
-    ///
-    /// It used to be a flag selecting SHA-256, so `chpasswd -s 5000 < file`
-    /// changed the hash method nobody had asked to change and left `5000` to
-    /// fall through as a positional. Two wrong outcomes from one letter.
-    #[test]
-    fn sha_rounds_takes_a_count_and_reaches_the_stored_entry() {
-        let cfg = parse_args(&argv(&["chpasswd", "-s", "9000"])).expect("-s parses");
-        assert_eq!(cfg.sha_rounds, Some(9000));
-        assert_eq!(
-            cfg.hash_method,
-            HashMethod::Sha512,
-            "-s must not change the method"
-        );
-
-        // The count is not merely stored: it appears in the entry, which is
-        // the only place it can be checked later.
-        let hashed = hash_password("pw", HashMethod::Sha512, "abcdefgh", Some(9000))
-            .expect("hashing with rounds");
-        assert!(
-            hashed.starts_with("$6$rounds=9000$"),
-            "the entry must state the cost it was produced at, got {hashed}"
-        );
-
-        // And without `-s` the entry has no rounds field at all, so an
-        // unchanged invocation still produces an unchanged entry.
-        let plain = hash_password("pw", HashMethod::Sha512, "abcdefgh", None).expect("plain");
-        assert!(plain.starts_with("$6$abcdefgh$"), "got {plain}");
-
-        // A non-numeric count is refused rather than silently defaulted.
-        assert!(parse_args(&argv(&["chpasswd", "-s", "lots"])).is_err());
-        assert!(parse_args(&argv(&["chpasswd", "-s"])).is_err());
-    }
-
-    /// `-c` selects the method, and refuses one it cannot honour.
-    #[test]
-    fn crypt_method_selects_or_refuses() {
-        for (name, want) in [
-            ("MD5", HashMethod::Md5),
-            ("sha256", HashMethod::Sha256),
-            ("SHA512", HashMethod::Sha512),
-        ] {
-            let cfg = parse_args(&argv(&["chpasswd", "-c", name])).expect("method parses");
-            assert_eq!(cfg.hash_method, want, "{name}");
-        }
-
-        // Named by the shadow suite, not implemented here. Refused rather
-        // than mapped to something near it: a password stored under a weaker
-        // scheme than the operator named is worse than a failure.
-        for name in ["NONE", "DES", "YESCRYPT"] {
-            let err =
-                parse_args(&argv(&["chpasswd", "-c", name])).expect_err("{name} must be refused");
-            assert!(err.contains("unsupported"), "{name}: {err}");
-        }
-    }
-
-    #[test]
-    fn test_parse_args_chpasswd_sha256() {
-        // `-c SHA256`, not `-s`. The old form asserted that `-s` selected
-        // SHA-256 -- which is what made `chpasswd -s 5000` change the method
-        // and discard the count.
-        let args = argv(&["chpasswd", "-c", "SHA256"]);
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.hash_method, HashMethod::Sha256);
-    }
-
-    #[test]
-    fn test_parse_args_help() {
-        let args = argv(&["chpasswd", "--help"]);
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.show_help);
-    }
-
-    /// A salt `crypt` can carry verbatim, in the alphabet `generate_salt`
-    /// draws from.  Fixed rather than generated, so the entries below are
-    /// reproducible and can be checked against a published answer.
-    ///
-    /// Eight characters because that is MD5 crypt's maximum and the tests
-    /// below run every method against this one salt; the SHA methods take
-    /// up to sixteen, and `generate_salt` is asked for each method's own
-    /// `salt_max` rather than a shared number.
-    const SALT: &str = "saltsalt";
-
-    /// The entry written must be one a standard reader recognises: the
-    /// method's own identifier, the salt as given, and a hash field of the
-    /// length that method produces.
-    ///
-    /// The tests this replaces asserted only the `$6$`/`$5$`/`$1$` prefix
-    /// and that the string was longer than 20 characters — both of which
-    /// the old made-up hash satisfied, which is how it survived.  The
-    /// prefix was in fact the bug: it named a standard method over a hash
-    /// that was not that method, or any method.
-    #[test]
-    fn test_hash_password_writes_standard_crypt_entries() {
-        for method in [HashMethod::Sha512, HashMethod::Sha256, HashMethod::Md5] {
-            let hash = hash_password("testpass", method, SALT, None)
-                .unwrap_or_else(|| panic!("{method:?}"));
-            assert!(hash.starts_with(method.prefix()), "{method:?}: {hash}");
-            assert_eq!(
-                posix::crypt::stored_method(hash.as_bytes()),
-                Some(method),
-                "{method:?}: {hash}"
-            );
-            // The entry must verify against the password that made it —
-            // which is the property `login` depends on, and the one the
-            // three tools used to disagree about.
-            assert!(
-                posix::crypt::verify(b"testpass", hash.as_bytes()),
-                "{method:?}: {hash}"
-            );
-            assert!(
-                !posix::crypt::verify(b"testpas", hash.as_bytes()),
-                "{method:?}"
-            );
-        }
-    }
-
-    /// A known answer, from Ulrich Drepper's SHA-crypt specification.  This
-    /// is the test the old code could not have had: its output followed no
-    /// specification, so there was nothing to compare against.
-    #[test]
-    fn test_hash_password_matches_a_published_vector() {
-        assert_eq!(
-            hash_password("Hello world!", HashMethod::Sha512, "saltstring", None).as_deref(),
-            Some(
-                "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1"
-            )
-        );
-        assert_eq!(
-            hash_password("Hello world!", HashMethod::Sha256, "saltstring", None).as_deref(),
-            Some("$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5")
-        );
-    }
-
-    #[test]
-    fn test_hash_password_different() {
-        let h1 = hash_password("pass1", HashMethod::Sha512, SALT, None).expect("h1");
-        let h2 = hash_password("pass2", HashMethod::Sha512, SALT, None).expect("h2");
-        assert_ne!(h1, h2);
-    }
-
-    /// Two accounts given the same password must not get the same entry.
-    /// The old salt generator seeded a linear congruential generator with a
-    /// literal 42 and stirred in `/proc/uptime` — a file this OS does not
-    /// have — so on the real system the salt varied only with the process
-    /// id, and one `chpasswd` run salted every account in its input
-    /// identically.
-    #[test]
-    fn test_the_same_password_under_different_salts_differs() {
-        let a = hash_password("same", HashMethod::Sha512, "aaaaaaaaaaaaaaaa", None).expect("a");
-        let b = hash_password("same", HashMethod::Sha512, "bbbbbbbbbbbbbbbb", None).expect("b");
-        assert_ne!(a, b);
-    }
-
-    /// A salt the format cannot carry is refused rather than truncated:
-    /// storing a truncated salt yields an entry that cannot verify against
-    /// itself.
-    #[test]
-    fn test_hash_password_refuses_a_salt_it_cannot_store() {
-        assert_eq!(hash_password("pw", HashMethod::Sha512, "", None), None);
-        assert_eq!(
-            hash_password("pw", HashMethod::Sha512, "has$dollar", None),
-            None
-        );
-        // 17 characters, one past SHA-crypt's maximum.
-        assert_eq!(
-            hash_password("pw", HashMethod::Sha512, "abcdefghijklmnopq", None),
-            None
-        );
-        // MD5 truncates at 8, so 9 is over for it and fine for SHA-512.
-        assert_eq!(
-            hash_password("pw", HashMethod::Md5, "123456789", None),
-            None
-        );
-        assert!(hash_password("pw", HashMethod::Sha512, "123456789", None).is_some());
-    }
-
-    #[test]
-    fn test_validate_password_too_short() {
-        assert!(validate_password("ab", 6).is_err());
-    }
-
-    #[test]
-    fn test_validate_password_ok() {
-        assert!(validate_password("MyP@ss1", 6).is_ok());
-    }
-
-    #[test]
-    fn test_validate_password_all_lower() {
-        assert!(validate_password("abcdefgh", 6).is_err());
-    }
-
-    #[test]
-    fn test_parse_shadow_line() {
-        let line = "root:$6$salt$hash:19000:0:99999:7:::";
-        let entry = parse_shadow_line(line).unwrap();
-        assert_eq!(entry.username, "root");
-        assert_eq!(entry.password_hash, "$6$salt$hash");
-        assert_eq!(entry.last_changed, "19000");
-    }
-
-    #[test]
-    fn test_parse_shadow_line_short() {
-        assert!(parse_shadow_line("short:line").is_none());
-    }
-
-    #[test]
-    fn test_format_shadow_entry() {
-        let entry = ShadowEntry {
-            username: "user".to_string(),
-            password_hash: "$6$hash".to_string(),
-            last_changed: "19000".to_string(),
-            min_days: "0".to_string(),
-            max_days: "99999".to_string(),
-            warn_days: "7".to_string(),
-            inactive_days: "".to_string(),
-            expire_date: "".to_string(),
-            reserved: "".to_string(),
-        };
-        let formatted = format_shadow_entry(&entry);
-        assert_eq!(formatted, "user:$6$hash:19000:0:99999:7:::");
-    }
-
-    #[test]
-    fn test_hash_method_prefix() {
-        assert_eq!(HashMethod::Sha512.prefix(), "$6$");
-        assert_eq!(HashMethod::Sha256.prefix(), "$5$");
-        assert_eq!(HashMethod::Md5.prefix(), "$1$");
-    }
-
-    #[test]
-    fn test_generate_salt() {
-        // `/dev/urandom` is the only source, and the development host does
-        // not have one, so there the only testable behaviour is the
-        // refusal.  Where it exists, the salt must be exactly the requested
-        // length, drawn from the crypt base-64 alphabet — a character
-        // outside it (`$` above all) would end the salt early in the stored
-        // entry — and different on each call.
-        match generate_salt(16) {
-            Some(salt) => {
-                assert_eq!(salt.len(), 16);
-                assert!(
-                    salt.bytes()
-                        .all(|b| b == b'.' || b == b'/' || b.is_ascii_alphanumeric()),
-                    "{salt}"
-                );
-                assert_ne!(generate_salt(16), Some(salt), "salt is not random");
-            }
-            // `File::open`, not `std::fs::read`, which reads to an end that
-            // `/dev/urandom` does not have -- the hang `generate_salt` itself
-            // had until 2026-10-07, when this test could not finish on any
-            // host with a `/dev/urandom`.
-            None => assert!(
-                std::fs::File::open("/dev/urandom").is_err(),
-                "`/dev/urandom' is readable but no salt was produced"
-            ),
-        }
-    }
-
-    #[test]
-    fn test_default_config() {
-        let cfg = Config::default();
-        assert_eq!(cfg.hash_method, HashMethod::Sha512);
-        assert_eq!(cfg.min_length, 6);
-        assert!(!cfg.encrypted);
-    }
-
-    #[test]
-    fn test_run_chpasswd_empty() {
-        let cfg = Config::default();
-        let input = b"";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut writer = Vec::new();
-        let mut err_writer = Vec::new();
-        let code = run_chpasswd(&cfg, &mut reader, &mut writer, &mut err_writer);
-        assert_eq!(code, 0);
-    }
-
-    #[test]
-    fn test_run_chpasswd_invalid_format() {
-        let cfg = Config::default();
-        let input = b"invalid_line_no_colon\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut writer = Vec::new();
-        let mut err_writer = Vec::new();
-        let code = run_chpasswd(&cfg, &mut reader, &mut writer, &mut err_writer);
-        assert_eq!(code, 1);
-        let err = String::from_utf8(err_writer).unwrap();
-        assert!(err.contains("invalid format"));
-    }
-
-    #[test]
-    fn test_run_chpasswd_empty_username() {
-        let cfg = Config::default();
-        let input = b":password\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut writer = Vec::new();
-        let mut err_writer = Vec::new();
-        let code = run_chpasswd(&cfg, &mut reader, &mut writer, &mut err_writer);
-        assert_eq!(code, 1);
-    }
-
-    #[test]
-    fn test_run_chpasswd_comment() {
-        let cfg = Config::default();
-        let input = b"# comment\n\n";
-        let mut reader = Cursor::new(input.as_slice());
-        let mut writer = Vec::new();
-        let mut err_writer = Vec::new();
-        let code = run_chpasswd(&cfg, &mut reader, &mut writer, &mut err_writer);
-        assert_eq!(code, 0);
-    }
-}
+mod tests;

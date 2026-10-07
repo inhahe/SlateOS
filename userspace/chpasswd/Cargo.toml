@@ -2,17 +2,30 @@
 name = "chpasswd"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS chpasswd - batch password change (chpasswd/passwd)"
+description = "SlateOS chpasswd - set many passwords at once, shadow-utils 4.13's, over /etc/users.yaml"
 
-# The libc's `crypt(3)`. `chpasswd`, `passwd` and `login` read and write the
-# same `/etc/shadow`, and while each implemented the hash format itself they
-# disagreed — this tool labelled its output `$5$`, the standard identifier
-# for SHA-256 crypt, over a hash that was not SHA-crypt at all. The format
-# now has exactly one implementation, and this dependency is what makes that
-# true rather than aspirational. See
-# `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 [dependencies]
 # Account names arrive on stdin, one per line, from whatever produced that
-# stream.
+# stream, and are quoted for the terminal when a diagnostic names one.
 quoting = { path = "../quoting" }
+# The libc's `crypt(3)` and libxcrypt's `crypt_gensalt`. `chpasswd`, `passwd`
+# and `login` read and write the same password entries, and while each
+# implemented the hash format itself they disagreed. The format now has one
+# implementation, and this dependency is what makes that true rather than
+# aspirational. See `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 posix = { path = "../../posix" }
+# The account database. `design-decisions.md` §353 makes `/etc/users.yaml` the
+# truth and `/etc/passwd` and `/etc/shadow` copies generated from it, so this
+# program writes the database and lets the save write the copies. It wrote
+# `/etc/shadow` directly until 2026-10-07, and nothing read what it wrote.
+userdb = { path = "../userdb" }
+# glibc's `getopt_long`, sentences included.
+getoptlong = { path = "../getoptlong" }
+# `strerror`'s words for a `--root` that cannot be entered.
+errmsg = { path = "../errmsg" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }
+
+[lints]
+workspace = true

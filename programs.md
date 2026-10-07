@@ -44,7 +44,7 @@ two disagree.
 | `chgrp` | Change group ownership. | yes | `coreutils` |  |
 | `chmod` | Change file mode bits. | yes | `coreutils` |  |
 | `chown` | Change file owner and group. | yes | `coreutils` |  |
-| `chpasswd` | Batch password change (chpasswd/passwd) | yes |  |  |
+| `chpasswd` | Set many passwords at once, from standard input. | yes |  |  |
 | `chroot` | Run a command with its root directory changed. | yes | `coreutils` |  |
 | `cksum` | Print or verify checksums, by default POSIX's 32-bit CRC. | yes | `coreutils` |  |
 | `cmp` | Compare two files byte by byte. | yes | `coreutils` |  |

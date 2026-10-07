@@ -531,8 +531,12 @@ dependencies = [
 name = "chpasswd"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
  "posix",
  "quoting",
+ "scratchdir",
+ "userdb",
 ]
 
 [[package]]

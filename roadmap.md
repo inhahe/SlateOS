@@ -3112,6 +3112,33 @@ D's to act on once answered).
   for it is lane E's (the request's third reply), and the kernel's own
   UPnP module can go (`requests/d-a-the-kernels-upnp-module-is-done-in-userspace-now.md`).
 
+- `[-]` `[D]` **A real debugger: GDB** (2026-10-07; the operator's "a capable
+  debugger, like cdb", design-decisions §1050, adopted from the list at line
+  ~1366). GDB 18.1 and gdbserver, unmodified, with GMP and MPFR, link
+  against our `libc.a` with nothing missing (`scripts/gdb-spike/`), and go on
+  the image as `/bin/gnu-gdb` and `/bin/gdbserver`. `/bin/gdb` is lane B's
+  hand-written debugger until lane B decides
+  (`requests/d-b-gnu-gdb-is-on-the-image-and-could-take-bin-gdb.md`).
+  `services/ctest-gdb-runs` runs both on SlateOS once lane A's generic rung
+  exists (`requests/d-a-one-rung-for-every-c-fixture.md`).
+  **What it cannot do yet: run a program under its control.** That is the
+  kernel's ptrace and `/proc/<pid>/mem` behind the DEBUG right
+  (design-decisions §24), asked of lane A in
+  `requests/d-a-a-debugger-needs-ptrace-for-native-programs.md`. The
+  library half is lane D's once the native calls exist: `ptrace(2)` passes
+  through to them, and `waitpid` gets `__WALL`. LLDB stays a later
+  alternative: it needs all of LLVM and Clang ported first.
+
+- `[-]` `[D]` **Mono, .NET on Linux** (2026-10-07; design-decisions §1050,
+  adopted from the same list). The Mono 6.14.1 runtime, `mono-sgen`, links
+  against our `libc.a` with nothing missing (`scripts/mono-spike/`). It is
+  built with cooperative GC suspend, since SlateOS has no per-thread signal
+  masks. Next: the class libraries (.NET assemblies, built by Mono's C#
+  compiler -- the same files on every system), then `mono` running a
+  program on SlateOS. The runtime turns a fault into an exception by
+  rewriting the faulting thread's signal context, which the boot has
+  not yet shown to work for a native program.
+
 Known-issues: the POSIX/libc entries that lane B's list above still names —
 `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (blocked only on the operator's Q48;
 the full state is in lane B's list) and `TD-FASTPY-PURE-MODE-FVALUE` — are

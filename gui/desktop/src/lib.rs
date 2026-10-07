@@ -2578,13 +2578,14 @@ pub struct DesktopShell {
     /// [`evaluate_auto_rules`]: focus_assist::FocusAssistManager::evaluate_auto_rules
     /// [`effective_mode`]: focus_assist::FocusAssistManager::effective_mode
     pub focus: focus_assist::FocusAssistManager,
-    /// The events the popup marks and lists.
+    /// The user's calendar: the events the popup marks and lists and the
+    /// calendar widget dots, as the calendar program keeps them
+    /// ([`refresh_agenda`](Self::refresh_agenda)).
     ///
-    /// Empty until something fills it. It lives on the shell rather than
-    /// inside the view because a calendar *view* is a way of looking at events,
-    /// not a place to keep them — the reminder path and any future agenda
-    /// surface read the same store.
-    pub events: calendar::EventStore,
+    /// It lives on the shell rather than inside the view because a calendar
+    /// *view* is a way of looking at events, not a place to keep them -- the
+    /// popup and the widget read the same one.
+    pub agenda: calendar::Agenda,
     /// The zone-tiling overlay: which layout is chosen, and whether it is up.
     ///
     /// State only. The rectangles it draws are a *picture* of what the user is
@@ -3074,7 +3075,7 @@ impl DesktopShell {
             backlight: backlight::Backlight::own(),
             toasts: toasts::ToastStack::new(),
             focus: focus_assist::FocusAssistManager::new(),
-            events: calendar::EventStore::new(),
+            agenda: calendar::Agenda::default(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
             // the appearance scaling that is only set two fields up. Seeded
             // immediately below rather than left to the first gesture, so that
@@ -5167,7 +5168,7 @@ impl DesktopShell {
             let (cx, cy) = self.calendar_origin();
             if let Some(hit) =
                 self.calendar
-                    .hit_test(cx, cy, self.calendar_scale(), x, y, &self.events)
+                    .hit_test(cx, cy, self.calendar_scale(), x, y, &self.agenda)
             {
                 return Hit::CalendarControl(hit);
             }
@@ -12995,7 +12996,18 @@ impl DesktopShell {
             clock: self.popup_clock(),
             zone,
         });
+        // The calendar as it is now: the calendar program may have saved
+        // since the popup was last open, and says nothing when it does.
+        self.refresh_agenda();
         self.calendar.set_visible(true);
+    }
+
+    /// Read the user's calendar again if its file has changed
+    /// ([`calendar::Agenda::refresh`]), and say whether its events may have:
+    /// as the popup opens, and as a calendar widget turns its minute. Nothing
+    /// to read where the environment names no home.
+    pub fn refresh_agenda(&mut self) -> bool {
+        calendarstore::events_path().is_some_and(|path| self.agenda.refresh(&path))
     }
 
     /// Open the notification pane, or close it if it is already open.
@@ -14616,12 +14628,13 @@ impl DesktopShell {
             // one does, this is the line that changes, and everything
             // downstream of it already works.
             battery: crate::power::BatteryInfo::default(),
-            // From the popup's calendar and its events, with the clock's
-            // zone, so the widget and the popup agree about today. Made only
+            // From the popup's calendar and the user's events, with the
+            // clock's zone, so the widget and the popup agree about today --
+            // each event marked as the popup marks it. Made only
             // while a calendar is drawn: it looks up forty-two days' events,
             // as the popup does when it is open.
             month: if self.widgets.draws(&WidgetKind::Calendar) {
-                self.calendar.month_glance(secs, &zone, &self.events)
+                self.calendar.month_glance(secs, &zone, &self.agenda)
             } else {
                 calendar::MonthGlance::default()
             },
@@ -15594,7 +15607,7 @@ impl DesktopShell {
             y,
             self.calendar_scale(),
             now,
-            &self.events,
+            &self.agenda,
         ));
         Some(tree)
     }

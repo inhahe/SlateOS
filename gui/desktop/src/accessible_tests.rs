@@ -1862,6 +1862,42 @@ fn the_system_is_sampled_only_while_a_monitor_is_out() {
     assert!(s.monitor.due(10_000 + spacing));
 }
 
+/// **The clock's popup shows the user's calendar** -- the calendar
+/// program's file, read as the popup opens, and read again when it has
+/// changed: a daily event begun years ago is on today; saved over with
+/// none, today has none the next time the popup opens.
+#[test]
+fn the_popup_shows_the_calendar_programs_events() {
+    appearance::config::testing::with_scratch_config("popup-agenda", |root| {
+        let dir = root.join("slateos").join("calendar");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("events.txt");
+        let daily = crate::calendar::testing::event(
+            "Standup",
+            (2020, 1, 1),
+            9,
+            calendarstore::RecurrenceRule::Daily,
+            None,
+        );
+        std::fs::write(&file, calendarstore::calendar_text(&[daily])).unwrap();
+        let today_says = |s: &DesktopShell| {
+            tree(s)
+                .walk()
+                .filter_map(|n| n.description.clone())
+                .find(|said| said.starts_with("today"))
+        };
+
+        let mut s = shell();
+        s.toggle_calendar();
+        assert_eq!(today_says(&s).as_deref(), Some("today, 1 event"));
+
+        s.toggle_calendar();
+        std::fs::write(&file, calendarstore::calendar_text(&[])).unwrap();
+        s.toggle_calendar();
+        assert_eq!(today_says(&s).as_deref(), Some("today"));
+    });
+}
+
 /// **A calendar widget shows the month today is in**, made by the shell's
 /// own calendar, the popup's -- and the month is made only while a calendar
 /// is out.

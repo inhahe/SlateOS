@@ -18,9 +18,9 @@ use guitk::widget::automation::{Node, Role, Value};
 use crate::Rect;
 
 use super::{
-    CalendarHit, CalendarView, CalendarViewMode, EVENT_HEADER_HEIGHT, EVENT_ROW_HEIGHT, EventStore,
-    GRID_CELLS, MAX_VISIBLE_EVENTS, MonthLayout, YearLayout, day_description, day_name, month_name,
-    timestamp_to_date,
+    Agenda, CalendarHit, CalendarView, CalendarViewMode, EVENT_HEADER_HEIGHT, EVENT_ROW_HEIGHT,
+    GRID_CELLS, MAX_VISIBLE_EVENTS, MonthLayout, YearLayout, day_description, day_name,
+    event_time_label, month_name,
 };
 
 /// A part of the calendar popup, as tools name it.
@@ -80,9 +80,9 @@ impl CalendarView {
     }
 
     /// The popup as tools see it, its top-left corner at `(x, y)` drawn at
-    /// `scale`, its days' events from `store`.
+    /// `scale`, its days' events from `agenda`.
     #[must_use]
-    pub fn automation(&self, x: f32, y: f32, scale: f32, store: &EventStore) -> Node<CalendarPart> {
+    pub fn automation(&self, x: f32, y: f32, scale: f32, agenda: &Agenda) -> Node<CalendarPart> {
         let control = |hit: CalendarHit, role: Role, name: String| {
             let bounds = self
                 .control_rect(hit, x, y, scale)
@@ -128,7 +128,7 @@ impl CalendarView {
                     let date = (cell.year, cell.month, cell.day);
                     let name = day_name(cell.year, cell.month, cell.day);
                     let mut day = control(CalendarHit::Day(index), Role::GridCell, name);
-                    let events = store.events_for_date(cell.year, cell.month, cell.day).len();
+                    let events = agenda.on(cell.year, cell.month, cell.day).len();
                     day.description =
                         day_description(date == self.today, events, cell.current_month);
                     day.value = Some(Value::Chosen(self.selected_date == Some(date)));
@@ -137,7 +137,7 @@ impl CalendarView {
                     grid.children.push(day);
                 }
                 popup.children.push(grid);
-                if let Some(card) = self.events_node(&layout, store) {
+                if let Some(card) = self.events_node(&layout, agenda) {
                     popup.children.push(card);
                 }
                 popup
@@ -187,10 +187,10 @@ impl CalendarView {
 
     /// The card of the chosen day's events, while it is shown: the events it
     /// shows, each named by its title and described by its time.
-    fn events_node(&self, layout: &MonthLayout, store: &EventStore) -> Option<Node<CalendarPart>> {
+    fn events_node(&self, layout: &MonthLayout, agenda: &Agenda) -> Option<Node<CalendarPart>> {
         let (year, month, day) = self.selected_date?;
-        let events = store.events_for_date(year, month, day);
-        let card = self.detail_rect(layout, store)?;
+        let events = agenda.on(year, month, day);
+        let card = self.detail_rect(layout, agenda)?;
         let mut node = Node::new(
             CalendarPart::Events,
             Role::List,
@@ -210,12 +210,8 @@ impl CalendarView {
                 event.title.clone(),
                 Rect::new(card.x, top, card.w, row_h),
             );
-            let (_, _, _, hour, minute, _) = timestamp_to_date(event.start_timestamp);
-            row.description = Some(if event.all_day {
-                "All day".to_owned()
-            } else {
-                format!("{hour:02}:{minute:02}")
-            });
+            // As the card says it.
+            row.description = Some(event_time_label(event));
             node.children.push(row);
             top += row_h;
         }

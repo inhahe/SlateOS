@@ -812,7 +812,7 @@ impl DesktopShell {
     fn calendar_node(&self) -> Node<ShellPart> {
         let (x, y) = self.calendar_origin();
         self.calendar
-            .automation(x, y, self.calendar_scale(), &self.events)
+            .automation(x, y, self.calendar_scale(), &self.agenda)
             .map(&|part| match part {
                 CalendarPart::Control(control) => ShellPart::Control(Hit::CalendarControl(control)),
                 other => ShellPart::Calendar(other),

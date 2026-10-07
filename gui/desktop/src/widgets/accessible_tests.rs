@@ -354,31 +354,25 @@ fn a_photo_frame_names_its_picture_or_says_why_not() {
 /// has no month to show.
 #[test]
 fn a_calendar_shows_its_month() {
-    use crate::calendar::{CalendarConfig, CalendarEvent, CalendarView, EventStore};
+    use crate::calendar::{Agenda, CalendarConfig, CalendarView, testing::event};
     let (layer, id) = one(WidgetKind::Calendar);
     let empty = node_of(&layer, &readings(), WidgetPart::Widget(id)).expect("seen");
     assert!(empty.children.is_empty(), "a month of nothing is seen");
 
     // 12:00 UTC on 6 October 2026, with an event then.
     let noon = 1_791_288_000;
-    let mut store = EventStore::new();
-    store
-        .add_event(CalendarEvent {
-            id: 0,
-            title: "Dentist".to_owned(),
-            start_timestamp: noon,
-            end_timestamp: noon + 3_600,
-            all_day: false,
-            repeat: None,
-            color: None,
-            description: String::new(),
-        })
-        .expect("an id");
+    let agenda = Agenda::of(vec![event(
+        "Dentist",
+        (2026, 10, 6),
+        12,
+        calendarstore::RecurrenceRule::None,
+        None,
+    )]);
     let live = LiveReadings {
         month: CalendarView::new(CalendarConfig::default()).month_glance(
             noon,
             &tzrules::Tz::UTC,
-            &store,
+            &agenda,
         ),
         ..readings()
     };

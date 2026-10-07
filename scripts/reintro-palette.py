@@ -3827,16 +3827,18 @@ DEFECTS = [
         ],
     ),
     (
-        "AAAAAAAAAAAAAAAAAAA: an uncoloured event's dot keeps Mocha's lavender",
+        "AAAAAAAAAAAAAAAAAAA: a dot in its event's category's colour keeps Mocha's green",
         WID,
         [
-            ('.unwrap_or(if day.today { on_accent } else { p.lavender });\n',
-             '.unwrap_or(if day.today { on_accent } else { Color::from_hex(0xB4BEFE) });\n'),
+            ('                    mark.color(p)\n                };\n',
+             '                    Color::from_hex(0xA6E3A1)\n                };\n'),
         ],
         ["desktop"],
         [
+            # Re-anchored 2026-10-07: the dot is the event's mark (`EventMark`), a
+            # personal event's green. The dark test draws Mocha's own green, so
+            # only the light sweep sees it.
             'every_colour_the_calendar_draws_comes_from_its_palette',
-            'a_calendar_draws_its_month',
         ],
     ),
     (
@@ -13290,12 +13292,81 @@ DEFECTS = [
             'every_role_the_calendar_draws_moves_with_the_mode',
         ],
     ),
+    # RETIRED 2026-10-07, with the desktop's own event store (design-decisions
+    # 1497): the clock's popup and the calendar widget read the calendar
+    # program's events through `calendarstore`, and the store, its text file,
+    # its recurrence walk, its reminders and `dot_color` were deleted -- code
+    # nothing ever filled, which these defects had been holding to its tests.
+    # The five on drawing that survives were re-anchored to the new code.
+    # Retired:
+    #   Z x68: the uncoloured event dot reads a fill role as a mark on the base
+    #   A x69: an uncoloured event resolves to blue, which is also the stock
+    #       accent
+    #   B x69: dot_color ignores the colour the user chose and always answers
+    #       the default
+    #   W x69: saving writes a colour line for every event, so an uncoloured
+    #       one gains one
+    #   X x69: loading gives an event with no colour line a default, which
+    #       saving then writes back
+    #   A x82: a weekly event recurs daily
+    #   B x82: a monthly event steps 30 days instead of a month, so the
+    #       anchored day decays
+    #   C x82: a yearly event is 365 days long, so it drifts across a leap year
+    #   D x82: a daily event skips its own first day
+    #   E x82: an occurrence that merely ends where the range begins is counted
+    #       inside it
+    #   F x82: the five-minute snooze lasts fifteen
+    #   G x82: the one-hour snooze lasts a minute
+    #   J x82: an event's duration is measured backwards, so every duration is
+    #       zero
+    #   K x82: search is case-sensitive again
+    #   L x82: a hex colour longer than six digits is accepted and silently
+    #       truncated
+    #   N x82: a day is an hour long when its events are gathered
+    #   O x82: occurrences come back in storage order rather than in time order
+    #   A x86: the ID handed back to the caller is not the ID stamped on the
+    #       event
+    #   B x86: removing an event that is not there reports success
+    #   C x86: removing one event removes every other event instead
+    #   D x86: an update to an event that does not exist reports that it
+    #       happened
+    #   E x86: an update lands on the first event whose ID is at least the one
+    #       asked for
+    #   F x86: an event is looked up by its position in the list rather than by
+    #       its ID
+    #   G x86: an event that begins exactly where the range ends is counted
+    #       inside it
+    #   H x86: an event that ends exactly where the range begins is counted
+    #       inside it
+    #   I x86: every non-recurring event is returned whatever range was asked
+    #       for
+    #   K x86: importing a multi-event file keeps only the last event's fields
+    #   L x86: an imported event's all-day flag comes back inverted
+    #   M x86: a weekly event is imported as a monthly one
+    #   N x86: the colour line's leading space is kept, so every imported
+    #       colour is dropped
+    #   O x86: an exported colour channel below 0x10 loses its leading zero
+    #   P x86: a recurrence walk runs one occurrence past the end of the range
+    #   Q x86: a reminder fires N minutes after its event instead of before it
+    #   R x86: the reminder lead time is read as seconds rather than as minutes
+    #   S x86: a dismissed reminder keeps coming back as due
+    #   T x86: a reminder due exactly now is not due yet
+    #   U x86: snoozing a reminder moves it earlier instead of later
+    #   V x86: a snooze is absorbed by an already-dismissed reminder for the
+    #       same event
+    #   W x86: dismissing one reminder dismisses every reminder for that event
+    #   X x86: dismiss-all dismisses only the first reminder
+    #   Y x86: the active-reminder count includes the dismissed ones
+    #   Z x86: pruning keeps the dismissed reminders and throws away the live
+    #       ones
+    #   A x87: an event's second reminder can never be dismissed, because the
+    #       first swallows every call
     (
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the day cells are handed a palette of their own, so only the grid ignores the mode',
         CAL,
         [
-            ('            self.render_day_cell(p, &mut cmds, &layout, index, cell, store);',
-             '            self.render_day_cell(&Palette::for_mode(false), &mut cmds, &layout, index, cell, store);'),
+            ('            self.render_day_cell(p, &mut cmds, &layout, index, cell, agenda);',
+             '            self.render_day_cell(&Palette::for_mode(false), &mut cmds, &layout, index, cell, agenda);'),
         ],
         ["desktop"],
         [
@@ -13476,68 +13547,33 @@ DEFECTS = [
         ],
     ),
     (
-        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the month-grid dot discards the colour the user gave the event',
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: an event's mark discards the colour the user gave it",
         CAL,
         [
-            ('            let dot_color = match (first.color, is_today) {\n                (Some(chosen), _) => chosen,',
-             '            let dot_color = match (first.color, is_today) {\n                (Some(_), _) => p.lavender,'),
+            ('        self.chosen.unwrap_or_else(|| self.category.color(p))\n',
+             '        let _ = self.chosen;\n        self.category.color(p)\n'),
         ],
         ["desktop"],
         [
+            # Re-anchored 2026-10-07: `EventMark::color`, which the month's dot,
+            # the card's bar and the widget's dot all read.
             'every_month_view_site_draws_the_role_it_claims',
             'a_coloured_event_shows_the_users_colour_in_the_month_grid',
-        ],
-    ),
-    (
-        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: an uncoloured dot on today's disc ignores the disc and may vanish into it",
-        CAL,
-        [
-            ('                (None, true) => readable_on(today_disc),',
-             '                (None, true) => p.lavender,'),
-        ],
-        ["desktop"],
-        [
-            'every_month_view_site_draws_the_role_it_claims',
-            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
-        ],
-    ),
-    (
-        'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the uncoloured event dot reads a fill role as a mark on the base',
-        CAL,
-        [
-            ('                (None, false) => p.lavender,',
-             '                (None, false) => p.surface2,'),
-        ],
-        ["desktop"],
-        [
-            'every_month_view_site_draws_the_role_it_claims',
-            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
-        ],
-    ),
-    (
-        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: an uncoloured event resolves to blue, which is also the stock accent',
-        CAL,
-        [
-            ('        self.color.unwrap_or(p.lavender)',
-             '        self.color.unwrap_or(p.blue)'),
-        ],
-        ["desktop"],
-        [
-            'every_month_view_site_draws_the_role_it_claims',
             'the_dot_and_the_detail_bar_resolve_a_colour_the_same_way',
+            'a_calendar_draws_its_month',
         ],
     ),
     (
-        'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: dot_color ignores the colour the user chose and always answers the default',
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: a dot in its category's colour on today's disc ignores the disc and may vanish into it",
         CAL,
         [
-            ('        self.color.unwrap_or(p.lavender)',
-             '        p.lavender'),
+            ('                mark.on_disc(today_disc)\n',
+             '                mark.color(p)\n'),
         ],
         ["desktop"],
         [
             'every_month_view_site_draws_the_role_it_claims',
-            'the_dot_and_the_detail_bar_resolve_a_colour_the_same_way',
+            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
         ],
     ),
     (
@@ -13606,7 +13642,7 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the detail card's colour bar ignores the event and draws a fixed role",
         CAL,
         [
-            ('                color: event.dot_color(p),',
+            ('                color: EventMark::of(event).color(p),',
              '                color: p.lavender,'),
         ],
         ["desktop"],
@@ -13786,32 +13822,6 @@ DEFECTS = [
         ["desktop"],
         [
             'every_year_view_site_draws_the_role_it_claims',
-        ],
-    ),
-    (
-        'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: saving writes a colour line for every event, so an uncoloured one gains one',
-        CAL,
-        [
-            ('            if let Some(c) = event.color {',
-             '            {\n                let c = event.color.unwrap_or(Color::from_hex(0x89B4FA));'),
-        ],
-        ["desktop"],
-        [
-            'an_uncoloured_event_round_trips_without_gaining_a_colour',
-        ],
-    ),
-    (
-        'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: loading gives an event with no colour line a default, which saving then writes back',
-        CAL,
-        [
-            ('        let mut color: Option<Color> = None;',
-             '        let mut color: Option<Color> = Some(Color::from_hex(0x89B4FA));'),
-            ('                color = None;',
-             '                color = Some(Color::from_hex(0x89B4FA));'),
-        ],
-        ["desktop"],
-        [
-            'an_uncoloured_event_round_trips_without_gaining_a_colour',
         ],
     ),
     (
@@ -16434,123 +16444,6 @@ DEFECTS = [
         ],
     ),
     (
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a weekly event recurs daily",
-        CAL,
-        [
-            ('            Recurrence::Weekly => anchor.add_days(step.saturating_mul(7)),',
-             '            Recurrence::Weekly => anchor.add_days(step),'),
-        ],
-        ["desktop"],
-        [
-            # The `saturating_mul(7)` is the only thing making Weekly weekly;
-            # the loop bound that justifies it lives in the header, which is
-            # exactly the arrangement the source comment warns is easy to break
-            # by editing one of the two.
-            'recurring_weekly',
-        ],
-    ),
-    (
-        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a monthly event steps 30 days instead of a month, so the anchored day decays",
-        CAL,
-        [
-            ('            Recurrence::Monthly => anchor.add_months(step),',
-             '            Recurrence::Monthly => anchor.add_days(step.saturating_mul(30)),'),
-        ],
-        ["desktop"],
-        [
-            # This is the exact bug the anchor rewrite existed to kill: a fixed-
-            # length step cannot express `the 31st of every month`, so the
-            # series slides off the date it was anchored on and February stops
-            # clamping to the 29th.
-            'recurring_monthly',
-            'recurring_monthly_day31_clamped',
-        ],
-    ),
-    (
-        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a yearly event is 365 days long, so it drifts across a leap year",
-        CAL,
-        [
-            ('            Recurrence::Yearly => anchor.add_years(step),',
-             '            Recurrence::Yearly => anchor.add_days(step.saturating_mul(365)),'),
-        ],
-        ["desktop"],
-        [
-            # First written as `add_years` -> `add_months`, which escaped: the
-            # test asks whether an anniversary four years on is present and
-            # whether the day after it is absent, and a monthly series answers
-            # both correctly -- it hits the anniversary on the way past. A
-            # fixed 365-day step is the version that actually separates them,
-            # and it is the more realistic bug besides: 2020-03-14 plus 4x365
-            # days is 2024-03-13, because 2024 is a leap year.
-            'recurring_yearly',
-        ],
-    ),
-    (
-        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: a daily event skips its own first day",
-        CAL,
-        [
-            ('            Recurrence::Daily => anchor.add_days(step),',
-             '            Recurrence::Daily => anchor.add_days(step + 1),'),
-        ],
-        ["desktop"],
-        [
-            # `step.saturating_mul(2)` was the first attempt and would not
-            # build: this arm is what pins `step`'s integer type for the whole
-            # `match`, so calling a method on it there leaves every arm's
-            # literal ambiguous -- two E0689s, and a defect that never reaches
-            # a test binary proves nothing. `step + 1` needs no method
-            # resolution, so the type still falls out of `add_days`.
-            'recurring_daily',
-        ],
-    ),
-    (
-        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an occurrence that merely ends where the range begins is counted inside it",
-        CAL,
-        [
-            ('        if occ_end > range_start {',
-             '        if occ_end >= range_start {'),
-        ],
-        ["desktop"],
-        [
-            # A half-open range is the only reading under which a day owns each
-            # instant exactly once. Closing the low end makes an event finishing
-            # at midnight belong to both days.
-            #
-            # Declared against the midnight test at first, which was simply the
-            # wrong branch: this guard is inside `expand_recurrence`, so a
-            # non-recurring event never reaches it. The all-day Pi Day series
-            # is what notices -- each occurrence is exactly one day long, so
-            # the previous year's ends precisely where the queried day starts
-            # and a closed low end returns two events for one date.
-            'recurring_yearly',
-        ],
-    ),
-    (
-        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the five-minute snooze lasts fifteen",
-        CAL,
-        [
-            ('            Self::FiveMinutes => 5 * SECS_PER_MIN,',
-             '            Self::FiveMinutes => 15 * SECS_PER_MIN,'),
-        ],
-        ["desktop"],
-        [
-            'reminder_snooze',
-            'reminder_snooze_durations',
-        ],
-    ),
-    (
-        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the one-hour snooze lasts a minute",
-        CAL,
-        [
-            ('            Self::OneHour => SECS_PER_HOUR,',
-             '            Self::OneHour => SECS_PER_MIN,'),
-        ],
-        ["desktop"],
-        [
-            'reminder_snooze_durations',
-        ],
-    ),
-    (
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a Monday-start week is labelled starting on Sunday",
         CAL,
         [
@@ -16599,59 +16492,6 @@ DEFECTS = [
         ],
     ),
     (
-        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: an event's duration is measured backwards, so every duration is zero",
-        CAL,
-        [
-            ('        self.end_timestamp.saturating_sub(self.start_timestamp)',
-             '        self.start_timestamp.saturating_sub(self.end_timestamp)'),
-        ],
-        ["desktop"],
-        [
-            # Saturating, so the reversal neither panics nor wraps -- it
-            # silently reports every event as instantaneous, which is the
-            # failure mode a plain `-` would at least have crashed on.
-            #
-            # `recurring_yearly` joins in because an all-day series takes each
-            # occurrence's length from this same subtraction, and a
-            # zero-length occurrence no longer overlaps the day it falls on.
-            'event_duration',
-            'recurring_yearly',
-        ],
-    ),
-    (
-        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: search is case-sensitive again",
-        CAL,
-        [
-            ('        let q = query.to_lowercase();',
-             '        let q = query.to_string();'),
-        ],
-        ["desktop"],
-        [
-            # The haystack is still lowercased, so this is worse than a
-            # consistently case-sensitive search: any capital in the query
-            # matches nothing at all.
-            #
-            # This escaped on its first run, and the test was the reason: every
-            # query in it was already lower-case, so it constrained only the
-            # half of the rule that lower-cases the *haystack*. Three
-            # capitalised queries were added to it; the name had been true in
-            # spirit and vacuous in fact.
-            'search_case_insensitive',
-        ],
-    ),
-    (
-        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a hex colour longer than six digits is accepted and silently truncated",
-        CAL,
-        [
-            ('    if s.len() != 6 {',
-             '    if s.len() < 6 {'),
-        ],
-        ["desktop"],
-        [
-            'parse_hex_color_invalid_length',
-        ],
-    ),
-    (
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a hex colour's blue channel reads the green digits",
         TK_COLOR,
         [
@@ -16672,51 +16512,6 @@ DEFECTS = [
             'hex_text_reads_either_case_and_refuses_anything_else',
             'import_single_event',
             'parse_hex_color_valid',
-        ],
-    ),
-    (
-        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a day is an hour long when its events are gathered",
-        CAL,
-        [
-            ('        let day_end = day_start.saturating_add(SECS_PER_DAY);',
-             '        let day_end = day_start.saturating_add(SECS_PER_HOUR);'),
-        ],
-        ["desktop"],
-        [
-            # Anything after 01:00 vanishes from the day it falls on. Every
-            # per-day reading in the calendar funnels through this one line,
-            # so the dots, the detail card and the popup's own height all fail
-            # together -- which is the useful shape of it: the day window is a
-            # single point of truth, and eight tests stand behind it.
-            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
-            'events_for_date_non_recurring',
-            'events_for_date_spanning_midnight',
-            'every_month_view_site_draws_the_role_it_claims',
-            'recurring_monthly_day31_clamped',
-            'render_event_dots_shown',
-            'render_selected_date_shows_detail',
-            'the_event_card_hangs_below_the_frame_and_still_counts_as_the_popup',
-        ],
-    ),
-    (
-        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: occurrences come back in storage order rather than in time order",
-        CAL,
-        [
-            ('        result.sort_by_key(|e| e.start_timestamp);\n',
-             ''),
-        ],
-        ["desktop"],
-        [
-            # A recurring event expands into a contiguous run, so the list is
-            # only ever mis-ordered when two events interleave -- the normal
-            # case for a real diary and never the case for a store holding one
-            # event.
-            #
-            # Which is why this escaped: `events_for_range` had three events
-            # and a range containing exactly one of them, so deleting the sort
-            # outright left the entire suite green. The sort had no test at
-            # all. The catcher below was written for it.
-            'events_come_back_in_time_order_whatever_order_they_were_stored_in',
         ],
     ),
     (
@@ -17898,146 +17693,6 @@ DEFECTS = [
     # 76 of the file's 114 tests had never been named by any defect.
     # ------------------------------------------------------------------
     (
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the ID handed back to the caller is not the ID stamped on the event",
-        CAL,
-        [
-            ('        event.id = id;\n',
-             '        event.id = id.saturating_add(1);\n'),
-        ],
-        ["desktop"],
-        [
-            # Every later lookup in the module is by the returned ID, so the
-            # event the caller just added is one it can never find again.
-            'an_uncoloured_event_round_trips_without_gaining_a_colour',
-            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
-            'event_store_get',
-            'event_store_remove',
-            'event_store_update',
-            'import_single_event',
-        ],
-    ),
-    (
-        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: removing an event that is not there reports success",
-        CAL,
-        [
-            ('        self.events.len() < before\n',
-             '        self.events.len() <= before\n'),
-        ],
-        ["desktop"],
-        [
-            'event_store_remove',
-        ],
-    ),
-    (
-        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: removing one event removes every other event instead",
-        CAL,
-        [
-            ('        self.events.retain(|e| e.id != id);\n',
-             '        self.events.retain(|e| e.id == id);\n'),
-        ],
-        ["desktop"],
-        [
-            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
-            'event_store_remove',
-        ],
-    ),
-    (
-        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: an update to an event that does not exist reports that it happened",
-        CAL,
-        [
-            ('            f(e);\n            true\n        } else {\n            false\n        }\n',
-             '            f(e);\n            true\n        } else {\n            true\n        }\n'),
-        ],
-        ["desktop"],
-        [
-            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
-            'event_store_update_nonexistent',
-        ],
-    ),
-    (
-        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an update lands on the first event whose ID is at least the one asked for",
-        CAL,
-        [
-            ('        if let Some(e) = self.events.iter_mut().find(|e| e.id == id) {\n',
-             '        if let Some(e) = self.events.iter_mut().find(|e| e.id >= id) {\n'),
-        ],
-        ["desktop"],
-        [
-            # Escaped on the first sweep: `event_store_update_nonexistent`
-            # asks an *empty* store for ID 999, and `>=` finds nothing in an
-            # empty store either. The two predicates only disagree when the
-            # store still holds an event whose ID is above the missing one,
-            # which is the state a delete leaves behind.
-            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
-        ],
-    ),
-    (
-        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: an event is looked up by its position in the list rather than by its ID",
-        CAL,
-        [
-            ('        self.events.iter().find(|e| e.id == id)\n',
-             '        self.events.get(id as usize)\n'),
-        ],
-        ["desktop"],
-        [
-            'an_uncoloured_event_round_trips_without_gaining_a_colour',
-            'an_update_to_a_deleted_event_does_not_land_on_a_later_one',
-            'event_store_get',
-            'event_store_update',
-            'import_single_event',
-        ],
-    ),
-    (
-        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: an event that begins exactly where the range ends is counted inside it",
-        CAL,
-        [
-            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n',
-             '                if event.start_timestamp <= range_end && event.end_timestamp > range_start {\n'),
-        ],
-        ["desktop"],
-        [
-            # Escaped on the first sweep: every event in the suite started at
-            # 09:00, 10:00, 14:00 or 23:00 against range ends that are all
-            # midnights, so no fixture put a start *on* a range end. Midnight
-            # is the range end of every day cell, so a real event at exactly
-            # 00:00 was drawn on the day before as well.
-            'the_range_is_half_open_at_both_ends',
-        ],
-    ),
-    (
-        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: an event that ends exactly where the range begins is counted inside it",
-        CAL,
-        [
-            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n',
-             '                if event.start_timestamp < range_end && event.end_timestamp >= range_start {\n'),
-        ],
-        ["desktop"],
-        [
-            # Escaped for the mirror-image reason as `G`: no fixture had an
-            # event *ending* exactly on a range start either. The half-open
-            # interval is what stops a meeting ending at midnight from
-            # appearing on both days. Module 82's `E` proved this for the
-            # recurring branch; the non-recurring one had never been asked.
-            'the_range_is_half_open_at_both_ends',
-        ],
-    ),
-    (
-        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: every non-recurring event is returned whatever range was asked for",
-        CAL,
-        [
-            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n                    result.push(event.clone());\n                }\n',
-             '                result.push(event.clone());\n'),
-        ],
-        ["desktop"],
-        [
-            'a_coloured_event_shows_the_users_colour_in_the_month_grid',
-            'events_for_date_non_recurring',
-            'events_for_range',
-            'every_month_view_site_draws_the_role_it_claims',
-            'the_range_is_half_open_at_both_ends',
-        ],
-    ),
-    (
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a hex colour made of non-hex characters parses as black",
         TK_COLOR,
         [
@@ -18057,248 +17712,6 @@ DEFECTS = [
             'parse_hex_color_invalid_chars',
         ],
     ),
-    (
-        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: importing a multi-event file keeps only the last event's fields",
-        CAL,
-        [
-            ('                if in_event {\n',
-             '                if !in_event {\n'),
-        ],
-        ["desktop"],
-        [
-            # The count still comes out right -- the store gains one event per
-            # EVENT line either way -- so only a test that reads the imported
-            # *fields* can see it.
-            'a_dark_colour_keeps_its_leading_zeros_through_the_file',
-            'an_uncoloured_event_round_trips_without_gaining_a_colour',
-            'export_import_roundtrip',
-            'import_single_event',
-        ],
-    ),
-    (
-        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: an imported event's all-day flag comes back inverted",
-        CAL,
-        [
-            ('                all_day = val == "true";\n',
-             '                all_day = val != "true";\n'),
-        ],
-        ["desktop"],
-        [
-            'export_import_roundtrip',
-        ],
-    ),
-    (
-        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a weekly event is imported as a monthly one",
-        CAL,
-        [
-            ('                    "weekly" => Some(Recurrence::Weekly),\n',
-             '                    "weekly" => Some(Recurrence::Monthly),\n'),
-        ],
-        ["desktop"],
-        [
-            'export_import_roundtrip',
-        ],
-    ),
-    (
-        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the colour line's leading space is kept, so every imported colour is dropped",
-        CAL,
-        [
-            ('            } else if let Some(val) = trimmed.strip_prefix("color: ") {\n',
-             '            } else if let Some(val) = trimmed.strip_prefix("color:") {\n'),
-        ],
-        ["desktop"],
-        [
-            # Seven characters is not six, so `parse_hex_color` answers None
-            # and the event silently reverts to the renderer's default.
-            'a_dark_colour_keeps_its_leading_zeros_through_the_file',
-            'export_import_roundtrip',
-            'import_single_event',
-        ],
-    ),
-    (
-        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: an exported colour channel below 0x10 loses its leading zero",
-        CAL,
-        [
-            ('                out.push_str(&format!("color: {:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n',
-             '                out.push_str(&format!("color: {:X}{:X}{:X}\\n", c.r, c.g, c.b));\n'),
-        ],
-        ["desktop"],
-        [
-            # Escaped on the first sweep: `export_color_hex_format` uses
-            # F38BA8 and the round trip A6E3A1 and F9E2AF -- every channel in
-            # the suite was >= 0x10, so the padding never had anything to do.
-            # A dark colour writes fewer than six digits, which the length
-            # check in `parse_hex_color` then refuses on the way back in,
-            # silently losing the colour the user chose.
-            'a_dark_colour_keeps_its_leading_zeros_through_the_file',
-        ],
-    ),
-    (
-        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a recurrence walk runs one occurrence past the end of the range",
-        CAL,
-        [
-            ('        if occ_start >= range_end {\n',
-             '        if occ_start > range_end {\n'),
-        ],
-        ["desktop"],
-        [
-            # Escaped on the first sweep: the recurrence fixtures anchor at
-            # 10:00 and 14:00 and stop at midnights, so no occurrence ever
-            # started *on* the range end. A daily event anchored at 00:00 --
-            # which is every all-day event -- gained a whole extra day at the
-            # end of every range it was drawn in.
-            'a_recurring_series_is_half_open_at_the_end_too',
-        ],
-    ),
-    (
-        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a reminder fires N minutes after its event instead of before it",
-        CAL,
-        [
-            ('            event_start.saturating_sub((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n',
-             '            event_start.saturating_add((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n'),
-        ],
-        ["desktop"],
-        [
-            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
-            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
-            'multiple_reminders_same_event',
-            'reminder_set_and_due',
-            'reminder_snooze',
-        ],
-    ),
-    (
-        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the reminder lead time is read as seconds rather than as minutes",
-        CAL,
-        [
-            ('            event_start.saturating_sub((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n',
-             '            event_start.saturating_sub(lead_minutes as u64);\n'),
-        ],
-        ["desktop"],
-        [
-            # A 15-minute warning arrives 15 seconds before the meeting.
-            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
-            'reminder_set_and_due',
-            'reminder_snooze',
-        ],
-    ),
-    (
-        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a dismissed reminder keeps coming back as due",
-        CAL,
-        [
-            ('            .filter(|r| !r.dismissed && r.fire_at <= now)\n',
-             '            .filter(|r| r.fire_at <= now)\n'),
-        ],
-        ["desktop"],
-        [
-            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
-            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
-            'reminder_dismiss',
-            'reminder_dismiss_all',
-        ],
-    ),
-    (
-        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a reminder due exactly now is not due yet",
-        CAL,
-        [
-            ('            .filter(|r| !r.dismissed && r.fire_at <= now)\n',
-             '            .filter(|r| !r.dismissed && r.fire_at < now)\n'),
-        ],
-        ["desktop"],
-        [
-            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
-            'reminder_set_and_due',
-            'reminder_snooze',
-        ],
-    ),
-    (
-        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: snoozing a reminder moves it earlier instead of later",
-        CAL,
-        [
-            ('                r.fire_at = r.fire_at.saturating_add(duration.secs());\n',
-             '                r.fire_at = r.fire_at.saturating_sub(duration.secs());\n'),
-        ],
-        ["desktop"],
-        [
-            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
-            'reminder_snooze',
-        ],
-    ),
-    (
-        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a snooze is absorbed by an already-dismissed reminder for the same event",
-        CAL,
-        [
-            # Scoped to `snooze` by its body: `dismiss` carries the same
-            # condition now, and an unscoped patch would match both.
-            ('            if r.event_id == event_id && !r.dismissed {\n                r.fire_at = r.fire_at.saturating_add(duration.secs());\n',
-             '            if r.event_id == event_id {\n                r.fire_at = r.fire_at.saturating_add(duration.secs());\n'),
-        ],
-        ["desktop"],
-        [
-            # Escaped on the first sweep: no fixture dismissed a reminder and
-            # then snoozed the same event. The loop breaks on the first match,
-            # so a dead reminder standing earlier in the list swallowed the
-            # snooze and the live one fired again immediately.
-            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
-        ],
-    ),
-    (
-        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: dismissing one reminder dismisses every reminder for that event",
-        CAL,
-        [
-            ('                r.dismissed = true;\n                break;\n',
-             '                r.dismissed = true;\n'),
-        ],
-        ["desktop"],
-        [
-            # Escaped on the first sweep: `multiple_reminders_same_event` set
-            # two reminders on one event but never dismissed either, and every
-            # fixture that *did* dismiss had one reminder per event. Yet that
-            # test is precisely what establishes two reminders on one event as
-            # a supported arrangement -- a day-before and an hour-before -- so
-            # dismissing the first must not cancel the second.
-            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
-            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
-        ],
-    ),
-    (
-        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: dismiss-all dismisses only the first reminder",
-        CAL,
-        [
-            ('        for r in &mut self.reminders {\n            r.dismissed = true;\n        }\n',
-             '        for r in &mut self.reminders {\n            r.dismissed = true;\n            break;\n        }\n'),
-        ],
-        ["desktop"],
-        [
-            'reminder_dismiss_all',
-        ],
-    ),
-    (
-        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the active-reminder count includes the dismissed ones",
-        CAL,
-        [
-            ('        self.reminders.iter().filter(|r| !r.dismissed).count()\n',
-             '        self.reminders.len()\n'),
-        ],
-        ["desktop"],
-        [
-            'a_snooze_moves_the_live_reminder_not_the_dismissed_one',
-            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
-            'reminder_dismiss',
-            'reminder_dismiss_all',
-        ],
-    ),
-    (
-        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: pruning keeps the dismissed reminders and throws away the live ones",
-        CAL,
-        [
-            ('        self.reminders.retain(|r| !r.dismissed);\n',
-             '        self.reminders.retain(|r| r.dismissed);\n'),
-        ],
-        ["desktop"],
-        [
-            'reminder_prune_dismissed',
-        ],
-    ),
     # ------------------------------------------------------------------
     # Module 87 opens with the production fix module 86 forced. Writing the
     # test for defect `W` -- "dismissing one reminder must not cancel the
@@ -18309,18 +17722,6 @@ DEFECTS = [
     # could never be dismissed at all. The guard is new code, so it needs a
     # defect of its own.
     # ------------------------------------------------------------------
-    (
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: an event's second reminder can never be dismissed, because the first swallows every call",
-        CAL,
-        [
-            ('            if r.event_id == event_id && !r.dismissed {\n                r.dismissed = true;\n',
-             '            if r.event_id == event_id {\n                r.dismissed = true;\n'),
-        ],
-        ["desktop"],
-        [
-            'dismissing_one_reminder_leaves_the_others_for_that_event_alone',
-        ],
-    ),
     # ------------------------------------------------------------------
     # Module 87 proper: the keyboard half of the desktop shell -- the chord
     # table in `DesktopAction::for_chord`, the Alt-Tab switcher's four

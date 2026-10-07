@@ -1,5 +1,10 @@
 ## MODULE 86 (lane C, 2026-08-25) -- the calendar's event store, its file format and its reminders
 
+*The code this module swept -- the desktop's own event store -- was deleted on
+2026-10-07, when the clock's calendar took the calendar program's events
+(`design-decisions.md` §1497), and its defects were retired from the palette.
+The lessons below are about tests, and stand.*
+
 **In short:** modules 68-70 swept how the calendar *draws* itself and module 82
 swept its date arithmetic, so what was left unasked was the bookkeeping
 underneath: adding, finding, updating and deleting events; the query that asks

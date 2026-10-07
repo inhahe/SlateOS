@@ -2280,6 +2280,28 @@ live.
   the choice on the Settings application's Notifications page, asked of
   lane E (`requests/c-e-a-choice-of-how-the-notification-pane-groups.md`).
 
+- `[x]` `[C]` **The system monitor widget draws the last minute**
+  (`design-decisions.md` §1496) -- done 2026-10-07. Given two rows ("Size"
+  on its menu), four graphs -- processor, memory, the disks' activity, the
+  network -- each with what it reads now and the most it read in the
+  minute, and the disk-space bar at its foot; the three bars it was at its
+  smaller sizes. The resource monitor that drew the graphs and was never on
+  screen is deleted (§1423). **Next:** the disks' and the network's counters
+  on SlateOS, asked of lane A
+  (`requests/c-a-the-system-monitor-reads-disk-and-network-counters-the-kernel-does-not-serve.md`).
+
+- `[x]` `[C]` **The clock's calendar and the calendar widget show the user's
+  events** (`design-decisions.md` §1497, on lane E's `calendarstore`, §1219)
+  -- done 2026-10-07. Read from the calendar program's own file, so a day
+  with an event has a dot in the event's colour, or its category's, and
+  choosing the day lists its events, all-day ones first and then by time --
+  the days and the events the program shows. Read again, when it has
+  changed, as the popup opens, as a calendar widget turns its minute and at
+  sign-in; a file that will not read keeps what was read before and says so
+  in a notification. The desktop's own event store, which nothing ever
+  filled, is deleted (§1423). **Next:** the desktop raises the calendar's
+  reminders, which nothing does today, and hears of a save as it is made.
+
 - `[x]` `[C]` **A theme is checked before it is installed or shared**
   (`design-decisions.md` §1469; `roadmap-detailed.md` §4.6, *Automated
   Validation*) -- done 2026-10-05. `themecheck FOLDER...` (and

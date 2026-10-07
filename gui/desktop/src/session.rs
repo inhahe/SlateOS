@@ -536,6 +536,10 @@ pub struct ShellSession<T: Transport> {
     background_paused: bool,
     /// The desktop's mode and accent as it was last told them.
     background_theme_told: Option<background_program::Event>,
+    /// Why the user's calendar could not be read, as the user was last told
+    /// it ([`tell_agenda_problem`](Self::tell_agenda_problem)); `None` once
+    /// it reads.
+    agenda_told: Option<String>,
     /// Whether a maximised window on the desktop shown covers the
     /// background, as the last window list had it: nobody sees it then.
     background_covered: bool,
@@ -1058,6 +1062,7 @@ impl<T: Transport> ShellSession<T> {
             background_size: None,
             background_paused: false,
             background_theme_told: None,
+            agenda_told: None,
             background_covered: false,
             waker: background_waker,
             start_background: Box::new(start_background_process),
@@ -1694,6 +1699,25 @@ impl<T: Transport> ShellSession<T> {
         if let Some((title, body)) = crate::window_rules::problems_notice(&problems) {
             self.post_desktop_notice(&title, &body);
         }
+    }
+
+    /// Tell the user, once, that their calendar could not be read, and why:
+    /// the clock's popup and a calendar widget then show the events read
+    /// before it, or none, which without a word would read as a calendar with
+    /// nothing on it. Nothing more until it reads, or fails another way.
+    fn tell_agenda_problem(&mut self) {
+        let problem = self.shell.agenda.problem().map(str::to_owned);
+        if problem == self.agenda_told {
+            return;
+        }
+        if let Some(why) = &problem {
+            eprintln!("desktop: the calendar could not be read: {why}");
+            self.post_desktop_notice(
+                "Your calendar could not be read",
+                &format!("The clock's calendar shows the events it read before: {why}."),
+            );
+        }
+        self.agenda_told = problem;
     }
 
     /// Post news from the desktop about itself: a wallpaper that could not be
@@ -2959,6 +2983,10 @@ impl<T: Transport> ShellSession<T> {
         }
         self.start_menu_was_open = menu_open;
 
+        // The user's calendar may have been read in this batch -- the
+        // clock's popup opened -- and found unreadable.
+        self.tell_agenda_problem();
+
         // *After* the input, deliberately. `poll` is also what reads the window
         // list off the wire, so by here the connection may already hold a newer
         // desktop than the taskbar the user clicked was drawn from. Folding it
@@ -3214,6 +3242,9 @@ impl<T: Transport> ShellSession<T> {
         // remember is a door somebody forgets, which is exactly how the
         // animation speed stayed inert.
         self.shell.load_widgets();
+        // The user's calendar, for a calendar widget to show from the start
+        // rather than from its first minute.
+        let _ = self.shell.refresh_agenda();
         // And the input settings, for that same reason: the keyboard-layout
         // shortcut is one the user chose and expects to find still chosen.
         // The grab that makes it work is reconciled on the next pump.
@@ -4325,6 +4356,16 @@ impl<T: Transport> ShellSession<T> {
             // became due, so the interval is the widget's own and not a second
             // timer free to disagree with it.
             self.shell.sample_system(self.clock_ms);
+            // A calendar widget turning its minute reads the calendar again
+            // if the calendar program has saved since: it says nothing when
+            // it does. Asked of the file's length and time alone, unchanged.
+            if self
+                .shell
+                .widgets
+                .draws(&crate::widgets::WidgetKind::Calendar)
+            {
+                let _ = self.shell.refresh_agenda();
+            }
             self.dirty = true;
         }
         if self.autohide.tick(self.clock_ms) {

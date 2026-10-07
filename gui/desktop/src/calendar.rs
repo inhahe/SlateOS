@@ -8,9 +8,9 @@
 //!
 //! - [`CalendarView`] — month grid navigation (prev/next, today jump, mini
 //!   year view, optional week numbers, configurable first-day-of-week).
-//! - [`CalendarEvent`] / [`EventStore`] — in-memory event CRUD with
-//!   recurring-event expansion, date-range queries, and text import/export.
-//! - [`ReminderManager`] — per-event reminders with snooze & dismiss.
+//! - [`Agenda`] — the user's events, as the calendar program keeps them
+//!   (`calendarstore`), and which are on a day; [`EventMark`], the colour an
+//!   event is marked in.
 //! - [`ClockDisplay`] — digital clock for the taskbar (12/24h, multi-timezone).
 //! - [`CalendarConfig`] — user preferences.
 //!
@@ -18,7 +18,8 @@
 //!
 //! ```ignore
 //! let mut cal = CalendarView::new(CalendarConfig::default());
-//! let mut store = EventStore::new();
+//! let mut agenda = Agenda::default();
+//! agenda.refresh(&calendarstore::events_path()?);
 //! let mut clock = ClockDisplay::new();
 //! clock.show_date = true;
 //!
@@ -34,11 +35,11 @@
 //! // is laid out in physical pixels because it is anchored to shell chrome
 //! // that already is, and `utc_now` is a parameter so the clock band across
 //! // its head reads the current second rather than the second it opened on.
-//! let cmds = cal.render(x, y, scale, utc_now, &store);
+//! let cmds = cal.render(x, y, scale, utc_now, &agenda);
 //!
 //! // A click anywhere while it is open, tested against the same layout the
 //! // render came from:
-//! match cal.hit_test(x, y, scale, click_x, click_y, &store) {
+//! match cal.hit_test(x, y, scale, click_x, click_y, &agenda) {
 //!     Some(hit) => { cal.apply(hit); }
 //!     None => cal.set_visible(false), // outside the popup: dismiss
 //! }
@@ -52,7 +53,6 @@ use guitk::color::Color;
 // which derives them from the same `tzrules` era arithmetic the libc's
 // `localtime` and the shell's `%(…)T` render through.
 use guitk::date::{self, Date, Weekday};
-use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -236,15 +236,6 @@ const CLOCK_TIME_FONT: f32 = 13.0;
 const CLOCK_DATE_FONT: f32 = 11.0;
 const CLOCK_ZONE_FONT: f32 = 10.0;
 
-/// Seconds per minute.
-const SECS_PER_MIN: u64 = 60;
-
-/// Seconds per hour.
-const SECS_PER_HOUR: u64 = 3600;
-
-/// Seconds per day.
-const SECS_PER_DAY: u64 = 86400;
-
 /// The same, signed, for the arithmetic that has to survive a pre-epoch
 /// instant without wrapping.
 const SECS_PER_DAY_I: i64 = 86_400;
@@ -317,12 +308,10 @@ fn timestamp_to_date(ts: u64) -> (i32, u32, u32, u32, u32, u32) {
     (year, month, day, hour, min, sec)
 }
 
-/// The Unix timestamp of `date` at `hour:min:sec`, or `None` before the epoch.
-///
-/// The `None` is the store's own limit, not the calendar's — event timestamps
-/// are `u64` — so it is stated here as one comparison against the epoch rather
-/// than as a `year < 1970` test standing in front of a loop that counts up
-/// from 1970 one year at a time.
+/// The Unix timestamp of `date` at `hour:min:sec`, or `None` before the epoch:
+/// how the tests make an instant to show the popup at, and the inverse they
+/// hold [`timestamp_to_date`] to.
+#[cfg(test)]
 fn timestamp_at(date: Date, hour: u32, min: u32, sec: u32) -> Option<u64> {
     let secs = date
         .unix_secs_utc()
@@ -334,6 +323,7 @@ fn timestamp_at(date: Date, hour: u32, min: u32, sec: u32) -> Option<u64> {
 
 /// Convert (year, month, day, hour, min, sec) to a Unix timestamp.
 /// Returns `None` for dates before 1970-01-01.
+#[cfg(test)]
 fn date_to_timestamp(
     year: i32,
     month: u32,
@@ -369,577 +359,225 @@ fn day_of_week_name(dow: u32) -> &'static str {
 }
 
 // ============================================================================
-// CalendarEvent and recurrence
+// The user's calendar
 // ============================================================================
 
-/// Recurrence pattern for a calendar event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Recurrence {
-    Daily,
-    Weekly,
-    Monthly,
-    Yearly,
+/// How long a file must have gone unwritten before its length and time are
+/// trusted to say it has not changed since: longer than the coarsest time a
+/// filesystem keeps -- whole seconds on an ext4 made with small inodes, two
+/// on FAT -- so that a save within the tick of the read before is still
+/// read.
+const STAMP_SETTLES: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The user's calendar as the desktop shows it: the calendar program's
+/// events, read from the file the program keeps them in through
+/// `calendarstore` (`design-decisions.md` §1219), each day's found as the
+/// program finds them ([`calendarstore::CalendarEvent::occurs_on`]) -- so the
+/// clock's popup, the calendar widget and the program cannot disagree about
+/// what is on a day.
+///
+/// Until 2026-10-07 the desktop kept a store of its own, with its own
+/// recurrence, file format and reminders, and nothing ever put an event in
+/// it: the popup and the widget had never shown an event the user made. It
+/// went, as the operator's rule for dead code with a live twin has it
+/// (§1423), and the program's model is the one read here (§1497).
+///
+/// The program is the only writer, and says nothing when it saves, so the
+/// file is read again when it has changed ([`refresh`](Self::refresh)) -- as
+/// the popup opens, and as a calendar widget turns its minute.
+#[derive(Clone, Debug, Default)]
+pub struct Agenda {
+    /// The events, as last read.
+    events: Vec<calendarstore::CalendarEvent>,
+    /// The file as last read -- its length and when it was written -- which
+    /// is what says a second read would find the same: `None` before the
+    /// first read, while there is no file, and while the file was last read
+    /// too soon after it was written for its time to say so
+    /// ([`STAMP_SETTLES`]).
+    seen: Option<(u64, std::time::SystemTime)>,
+    /// Why the file did not read, the last time it was tried; the events
+    /// kept are the ones read before it. `None` once it reads.
+    problem: Option<String>,
 }
 
-/// A single calendar event.
-#[derive(Clone, Debug)]
-pub struct CalendarEvent {
-    pub id: u64,
-    pub title: String,
-    pub start_timestamp: u64,
-    pub end_timestamp: u64,
-    pub all_day: bool,
-    pub repeat: Option<Recurrence>,
-    /// The colour the user chose for this event, if they chose one.
-    ///
-    /// `None` means "unspecified", which is not the same as any colour and
-    /// must not be spelled as one — the same reasoning as design-decisions
-    /// §526 for the peek popup's sampled colour. The renderer resolves `None`
-    /// to a palette role; see [`Self::dot_color`].
-    ///
-    /// It is deliberately **not** defaulted to a palette role at parse time.
-    /// This field is filled in by [`EventStore::import_text`], and a parser
-    /// that consulted the palette would make the same file parse to different
-    /// data depending on which theme happened to be active — after which
-    /// [`EventStore::export_text`] writes that theme-dependent value back, so
-    /// merely opening the calendar in light mode would silently rewrite every
-    /// event the user never coloured. A display setting must not be able to
-    /// edit user data.
-    pub color: Option<Color>,
-    pub description: String,
-}
-
-impl CalendarEvent {
-    /// Duration of this event in seconds.
-    pub fn duration_secs(&self) -> u64 {
-        self.end_timestamp.saturating_sub(self.start_timestamp)
-    }
-
-    /// The colour this event's dot is drawn in, given the palette in force.
-    ///
-    /// An event the user coloured keeps that colour in both modes — it is
-    /// their data, not a theme decision, so it is the one thing the calendar
-    /// draws that is deliberately not a palette member. An event they did not
-    /// colour gets `lavender`, which is what "an event exists here" has always
-    /// looked like.
+impl Agenda {
+    /// A calendar of `events`, as a test makes one.
+    #[cfg(test)]
     #[must_use]
-    pub fn dot_color(&self, p: &Palette) -> Color {
-        self.color.unwrap_or(p.lavender)
-    }
-}
-
-// ============================================================================
-// EventStore
-// ============================================================================
-
-/// In-memory storage for calendar events.
-pub struct EventStore {
-    events: Vec<CalendarEvent>,
-    ids: IdSeq,
-}
-
-impl EventStore {
-    pub fn new() -> Self {
+    pub(crate) fn of(events: Vec<calendarstore::CalendarEvent>) -> Self {
         Self {
-            events: Vec::new(),
-            ids: IdSeq::new(),
+            events,
+            seen: None,
+            problem: None,
         }
     }
 
-    /// Add a new event, assigning it a unique ID. Returns the assigned ID,
-    /// or `None` if the ID space is exhausted.
+    /// Read the calendar at `path` again if the file has changed since it
+    /// was last read -- its length, or when it was written -- and say
+    /// whether the events may have.
     ///
-    /// Refusing is the only answer that keeps IDs unique. Wrapping or
-    /// saturating the counter would hand out an ID some existing event
-    /// already holds, and every lookup in this module -- `remove_event`,
-    /// `update_event`, `ReminderManager` -- is by ID, so the two events
-    /// would thereafter be one event to every caller.
-    pub fn add_event(&mut self, mut event: CalendarEvent) -> Option<u64> {
-        let id = self.ids.issue()?;
-        event.id = id;
-        self.events.push(event);
-        Some(id)
+    /// No file is no events: nothing has been added yet. A file that will
+    /// not read keeps the events read before, and [`problem`](Self::problem)
+    /// says why -- a calendar shown empty would read as one with nothing on
+    /// it -- and it is not read again until it changes.
+    pub fn refresh(&mut self, path: &std::path::Path) -> bool {
+        self.refresh_at(path, std::time::SystemTime::now())
     }
 
-    /// Remove an event by ID. Returns `true` if the event was found and removed.
-    pub fn remove_event(&mut self, id: u64) -> bool {
-        let before = self.events.len();
-        self.events.retain(|e| e.id != id);
-        self.events.len() < before
-    }
-
-    /// Update an event by ID. The closure receives a mutable reference.
-    /// Returns `true` if the event was found and updated.
-    pub fn update_event<F: FnOnce(&mut CalendarEvent)>(&mut self, id: u64, f: F) -> bool {
-        if let Some(e) = self.events.iter_mut().find(|e| e.id == id) {
-            f(e);
-            true
+    /// [`refresh`](Self::refresh) at `now`, which is what decides whether
+    /// the file was written too recently for its stamp to be trusted.
+    fn refresh_at(&mut self, path: &std::path::Path, now: std::time::SystemTime) -> bool {
+        let meta = std::fs::metadata(path);
+        let missing = meta
+            .as_ref()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        let stamp = meta
+            .ok()
+            .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
+        let unchanged = if missing {
+            // Still no file, and nothing read from one before.
+            self.seen.is_none() && self.events.is_empty() && self.problem.is_none()
         } else {
-            false
-        }
-    }
-
-    /// Get a reference to an event by ID.
-    pub fn get_event(&self, id: u64) -> Option<&CalendarEvent> {
-        self.events.iter().find(|e| e.id == id)
-    }
-
-    /// All events (including base recurring events) stored.
-    pub fn all_events(&self) -> &[CalendarEvent] {
-        &self.events
-    }
-
-    /// Number of stored events.
-    pub fn len(&self) -> usize {
-        self.events.len()
-    }
-
-    /// Whether the store is empty.
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-
-    /// Get all event occurrences for a specific date, expanding recurring events.
-    pub fn events_for_date(&self, year: i32, month: u32, day: u32) -> Vec<CalendarEvent> {
-        let day_start = match date_to_timestamp(year, month, day, 0, 0, 0) {
-            Some(ts) => ts,
-            None => return Vec::new(),
+            // A file whose time cannot be had is read every time: a stamp
+            // that says nothing cannot say nothing changed.
+            stamp.is_some() && stamp == self.seen
         };
-        let day_end = day_start.saturating_add(SECS_PER_DAY);
-        self.events_for_range(day_start, day_end)
-    }
-
-    /// Get all event occurrences in a timestamp range, expanding recurring events.
-    pub fn events_for_range(&self, range_start: u64, range_end: u64) -> Vec<CalendarEvent> {
-        let mut result = Vec::new();
-
-        for event in &self.events {
-            if event.repeat.is_none() {
-                // Non-recurring: simple overlap check.
-                if event.start_timestamp < range_end && event.end_timestamp > range_start {
-                    result.push(event.clone());
-                }
-            } else {
-                // Recurring: expand occurrences within the range.
-                let occurrences = expand_recurrence(event, range_start, range_end);
-                result.extend(occurrences);
+        if unchanged {
+            return false;
+        }
+        match calendarstore::load(path) {
+            Ok(events) => {
+                self.events = events;
+                self.problem = None;
             }
+            Err(why) => self.problem = Some(why),
         }
-
-        result.sort_by_key(|e| e.start_timestamp);
-        result
-    }
-
-    /// Search events by title or description (case-insensitive substring match).
-    pub fn search(&self, query: &str) -> Vec<&CalendarEvent> {
-        let q = query.to_lowercase();
-        self.events
-            .iter()
-            .filter(|e| {
-                e.title.to_lowercase().contains(&q) || e.description.to_lowercase().contains(&q)
-            })
-            .collect()
-    }
-
-    /// Export all events to a simple text format.
-    ///
-    /// Format per event (lines separated by newlines, events by blank lines):
-    /// ```text
-    /// EVENT
-    /// title: <title>
-    /// start: <unix_timestamp>
-    /// end: <unix_timestamp>
-    /// all_day: <true|false>
-    /// repeat: <none|daily|weekly|monthly|yearly>
-    /// color: <hex>
-    /// description: <description>
-    /// ```
-    pub fn export_text(&self) -> String {
-        let mut out = String::new();
-        for (i, event) in self.events.iter().enumerate() {
-            if i > 0 {
-                out.push('\n');
-            }
-            out.push_str("EVENT\n");
-            out.push_str(&format!("title: {}\n", event.title));
-            out.push_str(&format!("start: {}\n", event.start_timestamp));
-            out.push_str(&format!("end: {}\n", event.end_timestamp));
-            out.push_str(&format!("all_day: {}\n", event.all_day));
-            let repeat_str = match event.repeat {
-                None => "none",
-                Some(Recurrence::Daily) => "daily",
-                Some(Recurrence::Weekly) => "weekly",
-                Some(Recurrence::Monthly) => "monthly",
-                Some(Recurrence::Yearly) => "yearly",
-            };
-            out.push_str(&format!("repeat: {repeat_str}\n"));
-            // Only when the user actually chose one. Emitting a `color:` line
-            // for an uncoloured event would make the file gain a colour it
-            // never had the first time it was saved, and from then on the
-            // event would be pinned to whatever the renderer's default happened
-            // to be on that day.
-            if let Some(c) = event.color {
-                out.push_str(&format!("color: {:02X}{:02X}{:02X}\n", c.r, c.g, c.b));
-            }
-            out.push_str(&format!("description: {}\n", event.description));
-        }
-        out
-    }
-
-    /// Import events from the text format produced by `export_text`.
-    /// Returns the number of events successfully imported.
-    pub fn import_text(&mut self, text: &str) -> usize {
-        // Counting what the store actually gained, rather than incrementing
-        // a tally beside each `add_event` call. The two `count += 1` this
-        // replaces sat at the ends of two different code paths — the
-        // mid-input flush and the final one — and had to be kept in step
-        // with the `add_event` calls they were meant to be counting.
-        let before = self.events.len();
-        let mut title = String::new();
-        let mut start: u64 = 0;
-        let mut end: u64 = 0;
-        let mut all_day = false;
-        let mut repeat: Option<Recurrence> = None;
-        let mut color: Option<Color> = None;
-        let mut description = String::new();
-        let mut in_event = false;
-
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed == "EVENT" {
-                // If we were already in an event, save the previous one.
-                if in_event {
-                    // A refused event is one the store did not gain, and the
-                    // returned count is derived from the store's length, so
-                    // ignoring the result here still reports it correctly.
-                    let _ = self.add_event(CalendarEvent {
-                        id: 0,
-                        title: core::mem::take(&mut title),
-                        start_timestamp: start,
-                        end_timestamp: end,
-                        all_day,
-                        repeat,
-                        color,
-                        description: core::mem::take(&mut description),
-                    });
-                }
-                // Reset for new event.
-                title = String::new();
-                start = 0;
-                end = 0;
-                all_day = false;
-                repeat = None;
-                color = None;
-                description = String::new();
-                in_event = true;
-                continue;
-            }
-
-            if !in_event {
-                continue;
-            }
-
-            if let Some(val) = trimmed.strip_prefix("title: ") {
-                title = val.to_string();
-            } else if let Some(val) = trimmed.strip_prefix("start: ") {
-                start = val.parse().unwrap_or(0);
-            } else if let Some(val) = trimmed.strip_prefix("end: ") {
-                end = val.parse().unwrap_or(0);
-            } else if let Some(val) = trimmed.strip_prefix("all_day: ") {
-                all_day = val == "true";
-            } else if let Some(val) = trimmed.strip_prefix("repeat: ") {
-                repeat = match val {
-                    "daily" => Some(Recurrence::Daily),
-                    "weekly" => Some(Recurrence::Weekly),
-                    "monthly" => Some(Recurrence::Monthly),
-                    "yearly" => Some(Recurrence::Yearly),
-                    _ => None,
-                };
-            } else if let Some(val) = trimmed.strip_prefix("color: ") {
-                // A malformed hex is not a colour either, so it stays
-                // `None` rather than silently becoming a default the file
-                // would then be rewritten with.
-                color = parse_hex_color(val);
-            } else if let Some(val) = trimmed.strip_prefix("description: ") {
-                description = val.to_string();
-            }
-        }
-
-        // Don't forget the last event.
-        if in_event {
-            // As above: not gaining the event is what the count measures.
-            let _ = self.add_event(CalendarEvent {
-                id: 0,
-                title,
-                start_timestamp: start,
-                end_timestamp: end,
-                all_day,
-                repeat,
-                color,
-                description,
-            });
-        }
-
-        self.events.len().saturating_sub(before)
-    }
-}
-
-impl Default for EventStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Read a colour as the calendar's file keeps it: six hex digits and no `#`
-/// ("89B4FA").
-///
-/// Checked as [`Color::from_hex_text`] checks, which the three
-/// `from_str_radix` calls this used to be did not: they take a leading `+`,
-/// so "+9B4FA" read as a colour.
-fn parse_hex_color(s: &str) -> Option<Color> {
-    if s.len() != 6 {
-        return None;
-    }
-    Color::from_hex_text(&format!("#{s}"))
-}
-
-/// A step of a series repeating `recurrence` from `anchor_start` that is at
-/// or before the first whose occurrence begins after `from` -- the first that
-/// can still end inside a range, `from` being the range's start less the
-/// event's length.
-///
-/// With `q` whole days from the anchor to `from`, the occurrence `k` steps on
-/// begins at most `k` periods of days after the anchor -- a month counted as
-/// 31 days and a year as 366, the most either can be -- so one whose `k`
-/// periods are `q` days or fewer begins at or before `from` and ends by the
-/// range's start. The first that can reach the range is past `q` days, which
-/// is a step past the one returned. A day is a day of these timestamps,
-/// which count wall-clock seconds.
-fn first_step(recurrence: Recurrence, anchor_start: u64, from: u64) -> i32 {
-    let days = from.saturating_sub(anchor_start) / SECS_PER_DAY;
-    let steps = match recurrence {
-        Recurrence::Daily => days,
-        Recurrence::Weekly => days / 7,
-        Recurrence::Monthly => days / 31,
-        Recurrence::Yearly => days / 366,
-    };
-    i32::try_from(steps).unwrap_or(i32::MAX)
-}
-
-/// Expand recurring event occurrences within a time range.
-///
-/// Generates synthetic `CalendarEvent` copies with adjusted timestamps
-/// for each occurrence that overlaps `[range_start, range_end)`.
-fn expand_recurrence(
-    event: &CalendarEvent,
-    range_start: u64,
-    range_end: u64,
-) -> Vec<CalendarEvent> {
-    let recurrence = match event.repeat {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
-
-    let duration = event.duration_secs();
-    let (orig_year, orig_month, orig_day, orig_hour, orig_min, orig_sec) =
-        timestamp_to_date(event.start_timestamp);
-
-    let mut results = Vec::new();
-
-    // Every occurrence is a fixed step from the *original* date, not from the
-    // one before it. That distinction is the whole reason the old walk needed
-    // an unclamped `day` carried alongside a `clamped_day`: stepping
-    // 31 January by one month and keeping the result gives 28 February and
-    // then 28 March, so "the 31st of every month" decays into "the 28th".
-    // Measuring from the anchor each time, `add_months` clamps for display
-    // without the series ever losing the day it was anchored on.
-    let anchor = Date::from_ymd(orig_year, orig_month, orig_day);
-
-    // Walked from the first step that can still reach the range -- no
-    // earlier one ends inside it -- and for at most `max_iterations` steps
-    // past it, against a series whose `repeat` names no end. Walked from the
-    // anchor, the bound cut a daily series off 1,000 days in, and every
-    // lookup paid for the series' whole life to reach its one day.
-    let max_iterations = 1000;
-    let first = first_step(
-        recurrence,
-        event.start_timestamp,
-        range_start.saturating_sub(duration),
-    );
-
-    for step in first..first.saturating_add(max_iterations) {
-        let occurrence = match recurrence {
-            Recurrence::Daily => anchor.add_days(step),
-            // `saturating_mul`: `step` is bounded by `max_iterations`, but the
-            // bound lives in the loop header rather than in this expression,
-            // which is exactly the arrangement that goes wrong when one of the
-            // two is edited.
-            Recurrence::Weekly => anchor.add_days(step.saturating_mul(7)),
-            Recurrence::Monthly => anchor.add_months(step),
-            Recurrence::Yearly => anchor.add_years(step),
-        };
-        let Some(occ_start) = timestamp_at(occurrence, orig_hour, orig_min, orig_sec) else {
-            break;
-        };
-
-        // Stop if we've passed the range.
-        if occ_start >= range_end {
-            break;
-        }
-
-        let occ_end = occ_start.saturating_add(duration);
-
-        // Include if there is overlap.
-        if occ_end > range_start {
-            results.push(CalendarEvent {
-                id: event.id,
-                title: event.title.clone(),
-                start_timestamp: occ_start,
-                end_timestamp: occ_end,
-                all_day: event.all_day,
-                repeat: event.repeat,
-                color: event.color,
-                description: event.description.clone(),
-            });
-        }
-    }
-
-    results
-}
-
-// ============================================================================
-// ReminderManager
-// ============================================================================
-
-/// Snooze duration options.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SnoozeDuration {
-    FiveMinutes,
-    FifteenMinutes,
-    ThirtyMinutes,
-    OneHour,
-}
-
-impl SnoozeDuration {
-    /// Duration in seconds.
-    pub fn secs(self) -> u64 {
-        match self {
-            Self::FiveMinutes => 5 * SECS_PER_MIN,
-            Self::FifteenMinutes => 15 * SECS_PER_MIN,
-            Self::ThirtyMinutes => 30 * SECS_PER_MIN,
-            Self::OneHour => SECS_PER_HOUR,
-        }
-    }
-}
-
-/// A reminder attached to an event.
-#[derive(Clone, Debug)]
-pub struct Reminder {
-    /// The event ID this reminder is for.
-    pub event_id: u64,
-    /// The event title (cached for display without needing the store).
-    pub event_title: String,
-    /// The timestamp when the reminder should fire (event_start - lead_minutes * 60).
-    pub fire_at: u64,
-    /// Whether this reminder has been dismissed.
-    pub dismissed: bool,
-}
-
-/// Manages reminders for calendar events.
-pub struct ReminderManager {
-    reminders: Vec<Reminder>,
-}
-
-impl ReminderManager {
-    pub fn new() -> Self {
-        Self {
-            reminders: Vec::new(),
-        }
-    }
-
-    /// Set a reminder N minutes before an event.
-    pub fn set_reminder(
-        &mut self,
-        event_id: u64,
-        event_title: &str,
-        event_start: u64,
-        lead_minutes: u32,
-    ) {
-        let fire_at =
-            event_start.saturating_sub((lead_minutes as u64).saturating_mul(SECS_PER_MIN));
-        self.reminders.push(Reminder {
-            event_id,
-            event_title: event_title.to_string(),
-            fire_at,
-            dismissed: false,
+        // Taken before the read, so a save landing during it is read next
+        // time. Trusted only once the file has gone unwritten for a while: a
+        // filesystem keeping whole seconds stamps a second save in the
+        // second of the first alike, and one of the same length -- a title
+        // with one letter changed -- would not be read until the next.
+        self.seen = stamp.filter(|&(_, written)| {
+            now.duration_since(written)
+                .is_ok_and(|age| age >= STAMP_SETTLES)
         });
+        true
     }
 
-    /// Check for reminders that are due at or before `now`.
-    /// Returns references to non-dismissed reminders whose fire time has passed.
-    pub fn due_reminders(&self, now: u64) -> Vec<&Reminder> {
-        self.reminders
+    /// Why the calendar's file did not read, the last time it was tried --
+    /// the events shown being the ones read before it -- if it did not.
+    #[must_use]
+    pub fn problem(&self) -> Option<&str> {
+        self.problem.as_deref()
+    }
+
+    /// The events on `year-month-day`, as the calendar program finds them
+    /// there: the ones lasting all day first, then by the time they begin,
+    /// then by title -- the order the popup lists and counts them in.
+    #[must_use]
+    pub fn on(&self, year: i32, month: u32, day: u32) -> Vec<&calendarstore::CalendarEvent> {
+        let date = calendarstore::Date::from_civil(Date::from_ymd(year, month, day));
+        let mut found: Vec<&calendarstore::CalendarEvent> = self
+            .events
             .iter()
-            .filter(|r| !r.dismissed && r.fire_at <= now)
-            .collect()
-    }
-
-    /// Snooze a reminder by pushing its fire time forward.
-    pub fn snooze(&mut self, event_id: u64, duration: SnoozeDuration) {
-        for r in &mut self.reminders {
-            if r.event_id == event_id && !r.dismissed {
-                r.fire_at = r.fire_at.saturating_add(duration.secs());
-                break;
-            }
-        }
-    }
-
-    /// Dismiss a reminder permanently.
-    ///
-    /// Dismisses *one* reminder -- the first live one for the event -- so that
-    /// waving away a day-before notice does not also cancel the hour-before
-    /// one. Calling it again retires the next.
-    ///
-    /// The `!r.dismissed` half of the test is what makes "again" work. Without
-    /// it the loop stops on the already-dismissed reminder it retired last
-    /// time, and every later call is a no-op: the event's second notice
-    /// becomes permanently un-dismissable and fires forever. `snooze` carries
-    /// the same guard for the same reason.
-    pub fn dismiss(&mut self, event_id: u64) {
-        for r in &mut self.reminders {
-            if r.event_id == event_id && !r.dismissed {
-                r.dismissed = true;
-                break;
-            }
-        }
-    }
-
-    /// Dismiss all reminders.
-    pub fn dismiss_all(&mut self) {
-        for r in &mut self.reminders {
-            r.dismissed = true;
-        }
-    }
-
-    /// Number of active (non-dismissed) reminders.
-    pub fn active_count(&self) -> usize {
-        self.reminders.iter().filter(|r| !r.dismissed).count()
-    }
-
-    /// All reminders (including dismissed).
-    pub fn all_reminders(&self) -> &[Reminder] {
-        &self.reminders
-    }
-
-    /// Remove all dismissed reminders from storage.
-    pub fn prune_dismissed(&mut self) {
-        self.reminders.retain(|r| !r.dismissed);
+            .filter(|event| event.occurs_on(date))
+            .collect();
+        found.sort_by(|a, b| {
+            (!a.all_day, a.start.time, &a.title).cmp(&(!b.all_day, b.start.time, &b.title))
+        });
+        found
     }
 }
 
-impl Default for ReminderManager {
-    fn default() -> Self {
-        Self::new()
+/// What marks an event on the calendar: the colour the user gave it, if they
+/// gave it one, and its category, in whose colour it is marked otherwise --
+/// kept as such rather than as a colour, so it is drawn in the palette of
+/// the moment it is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventMark {
+    /// The colour the user gave the event, if they did.
+    pub chosen: Option<Color>,
+    /// Its category.
+    pub category: calendarstore::EventCategory,
+}
+
+impl EventMark {
+    /// `event`'s mark.
+    #[must_use]
+    pub fn of(event: &calendarstore::CalendarEvent) -> Self {
+        Self {
+            chosen: event.color_override,
+            category: event.category,
+        }
+    }
+
+    /// Its colour in `p`: the one the user gave the event, else its
+    /// category's -- as the calendar program draws it
+    /// ([`calendarstore::CalendarEvent::effective_color`]).
+    #[must_use]
+    pub fn color(self, p: &Palette) -> Color {
+        self.chosen.unwrap_or_else(|| self.category.color(p))
+    }
+
+    /// Its colour drawn on today's disc, `disc`: a colour the user chose is
+    /// theirs, and stays there too (§1424: warned of where it is chosen,
+    /// never altered); a category's gives way to whatever reads against the
+    /// disc, which it may vanish into.
+    #[must_use]
+    pub fn on_disc(self, disc: Color) -> Color {
+        self.chosen.unwrap_or_else(|| readable_on(disc))
+    }
+}
+
+/// The user's events as tests across the shell make them -- the popup's,
+/// the calendar widget's, the shell's own.
+#[cfg(test)]
+pub(crate) mod testing {
+    /// A personal event `title`, from `hour` o'clock for an hour on
+    /// `(year, month, day)`, repeating as `recurrence`, in `color` where the
+    /// user gave it one.
+    #[must_use]
+    pub(crate) fn event(
+        title: &str,
+        (year, month, day): (i32, u32, u32),
+        hour: u32,
+        recurrence: calendarstore::RecurrenceRule,
+        color: Option<guitk::color::Color>,
+    ) -> calendarstore::CalendarEvent {
+        // Numbered from 1 and never twice, as the calendar program numbers
+        // them: its file refuses a 0, and two events of one number, whole.
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let date = calendarstore::Date { year, month, day };
+        let at = |hour: u32| calendarstore::Time {
+            hour: hour.min(23),
+            minute: 0,
+        };
+        calendarstore::CalendarEvent {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            title: title.to_owned(),
+            description: String::new(),
+            category: calendarstore::EventCategory::Personal,
+            start: calendarstore::DateTime::new(date, at(hour)),
+            end: calendarstore::DateTime::new(date, at(hour.saturating_add(1))),
+            all_day: false,
+            recurrence,
+            reminder: calendarstore::Reminder::None,
+            location: None,
+            color_override: color,
+        }
+    }
+}
+
+/// What the event card says of when `event` begins -- "All day", or its
+/// time -- and tools are told of it: one answer for both.
+fn event_time_label(event: &calendarstore::CalendarEvent) -> String {
+    if event.all_day {
+        "All day".to_owned()
+    } else {
+        format!(
+            "{:02}:{:02}",
+            event.start.time.hour, event.start.time.minute
+        )
     }
 }
 
@@ -1427,9 +1065,8 @@ pub struct GlanceDay {
     pub today: bool,
     /// How many events it has.
     pub events: usize,
-    /// The colour its first event was given, if it has an event and that one
-    /// was given a colour: its dot's colour, as on the popup.
-    pub event_color: Option<Color>,
+    /// Its first event's mark, if it has an event: its dot, as on the popup.
+    pub mark: Option<EventMark>,
 }
 
 impl GlanceDay {
@@ -2009,14 +1646,14 @@ impl CalendarView {
         scale: f32,
         px: f32,
         py: f32,
-        store: &EventStore,
+        agenda: &Agenda,
     ) -> Option<CalendarHit> {
         if !self.visible {
             return None;
         }
         match self.mode {
             CalendarViewMode::Month => {
-                self.hit_test_month(&MonthLayout::new(self, x, y, scale), px, py, store)
+                self.hit_test_month(&MonthLayout::new(self, x, y, scale), px, py, agenda)
             }
             CalendarViewMode::Year => Self::hit_test_year(&YearLayout::new(x, y, scale), px, py),
         }
@@ -2027,13 +1664,13 @@ impl CalendarView {
         layout: &MonthLayout,
         px: f32,
         py: f32,
-        store: &EventStore,
+        agenda: &Agenda,
     ) -> Option<CalendarHit> {
         // The event card is tested first because it is drawn last and hangs
         // *below* the frame: a point inside it is not inside `frame`, and
         // falling through to `None` would dismiss the popup on a click aimed at
         // the very list the click before it opened.
-        if let Some(card) = self.detail_rect(layout, store)
+        if let Some(card) = self.detail_rect(layout, agenda)
             && card.contains(px, py)
         {
             return Some(CalendarHit::Panel);
@@ -2080,9 +1717,9 @@ impl CalendarView {
     }
 
     /// Where the event card is, if one is showing.
-    fn detail_rect(&self, layout: &MonthLayout, store: &EventStore) -> Option<Rect> {
+    fn detail_rect(&self, layout: &MonthLayout, agenda: &Agenda) -> Option<Rect> {
         let (year, month, day) = self.selected_date?;
-        let count = store.events_for_date(year, month, day).len();
+        let count = agenda.on(year, month, day).len();
         if count == 0 {
             return None;
         }
@@ -2185,26 +1822,26 @@ impl CalendarView {
     }
 
     /// The month today is in -- today as it is at `utc_now` in `tz` -- at a
-    /// glance, its days' events from `store`: what the desktop's calendar
-    /// widget shows. Laid out as [`generate_grid`](Self::generate_grid) lays
-    /// out the popup's month, from the same week start, so the two cannot
-    /// disagree about which day is where; the popup's own month, today and
-    /// choice are left as they are.
+    /// glance, its days' events from `agenda`: what the desktop's calendar
+    /// widget shows. Laid out as
+    /// [`generate_grid`](Self::generate_grid) lays out the popup's month, from
+    /// the same week start, so the two cannot disagree about which day is
+    /// where; the popup's own month, today and choice are left as they are.
     #[must_use]
-    pub fn month_glance(&self, utc_now: u64, tz: &Tz, store: &EventStore) -> MonthGlance {
+    pub fn month_glance(&self, utc_now: u64, tz: &Tz, agenda: &Agenda) -> MonthGlance {
         let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_now, tz));
         let days = Date::from_ymd(year, month, 1)
             .month_grid(self.week_start())
             .map(|date| {
                 let (y, m, d) = date.ymd();
-                let events = store.events_for_date(y, m, d);
+                let events = agenda.on(y, m, d);
                 GlanceDay {
                     day: d,
                     name: day_name(y, m, d),
                     current_month: (y, m) == (year, month),
                     today: (y, m, d) == (year, month, day),
                     events: events.len(),
-                    event_color: events.first().and_then(|event| event.color),
+                    mark: events.first().map(|event| EventMark::of(event)),
                 }
             })
             .collect();
@@ -2269,14 +1906,14 @@ impl CalendarView {
         y: f32,
         scale: f32,
         utc_now: u64,
-        store: &EventStore,
+        agenda: &Agenda,
     ) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
 
         match self.mode {
-            CalendarViewMode::Month => self.render_month_view(p, x, y, scale, utc_now, store),
+            CalendarViewMode::Month => self.render_month_view(p, x, y, scale, utc_now, agenda),
             CalendarViewMode::Year => self.render_year_view(p, x, y, scale),
         }
     }
@@ -2288,7 +1925,7 @@ impl CalendarView {
         y: f32,
         scale: f32,
         utc_now: u64,
-        store: &EventStore,
+        agenda: &Agenda,
     ) -> Vec<RenderCommand> {
         let layout = MonthLayout::new(self, x, y, scale);
         let frame = layout.frame;
@@ -2366,12 +2003,12 @@ impl CalendarView {
             }
         }
         for (index, cell) in grid.iter().enumerate() {
-            self.render_day_cell(p, &mut cmds, &layout, index, cell, store);
+            self.render_day_cell(p, &mut cmds, &layout, index, cell, agenda);
         }
 
         // Event card for the selected date.
         if let Some((sy, sm, sd)) = self.selected_date {
-            let events = store.events_for_date(sy, sm, sd);
+            let events = agenda.on(sy, sm, sd);
             if !events.is_empty() {
                 let card = layout.detail(events.len());
                 Self::render_event_detail(p, &mut cmds, &layout, card, sm, sd, &events);
@@ -2481,7 +2118,7 @@ impl CalendarView {
         layout: &MonthLayout,
         index: usize,
         cell: &GridCell,
-        store: &EventStore,
+        agenda: &Agenda,
     ) {
         let rect = layout.cell(index);
         let is_today =
@@ -2554,18 +2191,19 @@ impl CalendarView {
         // fixed LAVENDER that never consulted the event at all, so a colour
         // the user set in the calendar file was parsed, stored and written
         // back out faithfully while changing nothing they could see.
-        let todays_events = store.events_for_date(cell.year, cell.month, cell.day);
+        let todays_events = agenda.on(cell.year, cell.month, cell.day);
         if let Some(first) = todays_events.first() {
             let dot = layout.px(DOT_RADIUS);
             // An event the user coloured keeps that colour everywhere, even
             // on today's disc: it is their data and the calendar does not get
-            // to overrule it. An *uncoloured* event has no such claim, so on
-            // the disc it becomes whatever reads against the accent rather
-            // than a lavender that may vanish into it.
-            let dot_color = match (first.color, is_today) {
-                (Some(chosen), _) => chosen,
-                (None, true) => readable_on(today_disc),
-                (None, false) => p.lavender,
+            // to overrule it. One in its category's colour has no such claim,
+            // so on the disc it becomes whatever reads against the accent
+            // rather than a colour that may vanish into it.
+            let mark = EventMark::of(first);
+            let dot_color = if is_today {
+                mark.on_disc(today_disc)
+            } else {
+                mark.color(p)
             };
             cmds.push(RenderCommand::FillRect {
                 x: rect.x + (rect.w - dot * 2.0) / 2.0,
@@ -2585,7 +2223,7 @@ impl CalendarView {
         card: Rect,
         month: u32,
         day: u32,
-        events: &[CalendarEvent],
+        events: &[&calendarstore::CalendarEvent],
     ) {
         let pad = layout.px(PADDING);
         let row_h = layout.px(EVENT_ROW_HEIGHT);
@@ -2634,20 +2272,15 @@ impl CalendarView {
                 y: ey + layout.px(4.0),
                 width: layout.px(3.0),
                 height: (row_h - layout.px(8.0)).max(0.0),
-                color: event.dot_color(p),
+                color: EventMark::of(event).color(p),
                 corner_radii: CornerRadii::all(layout.px(1.5)),
             });
 
             // Time.
-            let (_, _, _, h, m, _) = timestamp_to_date(event.start_timestamp);
             cmds.push(RenderCommand::Text {
                 x: card.x + pad + layout.px(10.0),
                 y: ey + layout.px(6.0),
-                text: if event.all_day {
-                    "All day".to_string()
-                } else {
-                    format!("{h:02}:{m:02}")
-                },
+                text: event_time_label(event),
                 color: time_ink,
                 font_size: layout.px(EVENT_TIME_FONT),
                 font_weight: FontWeightHint::Regular,
@@ -3248,7 +2881,7 @@ mod tests {
             ..ClockDisplay::new()
         };
         for (hour, h12, ampm) in expected {
-            let ts = hour * SECS_PER_HOUR;
+            let ts = hour * 3600;
             let text = clock.format_time(ts, &Tz::UTC);
             assert_eq!(text, format!("{h12}:00 {ampm}"), "hour {hour}");
         }
@@ -3359,761 +2992,6 @@ mod tests {
     }
 
     // ========================================================================
-    // EventStore CRUD tests
-    // ========================================================================
-
-    /// Add an event, insisting the store could mint an ID for it.
-    ///
-    /// `add_event` returns an `Option` now, and a test that wrote
-    /// `let _ = store.add_event(..)` at each of its twenty-odd setup sites
-    /// would be discarding exactly the signal those sites depend on.
-    fn add(store: &mut EventStore, event: CalendarEvent) -> u64 {
-        store
-            .add_event(event)
-            .expect("a store with a handful of events can still mint an ID")
-    }
-
-    fn make_event(title: &str, start: u64, end: u64) -> CalendarEvent {
-        CalendarEvent {
-            id: 0,
-            title: title.to_string(),
-            start_timestamp: start,
-            end_timestamp: end,
-            all_day: false,
-            repeat: None,
-            // No colour: the overwhelming majority of these tests do not care
-            // what an event is drawn in, and `None` is now the honest way to
-            // say so. It also makes the default path — the palette's own
-            // lavender — the one most of them exercise.
-            color: None,
-            description: String::new(),
-        }
-    }
-
-    #[test]
-    fn event_store_add_assigns_ids() {
-        let mut store = EventStore::new();
-        let id1 = add(&mut store, make_event("A", 100, 200));
-        let id2 = add(&mut store, make_event("B", 300, 400));
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
-        assert_eq!(store.len(), 2);
-    }
-
-    #[test]
-    fn event_store_remove() {
-        let mut store = EventStore::new();
-        let id = add(&mut store, make_event("A", 100, 200));
-        assert!(store.remove_event(id));
-        assert!(store.is_empty());
-        // Removing again should return false.
-        assert!(!store.remove_event(id));
-    }
-
-    #[test]
-    fn event_store_update() {
-        let mut store = EventStore::new();
-        let id = add(&mut store, make_event("Old Title", 100, 200));
-        let updated = store.update_event(id, |e| {
-            e.title = "New Title".to_string();
-        });
-        assert!(updated);
-        assert_eq!(store.get_event(id).expect("exists").title, "New Title");
-    }
-
-    #[test]
-    fn event_store_update_nonexistent() {
-        let mut store = EventStore::new();
-        assert!(!store.update_event(999, |_| {}));
-    }
-
-    /// `event_store_update_nonexistent` asks an *empty* store for a missing
-    /// ID, and an empty store answers "not found" to almost any predicate --
-    /// including a wrong one. Found by the reintroduction harness (module 86,
-    /// defect `E`): swapping the lookup's `==` for `>=` left the whole suite
-    /// green, because nothing ever asked a *populated* store for an ID it no
-    /// longer held.
-    ///
-    /// That is the state a delete leaves behind, and it is reached by the
-    /// ordinary sequence of deleting an event while its editor is open: the
-    /// edit would then silently land on whichever event happened to be next in
-    /// the list, overwriting a different appointment than the one on screen.
-    #[test]
-    fn an_update_to_a_deleted_event_does_not_land_on_a_later_one() {
-        let mut store = EventStore::new();
-        let first = add(&mut store, make_event("Dentist", 100, 200));
-        let second = add(&mut store, make_event("Standup", 300, 400));
-        assert!(store.remove_event(first));
-
-        // `first` is gone, but `second` -- whose ID is higher -- is not, and
-        // it is now the only event in the list.
-        let mut ran = false;
-        assert!(
-            !store.update_event(first, |e| {
-                ran = true;
-                e.title = "Clobbered".to_string();
-            }),
-            "updating a deleted event must report that it did not happen"
-        );
-        assert!(!ran, "the closure must not run against some other event");
-        assert_eq!(
-            store.get_event(second).expect("still there").title,
-            "Standup"
-        );
-    }
-
-    #[test]
-    fn event_store_get() {
-        let mut store = EventStore::new();
-        let id = add(&mut store, make_event("Test", 100, 200));
-        assert!(store.get_event(id).is_some());
-        assert!(store.get_event(999).is_none());
-    }
-
-    #[test]
-    fn events_for_date_non_recurring() {
-        let mut store = EventStore::new();
-        // Event on 2024-06-15 at 10:00-11:00 UTC.
-        let start = date_to_timestamp(2024, 6, 15, 10, 0, 0).expect("valid");
-        let end = start + 3600;
-        add(&mut store, make_event("Meeting", start, end));
-
-        let found = store.events_for_date(2024, 6, 15);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].title, "Meeting");
-
-        // Different day should find nothing.
-        let not_found = store.events_for_date(2024, 6, 16);
-        assert!(not_found.is_empty());
-    }
-
-    #[test]
-    fn events_for_date_spanning_midnight() {
-        let mut store = EventStore::new();
-        // Event from June 15 23:00 to June 16 01:00.
-        let start = date_to_timestamp(2024, 6, 15, 23, 0, 0).expect("valid");
-        let end = date_to_timestamp(2024, 6, 16, 1, 0, 0).expect("valid");
-        add(&mut store, make_event("Late Night", start, end));
-
-        // Should appear on both days.
-        assert_eq!(store.events_for_date(2024, 6, 15).len(), 1);
-        assert_eq!(store.events_for_date(2024, 6, 16).len(), 1);
-    }
-
-    #[test]
-    fn events_for_range() {
-        let mut store = EventStore::new();
-        let ts1 = date_to_timestamp(2024, 6, 10, 9, 0, 0).expect("valid");
-        let ts2 = date_to_timestamp(2024, 6, 15, 9, 0, 0).expect("valid");
-        let ts3 = date_to_timestamp(2024, 6, 20, 9, 0, 0).expect("valid");
-        add(&mut store, make_event("A", ts1, ts1 + 3600));
-        add(&mut store, make_event("B", ts2, ts2 + 3600));
-        add(&mut store, make_event("C", ts3, ts3 + 3600));
-
-        let range_start = date_to_timestamp(2024, 6, 12, 0, 0, 0).expect("valid");
-        let range_end = date_to_timestamp(2024, 6, 18, 0, 0, 0).expect("valid");
-        let found = store.events_for_range(range_start, range_end);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].title, "B");
-    }
-
-    /// `events_for_range` treats its range as half-open, `[start, end)`, and
-    /// both ends of that had escaped the suite. Found by the reintroduction
-    /// harness (module 86, defects `G` and `H`).
-    ///
-    /// Every other fixture in this file starts its events at 09:00, 10:00,
-    /// 14:00 or 23:00 and asks about ranges that end at midnight, so no event
-    /// ever sat *on* a range boundary and neither comparison was ever
-    /// exercised at equality. Both could be relaxed to `<=`/`>=` with the
-    /// whole suite still green.
-    ///
-    /// It is not a hypothetical shape. `events_for_date` hands this function a
-    /// range of exactly one midnight to the next, and a midnight-anchored
-    /// event -- an all-day event, or anything a user typed `00:00` into -- sits
-    /// precisely on it. Relaxing either end draws that event on two days:
-    /// the day it belongs to and the neighbouring one.
-    #[test]
-    fn the_range_is_half_open_at_both_ends() {
-        let mut store = EventStore::new();
-        let range_start = date_to_timestamp(2024, 6, 12, 0, 0, 0).expect("valid");
-        let range_end = date_to_timestamp(2024, 6, 13, 0, 0, 0).expect("valid");
-
-        // Abutting the range exactly, on each side. Neither overlaps it.
-        add(
-            &mut store,
-            make_event(
-                "ends where the range begins",
-                range_start - 3600,
-                range_start,
-            ),
-        );
-        add(
-            &mut store,
-            make_event("begins where the range ends", range_end, range_end + 3600),
-        );
-        // And two that overlap by a single second, which must be kept. Without
-        // these a "fix" that made *both* ends exclusive would pass.
-        add(
-            &mut store,
-            make_event(
-                "ends one second inside",
-                range_start - 3600,
-                range_start + 1,
-            ),
-        );
-        add(
-            &mut store,
-            make_event("begins one second inside", range_end - 1, range_end + 3600),
-        );
-
-        let found = store.events_for_range(range_start, range_end);
-        let titles: Vec<&str> = found.iter().map(|e| e.title.as_str()).collect();
-        assert_eq!(
-            titles,
-            ["ends one second inside", "begins one second inside"],
-            "the range must include exactly the events that overlap its interior"
-        );
-    }
-
-    /// The same half-open rule for the *recurring* branch, which reaches the
-    /// range end through `expand_recurrence`'s loop guard rather than through
-    /// the overlap test above. Found by the reintroduction harness (module 86,
-    /// defect `P`).
-    ///
-    /// The recurrence fixtures all anchor at 10:00 or 14:00 and ask about
-    /// ranges ending at midnight, so no occurrence ever started exactly on a
-    /// range end and the guard could be relaxed from `>=` to `>` unnoticed.
-    /// Anchoring at midnight is what makes the two differ -- and a daily
-    /// all-day event is anchored at midnight by construction, so it would have
-    /// shown one extra day at the end of every range it was drawn in.
-    #[test]
-    fn a_recurring_series_is_half_open_at_the_end_too() {
-        let mut store = EventStore::new();
-        let start = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Midnight Daily".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + 1800,
-                all_day: false,
-                repeat: Some(Recurrence::Daily),
-                color: None,
-                description: String::new(),
-            },
-        );
-
-        // June 1-5: the range ends at the 6th's midnight, which is exactly
-        // when the sixth occurrence begins. Five, not six.
-        let range_start = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
-        let range_end = date_to_timestamp(2024, 6, 6, 0, 0, 0).expect("valid");
-        let found = store.events_for_range(range_start, range_end);
-        assert_eq!(
-            found.len(),
-            5,
-            "an occurrence starting exactly at the range end is outside it"
-        );
-
-        // And the day cell that occurrence *does* belong to still shows it,
-        // so the guard cannot be satisfied by dropping the occurrence entirely.
-        assert_eq!(store.events_for_date(2024, 6, 6).len(), 1);
-    }
-
-    /// **A series older than a thousand steps is still found.** The walk ran
-    /// from the series' first date and stopped after 1,000 occurrences, so a
-    /// daily event begun 1,000 days before the day asked about -- under three
-    /// years -- had vanished from every day after; and each lookup walked the
-    /// whole life of the series to reach its day, 42 times over for a month
-    /// drawn. Each kind, anchored well past a thousand of its steps back, is
-    /// found once on the day it falls on, not on the day before, and with
-    /// the time of day it was set for. An occurrence that began the day
-    /// before and runs into the day asked about is found there too.
-    #[test]
-    fn a_series_older_than_a_thousand_steps_is_still_found() {
-        let at = |y, m, d, h| date_to_timestamp(y, m, d, h, 0, 0).expect("valid");
-        // Timestamps begin in 1970, so a monthly or yearly series a thousand
-        // steps old is asked about in the future.
-        for (repeat, anchored, asked, missed) in [
-            (
-                Recurrence::Daily,
-                (2018, 3, 1),
-                (2024, 6, 12),
-                (2024, 6, 11),
-            ),
-            // Both Wednesdays.
-            (
-                Recurrence::Weekly,
-                (1980, 1, 2),
-                (2024, 6, 12),
-                (2024, 6, 11),
-            ),
-            (
-                Recurrence::Monthly,
-                (1970, 1, 12),
-                (2060, 6, 12),
-                (2060, 6, 11),
-            ),
-            // Long enough that its leap days, counted as ordinary years,
-            // would have entered it a year late.
-            (
-                Recurrence::Yearly,
-                (1970, 6, 12),
-                (3600, 6, 12),
-                (3600, 6, 11),
-            ),
-        ] {
-            let mut store = EventStore::new();
-            let start = at(anchored.0, anchored.1, anchored.2, 9);
-            add(
-                &mut store,
-                CalendarEvent {
-                    id: 0,
-                    title: format!("{repeat:?}"),
-                    start_timestamp: start,
-                    end_timestamp: start + 1800,
-                    all_day: false,
-                    repeat: Some(repeat),
-                    color: None,
-                    description: String::new(),
-                },
-            );
-            let found = store.events_for_date(asked.0, asked.1, asked.2);
-            assert_eq!(found.len(), 1, "{repeat:?} on its day");
-            assert_eq!(
-                found[0].start_timestamp,
-                at(asked.0, asked.1, asked.2, 9),
-                "{repeat:?} at its hour"
-            );
-            // A daily series is on the day before as well, of course.
-            assert!(
-                repeat == Recurrence::Daily
-                    || store
-                        .events_for_date(missed.0, missed.1, missed.2)
-                        .is_empty(),
-                "{repeat:?} not on the day before"
-            );
-        }
-
-        // Sixty hours long, every day: each day holds its own occurrence and
-        // the ends of the two before -- the one begun two days earlier still
-        // running at nine in the evening.
-        let mut store = EventStore::new();
-        let start = at(2018, 3, 1, 9);
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Long".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + 60 * 3600,
-                all_day: false,
-                repeat: Some(Recurrence::Daily),
-                color: None,
-                description: String::new(),
-            },
-        );
-        let found = store.events_for_date(2024, 6, 12);
-        let starts: Vec<u64> = found.iter().map(|e| e.start_timestamp).collect();
-        assert_eq!(
-            starts,
-            [at(2024, 6, 10, 9), at(2024, 6, 11, 9), at(2024, 6, 12, 9)]
-        );
-    }
-
-    /// The sort at the end of `events_for_range` had no test at all: every
-    /// other caller either stores its events already in order or gets back a
-    /// single one, so deleting the sort outright left the whole suite green.
-    /// Found by the reintroduction harness (module 82, defect `O`).
-    ///
-    /// Order is not cosmetic here -- the day cells, the detail card and the
-    /// `N more` overflow all render the list front-to-back, so an unsorted
-    /// result shows a 5pm meeting above a 9am one and hides the *later* event
-    /// behind the overflow when the cell runs out of room.
-    #[test]
-    fn events_come_back_in_time_order_whatever_order_they_were_stored_in() {
-        let mut store = EventStore::new();
-        let ts = |d, h| date_to_timestamp(2024, 6, d, h, 0, 0).expect("valid");
-        // Deliberately stored latest-first, and interleaved across days so
-        // that neither insertion order nor a per-day grouping would pass.
-        for (title, day, hour) in [
-            ("evening", 15, 17),
-            ("morning", 14, 9),
-            ("noon", 15, 12),
-            ("dawn", 14, 6),
-        ] {
-            let start = ts(day, hour);
-            add(&mut store, make_event(title, start, start + 3600));
-        }
-
-        let found = store.events_for_range(ts(14, 0), ts(16, 0));
-        let titles: Vec<&str> = found.iter().map(|e| e.title.as_str()).collect();
-        assert_eq!(titles, ["dawn", "morning", "noon", "evening"]);
-
-        // Stated as an invariant too, so a future event added to the fixture
-        // cannot quietly weaken the assertion above into a shorter list.
-        assert!(
-            found
-                .windows(2)
-                .all(|w| w[0].start_timestamp <= w[1].start_timestamp),
-            "the result must be non-decreasing in start time"
-        );
-    }
-
-    #[test]
-    fn search_case_insensitive() {
-        let mut store = EventStore::new();
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Team Meeting".to_string(),
-                start_timestamp: 1000,
-                end_timestamp: 2000,
-                all_day: false,
-                repeat: None,
-                color: None,
-                description: "Weekly standup with the engineering team".to_string(),
-            },
-        );
-        add(&mut store, make_event("Lunch", 3000, 4000));
-
-        let results = store.search("meeting");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Team Meeting");
-
-        let results2 = store.search("engineering");
-        assert_eq!(results2.len(), 1);
-
-        let results3 = store.search("xyz");
-        assert!(results3.is_empty());
-
-        // Every query above is already lower-case, which makes them blind to
-        // the half of the rule that lower-cases the *query*: the haystack is
-        // lower-cased too, so dropping `query.to_lowercase()` leaves all three
-        // passing. A capital in the query is the only thing that tells the two
-        // halves apart -- and a user typing a proper noun is the ordinary way
-        // one arrives.
-        assert_eq!(store.search("MEETING").len(), 1, "an upper-case query");
-        assert_eq!(store.search("Team").len(), 1, "a capitalised query");
-        assert_eq!(store.search("ENGINEERING").len(), 1, "in the description");
-    }
-
-    // ========================================================================
-    // Recurring event expansion tests
-    // ========================================================================
-
-    #[test]
-    fn recurring_daily() {
-        let mut store = EventStore::new();
-        let start = date_to_timestamp(2024, 6, 1, 10, 0, 0).expect("valid");
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Daily Standup".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + 1800, // 30 min
-                all_day: false,
-                repeat: Some(Recurrence::Daily),
-                color: None,
-                description: String::new(),
-            },
-        );
-
-        // Check June 1-5 (5 days).
-        let range_start = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
-        let range_end = date_to_timestamp(2024, 6, 6, 0, 0, 0).expect("valid");
-        let events = store.events_for_range(range_start, range_end);
-        assert_eq!(events.len(), 5);
-    }
-
-    #[test]
-    fn recurring_weekly() {
-        let mut store = EventStore::new();
-        // Starting on a Monday (2024-06-03).
-        let start = date_to_timestamp(2024, 6, 3, 14, 0, 0).expect("valid");
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Weekly Review".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + 3600,
-                all_day: false,
-                repeat: Some(Recurrence::Weekly),
-                color: None,
-                description: String::new(),
-            },
-        );
-
-        // Check entire month of June.
-        let range_start = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
-        let range_end = date_to_timestamp(2024, 7, 1, 0, 0, 0).expect("valid");
-        let events = store.events_for_range(range_start, range_end);
-        // June 3, 10, 17, 24 = 4 occurrences.
-        assert_eq!(events.len(), 4);
-    }
-
-    #[test]
-    fn recurring_monthly() {
-        let mut store = EventStore::new();
-        let start = date_to_timestamp(2024, 1, 15, 9, 0, 0).expect("valid");
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Monthly Report".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + 7200,
-                all_day: false,
-                repeat: Some(Recurrence::Monthly),
-                color: None,
-                description: String::new(),
-            },
-        );
-
-        // Check Jan-June (6 months).
-        let range_start = date_to_timestamp(2024, 1, 1, 0, 0, 0).expect("valid");
-        let range_end = date_to_timestamp(2024, 7, 1, 0, 0, 0).expect("valid");
-        let events = store.events_for_range(range_start, range_end);
-        assert_eq!(events.len(), 6);
-
-        // A count alone does not say the series is *monthly*. Stepping a flat
-        // 30 days also yields six hits across these six months -- it just
-        // walks them off the 15th, one or two days further each time. Since
-        // landing on the same day of each month is the entire point of
-        // anchoring the recurrence rather than repeatedly adding to the
-        // previous occurrence, that is the part worth asserting.
-        for (i, e) in events.iter().enumerate() {
-            let (year, month, day, hour, ..) = timestamp_to_date(e.start_timestamp);
-            assert_eq!(
-                (year, month, day, hour),
-                (2024, u32::try_from(i + 1).expect("month fits"), 15, 9),
-                "occurrence {i} should be the 15th at 09:00"
-            );
-        }
-    }
-
-    #[test]
-    fn recurring_monthly_day31_clamped() {
-        let mut store = EventStore::new();
-        // Start on Jan 31.
-        let start = date_to_timestamp(2024, 1, 31, 10, 0, 0).expect("valid");
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Payday".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + 3600,
-                all_day: false,
-                repeat: Some(Recurrence::Monthly),
-                color: None,
-                description: String::new(),
-            },
-        );
-
-        // February 2024 has 29 days; the event should appear on Feb 29.
-        let feb_events = store.events_for_date(2024, 2, 29);
-        assert_eq!(feb_events.len(), 1);
-
-        // Should also appear on March 31.
-        let mar_events = store.events_for_date(2024, 3, 31);
-        assert_eq!(mar_events.len(), 1);
-
-        // April has 30 days; should appear on April 30.
-        let apr_events = store.events_for_date(2024, 4, 30);
-        assert_eq!(apr_events.len(), 1);
-    }
-
-    #[test]
-    fn recurring_yearly() {
-        let mut store = EventStore::new();
-        let start = date_to_timestamp(2020, 3, 14, 0, 0, 0).expect("valid");
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Pi Day".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + SECS_PER_DAY,
-                all_day: true,
-                repeat: Some(Recurrence::Yearly),
-                color: None,
-                description: String::new(),
-            },
-        );
-
-        // Should appear in 2024.
-        let found = store.events_for_date(2024, 3, 14);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].title, "Pi Day");
-
-        // Should not appear on other dates.
-        assert!(store.events_for_date(2024, 3, 15).is_empty());
-    }
-
-    // ========================================================================
-    // ReminderManager tests
-    // ========================================================================
-
-    #[test]
-    fn reminder_set_and_due() {
-        let mut rm = ReminderManager::new();
-        // Event at t=1000, reminder 15 minutes before = t=100.
-        rm.set_reminder(1, "Meeting", 1000, 15);
-
-        // At t=99, not yet due.
-        assert!(rm.due_reminders(99).is_empty());
-
-        // At t=100, due.
-        let due = rm.due_reminders(100);
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].event_id, 1);
-
-        // At t=500, still due (hasn't been dismissed).
-        assert_eq!(rm.due_reminders(500).len(), 1);
-    }
-
-    #[test]
-    fn reminder_dismiss() {
-        let mut rm = ReminderManager::new();
-        rm.set_reminder(1, "Meeting", 1000, 15);
-        rm.dismiss(1);
-
-        // Should no longer appear in due list.
-        assert!(rm.due_reminders(2000).is_empty());
-        assert_eq!(rm.active_count(), 0);
-    }
-
-    #[test]
-    fn reminder_snooze() {
-        let mut rm = ReminderManager::new();
-        rm.set_reminder(1, "Meeting", 1000, 15);
-        // fire_at = 1000 - 900 = 100.
-
-        // Snooze 5 minutes (300 seconds).
-        rm.snooze(1, SnoozeDuration::FiveMinutes);
-        // New fire_at = 100 + 300 = 400.
-        assert!(rm.due_reminders(399).is_empty());
-        assert_eq!(rm.due_reminders(400).len(), 1);
-    }
-
-    #[test]
-    fn reminder_snooze_durations() {
-        assert_eq!(SnoozeDuration::FiveMinutes.secs(), 300);
-        assert_eq!(SnoozeDuration::FifteenMinutes.secs(), 900);
-        assert_eq!(SnoozeDuration::ThirtyMinutes.secs(), 1800);
-        assert_eq!(SnoozeDuration::OneHour.secs(), 3600);
-    }
-
-    #[test]
-    fn reminder_dismiss_all() {
-        let mut rm = ReminderManager::new();
-        rm.set_reminder(1, "A", 1000, 10);
-        rm.set_reminder(2, "B", 2000, 10);
-        rm.set_reminder(3, "C", 3000, 10);
-        assert_eq!(rm.active_count(), 3);
-
-        rm.dismiss_all();
-        assert_eq!(rm.active_count(), 0);
-        assert!(rm.due_reminders(5000).is_empty());
-    }
-
-    #[test]
-    fn reminder_prune_dismissed() {
-        let mut rm = ReminderManager::new();
-        rm.set_reminder(1, "A", 1000, 10);
-        rm.set_reminder(2, "B", 2000, 10);
-        rm.dismiss(1);
-        assert_eq!(rm.all_reminders().len(), 2);
-
-        rm.prune_dismissed();
-        assert_eq!(rm.all_reminders().len(), 1);
-        assert_eq!(rm.all_reminders()[0].event_id, 2);
-    }
-
-    #[test]
-    fn multiple_reminders_same_event() {
-        let mut rm = ReminderManager::new();
-        rm.set_reminder(1, "Meeting", 1000, 15);
-        rm.set_reminder(1, "Meeting", 1000, 5);
-
-        // Both should fire at or before t=1000.
-        let due = rm.due_reminders(1000);
-        assert_eq!(due.len(), 2);
-    }
-
-    /// `multiple_reminders_same_event` establishes that two reminders on one
-    /// event -- a day-before and an hour-before -- is a supported arrangement,
-    /// but it never dismisses either, and every fixture that *does* dismiss
-    /// has one reminder per event. So `dismiss`'s `break` had nothing holding
-    /// it in place: removing it, and cancelling the whole event's reminders at
-    /// a stroke, left the suite green. Found by the reintroduction harness
-    /// (module 86, defect `W`).
-    ///
-    /// The two-reminder arrangement is the one where it matters. Waving away
-    /// the day-before notice must not also cancel the hour-before one, which
-    /// is the notice that actually gets the user to the meeting.
-    #[test]
-    fn dismissing_one_reminder_leaves_the_others_for_that_event_alone() {
-        let mut rm = ReminderManager::new();
-        rm.set_reminder(1, "Meeting", 100_000, 24 * 60);
-        rm.set_reminder(1, "Meeting", 100_000, 60);
-        assert_eq!(rm.active_count(), 2);
-
-        rm.dismiss(1);
-        assert_eq!(
-            rm.active_count(),
-            1,
-            "dismissing one notice must not cancel the event's other notices"
-        );
-
-        // And the survivor is the one that had not been dealt with: the
-        // remaining reminder is the later of the two.
-        let due = rm.due_reminders(100_000);
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].fire_at, 100_000 - 3600);
-
-        // A second dismissal reaches it, so `dismiss` is still able to
-        // retire every reminder one call at a time.
-        rm.dismiss(1);
-        assert_eq!(rm.active_count(), 0);
-    }
-
-    /// `snooze` skips dismissed reminders, and nothing tested that: no fixture
-    /// dismissed a reminder and then snoozed the same event. Found by the
-    /// reintroduction harness (module 86, defect `V`).
-    ///
-    /// The filter is load-bearing because the loop stops at its first match.
-    /// A dismissed reminder standing earlier in the list would swallow the
-    /// snooze, leaving the live one exactly where it was -- so the user
-    /// presses "snooze 5 minutes" and the alert reappears immediately, with no
-    /// way to make it stop short of dismissing it.
-    #[test]
-    fn a_snooze_moves_the_live_reminder_not_the_dismissed_one() {
-        let mut rm = ReminderManager::new();
-        // The day-before notice, already dealt with, sits ahead of the
-        // hour-before one in the list.
-        rm.set_reminder(7, "Review", 100_000, 24 * 60);
-        rm.set_reminder(7, "Review", 100_000, 60);
-        rm.dismiss(7);
-        assert_eq!(rm.active_count(), 1);
-
-        let before = rm.due_reminders(100_000)[0].fire_at;
-        rm.snooze(7, SnoozeDuration::FiveMinutes);
-
-        assert!(
-            rm.due_reminders(before).is_empty(),
-            "the live reminder must have moved forward, not the dismissed one"
-        );
-        let due = rm.due_reminders(before + SnoozeDuration::FiveMinutes.secs());
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].fire_at, before + SnoozeDuration::FiveMinutes.secs());
-    }
-
-    // ========================================================================
     // ClockDisplay tests
     // ========================================================================
 
@@ -4135,12 +3013,15 @@ mod tests {
         cal.set_today(2020, 2, 1);
         cal.go_to_today();
         let now = date_to_timestamp(2026, 10, 6, 12, 0, 0).expect("valid");
-        let mut store = EventStore::new();
-        let mut dentist = make_event("Dentist", now, now + 3600);
-        dentist.color = Some(Color::from_hex(0xC82828));
-        add(&mut store, dentist);
+        let agenda = Agenda::of(vec![testing::event(
+            "Dentist",
+            (2026, 10, 6),
+            12,
+            calendarstore::RecurrenceRule::None,
+            Some(Color::from_hex(0xC82828)),
+        )]);
 
-        let glance = cal.month_glance(now, &Tz::UTC, &store);
+        let glance = cal.month_glance(now, &Tz::UTC, &agenda);
         assert_eq!(glance.title, "October 2026");
         assert_eq!(glance.weekdays, ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]);
         let mut popup = CalendarView::new(CalendarConfig::default());
@@ -4160,8 +3041,14 @@ mod tests {
         assert_eq!(today.len(), 1, "one today");
         assert_eq!(today[0].name, "Tuesday 6 October 2026");
         assert_eq!(
-            (today[0].events, today[0].event_color),
-            (1, Some(Color::from_hex(0xC82828)))
+            (today[0].events, today[0].mark),
+            (
+                1,
+                Some(EventMark {
+                    chosen: Some(Color::from_hex(0xC82828)),
+                    category: calendarstore::EventCategory::Personal,
+                })
+            )
         );
         assert_eq!(today[0].description().as_deref(), Some("today, 1 event"));
         assert_eq!(
@@ -4171,18 +3058,242 @@ mod tests {
         );
     }
 
+    /// The titles on `(year, month, day)` in `agenda`, in its order.
+    fn titles(agenda: &Agenda, (year, month, day): (i32, u32, u32)) -> Vec<String> {
+        agenda
+            .on(year, month, day)
+            .iter()
+            .map(|event| event.title.clone())
+            .collect()
+    }
+
+    /// **A day holds the calendar program's events as the program finds
+    /// them** -- the agenda asks the program's own rule -- the repeats the
+    /// desktop's old store never knew among them: weekly on chosen days,
+    /// every two weeks, every ten days.
+    #[test]
+    fn a_day_holds_the_events_the_calendar_program_finds_on_it() {
+        use calendarstore::RecurrenceRule;
+        let event = |title: &str, day: u32, rule: RecurrenceRule| {
+            testing::event(title, (2026, 10, day), 9, rule, None)
+        };
+        let events = vec![
+            // From Monday the 5th: Mondays and Wednesdays.
+            event("Gym", 5, RecurrenceRule::Weekly { days: vec![1, 3] }),
+            event("Payroll", 2, RecurrenceRule::BiWeekly),
+            event(
+                "Water plants",
+                1,
+                RecurrenceRule::Custom { interval_days: 10 },
+            ),
+            event("Dentist", 14, RecurrenceRule::None),
+        ];
+        let agenda = Agenda::of(events.clone());
+        assert_eq!(titles(&agenda, (2026, 10, 4)), Vec::<String>::new());
+        assert_eq!(titles(&agenda, (2026, 10, 7)), ["Gym"]);
+        assert_eq!(titles(&agenda, (2026, 10, 11)), ["Water plants"]);
+        assert_eq!(titles(&agenda, (2026, 10, 14)), ["Dentist", "Gym"]);
+        assert_eq!(titles(&agenda, (2026, 10, 16)), ["Payroll"]);
+        assert_eq!(titles(&agenda, (2026, 10, 1)), ["Water plants"]);
+        assert_eq!(titles(&agenda, (2026, 9, 30)), Vec::<String>::new());
+        // And day by day for three months, against the program's rule.
+        let mut date = calendarstore::Date {
+            year: 2026,
+            month: 10,
+            day: 1,
+        };
+        for _ in 0..92 {
+            let mut want: Vec<String> = events
+                .iter()
+                .filter(|event| event.occurs_on(date))
+                .map(|event| event.title.clone())
+                .collect();
+            want.sort();
+            let mut got = titles(&agenda, (date.year, date.month, date.day));
+            got.sort();
+            assert_eq!(got, want, "{date:?}");
+            date = date.add_days(1);
+        }
+    }
+
+    /// **A day's events come all-day first, then by when they begin**, ties
+    /// by title: the order the card lists them in and the dot reads first.
+    #[test]
+    fn a_days_events_come_all_day_first_then_by_their_time() {
+        let event = |title: &str, hour: u32| {
+            testing::event(
+                title,
+                (2026, 10, 6),
+                hour,
+                calendarstore::RecurrenceRule::None,
+                None,
+            )
+        };
+        let mut holiday = event("Holiday", 0);
+        holiday.all_day = true;
+        let agenda = Agenda::of(vec![
+            event("Late", 18),
+            event("Early", 8),
+            holiday,
+            event("Also early", 8),
+        ]);
+        assert_eq!(
+            titles(&agenda, (2026, 10, 6)),
+            ["Holiday", "Also early", "Early", "Late"]
+        );
+    }
+
+    /// **The calendar is read again when its file has changed, and only
+    /// then**: no file is no events; the file written is read; read again
+    /// unchanged, it is not; a file that will not read keeps the events read
+    /// before, says why, and is not read again until it changes; gone, it is
+    /// no events again.
+    #[test]
+    fn the_calendar_is_read_again_only_when_its_file_changes() {
+        let dir = scratchdir::ScratchDir::new("agenda-refresh");
+        let path = dir.path("events.txt");
+        let event = |title: &str, hour: u32| {
+            testing::event(
+                title,
+                (2026, 10, 6),
+                hour,
+                calendarstore::RecurrenceRule::None,
+                None,
+            )
+        };
+        // Read an hour after every write here, when each stamp has settled;
+        // the next test is the read in the moment of the write.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_hours(1);
+        let mut agenda = Agenda::default();
+        assert!(
+            !agenda.refresh_at(&path, later),
+            "no file and none before: no change"
+        );
+
+        let one = vec![event("Dentist", 9)];
+        std::fs::write(&path, calendarstore::calendar_text(&one)).unwrap();
+        assert!(agenda.refresh_at(&path, later));
+        assert_eq!(titles(&agenda, (2026, 10, 6)), ["Dentist"]);
+        assert!(
+            !agenda.refresh_at(&path, later),
+            "the same file, not read again"
+        );
+
+        let two = vec![event("Dentist", 9), event("Haircut", 11)];
+        std::fs::write(&path, calendarstore::calendar_text(&two)).unwrap();
+        assert!(agenda.refresh_at(&path, later));
+        assert_eq!(titles(&agenda, (2026, 10, 6)), ["Dentist", "Haircut"]);
+
+        std::fs::write(&path, "not a calendar").unwrap();
+        assert!(agenda.refresh_at(&path, later));
+        assert!(agenda.problem().is_some(), "it says why");
+        assert_eq!(
+            titles(&agenda, (2026, 10, 6)),
+            ["Dentist", "Haircut"],
+            "the events read before are kept"
+        );
+        assert!(
+            !agenda.refresh_at(&path, later),
+            "the broken file, not read again"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(agenda.refresh_at(&path, later));
+        assert!(titles(&agenda, (2026, 10, 6)).is_empty());
+        assert_eq!(agenda.problem(), None);
+        assert!(
+            !agenda.refresh_at(&path, later),
+            "no file again, and nothing to read"
+        );
+    }
+
+    /// **A save in the second of the read before is read**: a filesystem
+    /// keeping whole seconds gives it the stamp of the save before, and one
+    /// of the same length -- a title with a letter changed -- would otherwise
+    /// go unseen until the calendar changed again.
+    #[test]
+    fn a_calendar_saved_in_the_moment_it_was_read_is_read_again() {
+        let dir = scratchdir::ScratchDir::new("agenda-racy");
+        let path = dir.path("events.txt");
+        let first = testing::event(
+            "Dentist",
+            (2026, 10, 6),
+            9,
+            calendarstore::RecurrenceRule::None,
+            None,
+        );
+        // The same event, a letter of its title changed: the same length.
+        let second = calendarstore::CalendarEvent {
+            title: "Dentixt".to_owned(),
+            ..first.clone()
+        };
+        let mut agenda = Agenda::default();
+        std::fs::write(&path, calendarstore::calendar_text(&[first])).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let written = before.modified().unwrap();
+        assert!(agenda.refresh_at(&path, written));
+        assert_eq!(titles(&agenda, (2026, 10, 6)), ["Dentist"]);
+
+        std::fs::write(&path, calendarstore::calendar_text(&[second])).unwrap();
+        // As a filesystem keeping whole seconds stamps two saves in one.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(written)
+            .unwrap();
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (after.len(), after.modified().unwrap()),
+            (before.len(), written),
+            "the test's premise: the second save has the first's stamp"
+        );
+        assert!(agenda.refresh_at(&path, written));
+        assert_eq!(
+            titles(&agenda, (2026, 10, 6)),
+            ["Dentixt"],
+            "the second save, unread"
+        );
+
+        // Once it has gone unwritten long enough, its stamp is believed.
+        let settled = written + STAMP_SETTLES;
+        assert!(agenda.refresh_at(&path, settled));
+        assert!(!agenda.refresh_at(&path, settled));
+    }
+
+    /// **A calendar that would not read, deleted, is no longer a problem** --
+    /// even read too soon after it was written for its stamp to be kept,
+    /// with no event ever read: no file, no stamp and no events is exactly
+    /// what a calendar never made looks like, and only the problem told the
+    /// two apart.
+    #[test]
+    fn a_broken_calendar_deleted_is_no_longer_a_problem() {
+        let dir = scratchdir::ScratchDir::new("agenda-broken-gone");
+        let path = dir.path("events.txt");
+        std::fs::write(&path, "not a calendar").unwrap();
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut agenda = Agenda::default();
+        assert!(agenda.refresh_at(&path, written));
+        assert!(agenda.problem().is_some());
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(agenda.refresh_at(&path, written));
+        assert_eq!(agenda.problem(), None, "the problem outlived its file");
+        assert!(!agenda.refresh_at(&path, written));
+    }
+
     /// **A glance's today is the zone's**: half past eleven at night on the
     /// last of October, in UTC, is already November in Tokyo.
     #[test]
     fn a_glances_today_is_the_zones() {
         let cal = CalendarView::new(CalendarConfig::default());
         let now = date_to_timestamp(2026, 10, 31, 23, 30, 0).expect("valid");
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         assert_eq!(
-            cal.month_glance(now, &Tz::UTC, &store).title,
+            cal.month_glance(now, &Tz::UTC, &agenda).title,
             "October 2026"
         );
-        let tokyo = cal.month_glance(now, &tz("JST-9"), &store);
+        let tokyo = cal.month_glance(now, &tz("JST-9"), &agenda);
         assert_eq!(tokyo.title, "November 2026");
         let today: Vec<&str> = tokyo
             .days
@@ -4201,7 +3312,7 @@ mod tests {
             ..CalendarConfig::default()
         });
         let now = date_to_timestamp(2026, 10, 6, 12, 0, 0).expect("valid");
-        let glance = cal.month_glance(now, &Tz::UTC, &EventStore::new());
+        let glance = cal.month_glance(now, &Tz::UTC, &Agenda::default());
         assert_eq!(glance.weekdays[0], "Mo");
         assert_eq!(glance.days[0].name, "Monday 28 September 2026");
     }
@@ -4505,163 +3616,6 @@ mod tests {
     // Import/Export round-trip tests
     // ========================================================================
 
-    #[test]
-    fn export_import_roundtrip() {
-        let mut store = EventStore::new();
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Team Meeting".to_string(),
-                start_timestamp: 1_700_000_000,
-                end_timestamp: 1_700_003_600,
-                all_day: false,
-                repeat: Some(Recurrence::Weekly),
-                color: Some(Color::from_hex(0xA6E3A1)),
-                description: "Weekly sync".to_string(),
-            },
-        );
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Holiday".to_string(),
-                start_timestamp: 1_700_100_000,
-                end_timestamp: 1_700_186_400,
-                all_day: true,
-                repeat: None,
-                color: Some(Color::from_hex(0xF9E2AF)),
-                description: "Day off".to_string(),
-            },
-        );
-
-        let exported = store.export_text();
-
-        // Import into a fresh store.
-        let mut store2 = EventStore::new();
-        let count = store2.import_text(&exported);
-        assert_eq!(count, 2);
-        assert_eq!(store2.len(), 2);
-
-        // Verify content.
-        let events = store2.all_events();
-        assert_eq!(events[0].title, "Team Meeting");
-        assert_eq!(events[0].start_timestamp, 1_700_000_000);
-        assert_eq!(events[0].repeat, Some(Recurrence::Weekly));
-        assert!(!events[0].all_day);
-
-        // The colours are the user's, not the theme's, so they have to come
-        // back exactly as they went in.
-        assert_eq!(events[0].color, Some(Color::from_hex(0xA6E3A1)));
-        assert_eq!(events[1].color, Some(Color::from_hex(0xF9E2AF)));
-
-        assert_eq!(events[1].title, "Holiday");
-        assert!(events[1].all_day);
-        assert_eq!(events[1].repeat, None);
-    }
-
-    #[test]
-    fn import_empty_text() {
-        let mut store = EventStore::new();
-        let count = store.import_text("");
-        assert_eq!(count, 0);
-        assert!(store.is_empty());
-    }
-
-    #[test]
-    fn import_single_event() {
-        let mut store = EventStore::new();
-        let text = "\
-EVENT
-title: Quick Note
-start: 5000
-end: 6000
-all_day: false
-repeat: none
-color: 89B4FA
-description: Just a test";
-
-        let count = store.import_text(text);
-        assert_eq!(count, 1);
-        let e = store.get_event(1).expect("event 1");
-        assert_eq!(e.title, "Quick Note");
-        assert_eq!(e.start_timestamp, 5000);
-        assert_eq!(e.end_timestamp, 6000);
-        assert_eq!(e.color, Some(Color::from_hex(0x89B4FA)));
-    }
-
-    #[test]
-    fn export_color_hex_format() {
-        let mut store = EventStore::new();
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Test".to_string(),
-                start_timestamp: 0,
-                end_timestamp: 100,
-                all_day: false,
-                repeat: None,
-                color: Some(Color::from_hex(0xF38BA8)),
-                description: String::new(),
-            },
-        );
-
-        let text = store.export_text();
-        assert!(
-            text.contains("color: F38BA8"),
-            "Expected hex color in export, got: {text}"
-        );
-    }
-
-    /// Every colour in this file's fixtures -- F38BA8, A6E3A1, F9E2AF, 89B4FA
-    /// -- has all three channels at 0x10 or above, so `{:02X}`'s padding never
-    /// had anything to do and could be written `{:X}` with the suite still
-    /// green. Found by the reintroduction harness (module 86, defect `O`).
-    ///
-    /// The failure it hides is not a cosmetic one. `parse_hex_color` refuses
-    /// any string that is not exactly six characters, so an unpadded dark
-    /// colour is written to the file and then *rejected on the way back in*:
-    /// the event silently reverts to the renderer's default, and the next save
-    /// writes that default out as though the user had chosen it. Dark accent
-    /// colours are exactly the ones a user picks for a dark theme.
-    #[test]
-    fn a_dark_colour_keeps_its_leading_zeros_through_the_file() {
-        let mut store = EventStore::new();
-        // One channel below 0x10 in each position, so a missing pad anywhere
-        // in the format string is visible.
-        let dark = Color::from_hex(0x0A_0B_0C);
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Night Shift".to_string(),
-                start_timestamp: 0,
-                end_timestamp: 100,
-                all_day: false,
-                repeat: None,
-                color: Some(dark),
-                description: String::new(),
-            },
-        );
-
-        let text = store.export_text();
-        assert!(
-            text.contains("color: 0A0B0C"),
-            "each channel is two digits wide however small it is, got: {text}"
-        );
-
-        // The round trip is the reason the padding matters: six characters is
-        // the only length `parse_hex_color` accepts.
-        let mut reloaded = EventStore::new();
-        assert_eq!(reloaded.import_text(&text), 1);
-        assert_eq!(
-            reloaded.all_events()[0].color,
-            Some(dark),
-            "a dark colour must survive the file, not fall back to the default"
-        );
-    }
-
     // ========================================================================
     // Rendering tests (smoke tests: verify non-empty output)
     // ========================================================================
@@ -4669,8 +3623,8 @@ description: Just a test";
     #[test]
     fn render_hidden_returns_empty() {
         let cal = CalendarView::new(CalendarConfig::default());
-        let store = EventStore::new();
-        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &store);
+        let agenda = Agenda::default();
+        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &agenda);
         assert!(cmds.is_empty());
     }
 
@@ -4680,8 +3634,8 @@ description: Just a test";
         cal.set_today(2026, 5, 18);
         cal.set_visible(true);
 
-        let store = EventStore::new();
-        let cmds = cal.render(&dark(), 100.0, 100.0, 1.0, NOW, &store);
+        let agenda = Agenda::default();
+        let cmds = cal.render(&dark(), 100.0, 100.0, 1.0, NOW, &agenda);
         // Should have popup bg, border, nav header, dow headers, and 42 day cells minimum.
         assert!(
             cmds.len() > 50,
@@ -4697,8 +3651,8 @@ description: Just a test";
         cal.set_visible(true);
         cal.mode = CalendarViewMode::Year;
 
-        let store = EventStore::new();
-        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &store);
+        let agenda = Agenda::default();
+        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &agenda);
         assert!(!cmds.is_empty());
     }
 
@@ -4712,8 +3666,8 @@ description: Just a test";
         cal.set_today(2026, 5, 18);
         cal.set_visible(true);
 
-        let store = EventStore::new();
-        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &store);
+        let agenda = Agenda::default();
+        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &agenda);
         // Should have extra text commands for week numbers.
         let text_cmds: Vec<_> = cmds
             .iter()
@@ -4733,11 +3687,15 @@ description: Just a test";
         cal.set_today(2026, 5, 18);
         cal.set_visible(true);
 
-        let mut store = EventStore::new();
-        let start = date_to_timestamp(2026, 5, 18, 10, 0, 0).expect("valid");
-        add(&mut store, make_event("Test Event", start, start + 3600));
+        let agenda = Agenda::of(vec![testing::event(
+            "Test Event",
+            (2026, 5, 18),
+            10,
+            calendarstore::RecurrenceRule::None,
+            None,
+        )]);
 
-        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &store);
+        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &agenda);
         // Should contain at least one small dot-sized FillRect.
         let has_dot = cmds.iter().any(|c| match c {
             RenderCommand::FillRect { width, height, .. } => {
@@ -4756,23 +3714,15 @@ description: Just a test";
         cal.set_visible(true);
         cal.selected_date = Some((2026, 5, 18));
 
-        let mut store = EventStore::new();
-        let start = date_to_timestamp(2026, 5, 18, 10, 0, 0).expect("valid");
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Visible Event".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + 3600,
-                all_day: false,
-                repeat: None,
-                color: None,
-                description: String::new(),
-            },
-        );
+        let agenda = Agenda::of(vec![testing::event(
+            "Visible Event",
+            (2026, 5, 18),
+            10,
+            calendarstore::RecurrenceRule::None,
+            None,
+        )]);
 
-        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &store);
+        let cmds = cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &agenda);
         // Should contain a text command with the event title.
         let has_event_text = cmds.iter().any(|c| match c {
             RenderCommand::Text { text, .. } => text == "Visible Event",
@@ -4879,12 +3829,12 @@ description: Just a test";
     #[test]
     fn the_selection_disc_is_drawn_on_the_cell_that_is_clicked() {
         let mut cal = open_month();
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         cal.selected_date = Some((2026, 5, 7));
 
         let disc_size = TODAY_RADIUS * 2.0;
         let disc = cal
-            .render(&dark(), 0.0, 0.0, 1.0, NOW, &store)
+            .render(&dark(), 0.0, 0.0, 1.0, NOW, &agenda)
             .into_iter()
             .find_map(|c| match c {
                 RenderCommand::FillRect {
@@ -4905,7 +3855,7 @@ description: Just a test";
             .expect("a selected day draws a disc");
 
         let (cx, cy) = centre(disc);
-        let Some(CalendarHit::Day(index)) = cal.hit_test(0.0, 0.0, 1.0, cx, cy, &store) else {
+        let Some(CalendarHit::Day(index)) = cal.hit_test(0.0, 0.0, 1.0, cx, cy, &agenda) else {
             panic!("the centre of the selection disc is not on a day cell");
         };
         let cell = cal.generate_grid()[index];
@@ -4918,7 +3868,7 @@ description: Just a test";
         // Off today's month, so the "Today" button exists.
         let mut cal = open_month();
         cal.view_month = 9;
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
 
         for (rect, want) in [
@@ -4932,7 +3882,7 @@ description: Just a test";
         ] {
             let (px, py) = centre(rect);
             assert_eq!(
-                cal.hit_test(0.0, 0.0, 1.0, px, py, &store),
+                cal.hit_test(0.0, 0.0, 1.0, px, py, &agenda),
                 Some(want),
                 "{want:?} is not clickable at the centre of its own box"
             );
@@ -4943,12 +3893,12 @@ description: Just a test";
     #[test]
     fn every_grid_cell_answers_at_its_own_index() {
         let cal = open_month();
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         let layout = MonthLayout::new(&cal, 17.0, 23.0, 1.0);
         for index in 0..GRID_CELLS {
             let (px, py) = centre(layout.cell(index));
             assert_eq!(
-                cal.hit_test(17.0, 23.0, 1.0, px, py, &store),
+                cal.hit_test(17.0, 23.0, 1.0, px, py, &agenda),
                 Some(CalendarHit::Day(index)),
                 "cell {index} is not clickable where it is drawn"
             );
@@ -4962,21 +3912,21 @@ description: Just a test";
     #[test]
     fn dead_space_inside_the_popup_is_not_a_dismissal() {
         let cal = open_month();
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
         let frame = layout.frame;
 
         // The strip between the frame's left edge and the padded grid.
         assert_eq!(
-            cal.hit_test(0.0, 0.0, 1.0, frame.x + 1.0, layout.grid_y + 1.0, &store),
+            cal.hit_test(0.0, 0.0, 1.0, frame.x + 1.0, layout.grid_y + 1.0, &agenda),
             Some(CalendarHit::Panel)
         );
         // A pixel past the right edge is off the popup entirely.
         assert_eq!(
-            cal.hit_test(0.0, 0.0, 1.0, frame.x + frame.w, frame.y + 1.0, &store),
+            cal.hit_test(0.0, 0.0, 1.0, frame.x + frame.w, frame.y + 1.0, &agenda),
             None
         );
-        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, -1.0, -1.0, &store), None);
+        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, -1.0, -1.0, &agenda), None);
     }
 
     /// The event card hangs below the frame and still belongs to the popup.
@@ -4986,14 +3936,18 @@ description: Just a test";
     #[test]
     fn the_event_card_hangs_below_the_frame_and_still_counts_as_the_popup() {
         let mut cal = open_month();
-        let mut store = EventStore::new();
-        let start = date_to_timestamp(2026, 5, 18, 10, 0, 0).expect("valid");
-        add(&mut store, make_event("Standup", start, start + 3600));
+        let agenda = Agenda::of(vec![testing::event(
+            "Standup",
+            (2026, 5, 18),
+            10,
+            calendarstore::RecurrenceRule::None,
+            None,
+        )]);
         cal.selected_date = Some((2026, 5, 18));
 
         let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
         let card = cal
-            .detail_rect(&layout, &store)
+            .detail_rect(&layout, &agenda)
             .expect("a selected day with events shows a card");
         assert!(
             card.y >= layout.frame.y + layout.frame.h,
@@ -5002,14 +3956,14 @@ description: Just a test";
 
         let (px, py) = centre(card);
         assert_eq!(
-            cal.hit_test(0.0, 0.0, 1.0, px, py, &store),
+            cal.hit_test(0.0, 0.0, 1.0, px, py, &agenda),
             Some(CalendarHit::Panel)
         );
 
         // With nothing selected there is no card, and that same point is off
         // the popup — so the host dismisses rather than swallowing the click.
         cal.selected_date = None;
-        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, px, py, &store), None);
+        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, px, py, &agenda), None);
     }
 
     /// The popup is measured in the shell's pixels, not its own.
@@ -5021,7 +3975,7 @@ description: Just a test";
     #[test]
     fn the_popup_is_measured_in_the_shells_pixels() {
         let cal = open_month();
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         let one = cal.popup_rect(0.0, 0.0, 1.0);
         let two = cal.popup_rect(0.0, 0.0, 2.0);
         assert!((two.w - one.w * 2.0).abs() < 0.01, "{two:?} vs {one:?}");
@@ -5032,7 +3986,7 @@ description: Just a test";
         for index in [0_usize, 15, 41] {
             let (px, py) = centre(MonthLayout::new(&cal, 0.0, 0.0, 1.0).cell(index));
             assert_eq!(
-                cal.hit_test(0.0, 0.0, 2.0, px * 2.0, py * 2.0, &store),
+                cal.hit_test(0.0, 0.0, 2.0, px * 2.0, py * 2.0, &agenda),
                 Some(CalendarHit::Day(index))
             );
         }
@@ -5100,11 +4054,11 @@ description: Just a test";
     #[test]
     fn the_today_button_is_absent_while_the_view_is_already_on_today() {
         let cal = open_month();
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
         assert_eq!(layout.today_button(), None);
         assert!(
-            !cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &store)
+            !cal.render(&dark(), 0.0, 0.0, 1.0, NOW, &agenda)
                 .iter()
                 .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == TODAY_LABEL))
         );
@@ -5116,11 +4070,11 @@ description: Just a test";
         let button = layout.today_button().expect("off-month shows Today");
         let (px, py) = centre(button);
         assert_eq!(
-            off.hit_test(0.0, 0.0, 1.0, px, py, &store),
+            off.hit_test(0.0, 0.0, 1.0, px, py, &agenda),
             Some(CalendarHit::Today)
         );
         assert!(
-            off.render(&dark(), 0.0, 0.0, 1.0, NOW, &store)
+            off.render(&dark(), 0.0, 0.0, 1.0, NOW, &agenda)
                 .iter()
                 .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == TODAY_LABEL))
         );
@@ -5131,10 +4085,10 @@ description: Just a test";
     fn a_hidden_calendar_is_not_clickable() {
         let mut cal = open_month();
         cal.set_visible(false);
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         let layout = MonthLayout::new(&cal, 0.0, 0.0, 1.0);
         let (px, py) = centre(layout.cell(0));
-        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, px, py, &store), None);
+        assert_eq!(cal.hit_test(0.0, 0.0, 1.0, px, py, &agenda), None);
     }
 
     /// Reopening rewinds to this month with nothing selected.
@@ -5160,13 +4114,13 @@ description: Just a test";
     fn every_mini_month_answers_at_its_own_box() {
         let mut cal = open_month();
         cal.show_year_view();
-        let store = EventStore::new();
+        let agenda = Agenda::default();
         let layout = YearLayout::new(0.0, 0.0, 1.0);
         for index in 0..12_usize {
             let (px, py) = centre(layout.month(index));
             let month = u32::try_from(index).expect("12 fits") + 1;
             assert_eq!(
-                cal.hit_test(0.0, 0.0, 1.0, px, py, &store),
+                cal.hit_test(0.0, 0.0, 1.0, px, py, &agenda),
                 Some(CalendarHit::Month(month)),
                 "mini month {month} is not clickable where it is drawn"
             );
@@ -5240,38 +4194,6 @@ description: Just a test";
     // ========================================================================
 
     #[test]
-    fn parse_hex_color_valid() {
-        let c = parse_hex_color("89B4FA").expect("valid");
-        assert_eq!(c, Color::from_hex(0x89B4FA));
-    }
-
-    #[test]
-    fn parse_hex_color_invalid_length() {
-        assert!(parse_hex_color("FFF").is_none());
-        assert!(parse_hex_color("").is_none());
-        assert!(parse_hex_color("1234567").is_none());
-    }
-
-    #[test]
-    fn parse_hex_color_invalid_chars() {
-        assert!(parse_hex_color("ZZZZZZ").is_none());
-        // A sign is not a digit, though `from_str_radix` takes one.
-        assert!(parse_hex_color("+9B4FA").is_none());
-        // Nor is the `#` the file never writes.
-        assert!(parse_hex_color("#9B4FA").is_none());
-    }
-
-    #[test]
-    fn event_duration() {
-        let e = make_event("X", 1000, 2000);
-        assert_eq!(e.duration_secs(), 1000);
-
-        // Zero-length event.
-        let e2 = make_event("Y", 500, 500);
-        assert_eq!(e2.duration_secs(), 0);
-    }
-
-    #[test]
     fn set_today_from_timestamp() {
         let mut cal = CalendarView::new(CalendarConfig::default());
         // 2024-06-15 at midnight UTC.
@@ -5314,31 +4236,6 @@ description: Just a test";
         let h = dow_headers(FirstDayOfWeek::Monday);
         assert_eq!(h[0], "Mo");
         assert_eq!(h[6], "Su");
-    }
-
-    #[test]
-    fn recurring_event_does_not_appear_before_start() {
-        let mut store = EventStore::new();
-        let start = date_to_timestamp(2024, 6, 15, 10, 0, 0).expect("valid");
-        add(
-            &mut store,
-            CalendarEvent {
-                id: 0,
-                title: "Future Weekly".to_string(),
-                start_timestamp: start,
-                end_timestamp: start + 3600,
-                all_day: false,
-                repeat: Some(Recurrence::Weekly),
-                color: None,
-                description: String::new(),
-            },
-        );
-
-        // Query a range entirely before the start date.
-        let range_start = date_to_timestamp(2024, 5, 1, 0, 0, 0).expect("valid");
-        let range_end = date_to_timestamp(2024, 6, 1, 0, 0, 0).expect("valid");
-        let events = store.events_for_range(range_start, range_end);
-        assert!(events.is_empty());
     }
 
     // ========================================================================
@@ -5420,7 +4317,7 @@ description: Just a test";
     /// are asserted here so that the literal indices the pin uses are anchored
     /// to the dates they claim to be, and cannot quietly come to mean other
     /// cells if the grid's origin ever moves.
-    fn scene() -> (CalendarView, EventStore) {
+    fn scene() -> (CalendarView, Agenda) {
         let config = CalendarConfig {
             show_week_numbers: true,
             ..Default::default()
@@ -5446,23 +4343,28 @@ description: Just a test";
         assert_eq!((grid[35].month, grid[35].day), (5, 31));
         assert_eq!((grid[41].month, grid[41].day), (6, 6));
 
-        let mut store = EventStore::new();
-        let at = |d: u32, h: u32| date_to_timestamp(2026, 5, d, h, 0, 0).expect("valid");
-        // A plain current-month day with one uncoloured event: the default dot.
-        add(&mut store, make_event("Dentist", at(3, 9), at(3, 10)));
+        let event = |title: &str, day: u32, hour: u32, color: Option<Color>| {
+            testing::event(
+                title,
+                (2026, 5, day),
+                hour,
+                calendarstore::RecurrenceRule::None,
+                color,
+            )
+        };
+        // A plain current-month day with one event the user gave no colour:
+        // the dot in its category's.
+        let mut events = vec![event("Dentist", 3, 9, None)];
         // Seven on the selected day, so the detail card fills to its six-row
-        // maximum and draws the overflow line. `events_for_date` sorts by
-        // start time, so the 08:00 one is the `first()` the dot reads — and it
-        // is the only one carrying a colour.
-        let mut coloured = make_event("Launch", at(7, 8), at(7, 9));
-        coloured.color = Some(USER_ORANGE);
-        add(&mut store, coloured);
-        for i in 1..7u32 {
-            add(&mut store, make_event("Slot", at(7, 9 + i), at(7, 10 + i)));
-        }
-        // One on today, uncoloured, so the dot's on-the-disc rule is drawn.
-        add(&mut store, make_event("Standup", at(18, 9), at(18, 10)));
-        (cal, store)
+        // maximum and draws the overflow line. `Agenda::on` sorts by start
+        // time, so the 08:00 one is the `first()` the dot reads -- and it is
+        // the only one carrying a colour of the user's.
+        events.push(event("Launch", 7, 8, Some(USER_ORANGE)));
+        events.extend((1..7u32).map(|i| event("Slot", 7, 9 + i, None)));
+        // One on today, in its category's colour, so the dot's on-the-disc
+        // rule is drawn.
+        events.push(event("Standup", 18, 9, None));
+        (cal, Agenda::of(events))
     }
 
     /// Every colour the month view draws, in draw order, written out by hand.
@@ -5474,7 +4376,7 @@ description: Just a test";
     fn every_month_view_site_draws_the_role_it_claims() {
         for light in [false, true] {
             let p = accented(light);
-            let (cal, store) = scene();
+            let (cal, agenda) = scene();
 
             let mut want = vec![
                 SHADOW,     // the popup's drop shadow
@@ -5503,7 +4405,7 @@ description: Just a test";
                     _ => want.push(p.text),
                 }
                 match i {
-                    7 => want.push(p.lavender),             // 3 May, uncoloured
+                    7 => want.push(p.green),                // 3 May, a personal event's
                     11 => want.push(USER_ORANGE),           // 7 May, the user's
                     22 => want.push(readable_on(p.accent)), // 18 May, on the disc
                     _ => {}
@@ -5516,12 +4418,12 @@ description: Just a test";
             want.extend([p.mantle, p.text]);
             want.extend([USER_ORANGE, p.subtext1, p.text]);
             for _ in 0..5 {
-                want.extend([p.lavender, p.subtext1, p.text]);
+                want.extend([p.green, p.subtext1, p.text]);
             }
             want.push(p.subtext1);
 
             assert_eq!(
-                colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &store)),
+                colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &agenda)),
                 want,
                 "month view, light = {light}"
             );
@@ -5537,10 +4439,10 @@ description: Just a test";
     fn the_today_button_wears_the_accent() {
         for light in [false, true] {
             let p = accented(light);
-            let (mut cal, store) = scene();
-            let on_today = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &store));
+            let (mut cal, agenda) = scene();
+            let on_today = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &agenda));
             cal.next_month();
-            let off_month = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &store));
+            let off_month = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &agenda));
 
             // The button is the tenth colour, straight after the month title,
             // and exists only in the second render.
@@ -5562,9 +4464,9 @@ description: Just a test";
     fn every_year_view_site_draws_the_role_it_claims() {
         for light in [false, true] {
             let p = accented(light);
-            let (mut cal, store) = scene();
+            let (mut cal, agenda) = scene();
             cal.mode = CalendarViewMode::Year;
-            let got = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &store));
+            let got = colors(&cal.render(&p, 0.0, 0.0, 1.0, NOW, &agenda));
 
             assert_eq!(
                 &got[..5],
@@ -5600,7 +4502,7 @@ description: Just a test";
             let derived = [p.accent, readable_on(p.accent), USER_ORANGE];
             for off_month in [false, true] {
                 for mode in [CalendarViewMode::Month, CalendarViewMode::Year] {
-                    let (mut cal, store) = scene();
+                    let (mut cal, agenda) = scene();
                     cal.mode = mode;
                     if off_month {
                         // Reaches the "Today" button, which the scene's own
@@ -5610,7 +4512,7 @@ description: Just a test";
                     }
                     appearance::palette_check::assert_drawn_from(
                         &p,
-                        &cal.render(&p, 0.0, 0.0, 1.0, NOW, &store),
+                        &cal.render(&p, 0.0, 0.0, 1.0, NOW, &agenda),
                         &derived,
                         "calendar",
                     );
@@ -5631,10 +4533,10 @@ description: Just a test";
         let dark = accented(false);
         let pale = accented(true);
         for mode in [CalendarViewMode::Month, CalendarViewMode::Year] {
-            let (mut cal, store) = scene();
+            let (mut cal, agenda) = scene();
             cal.mode = mode;
-            let a = colors(&cal.render(&dark, 0.0, 0.0, 1.0, NOW, &store));
-            let b = colors(&cal.render(&pale, 0.0, 0.0, 1.0, NOW, &store));
+            let a = colors(&cal.render(&dark, 0.0, 0.0, 1.0, NOW, &agenda));
+            let b = colors(&cal.render(&pale, 0.0, 0.0, 1.0, NOW, &agenda));
             assert_eq!(a.len(), b.len());
             for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
                 // Three values are the same in both modes on purpose: the drop
@@ -5757,27 +4659,6 @@ description: Just a test";
         }
     }
 
-    /// An event the user never coloured does not gain a colour by being saved.
-    ///
-    /// `color` was a plain `Color` whose parser default was a hardcoded Mocha
-    /// blue, which the serializer then wrote back out — so merely opening the
-    /// calendar edited the user's file. `None` is not a colour and must not be
-    /// spelled as one; see design-decisions §528.
-    #[test]
-    fn an_uncoloured_event_round_trips_without_gaining_a_colour() {
-        let mut store = EventStore::new();
-        add(&mut store, make_event("Plain", 5_000, 6_000));
-        let text = store.export_text();
-        assert!(
-            !text.contains("color:"),
-            "an uncoloured event was written out with a colour: {text}"
-        );
-
-        let mut back = EventStore::new();
-        assert_eq!(back.import_text(&text), 1);
-        assert_eq!(back.get_event(1).expect("event 1").color, None);
-    }
-
     /// A colour the user *did* choose is drawn in the month grid.
     ///
     /// The dot used to be a fixed lavender that never looked at the event, so
@@ -5788,9 +4669,9 @@ description: Just a test";
     fn a_coloured_event_shows_the_users_colour_in_the_month_grid() {
         for light in [false, true] {
             let p = accented(light);
-            let (cal, store) = scene();
+            let (cal, agenda) = scene();
             let dots: Vec<Color> = cal
-                .render(&p, 0.0, 0.0, 1.0, NOW, &store)
+                .render(&p, 0.0, 0.0, 1.0, NOW, &agenda)
                 .iter()
                 .filter_map(|c| match c {
                     RenderCommand::FillRect {
@@ -5806,31 +4687,60 @@ description: Just a test";
                     _ => None,
                 })
                 .collect();
-            // 3 May's default, 7 May's chosen colour, 18 May's on-disc ink.
+            // 3 May's category's colour, 7 May's chosen one, 18 May's
+            // on-disc ink.
             assert_eq!(
                 dots,
-                vec![p.lavender, USER_ORANGE, readable_on(p.accent)],
+                vec![p.green, USER_ORANGE, readable_on(p.accent)],
                 "light = {light}"
             );
         }
     }
 
-    /// The dot and the detail card's bar cannot disagree about one event.
+    /// The dot and the detail card's bar cannot disagree about one event,
+    /// and neither disagrees with the calendar program.
     ///
-    /// Both go through `CalendarEvent::dot_color`, which is the point of it
-    /// existing: two sites resolving `None` independently is two answers to
-    /// the same question, and they drift.
+    /// Both go through [`EventMark`], whose colour is the program's own
+    /// (`effective_color`): two sites resolving an event's colour
+    /// independently is two answers to the same question, and they drift.
+    /// On today's disc the user's colour stays; a category's gives way to
+    /// what reads there.
     #[test]
     fn the_dot_and_the_detail_bar_resolve_a_colour_the_same_way() {
         for light in [false, true] {
             let p = accented(light);
-            let coloured = {
-                let mut e = make_event("x", 0, 1);
-                e.color = Some(USER_ORANGE);
-                e
+            let event = |title: &str, color: Option<Color>| {
+                testing::event(
+                    title,
+                    (2026, 5, 7),
+                    8,
+                    calendarstore::RecurrenceRule::None,
+                    color,
+                )
             };
-            assert_eq!(coloured.dot_color(&p), USER_ORANGE);
-            assert_eq!(make_event("y", 0, 1).dot_color(&p), p.lavender);
+            let coloured = event("x", Some(USER_ORANGE));
+            let plain = event("y", None);
+            // In every category, the program's answer.
+            for &category in calendarstore::EventCategory::all() {
+                for base in [&coloured, &plain] {
+                    let e = calendarstore::CalendarEvent {
+                        category,
+                        ..base.clone()
+                    };
+                    assert_eq!(
+                        EventMark::of(&e).color(&p),
+                        e.effective_color(&p),
+                        "{category:?}"
+                    );
+                }
+            }
+            assert_eq!(EventMark::of(&coloured).color(&p), USER_ORANGE);
+            assert_eq!(EventMark::of(&plain).color(&p), p.green);
+            assert_eq!(EventMark::of(&coloured).on_disc(p.accent), USER_ORANGE);
+            assert_eq!(
+                EventMark::of(&plain).on_disc(p.accent),
+                readable_on(p.accent)
+            );
         }
     }
 }

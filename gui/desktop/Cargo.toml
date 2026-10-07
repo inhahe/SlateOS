@@ -68,6 +68,13 @@ sound = { path = "../sound" }
 # /proc parsers in one repository is the arrangement where a kernel
 # change fixes one program and not the other.
 procinfo = { path = "../../procinfo" }
+# The user's calendar, as the calendar program keeps it
+# (`<config>/calendar/events.txt`): its events, the file and which days an
+# event is on, read by the clock's popup and the calendar widget. A crate
+# under `apps/` -- the format lives with the program that writes it, and every
+# reader takes it from there (design-decisions 1219); it holds no window and
+# depends only on what this crate already does.
+calendarstore = { path = "../../apps/calendarstore" }
 
 # The compositor protocol's vocabulary — `WindowInfo`, the shape of the window
 # list a taskbar is built from, and `ShellControlAction`, the shape of what a

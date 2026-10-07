@@ -78,7 +78,7 @@ pub use accessible::WidgetPart;
 // pointed at -- a position, "here", which is the one thing the accent says in
 // this module, of a widget or of a day. Its number is in whatever reads on
 // that disc (`readable_on`), and a day's events' dot in the colour the user
-// gave the event, which is their data, or else the palette's lavender.
+// gave the event, which is their data, or else its category's (`EventMark`).
 
 // ============================================================================
 // Widget types
@@ -2402,9 +2402,9 @@ impl DesktopWidgetManager {
     /// the month and year, the weekdays, and six weeks of days -- today on
     /// the accent's disc, as the clock's popup marks it, the days of the
     /// months either side in the secondary ink, and a day with events dotted
-    /// in its first event's colour, the palette's lavender for one given
-    /// none. Nothing for an empty glance, which the shell makes only while
-    /// no calendar is drawn.
+    /// in its first event's colour, its category's for one given none.
+    /// Nothing for an empty glance, which the shell makes only while no
+    /// calendar is drawn.
     fn render_calendar(
         month: &crate::calendar::MonthGlance,
         p: &Palette,
@@ -2485,13 +2485,16 @@ impl DesktopWidgetManager {
                 max_width: Some(cell.w),
                 overflow: TextOverflow::Clip,
             });
-            if day.events > 0 {
+            if let Some(mark) = day.mark {
                 // The user's colour where they gave the event one -- their
-                // data, which the calendar does not overrule -- else what
-                // reads where the dot sits.
-                let dot = day
-                    .event_color
-                    .unwrap_or(if day.today { on_accent } else { p.lavender });
+                // data, which the calendar does not overrule -- else its
+                // category's, or on today's disc what reads there: as the
+                // popup marks it (`EventMark`).
+                let dot = if day.today {
+                    mark.on_disc(p.accent)
+                } else {
+                    mark.color(p)
+                };
                 let r = CALENDAR_DOT_RADIUS;
                 commands.push(RenderCommand::FillRect {
                     x: cx - r,
@@ -2571,30 +2574,28 @@ mod tests {
     }
 
     /// October 2026 at a glance, today the 6th, with an event on the 6th
-    /// the user coloured and one on the 20th they did not.
+    /// the user coloured and a personal one on the 20th they did not.
     fn october_glance() -> crate::calendar::MonthGlance {
-        use crate::calendar::{CalendarConfig, CalendarEvent, CalendarView, EventStore};
+        use crate::calendar::{Agenda, CalendarConfig, CalendarView, testing::event};
         // 12:00 UTC on 6 October 2026.
         let noon = 1_791_288_000;
-        let mut store = EventStore::new();
-        for (start, color) in [
-            (noon, Some(OCTOBER_EVENT_COLOR)),
-            (noon + 14 * 86_400, None),
-        ] {
-            store
-                .add_event(CalendarEvent {
-                    id: 0,
-                    title: "Meeting".to_string(),
-                    start_timestamp: start,
-                    end_timestamp: start + 3_600,
-                    all_day: false,
-                    repeat: None,
-                    color,
-                    description: String::new(),
-                })
-                .unwrap();
-        }
-        CalendarView::new(CalendarConfig::default()).month_glance(noon, &tzrules::Tz::UTC, &store)
+        let agenda = Agenda::of(vec![
+            event(
+                "Meeting",
+                (2026, 10, 6),
+                12,
+                calendarstore::RecurrenceRule::None,
+                Some(OCTOBER_EVENT_COLOR),
+            ),
+            event(
+                "Meeting",
+                (2026, 10, 20),
+                12,
+                calendarstore::RecurrenceRule::None,
+                None,
+            ),
+        ]);
+        CalendarView::new(CalendarConfig::default()).month_glance(noon, &tzrules::Tz::UTC, &agenda)
     }
 
     /// The colour the user gave the October fixture's first event.
@@ -3235,7 +3236,7 @@ mod tests {
     /// the accent's disc in the ink that reads on it, this month's days in
     /// the text's ink and the months either side's in the secondary one, and
     /// a dot under a day with events, in the colour the user gave its event
-    /// or else the palette's lavender.
+    /// or else its category's -- a personal one's green.
     #[test]
     fn a_calendar_draws_its_month() {
         let mut mgr = make_mgr();
@@ -3271,7 +3272,7 @@ mod tests {
             1,
             "the 6th's dot"
         );
-        assert_eq!(fills_exactly(&cmds, wash(p.lavender)), 1, "the 20th's dot");
+        assert_eq!(fills_exactly(&cmds, wash(p.green)), 1, "the 20th's dot");
         // The first week below the weekdays' line, not over it.
         let top = |want: &str, size: f32| {
             cmds.iter()

@@ -216,8 +216,8 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Fourteen programs still lack it: `bc chmod df dir ed find hostname
-install kill ls more patch stat vdir`. That list is now
+all. Thirteen programs still lack it: `bc chmod df dir ed find hostname
+install kill ls more patch vdir`. That list is now
 pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
 a program is added without the guard, when one is converted without being
 taken off the list, and when a program has only one half of it. Two had
@@ -252,6 +252,14 @@ conversion took upstream's routes for reading a file with it, which fixed
 three bugs on the way: files in `/proc` said `error reading ...: Invalid
 argument`, `tail -n0 -f` began by printing an unterminated last line, and
 `printf x | tail -f` never ended. `tail-diff.sh` gained the cases.
+`stat` followed the same day: `-` is descriptor 0 as given (`cannot stat
+standard input: Bad file descriptor` where it described the `/dev/null`
+Rust's runtime had put there), its output goes through standard output's
+`Stream` to `close_stdout` (it was a locked `io::stdout()`, which answers a
+closed descriptor's `EBADF` with success, so `stat f >&-` exited 0), and it
+is written a call at a time where GNU's makes one -- a `putchar` per literal
+byte, a `printf` per directive -- so that a full disk leaves the same
+sentence, and a warning lands after the output before it.
 `cmp` was converted on 2026-10-07 with diffutils'
 `xstdopen` and its own stdout checks: 163 rows agree with GNU 3.10, 10 differ
 on purpose. `sort` was converted on 2026-10-03, its output moved onto

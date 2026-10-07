@@ -26,6 +26,13 @@
 //! format string is bytes for the same reason: GNU passes a non-UTF-8 format
 //! through unchanged, and a `String` cannot hold one.
 //!
+//! **Output goes out as upstream's does.** Through standard output's
+//! `Stream` with gnulib's `close_stdout` at the end -- `stat f >&-` is `write
+//! error: Bad file descriptor`, status 1 -- and a call at a time where GNU's
+//! makes one, a `putchar` per literal byte and a `printf` per directive, so
+//! that a full disk is met by the same call and leaves the same sentence
+//! (see [`Sink`]). `-` is descriptor 0 as the program was given it.
+//!
 //! **The width/precision layer is a real `printf`.** GNU implements `%-10s`,
 //! `%#o`, `%04a`, `%.3Y` and the rest by rewriting each directive into a C
 //! format string with a *per-specifier* set of allowed flags, so `%+d` prints
@@ -380,18 +387,53 @@ fn pad_to_width(conv: Conv, body: Vec<u8>, zero_at: Option<usize>) -> Vec<u8> {
     out
 }
 
+/// Where rendered output goes, one of upstream's stdio calls at a time: a
+/// `Vec` in the tests, standard output's [`coreutils::stdfd::Stream`] in the
+/// program.
+///
+/// # One `put` is one stdio call, on purpose
+///
+/// GNU's `stat` writes each literal byte of a format with a `putchar` of its
+/// own and each directive with a `printf` (two for `%N` on a symbolic link,
+/// and two for a time with a fraction), and glibc's buffer arithmetic runs per
+/// call. On a full disk, which call finds the buffer full decides whether
+/// anything is left for the close to fail on -- and so whether
+/// `close_stdout`'s last word is `write error: No space left on device` or a
+/// bare `write error`. Rendering a whole report and writing it at once, as
+/// this did, made a different call the one that met the full buffer. So every
+/// `put` below stands for one of upstream's calls, and [`print_it`] makes them
+/// in upstream's order.
+trait Sink {
+    fn put(&mut self, bytes: &[u8]);
+}
+
+impl Sink for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+impl Sink for coreutils::stdfd::Stream {
+    fn put(&mut self, bytes: &[u8]) {
+        // A `Stream` records a failed write for `close_stdout` to report and
+        // never returns one, as stdio's `ferror` does: there is nothing here
+        // to look at. See its docs.
+        let _ = std::io::Write::write_all(self, bytes);
+    }
+}
+
 /// `%s`: precision truncates, width pads with spaces and never with zeros.
 ///
 /// Truncation is by *bytes*, as C's is. A name is bytes here and a `%.3n` that
 /// split a multi-byte character would be no worse than one that did not — but
 /// it would differ from GNU, and this output is parsed.
-fn out_string(out: &mut Vec<u8>, conv: Conv, text: &[u8]) {
+fn out_string(out: &mut dyn Sink, conv: Conv, text: &[u8]) {
     let conv = filter(conv, Kind::Str);
     let body = match conv.precision {
         Some(p) => text.get(..p).unwrap_or(text).to_vec(),
         None => text.to_vec(),
     };
-    out.extend_from_slice(&pad_to_width(conv, body, None));
+    out.put(&pad_to_width(conv, body, None));
 }
 
 /// Every numeric conversion, over an already-rendered magnitude.
@@ -400,7 +442,7 @@ fn out_string(out: &mut Vec<u8>, conv: Conv, text: &[u8]) {
 /// and no padding; `negative` is its sign. Splitting it this way is what lets
 /// one function serve `%ju`, `%jo`, `%jx` and `%ld` — the differences between
 /// them are entirely in the flags, which [`filter`] has already applied.
-fn out_number(out: &mut Vec<u8>, conv: Conv, kind: Kind, negative: bool, digits: &str) {
+fn out_number(out: &mut dyn Sink, conv: Conv, kind: Kind, negative: bool, digits: &str) {
     let conv = filter(conv, kind);
     let bytes = digits.as_bytes();
 
@@ -453,7 +495,7 @@ fn out_number(out: &mut Vec<u8>, conv: Conv, kind: Kind, negative: bool, digits:
     } else {
         Some(sign.len().saturating_add(prefix.len()))
     };
-    out.extend_from_slice(&pad_to_width(conv, body, zero_at));
+    out.put(&pad_to_width(conv, body, zero_at));
 }
 
 /// `%X`, `%Y`, `%Z`, `%W`: seconds since the epoch, with an optional fraction.
@@ -464,7 +506,7 @@ fn out_number(out: &mut Vec<u8>, conv: Conv, kind: Kind, negative: bool, digits:
 /// `secs = -2, nsec = 500000000`, and must print as `-1.500`. That is a borrow
 /// back out of the fraction, and it is why the seconds may round to zero and
 /// still need a minus sign in front of them (`-0.500`).
-fn out_epoch(out: &mut Vec<u8>, conv: Conv, secs: i64, nsec: u32) {
+fn out_epoch(out: &mut dyn Sink, conv: Conv, secs: i64, nsec: u32) {
     let conv = filter(conv, Kind::Int);
     let precision = match conv.precision {
         None => 0,
@@ -518,26 +560,41 @@ fn out_epoch(out: &mut Vec<u8>, conv: Conv, secs: i64, nsec: u32) {
         precision_digits: false,
         ..conv
     };
-    out_number(out, padded, Kind::Int, negative, &digits);
+    let mut rendered = Vec::new();
+    out_number(&mut rendered, padded, Kind::Int, negative, &digits);
+    // Two calls, as upstream's `out_epoch_sec` makes them: the whole seconds
+    // with their padding, then a `printf` of the point and the fraction --
+    // which carries the padding instead when the width is left-adjusted. The
+    // first `.` is the point: nothing before it is anything but sign, padding
+    // and digits.
+    let point = rendered
+        .iter()
+        .position(|&b| b == b'.')
+        .unwrap_or(rendered.len());
+    let (whole, fraction) = rendered.split_at(point);
+    out.put(whole);
+    if !fraction.is_empty() {
+        out.put(fraction);
+    }
 }
 
 /// `%ju`.
-fn uint(out: &mut Vec<u8>, conv: Conv, v: u64) {
+fn uint(out: &mut dyn Sink, conv: Conv, v: u64) {
     out_number(out, conv, Kind::Uint, false, &v.to_string());
 }
 
 /// `%ld`, for the filesystem counters GNU prints signed.
-fn int(out: &mut Vec<u8>, conv: Conv, v: i64) {
+fn int(out: &mut dyn Sink, conv: Conv, v: i64) {
     out_number(out, conv, Kind::Int, v < 0, &v.unsigned_abs().to_string());
 }
 
 /// `%jo`.
-fn octal(out: &mut Vec<u8>, conv: Conv, v: u64) {
+fn octal(out: &mut dyn Sink, conv: Conv, v: u64) {
     out_number(out, conv, Kind::Octal, false, &format!("{v:o}"));
 }
 
 /// `%jx`.
-fn hex(out: &mut Vec<u8>, conv: Conv, v: u64) {
+fn hex(out: &mut dyn Sink, conv: Conv, v: u64) {
     out_number(out, conv, Kind::Hex, false, &format!("{v:x}"));
 }
 
@@ -804,7 +861,7 @@ enum Target<'a> {
 
 /// GNU's `print_stat`, directive for directive.
 fn render_stat(
-    out: &mut Vec<u8>,
+    out: &mut dyn Sink,
     diags: &mut Diags,
     conv: Conv,
     modifier: u8,
@@ -825,7 +882,8 @@ fn render_stat(
             out_string(out, conv, &f.style.quote(&f.name));
             match &f.link {
                 Some(Ok(target)) => {
-                    out.extend_from_slice(b" -> ");
+                    // Upstream's `printf (" -> ")`, a call of its own.
+                    out.put(b" -> ");
                     // The width applies to *each* half, not to the pair. That
                     // is upstream's behaviour and it is what keeps `ls`-like
                     // columns of `%-30N` lined up on both sides of the arrow.
@@ -853,7 +911,7 @@ fn render_stat(
                 if let Some(message) = message {
                     diags.error(message);
                 }
-                out.push(b'?');
+                out.put(b"?");
             }
         },
         b's' => uint(out, conv, st.size),
@@ -882,12 +940,12 @@ fn render_stat(
         b'z' => out_string(out, conv, &human_time(zone, st.ctime, st.ctime_nsec)),
         b'Z' => out_epoch(out, conv, st.ctime, st.ctime_nsec),
         // `%C` — see the module docs: an absent field, not a failed lookup.
-        _ => out.push(b'?'),
+        _ => out.put(b"?"),
     }
 }
 
 /// GNU's `print_statfs`, directive for directive.
-fn render_statfs(out: &mut Vec<u8>, conv: Conv, spec: u8, f: &FsFacts) {
+fn render_statfs(out: &mut dyn Sink, conv: Conv, spec: u8, f: &FsFacts) {
     let fs = &f.fs;
     match spec {
         b'n' => out_string(out, conv, &f.name),
@@ -910,27 +968,34 @@ fn render_statfs(out: &mut Vec<u8>, conv: Conv, spec: u8, f: &FsFacts) {
         b's' => uint(out, conv, fs.bsize),
         b'S' => uint(out, conv, if fs.frsize == 0 { fs.bsize } else { fs.frsize }),
         b'c' => uint(out, conv, fs.files),
-        _ => out.push(b'?'),
+        _ => out.put(b"?"),
     }
 }
 
-/// Render a scanned format for one operand.
+/// Render a scanned format for one operand, straight to `out` -- each literal
+/// byte as upstream's `putchar` and each directive as its `printf` (see
+/// [`Sink`]) -- so that a diagnostic said on the way follows the output
+/// before it, as `error()`'s `fflush (stdout)` places it.
 ///
 /// # Errors
 ///
 /// The text of an invalid directive, which the caller reports and then exits
-/// on — after writing whatever `out` already holds, because that is what GNU's
-/// print-then-die does.
+/// on — after what went before it, which has already been written, because
+/// that is what GNU's print-then-die does.
 fn print_it(
     pieces: &[Piece],
     target: &Target<'_>,
     zone: &Zone,
-    out: &mut Vec<u8>,
+    out: &mut dyn Sink,
     diags: &mut Diags,
 ) -> Result<(), Vec<u8>> {
     for piece in pieces {
         match piece {
-            Piece::Bytes(b) => out.extend_from_slice(b),
+            Piece::Bytes(b) => {
+                for &byte in b {
+                    out.put(&[byte]);
+                }
+            }
             Piece::Directive {
                 conv,
                 modifier,
@@ -945,11 +1010,11 @@ fn print_it(
                     "warning: unrecognized escape '\\{}'",
                     char::from(*c)
                 ));
-                out.push(*c);
+                out.put(&[*c]);
             }
             Piece::TrailingBackslash => {
                 diags.warn("warning: backslash at end of format");
-                out.push(b'\\');
+                out.put(b"\\");
             }
         }
     }
@@ -1206,34 +1271,40 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(1)
 }
 
-/// The funnel. A diagnostic that could not be written turns the earned
-/// status into `exit_failure`, which is what upstream's `atexit
-/// (close_stdout)` does on every exit path at once. See
+// Before `main`, so that `stdfd::restore` still sees the descriptors `stat`
+// was given: `stat -` with standard input closed is `cannot stat standard
+// input: Bad file descriptor` and `stat f >&-` a write error, as they are
+// GNU's -- not reports on the `/dev/null` Rust's runtime would put on each.
+coreutils::guard_std_fds!();
+
+/// The descriptors as given, then the funnel: a diagnostic that could not be
+/// written turns the earned status into `exit_failure`, which is what
+/// upstream's `atexit (close_stdout)` does on every exit path at once. See
 /// [`coreutils::stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
+    coreutils::stdfd::restore();
     coreutils::stdfd::close_stderr(imp::main(), 1)
 }
 
 #[cfg(unix)]
 mod imp {
     use super::{
-        Diags, FileFacts, FsFacts, FsInfo, Piece, Request, StatInfo, Target, default_format,
+        Diags, FileFacts, FsFacts, FsInfo, Piece, Request, Sink, StatInfo, Target, default_format,
         help_text, is_device, parse_args, print_it, quoting_style_from_env, scan, wants,
     };
     use coreutils::canon::{self, Mode, RealFs};
     use coreutils::diag;
     use coreutils::errmsg::strerror;
     use coreutils::pathname::dir_name;
-    use coreutils::quote::{self, Style, quote_os, quoteaf, quoteaf_os};
+    use coreutils::quote::{self, Style, quoteaf, quoteaf_os};
+    use coreutils::stdfd::{Stream, close_stdout};
     use localtime::Zone;
     use modechange::{S_IFDIR, S_IFLNK, S_IFMT};
     use pwdb::Db;
     use std::ffi::{CString, OsString};
     use std::fs;
-    use std::io::{self, Write};
-    use std::mem::ManuallyDrop;
-    use std::os::fd::FromRawFd;
+    use std::io;
     use std::os::unix::fs::MetadataExt;
     use std::process::ExitCode;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1381,14 +1452,12 @@ mod imp {
         diags: &mut Diags,
     ) -> Option<FileFacts> {
         // `-` is standard input, not a file called `-`. A pipeline that says
-        // `... | stat -c %s -` is asking about the descriptor it was handed.
+        // `... | stat -c %s -` is asking about the descriptor it was handed --
+        // upstream's `statx (0, "", AT_EMPTY_PATH)`. Descriptor 0 itself, as
+        // the guard left it: closed, it is `Bad file descriptor`, not the
+        // `/dev/null` Rust's runtime would have put there to describe.
         let meta = if name == b"-" {
-            // SAFETY: descriptor 0 is open for the lifetime of the process.
-            // `ManuallyDrop` is what keeps this borrow from closing it — a
-            // `File` built from a raw fd owns it, and dropping it here would
-            // shut stdin for everything that runs afterwards.
-            let stdin = ManuallyDrop::new(unsafe { fs::File::from_raw_fd(0) });
-            match stdin.metadata() {
+            match coreutils::stdfd::metadata(0) {
                 Ok(m) => m,
                 Err(e) => {
                     diags.error(&format!("cannot stat standard input: {}", strerror(&e)));
@@ -1499,19 +1568,31 @@ mod imp {
 
     pub fn main() -> ExitCode {
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        // Standard output as stdio's `stdout`, and gnulib's `close_stdout` on
+        // every way out: a write that failed is reported once, at the end --
+        // `write error: No space left on device`, or `Bad file descriptor`
+        // for `stat f >&-` -- and makes the status 1.
+        let mut out = Stream::stdout();
         let settings = match parse_args(&args) {
             Ok(Request::Help) => {
-                print!("{}", help_text());
-                return ExitCode::SUCCESS;
+                // A line per write, as upstream's `usage` writes it in pieces:
+                // the text is longer than stdio's buffer, and on a full disk
+                // what decides whether the `write error` has a reason is
+                // whether some of it is still waiting at the close.
+                for line in help_text().split_inclusive('\n') {
+                    out.put(line.as_bytes());
+                }
+                return close_stdout("stat", out, ExitCode::SUCCESS);
             }
             Ok(Request::Version) => {
-                println!("stat (SlateOS coreutils) 0.1.0");
-                return ExitCode::SUCCESS;
+                out.put(b"stat (SlateOS coreutils) 0.1.0\n");
+                return close_stdout("stat", out, ExitCode::SUCCESS);
             }
             Ok(Request::Run(settings)) => settings,
             Err(e) => {
                 diag!("stat: {e}");
-                return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
+                let status = u8::try_from(e.status).unwrap_or(1);
+                return close_stdout("stat", out, ExitCode::from(status));
             }
         };
 
@@ -1552,26 +1633,23 @@ mod imp {
         };
         let zone = Zone::from_env();
 
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
-        let mut invalid: Option<Vec<u8>> = None;
-
         for file in &settings.files {
             let name = quote::os_bytes(file).into_owned();
-            let mut buf: Vec<u8> = Vec::new();
 
             let outcome = if settings.filesystem {
                 if name == b"-" {
+                    // `quoteaf`, as upstream's `do_statfs` has it: shell
+                    // quotes, `'-'`, never the locale's curly ones.
                     diags.error(&format!(
                         "using {} to denote standard input does not work in file system mode",
-                        quote_os(file)
+                        quoteaf_os(file)
                     ));
                     continue;
                 }
                 let Some(facts) = gather_fs(&name, &mut diags) else {
                     continue;
                 };
-                print_it(&pieces, &Target::Fs(&facts), &zone, &mut buf, &mut diags)
+                print_it(&pieces, &Target::Fs(&facts), &zone, &mut out, &mut diags)
             } else {
                 let Some(facts) = gather(
                     &name,
@@ -1591,49 +1669,28 @@ mod imp {
                 } else {
                     &pieces
                 };
-                print_it(chosen, &Target::File(&facts), &zone, &mut buf, &mut diags)
+                print_it(chosen, &Target::File(&facts), &zone, &mut out, &mut diags)
             };
 
-            let stop = match outcome {
+            match outcome {
+                // Upstream's `fputs (trailing_delim, stdout)`: one call, and
+                // none at all for `--printf`'s empty one.
                 Ok(()) => {
-                    buf.extend_from_slice(trailing);
-                    false
+                    if !trailing.is_empty() {
+                        out.put(trailing);
+                    }
                 }
+                // `error (EXIT_FAILURE, ...)` where the directive was met,
+                // after what went before it -- the diagnostic flushes it
+                // first -- and with no operand after it.
                 Err(text) => {
-                    invalid = Some(text);
-                    true
+                    diag!("stat: {}: invalid directive", quote::quote(&text));
+                    return close_stdout("stat", out, ExitCode::from(1));
                 }
-            };
-
-            // A closed downstream reader — `stat * | head -1` — is an ordinary
-            // end to a pipeline, not a failure. Anything else is data the
-            // caller will never see and must not be reported as success.
-            if let Err(e) = out.write_all(&buf) {
-                // `stdfd::reader_gone`: quiet only where the `SIGPIPE` that
-                // would have ended upstream was not put back.
-                if coreutils::stdfd::reader_gone(&e) {
-                    return ExitCode::from(u8::from(diags.fail));
-                }
-                diag!("stat: write error: {}", strerror(&e));
-                return ExitCode::from(1);
-            }
-            if stop {
-                break;
             }
         }
 
-        if let Err(e) = out.flush()
-            && !coreutils::stdfd::reader_gone(&e)
-        {
-            diag!("stat: write error: {}", strerror(&e));
-            return ExitCode::from(1);
-        }
-
-        if let Some(text) = invalid {
-            diag!("stat: {}: invalid directive", quote::quote(&text));
-            return ExitCode::from(1);
-        }
-        ExitCode::from(u8::from(diags.fail))
+        close_stdout("stat", out, ExitCode::from(u8::from(diags.fail)))
     }
 }
 

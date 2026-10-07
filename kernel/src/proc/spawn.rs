@@ -3221,13 +3221,27 @@ pub struct MainPhdr {
 }
 
 /// Where [`place_phdr_table`] maps a copy of the program headers when no
-/// loaded segment holds them: one read-only frame, below the stack's region
-/// with a frame's gap between them, far above the mmap window and the image.
+/// loaded segment holds them: one read-only frame, below the lowest address
+/// the stack can grow to ([`USER_STACK_GUARD`]) with a frame's gap between
+/// them, far above the interpreter window, the mmap window and the image.
 /// Recorded as a `Fixed` VMA, so nothing else is placed over it.
-pub const PHDR_COPY_VADDR: u64 = USER_STACK_TOP - USER_STACK_SIZE - 2 * FRAME_SIZE as u64;
+///
+/// Below the stack's *growth* floor, not merely below the stack mapped at
+/// start: until 2026-10-07 it sat 96 KiB below the top, where the stack grows
+/// on demand (`idt::try_grow_user_stack`, down to 4 MiB), so a program whose
+/// stack passed 80 KiB wrote into a present read-only page and was killed --
+/// the persistent netstack daemon in every release build, whose inlined
+/// `main` probes its frame past that point at start.
+pub const PHDR_COPY_VADDR: u64 = USER_STACK_GUARD - 2 * FRAME_SIZE as u64;
 
 /// The end of the frame at [`PHDR_COPY_VADDR`].
 const PHDR_COPY_END: u64 = PHDR_COPY_VADDR + FRAME_SIZE as u64;
+
+// The copy must lie wholly below the stack's growth region, and above the
+// interpreter's randomised window.
+const _: () = assert!(PHDR_COPY_END < USER_STACK_GUARD);
+const _: () =
+    assert!(PHDR_COPY_VADDR > LINUX_INTERP_BASE + INTERP_ASLR_SPAN_PAGES * FRAME_SIZE as u64);
 
 /// Find the main image's program headers in its address space, or put them
 /// there -- `requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`.
@@ -22939,6 +22953,111 @@ pub fn self_test_linux_thread_signals() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux per-thread signals (ring 3: a thread inherits and then changes its \
          own mask, kill reaches the thread not blocking it, tgkill waits for its thread): OK"
+    );
+    Ok(())
+}
+
+/// Ring-3 test of the alternate signal stack:
+/// [`elf::build_linux_sigaltstack_test_elf`] checks `sigaltstack`'s answers,
+/// that an `SA_ONSTACK` handler runs on the stack (and one without it does
+/// not), the frame's `uc_stack` and its restore by `rt_sigreturn`,
+/// `SS_AUTODISARM`, a signal nested on the stack, `AT_MINSIGSTKSZ`, a stack
+/// overflow's `SIGSEGV` handled on the stack, the main stack growing past
+/// 80 KiB (which the program-header copy stopped until 2026-10-07), a new
+/// thread's and a forked child's stacks, and the `SIGSEGV` that ends a
+/// process whose frame does not fit or whose fault is blocked. Exits `0x2A`
+/// on success; the same program passes on Linux 6.6.
+pub fn self_test_linux_sigaltstack() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux alternate signal stack (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_sigaltstack_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-sigaltstack"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-sigaltstack",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: alternate signal stack spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: alternate signal stack (ring 3) — the program did not finish in \
+             60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x3F) => "setting up the mailbox, the stack or a handler failed",
+            Some(0x31) => "a thread with no alternate stack did not report SS_DISABLE",
+            Some(0x32 | 0x34) => "a stack under MINSIGSTKSZ or a bad mode was not refused",
+            Some(0x33) => "a refused sigaltstack reported the old stack anyway",
+            Some(0x35 | 0x36) => "SS_DISABLE|SS_AUTODISARM was not kept as Linux keeps it",
+            Some(0x37 | 0x38) => "setting a stack did not report the old one, or the new",
+            Some(0x40 | 0x41) => "the SA_ONSTACK handler did not run",
+            Some(0x42) => "the SA_ONSTACK handler did not run on the alternate stack",
+            Some(0x43) => "the frame's uc_stack was not the stack as set",
+            Some(0x44) => "a query on the stack did not say SS_ONSTACK",
+            Some(0x45) => "a change while on the stack was not EPERM",
+            Some(0x46..=0x48) => "AT_MINSIGSTKSZ is missing or does not cover the frame",
+            Some(0x49) => "the stack changed across a handler",
+            Some(0x50..=0x52) => "a handler without SA_ONSTACK ran on the alternate stack",
+            Some(0x53..=0x55) => "a handler off the stack saw the wrong uc_stack or answers",
+            Some(0x56) => "rt_sigreturn did not restore the stack from uc_stack",
+            Some(0x60..=0x67) => "SS_AUTODISARM did not disarm in the handler and re-arm after",
+            Some(0x70..=0x73) => "a signal nested on the stack did not stay on it",
+            Some(0x80..=0x84) => "a stack overflow's SIGSEGV was not handled on the stack",
+            Some(0x90..=0x93) => "a new thread did not start without an alternate stack",
+            Some(0xA0 | 0xA1) => "a forked child did not keep the stack",
+            Some(0xA2..=0xA5) => {
+                "a frame that did not fit the stack did not end the child by SIGSEGV"
+            }
+            Some(0xA6 | 0xA7) => "a fault with SIGSEGV blocked did not end the child by SIGSEGV",
+            Some(0xAF) => "wait4 for a child failed",
+            None => "no exit code: the program died -- a fault the stack should have caught?",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: alternate signal stack (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux alternate signal stack (ring 3: sigaltstack's answers, SA_ONSTACK, \
+         uc_stack and its restore, SS_AUTODISARM, nesting, AT_MINSIGSTKSZ, a stack \
+         overflow handled on it, SIGSEGV for a frame that does not fit): OK"
     );
     Ok(())
 }

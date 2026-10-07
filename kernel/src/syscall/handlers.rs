@@ -10593,9 +10593,12 @@ fn deliver_native_signal(
 ///     ([`crate::syscall::linux::build_linux_rt_frame`]) and enter the
 ///     handler. One handler per return-to-user (matching the native
 ///     path and Linux's "handle one, re-check on `rt_sigreturn`" model),
-///     so we stop and return `true` once a frame is built. If the stack
-///     cannot hold the frame the signal is re-armed and we return
-///     `false`.
+///     so we stop and return `true` once a frame is built. If the frame
+///     cannot be built -- the stack cannot hold it, or it does not fit the
+///     alternate stack it belongs on -- the signal is lost and `SIGSEGV`
+///     is sent in its place, as Linux's `force_sigsegv` does
+///     ([`crate::syscall::linux::force_sigsegv`]), and the loop goes on to
+///     deliver that; when it was `SIGSEGV`'s own frame, the process ends.
 ///   * **Ignore** (`SIG_IGN`) — drop and continue to the next signal.
 ///   * **Default** (`SIG_DFL`) — apply the kernel default action
 ///     (terminate / stop / ignore / continue), reusing the same helpers
@@ -10606,12 +10609,13 @@ fn deliver_native_signal(
 /// `false` if nothing was delivered to a handler.
 fn deliver_linux_signal(
     regs: &mut super::linux::LinuxTrapRegs,
-    exit: Option<SyscallExit>,
+    mut exit: Option<SyscallExit>,
     pid: crate::proc::pcb::ProcessId,
     task_id: crate::sched::task::TaskId,
 ) -> bool {
     use crate::proc::signal;
     use crate::syscall::linux::{self, LinuxDisposition};
+    const SIGSEGV: u32 = 11;
 
     loop {
         let (sig, info) = match signal::take_deliverable_info(pid) {
@@ -10634,9 +10638,18 @@ fn deliver_linux_signal(
             LinuxDisposition::Handler(act) => {
                 // Build a Linux rt_sigframe and enter the handler, passing the
                 // recorded source metadata so the siginfo_t is sender-faithful.
-                // On a stack-placement failure the signal is re-armed (with its
-                // info) inside build_linux_rt_frame and we fall through to false.
-                return linux::build_linux_rt_frame(regs, exit, pid, sig, &act, info);
+                if linux::build_linux_rt_frame(regs, exit, pid, sig, &act, info) {
+                    return true;
+                }
+                // The interrupted call's restart has been resolved into
+                // `regs` (Linux changes `regs->ax` in the same way, so its
+                // next handler sees no sentinel); resolving it again would
+                // rewind the call twice.
+                exit = None;
+                if !linux::force_sigsegv(pid, sig) {
+                    terminate_current_process_for_signal(pid, task_id, SIGSEGV);
+                    // Unreachable: task_exit never returns.
+                }
             }
             LinuxDisposition::Ignore => {
                 // Explicit SIG_IGN: drop and check the next signal.

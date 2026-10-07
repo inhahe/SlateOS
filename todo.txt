@@ -11154,6 +11154,10 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      to the already-blown stack and double-fault.  Tracked
 ##      alongside item 6 (Linux-shaped rt_sigframe delivery) — the
 ##      signal-delivery path is the same refactor.
+##      SUPERSEDED 2026-10-07 (lane A): sigaltstack is implemented in
+##      full -- the stack is kept per thread, SA_ONSTACK frames go on
+##      it, uc_stack/rt_sigreturn/SS_AUTODISARM and AT_MINSIGSTKSZ as
+##      Linux 6.6. known-issues/A-LINUX-PROGRAMS-HAVE-NO-ALTERNATE-SIGNAL-STACK.md.
 ##  15. IOCTL — DONE as ENOTTY-everywhere.  sys_ioctl returns
 ##      -ENOTTY for every (fd, request) pair, which is the
 ##      semantically correct response for ioctls on non-tty fds.

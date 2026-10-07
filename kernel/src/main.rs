@@ -3507,6 +3507,15 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_thread_signals(),
     );
 
+    // Ring-3 test of the alternate signal stack: sigaltstack's answers,
+    // SA_ONSTACK and SS_AUTODISARM, a stack overflow's SIGSEGV handled on it,
+    // AT_MINSIGSTKSZ, and SIGSEGV when a frame does not fit.
+    selftest::dispatch_debug(
+        "Linux alternate signal stack (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_sigaltstack(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

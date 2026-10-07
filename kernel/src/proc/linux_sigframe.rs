@@ -331,9 +331,17 @@ pub const RED_ZONE: u64 = 128;
 /// (a degenerate `%rsp` near 0), so callers map that to a delivery failure.
 #[must_use]
 pub fn compute_layout(user_rsp: u64, fp_size: u64) -> Option<FrameLayout> {
+    compute_layout_below(user_rsp.checked_sub(RED_ZONE)?, fp_size)
+}
+
+/// [`compute_layout`] below `base` itself: the FPU image and then the frame,
+/// with no red zone kept -- the layout at the top of an alternate stack, where
+/// nothing was interrupted.
+#[must_use]
+pub fn compute_layout_below(base: u64, fp_size: u64) -> Option<FrameLayout> {
     let size = RT_SIGFRAME_SIZE as u64;
-    // fp = round_down(sp - 128 - fp_size, 64); frame = round_down(fp - size, 16) - 8
-    let fp_addr = user_rsp.checked_sub(RED_ZONE)?.checked_sub(fp_size)? & !0x3Fu64;
+    // fp = round_down(base - fp_size, 64); frame = round_down(fp - size, 16) - 8
+    let fp_addr = base.checked_sub(fp_size)? & !0x3Fu64;
     let lowered = fp_addr.checked_sub(size)?;
     let frame_addr = (lowered & !0xFu64).checked_sub(8)?;
     let uc_addr = frame_addr.checked_add(8)?;
@@ -344,6 +352,63 @@ pub fn compute_layout(user_rsp: u64, fp_size: u64) -> Option<FrameLayout> {
         info_addr,
         fp_addr,
     })
+}
+
+/// Where a signal frame goes: Linux's `get_sigframe`, alternate stack and all.
+///
+/// `user_rsp` is the interrupted stack pointer, `onstack` whether the handler
+/// asked for the alternate stack (`SA_ONSTACK`), `alt` the thread's alternate
+/// stack and `fp_size` the FPU image's size.
+///
+/// The red zone is stepped over first. Then, for an `SA_ONSTACK` handler with
+/// a stack set and the thread not on it -- judged, as Linux judges it, at the
+/// pointer below the red zone -- the frame moves to the stack's top, with no
+/// red zone kept there, since nothing was interrupted on it. A frame meant for
+/// the alternate stack -- because it moved there, or because the thread was
+/// already running on it -- that does not fit inside it is refused (`None`)
+/// rather than written past its bottom over whatever lies below; Linux
+/// answers that with `SIGSEGV` (its `get_sigframe` returns a bogus address),
+/// and so do the callers here.
+#[must_use]
+pub fn place_frame(
+    user_rsp: u64,
+    onstack: bool,
+    alt: &crate::proc::signal::AltStack,
+    fp_size: u64,
+) -> Option<FrameLayout> {
+    let nested = alt.on_stack(user_rsp);
+    let below_red_zone = user_rsp.checked_sub(RED_ZONE)?;
+    let entering = onstack && alt.mode_at(below_red_zone) == 0;
+    let base = if entering {
+        alt.sp.checked_add(alt.size)?
+    } else {
+        below_red_zone
+    };
+    let layout = compute_layout_below(base, fp_size)?;
+    if (nested || entering) && !alt.contains(layout.frame_addr) {
+        return None;
+    }
+    Some(layout)
+}
+
+/// The most stack a signal frame with an FPU image of `fp_size` bytes can take
+/// from the top of an alternate stack, whatever the top's alignment: the
+/// value of `AT_MINSIGSTKSZ` (Linux's `get_sigframe_size`), which glibc
+/// reports as `sysconf(_SC_MINSIGSTKSZ)` and sizes `SIGSTKSZ` from.
+///
+/// [`compute_layout_below`] puts the image at `round_down(top - fp_size, 64)`
+/// (up to 63 bytes lower than its size alone needs), the frame below it at a
+/// 16-byte boundary (up to 15 more) and then 8 below that, so the frame ends
+/// at most `fp_size + 63 + RT_SIGFRAME_SIZE + 15 + 8` below the top. Rounded
+/// up to 16, as Linux rounds its own. (Linux's own figure is larger: it is
+/// sized for the biggest of its frames, the 32-bit ones included.)
+#[must_use]
+pub const fn min_sigstack_size(fp_size: u64) -> u64 {
+    let worst = fp_size
+        .saturating_add(63)
+        .saturating_add(RT_SIGFRAME_SIZE as u64)
+        .saturating_add(15 + 8);
+    worst.saturating_add(15) & !15
 }
 
 /// `uc_flags`: `uc_mcontext.fpstate` is an XSAVE image with `_fpx_sw_bytes`.
@@ -584,9 +649,102 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[sigframe]   FAIL: compute_layout(8) should underflow to None");
         return Err(KernelError::InvalidArgument);
     }
+    test_place_frame()?;
 
     serial_println!(
         "[sigframe]   Linux rt_sigframe ABI layout (sigcontext 256 / ucontext 304 / siginfo 128, align): OK"
     );
+    Ok(())
+}
+
+/// [`place_frame`] and [`min_sigstack_size`]: where a frame goes for each
+/// combination of `SA_ONSTACK`, an alternate stack and where the thread is,
+/// that a frame meant for the stack never leaves it, and that
+/// `AT_MINSIGSTKSZ` covers a frame at every alignment of the stack's top.
+fn test_place_frame() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::proc::signal::{AltStack, ss_flags};
+    use crate::serial_println;
+    const FP: u64 = 836;
+    const SP: u64 = 0x7000_0000;
+    const SIZE: u64 = 0x1_0000;
+    const TOP: u64 = SP + SIZE;
+    const AWAY: u64 = 0x7fff_ffff_0000;
+    let fail = |what: &str| {
+        serial_println!("[sigframe]   FAIL: place_frame: {}", what);
+        Err(KernelError::InvalidArgument)
+    };
+    let alt = AltStack {
+        sp: SP,
+        size: SIZE,
+        flags: 0,
+    };
+
+    // No SA_ONSTACK, or no stack: the interrupted stack, below its red zone.
+    if place_frame(AWAY, false, &alt, FP) != compute_layout(AWAY, FP)
+        || place_frame(AWAY, true, &AltStack::DISABLED, FP) != compute_layout(AWAY, FP)
+    {
+        return fail("without SA_ONSTACK or a stack, the frame stays put");
+    }
+    // SA_ONSTACK, off the stack: at its top, all of it inside.
+    let Some(top) = place_frame(AWAY, true, &alt, FP) else {
+        return fail("SA_ONSTACK refused");
+    };
+    if top != compute_layout_below(TOP, FP).unwrap_or(top) || top.fp_addr.saturating_add(FP) > TOP {
+        return fail("SA_ONSTACK: not at the top");
+    }
+    // Already on it: below the red zone where it is, still on the stack.
+    let on = SP + 0x8000;
+    if place_frame(on, true, &alt, FP) != compute_layout(on, FP)
+        || place_frame(on, false, &alt, FP) != compute_layout(on, FP)
+    {
+        return fail("nested: the frame goes below the interrupted handler's");
+    }
+    // ...and one that would run off its bottom is refused, SA_ONSTACK or not.
+    if place_frame(SP + 600, true, &alt, FP).is_some()
+        || place_frame(SP + 600, false, &alt, FP).is_some()
+    {
+        return fail("a frame past the stack's bottom must be refused");
+    }
+    // A stack too small for the frame is refused at entry.
+    let small = AltStack {
+        sp: SP,
+        size: 1024,
+        flags: 0,
+    };
+    if place_frame(AWAY, true, &small, FP).is_some() {
+        return fail("a frame larger than the stack must be refused");
+    }
+    // SS_AUTODISARM: never "on" the stack, so a signal starts again at the top.
+    let disarming = AltStack {
+        flags: ss_flags::SS_AUTODISARM,
+        ..alt
+    };
+    if place_frame(on, true, &disarming, FP) != Some(top) {
+        return fail("SS_AUTODISARM: a signal restarts at the top");
+    }
+    // Linux's corner: a stack pointer just above the top, whose red zone
+    // reaches onto the stack, is judged on it and does not move.
+    if place_frame(TOP + 64, true, &alt, FP) != compute_layout(TOP + 64, FP) {
+        return fail("just above the top");
+    }
+    // AT_MINSIGSTKSZ: the frame never takes more, at any alignment of the top.
+    let min = min_sigstack_size(FP);
+    if !min.is_multiple_of(16) {
+        return fail("AT_MINSIGSTKSZ is not a multiple of 16");
+    }
+    for skew in 0..64u64 {
+        let fitted = AltStack {
+            sp: SP.saturating_add(skew),
+            size: min,
+            flags: 0,
+        };
+        match place_frame(AWAY, true, &fitted, FP) {
+            Some(l)
+                if l.frame_addr >= fitted.sp
+                    && l.fp_addr.saturating_add(FP) <= fitted.sp.saturating_add(min) => {}
+            _ => return fail("a stack of AT_MINSIGSTKSZ bytes does not hold the frame"),
+        }
+    }
     Ok(())
 }

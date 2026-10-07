@@ -1941,9 +1941,20 @@ fn linux_fault_mapping(code: crate::proc::exception::ExceptionCode) -> Option<(u
 ///
 /// Returns `true` if delivered (the ISR should return and let `IRETQ` run the
 /// handler).  Returns `false` if the process is native (keeps the SEH
-/// trampoline, design-decision #4), has no handler for `sig`, or the user
-/// stack is unusable — in which case the caller proceeds to native SEH
-/// dispatch / terminate (the kernel default for an undelivered fault).
+/// trampoline, design-decision #4), has no handler for `sig`, blocks `sig`,
+/// or no frame can be built for it nor for the `SIGSEGV` sent in its place —
+/// in which case the caller proceeds to native SEH dispatch / terminate (the
+/// kernel default for an undelivered fault).
+///
+/// A fault's signal cannot wait, pending, while the program goes on: going
+/// on would re-run the faulting instruction. So, as Linux's
+/// `force_sig_info_to_task` does, a blocked or ignored one takes its default
+/// action, which for every fault ends the program -- a fault inside a
+/// handler for that same fault ends it rather than nesting the handler. A
+/// frame that cannot be built (the stack is gone; it does not fit the
+/// alternate stack) is answered with `SIGSEGV`, as Linux's `force_sigsegv`
+/// does: delivered here if it has a handler that can run, its default action
+/// -- the end -- otherwise.
 fn try_deliver_linux_fault_signal(
     frame: &InterruptStackFrame,
     sig: u32,
@@ -1953,6 +1964,7 @@ fn try_deliver_linux_fault_signal(
     use crate::proc::thread;
     use crate::syscall::linux::{self, LinuxDisposition, LinuxTrapRegs};
     use core::ptr::{read_volatile, write_volatile};
+    const SIGSEGV: u32 = 11;
 
     let task_id = sched::current_task_id();
     let pid = match thread::owner_process(task_id) {
@@ -1967,10 +1979,13 @@ fn try_deliver_linux_fault_signal(
     }
 
     // Resolve the disposition; only a real handler diverts the fault. SIG_DFL /
-    // SIG_IGN fall through to the kernel default (terminate for a fault).
+    // SIG_IGN fall through to the kernel default (terminate for a fault), and
+    // so does a handler the thread blocks (see above).
     let act = match linux::linux_disposition(pid, sig) {
-        LinuxDisposition::Handler(act) => act,
-        LinuxDisposition::Ignore | LinuxDisposition::Default => return false,
+        LinuxDisposition::Handler(act) if !crate::proc::signal::is_blocked(pid, sig) => act,
+        LinuxDisposition::Handler(_) | LinuxDisposition::Ignore | LinuxDisposition::Default => {
+            return false;
+        }
     };
 
     // Recover raw pointers to the interrupt frame + saved GPRs without forming
@@ -2016,7 +2031,18 @@ fn try_deliver_linux_fault_signal(
 
     let entry = match linux::emit_linux_rt_frame(pid, sig, &act, &regs, siginfo) {
         Some(e) => e,
-        None => return false, // user stack unusable — caller terminates.
+        // No frame for `sig`: SIGSEGV in its place (`force_sigsegv`), at no
+        // address and from the kernel, as Linux's `force_sig` sends it -- or,
+        // when SIGSEGV's own frame failed, the end.
+        None if sig != SIGSEGV => {
+            return try_deliver_linux_fault_signal(
+                frame,
+                SIGSEGV,
+                crate::proc::signal::si_code::SI_KERNEL,
+                0,
+            );
+        }
+        None => return false,
     };
 
     // Redirect IRETQ into the handler.  Volatile writes guarantee the stores

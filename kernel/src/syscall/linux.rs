@@ -1761,6 +1761,7 @@ pub fn dispatch_linux_with_frame(frame: &mut crate::syscall::entry::SyscallFrame
         nr::EXECVE => Some(linux_execve(frame)),
         nr::EXECVEAT => Some(linux_execveat(frame)),
         nr::RT_SIGRETURN => Some(linux_rt_sigreturn(frame)),
+        nr::SIGALTSTACK => Some(linux_sys_sigaltstack(frame)),
         _ => None,
     }
 }
@@ -2206,6 +2207,20 @@ fn linux_rt_sigreturn(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     // SIGKILL/SIGSTOP, so a crafted uc_sigmask cannot wedge those.
     if let Some(pid) = caller_pid() {
         let _ = crate::proc::signal::set_blocked(pid, uc.uc_sigmask);
+        // The alternate stack the frame recorded (`uc_stack`), put back as
+        // `sigaltstack` would put it -- which re-arms an `SS_AUTODISARM`
+        // stack, and applies a change the handler made there. Judged from
+        // the stack pointer just restored, as Linux's `restore_altstack`
+        // runs after `restore_sigcontext`. A refusal is no error of the
+        // return (Linux squashes all but EFAULT, which the read above has
+        // ruled out): code resumed on the stack cannot change it (EPERM),
+        // and the stack it had stays.
+        let restored = crate::proc::signal::AltStack {
+            sp: uc.uc_stack.ss_sp,
+            size: uc.uc_stack.ss_size,
+            flags: uc.uc_stack.ss_flags.cast_unsigned(),
+        };
+        let _ = crate::proc::signal::linux_sigaltstack(pid, Some(restored), mc.rsp, MINSIGSTKSZ);
     }
 
     // The resumed RAX is whatever the interrupted context held (the
@@ -2295,12 +2310,15 @@ pub struct RtFrameEntry {
 ///
 /// This is the shared core behind both [`build_linux_rt_frame`] (asynchronous
 /// signals delivered at syscall return) and the synchronous fault-delivery
-/// path in the exception ISRs (`crate::idt`).  It performs **no re-arming**
-/// on failure: a `None` return means the frame could not be written (user
-/// stack would underflow or is not writable), and the caller decides the
-/// fallback — re-arm + retry for an asynchronous signal, or force-default
-/// (terminate) for a synchronous fault, which cannot be retried because
-/// resuming would just re-execute the faulting instruction.
+/// path in the exception ISRs (`crate::idt`).  The frame goes where Linux's
+/// `get_sigframe` puts it: below the interrupted stack's red zone, or at the
+/// top of the thread's alternate stack for an `SA_ONSTACK` handler
+/// ([`crate::proc::linux_sigframe::place_frame`]).  A `None` return means the
+/// frame could not be written -- the stack would underflow, is not writable,
+/// or the frame does not fit the alternate stack it belongs on -- and changes
+/// nothing; the caller then does what Linux's `force_sigsegv` does (see
+/// [`crate::syscall::handlers::deliver_linux_signal`] and the exception
+/// ISRs' `try_deliver_linux_fault_signal`).
 #[must_use]
 pub fn emit_linux_rt_frame(
     pid: pcb::ProcessId,
@@ -2319,8 +2337,17 @@ pub fn emit_linux_rt_frame(
     // and loaded back by `rt_sigreturn`.
     let fpu_image = crate::sched::fpu::capture_signal_image();
 
-    // Where does the frame land on the user stack?  Underflow ⇒ fail.
-    let layout: FrameLayout = linux_sigframe::compute_layout(regs.rsp, fpu_image.len() as u64)?;
+    // Where does the frame land?  Below the interrupted stack's red zone, or
+    // at the top of the thread's alternate stack for an `SA_ONSTACK` handler
+    // (Linux's `get_sigframe`).  Underflow, or a frame that does not fit the
+    // alternate stack it belongs on, ⇒ fail.
+    let altstack = signal::altstack(pid);
+    let layout: FrameLayout = linux_sigframe::place_frame(
+        regs.rsp,
+        act.sa_flags & sa_flags::SA_ONSTACK != 0,
+        &altstack,
+        fpu_image.len() as u64,
+    )?;
 
     // Validate the whole frame region [frame_addr, frame_addr + size) and the
     // FPU image's are writable user memory before touching them.
@@ -2400,12 +2427,14 @@ pub fn emit_linux_rt_frame(
     let uc = LinuxUcontext {
         uc_flags: xstate | linux_sigframe::UC_SIGCONTEXT_SS | linux_sigframe::UC_STRICT_RESTORE_SS,
         uc_link: 0,
+        // The thread's alternate stack as it stands, flags as they were set
+        // (Linux's `__save_altstack`) -- what `rt_sigreturn` puts back, which
+        // re-arms an `SS_AUTODISARM` stack disarmed below.
         uc_stack: LinuxStackT {
-            ss_sp: 0,
-            // SS_DISABLE (2): no alternate signal stack installed.
-            ss_flags: 2,
+            ss_sp: altstack.sp,
+            ss_flags: altstack.flags.cast_signed(),
             _pad: 0,
-            ss_size: 0,
+            ss_size: altstack.size,
         },
         uc_mcontext: sc,
         // Restored by rt_sigreturn: the mask in effect before the handler
@@ -2483,6 +2512,10 @@ pub fn emit_linux_rt_frame(
     // ---- apply the new blocked mask ----
     let _ = signal::set_blocked(pid, new_blocked);
 
+    // ---- SS_AUTODISARM: a handler has been entered (Linux's
+    // `signal_delivered`), whether on the alternate stack or not ----
+    signal::disarm_altstack(pid);
+
     // ---- SA_RESETHAND: one-shot handler resets to SIG_DFL ----
     if (act.sa_flags & sa_flags::SA_RESETHAND) != 0 {
         linux_sigaction_reset_handler(pid, sig);
@@ -2526,10 +2559,11 @@ pub fn emit_linux_rt_frame(
 /// state among them.
 ///
 /// Returns `true` on successful delivery (frame rewritten, one signal
-/// consumed).  Returns `false` if the user stack cannot hold the frame —
-/// in that case the signal is re-armed (left pending) for the next
-/// return-to-user, and the caller should fall back to the normal return
-/// value.
+/// consumed).  Returns `false` if the frame could not be built -- the stack
+/// cannot hold it, or it does not fit the alternate stack it belongs on: the
+/// signal is then lost, as on Linux, and the caller sends `SIGSEGV` in its
+/// place (`force_sigsegv`).  `regs` keeps any restart resolution already made,
+/// which the frame of the `SIGSEGV` handler records in turn.
 #[must_use]
 pub fn build_linux_rt_frame(
     regs: &mut LinuxTrapRegs,
@@ -2539,8 +2573,6 @@ pub fn build_linux_rt_frame(
     act: &LinuxSigaction,
     info: crate::proc::signal::SigInfo,
 ) -> bool {
-    use crate::proc::signal;
-
     // SA_RESTART: a handler is about to run, so resolve any restart sentinel
     // the interrupted syscall returned.  Either we rewind so the syscall
     // re-executes after the handler returns (RAX = original nr, RIP = the
@@ -2597,14 +2629,56 @@ pub fn build_linux_rt_frame(
             regs.rflags = entry.rflags;
             true
         }
-        None => {
-            // User stack unusable — re-arm (preserving the faithful `info`)
-            // so a later return-to-user retries delivery, exactly like the
-            // native path (a future sigaltstack would give a fallback stack).
-            let _ = signal::set_pending_info(pid, sig, info);
-            false
+        // No frame: the caller forces SIGSEGV. Until 2026-10-07 the signal was
+        // re-armed instead, and retried at every return to user mode for as
+        // long as the stack stayed unusable -- a program on a broken stack
+        // kept running, its signal never delivered.
+        None => false,
+    }
+}
+
+/// Linux's `force_sigsegv`, for a handler whose frame could not be built
+/// (`sig` is the signal it was for): the program is told by `SIGSEGV`
+/// instead -- unblocked, and its `SIG_IGN` undone, so that it is not lost too
+/// (`force_sig`). When the frame that failed was `SIGSEGV`'s own, there is
+/// nothing left to tell the program with, and `SIGSEGV`'s default action is
+/// forced, which ends it (`force_fatal_sig`).
+///
+/// Posts the `SIGSEGV` (`SI_KERNEL`) to the calling thread alone, as a fault
+/// is its own; the caller's delivery loop takes it next. Returns `false` when
+/// the program must end instead -- for the caller to end it with `SIGSEGV`.
+#[must_use]
+pub fn force_sigsegv(pid: pcb::ProcessId, sig: u32) -> bool {
+    use crate::proc::signal;
+    const SIGSEGV: u32 = 11;
+    let bit = signal::signal_bit(SIGSEGV).unwrap_or(0);
+    let act = linux_sigaction_get(pid, SIGSEGV);
+    let blocked = signal::blocked(pid) & bit != 0;
+    if sig == SIGSEGV || blocked || act.sa_handler == SIG_IGN {
+        // Linux's `force_sig_info_to_task`: a blocked or ignored SIGSEGV gets
+        // its default action back, and is unblocked.
+        linux_sigaction_set(
+            pid,
+            SIGSEGV,
+            LinuxSigaction {
+                sa_handler: SIG_DFL,
+                ..act
+            },
+        );
+        if blocked {
+            let _ = signal::set_blocked(pid, signal::blocked(pid) & !bit);
         }
     }
+    if sig == SIGSEGV {
+        return false;
+    }
+    let _ = signal::set_thread_pending_info(
+        pid,
+        crate::sched::current_task_id(),
+        SIGSEGV,
+        signal::SigInfo::kernel(),
+    );
+    true
 }
 
 /// Linux `fork()` / `vfork()` translation.
@@ -9466,179 +9540,103 @@ fn sys_umask(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `sigaltstack(ss, old_ss)` — install / query the alternate signal
-/// stack used when a handler has SA_ONSTACK set.
-///
-/// We don't currently implement alternate signal stacks (signals
-/// always deliver on the thread's main stack).  This stub:
-///   - Accepts any `ss` pointer and silently ignores it (we read it to
-///     validate it's a valid user-mapped range when non-NULL, matching
-///     Linux's EFAULT-on-bad-pointer behaviour).
-///   - When `old_ss` is non-NULL, writes a `stack_t` with `ss_flags ==
-///     SS_DISABLE` to communicate "no alternate stack is in effect".
-///   - Returns 0 (success) regardless.
-///
-/// `struct stack_t` on Linux x86_64:
-///   ```
-///   struct stack_t {
-///       void  *ss_sp;     // 8 bytes
-///       int    ss_flags;  // 4 bytes
-///       size_t ss_size;   // 8 bytes (after 4 bytes of padding)
-///   };  // 24 bytes total
-///   ```
-/// (`int` is followed by 4 bytes of natural-alignment padding before
-/// the `size_t`.)
-///
-/// Limitation: programs that catch SIGSEGV with SA_ONSTACK to print a
-/// backtrace after blowing the main stack will deliver to the
-/// already-blown stack and double-fault.  Tracked in todo.txt
-/// alongside the Linux-shaped rt_sigframe delivery work — both
-/// require the same signal-delivery refactor.
+/// `MINSIGSTKSZ` on x86_64 Linux (`arch/x86/include/uapi/asm/signal.h`):
+/// the smallest stack `sigaltstack` accepts, 2048 bytes -- the floor Linux's
+/// `do_sigaltstack` is called with, which is not the frame's real size
+/// (that is `AT_MINSIGSTKSZ`, [`crate::proc::linux_sigframe::min_sigstack_size`]).
+const MINSIGSTKSZ: u64 = 2048;
+
+/// Linux `sigaltstack(ss, old_ss)`, from a user system call: the calling
+/// thread's alternate signal stack, judged from the stack pointer it called
+/// with (`frame.user_rsp`, Linux's `current_user_stack_pointer`).
+fn linux_sys_sigaltstack(frame: &crate::syscall::entry::SyscallFrame) -> i64 {
+    sigaltstack_common(frame.arg0, frame.arg1, Some(frame.user_rsp)).value
+}
+
+/// `sigaltstack` with no caller's frame -- the kernel's own callers (the
+/// dispatch self-tests), which have no thread whose stack it could be: the
+/// arguments are checked as for a program, and the answer is "no stack".
+/// A program's call goes through [`linux_sys_sigaltstack`].
 fn sys_sigaltstack(args: &SyscallArgs) -> SyscallResult {
-    /// `SS_ONSTACK` from `<signal.h>` — caller is currently executing on
-    /// the alternate stack (and as a flag input, "install the new stack
-    /// in non-disabled mode").
-    const SS_ONSTACK: i32 = 1;
-    /// `SS_DISABLE` from `<signal.h>` — communicates "no alternate
-    /// stack is in effect" in `stack_t.ss_flags`.
-    const SS_DISABLE: i32 = 2;
-    /// `SS_AUTODISARM` (Linux 4.7+, top bit of ss_flags) — opt-in
-    /// "disarm the alt stack on entry to a handler" semantics.  Lives in
-    /// the `SS_FLAG_BITS` mask and is preserved across the mode switch
-    /// in Linux's `do_sigaltstack` (`ss_mode = ss_flags & ~SS_FLAG_BITS`).
-    const SS_AUTODISARM: i32 = 1 << 31;
-    /// `SS_FLAG_BITS` — bits stripped before comparing against the
-    /// {0, SS_DISABLE, SS_ONSTACK} mode set.
-    const SS_FLAG_BITS: i32 = SS_AUTODISARM;
-    /// `MINSIGSTKSZ` on x86_64 Linux (signal/arch/x86/include/uapi/asm/signal.h):
-    /// 2048 bytes.  Linux 6.x exposes a dynamic value via AT_MINSIGSTKSZ
-    /// to account for AVX-512 register-save footprint, but the syscall
-    /// floor enforced by `do_sigaltstack(... , MINSIGSTKSZ)` stays at
-    /// the compile-time 2048.
-    const MINSIGSTKSZ: u64 = 2048;
-    const STACK_T_SIZE: usize = 24;
+    sigaltstack_common(args.arg0, args.arg1, None)
+}
 
-    let ss_ptr = args.arg0;
-    let old_ss_ptr = args.arg1;
+/// Linux `sigaltstack(ss, old_ss)`: set and/or report the calling thread's
+/// alternate signal stack -- the stack an `SA_ONSTACK` handler runs on
+/// ([`emit_linux_rt_frame`]), so that a handler for a stack overflow has a
+/// stack to run on.
+///
+/// The order is Linux's (`SYSCALL_DEFINE2(sigaltstack)` → `do_sigaltstack`):
+///
+/// 1. `ss` (a `stack_t`: `ss_sp` at 0, `int ss_flags` at 8, `ss_size` at 16)
+///    is read whole first: `EFAULT` if it cannot be.
+/// 2. With `ss`: `EPERM` while the thread runs on its current stack, then
+///    `EINVAL` for a mode other than 0, `SS_ONSTACK` or `SS_DISABLE` (after
+///    `SS_AUTODISARM` is taken off), then `ENOMEM` for a stack under
+///    [`MINSIGSTKSZ`] that is not exactly the one already set
+///    ([`crate::proc::signal::linux_sigaltstack`]).
+/// 3. Only then, and only if nothing failed, is `old_ss` written: the base and
+///    size, the mode as seen from the caller's stack pointer (`SS_ONSTACK`,
+///    `SS_DISABLE` or 0) and the stored `SS_AUTODISARM`. A refused call writes
+///    nothing, as on Linux.
+///
+/// `sp` is the caller's stack pointer; `None` for a caller with no thread to
+/// speak of (see [`sys_sigaltstack`]), for which nothing is stored.
+///
+/// Until 2026-10-07 this checked the arguments and kept nothing: every Linux
+/// program's handlers ran on the stack they interrupted, so a handler for a
+/// stack overflow had none.
+fn sigaltstack_common(ss_ptr: u64, old_ss_ptr: u64, sp: Option<u64>) -> SyscallResult {
+    use crate::proc::linux_sigframe::LinuxStackT;
+    use crate::proc::signal::{self, AltStack, AltStackError, ss_flags};
 
-    // Linux gate order (kernel/signal.c::SYSCALL_DEFINE2(sigaltstack)
-    // -> do_sigaltstack):
-    //   1. If uss != NULL: `copy_from_user(&new, uss, sizeof(stack_t))`
-    //      -> EFAULT on bad pointer.  Reads the full struct before any
-    //      field validation.
-    //   2. do_sigaltstack:
-    //      a. If uoss != NULL: fill `old` from the kernel state
-    //         (no validation, no copy_to_user yet).
-    //      b. If uss != NULL:
-    //          i.   on_stack(sp) -> EPERM (we have no alt-stack
-    //               tracking and no caller-sp model in self-test
-    //               context, so this gate is skipped).
-    //          ii.  `ss_mode = ss_flags & ~SS_FLAG_BITS`; if
-    //               `ss_mode != {0, SS_DISABLE, SS_ONSTACK}` -> EINVAL.
-    //          iii. if mode != SS_DISABLE and ss_size < MINSIGSTKSZ
-    //               -> ENOMEM.
-    //      c. Commit the new alt-stack (we silently drop it).
-    //   3. If uoss != NULL: `copy_to_user(uoss, &old, sizeof(stack_t))`
-    //      -> EFAULT on bad pointer.  Note this happens AFTER the
-    //      uss-side validation gates.
-    //
-    // Pre-batch (354) this stub did:
-    //   - validate_user_read(uss, 24)   [matches gate 1]
-    //   - validate_user_write(uoss, 24) [BEFORE the uss field gates]
-    //   - write SS_DISABLE to uoss      [unconditional]
-    //   - return 0                      [unconditional]
-    //
-    // Divergences:
-    //   * uss with ss_flags = 0xCAFE (unknown mode bits): Linux returns
-    //     -EINVAL.  Pre-batch: 0 (silently accepted).
-    //   * uss with ss_flags = 0 (SS_ONSTACK-equiv install) and ss_size =
-    //     1024 (< MINSIGSTKSZ): Linux returns -ENOMEM.  Pre-batch: 0.
-    //   * uss with ss_flags = SS_AUTODISARM | 0xCAFE (mode bits in the
-    //     SS_FLAG_BITS-stripped low part are 0xCAFE & ~AUTODISARM =
-    //     0xCAFE, invalid): Linux returns -EINVAL.  Pre-batch: 0.
-    //   * uss valid + bad uoss: Linux returns 0 (or commits uss) then
-    //     EFAULT.  Pre-batch: EFAULT immediately without consulting uss
-    //     gates.  (We can't probe this from boot context because
-    //     validate_user_write is bypassed for kernel callers.)
-    //
-    // The SS_AUTODISARM bit must be preserved across the mode strip;
-    // Linux stores the full ss_flags including the AUTODISARM bit, so
-    // a probe with ss_flags = SS_AUTODISARM | SS_DISABLE is valid
-    // (mode = SS_DISABLE).
-
-    // Gate 1: copy_from_user(uss, 24) if uss != NULL.
-    let mut new_flags: i32 = 0;
-    let mut new_size: u64 = 0;
-    if ss_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(ss_ptr, STACK_T_SIZE) {
-            return linux_err(linux_errno_for(e));
+    let new = if ss_ptr == 0 {
+        None
+    } else {
+        match crate::mm::user::read_user_value::<LinuxStackT>(ss_ptr) {
+            Ok(s) => Some(AltStack {
+                sp: s.ss_sp,
+                size: s.ss_size,
+                flags: s.ss_flags.cast_unsigned(),
+            }),
+            Err(e) => return linux_err(linux_errno_for(e)),
         }
-        let mut buf = [0u8; STACK_T_SIZE];
-        // SAFETY: validate_user_read above confirmed the 24-byte range.
-        if let Err(e) =
-            unsafe { crate::mm::user::copy_from_user(ss_ptr, buf.as_mut_ptr(), STACK_T_SIZE) }
-        {
-            return linux_err(linux_errno_for(e));
-        }
-        // Field layout (verified against x86_64 Linux UAPI):
-        //   [0..8]   ss_sp     (void *, we don't honour but read past)
-        //   [8..12]  ss_flags  (int)
-        //   [12..16] padding
-        //   [16..24] ss_size   (size_t = u64)
-        new_flags = i32::from_ne_bytes(match <[u8; 4]>::try_from(&buf[8..12]) {
-            Ok(b) => b,
-            // SAFETY: 4-byte slice from a 24-byte buf at offset 8
-            // is always Ok.  The unreachable branch is a defensive
-            // EINVAL rather than a panic to keep the syscall
-            // never-panic invariant.
-            Err(_) => return linux_err(errno::EINVAL),
-        });
-        new_size = u64::from_ne_bytes(match <[u8; 8]>::try_from(&buf[16..24]) {
-            Ok(b) => b,
-            Err(_) => return linux_err(errno::EINVAL),
-        });
-    }
+    };
 
-    // Gate 2b.ii: ss_mode validation (only if uss != NULL).
-    if ss_ptr != 0 {
-        let ss_mode = new_flags & !SS_FLAG_BITS;
-        if ss_mode != 0 && ss_mode != SS_DISABLE && ss_mode != SS_ONSTACK {
-            return linux_err(errno::EINVAL);
-        }
-        // Gate 2b.iii: size floor when not SS_DISABLE.
-        if ss_mode != SS_DISABLE && new_size < MINSIGSTKSZ {
-            return linux_err(errno::ENOMEM);
-        }
-    }
+    let old = match (caller_pid(), sp) {
+        (Some(pid), Some(sp)) => signal::linux_sigaltstack(pid, new, sp, MINSIGSTKSZ),
+        // No thread: check the request as Linux would, and store nothing.
+        _ => new
+            .map_or(Ok(()), |n| {
+                let mode = n.flags & !ss_flags::SS_FLAG_BITS;
+                if mode != 0 && mode != ss_flags::SS_ONSTACK && mode != ss_flags::SS_DISABLE {
+                    Err(AltStackError::BadMode)
+                } else if mode != ss_flags::SS_DISABLE && n.size < MINSIGSTKSZ {
+                    Err(AltStackError::TooSmall)
+                } else {
+                    Ok(())
+                }
+            })
+            .map(|()| AltStack::DISABLED),
+    };
+    let old = match old {
+        Ok(old) => old,
+        Err(AltStackError::OnStack) => return linux_err(errno::EPERM),
+        Err(AltStackError::BadMode) => return linux_err(errno::EINVAL),
+        Err(AltStackError::TooSmall) => return linux_err(errno::ENOMEM),
+    };
 
-    // Gate 3: copy_to_user(uoss, &old) if uoss != NULL.  Linux runs
-    // this only after the uss gates have passed (above), so an EFAULT
-    // here surfaces only when the new-stack request was syntactically
-    // valid.
     if old_ss_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(old_ss_ptr, STACK_T_SIZE) {
-            return linux_err(linux_errno_for(e));
-        }
-        // Pack the disabled stack_t into a byte buffer.  Layout:
-        //   [0..8]   ss_sp (null)
-        //   [8..12]  ss_flags = SS_DISABLE
-        //   [12..16] padding
-        //   [16..24] ss_size (0)
-        let mut buf = [0u8; STACK_T_SIZE];
-        let flags_bytes = SS_DISABLE.to_ne_bytes();
-        buf[8] = flags_bytes[0];
-        buf[9] = flags_bytes[1];
-        buf[10] = flags_bytes[2];
-        buf[11] = flags_bytes[3];
-        // SAFETY: validate_user_write above confirmed the 24-byte
-        // writable user range; we copy exactly STACK_T_SIZE bytes
-        // from a kernel-owned buffer.
-        let r = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), old_ss_ptr, STACK_T_SIZE) };
-        if let Err(e) = r {
+        let report = LinuxStackT {
+            ss_sp: old.sp,
+            ss_flags: old.flags.cast_signed(),
+            _pad: 0,
+            ss_size: old.size,
+        };
+        if let Err(e) = crate::mm::user::write_user_value(old_ss_ptr, report) {
             return linux_err(linux_errno_for(e));
         }
     }
-
     SyscallResult::ok(0)
 }
 

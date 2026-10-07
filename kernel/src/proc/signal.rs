@@ -578,33 +578,114 @@ struct ThreadSignals {
     /// restores it — or by the no-handler tail of `deliver_linux_signal`,
     /// which restores it directly. `None` means no restore is pending.
     saved_sigmask: Option<u64>,
-    /// Base and length of the thread's alternate signal stack, as last
-    /// reported by `SYS_SIGNAL_ALTSTACK`. `(0, 0)` means none is registered.
+    /// The thread's alternate signal stack, as last set by `SYS_SIGNAL_ALTSTACK`
+    /// (native) or `sigaltstack` (Linux); [`AltStack::DISABLED`] when there is
+    /// none.
     ///
     /// The kernel holds this rather than reading libc's copy at delivery time,
     /// because the case an alternate stack exists to serve is a *stack
     /// overflow*: reading userspace memory while building a signal frame for a
     /// fault is the same recursion the feature is meant to escape.
-    altstack_sp: u64,
-    /// See [`Self::altstack_sp`].
-    altstack_size: u64,
+    altstack: AltStack,
     /// Signals sent to this thread alone: `tgkill`, `tkill`, a
     /// `SIGEV_THREAD_ID` timer.
     pending: PendingSet,
 }
 
 impl ThreadSignals {
-    /// A thread with mask `blocked`, the alternate stack `(sp, size)`, and
+    /// A thread with mask `blocked`, the alternate stack `altstack`, and
     /// nothing pending.
-    const fn new(blocked: u64, altstack: (u64, u64)) -> Self {
+    const fn new(blocked: u64, altstack: AltStack) -> Self {
         Self {
             blocked,
             saved_sigmask: None,
-            altstack_sp: altstack.0,
-            altstack_size: altstack.1,
+            altstack,
             pending: PendingSet::new(),
         }
     }
+}
+
+/// `stack_t.ss_flags`: Linux's values, which the native libc uses too.
+pub mod ss_flags {
+    /// Reported: the thread is running on its alternate stack. Requested: an
+    /// alternate stack is to be used (the same as 0).
+    pub const SS_ONSTACK: u32 = 1;
+    /// No alternate stack, reported or requested.
+    pub const SS_DISABLE: u32 = 2;
+    /// Disarm the stack whenever a handler is entered, so that a handler can
+    /// leave it by `siglongjmp` without leaving it marked in use (Linux 4.7).
+    /// The frame's `uc_stack` keeps the stack, and `rt_sigreturn` re-arms it.
+    pub const SS_AUTODISARM: u32 = 1 << 31;
+    /// The flags beside the mode: what a request may add to 0, `SS_ONSTACK`
+    /// or `SS_DISABLE`.
+    pub const SS_FLAG_BITS: u32 = SS_AUTODISARM;
+}
+
+/// A thread's alternate signal stack, as Linux keeps one (`sas_ss_sp`,
+/// `sas_ss_size`, `sas_ss_flags`): its base, its size -- 0 for none -- and
+/// the flags it was set with, which the frame's `uc_stack` reports as they
+/// are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AltStack {
+    /// The lowest address of the stack (`ss_sp`).
+    pub sp: u64,
+    /// Its size in bytes (`ss_size`); 0 means there is no stack.
+    pub size: u64,
+    /// The `ss_flags` it was set with ([`ss_flags`]).
+    pub flags: u32,
+}
+
+impl AltStack {
+    /// No alternate stack: what a thread starts with, and what disabling or
+    /// disarming one leaves (Linux's `sas_ss_reset`).
+    pub const DISABLED: Self = Self {
+        sp: 0,
+        size: 0,
+        flags: ss_flags::SS_DISABLE,
+    };
+
+    /// Whether stack pointer `sp` lies on the stack: in `(base, base + size]`
+    /// -- a stack pointer at the very top has pushed nothing there yet, but
+    /// the next push lands on the stack (Linux's `__on_sig_stack`, for a stack
+    /// that grows down).
+    #[must_use]
+    pub const fn contains(&self, sp: u64) -> bool {
+        sp > self.sp && sp.wrapping_sub(self.sp) <= self.size
+    }
+
+    /// Whether a thread at `sp` counts as running on its stack (Linux's
+    /// `on_sig_stack`). Never with `SS_AUTODISARM`: such a stack is disarmed
+    /// while a handler runs on it, so a stack pointer inside it is the
+    /// program's own doing -- and a signal must still be able to use it.
+    #[must_use]
+    pub const fn on_stack(&self, sp: u64) -> bool {
+        self.flags & ss_flags::SS_AUTODISARM == 0 && self.contains(sp)
+    }
+
+    /// The mode a query reports for a thread at `sp` (Linux's
+    /// `sas_ss_flags`): `SS_DISABLE` with no stack, `SS_ONSTACK` on it, else
+    /// 0.
+    #[must_use]
+    pub const fn mode_at(&self, sp: u64) -> u32 {
+        if self.size == 0 {
+            ss_flags::SS_DISABLE
+        } else if self.on_stack(sp) {
+            ss_flags::SS_ONSTACK
+        } else {
+            0
+        }
+    }
+}
+
+/// Why Linux's `sigaltstack` refused a new stack ([`linux_sigaltstack`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AltStackError {
+    /// The thread is running on its current stack (`EPERM`).
+    OnStack,
+    /// `ss_flags` names no mode (`EINVAL`).
+    BadMode,
+    /// The stack is smaller than the minimum (`ENOMEM`).
+    TooSmall,
 }
 
 /// Per-process signal bookkeeping.
@@ -677,7 +758,7 @@ impl Default for SignalState {
     fn default() -> Self {
         Self {
             shared: PendingSet::new(),
-            template: ThreadSignals::new(0, (0, 0)),
+            template: ThreadSignals::new(0, AltStack::DISABLED),
             threads: BTreeMap::new(),
             trampoline: 0,
             extended_frame: false,
@@ -1110,10 +1191,115 @@ pub fn set_altstack(pid: ProcessId, sp: u64, size: u64, onstack_mask: u64) {
     let me = sched::current_task_id();
     with_states(|states| {
         let st = states.entry(pid).or_default();
-        let t = st.thread_mut(me);
-        t.altstack_sp = sp;
-        t.altstack_size = size;
+        st.thread_mut(me).altstack = if size == 0 {
+            AltStack::DISABLED
+        } else {
+            AltStack { sp, size, flags: 0 }
+        };
         st.onstack_mask = onstack_mask;
+    });
+}
+
+/// The calling thread's alternate signal stack ([`AltStack::DISABLED`] for
+/// none, or for a caller that is not one of `pid`'s threads and a process
+/// whose template has none).
+#[must_use]
+pub fn altstack(pid: ProcessId) -> AltStack {
+    let me = sched::current_task_id();
+    with_states(|states| {
+        states
+            .get(&pid)
+            .map_or(AltStack::DISABLED, |s| s.thread(me).altstack)
+    })
+}
+
+/// Linux's `do_sigaltstack` for the calling thread of `pid`, whose stack
+/// pointer is `sp`: the stack as a query reports it (`sigaltstack`'s `oss`),
+/// and with `new`, the stack replaced by it.
+///
+/// The report is the stored base and size, the mode as seen from `sp`
+/// ([`AltStack::mode_at`]) and the stored `SS_AUTODISARM`. A change is refused
+/// while the thread runs on its current stack ([`AltStackError::OnStack`],
+/// checked first, as Linux does), for a mode other than 0, `SS_ONSTACK` and
+/// `SS_DISABLE` (`BadMode`), and for a stack smaller than `min_size`
+/// (`TooSmall`) -- except that a request for exactly the stack already set is
+/// accepted before the size is looked at, as Linux returns early for one.
+/// Disabling keeps the flags but no base and no size. On a refusal nothing
+/// changes, and Linux reports nothing either.
+///
+/// # Errors
+/// [`AltStackError`], as above.
+pub fn linux_sigaltstack(
+    pid: ProcessId,
+    new: Option<AltStack>,
+    sp: u64,
+    min_size: u64,
+) -> Result<AltStack, AltStackError> {
+    linux_sigaltstack_as(pid, sched::current_task_id(), new, sp, min_size)
+}
+
+/// [`linux_sigaltstack`] for thread `me` (the self-tests name one).
+fn linux_sigaltstack_as(
+    pid: ProcessId,
+    me: TaskId,
+    new: Option<AltStack>,
+    sp: u64,
+    min_size: u64,
+) -> Result<AltStack, AltStackError> {
+    with_states(|states| {
+        let t = states.entry(pid).or_default().thread_mut(me);
+        let cur = t.altstack;
+        let old = AltStack {
+            sp: cur.sp,
+            size: cur.size,
+            flags: cur.mode_at(sp) | (cur.flags & ss_flags::SS_FLAG_BITS),
+        };
+        let Some(new) = new else {
+            return Ok(old);
+        };
+        if cur.on_stack(sp) {
+            return Err(AltStackError::OnStack);
+        }
+        let mode = new.flags & !ss_flags::SS_FLAG_BITS;
+        if mode != 0 && mode != ss_flags::SS_ONSTACK && mode != ss_flags::SS_DISABLE {
+            return Err(AltStackError::BadMode);
+        }
+        if new == cur {
+            return Ok(old);
+        }
+        t.altstack = if mode == ss_flags::SS_DISABLE {
+            AltStack {
+                sp: 0,
+                size: 0,
+                flags: new.flags,
+            }
+        } else if new.size < min_size {
+            return Err(AltStackError::TooSmall);
+        } else {
+            new
+        };
+        Ok(old)
+    })
+}
+
+/// A handler has been entered on the calling thread of `pid`: disarm its
+/// alternate stack if it was set with `SS_AUTODISARM` (Linux's
+/// `signal_delivered`, for every handler, whether or not it ran on the
+/// stack). The handler's frame keeps the stack in `uc_stack`, and
+/// `rt_sigreturn` puts it back.
+pub fn disarm_altstack(pid: ProcessId) {
+    disarm_altstack_as(pid, sched::current_task_id());
+}
+
+/// [`disarm_altstack`] for thread `me` (the self-tests name one).
+fn disarm_altstack_as(pid: ProcessId, me: TaskId) {
+    with_states(|states| {
+        if let Some(s) = states.get_mut(&pid) {
+            let t = s.thread_mut(me);
+            if t.altstack.flags & ss_flags::SS_AUTODISARM != 0 {
+                t.altstack = AltStack::DISABLED;
+            }
+        }
     });
 }
 
@@ -1144,12 +1330,12 @@ pub fn altstack_top_for(pid: ProcessId, sig: u32, current_rsp: u64) -> Option<u6
     let me = sched::current_task_id();
     with_states(|states| {
         let st = states.get(&pid)?;
-        let t = st.thread(me);
-        if st.onstack_mask & bit == 0 || t.altstack_size == 0 {
+        let alt = st.thread(me).altstack;
+        if st.onstack_mask & bit == 0 || alt.size == 0 {
             return None;
         }
-        let top = t.altstack_sp.checked_add(t.altstack_size)?;
-        if current_rsp >= t.altstack_sp && current_rsp < top {
+        let top = alt.sp.checked_add(alt.size)?;
+        if current_rsp >= alt.sp && current_rsp < top {
             return None;
         }
         Some(top)
@@ -1254,10 +1440,9 @@ pub fn on_exec(pid: ProcessId) {
             }
             state.threads.clear();
             let blocked = mine.as_ref().map_or(state.template.blocked, |t| t.blocked);
-            state.template = ThreadSignals::new(blocked, (0, 0));
+            state.template = ThreadSignals::new(blocked, AltStack::DISABLED);
             if let Some(mut t) = mine {
-                t.altstack_sp = 0;
-                t.altstack_size = 0;
+                t.altstack = AltStack::DISABLED;
                 t.saved_sigmask = None;
                 state.threads.insert(me, t);
             }
@@ -1295,7 +1480,7 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
                     // stack settings". The child's CoW-copied stack lives at the
                     // same user address, exactly as the trampoline does. (Not
                     // preserved across execve -- see `on_exec`.)
-                    template: ThreadSignals::new(t.blocked, (t.altstack_sp, t.altstack_size)),
+                    template: ThreadSignals::new(t.blocked, t.altstack),
                     trampoline: s.trampoline,
                     // The trampoline's frame goes with it.
                     extended_frame: s.extended_frame,
@@ -1358,7 +1543,7 @@ pub fn start_spawned(parent: ProcessId, child: ProcessId, sigmask: Option<u64>, 
             SignalState {
                 template: ThreadSignals::new(
                     sigmask.unwrap_or(parent_blocked) & !uncatchable_mask(),
-                    (0, 0),
+                    AltStack::DISABLED,
                 ),
                 ignored: parent_ignored & !sigdefault,
                 ..SignalState::default()
@@ -1383,12 +1568,9 @@ pub fn on_thread_start(pid: ProcessId, tid: TaskId) {
         let first = state.threads.is_empty();
         let from_creator = state.threads.get(&creator).map(|t| t.blocked);
         let thread = match from_creator {
-            Some(blocked) => ThreadSignals::new(blocked, (0, 0)),
-            None if first => ThreadSignals::new(
-                state.template.blocked,
-                (state.template.altstack_sp, state.template.altstack_size),
-            ),
-            None => ThreadSignals::new(state.template.blocked, (0, 0)),
+            Some(blocked) => ThreadSignals::new(blocked, AltStack::DISABLED),
+            None if first => ThreadSignals::new(state.template.blocked, state.template.altstack),
+            None => ThreadSignals::new(state.template.blocked, AltStack::DISABLED),
         };
         state.threads.entry(tid).or_insert(thread);
     });
@@ -1784,7 +1966,7 @@ pub fn set_thread_pending_info(pid: ProcessId, tid: TaskId, sig: u32, info: SigI
         if !state.threads.contains_key(&tid) {
             // A thread that started before its state could be made (none
             // should): from the template, as `on_thread_start` would have.
-            let t = ThreadSignals::new(state.template.blocked, (0, 0));
+            let t = ThreadSignals::new(state.template.blocked, AltStack::DISABLED);
             state.threads.insert(tid, t);
         }
         state
@@ -2537,8 +2719,9 @@ pub fn self_test() -> KernelResult<()> {
     test_ignored_set()?;
     test_ignored_across_images()?;
     test_per_thread_state()?;
+    test_linux_altstack()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (18 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (19 tests)");
     Ok(())
 }
 
@@ -2634,7 +2817,8 @@ fn test_per_thread_state() -> KernelResult<()> {
     with_states(|st| {
         if let Some(s) = st.get_mut(&p) {
             let m = s.thread(t1).blocked;
-            s.threads.insert(0x7A3, ThreadSignals::new(m, (0, 0)));
+            s.threads
+                .insert(0x7A3, ThreadSignals::new(m, AltStack::DISABLED));
         }
     });
     check(
@@ -2675,6 +2859,144 @@ fn test_per_thread_state() -> KernelResult<()> {
 
     remove(p);
     serial_println!("[signal]   per-thread masks, queues and exit: OK");
+    Ok(())
+}
+
+/// Linux's `sigaltstack` rules ([`linux_sigaltstack`]), each answer as Linux
+/// 6.6 gives it (`build/altstk_oracle.c`, run in WSL): what a query reports,
+/// the refusals and the order they come in, `SS_ONSTACK` and `SS_DISABLE` as
+/// requests, `SS_AUTODISARM` and its disarming, and that a thread's stack is
+/// its own and a new thread's is none.
+fn test_linux_altstack() -> KernelResult<()> {
+    use ss_flags::{SS_AUTODISARM, SS_DISABLE, SS_ONSTACK};
+    const MIN: u64 = 2048;
+    const SP: u64 = 0x7000_0000;
+    const SIZE: u64 = 0x1_0000;
+    const TOP: u64 = SP + SIZE;
+    const AWAY: u64 = 0x7FFF_0000; // a stack pointer off the alternate stack
+    let p = TEST_PID_BASE + 70;
+    let (t1, t2): (TaskId, TaskId) = (0x7B1, 0x7B2);
+    let stack = |sp: u64, flags: u32, size: u64| AltStack { sp, size, flags };
+    let q = |t: TaskId, at: u64| linux_sigaltstack_as(p, t, None, at, MIN);
+    let set = |t: TaskId, new: AltStack, at: u64| linux_sigaltstack_as(p, t, Some(new), at, MIN);
+
+    let result = (|| -> KernelResult<()> {
+        start_spawned(0, p, None, 0);
+        on_thread_start(p, t1);
+        on_thread_start(p, t2);
+        check(q(t1, AWAY) == Ok(AltStack::DISABLED), "none at first")?;
+
+        // The refusals report nothing and change nothing.
+        check(
+            set(t1, stack(SP, 0, 1024), AWAY) == Err(AltStackError::TooSmall),
+            "under MINSIGSTKSZ: ENOMEM",
+        )?;
+        check(
+            set(t1, stack(SP, 5, SIZE), AWAY) == Err(AltStackError::BadMode),
+            "mode 5: EINVAL",
+        )?;
+        check(
+            set(t1, stack(SP, SS_AUTODISARM | 0xCAFE, SIZE), AWAY) == Err(AltStackError::BadMode),
+            "SS_AUTODISARM is stripped before the mode is judged",
+        )?;
+        check(q(t1, AWAY) == Ok(AltStack::DISABLED), "still none")?;
+
+        // Disabling keeps the flags, not the base or size.
+        check(
+            set(t1, stack(SP, SS_DISABLE | SS_AUTODISARM, 1234), AWAY) == Ok(AltStack::DISABLED),
+            "disable",
+        )?;
+        check(
+            q(t1, AWAY) == Ok(stack(0, SS_DISABLE | SS_AUTODISARM, 0)),
+            "a disabled stack reports SS_AUTODISARM",
+        )?;
+
+        // SS_ONSTACK as a request is "enable"; the query reports the mode as
+        // seen from the stack pointer, and the frame (`altstack`) the flags as
+        // set.
+        check(
+            set(t1, stack(SP, SS_ONSTACK, SIZE), AWAY)
+                == Ok(stack(0, SS_DISABLE | SS_AUTODISARM, 0)),
+            "enable with SS_ONSTACK, reporting the old",
+        )?;
+        check(q(t1, AWAY) == Ok(stack(SP, 0, SIZE)), "off the stack: 0")?;
+        check(
+            q(t1, TOP) == Ok(stack(SP, SS_ONSTACK, SIZE)),
+            "the top is on it",
+        )?;
+        check(
+            q(t1, SP + 1) == Ok(stack(SP, SS_ONSTACK, SIZE)),
+            "base + 1 is on it",
+        )?;
+        check(
+            q(t1, SP) == Ok(stack(SP, 0, SIZE)),
+            "the base itself is not",
+        )?;
+        check(
+            with_states(|st| st.get(&p).map(|s| s.thread(t1).altstack))
+                == Some(stack(SP, SS_ONSTACK, SIZE)),
+            "kept as set",
+        )?;
+
+        // On it, no change -- not even to disable it -- but a query is fine.
+        check(
+            set(t1, AltStack::DISABLED, SP + 64) == Err(AltStackError::OnStack),
+            "on the stack: EPERM",
+        )?;
+        check(
+            set(t1, stack(SP, 5, SIZE), SP + 64) == Err(AltStackError::OnStack),
+            "EPERM comes before EINVAL",
+        )?;
+
+        // Exactly the stack already set is accepted before the size check.
+        check(
+            set(t1, stack(SP, SS_ONSTACK, SIZE), AWAY).is_ok(),
+            "the same stack again",
+        )?;
+
+        // Per thread: t2 has none, and t1's is untouched by t2's.
+        check(q(t2, AWAY) == Ok(AltStack::DISABLED), "t2 has none")?;
+        check(
+            set(t2, stack(SP + SIZE, 0, MIN), AWAY).is_ok(),
+            "t2 sets one",
+        )?;
+        check(q(t1, AWAY) == Ok(stack(SP, 0, SIZE)), "t1's is its own")?;
+
+        // SS_AUTODISARM: never "on" the stack, so a change is allowed on it;
+        // disarmed when a handler is entered.
+        check(
+            set(t1, stack(SP, SS_AUTODISARM, SIZE), AWAY).is_ok(),
+            "autodisarm",
+        )?;
+        check(
+            q(t1, SP + 64) == Ok(stack(SP, SS_AUTODISARM, SIZE)),
+            "with SS_AUTODISARM a thread is never on its stack",
+        )?;
+        disarm_altstack_as(p, t2);
+        check(
+            q(t2, AWAY) == Ok(stack(SP + SIZE, 0, MIN)),
+            "no SS_AUTODISARM: kept",
+        )?;
+        disarm_altstack_as(p, t1);
+        check(q(t1, AWAY) == Ok(AltStack::DISABLED), "disarmed")?;
+
+        // A thread t1 starts has none; fork passes the forking thread's.
+        check(set(t1, stack(SP, 0, SIZE), AWAY).is_ok(), "re-set")?;
+        with_states(|st| {
+            if let Some(s) = st.get_mut(&p) {
+                s.threads
+                    .insert(0x7B3, ThreadSignals::new(0, AltStack::DISABLED));
+            }
+        });
+        check(
+            q(0x7B3, AWAY) == Ok(AltStack::DISABLED),
+            "a new thread has none",
+        )?;
+        Ok(())
+    })();
+    remove(p);
+    result?;
+    serial_println!("[signal]   Linux sigaltstack rules: OK");
     Ok(())
 }
 

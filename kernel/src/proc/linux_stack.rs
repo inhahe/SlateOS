@@ -89,6 +89,11 @@ pub const AT_SECURE: u64 = 23;
 pub const AT_RANDOM: u64 = 25;
 /// Address of a NUL-terminated string naming the executed file.
 pub const AT_EXECFN: u64 = 31;
+/// The most stack a signal frame can take: what an alternate signal stack
+/// needs for the frame alone (Linux 5.14+, x86). glibc reports it as
+/// `sysconf(_SC_MINSIGSTKSZ)` and sizes `SIGSTKSZ` from it; without it,
+/// glibc estimates from CPUID, which knows nothing of this kernel's frame.
+pub const AT_MINSIGSTKSZ: u64 = 51;
 
 /// Page size reported to Linux binaries through `AT_PAGESZ`.
 ///
@@ -395,6 +400,12 @@ fn base_auxv(
         AuxEntry::new(AT_EUID, 0),
         AuxEntry::new(AT_GID, 0),
         AuxEntry::new(AT_EGID, 0),
+        AuxEntry::new(
+            AT_MINSIGSTKSZ,
+            crate::proc::linux_sigframe::min_sigstack_size(
+                crate::sched::fpu::signal_image_size() as u64
+            ),
+        ),
     ];
     // The table's runtime address, found or placed by the loader
     // (`spawn::place_phdr_table`): a loaded segment's, or a copy's when no

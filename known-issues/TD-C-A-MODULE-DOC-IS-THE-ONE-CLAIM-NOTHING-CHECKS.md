@@ -53,3 +53,36 @@ the class rather than all of it.
 gives a crate a capability, re-read its module doc in the *same* change. Every
 one of these was introduced by an edit that added something and left the
 header alone.
+
+### Tried 2026-10-07: the pairs pointed at `//!`, and what they found
+
+A throwaway scan (not in the tree) ran `find-stale-admissions.py`'s three
+pairs over every crate's `//!` blocks, cut into sentences, in `gui/`, `apps/`,
+`userspace/` and `services/`.
+
+- **With the drawn-text vocabulary as it is: 17 sentences in `gui/` and
+  `apps/`, 16 of them true.** Module docs say "cannot read" and "cannot be
+  read" to describe how unreadable *input* is handled -- "a rule this cannot
+  read is not applied at all" (`windowrules`), "a declaration that cannot be
+  read ... is dropped" (the toolkit's CSS) -- which is the opposite of
+  denying a capability. In a banner those words are a claim; in a module doc
+  they are a contract.
+- **Dropping that family -- keeping "no filesystem access", "no network
+  access", "never fetched", "no `std::net`", "no socket", "no way to run":
+  11 sentences over all four trees, 9 of them true.** What remains is history
+  ("until then it had no socket", `apps/ircclient`, `apps/netscan`) and two
+  error-handling sentences in `userspace/coreutils` ("a file that cannot be
+  opened does not stop the run").
+- **The one finding, both times: `apps/torrent`'s header**, two sentences --
+  "no `std::net` here and no socket of any kind" and "the announce URL ... is
+  never fetched" -- in a crate that has opened peer connections over
+  `TcpStream` since 3844f184e and downloaded from its window since
+  bc56d4e02. Lane E's: `requests/c-e-the-torrent-apps-header-says-it-cannot-transfer-anything.md`.
+
+So the pairs *do* work on module docs, at one real finding in eleven, and
+what makes the rest noise is recognisable: past tense, and a subject that is
+input ("a file", "a line", "a rule") rather than the program. A version worth
+keeping in the tree would skip sentences in the past tense and keep the
+eleven-word vocabulary above, and list what it still reports, as its siblings
+do. Not built: one finding in four trees does not yet pay for a fourth list of
+known exceptions to keep current.

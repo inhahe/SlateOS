@@ -466,6 +466,18 @@ MUTATIONS = [
         "            (PLAY_AGAIN_LABEL, Target::PlayAgain, false),",
         ["the_buttons_say_what_they_do_and_whether_they_would"],
     ),
+    (
+        "a key's letter is the page's text on its face",
+        "                    (self.colours.surface0, self.colours.on_key)",
+        "                    (self.colours.surface0, self.colours.text)",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a key held with a modifier is the game's",
+        '                if !textline::is_plain(ke.modifiers) {\n                    return EventResult::Ignored;\n                }\n',
+        '',
+        ['a_key_held_with_a_modifier_guesses_nothing'],
+    ),
 ]
 
 if __name__ == "__main__":

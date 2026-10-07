@@ -1498,6 +1498,11 @@ pub struct DefragUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the pointer is over the exclude pattern's box, so it is drawn
+    /// lit (lane C, c-e-a-theme-can-shape-the-controls).
+    exclude_input_hovered: bool,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
 }
 
 /// Reads a drive's block layout and per-file fragmentation.
@@ -1539,6 +1544,8 @@ impl DefragUI {
             show_ssd_warning: false,
             show_exclude_editor: false,
             exclude_input: String::new(),
+            exclude_input_hovered: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             wheel: wheel::Accumulator::default(),
@@ -1843,12 +1850,17 @@ impl DefragUI {
             return EventResult::Ignored;
         }
 
-        if key.key == Key::F1 {
+        // Every key but what the pattern field types is taken plain: a chord
+        // with Ctrl, Alt or the Windows key is the window's or the desktop's
+        // and arrives carrying its key -- Alt+Enter answered the SSD warning
+        // with "defragment anyway".
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -1859,6 +1871,7 @@ impl DefragUI {
         // buttons already have.
         if self.show_ssd_warning {
             return match key.key {
+                _ if !plain => EventResult::Consumed,
                 Key::Escape => {
                     self.show_ssd_warning = false;
                     EventResult::Consumed
@@ -1872,7 +1885,19 @@ impl DefragUI {
         }
 
         if self.show_exclude_editor {
+            // `typed` rather than the raw `text`: it drops control
+            // characters, which would be invisible in the field and
+            // meaningless in a glob, and it yields *every* character the
+            // keystroke produced -- a dead key followed by a non-composing
+            // one types two, and taking only the first would silently eat
+            // what someone typed. Typed, not a command's letter, which a
+            // chord carries: Alt+X typed an `x` into the pattern.
+            if textline::types_into_field(key) {
+                self.exclude_input.extend(key.typed());
+                return EventResult::Consumed;
+            }
             match key.key {
+                _ if !plain => {}
                 Key::Escape => {
                     self.show_exclude_editor = false;
                     self.exclude_input.clear();
@@ -1888,22 +1913,14 @@ impl DefragUI {
                 Key::Backspace => {
                     self.exclude_input.pop();
                 }
-                _ => {
-                    // `typed` rather than the raw `text`: it drops control
-                    // characters, which would be invisible in the field and
-                    // meaningless in a glob, and it yields *every* character
-                    // the keystroke produced -- a dead key followed by a
-                    // non-composing one types two, and taking only the first
-                    // would silently eat what someone typed.
-                    self.exclude_input.extend(key.typed());
-                }
+                _ => {}
             }
             return EventResult::Consumed;
         }
 
         // Tab cycles the views, which is the one thing in this window worth a
         // key of its own: the four tabs are the whole app.
-        if key.key == Key::Tab {
+        if key.key == Key::Tab && plain {
             let tabs = ViewTab::all();
             let here = tabs.iter().position(|t| *t == self.view_tab).unwrap_or(0);
             let step = if key.modifiers.shift {
@@ -1935,6 +1952,9 @@ impl DefragUI {
 /// the tick cheap and bounded while still finishing in a plausible time.
 const STEPS_PER_TICK: u64 = 64;
 
+/// How often a running defrag is ticked: sixty times a second.
+const TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// Route one event into [`DefragUI`].
 ///
 /// A free function rather than a method so the tests can drive the same path
@@ -1942,8 +1962,19 @@ const STEPS_PER_TICK: u64 = 64;
 fn handle_event(ui: &mut DefragUI, event: &Event) -> EventResult {
     match event {
         Event::Mouse(m) => match m.kind {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // control drawn under it -- Defragment among them -- and the
+            // wheel scrolls nothing it covers.
+            MouseEventKind::Press(_) if ui.show_help => {
+                ui.show_help = false;
+                EventResult::Consumed
+            }
+            MouseEventKind::Scroll { .. } if ui.show_help => EventResult::Ignored,
             MouseEventKind::Press(MouseButton::Left) => ui.handle_click(m.x, m.y),
             MouseEventKind::Scroll { dy, .. } => ui.handle_scroll(m.x, m.y, dy),
+            MouseEventKind::Move => ui.point_at(Some((m.x, m.y))),
+            MouseEventKind::Leave => ui.point_at(None),
             _ => EventResult::Ignored,
         },
         Event::Key(k) => ui.handle_key(k),
@@ -1971,6 +2002,11 @@ impl App for DefragUI {
         self.palette = *palette;
     }
 
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         "Disk Defragmenter".to_string()
     }
@@ -1979,11 +2015,20 @@ impl App for DefragUI {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// A clock only while a defrag is running, at the sixty a second its
+    /// steps are batched for (`STEPS_PER_TICK`). It asked for none -- the
+    /// trait's default -- so no tick came, and a started defrag stood at
+    /// nought per cent for good, its steps waiting on a tick.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        (self.defrag_state() == DefragState::Running).then_some(TICK)
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
+        // A Ctrl chord, not Ctrl held: AltGr+Q -- Ctrl+Alt -- is a German `@`.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -2107,6 +2152,31 @@ impl DefragUI {
     /// unable to disagree with what the user saw.
     fn target_at(&self, x: f32, y: f32) -> Option<Target> {
         self.frame(self.width, self.height).hit_test(x, y)
+    }
+
+    /// Follow the pointer: `Some` where it has moved to, `None` when it has
+    /// left the window. Only whether it is over the exclude pattern's box is
+    /// kept, and only a change in that is a repaint.
+    fn point_at(&mut self, at: Option<(f32, f32)>) -> EventResult {
+        let over = at.is_some_and(|(x, y)| self.target_at(x, y) == Some(Target::ExcludeInput));
+        if over == self.exclude_input_hovered {
+            return EventResult::Ignored;
+        }
+        self.exclude_input_hovered = over;
+        EventResult::Consumed
+    }
+
+    /// How the exclude pattern's box is drawn now: lit under the pointer and
+    /// marked while the keys type into it -- neither while the list of keys
+    /// or the SSD question takes them first.
+    fn exclude_input_state(&self) -> guitk::field::State {
+        let open = !self.show_help && !self.show_ssd_warning;
+        guitk::field::State {
+            hovered: open && self.exclude_input_hovered,
+            focused: open && self.show_exclude_editor,
+            disabled: false,
+            invalid: false,
+        }
     }
 
     /// Remember a new window size, for the benefit of the event path.
@@ -3490,25 +3560,26 @@ impl DefragUI {
                 Target::ExcludeInput,
                 Rect::new(card_x + PADDING, ey, field_w, 22.0),
             );
-            self.palette.push_surface(
+            // The toolkit's field (lane C, c-e-a-theme-can-shape-the-
+            // controls), marked while the keys type into it.
+            let state = self.exclude_input_state();
+            guitk::field::draw(
                 frame,
-                card_x + PADDING,
-                ey,
-                field_w,
-                22.0,
-                4.0,
-                Surface::Card,
+                &self.palette,
+                Rect::new(card_x + PADDING, ey, field_w, 22.0),
+                state,
+                self.focus_ring_width,
             );
-            // A caret, so an empty field does not look like a dead box: this
-            // is the only place in the window that takes typed text, and with
-            // nothing in it there is otherwise no sign it is listening.
+            // A caret while it has the keys, so an empty field does not look
+            // like a dead box: this is the only place in the window that
+            // takes typed text.
             frame.push(RenderCommand::Text {
                 x: card_x + PADDING + 6.0,
                 y: ey + 4.0,
-                text: if self.exclude_input.is_empty() {
-                    "|".to_string()
-                } else {
+                text: if state.focused {
                     format!("{}|", self.exclude_input)
+                } else {
+                    self.exclude_input.clone()
                 },
                 color: if self.exclude_input.is_empty() {
                     self.palette.subtext0
@@ -4438,6 +4509,60 @@ mod tests {
         assert_eq!(ui.file_scroll_offset, 0);
     }
 
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::FileList);
+        let (cx, cy) = Layout::new(ui.width, ui.height).content.centre();
+        let wheel = |ui: &mut DefragUI| {
+            handle_event(
+                ui,
+                &Event::Mouse(MouseEvent {
+                    x: cx,
+                    y: cy,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                }),
+            )
+        };
+        let header = Target::FileHeader(FileSortColumn::Path);
+        let column = ui.file_sort_column;
+
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(ui.show_help);
+        wheel(&mut ui);
+        assert_eq!(
+            ui.file_scroll_offset, 0,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(probe::click(&mut ui, header), EventResult::Consumed);
+        assert!(!ui.show_help, "the press did not put the card away");
+        assert_eq!(
+            ui.file_sort_column, column,
+            "the press went through the card to a column's header"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut ui, &probe::press(Key::F1));
+        probe::click_with(&mut ui, header, MouseButton::Right);
+        assert!(!ui.show_help, "a right-button press left the card up");
+
+        wheel(&mut ui);
+        assert_ne!(
+            ui.file_scroll_offset, 0,
+            "control: the wheel scrolls nothing"
+        );
+        probe::click(&mut ui, header);
+        assert_ne!(
+            ui.file_sort_column, column,
+            "control: the press does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn the_wheel_scrolls_the_file_list_and_only_over_the_file_list() {
         let mut ui = populated_ui();
@@ -4544,6 +4669,81 @@ mod tests {
         assert_eq!(ui.target_at(cx, cy), Some(Target::ExcludeRemove(0)));
     }
 
+    /// **The exclude pattern's box is the toolkit's field** (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer and out when
+    /// it goes, marked at the user's focus width while the keys type into it
+    /// -- and neither while the list of keys or the SSD question takes them
+    /// first.
+    #[test]
+    fn the_exclude_box_is_the_toolkits_field() {
+        use guitk::field::State;
+        let size = <DefragUI as Probe>::SIZE;
+        let mut ui = populated_ui();
+        let mut palette = ui.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut ui, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut ui, &settings);
+        ui.set_view_tab(ViewTab::Schedule);
+        probe::click(&mut ui, Target::ExcludeAdd);
+        let rect = probe::rect_of(&ui, Target::ExcludeInput).expect("the box is drawn");
+        let draws = |ui: &DefragUI, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            let mut mark: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(
+                &mut mark,
+                &palette,
+                rect,
+                State { focused: true, ..s },
+                width,
+            );
+            let frame = ui.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |w: &[RenderCommand]| !w.is_empty() && cmds.windows(w.len()).any(|c| c == w);
+            has(&want) && (s.focused || !has(&mark))
+        };
+        let pointer = |ui: &mut DefragUI, kind: MouseEventKind| {
+            let (x, y) = rect.centre();
+            handle_event(ui, &Event::Mouse(MouseEvent { x, y, kind }))
+        };
+        let keyed = State {
+            focused: true,
+            ..State::default()
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        assert!(draws(&ui, keyed), "the box is not marked with the keys");
+        assert_eq!(
+            pointer(&mut ui, MouseEventKind::Move),
+            EventResult::Consumed,
+            "the light came on without a repaint"
+        );
+        assert!(draws(&ui, both), "the box does not light under the pointer");
+        probe::key(&mut ui, &probe::press(Key::F1));
+        assert!(
+            draws(&ui, State::default()),
+            "the box shows through the list of keys"
+        );
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        ui.show_ssd_warning = true;
+        assert!(
+            draws(&ui, State::default()),
+            "the box shows through the SSD question"
+        );
+        ui.show_ssd_warning = false;
+        pointer(&mut ui, MouseEventKind::Leave);
+        assert!(draws(&ui, keyed), "the light stayed when the pointer left");
+    }
+
     #[test]
     fn the_add_button_opens_a_field_that_takes_a_pattern() {
         let mut ui = populated_ui();
@@ -4570,6 +4770,80 @@ mod tests {
         );
         assert!(!ui.show_exclude_editor, "Enter left the editor open");
         assert!(ui.exclude_input.is_empty(), "Enter left the field dirty");
+    }
+
+    /// **A chord is neither a key of the window nor typing, and AltGr types**:
+    /// Alt+Enter answered the SSD warning with "defragment anyway", Alt+X
+    /// typed an `x` into a pattern, Alt+Tab-like chords changed the view, and
+    /// AltGr+Q -- a German `@` -- closed the window.
+    #[test]
+    fn a_chord_is_neither_a_key_of_the_window_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let chords = [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+            Modifiers::ctrl(),
+        ];
+
+        let mut ui = populated_ui();
+        let view = ui.view_tab;
+        // Each press must be refused, not only the end state checked: four
+        // chorded Tabs go round the four tabs and back, and four chorded F1s
+        // raise the card and put it away twice.
+        for m in chords {
+            for k in [Key::Tab, Key::F1] {
+                assert_eq!(
+                    probe::key(&mut ui, &key(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(ui.view_tab, view, "a chord changed the view");
+        assert!(!ui.show_help, "a chord raised the keys");
+        assert!(
+            !matches!(
+                ui.on_event(&Event::Key(key(Key::Q, "@", altgr))),
+                Response::Exit
+            ),
+            "AltGr+Q closed the window"
+        );
+
+        // The SSD warning is answered by a plain key only.
+        ui.show_ssd_warning = true;
+        let state = ui.defrag_state();
+        for m in chords {
+            probe::key(&mut ui, &key(Key::Enter, "", m));
+            probe::key(&mut ui, &key(Key::Escape, "", m));
+        }
+        assert!(ui.show_ssd_warning, "a chord answered the SSD warning");
+        assert_eq!(ui.defrag_state(), state, "a chord started the defrag");
+        ui.show_ssd_warning = false;
+
+        // The pattern field types what a key typed.
+        ui.set_view_tab(ViewTab::Schedule);
+        probe::click(&mut ui, Target::ExcludeAdd);
+        for m in [Modifiers::alt(), Modifiers::super_key(), Modifiers::ctrl()] {
+            probe::key(&mut ui, &key(Key::X, "x", m));
+            probe::key(&mut ui, &key(Key::Escape, "", m));
+        }
+        assert!(ui.show_exclude_editor, "a chord closed the field");
+        probe::key(&mut ui, &key(Key::Q, "@", altgr));
+        assert_eq!(
+            ui.exclude_input, "@",
+            "the field typed a command or lost AltGr's @"
+        );
     }
 
     #[test]
@@ -4716,6 +4990,39 @@ mod tests {
         assert!(
             moved_after > moved_before,
             "a tick during a running defrag moved no blocks",
+        );
+    }
+
+    /// **A running defrag asks for the clock, and nothing else does.** Its
+    /// steps are taken on the tick, and the app asked for none: in a window a
+    /// started defrag never moved a block.
+    #[test]
+    fn a_running_defrag_asks_for_the_clock_and_nothing_else_does() {
+        let mut ui = scannable_ui();
+        assert_eq!(
+            App::tick_interval(&ui),
+            None,
+            "an idle window wants a clock"
+        );
+        probe::click(&mut ui, Target::Action); // Analyze
+        assert_eq!(
+            App::tick_interval(&ui),
+            None,
+            "an analysed disk wants a clock"
+        );
+        probe::click(&mut ui, Target::Action); // Defragment
+        assert_eq!(ui.defrag_state(), DefragState::Running);
+        assert_eq!(
+            App::tick_interval(&ui),
+            Some(TICK),
+            "a running defrag asks for no clock, so it never moves"
+        );
+        probe::click(&mut ui, Target::Action); // Pause
+        assert_eq!(ui.defrag_state(), DefragState::Paused);
+        assert_eq!(
+            App::tick_interval(&ui),
+            None,
+            "a paused defrag wants a clock"
         );
     }
 

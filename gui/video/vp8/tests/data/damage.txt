@@ -1,0 +1,5709 @@
+# What libvpx v1.17.0's VP8 decoder does with damaged vectors:
+# written by tools/generate_damage.py; do not edit.
+case vp80-00-comprehensive-001.ivf flip:0:0:1
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-001.ivf flip:0:0:255
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-001.ivf flip:0:1:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf flip:0:7:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf flip:0:5:178
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-001.ivf flip:0:7:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf flip:0:114:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf flip:0:184:175
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf flip:0:190:1
+ok e8331bc8 0
+ok 1e368f9f 0
+ok 023b5266 0
+ok 5ebaaeb9 0
+ok 4da8902e 0
+ok fea6fddd 0
+ok a3bf606c 0
+ok b5da631a 0
+ok a6b44d61 0
+ok 178a4349 0
+ok f4956548 0
+ok 2f9ec200 0
+end
+case vp80-00-comprehensive-001.ivf flip:0:638:128
+ok c35bd779 0
+ok 334f6071 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 1bc97b6b 0
+ok 0586d948 0
+ok c9a1198e 0
+ok 547d8ffc 0
+ok d31c02a5 0
+end
+case vp80-00-comprehensive-001.ivf flip:0:426:1
+ok 0e3b85b0 0
+ok a5070ad4 0
+ok a13c977d 0
+ok 3f6f4d9b 0
+ok ebedbf61 0
+ok eed82de8 0
+ok a967b1e3 0
+ok e117b53c 0
+ok 34890608 0
+ok b011e3d4 0
+ok 5cf6fc7f 0
+ok bae32feb 0
+end
+case vp80-00-comprehensive-001.ivf flip:0:278:128
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf cut:0:1
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-001.ivf cut:0:2
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-001.ivf cut:0:3
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-001.ivf cut:0:9
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-001.ivf cut:0:10
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf cut:0:11
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf cut:0:332
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf cut:0:243
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf cut:0:244
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf cut:0:663
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-001.ivf flip:3:1:128
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 7
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf flip:3:0:128
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok 5a848c69 1
+ok da26f135 1
+ok 13d54d85 1
+ok 6be9f403 1
+ok f53a26b5 1
+ok 018a86dc 1
+ok f0f9e5d9 1
+ok 731972cc 1
+ok 8d55e6e2 1
+end
+case vp80-00-comprehensive-001.ivf flip:3:0:255
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 5
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf flip:3:77:128
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok 02da0bbe 1
+ok 646ef986 1
+ok e5658976 1
+ok 6f01f527 1
+ok 7430f400 1
+ok ea04311f 1
+ok a0c0e55f 1
+ok a40ff5e4 1
+ok 531d784c 1
+end
+case vp80-00-comprehensive-001.ivf flip:3:75:255
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok 4c718061 1
+ok 9d8abfd3 1
+ok e4bae7b3 1
+ok 5ac33add 1
+ok e5e20ce4 1
+ok 5df04698 1
+ok cd1dfd8f 1
+ok 7bfc1cf1 1
+ok 800b7fbb 1
+end
+case vp80-00-comprehensive-001.ivf flip:3:16:128
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok ecc298d5 1
+ok cea5662f 1
+ok d07a1eb4 1
+ok fa12a3a0 1
+ok 1de1435c 1
+ok db3acb76 1
+ok 4647c413 1
+ok ce8ea27c 1
+ok 940e3577 1
+end
+case vp80-00-comprehensive-001.ivf flip:3:116:255
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok 104932be 1
+ok 27a930c8 1
+ok 4cf1491a 1
+ok b8cdf87a 1
+ok 9f3412b6 1
+ok c191a959 1
+ok eeeb639d 1
+ok 0de14a41 1
+ok 5ace2af6 1
+end
+case vp80-00-comprehensive-001.ivf flip:3:227:1
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok 10f61903 0
+ok 94d7f600 0
+ok a3ceb0a5 0
+ok 062450de 0
+ok c5a039ee 0
+ok 50d6ddd4 0
+ok d98b6484 0
+ok 44f482a7 0
+ok 85b52e55 0
+end
+case vp80-00-comprehensive-001.ivf flip:3:155:1
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok bc16210a 1
+ok ed568640 1
+ok cb097e7c 1
+ok c9b5967c 1
+ok 49913202 1
+ok 667592ee 1
+ok 4242955b 1
+ok 1055a77d 1
+ok b75beaf7 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:1
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 7
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:2
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 7
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:3
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 7
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:9
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 7
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:10
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 7
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:11
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 7
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:86
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+err 7
+ok 2895746f 1
+ok 9bfd1d5b 1
+ok 6ba8182b 1
+ok fd62ddad 1
+ok 8fc38ee7 1
+ok 99df2799 1
+ok 0f3e6e05 1
+ok 822509a8 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:87
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok fcf081af 1
+ok 0401dbb9 1
+ok 9a7b8fe1 1
+ok cb6781e5 1
+ok 11cdc3fc 1
+ok 4ba25984 1
+ok e95ebd65 1
+ok 094e5e6a 1
+ok a42d428a 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:377
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 1
+ok 60c26079 1
+ok e683f2bf 1
+ok 0c292378 1
+ok 1bc97b6b 1
+ok 0586d948 1
+ok c9a1198e 1
+ok 547d8ffc 1
+ok d31c02a5 1
+end
+case vp80-00-comprehensive-001.ivf cut:3:189
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok eac38c4a 1
+ok 680fc019 1
+ok fbe8ca42 1
+ok 96eeb277 1
+ok ec171fcb 1
+ok 7f5eb045 1
+ok 1fab2a2e 1
+ok 6fefeb28 1
+ok 4f5c80df 1
+end
+case vp80-00-comprehensive-001.ivf flip:7:1:114
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+err 7
+ok 43ec12a8 1
+ok 319ac238 1
+ok 042fdcf7 1
+ok 0ace4840 1
+end
+case vp80-00-comprehensive-001.ivf flip:7:0:128
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok ae984bfb 1
+ok fcfebefd 1
+ok 2121e2c3 1
+ok 914783bb 1
+ok d2e13eeb 1
+end
+case vp80-00-comprehensive-001.ivf flip:7:1:1
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 110cf410 1
+ok 1cc32e89 1
+ok dadd063f 1
+ok 2d766a56 1
+ok de01e126 1
+end
+case vp80-00-comprehensive-001.ivf flip:7:147:136
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 51036908 1
+ok 0a48894a 1
+ok e656b701 1
+ok 6d6ed9ca 1
+ok 46c4639d 1
+end
+case vp80-00-comprehensive-001.ivf flip:7:125:213
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 98f5c175 0
+ok 14253ebc 0
+ok 908b850e 0
+ok 312ff921 0
+ok d7d806f7 0
+end
+case vp80-00-comprehensive-001.ivf flip:7:153:128
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok fd35f3c1 1
+ok db7b15e0 1
+ok 530ae476 1
+ok 01829c4f 1
+ok 9bb29282 1
+end
+case vp80-00-comprehensive-001.ivf flip:7:335:1
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok e332ced8 1
+ok 3889a42f 1
+ok f95a8eed 1
+ok d14252bc 1
+ok 24183c00 1
+end
+case vp80-00-comprehensive-001.ivf flip:7:491:1
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok d5082070 0
+ok 0fb1901b 0
+ok 0c6a5d12 0
+ok 50642f4f 0
+ok 51acdb2e 0
+end
+case vp80-00-comprehensive-001.ivf flip:7:505:193
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 6c8871a6 0
+ok 23519b3c 0
+ok 97402417 0
+ok 6368668e 0
+ok 7ee8ed1c 0
+end
+case vp80-00-comprehensive-001.ivf cut:7:1
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+err 7
+ok 43ec12a8 1
+ok 319ac238 1
+ok 042fdcf7 1
+ok 0ace4840 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:2
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+err 7
+ok 43ec12a8 1
+ok 319ac238 1
+ok 042fdcf7 1
+ok 0ace4840 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:3
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+err 7
+ok 43ec12a8 1
+ok 319ac238 1
+ok 042fdcf7 1
+ok 0ace4840 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:164
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+err 7
+ok 43ec12a8 1
+ok 319ac238 1
+ok 042fdcf7 1
+ok 0ace4840 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:165
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 0cb15000 1
+ok b73247b6 1
+ok a632089d 1
+ok 3f21fb4a 1
+ok a56f1a3b 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:9
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+err 7
+ok 43ec12a8 1
+ok 319ac238 1
+ok 042fdcf7 1
+ok 0ace4840 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:10
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+err 7
+ok 43ec12a8 1
+ok 319ac238 1
+ok 042fdcf7 1
+ok 0ace4840 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:11
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+err 7
+ok 43ec12a8 1
+ok 319ac238 1
+ok 042fdcf7 1
+ok 0ace4840 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:266
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok b76f83a8 1
+ok 61d55be3 1
+ok 4bef0e29 1
+ok 3a9b0dc9 1
+ok 48c4dbbd 1
+end
+case vp80-00-comprehensive-001.ivf cut:7:532
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 1bc97b6b 1
+ok 0586d948 1
+ok c9a1198e 1
+ok 547d8ffc 1
+ok d31c02a5 1
+end
+case vp80-00-comprehensive-001.ivf drop:0
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-001.ivf drop:11
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 1bc97b6b 0
+ok 0586d948 0
+ok c9a1198e 0
+ok 547d8ffc 0
+end
+case vp80-00-comprehensive-001.ivf flip:4:344:31 flip:11:15:56
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 2713020f 1
+ok 57a3c3ed 1
+ok 7adce53e 1
+ok 75ae7901 1
+ok 32557c4e 1
+ok 7c850de4 1
+ok 3a660aa5 1
+ok 1e06dccb 1
+end
+case vp80-00-comprehensive-001.ivf flip:9:481:42 flip:3:292:126
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok 2a5c7738 0
+ok 3c8e76b7 0
+ok 39a46a55 0
+ok b6bcd416 0
+ok cc74856d 0
+ok e384fbee 0
+ok 680ec1cc 0
+ok c681ccd1 0
+ok 6d0f57d3 0
+end
+case vp80-00-comprehensive-001.ivf flip:9:494:39 flip:5:77:68
+ok 83c78b5d 0
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok 69ccdfce 1
+ok a05c254e 1
+ok 1ffba360 1
+ok ef356f8f 1
+ok 3c7a7766 1
+ok c0c119d5 1
+ok 39931d36 1
+end
+case vp80-00-comprehensive-001.ivf flip:2:52:100 flip:6:52:232
+ok 83c78b5d 0
+ok 8d089d22 0
+ok 935b0964 0
+ok dc1efc4e 0
+ok f4371231 0
+ok fcc5ff41 0
+ok fc7a4c4a 0
+ok f57abb4c 0
+ok b7688263 0
+ok 21b7eccf 0
+ok bf8f8e80 0
+ok fb6e0dd8 0
+end
+case vp80-00-comprehensive-004.ivf flip:0:1:128
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf flip:0:1:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf flip:0:2:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf flip:0:8:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf flip:0:6:255
+ok 1f42ea23 0
+ok e24cec50 0
+ok a786fc74 0
+ok f7fe8353 0
+ok ccb9eca0 0
+ok 4f63fe23 0
+ok 6fdca90e 0
+ok 768df37f 0
+ok 115fc80d 0
+ok 10f10719 0
+ok 1be7784a 0
+ok 5085fa94 0
+end
+case vp80-00-comprehensive-004.ivf flip:0:4:1
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-004.ivf flip:0:202:1
+ok 3dfce15c 0
+ok f1d58589 0
+ok c2c9d7fa 0
+ok bbaf345a 0
+ok 71395b8b 0
+ok 470518bf 0
+ok a4f3a788 0
+ok 30d1cf7e 0
+ok bd66c5a4 0
+ok f37f8821 0
+ok 67907b22 0
+ok 134cee09 0
+end
+case vp80-00-comprehensive-004.ivf flip:0:130:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf flip:0:118:255
+ok adb77dd6 0
+ok 91d52be0 0
+ok e4e4a8f5 0
+ok b20c9699 0
+ok d752f46a 0
+ok e89501ed 0
+ok ce942f90 0
+ok 0c0f3d5c 0
+ok 99235710 0
+ok b98efb0a 0
+ok bfda62dd 0
+ok 2351cca1 0
+end
+case vp80-00-comprehensive-004.ivf flip:0:274:64
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf flip:0:606:255
+ok edf59451 0
+ok ecd68e96 0
+ok ad762e78 0
+ok e67e9ce3 0
+ok b7b5a37c 0
+ok e71abd24 0
+ok c99cd7f9 0
+ok c92a352c 0
+ok 3ea68f1b 0
+ok 71c41e05 0
+ok 31e32956 0
+ok bce65f4b 0
+end
+case vp80-00-comprehensive-004.ivf flip:0:361:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf cut:0:1
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-004.ivf cut:0:2
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-004.ivf cut:0:3
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-004.ivf cut:0:9
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-004.ivf cut:0:10
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf cut:0:11
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf cut:0:332
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf cut:0:243
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf cut:0:244
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf cut:0:663
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:2:255
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:1:128
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:1:128
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:41:5
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok 21ba8f59 1
+ok f4d6e7ee 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:10:1
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok 3b355b40 1
+ok 072367cd 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:6:97
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok ce3479d7 1
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:194:1
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok 08add34f 0
+ok 9de6f522 0
+end
+case vp80-00-comprehensive-004.ivf flip:10:150:128
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok aa108d74 1
+ok 868323ec 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:154:255
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok ad7430c6 0
+ok 436101cf 0
+end
+case vp80-00-comprehensive-004.ivf cut:10:1
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:2
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:3
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:9
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:10
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:11
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:83
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+err 7
+ok 19976c72 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:84
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok 0652aab6 1
+ok 2d09bf6b 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:254
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok 2d6d68b9 1
+ok ba348b89 1
+end
+case vp80-00-comprehensive-004.ivf cut:10:127
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok aeb44f0f 0
+ok 42e40bed 0
+ok 9796191f 0
+ok 7c9698a6 1
+ok f3476bcd 1
+end
+case vp80-00-comprehensive-004.ivf flip:4:1:68
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 7
+ok bb1f1cba 1
+ok c39b64cd 1
+ok 12f2283e 1
+ok c23245a1 1
+ok 985a86e1 1
+ok c9e2297f 1
+ok 002683f8 1
+end
+case vp80-00-comprehensive-004.ivf flip:4:0:47
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 5
+ok bb1f1cba 0
+ok c39b64cd 0
+ok 12f2283e 0
+ok c23245a1 0
+ok 985a86e1 0
+ok c9e2297f 0
+ok 002683f8 0
+end
+case vp80-00-comprehensive-004.ivf flip:4:0:128
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok ebd1640b 1
+ok ce3dda43 1
+ok 39f9f97a 1
+ok b7025be2 1
+ok 63c5ecf5 1
+ok 8df237ec 1
+ok 88ea6d66 1
+ok 28b85e68 1
+end
+case vp80-00-comprehensive-004.ivf flip:4:6:52
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 44fbf7ec 1
+ok 1ce4cdef 0
+ok 7fe2a502 0
+ok e41f642f 0
+ok f6841470 0
+ok 6bbcc71f 0
+ok 8f6fa299 0
+ok 1d04fc30 0
+end
+case vp80-00-comprehensive-004.ivf flip:4:61:112
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok e3751869 1
+ok c5af3615 1
+ok 163be3cf 1
+ok 797db1ec 1
+ok c9063969 1
+ok b7c639ed 1
+ok 615f636b 1
+ok b51a1920 1
+end
+case vp80-00-comprehensive-004.ivf flip:4:70:93
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 68718b6e 1
+ok 01401e94 1
+ok 35d8b3c1 1
+ok aeb44f0f 1
+ok 42e40bed 1
+ok 9796191f 1
+ok 2d6d68b9 1
+ok ba348b89 1
+end
+case vp80-00-comprehensive-004.ivf flip:4:124:1
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok ca724ffa 1
+ok 1573e5c1 1
+ok be93f2a0 1
+ok f9c46efe 1
+ok 133b4305 1
+ok 07c61c5f 1
+ok ecec7785 1
+ok cca5fbef 1
+end
+case vp80-00-comprehensive-004.ivf flip:4:82:255
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 9c6d6fe2 0
+ok bfc0ee00 0
+ok 40295f2d 0
+ok 1380a17f 0
+ok 7f4284c2 0
+ok 9a6aaf6c 0
+ok 58586047 0
+ok 84ac46f1 0
+end
+case vp80-00-comprehensive-004.ivf flip:4:155:43
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok aaeea763 1
+ok d6c80416 1
+ok 993b266d 1
+ok 0877c445 1
+ok f2824b8a 1
+ok f4b1ae58 1
+ok 2e0e4f76 1
+ok c843582d 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:1
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 7
+ok bb1f1cba 1
+ok c39b64cd 1
+ok 12f2283e 1
+ok c23245a1 1
+ok 985a86e1 1
+ok c9e2297f 1
+ok 002683f8 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:2
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 7
+ok bb1f1cba 1
+ok c39b64cd 1
+ok 12f2283e 1
+ok c23245a1 1
+ok 985a86e1 1
+ok c9e2297f 1
+ok 002683f8 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:3
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 7
+ok bb1f1cba 1
+ok c39b64cd 1
+ok 12f2283e 1
+ok c23245a1 1
+ok 985a86e1 1
+ok c9e2297f 1
+ok 002683f8 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:9
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 7
+ok bb1f1cba 1
+ok c39b64cd 1
+ok 12f2283e 1
+ok c23245a1 1
+ok 985a86e1 1
+ok c9e2297f 1
+ok 002683f8 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:10
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 7
+ok bb1f1cba 1
+ok c39b64cd 1
+ok 12f2283e 1
+ok c23245a1 1
+ok 985a86e1 1
+ok c9e2297f 1
+ok 002683f8 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:11
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 7
+ok bb1f1cba 1
+ok c39b64cd 1
+ok 12f2283e 1
+ok c23245a1 1
+ok 985a86e1 1
+ok c9e2297f 1
+ok 002683f8 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:76
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+err 7
+ok bb1f1cba 1
+ok c39b64cd 1
+ok 12f2283e 1
+ok c23245a1 1
+ok 985a86e1 1
+ok c9e2297f 1
+ok 002683f8 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:77
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 33ed7d9b 1
+ok f416c9b7 1
+ok 3143ec5b 1
+ok d105c7ff 1
+ok 341009a5 1
+ok c6ca2e4e 1
+ok 5bea2fcc 1
+ok ea65fc6d 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:303
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 9be6571a 1
+ok 01401e94 1
+ok 35d8b3c1 1
+ok aeb44f0f 1
+ok 42e40bed 1
+ok 9796191f 1
+ok 2d6d68b9 1
+ok ba348b89 1
+end
+case vp80-00-comprehensive-004.ivf cut:4:152
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 7e572667 1
+ok 900c33f6 1
+ok ce40f687 1
+ok 2f9f555a 1
+ok 2d497afe 1
+ok 5380d373 1
+ok d433f62b 1
+ok 066fea6a 1
+end
+case vp80-00-comprehensive-004.ivf drop:0
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-004.ivf drop:5
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 9e44a4af 0
+ok c8146dc6 0
+ok d43e1d38 0
+ok 94221a1f 0
+ok 2a0f1a53 0
+ok 113e2799 0
+end
+case vp80-00-comprehensive-004.ivf flip:2:124:216 flip:11:139:249
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 8d778e5d 0
+ok ec89c700 0
+ok fc3b04ca 0
+ok 2108399f 0
+ok a09dd075 0
+ok 8d734d88 0
+ok 327143d8 0
+ok 22032d30 0
+ok 50ff4891 0
+ok aa1e4919 1
+end
+case vp80-00-comprehensive-004.ivf flip:0:7:244 flip:11:21:31
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:230:4 flip:7:119:231
+ok 83c78b5d 0
+ok d173eb8a 0
+ok 204e3e91 0
+ok 3cc1a395 0
+ok 024548b0 0
+ok 01401e94 0
+ok 35d8b3c1 0
+ok 6d970b5b 1
+ok 591680b5 1
+ok 45547a4e 1
+ok 005894cb 1
+ok c42fd248 1
+end
+case vp80-00-comprehensive-004.ivf flip:10:112:61 flip:0:50:246
+ok 265f4566 0
+ok 6ff240a6 0
+ok e9ed80d4 0
+ok fb73a99d 0
+ok 14be9e6f 0
+ok 9bd66903 0
+ok fdce6ff9 0
+ok d1f90206 0
+ok ecef0bed 0
+ok 6e989db5 0
+ok 7fe4845a 1
+ok 2a692c9c 1
+end
+case vp80-00-comprehensive-005.ivf flip:0:1:255
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:2:1
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:0:255
+err 5
+err 5
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:9:1
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:7:128
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:5:128
+err 5
+err 5
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:594:236
+ok f912f473 0
+ok 99e5054e 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:421:255
+ok 648b12f7 0
+ok adda86c6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:65:1
+ok a1f19cd7 0
+ok 949fb59b 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:3549:128
+ok 6c6abe40 0
+ok 251c8a15 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:2872:255
+ok 63ff4926 0
+ok d892d532 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:3701:12
+ok 0da74f8b 0
+ok d33d2068 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:1
+err 5
+err 5
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:2
+err 5
+err 5
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:3
+err 5
+err 5
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:2177
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:4353
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:9
+err 5
+err 5
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:10
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:11
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:717
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf cut:0:718
+err 7
+err 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:11:1:255
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf flip:11:0:219
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 5
+end
+case vp80-00-comprehensive-005.ivf flip:11:2:135
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf flip:11:47:226
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok d2d9503c 0
+end
+case vp80-00-comprehensive-005.ivf flip:11:34:255
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 30742466 1
+end
+case vp80-00-comprehensive-005.ivf flip:11:32:233
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok dfce3e62 1
+end
+case vp80-00-comprehensive-005.ivf flip:11:100:1
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 7b5f651b 0
+end
+case vp80-00-comprehensive-005.ivf flip:11:80:255
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 601738d1 1
+end
+case vp80-00-comprehensive-005.ivf flip:11:84:1
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok b4164da6 1
+end
+case vp80-00-comprehensive-005.ivf cut:11:1
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf cut:11:2
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf cut:11:3
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf cut:11:65
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf cut:11:66
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 5ccd6a49 1
+end
+case vp80-00-comprehensive-005.ivf cut:11:104
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 1
+end
+case vp80-00-comprehensive-005.ivf cut:11:9
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf cut:11:10
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf cut:11:11
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf cut:11:52
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+err 7
+end
+case vp80-00-comprehensive-005.ivf flip:10:0:121
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 5
+ok a1ea166a 0
+end
+case vp80-00-comprehensive-005.ivf flip:10:0:114
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+none
+ok 98c51fd1 1
+end
+case vp80-00-comprehensive-005.ivf flip:10:2:128
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf flip:10:8:128
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 915cb044 1
+ok 466caa61 1
+end
+case vp80-00-comprehensive-005.ivf flip:10:30:128
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok b61e8414 1
+ok 6ef07ca3 1
+end
+case vp80-00-comprehensive-005.ivf flip:10:23:1
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok c41fba4c 1
+ok 950f8a6c 1
+end
+case vp80-00-comprehensive-005.ivf flip:10:68:255
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 95f8b666 1
+ok 47d6d34d 1
+end
+case vp80-00-comprehensive-005.ivf flip:10:54:1
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 0c89f343 1
+ok 9a66b4f1 1
+end
+case vp80-00-comprehensive-005.ivf flip:10:68:128
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 8ed77427 1
+ok e2543afc 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:1
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:2
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:3
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:36
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:72
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 1
+ok 04dfd36a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:9
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:10
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:11
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:47
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+err 7
+ok a1ea166a 1
+end
+case vp80-00-comprehensive-005.ivf cut:10:48
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok dd1b966d 1
+ok ac317eea 1
+end
+case vp80-00-comprehensive-005.ivf drop:0
+err 5
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf drop:8
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok d9ec54b3 0
+ok a292df02 0
+ok fe586d46 0
+end
+case vp80-00-comprehensive-005.ivf flip:0:2159:43 flip:1:421:179
+ok 2a3ef79b 0
+ok d99b454f 1
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 0f96b1fb 0
+ok 68b0db00 0
+ok f9bc8edf 0
+ok bfe2115b 0
+ok 67f17f96 0
+ok 65827801 0
+ok 04dfd36a 0
+end
+case vp80-00-comprehensive-005.ivf flip:10:2:202 flip:5:22:81
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 75fa2501 1
+ok 0d7cbe47 1
+ok 8ec9f081 1
+ok 22f5d1da 1
+ok 5275020e 1
+err 7
+ok 44f3e953 1
+end
+case vp80-00-comprehensive-005.ivf flip:5:18:25 flip:4:68:162
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok d6cb4ce5 0
+ok 3c7dcc04 1
+ok f5aac322 1
+ok f0121f08 1
+ok 1432a9e7 1
+ok 52b68ab3 1
+ok b4fd2aa8 1
+ok b0530b95 1
+end
+case vp80-00-comprehensive-005.ivf flip:5:41:42 flip:10:21:76
+ok e7a4be43 0
+ok d903ade6 0
+ok af07ee39 0
+ok 388a5f73 0
+ok a0726009 0
+ok 337871f0 0
+ok d55517fa 0
+ok 26c6bf7c 0
+ok fd6b6c18 0
+ok 9e0988d9 0
+ok efcf3850 1
+ok 7bd2128b 1
+end
+case vp80-00-comprehensive-011.ivf flip:0:2:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf flip:0:1:128
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf flip:0:1:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf flip:0:6:66
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf flip:0:4:1
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-011.ivf flip:0:7:250
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf flip:0:49:255
+ok c917f9c5 0
+ok c62fec17 0
+ok a0350f14 0
+ok 58a53aa2 0
+ok 9f3ebab5 0
+ok 00e4d64b 0
+ok d365b18e 0
+ok 3cd65293 0
+ok c65bbabe 0
+ok 8bf0f751 0
+ok e861b00e 0
+ok 20c24cb3 0
+end
+case vp80-00-comprehensive-011.ivf flip:0:73:255
+ok f097f44b 0
+ok fa061540 0
+ok a994645d 0
+ok fbede4d1 0
+ok 8b8cfe95 0
+ok c5d4080d 0
+ok 059813b4 0
+ok 35361b70 0
+ok 85bfb12d 0
+ok 308e52ff 0
+ok dc2a4c51 0
+ok e8eacac0 0
+end
+case vp80-00-comprehensive-011.ivf flip:0:54:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf flip:0:313:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf flip:0:555:27
+ok 2045fb2a 0
+ok ff62da90 0
+ok 30afad57 0
+ok 42a49e3a 0
+ok d897d114 0
+ok 10549333 0
+ok 23f229c5 0
+ok 101dd0c3 0
+ok 0cceb903 0
+ok 3987ef38 0
+ok 7071fd9e 0
+ok 7fc57d46 0
+end
+case vp80-00-comprehensive-011.ivf flip:0:334:128
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf cut:0:1
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-011.ivf cut:0:2
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-011.ivf cut:0:3
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-011.ivf cut:0:9
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-011.ivf cut:0:10
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf cut:0:11
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf cut:0:333
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf cut:0:246
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf cut:0:247
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf cut:0:666
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-011.ivf flip:6:2:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf flip:6:2:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf flip:6:2:128
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf flip:6:120:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok adde41ef 0
+ok 2d47260e 0
+ok 3bc6f3c3 0
+ok 62ed1aca 0
+ok 9a3be814 0
+ok de66b43c 0
+end
+case vp80-00-comprehensive-011.ivf flip:6:19:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok d7a3fd93 1
+ok 22d8744e 1
+ok 8c619b41 1
+ok 25d8724e 1
+ok 7425c75f 1
+ok c96f21a5 1
+end
+case vp80-00-comprehensive-011.ivf flip:6:72:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok 789ea293 0
+ok f238e296 0
+ok a744a3ac 0
+ok 905f9872 0
+ok 26bc47b4 0
+ok 31c6c1b3 0
+end
+case vp80-00-comprehensive-011.ivf flip:6:269:128
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok 579474d3 0
+ok 806573e7 0
+ok eac11940 0
+ok ffa556ed 0
+ok cfcad4af 0
+ok 868acf69 0
+end
+case vp80-00-comprehensive-011.ivf flip:6:247:128
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok 4924af62 0
+ok 72c54a5f 0
+ok 6e4c2b5f 0
+ok 8aab92b4 0
+ok 9e959e05 0
+ok 1ce277ae 0
+end
+case vp80-00-comprehensive-011.ivf flip:6:239:255
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok 2aa4f1a8 0
+ok b59ae1a2 0
+ok 2dfb232a 0
+ok fe987488 0
+ok b37d1e96 0
+ok 0dfb4f83 0
+end
+case vp80-00-comprehensive-011.ivf cut:6:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf cut:6:2
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf cut:6:3
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf cut:6:9
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf cut:6:10
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf cut:6:11
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf cut:6:145
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+err 7
+ok 3c9df30f 1
+ok 068247e2 1
+ok 7ce5380e 1
+ok 07d68da9 1
+ok 3937bc8d 1
+end
+case vp80-00-comprehensive-011.ivf cut:6:146
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok 66787f2c 1
+ok e989cf77 1
+ok a47e352b 1
+ok 598c2f2b 1
+ok b102ad32 1
+ok 9e27a39d 1
+end
+case vp80-00-comprehensive-011.ivf cut:6:631
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok c96c3357 0
+ok 5eb1329f 0
+ok 68b3d516 0
+end
+case vp80-00-comprehensive-011.ivf cut:6:316
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok 64e4ade9 1
+ok a1f8aa20 1
+ok c30c6e69 1
+ok b71e50fd 1
+ok 26ac32f8 1
+ok b721552a 1
+end
+case vp80-00-comprehensive-011.ivf flip:9:2:128
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf flip:9:2:255
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf flip:9:0:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 5
+ok 141a2792 0
+ok 571be935 0
+end
+case vp80-00-comprehensive-011.ivf flip:9:126:71
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok 828431a4 0
+ok 28c83418 0
+ok da344dbb 0
+end
+case vp80-00-comprehensive-011.ivf flip:9:169:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok d787ec60 0
+ok 7620e766 0
+ok e7d59b84 0
+end
+case vp80-00-comprehensive-011.ivf flip:9:40:231
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok 745183ce 0
+ok c8d78ce4 0
+ok a603c617 0
+end
+case vp80-00-comprehensive-011.ivf flip:9:510:134
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok e59b6c5c 0
+ok f619ebe8 0
+ok 069bc8eb 0
+end
+case vp80-00-comprehensive-011.ivf flip:9:372:255
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok c9812ccd 1
+ok e3be7108 1
+ok 5b608b7c 1
+end
+case vp80-00-comprehensive-011.ivf flip:9:592:206
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok 2f6df298 0
+ok 29d866e4 0
+ok 0bbdb285 0
+end
+case vp80-00-comprehensive-011.ivf cut:9:1
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:2
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:3
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:326
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok caf645d3 1
+ok 50a901b0 1
+ok 1815b7cb 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:9
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:10
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:11
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:652
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok f69f154b 1
+ok 5eb1329f 1
+ok 68b3d516 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:209
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+err 7
+ok 141a2792 1
+ok 571be935 1
+end
+case vp80-00-comprehensive-011.ivf cut:9:210
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 34816d91 0
+ok 7d7d46cd 0
+ok e36a874c 1
+ok c5b7f8da 1
+ok 1eb8d299 1
+end
+case vp80-00-comprehensive-011.ivf drop:0
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-011.ivf drop:7
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 7d7d46cd 0
+ok c96c3357 0
+ok 5eb1329f 0
+ok 68b3d516 0
+end
+case vp80-00-comprehensive-011.ivf flip:7:468:253 flip:9:231:23
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok a114c37e 0
+ok 4bad1823 0
+ok a843b5c8 0
+ok 1e3958d6 0
+ok 7d7d46cd 0
+ok d4db5ca7 1
+ok b3d6bde7 1
+ok 64fe8356 1
+end
+case vp80-00-comprehensive-011.ivf flip:10:167:37 flip:4:133:23
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok 1f70e0e5 1
+ok ee9fcbd4 1
+ok ab1f83d2 1
+ok 98f4ce1b 1
+ok b15ba2a9 1
+ok 5b166b2d 1
+ok a05e025c 1
+ok ee13d57d 1
+end
+case vp80-00-comprehensive-011.ivf flip:8:326:64 flip:4:114:217
+ok 83c78b5d 0
+ok 9b755a63 0
+ok a591f0b0 0
+ok 6ebbd38d 0
+ok 859b3621 1
+ok 9192d030 1
+ok f504302b 1
+ok 85cfd644 1
+ok 6fa14000 1
+ok 948372ec 1
+ok 5ef46147 1
+ok 639b13f9 1
+end
+case vp80-00-comprehensive-011.ivf flip:1:354:212 flip:2:201:58
+ok 83c78b5d 0
+ok 8d5ac385 0
+ok 0a7f258b 0
+ok e7f116df 0
+ok ff31d26d 0
+ok 04af484d 0
+ok b84df9a6 0
+ok 0362a366 0
+ok 2d9149a0 0
+ok eae9f972 0
+ok b42020c2 0
+ok f8199862 0
+end
+case vp80-00-comprehensive-018.ivf flip:0:2:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf flip:0:1:199
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf flip:0:1:128
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf flip:0:9:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf flip:0:7:128
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 1bc97b6b 0
+ok 0586d948 0
+ok c9a1198e 0
+ok 547d8ffc 0
+ok d31c02a5 0
+end
+case vp80-00-comprehensive-018.ivf flip:0:6:47
+none
+ok 206267dd 0
+ok 1439ec3e 0
+ok 7d632213 1
+ok 4a130b98 1
+ok df5a87ba 1
+ok d0a9bb9a 1
+ok 86d5cf0c 1
+ok 7f20c2bd 1
+ok e9c19418 1
+ok 94baed5d 1
+ok 70397949 1
+end
+case vp80-00-comprehensive-018.ivf flip:0:16:145
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf flip:0:50:159
+none
+ok 3ce29b0f 0
+ok 9b75ad9b 0
+ok 5a98fe71 0
+ok e76ad139 0
+ok d5d46294 0
+ok 8227bc63 0
+ok 7ee803f4 0
+ok 688e6de5 0
+ok e5cd83cd 0
+ok 2df6cfe1 0
+ok 9a768de2 0
+end
+case vp80-00-comprehensive-018.ivf flip:0:147:255
+none
+ok 5694ba0e 0
+ok 969a6af0 0
+ok ba4068c7 0
+ok 7875b1e7 0
+ok 532427fe 0
+ok b080225d 0
+ok 71359c95 0
+ok 560ac8ad 0
+ok 5d1e3586 0
+ok 0653a30a 0
+ok 5548f581 0
+end
+case vp80-00-comprehensive-018.ivf flip:0:519:1
+none
+ok 667cdaa3 0
+ok d38da9fc 0
+ok 25df5d31 0
+ok 10bfe66e 0
+ok 0e40f0fe 0
+ok f8477aab 0
+ok 9ef6cf80 0
+ok 1dec48f5 0
+ok 743d0118 0
+ok 324d2821 0
+ok 08289aee 0
+end
+case vp80-00-comprehensive-018.ivf flip:0:371:99
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf flip:0:526:128
+none
+ok 6420a922 0
+ok 91618567 0
+ok e7c42b9c 0
+ok a4d3e893 0
+ok 92062a7f 0
+ok bd302ad0 0
+ok 8ae69c79 0
+ok ef12b08e 0
+ok a0476c4c 0
+ok eb10329e 0
+ok 7cea424a 0
+end
+case vp80-00-comprehensive-018.ivf cut:0:1
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-018.ivf cut:0:2
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-018.ivf cut:0:3
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-018.ivf cut:0:9
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-018.ivf cut:0:10
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf cut:0:11
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf cut:0:332
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf cut:0:243
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf cut:0:244
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf cut:0:663
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:0:128
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e2485374 1
+ok a04253ba 1
+ok 0c508ce0 1
+ok e2a92b2e 1
+ok 755213c7 1
+ok 4adffeff 1
+ok b846948f 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:2:1
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:2:1
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:20:242
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok 114358bc 1
+ok f99cbaff 1
+ok 1ed6a1e6 1
+ok 718f63e3 1
+ok 31a09243 1
+ok e1bccb16 1
+ok 4b2e9f37 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:61:128
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok 4ef496f5 1
+ok 7248803d 1
+ok 74b8299b 1
+ok 8ee725a0 1
+ok 3e8c9027 1
+ok 720e2608 1
+ok fd1c7f1c 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:49:255
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok f813d6cd 1
+ok 454bd763 1
+ok 5db2eb67 1
+ok cb2e4d40 1
+ok d0be6180 1
+ok 20a74c1d 1
+ok 2c871771 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:189:186
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok bf75f293 1
+ok e972fc50 1
+ok 5d10cf40 1
+ok 1a66a6b3 1
+ok 45982f76 1
+ok 3c88cfee 1
+ok 7fd28d10 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:336:255
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok 047c0a93 1
+ok 8ecbf467 1
+ok 07f882a3 1
+ok 1cfcc004 1
+ok d4cf0bab 1
+ok 5551b449 1
+ok 0363e0df 1
+end
+case vp80-00-comprehensive-018.ivf flip:5:217:128
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok 76a4e75a 1
+ok d08d4587 1
+ok 425bda13 1
+ok 75d6a8f9 1
+ok 39bdf303 1
+ok 9fffb690 1
+ok 8f83c51c 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:1
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:2
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:3
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:9
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:10
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:11
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:84
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+err 7
+ok 46c8d8b7 1
+ok ca31c356 1
+ok 9bc5f811 1
+ok 204cee6b 1
+ok 0f6edf08 1
+ok 74677194 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:85
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok 7d1c4e8c 1
+ok 174f0c7a 1
+ok e751d885 1
+ok 3c29938b 1
+ok 49d8c9f1 1
+ok 91b2a2d1 1
+ok a71578fa 1
+end
+case vp80-00-comprehensive-018.ivf cut:5:380
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 1bc97b6b 0
+ok 0586d948 0
+ok c9a1198e 0
+ok 547d8ffc 0
+ok d31c02a5 0
+end
+case vp80-00-comprehensive-018.ivf cut:5:190
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok 2e8af9c0 1
+ok 1f0680fd 1
+ok d3cf194f 1
+ok 6e32a2ab 1
+ok 9543168b 1
+ok f8ea5ed8 1
+ok fab06a13 1
+end
+case vp80-00-comprehensive-018.ivf flip:4:1:1
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok c6295788 1
+ok 85bb6655 1
+ok c2aa758f 1
+ok 363887a0 1
+ok a8bc6f41 1
+ok 90a3d5b0 1
+ok 679cdc32 1
+ok ce4045d2 1
+end
+case vp80-00-comprehensive-018.ivf flip:4:2:128
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+err 7
+ok d6c46963 1
+ok c0cafa85 1
+ok 14b50dc4 1
+ok e7026f79 1
+ok 46430c7a 1
+ok 1094513f 1
+ok 5c211dff 1
+end
+case vp80-00-comprehensive-018.ivf flip:4:0:24
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+none
+ok e683f2bf 0
+ok 0c292378 0
+ok 1bc97b6b 0
+ok 0586d948 0
+ok c9a1198e 0
+ok 547d8ffc 0
+ok d31c02a5 0
+end
+case vp80-00-comprehensive-018.ivf flip:4:9:1
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 5605e7d7 1
+ok a64a15ab 1
+ok ac1a200e 1
+ok 21932c15 1
+ok 1f5e7b84 1
+ok e527c2fa 1
+ok 26429999 1
+ok 0e0ebdbf 1
+end
+case vp80-00-comprehensive-018.ivf flip:4:22:255
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 0d9b48cd 0
+ok 2f0b5a28 0
+ok 089b205f 0
+ok 8baa55cd 0
+ok 78584721 0
+ok 617a2c51 0
+ok 666b7a70 0
+ok 137f376c 0
+end
+case vp80-00-comprehensive-018.ivf flip:4:71:255
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 5e9031f2 0
+ok c38d8ce5 0
+ok a5d06368 0
+ok 70020c4e 0
+ok c90f13bb 0
+ok 0143c1fb 0
+ok 508c42f5 0
+ok 5f56b4e0 0
+end
+case vp80-00-comprehensive-018.ivf flip:4:484:128
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 277f9028 0
+ok de11e88a 0
+ok 936ef107 0
+ok 631ce732 0
+ok 455f6bd3 0
+ok 6d6d04d8 0
+ok c7823e26 0
+ok a72b5a63 0
+end
+case vp80-00-comprehensive-018.ivf flip:4:309:1
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok de062e16 1
+ok 5d28cde5 1
+ok 7dc03aac 1
+ok 6880c183 1
+ok 48ec46a9 1
+ok 89e163dc 1
+ok 01d368b0 1
+ok 98367be3 1
+end
+case vp80-00-comprehensive-018.ivf flip:4:491:1
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok e6873a07 0
+ok 4a8f6bf4 0
+ok 93caf1cb 0
+ok 789edc00 0
+ok ef19fb11 0
+ok 107e6605 0
+ok f018cdbd 0
+ok 99730c82 0
+end
+case vp80-00-comprehensive-018.ivf cut:4:1
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+err 7
+ok d6c46963 1
+ok c0cafa85 1
+ok 14b50dc4 1
+ok e7026f79 1
+ok 46430c7a 1
+ok 1094513f 1
+ok 5c211dff 1
+end
+case vp80-00-comprehensive-018.ivf cut:4:2
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+err 7
+ok d6c46963 1
+ok c0cafa85 1
+ok 14b50dc4 1
+ok e7026f79 1
+ok 46430c7a 1
+ok 1094513f 1
+ok 5c211dff 1
+end
+case vp80-00-comprehensive-018.ivf cut:4:3
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+err 7
+ok d6c46963 1
+ok c0cafa85 1
+ok 14b50dc4 1
+ok e7026f79 1
+ok 46430c7a 1
+ok 1094513f 1
+ok 5c211dff 1
+end
+case vp80-00-comprehensive-018.ivf cut:4:194
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+err 7
+ok d6c46963 1
+ok c0cafa85 1
+ok 14b50dc4 1
+ok e7026f79 1
+ok 46430c7a 1
+ok 1094513f 1
+ok 5c211dff 1
+end
+case vp80-00-comprehensive-018.ivf cut:4:195
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 466fdcde 1
+ok d8408ad5 1
+ok 3cd1d7e4 1
+ok 5f9293fe 1
+ok c0836d6b 1
+ok 38709b46 1
+ok 85bbe260 1
+ok bead7359 1
+end
+case vp80-00-comprehensive-018.ivf cut:4:677
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 1bc97b6b 0
+ok 0586d948 0
+ok c9a1198e 0
+ok 547d8ffc 0
+ok d31c02a5 0
+end
+case vp80-00-comprehensive-018.ivf cut:4:9
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+err 7
+ok d6c46963 1
+ok c0cafa85 1
+ok 14b50dc4 1
+ok e7026f79 1
+ok 46430c7a 1
+ok 1094513f 1
+ok 5c211dff 1
+end
+case vp80-00-comprehensive-018.ivf cut:4:10
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+err 7
+ok d6c46963 1
+ok c0cafa85 1
+ok 14b50dc4 1
+ok e7026f79 1
+ok 46430c7a 1
+ok 1094513f 1
+ok 5c211dff 1
+end
+case vp80-00-comprehensive-018.ivf cut:4:11
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+err 7
+ok d6c46963 1
+ok c0cafa85 1
+ok 14b50dc4 1
+ok e7026f79 1
+ok 46430c7a 1
+ok 1094513f 1
+ok 5c211dff 1
+end
+case vp80-00-comprehensive-018.ivf cut:4:339
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok b2936102 1
+ok ee6be1a0 1
+ok 676d35cb 1
+ok 0b1338c5 1
+ok 0e6060bd 1
+ok 151d6756 1
+ok ff064905 1
+ok f297b08f 1
+end
+case vp80-00-comprehensive-018.ivf drop:0
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-00-comprehensive-018.ivf drop:2
+none
+ok 8d089d22 0
+ok b62d779e 1
+ok 3091e6e5 1
+ok 76bb0a44 1
+ok 3a1fb8cb 1
+ok 5a384132 1
+ok e900f20b 1
+ok 3bb3fea2 1
+ok 91ad7071 1
+ok ab79deca 1
+end
+case vp80-00-comprehensive-018.ivf flip:7:328:165 flip:10:190:53
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 0c292378 0
+ok 409d18d7 0
+ok b3963699 0
+ok 7f9e0734 0
+ok a4fe6b0f 0
+ok fd405092 0
+end
+case vp80-00-comprehensive-018.ivf flip:8:459:27 flip:6:17:55
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok e683f2bf 0
+ok 8b15ce67 1
+ok 765b5b66 1
+ok decd617d 1
+ok 03d5a4c6 1
+ok e15a52db 1
+ok fea11798 1
+end
+case vp80-00-comprehensive-018.ivf flip:3:85:114 flip:5:215:216
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok e94651d7 0
+ok 60c26079 0
+ok debe8309 1
+ok 0b1fec20 1
+ok 187fe9a7 1
+ok 5322d224 1
+ok 8cd3381f 1
+ok b9e30a1a 1
+ok b162b2b7 1
+end
+case vp80-00-comprehensive-018.ivf flip:9:570:75 flip:3:317:167
+none
+ok 8d089d22 0
+ok acaae81c 0
+ok b2953799 1
+ok 673ce095 1
+ok 9fb866cd 1
+ok 6c639f0e 1
+ok a65e6be9 1
+ok 69705165 1
+ok 9a1eef7e 1
+ok 7a021e35 1
+ok 021dc424 1
+end
+case vp80-04-partitions-1405.ivf flip:0:2:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf flip:0:1:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf flip:0:0:61
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-04-partitions-1405.ivf flip:0:7:1
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf flip:0:3:128
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-04-partitions-1405.ivf flip:0:9:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf flip:0:767:255
+ok 3ef1887d 0
+ok db728468 0
+ok 6d045940 0
+ok cdc0f167 0
+ok 147dd583 0
+ok 49c54d57 0
+ok b0d713d1 0
+ok f18d6f67 0
+ok f88a92c8 0
+ok 42d50ea1 0
+ok 058ba633 0
+ok 544d99b0 0
+end
+case vp80-04-partitions-1405.ivf flip:0:720:52
+ok c7d611f3 0
+ok e95446f6 0
+ok a832ff89 0
+ok 26631e6f 0
+ok b72b6dd8 0
+ok 42acdc0c 0
+ok a313196e 0
+ok e3d9ba6f 0
+ok 40a239cf 0
+ok c190e76f 0
+ok f33eeacb 0
+ok 7f515730 0
+end
+case vp80-04-partitions-1405.ivf flip:0:816:255
+ok 9fda025a 0
+ok 6671faf8 0
+ok 94fa3f1e 0
+ok a1c48cba 0
+ok b7476d1b 0
+ok bc52d681 0
+ok ba403d27 0
+ok d4527303 0
+ok 8700542f 0
+ok be834f1c 0
+ok 1a4aeea5 0
+ok 89b691ef 0
+end
+case vp80-04-partitions-1405.ivf flip:0:14784:255
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf flip:0:9070:1
+ok c3a5a6d9 0
+ok 86888a04 0
+ok 8f36055b 0
+ok 1c42f3dd 0
+ok a6cdc828 0
+ok 7d0b9905 0
+ok 87a55638 0
+ok f874f2ea 0
+ok 9f0e3deb 0
+ok 4e7863d0 0
+ok 1b19706c 0
+ok da6a9536 0
+end
+case vp80-04-partitions-1405.ivf flip:0:9968:255
+ok 5c5fa76a 0
+ok 02eb4856 0
+ok d46a2922 0
+ok f1165235 0
+ok b7009932 0
+ok 75042743 0
+ok 3d33129c 0
+ok bdb2d1d9 0
+ok b6d1c5be 0
+ok 6d8280f4 0
+ok 007f3943 0
+ok 992e485b 0
+end
+case vp80-04-partitions-1405.ivf cut:0:1
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-04-partitions-1405.ivf cut:0:2
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-04-partitions-1405.ivf cut:0:3
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-04-partitions-1405.ivf cut:0:9
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-04-partitions-1405.ivf cut:0:10
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf cut:0:11
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf cut:0:15216
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf cut:0:7608
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf cut:0:1150
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf cut:0:1151
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-04-partitions-1405.ivf flip:7:0:1
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 5
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf flip:7:0:255
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 5
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf flip:7:0:255
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 5
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf flip:7:464:255
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok e7472b68 1
+ok 5113bf5b 1
+ok 589c5925 1
+ok 6f5ced08 1
+ok 34d0db31 1
+end
+case vp80-04-partitions-1405.ivf flip:7:36:182
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok cc199952 0
+ok 59402723 1
+ok c9a2a535 1
+ok 64e5240c 1
+ok d514349b 1
+end
+case vp80-04-partitions-1405.ivf flip:7:292:128
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok 3c63f730 1
+ok f9278b2f 1
+ok b42ba347 1
+ok b3299f18 1
+ok 7956e54f 1
+end
+case vp80-04-partitions-1405.ivf flip:7:1090:255
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok c0d60487 1
+ok a50673fc 1
+ok 6509a7b4 1
+ok a74492c7 1
+ok 9954d19e 1
+end
+case vp80-04-partitions-1405.ivf flip:7:1537:1
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok eea7052b 0
+ok 34d207f7 0
+ok aceda30f 0
+ok 59b6a853 0
+ok 91e70973 0
+end
+case vp80-04-partitions-1405.ivf flip:7:1397:1
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok 798d98c3 0
+ok 955d3a06 0
+ok cdfe17b2 0
+ok c77f6566 0
+ok d54e96b6 0
+end
+case vp80-04-partitions-1405.ivf cut:7:1
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf cut:7:2
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf cut:7:3
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf cut:7:1090
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf cut:7:2180
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok 8d5e2e62 1
+ok 6ce75ac3 1
+ok e3a99202 1
+ok 56a607e5 1
+ok 49a2cac7 1
+end
+case vp80-04-partitions-1405.ivf cut:7:9
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf cut:7:10
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf cut:7:11
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf cut:7:589
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf cut:7:590
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+err 7
+ok 5c4cefaf 1
+ok 23e5873a 1
+ok be6612be 1
+ok 3752327b 1
+end
+case vp80-04-partitions-1405.ivf flip:1:0:16
+ok f6bf9ee8 0
+none
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok 8d5e2e62 0
+ok 6ce75ac3 0
+ok e3a99202 0
+ok 56a607e5 0
+ok 49a2cac7 0
+end
+case vp80-04-partitions-1405.ivf flip:1:1:1
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf flip:1:1:128
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf flip:1:179:128
+ok f6bf9ee8 0
+ok 6045fd8c 1
+ok fcffecb7 1
+ok 237ad477 1
+ok c4a934dd 1
+ok 871eef50 1
+ok 09d3d07e 1
+ok d15edb7d 1
+ok d3e1482c 1
+ok 97c9cf06 1
+ok 337450aa 1
+ok cbdc7996 1
+end
+case vp80-04-partitions-1405.ivf flip:1:379:128
+ok f6bf9ee8 0
+ok 4e718ed0 1
+ok fc0f9514 1
+ok 3d4a6627 1
+ok 29006151 1
+ok f07f0a55 1
+ok c19270b5 1
+ok 301e7f4a 1
+ok 0228d96a 1
+ok 29d1ff25 1
+ok 86a7ac47 1
+ok 6594e73b 1
+end
+case vp80-04-partitions-1405.ivf flip:1:304:1
+ok f6bf9ee8 0
+ok 1b422e51 1
+ok 859d5e47 1
+ok a45ddd23 1
+ok d795007f 1
+ok 5fa29357 1
+ok 370b83d7 1
+ok 3d4c5811 1
+ok 8b64d636 1
+ok 9a0e7875 1
+ok 1ce67f39 1
+ok 183150a4 1
+end
+case vp80-04-partitions-1405.ivf flip:1:528:255
+ok f6bf9ee8 0
+ok 7248383c 1
+ok 99ac6b40 1
+ok 3d4dbecc 1
+ok f265a846 1
+ok 19b1562c 1
+ok aa36849c 1
+ok 7691b286 1
+ok f29d1651 1
+ok 90999fe5 1
+ok a9bf2ad7 1
+ok 33eeab2c 1
+end
+case vp80-04-partitions-1405.ivf flip:1:430:255
+ok f6bf9ee8 0
+ok 40c4e0b1 1
+ok 53a757cf 1
+ok d0580c18 1
+ok 858a8143 1
+ok ac90d633 1
+ok d5052c36 1
+ok 679226e3 1
+ok 30e5a274 1
+ok 1a458273 1
+ok ad61b613 1
+ok 5133a999 1
+end
+case vp80-04-partitions-1405.ivf flip:1:598:128
+ok f6bf9ee8 0
+ok c837456d 1
+ok 4d9f2d14 1
+ok b79716d7 1
+ok 75641f28 1
+ok c1748777 1
+ok e45256f2 1
+ok 0bc17f54 1
+ok 5d961dce 1
+ok cd4cb6c5 1
+ok c32442f1 1
+ok 64e220da 1
+end
+case vp80-04-partitions-1405.ivf cut:1:1
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:2
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:3
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:9
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:10
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:11
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:300
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:397
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:398
+ok f6bf9ee8 0
+err 7
+ok 6e203efe 1
+ok 6bcb26ed 1
+ok 9ff9d9fb 1
+ok 2b90c4a2 1
+ok a016c903 1
+ok b0dd582d 1
+ok cc7d0984 1
+ok 6a1a7c4c 1
+ok 31a030ad 1
+ok 4c10bbe0 1
+end
+case vp80-04-partitions-1405.ivf cut:1:600
+ok f6bf9ee8 0
+ok a3efb76d 1
+ok 9de72ac1 1
+ok b79716d7 1
+ok 75641f28 1
+ok c1748777 1
+ok e45256f2 1
+ok 0bc17f54 1
+ok 5d961dce 1
+ok cd4cb6c5 1
+ok c32442f1 1
+ok 64e220da 1
+end
+case vp80-04-partitions-1405.ivf drop:0
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+err 5
+end
+case vp80-04-partitions-1405.ivf drop:8
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 8b5d4d3b 0
+ok cbe5ae7e 0
+ok 8d5e2e62 0
+ok 8ed4bb8f 1
+ok 66cd2a42 1
+ok 61ddcfb4 1
+end
+case vp80-04-partitions-1405.ivf flip:11:523:112 flip:5:564:16
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 0ef28856 0
+ok a877d5f1 0
+ok 00bf1a24 1
+ok 91bc29fb 1
+ok 5dc59bd3 1
+ok 68ac6f5d 1
+ok 3c0a6a3c 1
+ok ba20eabe 1
+ok 9f1afef2 1
+end
+case vp80-04-partitions-1405.ivf flip:0:3590:243 flip:10:230:14
+ok 24978b86 0
+ok 70a5e32c 0
+ok 6b92729e 0
+ok bcc8b55d 0
+ok b9c6c7f4 0
+ok 58cce8d4 0
+ok 232970d9 0
+ok 1df4f314 0
+ok bb24ad78 0
+ok 732e746b 0
+ok 92af5906 1
+ok c2171b72 1
+end
+case vp80-04-partitions-1405.ivf flip:3:550:193 flip:4:103:97
+ok f6bf9ee8 0
+ok 7388ed03 0
+ok 3990dbf9 0
+ok 3f522afe 1
+ok f655675e 1
+ok 3410b733 1
+ok 9da90614 1
+ok 28dfabb5 1
+ok d48b3bf6 1
+ok 39e8a467 1
+ok 4f9adfe2 1
+ok 645a2954 1
+end
+case vp80-04-partitions-1405.ivf flip:5:477:194 flip:0:1312:244
+err 7
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+err 1
+end
+case vp80-03-segmentation-1436.ivf flip:0:2:158
+err 7
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:0:1
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:0:1
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:5:128
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:3:1
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:4:128
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:1028:255
+ok 46f6167f 0
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:1272:128
+ok 33cb0f3d 0
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:1242:1
+ok e8c87665 0
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:10657:255
+ok 53d624d9 0
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:9622:128
+ok fbaf1d01 0
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:4157:1
+ok 885810a9 0
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:1
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:2
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:3
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:1762
+err 7
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:1763
+err 7
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:9
+err 5
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:10
+err 7
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:11
+err 7
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:7210
+err 7
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf cut:0:14420
+err 7
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf drop:0
+ok 3226bbf3 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:12156:43 flip:1:7855:110
+ok 4ce6d558 0
+err 7
+end
+case vp80-03-segmentation-1436.ivf flip:0:10585:111 flip:1:1755:146
+ok abeb195b 0
+ok 2fcffa68 0
+end
+case vp80-03-segmentation-1436.ivf flip:1:3919:213 flip:0:7384:90
+ok 44832f4a 0
+ok 2d77447c 0
+end
+case vp80-03-segmentation-1436.ivf flip:0:6619:95 flip:1:5094:62
+ok 14e5fb26 0
+ok 9631f62f 0
+end
+case vp80-03-segmentation-03.ivf flip:0:1:128
+ok c48c9b0d 0
+end
+case vp80-03-segmentation-03.ivf flip:0:2:94
+err 7
+end
+case vp80-03-segmentation-03.ivf flip:0:1:63
+ok dade78da 0
+end
+case vp80-03-segmentation-03.ivf flip:0:9:1
+err 7
+end
+case vp80-03-segmentation-03.ivf flip:0:7:128
+ok 73d86443 0
+end
+case vp80-03-segmentation-03.ivf flip:0:3:255
+err 5
+end
+case vp80-03-segmentation-03.ivf flip:0:730:4
+ok f9beadde 0
+end
+case vp80-03-segmentation-03.ivf flip:0:1033:128
+err 7
+end
+case vp80-03-segmentation-03.ivf flip:0:779:6
+ok dacf30f6 0
+end
+case vp80-03-segmentation-03.ivf flip:0:2284:128
+ok 524b86c4 0
+end
+case vp80-03-segmentation-03.ivf flip:0:1257:128
+ok 54bb38d8 0
+end
+case vp80-03-segmentation-03.ivf flip:0:4497:1
+ok 136d1389 0
+end
+case vp80-03-segmentation-03.ivf cut:0:1
+err 5
+end
+case vp80-03-segmentation-03.ivf cut:0:2
+err 5
+end
+case vp80-03-segmentation-03.ivf cut:0:3
+err 5
+end
+case vp80-03-segmentation-03.ivf cut:0:2725
+err 7
+end
+case vp80-03-segmentation-03.ivf cut:0:9
+err 5
+end
+case vp80-03-segmentation-03.ivf cut:0:10
+err 7
+end
+case vp80-03-segmentation-03.ivf cut:0:11
+err 7
+end
+case vp80-03-segmentation-03.ivf cut:0:5449
+err 7
+end
+case vp80-03-segmentation-03.ivf cut:0:1112
+err 7
+end
+case vp80-03-segmentation-03.ivf cut:0:1113
+err 7
+end
+case vp80-03-segmentation-03.ivf drop:0
+end

@@ -1,8 +1,20 @@
 # C -> E -- the one list of programs exists; four of your programs keep lists of their own
 
 **From:** Lane C. **To:** Lane E (`apps/**`).
-**Filed:** 2026-09-27. **Status:** OPEN -- step 3 of the operator's order for
-C-Q20 (`design-decisions.md` §1425); lane C's steps are done.
+**Filed:** 2026-09-27. **Status:** DONE 2026-09-29 (lane E) -- step 3 of the
+operator's order for C-Q20 (`design-decisions.md` §1425). The four programs
+read the library: `apps/launcher` 86d735cff, `apps/settings` f8284b290 (the
+Default Apps page names the program for every `Role`), `apps/explorer`
+693e0b5a3 (a file nobody chose a program for opens with `default_for`'s;
+Open With lists the programs whose types hold the file's), `apps/fileassoc`
+45b70e645 (its eight programs, group defaults and overrides replaced).
+File Associations no longer offers the file manager for `.iso` or archives;
+the hex editor is offered for what its entry lists (`.img` -- the toolkit's
+table has no `.bin`). One thing back to lane C: the three copies of "the
+programs installed here with SlateOS's behind them" --
+`requests/e-c-the-installed-and-built-in-programs-belong-in-gui-programs.md`.
+
+Original status: OPEN -- step 3; lane C's steps are done.
 
 **In short:** the operator chose one list of the installed programs, in a
 userspace library, after an inventory of every list there was. Both are done:

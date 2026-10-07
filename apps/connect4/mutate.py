@@ -21,6 +21,12 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+TREE = "a_turn_after_an_undo_keeps_the_undone_turn_reachable_with_alt_z"
+REDONE_WIN = "a_redone_win_is_a_win_again_with_its_point"
+CTRL_Y = "ctrl_y_and_ctrl_shift_z_play_a_turn_again"
+ALTGR = "altgr_and_the_windows_key_are_not_the_boards"
+MID = "a_turn_undone_mid_thought_is_redone_to_the_ais_move"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # ── Run geometry ──────────────────────────────────────────────────────
@@ -642,8 +648,8 @@ MUTATIONS = [
     ),
     (
         "a refused drop still leaves something to take back",
-        "        if self.board.drop_piece(col, player).is_none() {\n            return false;\n        }\n        self.history.push(before);",
-        "        let played = self.board.drop_piece(col, player).is_some();\n        self.history.push(before);\n        if !played {\n            return false;\n        }",
+        "        if self.board.drop_piece(col, player).is_none() {\n            return false;\n        }\n        if let Some(before) = before {\n            self.history.begin(before);\n        }",
+        "        let played = self.board.drop_piece(col, player).is_some();\n        if let Some(before) = before {\n            self.history.begin(before);\n        }\n        if !played {\n            return false;\n        }",
         ["a_refused_drop_leaves_nothing_to_take_back"],
     ),
     (
@@ -660,14 +666,14 @@ MUTATIONS = [
     ),
     (
         "the result of the drop is not read back off the board",
-        "        let (status, line) = self.board.outcome();\n        self.status = status;\n        self.win_line = line;",
-        "        let (status, line) = (GameStatus::Playing, None);\n        self.status = status;\n        self.win_line = line;",
+        "        self.move_history.push((col, player));\n\n        let (status, line) = self.board.outcome();",
+        "        self.move_history.push((col, player));\n\n        let (status, line) = (GameStatus::Playing, None);",
         ["a_drop_that_wins_ends_the_game_and_leaves_the_winner_to_move"],
     ),
     (
         "a win does not say which four cells made it",
-        "        self.win_line = line;",
-        "        self.win_line = None;",
+        "        self.win_line = line;\n        match status {",
+        "        self.win_line = None;\n        match status {",
         ["a_drop_that_wins_shows_which_four_cells_did_it"],
     ),
     (
@@ -690,32 +696,32 @@ MUTATIONS = [
     ),
     (
         "there is something to take back before the first move",
-        "        if self.history.is_empty() {\n            return false;\n        }",
-        "",
+        "                self.restore(s);\n                true\n            }\n            None => false,",
+        "                self.restore(s);\n                true\n            }\n            None => true,",
         ["there_is_nothing_to_take_back_before_the_first_move"],
     ),
     (
         "taking back stops after one drop rather than at the player's turn",
-        "        while let Some(s) = self.history.pop() {\n            self.restore(s);\n            if self.status == GameStatus::Playing && self.current_player == self.human_player {\n                break;\n            }\n        }",
-        "        if let Some(s) = self.history.pop() {\n            self.restore(s);\n        }",
+        "        let before = (player == self.human_player).then(|| self.snapshot());",
+        "        let before = Some(self.snapshot());",
         ["taking_back_takes_the_whole_round_and_not_half_of_it"],
     ),
     (
-        "taking back unwinds the whole game",
-        "            if self.status == GameStatus::Playing && self.current_player == self.human_player {\n                break;\n            }",
-        "",
+        "taking back lands on the AI's turn",
+        "        let before = (player == self.human_player).then(|| self.snapshot());",
+        "        let before = (player != self.human_player).then(|| self.snapshot());",
         ["taking_back_stops_at_the_players_turn_rather_than_unwinding_the_game"],
     ),
     (
         "taking back the winning move leaves the game won",
-        "        self.current_player = s.current_player;\n        self.status = GameStatus::Playing;\n        self.win_line = None;",
-        "        self.current_player = s.current_player;\n        self.win_line = None;",
+        "        let (status, line) = self.board.outcome();\n        self.status = status;\n        self.win_line = line;\n        self.human_wins = s.human_wins;",
+        "        let (_status, line) = self.board.outcome();\n        self.win_line = line;\n        self.human_wins = s.human_wins;",
         ["taking_back_the_winning_move_puts_the_game_back_in_play"],
     ),
     (
         "taking back the winning move leaves the winning four ringed",
-        "        self.current_player = s.current_player;\n        self.status = GameStatus::Playing;\n        self.win_line = None;",
-        "        self.current_player = s.current_player;\n        self.status = GameStatus::Playing;",
+        "        self.win_line = line;\n        self.human_wins = s.human_wins;",
+        "        drop(line);\n        self.human_wins = s.human_wins;",
         ["taking_back_the_winning_move_puts_the_game_back_in_play"],
     ),
     (
@@ -726,8 +732,8 @@ MUTATIONS = [
     ),
     (
         "the move list is not trimmed to the move it was taken back to",
-        "        self.move_history.truncate(s.moves);",
-        "",
+        "        self.move_history = s.move_history;",
+        "        drop(s.move_history);",
         ["the_history_is_trimmed_to_the_move_it_is_taken_back_to"],
     ),
     (
@@ -817,26 +823,26 @@ MUTATIONS = [
     # ── Keys, clicks and events ───────────────────────────────────────────
     (
         "ctrl+z is not an undo",
-        "    if ev.key == Key::Z && ev.modifiers.ctrl {\n        return Some(Intent::Undo);\n    }",
-        "",
+        "            HistoryKey::Undo => Intent::Undo,",
+        "            HistoryKey::Undo => Intent::NewGame,",
         ["ctrl_z_takes_a_move_back"],
     ),
     (
         "a bare Z is an undo too",
-        "    if ev.key == Key::Z && ev.modifiers.ctrl {",
-        "    if ev.key == Key::Z {",
+        "        Key::U => Some(Intent::Undo),",
+        "        Key::U | Key::Z => Some(Intent::Undo),",
         ["a_bare_z_asks_for_nothing"],
     ),
     (
         "ctrl and alt chords are read as bare keys",
-        "    if ev.modifiers.ctrl || ev.modifiers.alt {\n        return None;\n    }",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {\n        return None;\n    }",
         "",
         ["ctrl_and_alt_chords_belong_to_the_window_and_not_to_the_board"],
     ),
     (
         "shift stops a key meaning what it means",
-        "    if ev.modifiers.ctrl || ev.modifiers.alt {",
-        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.shift {",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key || ev.modifiers.shift {",
         ["shift_does_not_stop_a_key_meaning_what_it_means"],
     ),
     (
@@ -1338,7 +1344,113 @@ MUTATIONS = [
         "                Surface::Card,\n            );\n        }\n        // On the toolkit's panel",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    # ── The history: a tree of turns, walked with Alt+Z (C-Q24) ──────────
+    (
+        "a restored position's status is not read off its board",
+        "        let (status, line) = self.board.outcome();\n        self.status = status;\n        self.win_line = line;\n        self.human_wins = s.human_wins;",
+        "        let (status, line) = (GameStatus::Playing, None);\n        self.status = status;\n        self.win_line = line;\n        self.human_wins = s.human_wins;",
+        [REDONE_WIN],
+    ),
+    (
+        "windows-key chords are read as bare keys",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {",
+        "    if ev.modifiers.ctrl || ev.modifiers.alt {",
+        [ALTGR],
+    ),
+    (
+        "ctrl+y is not a redo",
+        "            HistoryKey::Redo => Intent::Redo,",
+        "            HistoryKey::Redo => Intent::Undo,",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z goes forward",
+        "            HistoryKey::Earlier => Intent::Earlier,",
+        "            HistoryKey::Earlier => Intent::Later,",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "            HistoryKey::Later => Intent::Later,",
+        "            HistoryKey::Later => Intent::Earlier,",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let then = self.history.redo(now);",
+        "        let then = self.history.undo(now);",
+        [REDONE_WIN, CTRL_Y, MID],
+    ),
+    (
+        "alt+z only undoes",
+        "        let then = self.history.earlier(now);",
+        "        let then = self.history.undo(now);",
+        [TREE],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let then = self.history.later(now);",
+        "        let then = self.history.redo(now);",
+        [TREE],
+    ),
+    (
+        "a redo asked for does nothing",
+        "            Intent::Redo => {\n                if self.redo() {",
+        "            Intent::Redo => {\n                if false {",
+        [CTRL_Y],
+    ),
+    (
+        "an earlier position asked for does nothing",
+        "            Intent::Earlier => {\n                if self.earlier() {",
+        "            Intent::Earlier => {\n                if false {",
+        [TREE],
+    ),
+    (
+        "a later position asked for does nothing",
+        "            Intent::Later => {\n                if self.later() {",
+        "            Intent::Later => {\n                if false {",
+        [TREE],
+    ),
+    # The cap has no row: a game is at most 21 turns deep, so what it drops
+    # are branches, which nothing can count yet (requests/e-c-undohistory-
+    # could-say-how-far-undo-and-redo-go.md).
+    (
+        'F1 and ? do not raise the sheet',
+        '    if help::raises(ev) {\n        return Some(Intent::ToggleHelp);',
+        '    if false {\n        return Some(Intent::ToggleHelp);',
+        ['f1_and_a_question_mark_raise_the_sheet_as_h_does'],
+    ),
+    (
+        'A does not move to the column before',
+        '        Key::Left | Key::A => Some(Intent::CursorLeft),',
+        '        Key::Left => Some(Intent::CursorLeft),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'D does not move to the column after',
+        '        Key::Right | Key::D => Some(Intent::CursorRight),',
+        '        Key::Right => Some(Intent::CursorRight),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        '7 drops nowhere',
+        '        Key::Num7 => Some(Intent::Drop(6)),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'S does not swap sides',
+        '        Key::S => Some(Intent::SwapSides),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'U takes nothing back',
+        '        Key::U => Some(Intent::Undo),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "connect4", timeout=240))
+    sys.exit(sweep(SRC, MUTATIONS, "connect4", timeout=240, only=sys.argv[1:] or None))

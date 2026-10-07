@@ -126,6 +126,12 @@ MUTATIONS = [
         "    fn reset(&mut self) {",
         ["every_control_answers_the_pointer", "key_r_resets"],
     ),
+    (
+        "a key held with a modifier is the metronome's",
+        '        if !textline::is_plain(event.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_metronomes'],
+    ),
 ]
 
 if __name__ == "__main__":

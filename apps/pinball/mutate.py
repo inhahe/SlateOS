@@ -70,9 +70,9 @@ MUTATIONS = [
     ),
     (
         "the table is drawn in the corner of a larger window",
-        "        let dx = ((window.w - WINDOW_WIDTH) / 2.0).max(0.0).floor();",
-        "        let dx = 0.0_f32;",
-        ["a_larger_window_puts_the_table_in_the_middle"],
+        "            dx: ((w - WINDOW_WIDTH * scale) / 2.0).max(0.0),",
+        "            dx: 0.0,",
+        ["a_larger_window_gets_a_larger_table"],
     ),
     # -- asking before a game is thrown away --
     (
@@ -266,6 +266,54 @@ MUTATIONS = [
         "            State {\n                disabled: !enabled,",
         "            State {\n                disabled: false,",
         ["a_button_that_would_do_nothing_is_switched_off"],
+    ),
+    (
+        "the scene is drawn at its design size whatever the window",
+        "        let scale = (w / WINDOW_WIDTH).min(h / WINDOW_HEIGHT).max(0.0);",
+        "        let scale = 1.0_f32;",
+        ["a_larger_window_gets_a_larger_table", "the_whole_scene_shows_in_every_window"],
+    ),
+    (
+        "the scene is fitted to the window's width alone",
+        "        let scale = (w / WINDOW_WIDTH).min(h / WINDOW_HEIGHT).max(0.0);",
+        "        let scale = (w / WINDOW_WIDTH).max(0.0);",
+        ["the_whole_scene_shows_in_every_window"],
+    ),
+    (
+        "a click is read against the scene's own size",
+        "            f.hit(*target, fit.rect(*r));",
+        "            f.hit(*target, *r);",
+        ["a_larger_window_gets_a_larger_table", "a_control_is_clicked_where_it_is_drawn_in_any_window"],
+    ),
+    (
+        "a text keeps its design size",
+        "                *font_size = self.len(*font_size);",
+        "",
+        ["a_fitted_command_is_where_the_fit_says"],
+    ),
+    (
+        "a translation inside the scene is moved twice",
+        "                (*dx, *dy) = (self.len(*dx), self.len(*dy));",
+        "                (*dx, *dy) = (self.x(*dx), self.y(*dy));",
+        ["a_fitted_command_is_where_the_fit_says"],
+    ),
+    (
+        "a line keeps its design width",
+        "                *width = self.len(*width);\n            }\n            RenderCommand::PushTranslate",
+        "            }\n            RenderCommand::PushTranslate",
+        ["a_fitted_command_is_where_the_fit_says"],
+    ),
+    (
+        "a key pressed with a modifier is the table's",
+        '        if ke.pressed && !textline::is_plain(ke.modifiers) {',
+        '        if false {',
+        ['a_key_pressed_with_a_modifier_is_not_the_tables'],
+    ),
+    (
+        "a release with a modifier held is not the table's",
+        '        if ke.pressed && !textline::is_plain(ke.modifiers) {',
+        '        if !textline::is_plain(ke.modifiers) {',
+        ['a_key_pressed_with_a_modifier_is_not_the_tables'],
     ),
 ]
 

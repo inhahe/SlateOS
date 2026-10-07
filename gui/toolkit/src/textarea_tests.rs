@@ -85,6 +85,36 @@ fn shift(k: Key) -> KeyEvent {
     )
 }
 
+/// **A shortcut the area does not know is the owner's, not a letter**:
+/// Ctrl+K, Alt+F and Windows+E, each handed its letter by the compositor,
+/// leave the text as it was and come back unhandled; AltGr types.
+#[test]
+fn a_shortcut_the_area_does_not_know_types_nothing() {
+    let m = wide(3);
+    for (k, modifiers, text) in [
+        (Key::K, Modifiers::ctrl(), "k"),
+        (Key::F, Modifiers::alt(), "f"),
+        (Key::E, Modifiers::super_key(), "e"),
+    ] {
+        let mut area = TextArea::new();
+        type_text(&mut area, "x", &m);
+        assert_eq!(
+            area.edit_key(&key_with(k, modifiers, text), &m),
+            KeyEdit::Unhandled,
+            "{modifiers:?}"
+        );
+        assert_eq!(area.text(), "x", "{modifiers:?} typed its letter");
+    }
+    let mut area = TextArea::new();
+    let altgr = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::NONE
+    };
+    area.edit_key(&key_with(Key::E, altgr, "€"), &m);
+    assert_eq!(area.text(), "€");
+}
+
 /// Type `text` a character at a time, as a keyboard delivers it.
 fn type_text(area: &mut TextArea, text: &str, m: &Metrics) {
     for ch in text.chars() {
@@ -640,6 +670,23 @@ fn a_caret_below_the_box_scrolls_the_view_to_it() {
     assert_eq!(area.scroll_y(&m), 0.0);
 }
 
+/// **A row of the right-click menu keeps the caret in view, as its key
+/// does**: twenty lines pasted into a five-line box leave the view at their
+/// end, where the caret is.
+#[test]
+fn a_paste_from_the_menu_scrolls_the_view_to_the_caret() {
+    use crate::editmenu::EditCommand;
+    let m = wide(5);
+    let text: Vec<String> = (0..20).map(|n| format!("line {n}")).collect();
+    crate::clipboard::set_text(&text.join("\n"));
+    let mut area = TextArea::with_text("");
+    assert_eq!(
+        area.edit_command(EditCommand::Paste.id(), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.scroll_y(&m), 20.0 * m.line_height() - m.height);
+}
+
 #[test]
 fn the_wheel_scrolls_the_view_and_leaves_the_caret() {
     let (mut area, m) = tall();
@@ -797,4 +844,74 @@ fn drawing_is_clipped_to_the_box() {
     let cmds = drawn(&area, &m, true);
     assert!(matches!(cmds.first(), Some(RenderCommand::PushClip { .. })));
     assert!(matches!(cmds.last(), Some(RenderCommand::PopClip)));
+}
+
+/// The labels of `rows` that are lit.
+fn lit(rows: &[crate::menu::MenuItem]) -> Vec<String> {
+    rows.iter()
+        .filter_map(|r| match r {
+            crate::menu::MenuItem::Action {
+                label,
+                enabled: true,
+                ..
+            } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **A right-click menu on a text area does what its keys do**: Undo once
+/// there is a change, Cut and Copy with a selection, Paste with something
+/// to paste -- and an id that is none of its rows is not the area's.
+#[test]
+fn the_right_click_menu_does_what_the_keys_do() {
+    use crate::editmenu::EditCommand;
+    let m = wide(4);
+    crate::clipboard::set_text("");
+    let mut area = TextArea::new();
+    assert_eq!(lit(area.edit_menu().items()), Vec::<String>::new());
+    type_text(&mut area, "one two", &m);
+    assert_eq!(lit(area.edit_menu().items()), ["Undo", "Select all"]);
+    assert_eq!(
+        area.edit_command(EditCommand::SelectAll.id(), &m),
+        KeyEdit::Handled
+    );
+    assert_eq!(
+        lit(area.edit_menu().items()),
+        ["Undo", "Cut", "Copy", "Delete", "Select all"]
+    );
+    assert_eq!(
+        area.edit_command(EditCommand::Cut.id(), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.text(), "");
+    assert_eq!(crate::clipboard::text(), "one two");
+    assert_eq!(
+        area.edit_command(EditCommand::Paste.id(), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.text(), "one two");
+    area.edit_command(EditCommand::Undo.id(), &m);
+    assert_eq!(area.text(), "", "Undo from the menu took nothing back");
+    assert!(lit(area.edit_menu().items()).contains(&"Redo".to_owned()));
+    area.edit_command(EditCommand::Redo.id(), &m);
+    assert_eq!(area.text(), "one two");
+    area.edit_command(EditCommand::SelectAll.id(), &m);
+    assert_eq!(
+        area.edit_command(EditCommand::Delete.id(), &m),
+        KeyEdit::Changed
+    );
+    assert_eq!(area.text(), "");
+    assert_eq!(area.edit_command(7, &m), KeyEdit::Unhandled);
+
+    // The menu's Delete takes what is selected and nothing else: with
+    // nothing selected it is no Delete key, which would take the character
+    // after the caret.
+    area.edit_command(EditCommand::Paste.id(), &m);
+    area.press(0.0, 0.0, 1, false, &m);
+    assert_eq!(
+        area.edit_command(EditCommand::Delete.id(), &m),
+        KeyEdit::Handled
+    );
+    assert_eq!(area.text(), "one two");
 }

@@ -578,6 +578,12 @@ MUTATIONS = [
         "                let on = c.chrome;",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "a chord works the game's keys",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_games'],
+    ),
 ]
 
 if __name__ == "__main__":

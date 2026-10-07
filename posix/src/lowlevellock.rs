@@ -1,7 +1,11 @@
 //! Futex waits and the low-level lock the pthread layer is built on.
 //!
 //! glibc's `lowlevellock.h` and `futex-internal.h`, over this kernel's futex
-//! syscalls (`SYS_FUTEX_WAIT`, `SYS_FUTEX_WAIT_TIMEOUT`, `SYS_FUTEX_WAKE`).
+//! syscalls (`SYS_FUTEX_WAIT`, `SYS_FUTEX_WAIT_TIMEOUT`, `SYS_FUTEX_WAKE`),
+//! and the priority-inheritance futexes `PTHREAD_PRIO_INHERIT` mutexes and
+//! the Linux `futex(2)` PI operations sleep in (`SYS_FUTEX_LOCK_PI`,
+//! `SYS_FUTEX_LOCK_PI_TIMEOUT`, `SYS_FUTEX_UNLOCK_PI`; see
+//! [`futex_lock_pi`]).
 //! A futex is a 32-bit word in user memory: a thread sleeps in the kernel
 //! only while the word still holds the value it saw, and is woken by a
 //! thread that changed it.  So the uncontended paths are pure userspace
@@ -299,6 +303,196 @@ pub(crate) fn lll_timedlock(word: &AtomicI32, mut remaining: impl FnMut() -> Opt
 pub(crate) fn lll_unlock(word: &AtomicI32) {
     if word.swap(UNLOCKED, Ordering::Release) == CONTENDED {
         futex_wake(word, 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Priority-inheritance futexes
+// ---------------------------------------------------------------------------
+//
+// The kernel's PI futexes (`kernel/src/ipc/futex.rs`) use Linux's word: the
+// owner's task id, 0 when free, and two flags the kernel sets.  The owner's
+// id is the one `SYS_TASK_ID` answers, which is `pthread::current_tid`'s.  A
+// locker that finds the word held sleeps in the kernel, which lends the
+// holder the sleeper's priority; the holder's unlock hands the word to the
+// highest-priority sleeper and drops what it was lent.
+//
+// The kernel documents a fast path besides -- take a free word with one
+// compare-and-swap of 0 for one's id, and give an uncontended one back by
+// swapping the id for 0, with no syscall -- but it records an owner only when
+// the word was taken inside the kernel.  A holder it has no record of keeps
+// the priority it was lent after its lender gave up waiting, is passed over
+// when a chain of lenders is walked, and loses what it was lent for one mutex
+// when it unlocks another
+// (`requests/d-a-pi-futex-owners-taken-in-userspace-are-invisible-to-the-kernel.md`).
+// So `pthread`'s PI mutexes take and give back every word through the kernel
+// until it records such owners; `linux_futex` passes on what its caller asks.
+
+/// The owner's task id in a PI futex word: Linux's `FUTEX_TID_MASK`.
+pub(crate) const FUTEX_TID_MASK: u32 = 0x3FFF_FFFF;
+
+// The kernel's two flags, and the conversion back into a stored word, are
+// named only where the kernel is played rather than called -- the host's
+// stand-in below and the tests: on the target the library sets neither flag
+// and reads only the owner's id.
+
+/// Set in a PI futex word by the kernel while a thread sleeps on it, so that
+/// the owner's unlock goes through the kernel and the word is handed on.
+#[cfg(not(target_os = "none"))]
+pub(crate) const FUTEX_WAITERS: u32 = 0x8000_0000;
+/// Set in a PI futex word by the kernel when its owner died holding it --
+/// the word is then handed to a sleeper, or left free with only this bit.
+#[cfg(not(target_os = "none"))]
+pub(crate) const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
+
+/// A PI futex word as the kernel reads it: the same 32 bits, unsigned.
+#[allow(clippy::cast_sign_loss)]
+pub(crate) const fn pi_bits(v: i32) -> u32 {
+    v as u32
+}
+
+/// A PI futex word as the `AtomicI32` it is stored in holds it.
+#[cfg(not(target_os = "none"))]
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) const fn pi_word(v: u32) -> i32 {
+    v as i32
+}
+
+/// The PI futex word that says `tid` holds it, nobody waiting.  Task ids are
+/// below 2^30 -- the kernel's own invariant, which its half of the protocol
+/// (`(task_id as u32) & FUTEX_TID_MASK`) assumes as well -- so the mask
+/// changes nothing for a real one.
+#[allow(clippy::cast_sign_loss)]
+pub(crate) const fn pi_owner(tid: i32) -> u32 {
+    (tid as u32) & FUTEX_TID_MASK
+}
+
+/// Take the PI futex `word` for the calling thread, sleeping while another
+/// thread holds it -- at most `timeout_ns` if given, where 0 tries once and
+/// does not sleep -- and lending that thread this one's priority meanwhile.
+/// A word a dead owner left (`FUTEX_OWNER_DIED` and no owner) is taken,
+/// the flag kept.  0, or the kernel's negative error: `TIMED_OUT`,
+/// `DEADLOCK` when this thread holds the word already.
+pub(crate) fn futex_lock_pi(word: &AtomicI32, timeout_ns: Option<u64>) -> i64 {
+    #[cfg(target_os = "none")]
+    {
+        let addr = core::ptr::from_ref(word) as u64;
+        match timeout_ns {
+            None => crate::syscall::syscall1(crate::syscall::SYS_FUTEX_LOCK_PI, addr),
+            Some(ns) => {
+                crate::syscall::syscall2(crate::syscall::SYS_FUTEX_LOCK_PI_TIMEOUT, addr, ns)
+            }
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_pi::lock(word, timeout_ns)
+    }
+}
+
+/// [`futex_lock_pi`] until `until` -- an instant on a clock -- passes, or
+/// with no limit for `None`: 0, or the kernel's negative error, `TIMED_OUT`
+/// once the instant has passed.
+///
+/// The kernel's timeout is relative, so it is measured afresh from `until`'s
+/// clock for each call; when the kernel's time runs out and the clock says
+/// some is left -- a realtime clock set back meanwhile -- the wait goes on,
+/// and once the instant has passed the last call tries the word once more
+/// without sleeping, as Linux's last `try_to_take_rt_mutex` does.  A signal
+/// does not end it: a PI lock is restarted, as Linux restarts one
+/// (`ERESTARTNOINTR`).
+pub(crate) fn futex_lock_pi_until(
+    word: &AtomicI32,
+    until: Option<(i32, &crate::stat::Timespec)>,
+) -> i64 {
+    loop {
+        let timeout = until.map(|(clock, at)| ns_until(&now_on(clock), at).unwrap_or(0));
+        match futex_lock_pi(word, timeout) {
+            crate::errno::native::INTERRUPTED => {}
+            crate::errno::native::TIMED_OUT if timeout != Some(0) => {}
+            r => return r,
+        }
+    }
+}
+
+/// Release the PI futex `word`, which the calling thread holds, handing it
+/// to the highest-priority thread asleep on it if there is one, and dropping
+/// any priority this thread was lent for it.  0, or the kernel's negative
+/// error: `INVALID_ARGUMENT` when the caller does not hold the word.
+pub(crate) fn futex_unlock_pi(word: &AtomicI32) -> i64 {
+    #[cfg(target_os = "none")]
+    {
+        let addr = core::ptr::from_ref(word) as u64;
+        crate::syscall::syscall1(crate::syscall::SYS_FUTEX_UNLOCK_PI, addr)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_pi::unlock(word)
+    }
+}
+
+/// The kernel's PI futexes, for the host, which has none: the same claims on
+/// the word, made the same way, but waited out by yielding rather than
+/// sleeping, and with no priorities to lend.  An unlock frees the word rather
+/// than handing it to a waiter, so a waiter may lose it to a newcomer -- which
+/// a PI mutex's caller cannot tell from the kernel choosing another sleeper.
+/// Nor is a word marked `FUTEX_WAITERS` while a thread waits: the mark
+/// tells an owner that gives a word back by itself to ask the kernel instead,
+/// and every PI unlock here asks.
+#[cfg(not(target_os = "none"))]
+mod host_pi {
+    use super::{FUTEX_OWNER_DIED, FUTEX_TID_MASK, FUTEX_WAITERS, pi_bits, pi_owner, pi_word};
+    use crate::errno::native;
+    use core::sync::atomic::{AtomicI32, Ordering};
+
+    /// The calling thread's id, as the kernel records an owner.
+    fn me() -> u32 {
+        pi_owner(crate::pthread::current_tid())
+    }
+
+    /// `kernel/src/ipc/futex.rs::lock_pi_inner`.
+    pub(super) fn lock(word: &AtomicI32, timeout_ns: Option<u64>) -> i64 {
+        let tid = me();
+        let start = std::time::Instant::now();
+        loop {
+            let w = pi_bits(word.load(Ordering::Relaxed));
+            let owner = w & FUTEX_TID_MASK;
+            if owner == 0 {
+                // Free, or a dead owner's: claim it, keeping the flags.
+                let new = tid | (w & (FUTEX_OWNER_DIED | FUTEX_WAITERS));
+                if word
+                    .compare_exchange(
+                        pi_word(w),
+                        pi_word(new),
+                        Ordering::Acquire,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    return 0;
+                }
+                continue;
+            }
+            if owner == tid {
+                return native::DEADLOCK;
+            }
+            if let Some(ns) = timeout_ns {
+                let waited = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                if ns == 0 || waited >= ns {
+                    return native::TIMED_OUT;
+                }
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// `kernel/src/ipc/futex.rs::futex_unlock_pi`.
+    pub(super) fn unlock(word: &AtomicI32) -> i64 {
+        if pi_bits(word.load(Ordering::Relaxed)) & FUTEX_TID_MASK != me() {
+            return native::INVALID_ARGUMENT;
+        }
+        word.store(0, Ordering::Release);
+        0
     }
 }
 

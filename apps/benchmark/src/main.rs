@@ -100,6 +100,8 @@ use oswindow::app::{self, App, Response};
 
 const WINDOW_WIDTH: f32 = 960.0;
 const WINDOW_HEIGHT: f32 = 740.0;
+/// How often a running suite's timer is ticked: four times a second.
+const TICK: std::time::Duration = std::time::Duration::from_millis(250);
 const TITLE_BAR_HEIGHT: f32 = 40.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
@@ -1730,8 +1732,6 @@ pub struct BenchmarkApp {
     pub clear_button_hover: bool,
     /// Selected history index for detail view.
     pub selected_history_idx: Option<usize>,
-    /// Tick counter for animation.
-    pub tick_counter: u64,
 }
 
 impl BenchmarkApp {
@@ -1753,7 +1753,6 @@ impl BenchmarkApp {
             export_button_hover: false,
             clear_button_hover: false,
             selected_history_idx: None,
-            tick_counter: 0,
         }
     }
 
@@ -1925,6 +1924,16 @@ impl BenchmarkApp {
                 let x = mouse_event.x;
                 let y = mouse_event.y;
                 match mouse_event.kind {
+                    // The card is modal for the pointer as it is for the
+                    // keys: a press, with any button, puts it away rather
+                    // than reaching the control drawn under it, and the wheel
+                    // does not scroll what it covers. A move still goes
+                    // through, so the light is right when the card goes.
+                    MouseEventKind::Press(_) if self.show_help => {
+                        self.show_help = false;
+                        EventResult::Consumed
+                    }
+                    MouseEventKind::Scroll { .. } if self.show_help => EventResult::Ignored,
                     MouseEventKind::Press(MouseButton::Left) => self.handle_click(x, y),
                     MouseEventKind::Move => self.handle_mouse_move(x, y),
                     // `dy` counts wheel *notches*, not pixels — see
@@ -1945,12 +1954,15 @@ impl BenchmarkApp {
                     _ => EventResult::Ignored,
                 }
             }
+            // Only a running suite has a timer to move, and only then is
+            // there anything new to draw.
             Event::Tick { elapsed_ms } => {
-                self.tick_counter = self.tick_counter.wrapping_add(*elapsed_ms);
                 if self.progress.phase.is_running() {
                     self.progress.elapsed_ms = self.progress.elapsed_ms.saturating_add(*elapsed_ms);
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
                 }
-                EventResult::Consumed
             }
             // Through `resize`, not by assigning the fields: a window that got
             // taller has less to scroll through, and a scroll offset left over
@@ -1965,16 +1977,30 @@ impl BenchmarkApp {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Ctrl+E is the one chord, asked as a Ctrl chord: AltGr, which
+        // arrives as Ctrl+Alt, types € on E on a German keyboard, and
+        // exported. Every other binding is on the key itself and is taken
+        // only with nothing but Shift held -- a chord with Alt or the
+        // Windows key is the window's or the desktop's, and arrives carrying
+        // its key: Alt+2 opened the CPU tab.
+        let export = key.key == Key::E && textline::is_ctrl_chord(key.modifiers);
+        if !export && !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            // Modal. F5 starts a run that takes over the window, and Ctrl+Q
-            // ends the program; neither should happen from behind a list.
+            // Modal. F5 starts a run that takes over the window, which
+            // should not happen from behind a list.
             if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
+            return EventResult::Consumed;
+        }
+        if export {
+            self.begin_export();
             return EventResult::Consumed;
         }
         match key.key {
@@ -1991,10 +2017,6 @@ impl BenchmarkApp {
             }
             Key::Tab if key.modifiers.shift => {
                 self.cycle_tab_backward();
-                EventResult::Consumed
-            }
-            Key::E if key.modifiers.ctrl => {
-                self.begin_export();
                 EventResult::Consumed
             }
             // Through `Tab::from_key`, so the digit a key opens and the
@@ -3384,13 +3406,27 @@ impl App for BenchmarkApp {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// A clock only while a suite runs, for the timer drawn beside its
+    /// progress -- whole seconds, so four ticks a second keep it true.
+    ///
+    /// `run_benchmark` runs the suite inside one call today, so the suite is
+    /// never running between events and this is never asked while it is.
+    /// The Tick arm is written for the run that does not block, and the
+    /// clock it needs is asked for here so that run does not freeze the way
+    /// credmanager's auto-lock and defrag did, waiting on a tick nothing had
+    /// asked for.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.progress.phase.is_running().then_some(TICK)
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         // Ctrl+Q closes the window. Escape does not: here it clears the History
-        // tab's selection, which is what the key is already for.
+        // tab's selection, which is what the key is already for. A Ctrl
+        // chord, not Ctrl held: AltGr+Q -- Ctrl+Alt -- is a German `@`.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -5000,6 +5036,51 @@ mod tests {
     }
 
     /// Export asks where to put it, from either control.
+    /// **A key held with Ctrl, Alt or the Windows key is not the window's
+    /// unless it is a chord the window has**: Alt+2 opened the CPU tab and
+    /// Windows+F5 ran the suite, each chord arriving carrying its key. AltGr
+    /// -- Ctrl+Alt -- types € on E and @ on Q on a German keyboard, and
+    /// exported and quit; Ctrl+E and Ctrl+Q still do.
+    #[test]
+    fn only_the_windows_own_chords_are_taken_and_altgr_is_not_one() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = app_with_history();
+        app.active_tab = Tab::Overview;
+        let runs = app.history.len();
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::Num2, Key::F5, Key::F1, Key::Tab, Key::End] {
+                assert_eq!(
+                    app.handle_event(&Event::Key(probe::press_with(key, held))),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.active_tab, Tab::Overview, "a chord changed the tab");
+        assert_eq!(app.history.len(), runs, "a chord ran the suite");
+        assert!(!app.show_help, "a chord raised the keys");
+
+        for held in [altgr, Modifiers::alt(), Modifiers::super_key()] {
+            app.handle_event(&Event::Key(probe::press_with(Key::E, held)));
+            assert!(!app.picker.is_open(), "{held:?}+E exported");
+            assert_ne!(
+                app.on_event(&Event::Key(probe::press_with(Key::Q, held))),
+                Response::Exit,
+                "{held:?}+Q closed the window"
+            );
+        }
+        app.handle_event(&ctrl(Key::E));
+        assert!(app.picker.is_open(), "Ctrl+E no longer exports");
+    }
+
     #[test]
     fn both_export_controls_open_the_picker() {
         let mut app = app_with_history();
@@ -5045,6 +5126,102 @@ mod tests {
                 RenderCommand::Text { text, .. } if text == &said
             )),
             "the notice is set but never drawn"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = BenchmarkApp::new();
+        // Short, so the overview has somewhere to scroll.
+        app.handle_event(&Event::Resize {
+            width: WINDOW_WIDTH as u32,
+            height: 260,
+        });
+        assert!(app.max_scroll() > 0.0, "the fixture must scroll");
+        let card_up = |app: &BenchmarkApp| app.show_help;
+        let (x, y) =
+            guitk::probe::rect_of_sized(&app, Target::Tab(Tab::History), (app.width, app.height))
+                .expect("the History tab")
+                .centre();
+        let mouse = |app: &mut BenchmarkApp, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+        };
+        let tab = app.active_tab;
+
+        app.handle_event(&Event::Key(guitk::probe::press(Key::F1)));
+        assert!(card_up(&app));
+        mouse(&mut app, MouseEventKind::Scroll { dx: 0.0, dy: -3.0 });
+        assert!(
+            app.scroll_y.abs() < f32::EPSILON,
+            "the wheel scrolled the page under the card"
+        );
+        assert_eq!(
+            mouse(&mut app, MouseEventKind::Press(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!card_up(&app), "the press did not put the card away");
+        assert_eq!(
+            app.active_tab, tab,
+            "the press went through the card to a tab"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        app.handle_event(&Event::Key(guitk::probe::press(Key::F1)));
+        mouse(&mut app, MouseEventKind::Press(MouseButton::Right));
+        assert!(!card_up(&app), "a right-button press left the card up");
+
+        mouse(&mut app, MouseEventKind::Scroll { dx: 0.0, dy: -3.0 });
+        assert!(
+            app.scroll_y > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut app, MouseEventKind::Press(MouseButton::Left));
+        assert_ne!(
+            app.active_tab, tab,
+            "control: the press does nothing even with the card down"
+        );
+    }
+
+    /// **A running suite asks for the clock that times it, and only then**:
+    /// an idle window that asked would wake the desktop to draw nothing new,
+    /// and one that did not would freeze its timer -- credmanager's auto-lock
+    /// and defrag's progress both did, waiting on ticks nobody asked for.
+    #[test]
+    fn a_running_suite_asks_for_the_clock_and_an_idle_one_does_not() {
+        let mut app = BenchmarkApp::new();
+        assert_eq!(
+            App::tick_interval(&app),
+            None,
+            "an idle window wants a clock"
+        );
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 250 }),
+            EventResult::Ignored,
+            "a tick with nothing running asks for a repaint"
+        );
+        app.progress.phase = BenchPhase::RunningCpu;
+        assert_eq!(
+            App::tick_interval(&app),
+            Some(TICK),
+            "a running suite asks for no clock, so its timer would never move"
+        );
+        let before = app.progress.elapsed_ms;
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 250 }),
+            EventResult::Consumed
+        );
+        assert_eq!(app.progress.elapsed_ms, before + 250);
+        app.run_benchmark();
+        assert!(app.progress.phase.is_complete());
+        assert_eq!(
+            App::tick_interval(&app),
+            None,
+            "a finished suite wants a clock"
         );
     }
 

@@ -76,6 +76,9 @@ use osfont::system::{Family, FontCache, Weight};
 pub mod blur;
 mod buffer;
 pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
+// The video-encoded capture fallback: a remote stream's VP9 of each window
+// that presents its own pixels. See the module docs.
+mod video;
 // Sticky, filter and mouse keys. The state machines live here rather than
 // beside the settings because the compositor is the only place every
 // keystroke passes through; `inputsettings` owns what the user chose.
@@ -107,7 +110,7 @@ mod deadkey;
 // and compositor events back into bytes. Everything above this line works in
 // terms of typed requests; `wire` is the only place that parses frames.
 mod wire;
-pub use wire::{ClientLink, WireError};
+pub use wire::{ClientLink, ShellGate, WireError};
 // The listening front end that owns the sockets `wire` deliberately does not.
 // `wire` is the translation, `server` is the plumbing; keeping them apart is
 // what lets the translation be tested without a network.
@@ -135,7 +138,7 @@ pub use guiremote::control::Layer;
 // Same reason: `CompositorRequest::ShellControl` carries one, so a caller
 // building that request must be able to name it.
 pub use guiremote::control::ShellControlAction;
-use guiremote::control::{BlurKind, StackTier, WindowPolicy, WindowSpec};
+use guiremote::control::{BlurKind, PickedWindow, StackTier, WindowPolicy, WindowSpec};
 // Re-exported for the same reason as `WindowInfo` below: `Window::reserved_edge`
 // holds one and `reserve_edge` takes one, and a panel that has to reach past the
 // compositor to name the edge it is anchored to is naming a different type from
@@ -144,7 +147,7 @@ use guiremote::control::{BlurKind, StackTier, WindowPolicy, WindowSpec};
 // the compositor cannot disagree about what a reservation means.
 pub use guiremote::reserve::PanelEdge;
 use guiremote::reserve::ReservedEdges;
-use guiremote::scene::{ImageSnapshot, SceneFrame, SceneSession, WindowSnapshot};
+use guiremote::scene::{ImageSnapshot, SceneFrame, SceneSession, VideoUpdate, WindowSnapshot};
 // Same reason: `window_list` returns these, and a shell reading one should not
 // have to reach past the compositor to name what it got.
 pub use guiremote::window_list::{WindowInfo, WindowList};
@@ -220,6 +223,15 @@ const MAX_FB_WIDTH: u32 = 7680;
 
 /// Maximum framebuffer height supported.
 const MAX_FB_HEIGHT: u32 = 4320;
+
+/// How long after the displays go to sleep pointer motion does not wake them
+/// (`Compositor::sleep_displays`).
+///
+/// A second: long enough for the hand that clicked "Sleep the display" in a
+/// menu to come off the mouse, short enough that a person who changes their
+/// mind is not left waiting. Keys and clicks wake at once -- they are
+/// deliberate in a way a twitch of the mouse is not.
+pub const SLEEP_MOTION_GRACE: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
 // Window ID generation
@@ -326,6 +338,15 @@ pub enum CompositorError {
         /// The image's width and height.
         image: (u32, u32),
     },
+    /// A client asked for a new tray icon while it had its share of the tray,
+    /// [`guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT`].
+    ///
+    /// Reported rather than answered `Ok`: a program whose icon is silently
+    /// not shown has no way to tell that from a shell that is not drawing it.
+    TrayShareTaken,
+    /// The tray holds [`guiremote::tray::MAX_TRAY_ICONS`] icons, the most a
+    /// `TRAY` frame may carry.
+    TrayFull,
 }
 
 impl std::fmt::Display for CompositorError {
@@ -386,6 +407,16 @@ impl std::fmt::Display for CompositorError {
                 f,
                 "a {width}x{height} patch at ({x}, {y}) does not lie inside the \
                  {image_width}x{image_height} image"
+            ),
+            Self::TrayShareTaken => write!(
+                f,
+                "this program already has {} tray icons, the most one may have",
+                guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT
+            ),
+            Self::TrayFull => write!(
+                f,
+                "the tray already holds {} icons",
+                guiremote::tray::MAX_TRAY_ICONS
             ),
         }
     }
@@ -995,6 +1026,11 @@ pub struct Window {
     pub maximized: bool,
     /// Whether this window currently has keyboard focus.
     pub focused: bool,
+    /// Whether the window has asked for the user's attention and has not been
+    /// focused since. Never set while [`Self::focused`] is: a focused window's
+    /// request is moot, and focusing a window clears it. See
+    /// [`Compositor::set_attention`].
+    pub demands_attention: bool,
     /// Z-order index (higher = more in front).
     pub z_order: u32,
     /// Which band of the stacking order this window may move within.
@@ -1023,8 +1059,14 @@ pub struct Window {
     pub tier: StackTier,
     /// Window opacity (0.0 = fully transparent, 1.0 = fully opaque).
     pub opacity: f32,
-    /// Process ID of the client that owns this window.
+    /// The connection that opened it: the per-connection id that routing
+    /// and reaping go by (`ClientLink::client_pid`). Not a process id -- one
+    /// process may hold two connections.
     pub client_pid: u64,
+    /// The process that opened it, as the kernel names the connection's
+    /// peer; `None` for a window opened over TCP, which cannot say. What a
+    /// window pick reports ([`Compositor::arm_pick`]).
+    pub owner_pid: Option<u32>,
     /// The most recently submitted render tree from the client.
     pub render_tree: RenderTree,
     /// An attached shared pixel buffer (DMA-BUF path). When `Some`, the
@@ -1211,11 +1253,13 @@ impl Window {
             minimized: false,
             maximized: false,
             focused: false,
+            demands_attention: false,
             z_order: 0,
             layer: spec.layer,
             blur_behind: spec.blur_behind,
             opacity: DEFAULT_OPACITY,
             client_pid,
+            owner_pid: None,
             render_tree: RenderTree::new(),
             buffer: None,
             images: HashMap::new(),
@@ -3402,7 +3446,13 @@ pub enum CompositorRequest {
     /// no matter what the client wanted. `client_pid` is separate because it is
     /// not part of the request — the compositor knows which connection the
     /// request arrived on and the client does not get to claim otherwise.
-    CreateWindow { spec: WindowSpec, client_pid: u64 },
+    /// `owner_pid` likewise: the kernel's name for the connection's peer,
+    /// never the client's.
+    CreateWindow {
+        spec: WindowSpec,
+        client_pid: u64,
+        owner_pid: Option<u32>,
+    },
     /// Destroy an existing window.
     DestroyWindow { window_id: WindowId },
     /// Set the window title.
@@ -3455,6 +3505,13 @@ pub enum CompositorRequest {
     },
     /// Query display information.
     GetDisplayInfo,
+    /// Which modifier keys are held now, answered with
+    /// [`CompositorResponse::Modifiers`]. A shell's question: see
+    /// [`guiremote::control::RequestBody::GetHeldModifiers`].
+    GetHeldModifiers,
+    /// Ask for, or withdraw a request for, the user's attention for a window:
+    /// see [`Compositor::set_attention`].
+    SetAttention { window_id: WindowId, wanted: bool },
     /// Re-read the user's `appearance.yaml` and adopt whatever it now says.
     ///
     /// Carries no settings: see
@@ -3649,6 +3706,12 @@ pub enum CompositorResponse {
         width: u32,
         height: u32,
     },
+    /// The modifier keys held. Answer to
+    /// [`CompositorRequest::GetHeldModifiers`].
+    Modifiers(Modifiers),
+    /// The window a pick landed on, or `None` for a pick given up: the
+    /// answer to [`Compositor::arm_pick`], sent when the pick ends.
+    Picked(Option<PickedWindow>),
 }
 
 /// Notifications sent from the compositor to clients (events).
@@ -3685,6 +3748,11 @@ pub enum EventNotification {
         x: i32,
         y: i32,
         kind: MouseEventKind,
+        /// The modifier keys held when the event was handled -- taken then,
+        /// not when the notification is sent, so a Ctrl let go later in the
+        /// same tick cannot change what the click said. See
+        /// `guiremote::InputEvent::modifiers` for why a click carries them.
+        modifiers: Modifiers,
     },
     /// Window close was requested (close button clicked).
     WindowClose { window_id: WindowId },
@@ -3787,12 +3855,16 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
                 text,
             },
             scancode,
-        ),
+        )
+        // On the envelope too, so every key and pointer event says what was
+        // held in the same place.
+        .with_modifiers(modifiers),
         EventNotification::MouseEvent {
             window_id,
             x,
             y,
             kind,
+            modifiers,
         } => guiremote::InputEvent::new(
             window_id.0,
             ClientEvent::Mouse(ClientMouseEvent {
@@ -3805,7 +3877,8 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
                 y: y as f32,
                 kind: wire_mouse_kind(kind),
             }),
-        ),
+        )
+        .with_modifiers(modifiers),
         EventNotification::WindowClose { window_id } => {
             guiremote::InputEvent::new(window_id.0, ClientEvent::CloseRequested)
         }
@@ -4081,28 +4154,21 @@ impl TranslateStack {
 /// on a dark theme (design-decisions §1327). Taken resolved rather than
 /// resolved here, because a palette is resolved once per change of settings
 /// (`the_palette_is_resolved_when_it_changes_not_per_frame`).
+///
+/// The settings-to-rasterizer mapping itself is `FontSettings::rendering`,
+/// the one every application's toolkit cache is set from as well
+/// (`FontSettings::apply`): one mapping, so a setting added later cannot be
+/// read one way here and another in the windows beside these decorations.
 fn font_rendering(
     settings: &AppearanceSettings,
     palette: &appearance::Palette,
 ) -> osfont::raster::Rendering {
     use osfont::colr::ColourPalette;
-    use osfont::raster::Subpixel;
-    osfont::raster::Rendering {
-        smoothing: settings.fonts.smoothing,
-        subpixel: match settings.fonts.subpixel {
-            appearance::SubpixelMode::None => Subpixel::None,
-            appearance::SubpixelMode::Rgb => Subpixel::Rgb,
-            appearance::SubpixelMode::Bgr => Subpixel::Bgr,
-            appearance::SubpixelMode::VRgb => Subpixel::VRgb,
-            appearance::SubpixelMode::VBgr => Subpixel::VBgr,
-        },
-        hinting: settings.fonts.hinting,
-        palette: if palette.light {
-            ColourPalette::Light
-        } else {
-            ColourPalette::Dark
-        },
-    }
+    settings.fonts.rendering(if palette.light {
+        ColourPalette::Light
+    } else {
+        ColourPalette::Dark
+    })
 }
 
 /// Straight `0xAARRGGBB` from premultiplied, rounding to nearest.
@@ -5402,6 +5468,40 @@ enum PointerTarget {
     Desktop,
 }
 
+/// The implicit pointer grab a press in a client area starts.
+///
+/// Until the last button held in it comes up, every pointer event -- motion,
+/// scroll, and the presses and releases of any button -- goes to `window`,
+/// wherever the pointer is. That is the implicit grab every windowing system
+/// has, and what lets a slider, a scrollbar or a text selection keep following
+/// a pointer that has strayed outside the window.
+///
+/// The grab is the window's and not one button's, so it lasts until every
+/// button is up: press the left button, press the right, let go of the left,
+/// and the right button's release still belongs to the window both were
+/// pressed in. A grab tied to the first button ended at its release, and the
+/// second button's release then reached nobody, leaving the window believing
+/// that button was still down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PointerGrab {
+    /// The window the grab began in.
+    window: WindowId,
+    /// The buttons held, one bit each ([`button_bit`]). Never empty while the
+    /// grab exists: the grab ends when the last one comes up.
+    held: u8,
+}
+
+/// A mouse button's bit in [`PointerGrab::held`].
+const fn button_bit(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Right => 1 << 1,
+        MouseButton::Middle => 1 << 2,
+        MouseButton::Back => 1 << 3,
+        MouseButton::Forward => 1 << 4,
+    }
+}
+
 /// How the most recently presented frame was produced.
 ///
 /// In the [`Direct`](Scanout::Direct) case the displayed pixels come straight
@@ -5414,6 +5514,25 @@ pub enum Scanout {
     Composited,
     /// Frame scanned out directly from the named window's shared buffer.
     Direct(WindowId),
+}
+
+/// One remote viewer's stream: what its viewer holds of the scene, the video
+/// stream of each window presenting a buffer (`video`), and when it started
+/// -- the clock the video is stamped by.
+struct StreamSession {
+    scene: SceneSession,
+    videos: BTreeMap<u64, video::VideoStream>,
+    started: std::time::Instant,
+}
+
+impl StreamSession {
+    fn new() -> Self {
+        Self {
+            scene: SceneSession::new(),
+            videos: BTreeMap::new(),
+            started: std::time::Instant::now(),
+        }
+    }
 }
 
 /// The main compositor state machine.
@@ -5469,17 +5588,14 @@ pub struct Compositor {
     /// the one owed a `Leave` when that stops being true. See
     /// [`track_pointer_window`](Self::track_pointer_window).
     pointer_window: Option<WindowId>,
-    /// The window a held button was pressed in, and the button.
+    /// The window the held buttons were pressed in, and which are held: see
+    /// [`PointerGrab`].
     ///
-    /// Until that button is released, pointer motion and the release itself
-    /// go to that window wherever the pointer is — the implicit grab every
-    /// windowing system has, and what lets a slider, a scrollbar or a text
-    /// selection keep following a pointer that has strayed outside the window.
     /// Motion used to go to whatever window was under the pointer, so a drag
     /// stopped dead at the window's edge; and the release went to the
     /// *focused* window, which for a right-click on a window that was not
     /// focused is a different window from the one that saw the press.
-    pointer_grab: Option<(WindowId, MouseButton)>,
+    pointer_grab: Option<PointerGrab>,
     /// Active drag operation (if any).
     drag: Option<DragState>,
     /// Where the window being dragged would land if the user let go now.
@@ -5588,6 +5704,35 @@ pub struct Compositor {
     tray_icons: Vec<guiremote::tray::TrayIcon>,
     /// The buffer `route_tray_list` encodes into, reused across ticks.
     tray_list_scratch: Vec<u8>,
+    /// What is on the clipboard: the last text a focused window copied, or
+    /// `None` before anything has been. Held here, as an X server or a Wayland
+    /// compositor holds the selection, so a copy outlives the program it came
+    /// from and a paste needs no connection but the one every window has.
+    clipboard: Option<String>,
+    /// Whether the displays are asleep: see [`Self::sleep_displays`].
+    displays_asleep: bool,
+    /// When they went to sleep, while they are asleep: what the motion grace
+    /// ([`Self::sleep_motion_grace`]) is measured from.
+    slept_at: Option<Instant>,
+    /// How long after the displays go to sleep pointer motion does not wake
+    /// them. The hand that clicked "sleep" in a menu is still on the mouse,
+    /// and without this its next twitch would undo the click.
+    sleep_motion_grace: Duration,
+    /// The pending `SleepDisplays` requests, as (client, request sequence
+    /// number), answered at the wake.
+    sleep_waiters: Vec<(u64, u32)>,
+    /// Answers given after the request that asked for them -- a sleep's at
+    /// the wake, a pick's at the click -- that the wire layer has not yet
+    /// sent, as (client, request sequence number, answer).
+    deferred_replies: Vec<(u64, u32, CompositorResponse)>,
+    /// The window pick in progress, as (client, request sequence number):
+    /// see [`Self::arm_pick`]. One at a time on the whole desktop, so a click
+    /// answers exactly one asker.
+    pick: Option<(u64, u32)>,
+    /// Keys whose press woke the displays and was swallowed. Their repeats
+    /// and their release are swallowed with them: a program that never saw
+    /// the press must not be told about a release, or about a key typing.
+    swallowed_keys: Vec<u32>,
     /// Events addressed to a *connection* rather than to a window.
     ///
     /// The window-addressed queue cannot carry these: `route_input` delivers a
@@ -5668,9 +5813,12 @@ pub struct Compositor {
     /// How the last presented frame was produced (composited vs direct scanout).
     scanout: Scanout,
     /// Active remote draw-command stream sessions, keyed by stream id. Each
-    /// tracks its own per-window delta state so multiple remote viewers can be
+    /// tracks its own per-window delta state, and its own video stream of
+    /// each window presenting a buffer, so multiple remote viewers can be
     /// served independently.
-    stream_sessions: BTreeMap<u64, SceneSession>,
+    stream_sessions: BTreeMap<u64, StreamSession>,
+    /// The serial the next attached buffer gets ([`SharedBuffer::serial`]).
+    next_buffer_serial: u64,
     /// Monotonic allocator for stream session ids.
     next_stream_id: u64,
     /// The last revision stamped on an image (`ImageAsset::revision`), from
@@ -5798,30 +5946,32 @@ struct ModifierEpisode {
     spent: bool,
 }
 
-/// Cut a glyph to what the protocol will carry, on a character boundary.
+/// Cut a tray icon's text to `max` bytes, on a character boundary.
 ///
-/// A client sending a paragraph gets the first few characters of it rather than
-/// a refusal: the icon is the client's own, nobody else is harmed, and a tray
-/// that silently dropped the icon would look like a bug in the program that
-/// sent it. `MAX_GLYPH_BYTES` is generous enough that no honest caller meets
-/// it.
+/// A client sending a paragraph as a glyph, or a page as a tooltip, gets the
+/// first part of it rather than a refusal: the icon is the client's own,
+/// nobody else is harmed, and a tray that silently dropped the icon would look
+/// like a bug in the program that sent it. The bounds
+/// ([`MAX_GLYPH_BYTES`](guiremote::tray::MAX_GLYPH_BYTES),
+/// [`MAX_TOOLTIP_BYTES`](guiremote::tray::MAX_TOOLTIP_BYTES)) are generous
+/// enough that no honest caller meets them.
 ///
 /// Truncating on a *character* boundary matters more than the limit does.
 /// Cutting mid-sequence would put an invalid UTF-8 fragment on the wire, and
 /// the decoder would refuse the whole frame -- so one client's long glyph would
 /// stop the tray updating for every client.
-fn truncate_glyph(glyph: &str) -> String {
-    if glyph.len() <= guiremote::tray::MAX_GLYPH_BYTES {
-        return glyph.to_string();
+fn truncate_text(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
     }
     // `saturating_sub` rather than `-=`: the loop guard already stops at 0,
     // but the lint is right in general and a subtraction that cannot
     // underflow is cheaper to read as one that provably cannot.
-    let mut end = guiremote::tray::MAX_GLYPH_BYTES;
-    while end > 0 && !glyph.is_char_boundary(end) {
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
-    glyph.get(..end).unwrap_or_default().to_string()
+    text.get(..end).unwrap_or_default().to_string()
 }
 
 impl Compositor {
@@ -5880,6 +6030,14 @@ impl Compositor {
             input_epoch: Instant::now(),
             window_list_scratch: Vec::new(),
             tray_icons: Vec::new(),
+            clipboard: None,
+            displays_asleep: false,
+            slept_at: None,
+            sleep_motion_grace: SLEEP_MOTION_GRACE,
+            sleep_waiters: Vec::new(),
+            deferred_replies: Vec::new(),
+            pick: None,
+            swallowed_keys: Vec::new(),
             tray_list_scratch: Vec::new(),
             pending_client_events: Vec::new(),
             modifiers: ModifierState::new(),
@@ -5895,6 +6053,7 @@ impl Compositor {
             scanout: Scanout::Composited,
             idle_watches: HashMap::new(),
             stream_sessions: BTreeMap::new(),
+            next_buffer_serial: 1,
             next_stream_id: 1,
             last_image_revision: 0,
             current_workspace: 0,
@@ -6016,19 +6175,44 @@ impl Compositor {
     /// from a client re-sending what it already sent. The push does not depend
     /// on this -- it compares encoded frames -- but a caller that wants to know
     /// should not have to encode one to find out.
-    pub fn set_tray_icon(&mut self, owner: u64, id: u32, glyph: &str, tooltip: &str) -> bool {
-        let glyph = truncate_glyph(glyph);
+    ///
+    /// The glyph and tooltip are cut to their bounds ([`truncate_text`]), so
+    /// what is stored, compared and sent is always what the wire can carry.
+    ///
+    /// # Errors
+    ///
+    /// For a new id only -- replacing is never refused:
+    /// [`CompositorError::TrayShareTaken`] when `owner` already has
+    /// [`MAX_TRAY_ICONS_PER_CLIENT`](guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT)
+    /// icons, and [`CompositorError::TrayFull`] when the tray holds
+    /// [`MAX_TRAY_ICONS`](guiremote::tray::MAX_TRAY_ICONS).
+    pub fn set_tray_icon(
+        &mut self,
+        owner: u64,
+        id: u32,
+        glyph: &str,
+        tooltip: &str,
+    ) -> CompositorResult<bool> {
+        let glyph = truncate_text(glyph, guiremote::tray::MAX_GLYPH_BYTES);
+        let tooltip = truncate_text(tooltip, guiremote::tray::MAX_TOOLTIP_BYTES);
         if let Some(existing) = self
             .tray_icons
             .iter_mut()
             .find(|i| i.owner == owner && i.id == id)
         {
             if existing.glyph == glyph && existing.tooltip == tooltip {
-                return false;
+                return Ok(false);
             }
             existing.glyph = glyph;
-            existing.tooltip = tooltip.to_string();
-            return true;
+            existing.tooltip = tooltip;
+            return Ok(true);
+        }
+        // The client's share first: it is the bound a program can be told
+        // about and do something with, and it is what stops one program
+        // reaching the tray's own bound at all.
+        let held = self.tray_icons.iter().filter(|i| i.owner == owner).count();
+        if u32::try_from(held).unwrap_or(u32::MAX) >= guiremote::tray::MAX_TRAY_ICONS_PER_CLIENT {
+            return Err(CompositorError::TrayShareTaken);
         }
         if u32::try_from(self.tray_icons.len()).unwrap_or(u32::MAX)
             >= guiremote::tray::MAX_TRAY_ICONS
@@ -6037,15 +6221,223 @@ impl Compositor {
             // past this, so accepting one more would build a list no client
             // could read -- the tray would stop updating entirely, for every
             // program, because one of them registered too many.
-            return false;
+            return Err(CompositorError::TrayFull);
         }
-        self.tray_icons.push(guiremote::tray::TrayIcon {
-            owner,
-            id,
-            glyph,
-            tooltip: tooltip.to_string(),
-        });
-        true
+        self.tray_icons
+            .push(guiremote::tray::TrayIcon::new(owner, id, glyph, tooltip));
+        Ok(true)
+    }
+
+    /// Put `text` on the clipboard, replacing what was there.
+    ///
+    /// The compositor's own record. Who may do this -- a client whose window
+    /// has the keyboard focus -- is decided where the request arrives, which is
+    /// the only place that knows which client sent it.
+    pub fn set_clipboard(&mut self, text: String) {
+        self.clipboard = Some(text);
+    }
+
+    /// What is on the clipboard, or `None` before anything has been copied.
+    #[must_use]
+    pub fn clipboard(&self) -> Option<&str> {
+        self.clipboard.as_deref()
+    }
+
+    /// The window with the keyboard focus, if any.
+    #[must_use]
+    pub const fn focused_window(&self) -> Option<WindowId> {
+        self.focused_window
+    }
+
+    /// Put the displays to sleep for `client`'s request `seq`, which is
+    /// answered when they wake.
+    ///
+    /// The server turns the displays off
+    /// ([`Present::sleep`](crate::present::Present::sleep)) and stops
+    /// presenting while [`Self::displays_asleep`] says so. They wake at the
+    /// next key press, click, scroll or pointer movement ([`Self::handle_input`]
+    /// swallows that input), or at [`Self::wake_displays`]. Asking again while
+    /// asleep only adds a request to answer at the same wake.
+    pub fn sleep_displays(&mut self, client: u64, seq: u32) {
+        if !self.displays_asleep {
+            self.displays_asleep = true;
+            self.slept_at = Some(Instant::now());
+        }
+        self.sleep_waiters.push((client, seq));
+    }
+
+    /// Wake the displays, if they are asleep: every pending sleep request is
+    /// answered, and the whole screen is drawn again, since what it shows now
+    /// must be the desktop and not whatever it held before it went dark.
+    pub fn wake_displays(&mut self) {
+        if !self.displays_asleep {
+            return;
+        }
+        self.displays_asleep = false;
+        self.slept_at = None;
+        self.deferred_replies.extend(
+            self.sleep_waiters
+                .drain(..)
+                .map(|(client, seq)| (client, seq, CompositorResponse::Ok)),
+        );
+        self.reset_for_recovery();
+    }
+
+    /// Whether the displays are asleep.
+    #[must_use]
+    pub const fn displays_asleep(&self) -> bool {
+        self.displays_asleep
+    }
+
+    /// The answers owed to `client` that were given after it asked -- a
+    /// sleep's at the wake, a pick's at the click -- as (request sequence
+    /// number, answer), taken.
+    pub fn take_deferred_replies(&mut self, client: u64) -> Vec<(u32, CompositorResponse)> {
+        if self.deferred_replies.is_empty() {
+            return Vec::new();
+        }
+        self.deferred_replies
+            .extract_if(.., |(owner, _, _)| *owner == client)
+            .map(|(_, seq, answer)| (seq, answer))
+            .collect()
+    }
+
+    /// Forget a departed client's deferred requests -- sleeps pending or
+    /// answered, an open pick, answers not yet sent. There is nobody left to
+    /// tell, a record kept for ever would grow with every program that asked
+    /// and died, and a pick nobody will hear about must not keep the pointer
+    /// a crosshair.
+    pub fn forget_client_requests(&mut self, client: u64) {
+        self.sleep_waiters.retain(|&(owner, _)| owner != client);
+        self.deferred_replies
+            .retain(|(owner, _, _)| *owner != client);
+        if self.pick.is_some_and(|(owner, _)| owner == client) {
+            self.pick = None;
+        }
+    }
+
+    /// Start a window pick for `client`'s request `seq`: the pointer is a
+    /// crosshair until the next click, which is taken by the pick rather
+    /// than delivered, and answered with the window it landed on
+    /// ([`CompositorResponse::Picked`], through
+    /// [`Self::take_deferred_replies`]). Escape or another button gives up.
+    ///
+    /// Whether `client` may pick -- it must own the focused window -- is the
+    /// wire layer's to decide, as for the clipboard. Asking again while its
+    /// own pick is open replaces it, the earlier request answered as given
+    /// up.
+    ///
+    /// # Errors
+    ///
+    /// Another client's pick is open: one at a time on the whole desktop.
+    pub fn arm_pick(&mut self, client: u64, seq: u32) -> Result<(), String> {
+        match self.pick {
+            Some((owner, _)) if owner != client => {
+                return Err("another program is waiting for the user to pick a window".to_string());
+            }
+            Some((owner, earlier)) => {
+                self.deferred_replies
+                    .push((owner, earlier, CompositorResponse::Picked(None)));
+            }
+            None => {}
+        }
+        self.pick = Some((client, seq));
+        Ok(())
+    }
+
+    /// Give up `client`'s pick, if it has one open: its request is answered
+    /// as given up. Another client's pick is not its to end.
+    pub fn cancel_pick(&mut self, client: u64) {
+        if self.pick.is_some_and(|(owner, _)| owner == client) {
+            self.finish_pick(None);
+        }
+    }
+
+    /// Whether a window pick is open.
+    #[must_use]
+    pub const fn picking(&self) -> bool {
+        self.pick.is_some()
+    }
+
+    /// End the open pick, answering it with `picked`.
+    fn finish_pick(&mut self, picked: Option<PickedWindow>) {
+        if let Some((owner, seq)) = self.pick.take() {
+            self.deferred_replies
+                .push((owner, seq, CompositorResponse::Picked(picked)));
+        }
+    }
+
+    /// What a pick reports for a click at `(x, y)`: the window there, title
+    /// bar and frame included, as the user sees it -- its id, title, program
+    /// and attested owner, and nothing of its contents.
+    fn picked_at(&self, x: i32, y: i32) -> Option<PickedWindow> {
+        let id = self.window_at_with_decorations(x, y)?;
+        let window = self.window_ref(id)?;
+        Some(PickedWindow {
+            window: id.raw(),
+            title: window.title.clone(),
+            app_id: window.app_id.clone(),
+            pid: window.owner_pid,
+        })
+    }
+
+    /// How long after the displays go to sleep pointer motion does not wake
+    /// them ([`SLEEP_MOTION_GRACE`] unless set).
+    pub const fn set_sleep_motion_grace(&mut self, grace: Duration) {
+        self.sleep_motion_grace = grace;
+    }
+
+    /// Whether `event` wakes sleeping displays, and must then be swallowed;
+    /// or is a swallowed key's repeat or release, and must be swallowed too.
+    /// Answers `true` when the event has been dealt with here.
+    ///
+    /// Only the modifier state is kept: a Shift that woke the screen is still
+    /// held, and the letter typed next is a capital.
+    fn absorb_while_asleep(&mut self, event: &InputEvent) -> bool {
+        match *event {
+            // A swallowed key's repeat, asleep or not: the program never saw
+            // it go down, so it must not see it type.
+            InputEvent::KeyDown { scancode, .. } if self.swallowed_keys.contains(&scancode) => true,
+            InputEvent::KeyUp { scancode } if self.swallowed_keys.contains(&scancode) => {
+                self.swallowed_keys.retain(|&s| s != scancode);
+                self.modifiers.update(scancode, false);
+                true
+            }
+            _ if !self.displays_asleep => false,
+            InputEvent::KeyDown { scancode, .. } => {
+                self.modifiers.update(scancode, true);
+                self.swallowed_keys.push(scancode);
+                self.wake_displays();
+                true
+            }
+            // Pointer motion keeps the pointer where the hand is, wakes once
+            // the grace has passed, and is not delivered.
+            InputEvent::MouseMove { x, y } => {
+                self.cursor_x = x;
+                self.cursor_y = y;
+                let settled = self
+                    .slept_at
+                    .is_none_or(|at| at.elapsed() >= self.sleep_motion_grace);
+                if settled {
+                    self.wake_displays();
+                }
+                true
+            }
+            // The press wakes and is not delivered, so it starts no grab, and
+            // its release goes nowhere -- the rule for any release whose press
+            // no window saw.
+            InputEvent::MouseButton { pressed: true, .. } | InputEvent::MouseScroll { .. } => {
+                self.wake_displays();
+                true
+            }
+            // A release while asleep is of a press made before it -- the key or
+            // the click that asked for sleep -- and is delivered as usual, and
+            // does not wake.
+            InputEvent::KeyUp { .. }
+            | InputEvent::MouseButton { pressed: false, .. }
+            | InputEvent::PointerLeft
+            | InputEvent::TextInput { .. } => false,
+        }
     }
 
     /// Take one icon out of the tray.
@@ -6390,7 +6782,12 @@ impl Compositor {
         if self.pointer_window == Some(window_id) {
             self.pointer_window = None;
         }
-        if self.pointer_grab.is_some_and(|(id, _)| id == window_id) {
+        // Its grab ends with it: the buttons' releases then go nowhere, rather
+        // than to whatever window happens to be under the pointer.
+        if self
+            .pointer_grab
+            .is_some_and(|grab| grab.window == window_id)
+        {
             self.pointer_grab = None;
         }
 
@@ -7227,6 +7624,8 @@ impl Compositor {
             && win.is_showing(workspace)
         {
             win.focused = true;
+            // The user is looking at it now, which is all the request asked.
+            win.demands_attention = false;
             win.dirty = true;
             self.focused_window = Some(window_id);
 
@@ -7239,6 +7638,26 @@ impl Compositor {
             self.pending_notifications
                 .push_back(EventNotification::FocusGained { window_id });
         }
+    }
+
+    /// Mark a window as asking for the user's attention (`wanted`), or withdraw
+    /// the request.
+    ///
+    /// Shown by the shell on the window's taskbar tile, through the window
+    /// list's `demands_attention`; cleared when the window is next focused
+    /// ([`Self::focus_window`]). A focused window's request is moot and changes
+    /// nothing, so the flag is never set on the window that has the user.
+    /// Nothing else follows from it: no raise, no focus, no sound.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] for an id that names no window.
+    pub fn set_attention(&mut self, window_id: WindowId, wanted: bool) -> CompositorResult<()> {
+        let win = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        win.demands_attention = wanted && !win.focused;
+        Ok(())
     }
 
     /// Bring a window to the user: un-minimize it and switch to its workspace
@@ -7534,12 +7953,15 @@ impl Compositor {
         bytes: &[u8],
     ) -> CompositorResult<()> {
         // Validate before touching window state so a bad buffer is a no-op.
-        let buffer = SharedBuffer::import(handle, width, height, stride, format, bytes)?;
+        let mut buffer = SharedBuffer::import(handle, width, height, stride, format, bytes)?;
+        let serial = self.next_buffer_serial;
         let window = self
             .window_mut(window_id)
             .ok_or(CompositorError::WindowNotFound(window_id))?;
+        buffer.set_serial(serial);
         window.buffer = Some(buffer);
         window.dirty = true;
+        self.next_buffer_serial = serial.wrapping_add(1);
         self.damage_window(window_id);
         Ok(())
     }
@@ -7867,6 +8289,12 @@ impl Compositor {
         for watch in self.idle_watches.values_mut() {
             watch.fired = false;
         }
+        // After the activity bookkeeping -- waking the screen is the user being
+        // present -- and before anything is delivered: the input that wakes
+        // sleeping displays reaches no window.
+        if self.absorb_while_asleep(&event) {
+            return;
+        }
 
         // Hit testing derives from `frame_insets`, which is scaled, so input
         // needs the same refresh compositing does — and needs it more often.
@@ -7972,7 +8400,7 @@ impl Compositor {
         // otherwise to the client area under the pointer.
         let target = self
             .pointer_grab
-            .map(|(window_id, _)| window_id)
+            .map(|grab| grab.window)
             .or_else(|| self.window_at(x, y));
         if let Some(window_id) = target {
             self.notify_pointer(window_id, x, y, MouseEventKind::Move);
@@ -8129,6 +8557,21 @@ impl Compositor {
         self.modifier_episode.spent |= pressed;
         self.track_pointer_window(x, y);
 
+        // An open pick takes the next press, wherever it lands: the primary
+        // button picks the window under it, any other gives up. Not delivered,
+        // so its release goes nowhere -- the rule below for a release whose
+        // press no window saw. Here rather than in `handle_input` so that a
+        // click made with the keypad (mouse keys) picks as a real one does.
+        if pressed && self.pick.is_some() {
+            let picked = if button == MouseButton::Left {
+                self.picked_at(x, y)
+            } else {
+                None
+            };
+            self.finish_pick(picked);
+            return;
+        }
+
         // Release ends any active drag.
         if !pressed && button == MouseButton::Left {
             if let Some(drag) = self.drag.take() {
@@ -8142,14 +8585,35 @@ impl Compositor {
             // this compositor delivered — the press landed on a title bar, or
             // on the desktop — goes nowhere: a client told about a release it
             // never saw pressed would take it for the end of a click.
-            if let Some((window_id, held)) = self.pointer_grab
-                && held == button
+            if let Some(grab) = self.pointer_grab
+                && grab.held & button_bit(button) != 0
             {
-                self.pointer_grab = None;
-                self.notify_pointer(window_id, x, y, MouseEventKind::ButtonRelease(button));
-                // The grab held the pointer inside the window; now it is
-                // wherever it really is.
-                self.track_pointer_window(x, y);
+                let held = grab.held & !button_bit(button);
+                self.pointer_grab = (held != 0).then_some(PointerGrab { held, ..grab });
+                self.notify_pointer(grab.window, x, y, MouseEventKind::ButtonRelease(button));
+                if held == 0 {
+                    // The grab held the pointer inside the window; now it is
+                    // wherever it really is.
+                    self.track_pointer_window(x, y);
+                }
+            }
+            return;
+        }
+
+        // A press while the pointer is grabbed is the grabbing window's,
+        // wherever the pointer is -- even over another window's title bar,
+        // which would otherwise be focused, raised or dragged in the middle of
+        // a gesture that belongs to somebody else. A press of a button already
+        // held is no transition (a device's own repeat of a held button) and
+        // is not delivered: a second press with no release between would be
+        // read as the start of a double click.
+        if let Some(grab) = self.pointer_grab {
+            if grab.held & button_bit(button) == 0 {
+                self.pointer_grab = Some(PointerGrab {
+                    held: grab.held | button_bit(button),
+                    ..grab
+                });
+                self.notify_pointer(grab.window, x, y, MouseEventKind::ButtonPress(button));
             }
             return;
         }
@@ -8265,21 +8729,23 @@ impl Compositor {
     }
 
     /// Deliver a button press to a window's client area, and grab the pointer
-    /// for that window until the button comes back up.
+    /// for that window until every button is back up.
+    ///
+    /// Reached only with no grab in force: a press during one goes to the
+    /// grabbing window before any hit test (`handle_mouse_button`).
     fn press_in(&mut self, window_id: WindowId, button: MouseButton, x: i32, y: i32) {
         self.notify_pointer(window_id, x, y, MouseEventKind::ButtonPress(button));
-        // The first button down owns the grab; a second button pressed during
-        // it goes to the same window without taking the grab over.
-        if self.pointer_grab.is_none() {
-            self.pointer_grab = Some((window_id, button));
-        }
+        self.pointer_grab = Some(PointerGrab {
+            window: window_id,
+            held: button_bit(button),
+        });
     }
 
     fn handle_mouse_scroll(&mut self, dx: f32, dy: f32, x: i32, y: i32) {
         self.track_pointer_window(x, y);
         let target = self
             .pointer_grab
-            .map(|(window_id, _)| window_id)
+            .map(|grab| grab.window)
             .or_else(|| self.window_at(x, y));
         if let Some(window_id) = target {
             self.notify_pointer(window_id, x, y, MouseEventKind::Scroll { dx, dy });
@@ -8652,6 +9118,14 @@ impl Compositor {
     }
 
     fn dispatch_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
+        // Escape gives up an open pick and reaches no window: the program
+        // under the crosshair did not ask for it. Its repeats and release are
+        // swallowed with it (`absorb_while_asleep`).
+        if pressed && self.pick.is_some() && keymap::key_for_scancode(scancode) == Key::Escape {
+            self.swallowed_keys.push(scancode);
+            self.finish_pick(None);
+            return;
+        }
         // Folded *before* the notification is built, so a client told about
         // Shift+A sees `shift: true`. Folding afterwards would report the state
         // as it was before the chord completed, which for the modifier key's
@@ -8686,7 +9160,8 @@ impl Compositor {
         level.shift |= stuck.shift;
         let (key, laid_out) = keymap::key_for_layout(self.layout, scancode, level);
         let mut modifiers = self.modifiers.modifiers();
-        if keymap::resolves_through_alt_gr(self.layout, scancode, level) {
+        let through_alt_gr = keymap::resolves_through_alt_gr(self.layout, scancode, level);
+        if through_alt_gr {
             // AltGr spent itself selecting a character, so it is not also an
             // Alt chord. Without this a German user typing `@` (AltGr+Q) sends
             // every application an Alt+Q, and the menu bar answers first.
@@ -8705,6 +9180,17 @@ impl Compositor {
         modifiers.alt |= stuck.alt;
         modifiers.shift |= stuck.shift;
         modifiers.super_key |= stuck.super_key;
+
+        // A Ctrl+Alt chord the layout did not resolve through AltGr is a
+        // command and types nothing. AltGr is the right-hand Alt only, so
+        // left Ctrl + left Alt + E is a shortcut, not Windows' stand-in for
+        // AltGr+E -- and a text field that reads Ctrl and Alt together as
+        // AltGr's report, which is how Windows and a remote client on it send
+        // AltGr, must not be handed the plain `e` to type
+        // (`requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`,
+        // part 2; design-decisions §1338). After the sticky merge, so a stuck
+        // Ctrl+Alt is a command too.
+        let ctrl_alt_command = modifiers.ctrl && modifiers.alt && !through_alt_gr;
 
         // The recovery chord is the compositor's own, and is checked before
         // the grab table so that no client can claim it: it exists for when
@@ -8798,6 +9284,10 @@ impl Compositor {
         // keystroke could only ever produce one.
         let text = match (character, pressed) {
             (Some(from_source), true) => from_source.to_string(),
+            // Not through the dead-key machine either, so an accent waiting
+            // for its vowel is still waiting after the shortcut, as it is
+            // after any command chord.
+            (None, true) if ctrl_alt_command => String::new(),
             (None, true) => self.dead_keys.press(
                 self.layout,
                 scancode,
@@ -9183,12 +9673,17 @@ impl Compositor {
     fn notify_pointer(&mut self, window_id: WindowId, x: i32, y: i32, kind: MouseEventKind) {
         if let Some(win) = self.window_ref(window_id) {
             let (local_x, local_y) = win.local_point(x, y);
+            // Whatever the keyboard holds now, whichever window has its focus:
+            // the window being clicked is often not the one that was told the
+            // keys went down.
+            let modifiers = self.modifiers.modifiers();
             self.pending_notifications
                 .push_back(EventNotification::MouseEvent {
                     window_id,
                     x: local_x,
                     y: local_y,
                     kind,
+                    modifiers,
                 });
         }
     }
@@ -10373,8 +10868,15 @@ impl Compositor {
     /// Handle a compositor request from a client.
     pub fn handle_request(&mut self, request: CompositorRequest) -> CompositorResponse {
         match request {
-            CompositorRequest::CreateWindow { spec, client_pid } => {
+            CompositorRequest::CreateWindow {
+                spec,
+                client_pid,
+                owner_pid,
+            } => {
                 let id = self.create_window_from_spec(&spec, client_pid);
+                if let Some(window) = self.window_mut(id) {
+                    window.owner_pid = owner_pid;
+                }
                 CompositorResponse::WindowCreated { window_id: id }
             }
             CompositorRequest::DestroyWindow { window_id } => {
@@ -10508,6 +11010,19 @@ impl Compositor {
                     CompositorResponse::Error {
                         message: "no primary display".to_string(),
                     }
+                }
+            }
+            // The keys every keyboard reports down, folded into the modifier
+            // state by `handle_input` -- including any a device was already
+            // holding when it was opened, which the evdev source reads then
+            // and hands over before the first client is answered.
+            CompositorRequest::GetHeldModifiers => CompositorResponse::Modifiers(self.modifiers()),
+            CompositorRequest::SetAttention { window_id, wanted } => {
+                match self.set_attention(window_id, wanted) {
+                    Ok(()) => CompositorResponse::Ok,
+                    Err(e) => CompositorResponse::Error {
+                        message: e.to_string(),
+                    },
                 }
             }
             CompositorRequest::ReloadAppearance => {
@@ -11184,28 +11699,40 @@ impl Compositor {
     /// out of the compositor is what lets a presenter hand the same
     /// description to a hardware cursor plane instead.
     ///
-    /// The size is `pointer_preferences`' size
-    /// times the scale of the display the pointer is on, so a pointer crossing
+    /// The size and colours are the user's: `appearance.yaml`'s
+    /// `cursors.size` and `cursors.scheme` (`AppearanceSettings::cursor_size`
+    /// and `cursor_scheme`, the one home the pointer's settings have --
+    /// `design-decisions/0872`), so a change reaches a running compositor
+    /// through `ReloadAppearance` as every other appearance setting does. The
+    /// size is scaled by the display the pointer is on, so a pointer crossing
     /// onto a 2x monitor doubles as it crosses, exactly as the window
     /// decorations there do.
     #[must_use]
     pub fn pointer(&self) -> Option<PointerState> {
-        if !self.pointer_on_output || self.cursor_shape == CursorShape::Hidden {
+        // A crosshair while a pick is open, over whatever window: the
+        // compositor's own mark that the next click is not the window's, so
+        // no program can draw it to fake the mode, nor hide it.
+        let shape = if self.pick.is_some() {
+            CursorShape::Crosshair
+        } else {
+            self.cursor_shape
+        };
+        if !self.pointer_on_output || shape == CursorShape::Hidden {
             return None;
         }
         let (x, y) = (self.cursor_x, self.cursor_y);
         let scale = self.display_manager.scale_for(&Rect::new(x, y, 1, 1));
-        let (size, scheme) = Self::pointer_preferences();
+        let (size, scheme) = (self.appearance.cursor_size, self.appearance.cursor_scheme);
         #[allow(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "16 to 48 pixels times a display scale; the rasterizer clamps the result, and a nonsense scale saturates rather than wrapping"
+            reason = "16 to 96 pixels times a display scale; the rasterizer clamps the result, and a nonsense scale saturates rather than wrapping"
         )]
         let size_px = (size.pixels() as f32 * scale).round() as u32;
         let (fill, outline) = Self::pointer_colors(scheme, self.palette.accent);
         Some(PointerState {
-            shape: self.cursor_shape,
+            shape,
             x,
             y,
             style: CursorStyle {
@@ -11214,27 +11741,6 @@ impl Compositor {
                 outline,
             },
         })
-    }
-
-    /// The pointer's size and colour scheme: the defaults, on purpose, until
-    /// the user's choice has one home.
-    ///
-    /// Three settings hold a pointer size — `appearance`'s `cursor_size`,
-    /// `inputsettings`' `mouse.cursor_size`, and the Settings app's own
-    /// `CursorSize`, which it never saves — and no control writes any of them
-    /// where another program can read it. `known-issues.md` →
-    /// `TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER`,
-    /// lane C's entry about lane C's models, asks that they be collapsed to one
-    /// before anything reads one: wiring one of several rival copies leaves the
-    /// others silently wrong instead of uniformly inert. The pointer now exists
-    /// to read the survivor, and which one survives is asked in
-    /// `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.
-    /// When it is answered, this reads it and nothing else changes.
-    const fn pointer_preferences() -> (appearance::CursorSize, appearance::CursorScheme) {
-        (
-            appearance::CursorSize::Normal,
-            appearance::CursorScheme::Default,
-        )
     }
 
     /// The pointer's fill and outline for `scheme`, as `0xAARRGGBB`: white
@@ -11512,6 +12018,8 @@ impl Compositor {
                 .map(|w| WindowInfo {
                     id: w.id.raw(),
                     pid: w.client_pid,
+                    // The kernel's name for the opener, if it gave one.
+                    process: w.owner_pid,
                     layer: w.layer,
                     title: w.title.clone(),
                     // Passed through exactly as the client sent it, including
@@ -11529,6 +12037,7 @@ impl Compositor {
                     // `self.focused_window`, so the list cannot disagree with
                     // the window it describes if the two ever drift apart.
                     focused: w.focused,
+                    demands_attention: w.demands_attention,
                     workspace: w.workspace,
                     // Reported, never accepted back. Nothing in `ShellControl`
                     // takes a rectangle — a snap names an edge (§505) and a
@@ -11555,47 +12064,56 @@ impl Compositor {
         }
     }
 
+    /// The windows a stream frame shows, bottom to top: every visible,
+    /// non-minimised one on the current workspace.
+    fn streamed_windows(&self) -> impl Iterator<Item = &Window> {
+        self.z_stack
+            .iter()
+            .filter_map(|&id| self.window_ref(id))
+            .filter(|win| win.is_showing(self.current_workspace))
+    }
+
     /// Capture the current scene as a draw-command stream frame for a remote
     /// viewer (native compositor-level streaming).
     ///
     /// Walks the z-stack bottom-to-top, includes every visible, non-minimized
     /// window, and hands the per-window render-command lists to `session`,
     /// which forwards only the commands that changed since the last frame
-    /// (geometry-only deltas otherwise). The buffer (DMA-BUF) path has no
-    /// vector commands to forward, so such windows stream as empty command
-    /// lists — pixel forwarding for those is the video-encoded fallback's job,
-    /// not this path's.
-    pub fn capture_stream_frame(&self, session: &mut SceneSession) -> SceneFrame {
-        let mut snaps: Vec<WindowSnapshot<'_>> = Vec::with_capacity(self.z_stack.len());
-        for &id in &self.z_stack {
-            if let Some(win) = self.window_ref(id) {
-                if !win.is_showing(self.current_workspace) {
-                    continue;
-                }
-                snaps.push(WindowSnapshot {
-                    id: win.id.raw(),
-                    x: win.x,
-                    y: win.y,
-                    width: win.width,
-                    height: win.height,
-                    opacity: win.opacity,
-                    commands: &win.render_tree,
-                    images: win
-                        .images
-                        .iter()
-                        .map(|(&id, image)| ImageSnapshot {
-                            id,
-                            revision: image.revision(),
-                            width: image.width(),
-                            height: image.height(),
-                            pixels: image.pixels(),
-                            patch_base: image.patch_base(),
-                            patches: image.patch_log(),
-                        })
-                        .collect(),
-                });
-            }
-        }
+    /// (geometry-only deltas otherwise). A window presenting a buffer has no
+    /// commands to forward; its pixels go as video, whose updates for this
+    /// frame are `video`'s (`video::capture`, which
+    /// [`capture_stream`](Self::capture_stream) runs first).
+    pub fn capture_stream_frame(
+        &self,
+        session: &mut SceneSession,
+        video: &BTreeMap<u64, VideoUpdate>,
+    ) -> SceneFrame {
+        let snaps: Vec<WindowSnapshot<'_>> = self
+            .streamed_windows()
+            .map(|win| WindowSnapshot {
+                id: win.id.raw(),
+                x: win.x,
+                y: win.y,
+                width: win.width,
+                height: win.height,
+                opacity: win.opacity,
+                commands: &win.render_tree,
+                images: win
+                    .images
+                    .iter()
+                    .map(|(&id, image)| ImageSnapshot {
+                        id,
+                        revision: image.revision(),
+                        width: image.width(),
+                        height: image.height(),
+                        pixels: image.pixels(),
+                        patch_base: image.patch_base(),
+                        patches: image.patch_log(),
+                    })
+                    .collect(),
+                video: video.get(&win.id.raw()),
+            })
+            .collect();
         let (fb_w, fb_h) = self.backend.size();
         session.build_frame(fb_w, fb_h, &snaps)
     }
@@ -11606,21 +12124,41 @@ impl Compositor {
     pub fn start_stream(&mut self) -> u64 {
         let id = self.next_stream_id;
         self.next_stream_id = self.next_stream_id.wrapping_add(1);
-        self.stream_sessions.insert(id, SceneSession::new());
+        self.stream_sessions.insert(id, StreamSession::new());
         id
     }
 
     /// Capture the current scene for stream `stream_id` and return the encoded
-    /// wire frame (geometry-only deltas for unchanged windows). Errors if the
-    /// id is unknown (e.g. the session was already stopped).
+    /// wire frame (geometry-only deltas for unchanged windows), its windows'
+    /// video stamped with the time since the stream started. Errors if the id
+    /// is unknown (e.g. the session was already stopped).
     pub fn capture_stream(&mut self, stream_id: u64) -> CompositorResult<Vec<u8>> {
-        // Take ownership of the session so capture_stream_frame can borrow
-        // &self immutably while mutating the (now-local) session; reinsert after.
+        let now_ms = self
+            .stream_sessions
+            .get(&stream_id)
+            .ok_or(CompositorError::StreamNotFound(stream_id))?
+            .started
+            .elapsed()
+            .as_millis();
+        self.capture_stream_at(stream_id, u64::try_from(now_ms).unwrap_or(u64::MAX))
+    }
+
+    /// [`capture_stream`](Self::capture_stream) at `now_ms` milliseconds into
+    /// the stream: the time its windows' video frames are stamped with,
+    /// which must not go backwards from one capture to the next.
+    pub fn capture_stream_at(&mut self, stream_id: u64, now_ms: u64) -> CompositorResult<Vec<u8>> {
+        // Take ownership of the session so the windows can be borrowed while
+        // the (now-local) session changes; reinsert after.
         let mut session = self
             .stream_sessions
             .remove(&stream_id)
             .ok_or(CompositorError::StreamNotFound(stream_id))?;
-        let frame = self.capture_stream_frame(&mut session);
+        let shown: Vec<(u64, Option<&SharedBuffer>)> = self
+            .streamed_windows()
+            .map(|win| (win.id.raw(), win.buffer.as_ref()))
+            .collect();
+        let updates = video::capture(&mut session.videos, &shown, now_ms);
+        let frame = self.capture_stream_frame(&mut session.scene, &updates);
         let bytes = guiremote::scene::encode_scene_frame(&frame);
         self.stream_sessions.insert(stream_id, session);
         Ok(bytes)
@@ -12295,6 +12833,7 @@ mod tests {
         let resp = comp.handle_request(CompositorRequest::CreateWindow {
             spec: WindowSpec::new("Protocol Test", 320, 240),
             client_pid: 99,
+            owner_pid: None,
         });
         let window_id = match resp {
             CompositorResponse::WindowCreated { window_id } => window_id,
@@ -13975,6 +14514,164 @@ mod tests {
             k.modifiers.alt,
             "US QWERTY has no third level to spend it on"
         );
+    }
+
+    /// The key presses reaching the focused window, decoded as a client
+    /// sees them.
+    fn typed_keys(comp: &mut Compositor) -> Vec<ClientKeyEvent> {
+        decode_drained(comp)
+            .into_iter()
+            .filter_map(|e| match e.event {
+                ClientEvent::Key(k) if k.pressed => Some(k),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn press_keys(comp: &mut Compositor, scancodes: &[u32]) {
+        for &scancode in scancodes {
+            comp.handle_input(InputEvent::KeyDown {
+                scancode,
+                character: None,
+            });
+        }
+    }
+
+    fn release_keys(comp: &mut Compositor, scancodes: &[u32]) {
+        for &scancode in scancodes.iter().rev() {
+            comp.handle_input(InputEvent::KeyUp { scancode });
+        }
+    }
+
+    /// The press of `key` among what the focused window was sent.
+    fn press_of(comp: &mut Compositor, key: Key) -> ClientKeyEvent {
+        typed_keys(comp)
+            .into_iter()
+            .find(|k| k.key == key)
+            .unwrap_or_else(|| panic!("no {key:?} key event"))
+    }
+
+    const LEFT_CTRL: u32 = 0x1D;
+    const LEFT_ALT: u32 = 0x38;
+    const ALT_GR: u32 = 0xE038;
+    const KEY_E: u32 = 0x12;
+
+    /// Left Ctrl + left Alt is a command, not AltGr: on a German board it
+    /// carries no text, where a field reading Ctrl and Alt together as
+    /// AltGr's report would type the `e`. AltGr itself still types `€`.
+    #[test]
+    fn left_ctrl_and_alt_are_a_command_and_carry_no_text() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        let _ = decode_drained(&mut comp);
+
+        press_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, KEY_E]);
+        release_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, KEY_E]);
+        let e = press_of(&mut comp, Key::E);
+        assert_eq!(e.text, "", "a Ctrl+Alt shortcut typed its letter");
+        assert!(
+            e.modifiers.ctrl && e.modifiers.alt,
+            "and it is still the chord"
+        );
+
+        press_keys(&mut comp, &[ALT_GR, KEY_E]);
+        release_keys(&mut comp, &[ALT_GR, KEY_E]);
+        let e = press_of(&mut comp, Key::E);
+        assert_eq!(
+            e.text, "\u{20AC}",
+            "AltGr+E is the euro sign on a German board"
+        );
+        assert!(!e.modifiers.alt && !e.modifiers.ctrl);
+    }
+
+    /// On a board with no third level the rule is the same, from either Alt:
+    /// Ctrl+Alt+T and its kind are shortcuts, and type nothing.
+    #[test]
+    fn ctrl_alt_shortcuts_type_nothing_on_a_us_board_either() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("us-qwerty"));
+        let _ = decode_drained(&mut comp);
+
+        for alt in [LEFT_ALT, ALT_GR] {
+            press_keys(&mut comp, &[LEFT_CTRL, alt, KEY_E]);
+            release_keys(&mut comp, &[LEFT_CTRL, alt, KEY_E]);
+            let e = press_of(&mut comp, Key::E);
+            assert_eq!(e.text, "", "with {alt:#x}");
+            assert!(e.modifiers.ctrl && e.modifiers.alt);
+        }
+    }
+
+    /// Only Ctrl and Alt together lose their text: Ctrl or Alt alone still
+    /// carries the letter, for a terminal, or a field's own rule, to decide
+    /// on (`requests/e-cf-...`, part 1, is the toolkit's).
+    #[test]
+    fn ctrl_or_alt_alone_still_carries_its_letter() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        let _ = decode_drained(&mut comp);
+
+        for held in [LEFT_CTRL, LEFT_ALT] {
+            press_keys(&mut comp, &[held, KEY_E]);
+            release_keys(&mut comp, &[held, KEY_E]);
+            assert_eq!(press_of(&mut comp, Key::E).text, "e", "held {held:#x}");
+        }
+    }
+
+    /// A Ctrl+Alt shortcut in the middle of an accent leaves the accent
+    /// waiting for its vowel, as any other command chord does.
+    #[test]
+    fn a_ctrl_alt_shortcut_leaves_a_pending_accent_waiting() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        let _ = decode_drained(&mut comp);
+
+        press_keys(&mut comp, &[0x0D]); // the acute accent, dead on German
+        release_keys(&mut comp, &[0x0D]);
+        press_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, KEY_E]);
+        release_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, KEY_E]);
+        press_keys(&mut comp, &[KEY_E]);
+        let texts: Vec<String> = typed_keys(&mut comp).into_iter().map(|k| k.text).collect();
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some("\u{e9}"),
+            "the accent did not survive the shortcut: {texts:?}"
+        );
+    }
+
+    /// A key the layout did resolve through AltGr types its character even
+    /// with left Ctrl and Alt held as well: the rule is for chords that
+    /// selected no character, and this one selected `€`.
+    #[test]
+    fn a_character_alt_gr_selected_survives_ctrl_and_alt_held_beside_it() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+        let _ = decode_drained(&mut comp);
+
+        press_keys(&mut comp, &[LEFT_CTRL, LEFT_ALT, ALT_GR, KEY_E]);
+        assert_eq!(press_of(&mut comp, Key::E).text, "\u{20AC}");
+    }
+
+    /// A source that hands over its own character -- the Windows host
+    /// window, whose AltGr arrives as Ctrl+Alt -- has resolved AltGr itself,
+    /// and its character is typed whatever the compositor's layout says.
+    #[test]
+    fn a_sources_own_character_is_typed_under_ctrl_and_alt() {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("us-qwerty"));
+        let _ = decode_drained(&mut comp);
+
+        press_keys(&mut comp, &[LEFT_CTRL, ALT_GR]);
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: KEY_E,
+            character: Some('\u{20AC}'),
+        });
+        assert_eq!(press_of(&mut comp, Key::E).text, "\u{20AC}");
     }
 
     #[test]
@@ -17402,6 +18099,169 @@ mod tests {
         );
         viewer.apply(&dropped).unwrap();
         assert!(held(&viewer).is_empty());
+    }
+
+    /// A window presenting a buffer streams as video: a frame whenever a new
+    /// buffer is attached, which a viewer decodes back to the buffer's pixels
+    /// (within what the coding loses); nothing while the buffer is the same;
+    /// a stop when the window goes back to commands. A window drawing
+    /// commands sends no video.
+    #[test]
+    fn test_stream_codes_a_buffers_pixels_as_video() {
+        use guiremote::scene::{SceneFrame, SceneViewer};
+
+        fn capture(comp: &mut Compositor, stream: u64, ms: u64) -> SceneFrame {
+            let data = comp
+                .capture_stream_at(stream, ms)
+                .expect("the stream exists");
+            let (frame, used) = guiremote::scene::decode_scene_frame(&data).expect("decodes");
+            assert_eq!(used, data.len());
+            frame
+        }
+        fn video_of(frame: &SceneFrame, id: WindowId) -> Option<VideoUpdate> {
+            frame
+                .windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .and_then(|w| w.video.clone())
+        }
+        /// Peak signal to noise over the colour channels, in decibels.
+        fn psnr(a: &[u32], b: &[u32]) -> f64 {
+            assert_eq!(a.len(), b.len());
+            let mut sse = 0f64;
+            for (&p, &q) in a.iter().zip(b) {
+                for shift in [0, 8, 16] {
+                    let d = f64::from((p >> shift) & 0xff) - f64::from((q >> shift) & 0xff);
+                    sse += d * d;
+                }
+            }
+            let mse = sse / (a.len() as f64 * 3.0);
+            10.0 * (255.0 * 255.0 / mse.max(1e-9)).log10()
+        }
+
+        let mut comp = Compositor::new(320, 240, 60).unwrap();
+        let game = comp.create_window("Game".to_string(), 160, 96, 1);
+        let ui = comp.create_window("UI".to_string(), 80, 60, 1);
+        // Smooth, as video's pictures are.
+        let picture = |shift: u32| -> Vec<u8> {
+            (0..96u32)
+                .flat_map(|y| {
+                    (0..160u32).flat_map(move |x| {
+                        let r = (x + shift) & 0xff;
+                        let g = (y * 2) & 0xff;
+                        let b = x.midpoint(y) & 0xff;
+                        (0xFF00_0000 | (r << 16) | (g << 8) | b).to_le_bytes()
+                    })
+                })
+                .collect()
+        };
+        let attach = |comp: &mut Compositor, shift: u32| {
+            comp.attach_buffer(
+                game,
+                11,
+                160,
+                96,
+                160 * 4,
+                BufferFormat::Xrgb8888,
+                &picture(shift),
+            )
+            .unwrap();
+        };
+        let pixels = |comp: &Compositor| {
+            comp.window_ref(game)
+                .unwrap()
+                .buffer
+                .as_ref()
+                .unwrap()
+                .pixels()
+                .to_vec()
+        };
+        attach(&mut comp, 0);
+        let stream = comp.start_stream();
+        let mut viewer = SceneViewer::new();
+        let mut decoder = videocodec::Decoder::new(
+            videocodec::Codec::Vp9,
+            &[],
+            videocodec::ColourHint::default(),
+            videocodec::Limits::default(),
+        )
+        .unwrap();
+        // Every frame the viewer holds for the game, decoded and converted in
+        // order as a viewer would; the last one's pixels. A stop is not
+        // expected until the end.
+        let mut take = |viewer: &mut SceneViewer| -> Option<Vec<u32>> {
+            let held = viewer.windows.get_mut(&game.raw())?;
+            let mut last = None;
+            for update in held.take_video() {
+                let VideoUpdate::Frame(video) = update else {
+                    panic!("a stop while the game still presents its buffer");
+                };
+                assert_eq!((video.width, video.height), (160, 96));
+                decoder
+                    .send(&videocodec::Packet {
+                        data: &video.frame,
+                        alpha: None,
+                        time: 0,
+                        duration: 0,
+                        keyframe: false,
+                        discard: false,
+                    })
+                    .unwrap();
+                while let Some(picture) = decoder.receive() {
+                    // The stream says it is BT.601 (VP9's colour space 1,
+                    // H.273's 5), as the compositor converted it; a stream
+                    // that said nothing would be guessed (6 at this size,
+                    // 1 -- BT.709 -- at 1280 wide).
+                    assert_eq!(picture.colour().matrix, 5);
+                    last = Some(picture.to_frame().unwrap().pixels);
+                }
+            }
+            last
+        };
+
+        let first = capture(&mut comp, stream, 0);
+        assert!(matches!(
+            video_of(&first, game),
+            Some(VideoUpdate::Frame(_))
+        ));
+        assert_eq!(video_of(&first, ui), None, "commands send no video");
+        viewer.apply(&first).unwrap();
+        let got = take(&mut viewer).expect("the first picture");
+        assert!(
+            psnr(&got, &pixels(&comp)) > 35.0,
+            "{} dB",
+            psnr(&got, &pixels(&comp))
+        );
+
+        // The same buffer: nothing new.
+        let same = capture(&mut comp, stream, 33);
+        assert_eq!(video_of(&same, game), None);
+        viewer.apply(&same).unwrap();
+        assert!(take(&mut viewer).is_none());
+
+        // New pictures: frames coded against the last.
+        for (n, shift) in [(1u64, 4u32), (2, 8), (3, 12)] {
+            attach(&mut comp, shift);
+            let next = capture(&mut comp, stream, 33 + 33 * n);
+            assert!(matches!(video_of(&next, game), Some(VideoUpdate::Frame(_))));
+            viewer.apply(&next).unwrap();
+            let got = take(&mut viewer).expect("the next picture");
+            assert!(
+                psnr(&got, &pixels(&comp)) > 33.0,
+                "frame {n}: {} dB",
+                psnr(&got, &pixels(&comp))
+            );
+        }
+
+        // Back to commands: the video stops.
+        assert_eq!(comp.detach_buffer(game), Some(11));
+        let stopped = capture(&mut comp, stream, 200);
+        assert_eq!(video_of(&stopped, game), Some(VideoUpdate::Stop));
+        viewer.apply(&stopped).unwrap();
+        assert_eq!(
+            viewer.windows.get_mut(&game.raw()).unwrap().take_video(),
+            [VideoUpdate::Stop]
+        );
     }
 
     #[test]
@@ -23155,6 +24015,47 @@ mod tests {
         );
     }
 
+    /// A window that asks for the user's attention is listed as asking until
+    /// it is focused; a focused window's request is moot; and a request can be
+    /// withdrawn before anyone looks.
+    #[test]
+    fn a_window_asking_for_attention_is_listed_until_it_is_focused() {
+        let mut comp = ungated_compositor(800, 600);
+        let chat = comp.create_window("Chat".to_string(), 200, 150, 1);
+        let editor = comp.create_window("Editor".to_string(), 200, 150, 2);
+        comp.focus_window(editor);
+        let asking = |comp: &Compositor, id: WindowId| {
+            comp.window_list()
+                .windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .map(|w| w.demands_attention)
+        };
+        assert_eq!(asking(&comp, chat), Some(false));
+
+        // A new message, while the user works in the editor.
+        comp.set_attention(chat, true).expect("chat");
+        assert_eq!(asking(&comp, chat), Some(true));
+        // The editor has the user already: asking changes nothing.
+        comp.set_attention(editor, true).expect("editor");
+        assert_eq!(asking(&comp, editor), Some(false));
+
+        // The user looks: focusing it is the end of the request.
+        comp.focus_window(chat);
+        assert_eq!(asking(&comp, chat), Some(false));
+
+        // Withdrawn before anyone looked: the message was read elsewhere.
+        comp.focus_window(editor);
+        comp.set_attention(chat, true).expect("chat");
+        comp.set_attention(chat, false).expect("chat");
+        assert_eq!(asking(&comp, chat), Some(false));
+
+        assert!(
+            comp.set_attention(WindowId::from_raw(9999), true).is_err(),
+            "a window that does not exist cannot ask"
+        );
+    }
+
     #[test]
     fn the_window_list_says_which_program_each_window_belongs_to() {
         // Two windows of one program and one of another, because the single
@@ -24374,21 +25275,47 @@ mod tests {
         assert_eq!(comp.pointer().expect("pointer").style.size_px, normal * 2);
     }
 
-    /// The user's pointer settings are not read yet, on purpose — see
-    /// `pointer_preferences`. This pins that: a change to one of the rival
-    /// copies must not reach the pointer until the copies are one, or the
-    /// others become silently wrong. It is the test to update, not to delete,
-    /// when the survivor is named.
+    /// The pointer is the size and colours the user chose in
+    /// `appearance.yaml`, and follows a change to them -- every size the
+    /// setting offers, at the display's scale, and every scheme.
     #[test]
-    fn the_pointer_does_not_read_a_rival_copy_of_its_settings() {
+    fn the_pointer_follows_the_users_appearance_settings() {
         let mut comp = Compositor::new(800, 600, 60).expect("compositor");
-        let before = comp.pointer().expect("pointer").style;
+        assert_eq!(
+            comp.pointer().expect("pointer").style.size_px,
+            appearance::CursorSize::Normal.pixels(),
+            "the default is not the setting's default"
+        );
+        for &size in appearance::CursorSize::ALL {
+            for &scheme in appearance::CursorScheme::ALL {
+                comp.set_appearance(AppearanceSettings {
+                    cursor_size: size,
+                    cursor_scheme: scheme,
+                    ..AppearanceSettings::default()
+                });
+                let style = comp.pointer().expect("pointer").style;
+                assert_eq!(style.size_px, size.pixels(), "{size:?}");
+                let colors = Compositor::pointer_colors(scheme, comp.palette.accent);
+                assert_eq!((style.fill, style.outline), colors, "{scheme:?}");
+            }
+        }
+        // The largest at a 4x display is drawn at its size, not cut down to
+        // a bound meant for nonsense scales.
         comp.set_appearance(AppearanceSettings {
-            cursor_size: appearance::CursorSize::ExtraLarge,
-            cursor_scheme: appearance::CursorScheme::Inverted,
+            cursor_size: appearance::CursorSize::Giant,
             ..AppearanceSettings::default()
         });
-        assert_eq!(comp.pointer().expect("pointer").style, before);
+        if let Some(d) = comp.display_manager.displays.first_mut() {
+            d.scale_factor = 4.0;
+        }
+        let style = comp.pointer().expect("pointer").style;
+        assert_eq!(style.size_px, 4 * appearance::CursorSize::Giant.pixels());
+        let image = cursor::render(CursorShape::Arrow, &style).expect("an arrow");
+        assert!(
+            image.width > 4 * appearance::CursorSize::Giant.pixels(),
+            "the largest pointer was clamped: {} px wide",
+            image.width
+        );
     }
 
     #[test]
@@ -24627,6 +25554,152 @@ mod tests {
         );
     }
 
+    /// The grab is the window's until every button is up, not the first
+    /// button's: press left, press right, let go of left, and the right
+    /// button's press and release still belong to the window the gesture
+    /// began in, wherever the pointer is.
+    #[test]
+    fn the_grab_lasts_until_the_last_button_is_up() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        move_to(&mut comp, 100, 150);
+        button_down(&mut comp, MouseButton::Left, 100, 150);
+        let _ = pointer_news(&mut comp);
+
+        // Out over the other window, and a second button.
+        move_to(&mut comp, 450, 150);
+        button_down(&mut comp, MouseButton::Right, 450, 150);
+        button_up(&mut comp, MouseButton::Left, 450, 150);
+        move_to(&mut comp, 460, 160);
+        button_up(&mut comp, MouseButton::Right, 460, 160);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![
+                (a, "Move".to_string()),
+                (a, "ButtonPress(Right)".to_string()),
+                (a, "ButtonRelease(Left)".to_string()),
+                // Still grabbed: the right button is down.
+                (a, "Move".to_string()),
+                (a, "ButtonRelease(Right)".to_string()),
+                // Only now is the pointer where it really is.
+                (a, "Leave".to_string()),
+                (b, "Enter".to_string()),
+            ]
+        );
+        // And the grab is over: motion goes to the window under the pointer.
+        move_to(&mut comp, 470, 170);
+        assert_eq!(pointer_news(&mut comp), vec![(b, "Move".to_string())]);
+    }
+
+    /// A press during a grab is the grabbing window's even over another
+    /// window's title bar, which would otherwise be focused and start a move
+    /// in the middle of somebody else's gesture.
+    #[test]
+    fn a_press_during_a_grab_is_not_taken_by_another_window_s_frame() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        let bar = comp
+            .window_ref(b)
+            .expect("b")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let (bx, by) = (bar.x + bar.width as i32 / 2, bar.y + bar.height as i32 / 2);
+        let b_was = comp.window_ref(b).map(|w| (w.x, w.y));
+        comp.focus_window(a);
+
+        button_down(&mut comp, MouseButton::Right, 100, 150);
+        move_to(&mut comp, bx, by);
+        button_down(&mut comp, MouseButton::Left, bx, by);
+        move_to(&mut comp, bx + 60, by + 40);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.contains(&(a, "ButtonPress(Left)".to_string())),
+            "the left press did not reach the grabbing window: {news:?}"
+        );
+        assert!(news.iter().all(|(id, _)| *id != b), "{news:?}");
+        assert_eq!(
+            comp.window_ref(b).map(|w| (w.x, w.y)),
+            b_was,
+            "the other window was dragged by a press that was not its own"
+        );
+        assert!(
+            !comp.window_ref(b).expect("b").focused,
+            "the other window took focus"
+        );
+        assert!(comp.window_ref(a).expect("a").focused);
+    }
+
+    /// A button a device reports pressed again while it is held -- its own
+    /// repeat -- is not a second press: the window would read two presses
+    /// with no release between as the start of a double click.
+    #[test]
+    fn a_held_button_pressed_again_is_not_delivered_twice() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        move_to(&mut comp, 100, 150);
+        button_down(&mut comp, MouseButton::Left, 100, 150);
+        button_down(&mut comp, MouseButton::Left, 100, 150);
+        button_up(&mut comp, MouseButton::Left, 100, 150);
+        let presses = pointer_news(&mut comp)
+            .into_iter()
+            .filter(|(id, kind)| *id == a && kind.starts_with("ButtonPress"))
+            .count();
+        assert_eq!(presses, 1);
+    }
+
+    /// A click says which modifiers were held, even to a window that was never
+    /// told the key went down: Ctrl pressed while one window has the keyboard,
+    /// then a click on another, reaches the other as a Ctrl+click -- the
+    /// desktop's case, whose surface almost never has the keyboard.
+    #[test]
+    fn a_click_carries_the_modifiers_held_even_to_a_window_without_the_keyboard() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        comp.focus_window(a);
+        // Left Ctrl, down while `a` has the keyboard.
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1D,
+            character: None,
+        });
+        button_down(&mut comp, MouseButton::Right, 450, 150);
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x1D });
+        button_up(&mut comp, MouseButton::Right, 450, 150);
+
+        let to_b: Vec<EventNotification> = comp
+            .drain_notifications()
+            .into_iter()
+            .filter(|n| {
+                matches!(
+                    n,
+                    EventNotification::MouseEvent {
+                        window_id,
+                        kind: MouseEventKind::ButtonPress(_) | MouseEventKind::ButtonRelease(_),
+                        ..
+                    } if *window_id == b
+                )
+            })
+            .collect();
+        let held: Vec<Modifiers> = to_b
+            .iter()
+            .filter_map(|n| match n {
+                EventNotification::MouseEvent { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            held,
+            vec![Modifiers::ctrl(), Modifiers::NONE],
+            "the press was made with Ctrl down and the release after it came up"
+        );
+        // And it survives the translation to what the client is sent.
+        let sent = to_b.into_iter().map(wire_event).collect::<Vec<_>>();
+        assert_eq!(sent[0].modifiers, Modifiers::ctrl());
+        assert_eq!(sent[1].modifiers, Modifiers::NONE);
+    }
+
     /// A release whose press no window saw goes nowhere, rather than to
     /// whichever window is focused.
     #[test]
@@ -24700,6 +25773,431 @@ mod tests {
             pointer_news(&mut comp),
             vec![(b, "Enter".to_string()), (b, "Move".to_string())],
             "a closed window still held the pointer"
+        );
+    }
+
+    // -- displays asleep --------------------------------------------------------------
+
+    /// The key events reaching windows, as `(scancode-named key, pressed)`.
+    fn key_news(comp: &mut Compositor) -> Vec<(Key, bool)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::KeyEvent { key, pressed, .. } => Some((key, pressed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn key_down(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyDown {
+            scancode,
+            character: None,
+        });
+    }
+
+    fn key_up(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyUp { scancode });
+    }
+
+    /// The key that wakes the screen does not type, nor do its repeats, nor
+    /// is its release reported; and the request that slept them is answered.
+    #[test]
+    fn the_key_that_wakes_the_displays_wakes_them_and_types_nothing() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        let _ = key_news(&mut comp);
+        comp.sleep_displays(7, 41);
+        assert!(comp.displays_asleep());
+        assert!(
+            wake_seqs(&mut comp, 7).is_empty(),
+            "answered before the wake"
+        );
+
+        key_down(&mut comp, 0x1E); // A
+        assert!(!comp.displays_asleep());
+        assert_eq!(wake_seqs(&mut comp, 7), vec![41]);
+        key_down(&mut comp, 0x1E); // its repeat
+        key_up(&mut comp, 0x1E);
+        assert_eq!(key_news(&mut comp), Vec::new(), "the waking key typed");
+
+        // The next press is an ordinary one.
+        key_down(&mut comp, 0x1E);
+        assert_eq!(key_news(&mut comp), vec![(Key::A, true)]);
+    }
+
+    /// A Shift that wakes the screen is still held: the waking press is not
+    /// delivered, and the letter typed next is still a capital.
+    #[test]
+    fn a_shift_that_wakes_the_displays_still_shifts_the_next_letter() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        comp.sleep_displays(7, 1);
+        key_down(&mut comp, 0x2A); // left Shift
+        assert!(!comp.displays_asleep());
+        assert!(comp.modifiers().shift);
+        let _ = key_news(&mut comp);
+        key_down(&mut comp, 0x1E);
+        let held = comp
+            .drain_notifications()
+            .into_iter()
+            .find_map(|n| match n {
+                EventNotification::KeyEvent { modifiers, .. } => Some(modifiers),
+                _ => None,
+            });
+        assert_eq!(held, Some(Modifiers::shift()));
+    }
+
+    /// Letting go of the hotkey that put the displays to sleep does not wake
+    /// them, and its release is delivered: its press was.
+    #[test]
+    fn a_key_released_while_asleep_does_not_wake_the_displays() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        key_down(&mut comp, 0x26); // L, pressed before the sleep
+        let _ = key_news(&mut comp);
+        comp.sleep_displays(7, 1);
+        key_up(&mut comp, 0x26);
+        assert!(
+            comp.displays_asleep(),
+            "letting go of the hotkey woke the displays"
+        );
+        assert_eq!(key_news(&mut comp), vec![(Key::L, false)]);
+    }
+
+    /// The hand that clicked "sleep" is still on the mouse: motion within the
+    /// grace does not wake the displays. After it, motion does. Neither is
+    /// delivered, and the pointer is where the hand is.
+    #[test]
+    fn pointer_motion_wakes_the_displays_only_after_the_grace() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let _a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.set_sleep_motion_grace(Duration::from_hours(1));
+        comp.sleep_displays(7, 1);
+        move_to(&mut comp, 150, 150);
+        assert!(
+            comp.displays_asleep(),
+            "a twitch of the mouse woke the displays"
+        );
+
+        comp.set_sleep_motion_grace(Duration::ZERO);
+        move_to(&mut comp, 160, 160);
+        assert!(!comp.displays_asleep());
+        assert_eq!(
+            pointer_news(&mut comp),
+            Vec::new(),
+            "the waking motion was delivered"
+        );
+        assert_eq!(comp.cursor_position(), (160, 160));
+    }
+
+    /// A click that wakes the screen clicks nothing: its press is not
+    /// delivered, so it starts no grab, and its release goes nowhere.
+    #[test]
+    fn a_click_that_wakes_the_displays_reaches_no_window() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let _a = window_at_point(&mut comp, 100, 100, 200, 150);
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        comp.sleep_displays(7, 1);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        assert!(!comp.displays_asleep());
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter().all(|(_, kind)| !kind.starts_with("Button")),
+            "the waking click reached a window: {news:?}"
+        );
+    }
+
+    /// The screen was black or off, so waking it draws all of it again.
+    #[test]
+    fn waking_the_displays_draws_the_whole_screen_again() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let _a = window_at_point(&mut comp, 100, 100, 200, 150);
+        let _ = comp.compose_frame();
+        assert!(!comp.compose_frame(), "nothing changed");
+        comp.sleep_displays(7, 1);
+        comp.wake_displays();
+        assert!(comp.compose_frame(), "the wake drew nothing");
+    }
+
+    /// The sequence numbers of `client`'s answered sleep requests, taken;
+    /// every one must be answered `Ok`.
+    fn wake_seqs(comp: &mut Compositor, client: u64) -> Vec<u32> {
+        comp.take_deferred_replies(client)
+            .into_iter()
+            .map(|(seq, answer)| {
+                assert!(matches!(answer, CompositorResponse::Ok), "{answer:?}");
+                seq
+            })
+            .collect()
+    }
+
+    /// A client that goes away leaves no sleep request behind to answer.
+    #[test]
+    fn a_departed_client_s_sleep_requests_are_forgotten() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.sleep_displays(7, 1);
+        comp.sleep_displays(8, 2);
+        comp.forget_client_requests(7);
+        comp.wake_displays();
+        assert!(wake_seqs(&mut comp, 7).is_empty());
+        assert_eq!(wake_seqs(&mut comp, 8), vec![2]);
+    }
+
+    // -- picking a window ---------------------------------------------------------------
+
+    /// The picks answered for `client`, taken.
+    fn picks(comp: &mut Compositor, client: u64) -> Vec<(u32, Option<PickedWindow>)> {
+        comp.take_deferred_replies(client)
+            .into_iter()
+            .map(|(seq, answer)| match answer {
+                CompositorResponse::Picked(picked) => (seq, picked),
+                other => panic!("a pick was answered {other:?}"),
+            })
+            .collect()
+    }
+
+    /// A window with its client area at (100, 100), 300 by 200, opened by a
+    /// client the kernel named as process `pid` (or did not name).
+    fn attested_window(comp: &mut Compositor, title: &str, pid: Option<u32>) -> WindowId {
+        let spec = WindowSpec {
+            position: Some((100, 100)),
+            app_id: "org.example.Notes".to_string(),
+            ..WindowSpec::new(title, 300, 200)
+        };
+        match comp.handle_request(CompositorRequest::CreateWindow {
+            spec,
+            client_pid: 3,
+            owner_pid: pid,
+        }) {
+            CompositorResponse::WindowCreated { window_id } => window_id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn shape(comp: &Compositor) -> Option<CursorShape> {
+        comp.pointer().map(|p| p.shape)
+    }
+
+    /// The next click names the window under it, with the process the
+    /// kernel named for it, and reaches no window.
+    #[test]
+    fn a_pick_takes_the_next_click_and_names_the_window_under_it() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let notes = attested_window(&mut comp, "notes.txt", Some(321));
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        assert_ne!(shape(&comp), Some(CursorShape::Crosshair));
+
+        comp.arm_pick(7, 5).unwrap();
+        assert!(comp.picking());
+        assert_eq!(
+            shape(&comp),
+            Some(CursorShape::Crosshair),
+            "the compositor's own mark that the next click is the pick's"
+        );
+        assert!(picks(&mut comp, 7).is_empty(), "answered before the click");
+
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        assert_eq!(
+            picks(&mut comp, 7),
+            vec![(
+                5,
+                Some(PickedWindow {
+                    window: notes.raw(),
+                    title: "notes.txt".to_string(),
+                    app_id: "org.example.Notes".to_string(),
+                    pid: Some(321),
+                })
+            )]
+        );
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter().all(|(_, kind)| !kind.contains("Button")),
+            "the picking click reached a window: {news:?}"
+        );
+        assert!(!comp.picking());
+        assert_ne!(shape(&comp), Some(CursorShape::Crosshair));
+
+        // The click after it is an ordinary one.
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        assert!(
+            pointer_news(&mut comp)
+                .iter()
+                .any(|(w, kind)| *w == notes && kind.contains("ButtonPress"))
+        );
+    }
+
+    /// The crosshair shows over a window that hides the pointer: no program
+    /// may hide the mark of a pick.
+    #[test]
+    fn the_crosshair_shows_over_a_window_that_hides_the_pointer() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let video = attested_window(&mut comp, "video", None);
+        comp.handle_request(CompositorRequest::SetCursor {
+            window_id: video,
+            cursor: CursorShape::Hidden,
+        });
+        move_to(&mut comp, 150, 150);
+        assert_eq!(shape(&comp), None, "the window hid the pointer");
+        comp.arm_pick(7, 1).unwrap();
+        assert_eq!(shape(&comp), Some(CursorShape::Crosshair));
+    }
+
+    /// A press on the title bar picks the window it heads, and starts no
+    /// drag: the user sees one window, frame and all.
+    #[test]
+    fn a_click_on_the_frame_picks_the_window_it_frames() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let notes = attested_window(&mut comp, "notes.txt", None);
+        comp.arm_pick(7, 1).unwrap();
+        button_down(&mut comp, MouseButton::Left, 150, 95);
+        let picked = picks(&mut comp, 7);
+        assert_eq!(picked.len(), 1);
+        let window = picked[0].1.clone().expect("the frame's window");
+        assert_eq!(window.window, notes.raw());
+        assert_eq!(
+            window.pid, None,
+            "a window opened over TCP has no attested owner"
+        );
+        move_to(&mut comp, 400, 300);
+        button_up(&mut comp, MouseButton::Left, 400, 300);
+        let rect = comp.window_ref(notes).map(|w| (w.x, w.y));
+        assert_eq!(
+            rect,
+            Some((100, 100)),
+            "the picking press dragged the window"
+        );
+    }
+
+    /// Escape gives up, and neither it nor its repeat nor its release
+    /// reaches the focused window; once the pick is over Escape is a key.
+    #[test]
+    fn escape_gives_up_a_pick_and_types_nothing() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        let _ = key_news(&mut comp);
+        comp.arm_pick(7, 2).unwrap();
+        key_down(&mut comp, 0x01);
+        key_down(&mut comp, 0x01); // its repeat
+        key_up(&mut comp, 0x01);
+        assert_eq!(picks(&mut comp, 7), vec![(2, None)]);
+        assert_eq!(key_news(&mut comp), Vec::new(), "the Escape typed");
+        assert!(!comp.picking());
+
+        key_down(&mut comp, 0x01);
+        assert_eq!(key_news(&mut comp), vec![(Key::Escape, true)]);
+    }
+
+    /// Typing goes on during a pick: only the click is the pick's.
+    #[test]
+    fn typing_during_a_pick_still_types() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        let _ = key_news(&mut comp);
+        comp.arm_pick(7, 1).unwrap();
+        key_down(&mut comp, 0x1E); // A
+        assert_eq!(key_news(&mut comp), vec![(Key::A, true)]);
+        assert!(comp.picking());
+    }
+
+    /// Any other button gives up, and reaches no window either.
+    #[test]
+    fn another_button_gives_up_a_pick_and_reaches_no_window() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let _notes = attested_window(&mut comp, "notes.txt", Some(9));
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        comp.arm_pick(7, 3).unwrap();
+        button_down(&mut comp, MouseButton::Right, 150, 150);
+        button_up(&mut comp, MouseButton::Right, 150, 150);
+        assert_eq!(picks(&mut comp, 7), vec![(3, None)]);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter().all(|(_, kind)| !kind.contains("Button")),
+            "{news:?}"
+        );
+    }
+
+    #[test]
+    fn a_click_where_there_is_no_window_picks_nothing() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.arm_pick(7, 4).unwrap();
+        button_down(&mut comp, MouseButton::Left, 700, 500);
+        assert_eq!(picks(&mut comp, 7), vec![(4, None)]);
+    }
+
+    /// One pick on the desktop at a time; a program cannot end another's;
+    /// and asking again replaces one's own, the earlier ask answered as
+    /// given up so nothing waits for ever.
+    #[test]
+    fn one_pick_at_a_time_and_asking_again_replaces_ones_own() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.arm_pick(7, 1).unwrap();
+        assert!(
+            comp.arm_pick(8, 1).is_err(),
+            "another program's pick is open"
+        );
+        comp.cancel_pick(8);
+        assert!(comp.picking(), "a program ended another's pick");
+        comp.arm_pick(7, 2).unwrap();
+        assert_eq!(picks(&mut comp, 7), vec![(1, None)]);
+        comp.cancel_pick(7);
+        assert_eq!(picks(&mut comp, 7), vec![(2, None)]);
+        assert!(!comp.picking());
+        assert!(picks(&mut comp, 8).is_empty());
+    }
+
+    /// A program that goes away mid-pick takes its pick with it: no
+    /// crosshair is left for nobody, and the next click is ordinary.
+    #[test]
+    fn a_departed_picker_leaves_no_crosshair_behind() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let notes = attested_window(&mut comp, "notes.txt", None);
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        comp.arm_pick(7, 1).unwrap();
+        comp.forget_client_requests(7);
+        assert!(!comp.picking());
+        assert_ne!(shape(&comp), Some(CursorShape::Crosshair));
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        assert!(
+            pointer_news(&mut comp)
+                .iter()
+                .any(|(w, kind)| *w == notes && kind.contains("ButtonPress"))
+        );
+        assert!(picks(&mut comp, 7).is_empty());
+    }
+
+    /// The click that wakes sleeping displays is the user finding the screen,
+    /// not choosing a window: the pick waits for the next one.
+    #[test]
+    fn the_click_that_wakes_the_displays_does_not_pick() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let notes = attested_window(&mut comp, "notes.txt", Some(5));
+        comp.arm_pick(7, 1).unwrap();
+        comp.sleep_displays(9, 1);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        assert!(!comp.displays_asleep());
+        assert!(comp.picking(), "the waking click picked");
+        assert!(picks(&mut comp, 7).is_empty());
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        let picked = picks(&mut comp, 7);
+        assert_eq!(
+            picked
+                .first()
+                .and_then(|(_, p)| p.as_ref())
+                .map(|p| p.window),
+            Some(notes.raw())
         );
     }
 }

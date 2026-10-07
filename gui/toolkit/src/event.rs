@@ -307,12 +307,20 @@ impl KeyEvent {
     /// moment someone presses Escape.
     ///
     /// Yields nothing for a release, for a dead key awaiting its next
-    /// keystroke, and for a key that types only a control character. Pair it
-    /// with [`types_text`](Self::types_text) when the answer to "did this
-    /// keystroke belong to the text field at all?" decides whether the event is
-    /// consumed.
+    /// keystroke, for a key that types only a control character -- and for a
+    /// command ([`Modifiers::is_command`]): the compositor hands a command its
+    /// letter as text, Ctrl+S carrying `s`, so a field that typed whatever
+    /// arrived put an `s` in the document for every shortcut it did not know
+    /// itself. A program that wants a chord's letter -- a terminal sending
+    /// Ctrl+C on as a byte -- reads [`text`](Self::text), which is untouched.
+    /// Pair it with [`types_text`](Self::types_text) when the answer to "did
+    /// this keystroke belong to the text field at all?" decides whether the
+    /// event is consumed.
     pub fn typed(&self) -> impl Iterator<Item = char> + '_ {
-        self.text.chars().filter(|c| !c.is_control())
+        let command = self.modifiers.is_command();
+        self.text
+            .chars()
+            .filter(move |c| !command && !c.is_control())
     }
 
     /// Whether [`typed`](Self::typed) would yield anything.
@@ -492,6 +500,43 @@ impl Modifiers {
         }
     }
 
+    /// Whether a key held with these is a Ctrl chord a program answers: Ctrl
+    /// without Alt, and without the Windows key.
+    ///
+    /// Not Ctrl+Alt, because that is AltGr as Windows and a remote desktop
+    /// client on it report it: a Polish user's Ctrl+Alt+S types a letter, and
+    /// a field that took every Ctrl+S as "save" would save when the user typed
+    /// it. And not with the Windows key: Ctrl+Windows+D is the desktop's,
+    /// not a program's Ctrl+D.
+    #[must_use]
+    pub const fn is_ctrl_chord(self) -> bool {
+        self.ctrl && !self.alt && !self.super_key
+    }
+
+    /// Whether a key held with these is a command rather than typing: Ctrl or
+    /// Alt on its own, or anything with the Windows key. Ctrl and Alt held
+    /// together are AltGr ([`is_ctrl_chord`](Self::is_ctrl_chord)) and type.
+    ///
+    /// What [`KeyEvent::typed`] asks, so every text field in the tree types
+    /// nothing for a shortcut.
+    #[must_use]
+    pub const fn is_command(self) -> bool {
+        self.super_key || self.ctrl != self.alt
+    }
+
+    /// Whether nothing but Shift is held: a key pressed so is the key itself
+    /// -- Enter, Space, Escape, Tab, a letter bound as itself -- and not a
+    /// command for the window or the desktop, as Alt+Space (the window menu)
+    /// and Windows+Enter are. What a control asks before a bare key acts:
+    /// a dialog whose focused button took Alt+Space as Space pressed it.
+    ///
+    /// Shift may be held: Shift+Tab walks back, and a capital letter typed
+    /// is still typed.
+    #[must_use]
+    pub const fn is_plain(self) -> bool {
+        !self.ctrl && !self.alt && !self.super_key
+    }
+
     /// Shift alone.
     #[must_use]
     pub const fn shift() -> Self {
@@ -548,6 +593,67 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: text.to_string(),
         }
+    }
+
+    /// **A command is Ctrl or Alt on its own, or anything with the Windows
+    /// key; a Ctrl chord is Ctrl without either; a plain key has none of the
+    /// three** -- across all eight ways they can be held. Ctrl and Alt
+    /// together are AltGr: no command, and not plain.
+    #[test]
+    fn a_command_and_a_ctrl_chord_across_every_way_to_hold_them() {
+        // (ctrl, alt, super) -> (command, ctrl chord, plain)
+        let table = [
+            ((false, false, false), (false, false, true)),
+            ((true, false, false), (true, true, false)),
+            ((false, true, false), (true, false, false)),
+            ((true, true, false), (false, false, false)),
+            ((false, false, true), (true, false, false)),
+            ((true, false, true), (true, false, false)),
+            ((false, true, true), (true, false, false)),
+            ((true, true, true), (true, false, false)),
+        ];
+        for ((ctrl, alt, super_key), (command, chord, plain)) in table {
+            let m = Modifiers {
+                ctrl,
+                alt,
+                super_key,
+                shift: false,
+            };
+            assert_eq!(m.is_command(), command, "{m:?}");
+            assert_eq!(m.is_ctrl_chord(), chord, "{m:?}");
+            assert_eq!(m.is_plain(), plain, "{m:?}");
+            // Shift changes none of them.
+            let shifted = Modifiers { shift: true, ..m };
+            assert_eq!(shifted.is_command(), command, "{shifted:?}");
+            assert_eq!(shifted.is_ctrl_chord(), chord, "{shifted:?}");
+            assert_eq!(shifted.is_plain(), plain, "{shifted:?}");
+        }
+    }
+
+    /// **A command types nothing**, though the compositor hands it its
+    /// letter; AltGr and Shift type; and the raw text is left for a terminal.
+    #[test]
+    fn a_command_types_nothing() {
+        let with = |modifiers, text: &str| KeyEvent {
+            modifiers,
+            ..typing(text)
+        };
+        for m in [Modifiers::ctrl(), Modifiers::alt(), Modifiers::super_key()] {
+            let key = with(m, "k");
+            assert_eq!(key.typed().count(), 0, "{m:?}");
+            assert!(!key.types_text(), "{m:?}");
+            assert_eq!(key.text, "k", "the letter is still there to read");
+        }
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(with(altgr, "€").typed().collect::<String>(), "€");
+        assert_eq!(
+            with(Modifiers::shift(), "K").typed().collect::<String>(),
+            "K"
+        );
     }
 
     #[test]

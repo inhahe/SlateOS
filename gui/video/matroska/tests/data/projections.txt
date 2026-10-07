@@ -1,0 +1,24 @@
+# Each proj_*.mkv: the display matrix ffprobe shows for its projection, `none`, or
+# `refused` where ffprobe will not open it (generate_fixtures.py).
+proj_cubemap.mkv none
+proj_cubemap_layout.mkv none
+proj_cubemap_short.mkv refused
+proj_cubemap_size.mkv refused
+proj_equirect.mkv none
+proj_equirect_bounds.mkv refused
+proj_equirect_empty.mkv none
+proj_equirect_size.mkv refused
+proj_mesh.mkv none
+proj_mirror.mkv -65536,0,0,0,65536,0,0,0,1073741824
+proj_mirror_minus_180.mkv 0,65536,0,65536,0,0,0,0,1073741824
+proj_mirror_roll.mkv 0,-65536,0,-65536,0,0,0,0,1073741824
+proj_pitch.mkv none
+proj_private_version.mkv none
+proj_roll_180.mkv -65536,0,0,0,-65536,0,0,0,1073741824
+proj_roll_30.mkv 56755,-32767,0,32767,56755,0,0,0,1073741824
+proj_roll_90.mkv 0,-65536,0,65536,0,0,0,0,1073741824
+proj_roll_minus_90.mkv 0,65536,0,-65536,0,0,0,0,1073741824
+proj_roll_nan.mkv none
+proj_sound_track.mkv none
+proj_still.mkv none
+proj_yaw_90.mkv none

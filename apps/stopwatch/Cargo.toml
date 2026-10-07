@@ -12,6 +12,10 @@ guitk = { path = "../../gui/toolkit" }
 # and exited — a stopwatch with no face, no buttons, and nothing to tick it.
 oswindow = { path = "../../gui/window" }
 
+# Whether a key is plain enough for a binding on the key itself
+# (`is_plain`): a chord held with Alt or the Windows key is not R.
+textline = { path = "../textline" }
+
 [dev-dependencies]
 # `appearance::palette_check`.
 appearance = { path = "../../gui/appearance", features = ["testing"] }

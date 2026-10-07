@@ -62,6 +62,11 @@
 //! marks that can swap places cannot keep separate clusters. It is also the
 //! better answer independently — a caret should not be able to land between
 //! a letter and its accent, for the same reason it cannot land inside `fi`.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's
+//! `src/hb-ot-shape-normalize.cc` and `src/hb-unicode.hh`, copyright © 2009 Red
+//! Hat, Inc., © 2011 Codethink Limited and © 2010, 2011, 2012 Google, Inc. Used
+//! under HarfBuzz's licence: see `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 

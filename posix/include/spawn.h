@@ -21,9 +21,25 @@
 extern "C" {
 #endif
 
+#ifdef _GNU_SOURCE
+/* Start the child in the cgroup posix_spawnattr_setcgroup_np names. There
+ * are no cgroups here: a spawn asking for one fails with ENOTSUP. */
+#define POSIX_SPAWN_SETCGROUP 0x100
+#endif
+
 #ifdef _SLATEOS_USE_MISC
 /* A file action closing every descriptor from the argument up. */
 int posix_spawn_file_actions_addclosefrom_np(posix_spawn_file_actions_t *, int);
+
+/* A file action making the child's process group the foreground group of
+ * the terminal at the descriptor. A spawn with it fails with ENOSYS here:
+ * the system cannot yet set the group before the child runs. */
+int posix_spawn_file_actions_addtcsetpgrp_np(posix_spawn_file_actions_t *, int);
+
+/* The cgroup, by a descriptor of its directory, that POSIX_SPAWN_SETCGROUP
+ * starts the child in. */
+int posix_spawnattr_getcgroup_np(const posix_spawnattr_t *__restrict, int *__restrict);
+int posix_spawnattr_setcgroup_np(posix_spawnattr_t *, int);
 
 /* posix_spawn and posix_spawnp answering a pidfd for the child (glibc 2.39).
  * A native program has no pidfds: ENOSYS, and no child. */

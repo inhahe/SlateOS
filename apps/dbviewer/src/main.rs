@@ -3496,6 +3496,12 @@ pub struct DbViewerApp {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// What the pointer is over, so a text box under it can be drawn lit
+    /// (`track_pointer`).
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl Default for DbViewerApp {
@@ -3511,6 +3517,8 @@ impl DbViewerApp {
 
         Self {
             show_help: false,
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             file_intent: FileIntent::ImportCsv,
@@ -4193,9 +4201,17 @@ impl DbViewerApp {
             if row.is_empty() || row.bottom() > area.bottom() {
                 return;
             }
-            f.push(fill(row, self.palette.surface0, 3.0));
-            if target == Target::FilterValue && self.focus == Focus::FilterValue {
-                f.push(stroke(row, self.palette.blue, 3.0));
+            if target == Target::FilterValue {
+                // The one row that takes text: the toolkit's field.
+                guitk::field::draw(
+                    f,
+                    &self.palette,
+                    row,
+                    self.field_state(Target::FilterValue, Focus::FilterValue),
+                    self.focus_ring_width,
+                );
+            } else {
+                f.push(fill(row, self.palette.surface0, 3.0));
             }
             put_text(
                 f,
@@ -4537,20 +4553,26 @@ impl DbViewerApp {
         // starred because neither control was ever drawn at all.
         let line_h = 16.0_f32;
         let box_h = (line_h + 8.0).min((area.h - 24.0).max(0.0));
-        let editor = Rect::new(area.x + 8.0, area.y + 4.0, (area.w - 16.0).max(0.0), box_h);
+        // The pane is clipped, and the box's focus ring is drawn outside it:
+        // the margins are the pane's own, or the ring's width where wider.
+        let ring = self.focus_ring_width.max(0.0).ceil();
+        let (side, top) = (8.0_f32.max(ring), 4.0_f32.max(ring));
+        let editor = Rect::new(
+            area.x + side,
+            area.y + top,
+            (area.w - 2.0 * side).max(0.0),
+            box_h,
+        );
         if editor.is_empty() {
             return;
         }
-        f.push(fill(editor, self.palette.crust, CORNER_RADIUS));
-        f.push(stroke(
+        guitk::field::draw(
+            f,
+            &self.palette,
             editor,
-            if self.focus == Focus::Editor {
-                self.palette.blue
-            } else {
-                self.palette.surface1
-            },
-            CORNER_RADIUS,
-        ));
+            self.field_state(Target::SqlEditor, Focus::Editor),
+            self.focus_ring_width,
+        );
         f.hit(Target::SqlEditor, editor);
 
         let line = Rect::new(
@@ -5235,6 +5257,7 @@ impl DbViewerApp {
 impl DbViewerApp {
     /// Route an event to whatever the drawing pass put under it.
     fn handle_event(&mut self, event: &Event, size: (f32, f32)) {
+        self.track_pointer(event, size);
         // The picker takes the event first while it is up, or a keystroke
         // meant for a filename lands in the SQL editor behind it.
         match self.picker.handle(event, size.0, size.1) {
@@ -5257,6 +5280,43 @@ impl DbViewerApp {
         }
     }
 
+    /// Follow the pointer, whatever is up: what it is over is drawn lit only
+    /// while nothing covers the window ([`Self::covered`]), but it is known
+    /// all the same, so the light is right the moment the cover goes.
+    fn track_pointer(&mut self, event: &Event, size: (f32, f32)) {
+        let Event::Mouse(mouse) = event else {
+            return;
+        };
+        match mouse.kind {
+            MouseEventKind::Move => {
+                self.hover = self.frame(size.0, size.1).hit_test(mouse.x, mouse.y);
+            }
+            MouseEventKind::Leave => self.hover = None,
+            _ => {}
+        }
+    }
+
+    /// Whether something drawn over the window takes its keys and presses --
+    /// the file dialog or the shortcut card -- so that nothing under it
+    /// lights or shows the keyboard.
+    fn covered(&self) -> bool {
+        self.picker.is_open() || self.show_help
+    }
+
+    /// How a text box is drawn now: lit under the pointer, and marked while
+    /// it has the keyboard -- neither while something covers the window. The
+    /// toolkit's field, in the theme's shape (lane C,
+    /// c-e-a-theme-can-shape-the-controls).
+    fn field_state(&self, target: Target, focus: Focus) -> guitk::field::State {
+        let open = !self.covered();
+        guitk::field::State {
+            hovered: open && self.hover == Some(target),
+            focused: open && self.focus == focus,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
     /// Route a press to the control the last frame drew at that point.
     ///
     /// The hit boxes come from a frame drawn at the same size, so a control the
@@ -5264,6 +5324,15 @@ impl DbViewerApp {
     /// the toolbar button that ran off the right-hand edge of a narrow window
     /// cannot be pressed from off the edge.
     fn handle_mouse(&mut self, event: &MouseEvent, size: (f32, f32)) {
+        if self.show_help {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // control drawn under it.
+            if matches!(event.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+            }
+            return;
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return;
         };
@@ -5574,25 +5643,32 @@ impl DbViewerApp {
 
     /// Route a keystroke to whatever has the keyboard.
     fn handle_key(&mut self, event: &KeyEvent) {
+        // First: every key comes down and goes back up, and F1's release
+        // toggled the list off again as soon as its press had raised it.
+        if !event.pressed {
+            return;
+        }
+        // Every key but what is typed is taken plain: a chord with Ctrl, Alt
+        // or the Windows key is the window's or the desktop's and arrives
+        // carrying its key -- Alt+N opened a tab and Alt+Enter ran the query.
+        let plain = textline::is_plain(event.modifiers);
         // Ahead of the text handling below: `F1` is not a character, and a
         // reader with the editor focused still wants the keys.
-        if event.key == Key::F1 {
+        if event.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return;
         }
         if self.show_help {
             // Modal. Letting keys through would mean running a query you
             // cannot see.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return;
         }
 
-        if !event.pressed {
-            return;
-        }
         match event.key {
+            _ if !plain => {}
             Key::Escape => {
                 self.focus = Focus::None;
                 self.status = String::from("Keyboard released");
@@ -5629,17 +5705,20 @@ impl DbViewerApp {
         // layout produced, shift and dead keys included; deriving a character
         // from the key code instead is what makes a `*` impossible to type on
         // any layout but the one the table was written for -- and `SELECT *` is
-        // the first query anybody types.
-        let typed = event.text.clone();
-        if !typed.is_empty()
-            && !typed.chars().any(char::is_control)
+        // the first query anybody types. Typed, not a command's letter, which
+        // a chord carries: Alt+S typed an `s` into the query. AltGr's
+        // characters are typed.
+        if textline::types_into_field(event)
             && let Some(text) = self.focused_text()
         {
-            text.push_str(&typed);
+            text.push_str(&event.text);
             return;
         }
 
-        // Nothing has the keyboard, so letters are shortcuts.
+        // Nothing has the keyboard, so letters are shortcuts -- plain ones.
+        if !plain {
+            return;
+        }
         match event.key {
             Key::N => self.activate(Target::NewTab),
             Key::F => self.activate(Target::ToggleFilterBuilder),
@@ -5661,6 +5740,10 @@ impl DbViewerApp {
 impl App for DbViewerApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5885,6 +5968,283 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A press while the card is up puts it away, and does nothing else.**
+    /// It used to go straight through the card to the control drawn under
+    /// it. The control at the end is the same press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = DbViewerApp::new();
+        let filters = app.show_filter_builder;
+        let (x, y) = probe::rect_of(&app, Target::ToggleFilterBuilder)
+            .expect("the Filters button")
+            .centre();
+        let press = |app: &mut DbViewerApp, button: MouseButton| {
+            app.handle_event(
+                &Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(button),
+                }),
+                size,
+            );
+        };
+
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        assert!(app.show_help);
+        press(&mut app, MouseButton::Left);
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.show_filter_builder, filters,
+            "the press went through the card to the Filters button"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        press(&mut app, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        // A move under the card is not a press, and leaves it up.
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        app.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+            size,
+        );
+        assert!(app.show_help, "a move put the card away");
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+
+        press(&mut app, MouseButton::Left);
+        assert_ne!(
+            app.show_filter_builder, filters,
+            "control: the press does nothing even with the card down"
+        );
+    }
+
+    /// **The SQL editor and the filter's value box are the toolkit's
+    /// fields** (lane C, c-e-a-theme-can-shape-the-controls): lit under the
+    /// pointer and out when it goes, marked at the user's focus width while
+    /// they have the keyboard -- neither under the card or the file dialog --
+    /// and the editor's ring inside the clip of the pane it is drawn in.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = DbViewerApp::new();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 4.0,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let seq = |rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            want
+        };
+        let draws = |app: &DbViewerApp, rect: Rect, s: State| {
+            let frame = app.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(rect, s)) && (s.focused || !has(&seq(rect, State { focused: true, ..s })))
+        };
+        let pointer = |app: &mut DbViewerApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size);
+        };
+        let idle = State::default();
+        let lit = State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = State {
+            focused: true,
+            ..idle
+        };
+
+        // The editor has the keyboard to start with.
+        let editor = probe::rect_of(&app, Target::SqlEditor).expect("the SQL editor");
+        assert!(
+            draws(&app, editor, keyed),
+            "the editor is not marked at the user's focus width"
+        );
+        let (x, y) = editor.centre();
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        assert!(
+            draws(
+                &app,
+                editor,
+                State {
+                    hovered: true,
+                    ..keyed
+                }
+            ),
+            "the editor does not light under the pointer"
+        );
+        pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave);
+        assert!(
+            draws(&app, editor, keyed),
+            "the editor stays lit after the pointer leaves the window"
+        );
+
+        // The pane is clipped: the ring, drawn outside the box, is inside it.
+        let frame = app.frame(size.0, size.1);
+        let cmds = frame.commands();
+        let ring = seq(editor, keyed);
+        let at = cmds
+            .windows(ring.len())
+            .position(|w| w == ring.as_slice())
+            .expect("the editor is drawn");
+        let clip = cmds[..at]
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => Some(Some(Rect::new(*x, *y, *width, *height))),
+                RenderCommand::PopClip => Some(None),
+                _ => None,
+            })
+            .flatten()
+            .expect("the editor is drawn in its pane's clip");
+        assert!(
+            clip.x <= editor.x - width
+                && clip.y <= editor.y - width
+                && clip.right() >= editor.right() + width,
+            "the pane's clip {clip:?} cuts the ring round {editor:?}, {width} wide"
+        );
+
+        // Under the card and the file dialog it is neither lit nor marked.
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        assert!(
+            draws(&app, editor, idle),
+            "the editor is lit or marked under the shortcut card"
+        );
+        // The pointer moves off while the card is up; when the card goes,
+        // the editor is out.
+        pointer(&mut app, x, editor.y - 30.0, MouseEventKind::Move);
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        assert!(
+            draws(&app, editor, keyed),
+            "the pointer was not followed under the card"
+        );
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        probe::click(&mut app, Target::Import);
+        assert!(app.picker.is_open(), "control: the file dialog must be up");
+        assert!(
+            draws(&app, editor, idle),
+            "the editor is lit or marked under the file dialog"
+        );
+        app.handle_event(&Event::Key(probe::press(Key::Escape)), size);
+        assert!(!app.picker.is_open());
+
+        // The filter's value box takes the keyboard from the editor.
+        probe::click(&mut app, Target::ToggleFilterBuilder);
+        probe::click(&mut app, Target::FilterValue);
+        assert_eq!(app.focus, Focus::FilterValue);
+        let value = probe::rect_of(&app, Target::FilterValue).expect("the value box");
+        assert!(
+            draws(&app, value, keyed),
+            "the value box is not marked while it has the keyboard"
+        );
+        // Lit -- the pointer was left over it -- but no longer marked.
+        assert!(draws(&app, editor, lit), "the editor is still marked");
+        let (vx, vy) = value.centre();
+        pointer(&mut app, vx, vy, MouseEventKind::Move);
+        assert!(
+            draws(
+                &app,
+                value,
+                State {
+                    hovered: true,
+                    ..keyed
+                }
+            ),
+            "the value box does not light under the pointer"
+        );
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        assert!(draws(&app, editor, lit) && draws(&app, value, keyed));
+    }
+
+    /// **F1 raises the list of keys, down and up**: its release toggled the
+    /// list off as soon as the press had raised it, so on a real keyboard it
+    /// never showed. **A chord is neither a shortcut nor typing, and AltGr
+    /// types**: Alt+N opened a tab, Alt+Enter ran the query, Alt+Escape let
+    /// go of the editor, and Alt+S typed an `s` into the query.
+    #[test]
+    fn f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing() {
+        use guitk::event::Modifiers;
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = DbViewerApp::new();
+        app.handle_event(&Event::Key(probe::press(Key::F1)), size);
+        app.handle_event(&Event::Key(probe::release(Key::F1)), size);
+        assert!(app.show_help, "F1's release put the list away again");
+        app.handle_event(&Event::Key(probe::press(Key::Escape)), size);
+        assert!(!app.show_help, "control: Escape closes the list");
+
+        // The editor has the keys to start with.
+        assert_eq!(app.focus, Focus::Editor);
+        let query = app.sql_input.clone();
+        let ran = app.query_result.is_some();
+        for m in [Modifiers::alt(), Modifiers::ctrl(), Modifiers::super_key()] {
+            app.handle_event(&key(Key::S, "s", m), size);
+            app.handle_event(&key(Key::Enter, "", m), size);
+            app.handle_event(&key(Key::Escape, "", m), size);
+            app.handle_event(&key(Key::F1, "", m), size);
+        }
+        assert_eq!(app.sql_input, query, "a command's letter was typed");
+        assert_eq!(app.query_result.is_some(), ran, "a chord ran the query");
+        assert_eq!(app.focus, Focus::Editor, "a chord let go of the editor");
+        assert!(!app.show_help, "a chord raised the list");
+        app.handle_event(&key(Key::E, "€", altgr), size);
+        assert_eq!(
+            app.sql_input,
+            format!("{query}€"),
+            "AltGr's € was not typed"
+        );
+
+        // Nothing has the keys: the letters are shortcuts, plain ones.
+        app.handle_event(&Event::Key(probe::press(Key::Escape)), size);
+        assert_eq!(app.focus, Focus::None);
+        let tabs = app.tabs.len();
+        for m in [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+            Modifiers::ctrl(),
+        ] {
+            app.handle_event(&key(Key::N, "n", m), size);
+        }
+        assert_eq!(app.tabs.len(), tabs, "a chord opened a tab");
     }
 
     /// **The shortcut list reaches the window, and nothing acts behind it.**

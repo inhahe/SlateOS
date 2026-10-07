@@ -9,6 +9,8 @@ pathtext = { path = "../pathtext" }
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# The line between a chord and a character: Alt+Left is the window manager's.
+textline = { path = "../textline" }
 
 # The export replaces a file of the user's VPN profiles. `fs::write`
 # truncates the target first, so an interrupted write leaves neither the

@@ -1,0 +1,4 @@
+# pgs_sd.mkv: the picture at each change, as an MD5 of the RGBA canvas; `forced` lines with only forced subtitles shown (generate_subtitle_fixtures.py)
+canvas 720 480
+state 1000 f8e99bf9b5d24276d1bd22d5a31d444f
+state 2000 9e3119db8898b8f610596ed99bb3e433

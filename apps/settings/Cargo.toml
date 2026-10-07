@@ -13,7 +13,21 @@ quoting = { path = "../../userspace/quoting" }
 # what is set; `apps/fileassoc` writes it and `apps/explorer` obeys it, and all
 # three used to spell the group name separately. See gui/associations/src/lib.rs.
 associations = { path = "../../gui/associations" }
+# The programs SlateOS knows and the jobs each can do (C-Q20, design-decisions
+# §1425): the Default Apps page names the program for every job.
+programs = { path = "../../gui/programs" }
+# The installed programs' desktop entries, read as the start menu reads them,
+# for the same page: a program installed here can do a job SlateOS's own
+# cannot.
+desktopentry = { path = "../../gui/desktopentry" }
+# The third-party notices the image carries (design-decisions §1433): the
+# About page shows them, which is where §815 puts a screen you open.
+notices = { path = "../../gui/notices" }
 guitk = { path = "../../gui/toolkit" }
+# The keys of a one-line field -- the search and the exclusion pattern -- and
+# whether a key is plain: the one table of them, where these two fields each
+# had a copy that took AltGr for Ctrl and typed a chord's letter.
+textline = { path = "../textline" }
 # The Personalization pages edit the same preferences the desktop shell paints
 # from, so they share one model and one file rather than each keeping a copy.
 # See known-issues.md TD-THREE-INDEPENDENT-APPEARANCE-MODELS.
@@ -32,6 +46,11 @@ inputsettings = { path = "../../gui/inputsettings" }
 loginusers = { path = "../../gui/loginusers" }
 
 notifsettings = { path = "../../gui/notifsettings" }
+# The calendar's events, read -- never written -- so the Colors page can say
+# which of them an accent hides (design-decisions §1424, C-Q19): the same
+# reader the desktop's calendar popup uses.
+calendarstore = { path = "../calendarstore" }
+
 # The window and the event loop. Settings names `oswindow`, never `guiremote` —
 # an application should no more name the display protocol than a Unix program
 # names the socket layer.

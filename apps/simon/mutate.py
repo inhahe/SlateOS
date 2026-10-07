@@ -696,14 +696,14 @@ MUTATIONS = [
     ),
     (
         "the desktop's accelerators are the game's controls",
-        "    if ev.modifiers.ctrl || ev.modifiers.alt {\n        return None;\n    }",
+        "    if !textline::is_plain(ev.modifiers) {\n        return None;\n    }",
         "    if false {\n        return None;\n    }",
-        ["the_window_keeps_its_ctrl_and_alt_combinations"],
+        ["the_window_and_the_desktop_keep_their_combinations"],
     ),
     (
         "holding shift stops every key working",
-        "    if ev.modifiers.ctrl || ev.modifiers.alt {",
-        "    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.shift {",
+        "    if !textline::is_plain(ev.modifiers) {",
+        "    if !textline::is_plain(ev.modifiers) || ev.modifiers.shift {",
         ["shift_does_not_stop_a_key_working"],
     ),
     (
@@ -1298,6 +1298,12 @@ MUTATIONS = [
         "                Surface::Panel,\n            );\n        }\n        stroke(f, panel, c.chrome.bad",
         "                Surface::Card,\n            );\n        }\n        stroke(f, panel, c.chrome.bad",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the Windows key's chords are the game's controls",
+        '    if !textline::is_plain(ev.modifiers) {',
+        '    if ev.modifiers.ctrl || ev.modifiers.alt {',
+        ['the_window_and_the_desktop_keep_their_combinations'],
     ),
 ]
 

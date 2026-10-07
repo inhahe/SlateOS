@@ -335,6 +335,92 @@ MUTATIONS = [
         "            true",
         [LIST_CURSOR],
     ),
+    (
+        'a chord raises the keys',
+        '    if key.key == Key::F1 && plain {',
+        '    if key.key == Key::F1 {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '    if textline::is_ctrl_chord(key.modifiers) {\n        return handle_ctrl_chord(app, key);',
+        '    if key.modifiers.ctrl {\n        return handle_ctrl_chord(app, key);',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'AltGr is taken for Alt',
+        '    if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key {',
+        '    if key.modifiers.alt {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        "the Windows key's chords work the board",
+        '    if !plain {\n        return false;\n    }\n',
+        '',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the archive',
+        '    let plain = textline::is_plain(key.modifiers);\n    match key.key {\n        Key::Up if plain => {',
+        '    let plain = true;\n    match key.key {\n        Key::Up if plain => {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the archive',
+        '        Key::D if textline::is_ctrl_chord(key.modifiers) => {',
+        '        Key::D if key.modifiers.ctrl => {',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the open card',
+        '    let plain = textline::is_plain(key.modifiers);\n    let card_id = app.selected_card?;',
+        '    let plain = true;\n    let card_id = app.selected_card?;',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        "a command's letter is typed into the input line",
+        '    if textline::types_into_field(key) {\n        app.input_buffer.extend(key.typed());',
+        '    if key.types_text() {\n        app.input_buffer.extend(key.typed());',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+    (
+        'a chord works the input line',
+        '    if !textline::is_plain(key.modifiers) {\n        return false;\n    }\n    match key.key {\n        Key::Escape => {\n            app.input_mode = InputMode::None;',
+        '    match key.key {\n        Key::Escape => {\n            app.input_mode = InputMode::None;',
+        ['each_kind_of_key_is_asked_for_as_itself'],
+    ),
+]
+
+FIELD = "the_input_dialogs_box_is_the_toolkits_field"
+CARET = "the_input_dialogs_caret_follows_the_typing"
+
+MUTATIONS += [
+    # The input dialog's box is the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the dialog's box never has the keyboard",
+        "        focused: !app.show_help,\n",
+        "        focused: false,\n",
+        [FIELD, CARET],
+    ),
+    (
+        "the dialog's box keeps its mark under the card",
+        "        focused: !app.show_help,\n",
+        "        focused: true,\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the caret is at the start of the typing",
+        "            cursor: text::TextCursor::from(app.input_buffer.len()),\n",
+        "            cursor: text::TextCursor::from(0),\n",
+        [CARET],
+    ),
 ]
 
 if __name__ == "__main__":

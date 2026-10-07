@@ -18,6 +18,9 @@ mediaprobe = { path = "../mediaprobe" }
 # program (C-Q26, option A).
 settingsfile = { path = "../../gui/settingsfile" }
 yamldoc = { path = "../../yamldoc" }
+# `is_plain` and `is_ctrl_chord`: a key held with the Windows key is not the
+# player's, and AltGr is not Ctrl.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # A scratch configuration directory, so no test writes the developer's own.

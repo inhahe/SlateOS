@@ -29,6 +29,7 @@
 //!     window : u64                     addressee window id
 //!     stamped: u8                      1 if a time follows, 0 if not
 //!     time   : u32                     (if stamped) the compositor's clock, ms
+//!     mods   : u8                      modifier keys held (MOD_* bits)
 //!     tag    : u8                      EventTag
 //!     payload: variable                see the per-tag encoders below
 //! ```
@@ -97,7 +98,12 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 /// only a change to the four files the desktop reads (`design-decisions.md`
 /// §1418). Incompatible on 3's terms and on 7's: a version-7 peer refuses the
 /// group code, and would have read the name as the next event.
-pub const INPUT_VERSION: u8 = 8;
+///
+/// **9** — every event carries the modifier keys held when the compositor
+/// handled it ([`InputEvent::modifiers`]), one byte between its stamp and its
+/// tag, so a click can say Ctrl was down. A layout change on 7's terms: a
+/// version-8 peer would read the modifiers byte as the event's tag.
+pub const INPUT_VERSION: u8 = 9;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -154,6 +160,23 @@ pub struct InputEvent {
     ///
     /// `None` for an event nothing stamped: a test's, or one a client made up.
     pub time: Option<u32>,
+
+    /// The modifier keys held when the compositor handled a pointer or key
+    /// event; none for every other kind.
+    ///
+    /// What lets Ctrl+click add to a selection in a window that was not told
+    /// about the Ctrl. A program learns the modifiers from its own key events
+    /// only while it has the keyboard, and the click that matters most is one
+    /// on a window that does not: a Ctrl pressed while another window is
+    /// focused goes to that window, so the click arrives with nothing having
+    /// said Ctrl is down. The keyboard state at the moment of the click is
+    /// known in one place, the compositor, which stamps it here.
+    ///
+    /// On the envelope rather than on [`MouseEvent`] for [`Self::scancode`]'s
+    /// reason: `MouseEvent` is built by struct literal at about 500 places,
+    /// and a field there would have to be written at every one. A key event
+    /// carries the same set twice, here and in its [`KeyEvent::modifiers`].
+    pub modifiers: Modifiers,
 }
 
 impl InputEvent {
@@ -165,6 +188,7 @@ impl InputEvent {
             event,
             scancode: None,
             time: None,
+            modifiers: Modifiers::NONE,
         }
     }
 
@@ -172,6 +196,14 @@ impl InputEvent {
     #[must_use]
     pub const fn at(mut self, time: u32) -> Self {
         self.time = Some(time);
+        self
+    }
+
+    /// This event, with the modifier keys held when it happened: see
+    /// [`Self::modifiers`].
+    #[must_use]
+    pub const fn with_modifiers(mut self, modifiers: Modifiers) -> Self {
+        self.modifiers = modifiers;
         self
     }
 
@@ -183,6 +215,7 @@ impl InputEvent {
             event: Event::Key(event),
             scancode: Some(scancode),
             time: None,
+            modifiers: Modifiers::NONE,
         }
     }
 }
@@ -417,6 +450,7 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
         }
         None => out.push(0),
     }
+    out.push(encode_modifiers(ev.modifiers));
     match &ev.event {
         Event::Mouse(m) => {
             out.push(EventTag::Mouse as u8);
@@ -646,6 +680,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
         1 => Some(r.read_u32()?),
         other => return Err(DecodeError::BadTag(other)),
     };
+    let modifiers = decode_modifiers(r.read_u8()?)?;
     let tag_byte = r.read_u8()?;
     let tag = EventTag::from_byte(tag_byte).ok_or(DecodeError::BadTag(tag_byte))?;
     let (event, scancode) = match tag {
@@ -743,6 +778,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
         event,
         scancode,
         time,
+        modifiers,
     })
 }
 
@@ -1216,6 +1252,7 @@ mod tests {
             event: Event::Key(key(Key::Enter)),
             scancode: None,
             time: None,
+            modifiers: Modifiers::NONE,
         };
         assert_eq!(roundtrip(std::slice::from_ref(&ev)), vec![ev]);
     }
@@ -1296,9 +1333,58 @@ mod tests {
         assert_eq!(back[2].time, Some(0), "zero is a time, not an absence");
     }
 
-    /// What comes before an unstamped event's tag: its window id (8 bytes) and
-    /// the stamp's presence byte, which says there is no stamp.
-    const UNSTAMPED_HEAD: usize = 8 + 1;
+    /// What comes before an unstamped event's tag: its window id (8 bytes),
+    /// the stamp's presence byte, which says there is no stamp, and the
+    /// modifiers byte.
+    const UNSTAMPED_HEAD: usize = 8 + 1 + 1;
+
+    /// The modifiers held travel with every event, each key its own bit, and
+    /// an event nothing stamped carries none.
+    #[test]
+    fn the_modifiers_held_travel_with_the_event() {
+        let click = |modifiers| {
+            InputEvent::new(
+                3,
+                Event::Mouse(MouseEvent {
+                    x: 4.0,
+                    y: 5.0,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+            )
+            .at(77)
+            .with_modifiers(modifiers)
+        };
+        let events: Vec<InputEvent> = (0u8..16)
+            .map(|bits| {
+                click(Modifiers {
+                    shift: bits & 1 != 0,
+                    ctrl: bits & 2 != 0,
+                    alt: bits & 4 != 0,
+                    super_key: bits & 8 != 0,
+                })
+            })
+            .chain([InputEvent::new(3, Event::FocusIn)])
+            .collect();
+        let bytes = encode_input_frame(&events);
+        let (back, used) = decode_input_frame(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(back, events);
+        assert_eq!(back[16].modifiers, Modifiers::NONE);
+    }
+
+    /// A modifier bit the encoding does not define is refused, as it is inside
+    /// a key event: a newer compositor's fifth modifier must not read as none.
+    #[test]
+    fn an_undefined_modifier_bit_on_the_envelope_is_refused() {
+        let mut bytes = encode_input_frame(&[InputEvent::new(1, Event::FocusIn)]);
+        let mods_at = INPUT_HEADER_LEN + UNSTAMPED_HEAD - 1;
+        assert_eq!(bytes[mods_at], 0, "the probe is not the modifiers byte");
+        bytes[mods_at] = 0x40;
+        assert_eq!(
+            decode_input_frame(&bytes),
+            Err(DecodeError::ReservedFlags(0x40))
+        );
+    }
 
     #[test]
     fn a_stamp_byte_that_is_neither_yes_nor_no_is_refused() {

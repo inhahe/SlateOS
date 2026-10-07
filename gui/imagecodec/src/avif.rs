@@ -33,15 +33,18 @@
 //! The AV1 frames are decoded by rav1d, the Rust port of dav1d -- the decoder
 //! libavif, Chrome and Pillow use -- driven as libavif drives dav1d
 //! (`avif/decode.rs`): the same settings, the same send-and-drain loop, a
-//! grid's tiles checked and put together by libavif's rules. A frame whose
-//! size, depth or chroma layout is not the container's is refused, as Chrome
-//! refuses it.
+//! grid's tiles checked and put together by libavif's rules. A frame coded
+//! at another size than its item's `ispe` (or its track's) is brought to that
+//! size as libavif brings it, by libyuv's scaling (`gui/video/yuv`). After
+//! that, a frame whose size, depth or chroma layout is not the container's
+//! is refused, as Chrome refuses it.
 //!
 //! The conversion to pixels is libavif's `avifImageYUVToRGB` as Chrome calls
 //! it -- 8-bit BGRA, straight alpha, libavif's default upsampling -- with
 //! libyuv's fixed-point arithmetic where libavif hands the picture to libyuv
-//! and libavif's floating point where it does not (`avif/convert.rs`,
-//! `avif/libyuv.rs`). Held to Pillow's decode of the same files, it agrees to
+//! and libavif's floating point where it does not (`avif/convert.rs`, and
+//! libyuv's port in `gui/video/yuv`). Held to Pillow's decode of the same
+//! files, it agrees to
 //! the bit wherever Pillow takes the same path: every picture with alpha, and
 //! every 8-bit colour one (without alpha, Pillow asks libavif for 24-bit RGB,
 //! which libyuv converts from deep or grey pictures by other routes).
@@ -50,9 +53,6 @@
 //! still viewer shows; [`Animation`] plays every frame, as libavif's
 //! `avifDecoderNextImage` and `avifDecoderNthImage` decode them
 //! (`avif/animation.rs`).
-//!
-//! Not yet: a frame coded at another size than its item's `ispe` -- which
-//! libavif rescales with libyuv's box filter -- is refused as unsupported.
 //!
 //! # Hostile input
 //!
@@ -77,8 +77,6 @@ mod container;
 mod convert;
 #[cfg(feature = "avif")]
 mod decode;
-#[cfg(feature = "avif")]
-mod libyuv;
 mod movie;
 mod obu;
 mod setup;

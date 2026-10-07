@@ -57,8 +57,8 @@ MUTATIONS = [
     ),
     (
         "undo answers from the first page's history whatever page is showing",
-        "        if let Some(action) = self.current_page_mut().undo_stack.pop_back() {",
-        "        if let Some(action) = self.pages[0].undo_stack.pop_back() {",
+        "        if let Some(action) = self.current_page_mut().history.undo() {",
+        "        if let Some(action) = self.pages[0].history.undo() {",
         ["undo_acts_only_on_the_page_it_is_about"],
     ),
     (
@@ -69,8 +69,8 @@ MUTATIONS = [
     ),
     (
         "a change does not mark the board",
-        "        page.undo_stack.push_back(action);\n        self.dirty = true;\n",
-        "        page.undo_stack.push_back(action);\n",
+        "        self.current_page_mut().history.record(action);\n        self.dirty = true;\n",
+        "        self.current_page_mut().history.record(action);\n",
         [KEYS, CLOSE],
     ),
     (
@@ -170,6 +170,234 @@ MUTATIONS = [
         "        if let Some(note) = &self.status_message {",
         "        if let Some(note) = None::<&String> {",
         ["the_status_bar_says_what_the_last_save_did"],
+    ),
+    # -- each page's history as a tree, and the keys (C-Q24, §1416) --------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(action) => self.revert(&action),",
+        "                Travel::Undo(action) => self.apply_action_silent(&action),",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.current_page_mut().history.earlier();",
+        "        let steps = self.current_page_mut().history.later();",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "a journey does not mark the board",
+        "        self.dirty |= moved;",
+        "",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z is not a key",
+        "        if event.key == Key::Z\n            && event.modifiers.alt",
+        "        if false\n            && event.modifiers.alt",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "                self.later();",
+        "                self.earlier();",
+        ["an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "AltGr is taken for Ctrl",
+        "        if textline::is_ctrl_chord(event.modifiers) {",
+        "        if event.modifiers.ctrl {",
+        ["altgr_z_does_not_undo"],
+    ),
+    (
+        "the history keeps ten actions more",
+        "const MAX_UNDO_STEPS: usize = 200;",
+        "const MAX_UNDO_STEPS: usize = 210;",
+        ["test_undo_stack_limit"],
+    ),
+    (
+        "a key held with Alt is the board's",
+        '        if textline::is_alt_or_windows_chord(event.modifiers) {',
+        '        if event.modifiers.super_key {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
+    (
+        "a key held with the Windows key is the board's",
+        '        if textline::is_alt_or_windows_chord(event.modifiers) {',
+        '        if event.modifiers.alt && !event.modifiers.ctrl {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
+    (
+        'AltGr is taken for Alt',
+        '        if textline::is_alt_or_windows_chord(event.modifiers) {',
+        '        if event.modifiers.alt || event.modifiers.super_key {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
+    (
+        'Ctrl with the Windows key undoes',
+        '        if textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.modifiers.ctrl && !event.modifiers.alt {',
+        ['altgr_z_does_not_undo'],
+    ),
+]
+
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+
+MUTATIONS += [
+    # The list of keys takes the pointer (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return true;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return true;\n",
+        "                    return true;\n",
+        [CARD],
+    ),
+    (
+        "the wheel zooms what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return false,\n",
+        "",
+        [CARD],
+    ),
+    (
+        "the list of keys takes a release, and a shape never ends",
+        "                MouseEventKind::Scroll { .. } => return false,\n"
+        "                _ => {}\n",
+        "                MouseEventKind::Scroll { .. } => return false,\n"
+        "                _ => return false,\n",
+        [CARD],
+    ),
+]
+
+# The Text and Sticky Note tools take typing, in the toolkit's field, and the
+# list of keys answers plain keys (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+WORDS = "the_text_tool_takes_typing_and_places_a_label"
+WORDS_BOX = "the_words_box_is_the_toolkits_field"
+HELD = "a_key_held_with_alt_or_the_windows_key_is_not_the_boards"
+
+MUTATIONS += [
+    (
+        "a chord raises the list of keys",
+        "        if event.key == Key::F1 && plain {\n",
+        "        if event.key == Key::F1 {\n",
+        [HELD],
+    ),
+    (
+        "a chorded Escape puts the list of keys away",
+        "            if plain && matches!(event.key, Key::Escape | Key::Enter) {\n",
+        "            if matches!(event.key, Key::Escape | Key::Enter) {\n",
+        [HELD],
+    ),
+    (
+        "nothing types into the words",
+        "        if self.text_focused && self.text_box_rect().is_some() {\n",
+        "        if false {\n",
+        [WORDS, WORDS_BOX],
+    ),
+    (
+        "the Text tool does not give its box the keyboard",
+        "        self.text_focused = matches!(tool, Tool::Text | Tool::StickyNote);\n",
+        "        self.text_focused = false;\n",
+        [WORDS, WORDS_BOX],
+    ),
+    (
+        "a tool letter chooses no tool through the box",
+        "        if let Some(tool) = Tool::from_shortcut(ch) {\n            self.choose_tool(tool);\n",
+        "        if let Some(tool) = Tool::from_shortcut(ch) {\n            self.current_tool = tool;\n",
+        [WORDS],
+    ),
+    (
+        "Escape on an empty box keeps the keyboard",
+        "                    self.text_focused = false;\n"
+        "                } else {\n"
+        "                    self.text_input_buffer.clear();\n",
+        "                } else {\n"
+        "                    self.text_input_buffer.clear();\n",
+        [WORDS, WORDS_BOX],
+    ),
+    (
+        "Escape on words keeps them",
+        "                } else {\n"
+        "                    self.text_input_buffer.clear();\n"
+        "                }\n"
+        "                return true;\n",
+        "                } else {\n"
+        "                }\n"
+        "                return true;\n",
+        [WORDS],
+    ),
+    (
+        "the words' box has no strip",
+        "        self.render_text_box(&mut cmds);\n",
+        "",
+        [WORDS_BOX],
+    ),
+    (
+        "the words' box never has the keyboard's mark",
+        "        let focused = self.text_focused && !self.show_help && !self.picker.is_open();\n",
+        "        let focused = false;\n",
+        [WORDS_BOX],
+    ),
+    (
+        "the words' box keeps its mark under the list of keys",
+        "        let focused = self.text_focused && !self.show_help && !self.picker.is_open();\n",
+        "        let focused = self.text_focused && !self.picker.is_open();\n",
+        [WORDS_BOX],
+    ),
+    (
+        "the words' box shows with any tool",
+        "        if !matches!(self.current_tool, Tool::Text | Tool::StickyNote) {\n            return None;\n        }\n",
+        "",
+        [WORDS_BOX],
+    ),
+    (
+        "a press on the words' box draws on the canvas",
+        "                    if rect.contains(x, y) {\n"
+        "                        self.press_text_box(rect, x);\n"
+        "                    }\n"
+        "                    return true;\n",
+        "                    let _ = rect;\n",
+        [WORDS_BOX],
+    ),
+    (
+        "a press leaves the caret where it was",
+        "        self.text_editor.set_cursor(cursor);\n",
+        "        let _ = cursor;\n",
+        [WORDS_BOX],
+    ),
+    (
+        "a press on the box does not take the keyboard back",
+        "        self.text_focused = true;\n"
+        "        if self.text_editor.text() != self.text_input_buffer {\n",
+        "        if self.text_editor.text() != self.text_input_buffer {\n",
+        [WORDS_BOX],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.text_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [WORDS_BOX],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [WORDS_BOX],
     ),
 ]
 

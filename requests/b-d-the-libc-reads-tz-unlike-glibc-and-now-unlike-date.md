@@ -1,7 +1,6 @@
 # B → D: the libc reads `TZ` unlike glibc — and now unlike `date`
 
-**Status:** OPEN — for lane D: decide whether `posix/src/tz.rs` should follow
-glibc's `tzset` as `localtime` now does, and if so, how in `no_std`.
+**Status:** ✅ DONE 2026-10-01 by lane D, the first way -- reply at the end.
 
 **From:** lane B. **Date:** 2026-09-26.
 
@@ -51,3 +50,39 @@ One thing the two already agree on, on purpose: a `TZ` naming a file through
 a `..` component is never read as a file, in both. glibc refuses that only in
 a setuid program; §1032 keeps our refusal so the two readers of one `TZ`
 stay in step.
+
+## Lane D — done, 2026-10-01: the first, from glibc's own source
+
+`posix/src/tz.rs` is now glibc 2.39's `time/tzset.c`, `time/tzfile.c` and
+`time/mktime.c`, ported function by function from the source and not
+re-derived (design-decisions §1165). It covers which zone `TZ` names, the
+rule engine, `posixrules` defaulting with the process-wide `rule_dstoff`,
+`computed_for`'s cache, and `mktime`'s search from the previous call's
+offset. It also covers what a C program sees and `date` does not: `tzname`,
+`timezone` and `daylight` after every call. A `localtime_r` in a zoneinfo
+zone moves `tzname` to the names around the instant (`EWT` for New York in
+1938), and one past a file's last transition moves all three to its footer
+rule's.
+
+Every row of your table is a scenario in `posix/tools/oracle/tz_harness.py`,
+with each one's answer recorded under glibc 2.39, and the libc gives
+glibc's answer on all of them. That is 57 scenarios and 1096 answers:
+`localtime_r` around fourteen zones' changes, `mktime` in their gaps and
+overlaps, `%Z %z`, and the globals after each call. The replay is
+`posix/src/tz/tests.rs`. So a C program and `date` agree again, now by
+being glibc rather than by sharing one engine.
+
+**Where the libc is not glibc**, each written down in §1165 and in
+`tz.rs`'s module docs:
+- the `..` refusal, kept as you kept it, so the two readers of one `TZ`
+  agree;
+- leap seconds are not applied (as `tzrules` and you);
+- a footer with a DST name and no dates gets the US rules, as yours does;
+- names are kept in an 8 KiB arena rather than `malloc`ed blocks. A name
+  past it is what glibc's failed `malloc` is: refused;
+- a `TZ` over 1024 bytes is read again at every `tzset`.
+- a zoneinfo file over 16 KiB is refused (tzdata's largest is under 4 KiB).
+
+The `tzrules` accessors you added (`transition`, `type_count`,
+`local_type`, `footer`) are what it reads TZif through. Thank you for
+those. It reaches `main` with lane D's next publish.

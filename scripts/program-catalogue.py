@@ -4,7 +4,11 @@
 Every binary target in the workspace, each with a line on what it does, in the
 program's own words: the first sentence of its binary's module doc (`//!`),
 else its crate's `description`. Taken from the source, so the catalogue cannot
-drift from the programs -- regenerate it and it is current.
+drift from the programs -- regenerate it and it is current. And every ported
+program -- bash, CMake, CPython, the C and C++ programs `scripts/*-spike/`
+cross-build -- from the `# PROGRAM:` line above the block of
+`scripts/create-ext4-rootfs.sh` that stages it, each line checked against the
+paths that recipe really writes.
 
 The operator asked for this answering B-Q21 (design-decisions §1053): a list of
 every program with a short description, and "a rule somewhere that if you make
@@ -12,8 +16,10 @@ a program, record it somewhere so everybody knows it exists". This file is that
 somewhere, and `--check` is the rule: it fails when a binary exists that
 `programs.md` does not list, or lists one that no longer exists.
 
-Beside each program: whether it is on the disk image that boots
-(`scripts/rootfs-bin-manifest.txt`, or the fastpy `PROMOTED` map of
+Beside each program: whether it is on the disk image that boots (every
+program under `userspace/` but for `scripts/rootfs-bin-kept-off.txt`'s, as
+`scripts/create-ext4-rootfs.sh` stages them, design-decisions §1164; the
+names in `scripts/rootfs-bin-manifest.txt`; and the fastpy `PROMOTED` map of
 `scripts/create-ext4-rootfs.sh`), and the other names it answers to -- those
 the manifest installs it under (`name = producer` lines), and those nothing
 installs yet (`scripts/multicall-aliases-baseline.txt`).
@@ -36,6 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "programs.md")
 MANIFEST = os.path.join(HERE, "rootfs-bin-manifest.txt")
+KEPT_OFF = os.path.join(HERE, "rootfs-bin-kept-off.txt")
 ROOTFS = os.path.join(HERE, "create-ext4-rootfs.sh")
 ALIASES = os.path.join(HERE, "multicall-aliases-baseline.txt")
 
@@ -110,8 +117,27 @@ def describe(doc: str, crate_desc: str) -> str:
     return text or "*(no description in the source)*"
 
 
-def on_image() -> set[str]:
+def kept_off() -> set[str]:
+    """The userland programs the image leaves off (`rootfs-bin-kept-off.txt`)."""
     names: set[str] = set()
+    try:
+        for line in open(KEPT_OFF, encoding="utf-8"):
+            name = line.split("#", 1)[0].strip()
+            if name:
+                names.add(name)
+    except OSError:
+        pass
+    return names
+
+
+def on_image(progs: list[dict]) -> set[str]:
+    """The names on the image: the manifest's, then every other program
+    `userspace/` builds but for what is kept off -- as
+    `create-ext4-rootfs.sh` stages them (design-decisions §1053, §1164) --
+    and the promoted fastpy commands."""
+    off = kept_off()
+    names: set[str] = {p["name"] for p in progs
+                       if p["dir"].startswith("userspace/") and p["name"] not in off}
     try:
         for line in open(MANIFEST, encoding="utf-8"):
             line = line.split("#", 1)[0].strip()
@@ -177,6 +203,55 @@ def kernel_embedded() -> set[str]:
     return names
 
 
+# A ported program's line in `create-ext4-rootfs.sh`, above the block that
+# stages it: the paths it is installed at, what it does, and what builds it --
+# a port's directory (`scripts/bash-spike/`) or, for a program one script
+# builds, that script (`scripts/fastpy-slateos-bundle.py`, since 2026-10-05).
+PORT_MARK = re.compile(
+    r"^# PROGRAM: (.+?) -- (.+) \((scripts/[A-Za-z0-9_.-]+(?:/|\.py|\.sh))\)$"
+)
+
+
+def parse_ports(text: str) -> list[dict]:
+    """The ported programs a rootfs recipe's `# PROGRAM:` lines name.
+
+    A port -- bash, CMake, CPython -- is no cargo target, so `cargo metadata`
+    cannot see it; the recipe that stages it is where it is known. Each line
+    is checked against the recipe it is in: every path it names must be one
+    the recipe writes (`"$STAGE<path>"`), so a line cannot list a program the
+    image does not get."""
+    out = []
+    for line in text.splitlines():
+        m = PORT_MARK.match(line)
+        if not m:
+            continue
+        paths = [p.strip() for p in m.group(1).split(",")]
+        for path in paths:
+            if not path.startswith("/") or f'"$STAGE{path}"' not in text:
+                raise SystemExit(
+                    f"program-catalogue: {ROOTFS}: '# PROGRAM: {path}' names a path "
+                    f"nothing in the recipe stages"
+                )
+        names = [os.path.basename(p) for p in paths]
+        out.append({
+            "name": names[0],
+            "crate": "",
+            "dir": m.group(3).rstrip("/"),
+            "src": m.group(3),
+            "desc": m.group(2),
+            "others": names[1:],
+        })
+    return out
+
+
+def ports() -> list[dict]:
+    try:
+        text = open(ROOTFS, encoding="utf-8").read()
+    except OSError:
+        return []
+    return parse_ports(text)
+
+
 def standalone_services(known: set[str]) -> list[dict]:
     """The bare-metal `services/*` crates, which the workspace excludes (they
     build for `x86_64-unknown-none`, each on its own) and `cargo metadata`
@@ -233,8 +308,8 @@ def targets() -> list[dict]:
     return progs
 
 
-def render(progs: list[dict]) -> str:
-    image = on_image()
+def render(progs: list[dict], ported: list[dict]) -> str:
+    image = on_image(progs)
     embedded = kernel_embedded()
     alias = aliases()
     installed = installed_names()
@@ -248,18 +323,20 @@ def render(progs: list[dict]) -> str:
         "",
         "Generated by `scripts/program-catalogue.py` from the source -- do not edit by",
         "hand; regenerate. Each description is the first sentence of the program's",
-        "own module doc, or its crate's `description`. **On image** says whether the",
-        "program is on the disk image that boots; **Other names** lists the other",
-        "names it answers to -- those the image installs it under, and, marked",
-        "*(not installed)*, those nothing installs yet (design-decisions §1045).",
+        "own module doc, or its crate's `description`; a ported program's is the",
+        "`# PROGRAM:` line above the block of `scripts/create-ext4-rootfs.sh` that",
+        "stages it. **On image** says whether the program is on the disk image that",
+        "boots; **Other names** lists the other names it answers to -- those the",
+        "image installs it under, and, marked *(not installed)*, those nothing",
+        "installs yet (design-decisions §1045).",
         "",
         "A new program is recorded here in the commit that creates it (§1053): run",
         "the script, commit `programs.md` with the program. `--check` fails when the",
         "two disagree.",
         "",
     ]
-    total = len(progs)
-    shipped = sum(1 for p in progs if where(p) == "yes")
+    total = len(progs) + len(ported)
+    shipped = sum(1 for p in progs if where(p) == "yes") + len(ported)
     inside = sum(1 for p in progs if where(p) == "in the kernel")
     lines.append(
         f"**{total} programs; {shipped} on the image, {inside} carried inside the kernel.**"
@@ -292,6 +369,20 @@ def render(progs: list[dict]) -> str:
                 f"| `{p['name']}` | {p['desc']} | {where(p)} | {crate} | {extra} |"
             )
             placed.add(id(p))
+        lines.append("")
+    if ported:
+        lines += [f"## Ported programs (`scripts/`, the rootfs recipe's) -- {len(ported)}", "",
+                  "Programs that are no cargo target, each built by its own scripts and",
+                  "staged by `scripts/create-ext4-rootfs.sh`: upstream C and C++ programs",
+                  "cross-built against SlateOS's own C library (`scripts/*-spike/`, lane D),",
+                  "and programs another lane's script assembles. The image carries each",
+                  "when it has been built on the machine that makes it.", "",
+                  "| Program | What it does | On image | Built by | Other names |",
+                  "|---|---|---|---|---|"]
+        for p in sorted(ported, key=lambda x: x["name"]):
+            extra = ", ".join(f"`{a}`" for a in p["others"])
+            src = p.get("src", p["dir"] + "/")
+            lines.append(f"| `{p['name']}` | {p['desc']} | yes | `{src}` | {extra} |")
         lines.append("")
     rest = [p for p in progs if id(p) not in placed]
     if rest:
@@ -329,6 +420,24 @@ def selftest() -> int:
            describe("SlateOS acpi - power management info", ""), "Power management info")
     expect("a hyphenated word is not a name-dash prefix",
            describe("Built-in commands.", ""), "Built-in commands.")
+    recipe = ("# PROGRAM: /bin/pkgconf, /bin/pkg-config -- Library flags. (scripts/pkgconf-spike/)\n"
+              'cp a "$STAGE/bin/pkgconf"\ncp a "$STAGE/bin/pkg-config"\n')
+    expect("a port's line gives its name, other names, port and words",
+           [(p["name"], p["others"], p["dir"], p["desc"]) for p in parse_ports(recipe)],
+           [("pkgconf", ["pkg-config"], "scripts/pkgconf-spike", "Library flags.")])
+    try:
+        parse_ports("# PROGRAM: /bin/ghost -- Haunts. (scripts/ghost-spike/)\n")
+        refused = False
+    except SystemExit:
+        refused = True
+    expect("a port's line naming a path nothing stages is refused", refused, True)
+    recipe = ("# PROGRAM: /bin/fastpy -- Compiles Python. (scripts/fastpy-slateos-bundle.py)\n"
+              'chmod 0755 "$STAGE/bin/fastpy"\n')
+    expect("a program one script builds names the script",
+           [(p["name"], p["src"]) for p in parse_ports(recipe)],
+           [("fastpy", "scripts/fastpy-slateos-bundle.py")])
+    expect("a script not ending .py or .sh is no port's line",
+           parse_ports("# PROGRAM: /bin/x -- X. (scripts/x.txt)\n"), [])
     print(f"selftest: {bad} failure(s)")
     return 1 if bad else 0
 
@@ -340,7 +449,7 @@ def main() -> int:
     a = ap.parse_args()
     if a.selftest:
         return selftest()
-    text = render(targets())
+    text = render(targets(), ports())
     if a.check:
         try:
             have = open(OUT, encoding="utf-8").read()

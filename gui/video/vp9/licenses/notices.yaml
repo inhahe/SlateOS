@@ -1,0 +1,31 @@
+# The third-party code gui/video/vp9 carries (design-decisions 1433), read by
+# scripts/gather-notices.py: one entry per upstream project, with the texts
+# that must travel with any binary built from the crate. Each translated
+# source file names the upstream files it derives from.
+
+# The decoder and the encoder are libvpx's, translated. The patent grant is
+# part of what libvpx is distributed under, so it travels with the licence.
+# This entry also covers gui/video/vp8, libvpx's VP8 decoder translated from
+# the same release, whose manifest does not name libvpx again, as
+# gather-notices.py requires each project named once.
+libvpx:
+  version: 1.17.0
+  licence: BSD-3-Clause
+  texts:
+    - libvpx-LICENSE
+    - libvpx-PATENTS
+
+# src/enc/glibcmath.rs: logf's algorithm, table and polynomial, from
+# math/logf.c and math/logf_data.c (Arm offers them under MIT or Apache-2.0
+# with the LLVM exception; they are used under MIT). glibc ships the same
+# function under its own licence; the translation is of Arm's.
+Arm optimized-routines:
+  licence: MIT
+  texts:
+    - arm-optimized-routines-LICENSE
+
+# src/rgb.rs takes ARGBToI420's arithmetic from libyuv 1924
+# (644251f252a84bf8ce91ff0aca86a9b16b069ab8, the revision libavif 1.4.2
+# pins): the libyuv gui/video/yuv carries, whose manifest names it -- once,
+# as gather-notices.py requires. Its texts are beside this file too, for the
+# source that cites them.

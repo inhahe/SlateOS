@@ -243,15 +243,11 @@ MUTATIONS = [
     ),
     (
         "a character is coloured by where it is rather than how it was typed",
-        "            match session.statuses.get(i) {\n"
-        "                Some(CharStatus::Correct) => hex(COL_GREEN),\n"
-        "                Some(CharStatus::Incorrect) => hex(COL_RED),\n"
-        "                _ => hex(COL_SURFACE2),\n"
-        "            }",
-        "            match session.statuses.get(i) {\n"
-        "                Some(_) if i < session.cursor => hex(COL_GREEN),\n"
-        "                _ => hex(COL_SURFACE2),\n"
-        "            }",
+        "                Some(CharStatus::Correct) => pal.ink(pal.green),\n"
+        "                Some(CharStatus::Incorrect) => pal.ink(pal.red),\n"
+        "                _ => pal.surface2,",
+        "                Some(_) if i < session.cursor => pal.ink(pal.green),\n"
+        "                _ => pal.surface2,",
         ["each_character_is_coloured_by_how_it_was_typed"],
     ),
     (
@@ -273,8 +269,8 @@ MUTATIONS = [
     # -- The clock, end to end -------------------------------------------
     (
         "the window loop is never asked for a clock",
-        "    fn tick_interval(&self) -> Option<Duration> {\n        Some(Duration::from_millis(100))\n    }",
-        "    fn tick_interval(&self) -> Option<Duration> {\n        None\n    }",
+        "        timing.then_some(Duration::from_millis(100))",
+        "        let _ = timing;\n        None",
         ["the_app_asks_the_window_loop_for_a_clock"],
     ),
     (
@@ -323,11 +319,11 @@ MUTATIONS = [
     ),
     (
         "the background is painted at the size the program was written for",
-        "        fill(&mut f, l.window, hex(COL_BASE), CornerRadii::ZERO);",
+        "        fill(&mut f, l.window, self.palette.base, CornerRadii::ZERO);",
         "        fill(\n"
         "            &mut f,\n"
         "            Rect::new(0.0, 0.0, WINDOW_WIDTH, WINDOW_HEIGHT),\n"
-        "            hex(COL_BASE),\n"
+        "            self.palette.base,\n"
         "            CornerRadii::ZERO,\n"
         "        );",
         ["the_background_covers_the_window_at_every_size"],
@@ -335,8 +331,8 @@ MUTATIONS = [
     # -- The list, the results and the history ---------------------------
     (
         "an unselected row is filled with the background",
-        "                hex(if selected { COL_SURFACE0 } else { COL_MANTLE }),",
-        "                hex(if selected { COL_SURFACE0 } else { COL_BASE }),",
+        "                    self.palette.surface0\n                } else {\n                    self.palette.mantle",
+        "                    self.palette.surface0\n                } else {\n                    self.palette.base",
         ["an_unselected_row_is_told_apart_from_the_background"],
     ),
     (
@@ -353,14 +349,14 @@ MUTATIONS = [
     ),
     (
         "a results card rounds away the figure it names",
-        '            ("Accuracy", format!("{:.1}%", session.accuracy()), COL_GREEN),',
-        '            ("Accuracy", format!("{:.0}%", session.accuracy()), COL_GREEN),',
+        "                \"Accuracy\",\n                format!(\"{:.1}%\", session.accuracy()),",
+        "                \"Accuracy\",\n                format!(\"{:.0}%\", session.accuracy()),",
         ["every_results_card_shows_its_own_figure"],
     ),
     (
         "the results text starts at a constant rather than below the cards",
-        "        let bottom = draw_cards(f, l, &cards);\n        let rating = format!",
-        "        draw_cards(f, l, &cards);\n        let bottom = 240.0;\n        let rating = format!",
+        "        let bottom = draw_cards(f, &self.palette, l, &cards);\n        let rating = format!",
+        "        draw_cards(f, &self.palette, l, &cards);\n        let bottom = 240.0;\n        let rating = format!",
         # Not `every_results_card_shows_its_own_figure`: that reads the card
         # text, which a constant placed below the cards does not touch. The
         # only thing that noticed was the geometric catch-all, and only at the
@@ -377,8 +373,8 @@ MUTATIONS = [
     ),
     (
         "the history row is drawn in the text colour, so its category is lost",
-        "                (result.lesson_title.clone(), result.category.color()),",
-        "                (result.lesson_title.clone(), hex(COL_TEXT)),",
+        "                    result.category.color(&self.palette),",
+        "                    self.palette.text,",
         ["a_history_row_carries_its_category_colour"],
     ),
     (
@@ -387,6 +383,30 @@ MUTATIONS = [
         "        let col_x = |i: usize| area.x + [30.0f32, 250.0, 340.0, 440.0]"
         ".get(i).copied().unwrap_or(0.0);",
         ["nothing_is_painted_outside_the_window"],
+    ),
+    (
+        "a chord works the tutor's keys",
+        '            _ if !textline::is_plain(event.modifiers) => EventResult::Ignored,\n',
+        '',
+        ['a_chord_is_neither_a_tutor_key_nor_typing'],
+    ),
+    (
+        'Alt+Escape throws the lesson away',
+        '        if event.key == Key::Escape && textline::is_plain(event.modifiers) {',
+        '        if event.key == Key::Escape {',
+        ['a_chord_is_neither_a_tutor_key_nor_typing'],
+    ),
+    (
+        'Alt+Backspace takes a letter back',
+        '        if event.key == Key::Backspace && !textline::is_alt_or_windows_chord(event.modifiers) {',
+        '        if event.key == Key::Backspace {',
+        ['a_chord_is_neither_a_tutor_key_nor_typing'],
+    ),
+    (
+        "a command's letter is scored as typing",
+        '        if !textline::types_into_field(event) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_tutor_key_nor_typing'],
     ),
 ]
 

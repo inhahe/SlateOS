@@ -8,7 +8,9 @@ program is not testing the program.
 Ctrl+S wrote the sheet in front as CSV -- values only, no formula, no format,
 no other sheet -- and nothing recorded unsaved changes, so the window closed
 over them.  The table covers the workbook file and the question; the rest of
-the suite predates them.
+the suite predates them.  The last rows, added 2026-10-04, cover the shortcut
+list: modal for the keys and the pointer, where it had taken only F1 and
+Escape.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -32,11 +34,9 @@ CLOSE = "closing_or_opening_over_unsaved_changes_asks"
 MUTATIONS = [
     (
         "an edit does not mark the workbook",
-        "        self.undo_stack.push(action);\n"
-        "        self.redo_stack.clear();\n"
+        "        self.history.record(action);\n"
         "        self.changed = true;\n",
-        "        self.undo_stack.push(action);\n"
-        "        self.redo_stack.clear();\n",
+        "        self.history.record(action);\n",
         [KEYS, CLOSE],
     ),
     (
@@ -162,6 +162,199 @@ MUTATIONS = [
         "        app\n"
         "    }",
         ["a_new_book_opens_blank"],
+    ),
+    # -- the actions as a tree, and the keys (C-Q24, §1416) ----------------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(action) => self.apply_undo_action(&action, true),",
+        "                Travel::Undo(action) => self.apply_undo_action(&action, false),",
+        ["an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.history.earlier();",
+        "        let steps = self.history.later();",
+        ["an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "a journey does not mark the workbook",
+        "        let steps = self.history.earlier();\n        self.changed |= !steps.is_empty();",
+        "        let steps = self.history.earlier();",
+        ["an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "            let moved = if event.modifiers.shift {\n                self.later()",
+        "            let moved = if event.modifiers.shift {\n                self.earlier()",
+        ["an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "the ends of the history are not said",
+        "            if !moved {\n                self.notice = Some(",
+        "            if false {\n                self.notice = Some(",
+        ["the_ends_of_the_history_are_said"],
+    ),
+    (
+        "AltGr is taken for Ctrl",
+        "        if event.modifiers.ctrl && !event.modifiers.alt {",
+        "        if event.modifiers.ctrl {",
+        ["an_altgr_letter_is_typed_not_taken_for_a_chord"],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "                Key::Z if event.modifiers.shift => {\n                    self.redo();",
+        "                Key::Z if event.modifiers.shift => {\n                    self.undo();",
+        ["ctrl_shift_z_redoes"],
+    ),
+    (
+        "the history keeps ten actions more",
+        "const UNDO_STACK_LIMIT: usize = 200;",
+        "const UNDO_STACK_LIMIT: usize = 210;",
+        ["test_undo_manager_limit"],
+    ),
+    (
+        "undo on an empty history claims an action",
+        "        let action = self.history.undo()?;",
+        "        let action = self.history.undo().or(Some(UndoAction::CellEdit {\n"
+        "            sheet_idx: 0,\n"
+        "            addr: CellAddr::new(0, 0),\n"
+        "            old_cell: Cell::empty(),\n"
+        "            new_cell: Cell::empty(),\n"
+        "        }))?;",
+        ["test_undo_manager_limit"],
+    ),
+]
+
+CARD = "the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on"
+FIELDS = "the_text_boxes_are_the_toolkits_fields"
+
+MUTATIONS += [
+    # -- The text boxes are the toolkit's fields (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the formula box is drawn in no state",
+        "                self.box_state(TextBox::Formula),\n",
+        "                guitk::field::State::default(),\n",
+        [FIELDS],
+    ),
+    (
+        "the find boxes are drawn in no state",
+        "                        self.box_state(TextBox::Find(field)),\n",
+        "                        guitk::field::State::default(),\n",
+        [FIELDS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELDS],
+    ),
+    (
+        "a box lights under the list of keys",
+        "        let open = !self.covered();\n",
+        "        let open = true;\n",
+        [FIELDS],
+    ),
+    (
+        "the pointer is never followed",
+        "        self.hovered_box = over;\n",
+        "        let _ = over;\n",
+        [FIELDS],
+    ),
+    (
+        "the light stays after the pointer leaves",
+        "            MouseEventKind::Leave => None,\n",
+        "            MouseEventKind::Leave => self.hovered_box,\n",
+        [FIELDS],
+    ),
+    (
+        "a press in the formula box edits nothing",
+        "            if !matches!(self.mode, InteractionMode::Editing { .. }) {\n"
+        "                self.begin_editing();\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n",
+        "            return EventResult::Consumed;\n",
+        [FIELDS],
+    ),
+    (
+        "both find boxes are marked while either has the keys",
+        "                self.mode == InteractionMode::FindReplace && self.find_replace.field == field\n",
+        "                self.mode == InteractionMode::FindReplace\n",
+        [FIELDS],
+    ),
+]
+
+MUTATIONS += [
+    # -- The shortcut list is modal for the keys and the pointer (2026-10-04;
+    # known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches what the list of keys covers",
+        "        if self.show_help {\n"
+        "            let held = event.modifiers;\n"
+        "            if matches!(event.key, Key::F1 | Key::Escape)\n"
+        "                && !held.ctrl\n"
+        "                && !held.alt\n"
+        "                && !held.super_key\n"
+        "            {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "F1 does not put the list of keys away",
+        "            if matches!(event.key, Key::F1 | Key::Escape)\n",
+        "            if matches!(event.key, Key::Escape)\n",
+        [CARD],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "            if matches!(event.key, Key::F1 | Key::Escape)\n",
+        "            if matches!(event.key, Key::F1)\n",
+        [CARD],
+    ),
+    (
+        "a chorded Escape puts the list of keys away",
+        "                && !held.alt\n",
+        "",
+        [CARD],
+    ),
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only a single press puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(_) => {\n",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
     ),
 ]
 

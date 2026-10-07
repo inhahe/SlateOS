@@ -23,10 +23,12 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::textedit;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
 
@@ -770,8 +772,16 @@ struct CharMapApp {
     search_results: Vec<u32>,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// Whether the search is open: the grid shows its results and what is
+    /// typed goes into its box.
     search_active: bool,
     search_selected: usize,
+    /// Whether the pointer is over the search box, which lights its edge.
+    search_hovered: bool,
+    /// How wide the mark is round the search box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    focus_ring_width: f32,
 
     // Recently used
     recent: Vec<u32>,
@@ -823,6 +833,8 @@ impl CharMapApp {
             show_help: false,
             search_active: false,
             search_selected: 0,
+            search_hovered: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             recent: Vec::new(),
             max_recent: 64,
             favorites: Vec::new(),
@@ -1129,7 +1141,10 @@ impl CharMapApp {
             }
             return true;
         }
-        let ctrl = event.modifiers.ctrl;
+        // Ctrl alone: Ctrl+Alt is AltGr, which types -- Polish `ć` is
+        // AltGr+C, which copied the selection -- and the Windows key's chords
+        // are the desktop's.
+        let ctrl = textline::is_ctrl_chord(event.modifiers);
         match event.key {
             Key::F if ctrl => self.set_search_active(true),
             Key::C if ctrl => self.copy_selected(),
@@ -1194,9 +1209,12 @@ impl CharMapApp {
             _ => {
                 // `text`, not the key name: it is the only field that survives a
                 // keyboard layout, a held Shift, or a dead key composing `´`
-                // and `e` into the single `é` that a name search wants.
-                if self.search_active && !ctrl && !event.text.is_empty() {
-                    self.search_query.push_str(&event.text);
+                // and `e` into the single `é` that a name search wants. What
+                // was typed, AltGr's among it -- refused here once, so no
+                // character AltGr makes could be searched for -- and not a
+                // command's letter: Alt+X typed an `x`.
+                if self.search_active && textline::types_into_field(event) {
+                    self.search_query.extend(event.typed());
                     self.perform_search();
                 } else {
                     return false;
@@ -1313,10 +1331,15 @@ impl CharMapApp {
             Target::RecentTile(idx) => self.copy_tile(self.recent.get(idx).copied()),
             Target::FavoriteTile(idx) => self.copy_tile(self.favorites.get(idx).copied()),
             Target::Filter => self.next_category_filter(),
+            // A press in the box opens the search; it does not close an open
+            // one, as a press in any text box puts the caret there. The ×
+            // closes it.
             Target::SearchBox => {
-                let open = self.search_active;
-                self.set_search_active(!open);
+                if !self.search_active {
+                    self.set_search_active(true);
+                }
             }
+            Target::SearchClose => self.set_search_active(false),
             Target::PreviewSize => {
                 self.preview_size = self.preview_size.next();
                 self.status_message = format!("Preview: {}", self.preview_size.label());
@@ -1362,6 +1385,19 @@ impl CharMapApp {
     /// What is under `x, y`, if anything.
     fn target_at(&self, x: f32, y: f32) -> Option<Target> {
         self.frame(self.width, self.height).hit_test(x, y)
+    }
+
+    /// Note whether the pointer is over the search box -- `None` when it has
+    /// left the window. Returns whether that changed, which is a repaint: the
+    /// box's edge lights. Tested against the box's own rectangle, not a hit
+    /// test, which would draw the whole grid on every movement of the pointer.
+    fn point_at(&mut self, at: Option<(f32, f32)>) -> bool {
+        let over = at.is_some_and(|(x, y)| self.layout().search.contains(x, y));
+        if over == self.search_hovered {
+            return false;
+        }
+        self.search_hovered = over;
+        true
     }
 
     // ── Rendering ──────────────────────────────────────────────────────────
@@ -1516,12 +1552,12 @@ impl CharMapApp {
         fill(frame, layout.header, self.palette.crust, 0.0);
         frame.clip(layout.header);
 
+        // The query is in its box now; the title says what it found.
         let title = if self.search_active {
-            format!(
-                "Search: '{}' ({} results)",
-                self.search_query,
-                self.search_results.len()
-            )
+            match self.search_results.len() {
+                1 => "1 character found".to_string(),
+                n => format!("{n} characters found"),
+            }
         } else {
             let name = self
                 .blocks
@@ -1540,36 +1576,107 @@ impl CharMapApp {
             (layout.search.x - layout.header.x - 16.0).max(0.0),
         );
 
-        fill(
-            frame,
-            layout.search,
-            if self.search_active {
-                self.palette.blue
-            } else {
-                self.palette.surface0
-            },
-            4.0,
-        );
-        frame.hit(Target::SearchBox, layout.search);
-        label(
-            frame,
-            layout.search.x + 6.0,
-            layout.search.y + 4.0,
-            if self.search_active {
-                "Close [Esc]"
-            } else {
-                "Search [Ctrl+F]"
-            },
-            10.0,
-            if self.search_active {
-                self.palette.crust
-            } else {
-                self.palette.subtext0
-            },
-            FontWeightHint::Regular,
-            layout.search.w - 12.0,
-        );
+        self.render_search_box(frame, layout.search);
         frame.unclip();
+    }
+
+    /// How the search box is drawn now: lit under the pointer, marked while
+    /// the search is open -- every key that types goes to it then -- neither
+    /// under the shortcut card, and red while a query finds nothing.
+    fn search_box_state(&self) -> field::State {
+        let open = !self.show_help;
+        field::State {
+            hovered: open && self.search_hovered,
+            focused: open && self.search_active,
+            disabled: false,
+            invalid: self.search_active
+                && !self.search_query.trim().is_empty()
+                && self.search_results.is_empty(),
+        }
+    }
+
+    /// The × that closes an open search, at the end of its box.
+    fn search_close_rect(search: Rect) -> Rect {
+        let w = SEARCH_CLOSE_W.min(search.w);
+        Rect::new(search.right() - w, search.y, w, search.h)
+    }
+
+    /// The search box: the toolkit's field, holding the query with the caret
+    /// after it -- scrolled so the end being typed stays in view -- or, empty,
+    /// what it is for; and, while the search is open, the × that closes it.
+    fn render_search_box(&self, frame: &mut Frame, search: Rect) {
+        let state = self.search_box_state();
+        field::draw(frame, &self.palette, search, state, self.focus_ring_width);
+        frame.hit(Target::SearchBox, search);
+
+        let size = SEARCH_TEXT_SIZE;
+        let line = guitk::text::line_height(size, FontWeightHint::Regular);
+        let close = Self::search_close_rect(search);
+        let right = if self.search_active {
+            close.x
+        } else {
+            search.right()
+        };
+        let inner = Rect::new(
+            search.x + 6.0,
+            search.y + (search.h - line) / 2.0,
+            (right - search.x - 8.0).max(0.0),
+            line,
+        );
+        if self.search_query.is_empty() {
+            label(
+                frame,
+                inner.x,
+                inner.y,
+                if self.search_active {
+                    "A name, U+XXXX or a character"
+                } else {
+                    "Search (Ctrl+F)"
+                },
+                size,
+                self.palette.subtext0,
+                FontWeightHint::Regular,
+                inner.w,
+            );
+        }
+        if self.search_active {
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    // Typed and erased at its end, so the end is where the
+                    // caret is.
+                    cursor: guitk::text::TextCursor::from(self.search_query.len()),
+                    selection_anchor: None,
+                    focused: state.focused,
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.w,
+                    line_height: line,
+                    font_size: size,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            frame.extend(tree.commands);
+            label(
+                frame,
+                close.x
+                    + (close.w - guitk::text::measure("\u{d7}", size, FontWeightHint::Bold)) / 2.0,
+                inner.y,
+                "\u{d7}",
+                size,
+                self.palette.subtext0,
+                FontWeightHint::Bold,
+                close.w,
+            );
+            // After the box's, so a press on the × is the ×'s.
+            frame.hit(Target::SearchClose, close);
+        }
     }
 
     fn render_grid(&self, frame: &mut Frame, layout: &Layout) {
@@ -1980,6 +2087,10 @@ const TILE_TITLE_H: f32 = 16.0;
 const FIELD_ROW_H: f32 = 16.0;
 const PREVIEW_H: f32 = 80.0;
 const BUTTON_H: f32 = 16.0;
+/// The width of the × that closes an open search, at the end of its box.
+const SEARCH_CLOSE_W: f32 = 18.0;
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 11.0;
 const PAD: f32 = 10.0;
 
 /// The narrowest grid worth keeping. Below it a panel is dropped instead.
@@ -2106,7 +2217,9 @@ impl Layout {
 
         let header_h = HEADER_H.min(body_h);
         let header = Rect::new(main_x, 0.0, main_w, header_h);
-        let search_w = 96.0_f32.min((main_w - 16.0).max(0.0));
+        // Wide enough to hold what is typed: it was a 96-pixel toggle, and the
+        // query was only ever shown inside the header's title.
+        let search_w = 240.0_f32.min(main_w * 0.45).min((main_w - 16.0).max(0.0));
         let search = Rect::new(
             header.right() - search_w - 8.0,
             header.y + 6.0,
@@ -2209,8 +2322,11 @@ pub enum Target {
     FavoriteTile(usize),
     /// The category-filter button.
     Filter,
-    /// The search toggle in the grid's header.
+    /// The search box in the grid's header: a press opens the search.
     SearchBox,
+    /// The × at the end of the search box while the search is open, which
+    /// closes it -- the pointer's Escape.
+    SearchClose,
     /// The preview-size cycle button.
     PreviewSize,
     /// Add or remove the selected character from favourites.
@@ -2299,8 +2415,19 @@ fn handle_event(app: &mut CharMapApp, event: &Event) -> EventResult {
     }
     match event {
         Event::Mouse(m) => match m.kind {
+            // The card is modal for the pointer as it is for the keys: a
+            // press, with any button, puts it away rather than reaching the
+            // character drawn under it, and the wheel scrolls nothing it
+            // covers.
+            MouseEventKind::Press(_) if app.show_help => {
+                app.show_help = false;
+                EventResult::Consumed
+            }
+            MouseEventKind::Scroll { .. } if app.show_help => EventResult::Ignored,
             MouseEventKind::Press(MouseButton::Left) => result(app.handle_click(m.x, m.y)),
             MouseEventKind::Scroll { dy, .. } => result(app.handle_scroll(m.x, m.y, dy)),
+            MouseEventKind::Move => result(app.point_at(Some((m.x, m.y)))),
+            MouseEventKind::Leave => result(app.point_at(None)),
             _ => EventResult::Ignored,
         },
         Event::Key(k) => result(app.handle_key(k)),
@@ -2316,6 +2443,10 @@ fn handle_event(app: &mut CharMapApp, event: &Event) -> EventResult {
 impl App for CharMapApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -2433,6 +2564,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = CharMapApp::new();
+        let size = <CharMapApp as Probe>::SIZE;
+        // Over the block list, which has hundreds of rows to scroll through.
+        let cell = probe::rect_of(&app, Target::Block(0))
+            .expect("a block row")
+            .centre();
+        let wheel = |app: &mut CharMapApp| {
+            app.resize(size.0, size.1);
+            handle_event(
+                app,
+                &Event::Mouse(MouseEvent {
+                    x: cell.0,
+                    y: cell.1,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+                }),
+            )
+        };
+        let preview = app.preview_size;
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        assert!(app.show_help);
+        wheel(&mut app);
+        assert_eq!(
+            app.block_scroll, 0,
+            "the wheel scrolled the block list under the card"
+        );
+        assert_eq!(
+            probe::click(&mut app, Target::PreviewSize),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.preview_size, preview,
+            "the press went through the card to the preview button"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::click_with(&mut app, Target::PreviewSize, MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        wheel(&mut app);
+        assert!(
+            app.block_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        probe::click(&mut app, Target::PreviewSize);
+        assert_ne!(
+            app.preview_size, preview,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     /// **The card reaches the window, and nothing copies behind it.**
@@ -3586,5 +3777,266 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+    // -- The search box is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// A key held with `modifiers` that typed `text`.
+    fn chord(key: Key, text: &str, modifiers: guitk::event::Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        }
+    }
+
+    /// A pointer event of `kind` at `(x, y)`.
+    fn pointer(app: &mut CharMapApp, kind: MouseEventKind, (x, y): (f32, f32)) -> EventResult {
+        let size = <CharMapApp as Probe>::SIZE;
+        app.resize(size.0, size.1);
+        handle_event(app, &Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// Whether `app` draws exactly the toolkit's field for `rect` in `state`
+    /// -- and, unless `state` has the keyboard, not the focused one too: a
+    /// box without the mark is the first part of the same box with it.
+    fn draws_box(app: &CharMapApp, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, app.focus_ring_width);
+            v
+        };
+        let size = <CharMapApp as Probe>::SIZE;
+        let f = app.frame(size.0, size.1);
+        let has = |want: &[RenderCommand]| f.commands().windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// **The search box is the toolkit's field**: lit under the pointer and
+    /// dark again when it leaves, marked as the theme marks a field with the
+    /// keyboard, in the user's width, while the search is open, red while
+    /// what is typed finds nothing, and neither lit nor marked under the
+    /// card. It was a 96-pixel toggle filled blue while open, and the query
+    /// was shown only in the header's title.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        let mut app = CharMapApp::new();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = probe::rect_of(&app, Target::SearchBox).expect("the search box is drawn");
+        assert!(rect.w >= 200.0, "the box has no room for a query: {rect:?}");
+        let rest = field::State::default();
+        assert!(draws_box(&app, &p, rect, rest), "at rest");
+
+        let centre = rect.centre();
+        assert_eq!(
+            pointer(&mut app, MouseEventKind::Move, centre),
+            EventResult::Consumed
+        );
+        assert!(
+            draws_box(
+                &app,
+                &p,
+                rect,
+                field::State {
+                    hovered: true,
+                    ..rest
+                }
+            ),
+            "the pointer does not light the box"
+        );
+        assert_eq!(
+            pointer(&mut app, MouseEventKind::Move, centre),
+            EventResult::Ignored,
+            "moving within the box changed something"
+        );
+        pointer(&mut app, MouseEventKind::Leave, centre);
+        assert!(
+            draws_box(&app, &p, rect, rest),
+            "the light stays after the pointer leaves"
+        );
+
+        let ctrl = guitk::event::Modifiers {
+            ctrl: true,
+            ..guitk::event::Modifiers::NONE
+        };
+        probe::key(&mut app, &chord(Key::F, "f", ctrl));
+        let focused = field::State {
+            focused: true,
+            ..rest
+        };
+        assert!(
+            draws_box(&app, &p, rect, focused),
+            "an open search's box is not marked"
+        );
+
+        probe::key(&mut app, &probe::typing("qqqqqqqq"));
+        assert!(app.search_results.is_empty());
+        assert!(
+            draws_box(
+                &app,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a query that finds nothing does not turn the box red"
+        );
+
+        pointer(&mut app, MouseEventKind::Move, centre);
+        app.show_help = true;
+        assert!(
+            draws_box(
+                &app,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..rest
+                }
+            ),
+            "the box is lit or marked under the shortcut card"
+        );
+    }
+
+    /// **The query is typed into the box, with the caret after it**, and the
+    /// header's title says what it found rather than repeating it.
+    #[test]
+    fn the_query_is_typed_into_the_box_with_its_caret() {
+        let mut app = CharMapApp::new();
+        probe::click(&mut app, Target::SearchBox);
+        assert!(
+            app.search_active,
+            "a press on the box did not open the search"
+        );
+        probe::key(&mut app, &probe::typing("latin"));
+        assert_eq!(app.search_query, "latin");
+        let size = <CharMapApp as Probe>::SIZE;
+        let f = app.frame(size.0, size.1);
+        let cmds = f.commands();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "latin"))
+            .expect("the query is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the query: {other:?}"),
+        };
+        let rect = probe::rect_of(&app, Target::SearchBox).expect("the box");
+        assert!(
+            caret > rect.x && caret < rect.right(),
+            "the caret is at {caret}, outside the box {rect:?}"
+        );
+        // The header band's words: the status bar repeats the query, as a
+        // report of what was searched for, and that is not the title.
+        let header = app.layout().header;
+        let titles: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, y, .. } if *y < header.bottom() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            titles.iter().any(|t| t.ends_with("found")),
+            "the title does not say what the search found: {titles:?}"
+        );
+        assert!(
+            !titles.iter().any(|t| t.contains("latin")),
+            "the query is still written into the title"
+        );
+    }
+
+    /// **AltGr types into the search, and a command does not.** AltGr
+    /// arrives as Ctrl+Alt and was refused with every Ctrl key, so no
+    /// character it makes could be searched for -- and AltGr+C, Polish `ć`,
+    /// copied the selection instead. Alt+X typed an `x`.
+    #[test]
+    fn altgr_types_into_the_search_and_a_command_does_not() {
+        use guitk::event::Modifiers;
+        let mut app = CharMapApp::new();
+        probe::click(&mut app, Target::SearchBox);
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let clipboard = app.clipboard.clone();
+        probe::key(&mut app, &chord(Key::C, "\u{107}", altgr));
+        assert_eq!(
+            app.search_query, "\u{107}",
+            "AltGr+C did not type its letter"
+        );
+        assert_eq!(app.clipboard, clipboard, "AltGr+C copied");
+        for (k, t, m) in [
+            (
+                Key::X,
+                "x",
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
+            (
+                Key::K,
+                "k",
+                Modifiers {
+                    ctrl: true,
+                    ..Modifiers::NONE
+                },
+            ),
+            (
+                Key::E,
+                "e",
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        ] {
+            probe::key(&mut app, &chord(k, t, m));
+        }
+        assert_eq!(app.search_query, "\u{107}", "a command's letter was typed");
+    }
+
+    /// **A press on the box opens the search and does not close it; the ×
+    /// closes it.** The box was a toggle, so a press meant to put the caret
+    /// in an open search closed it instead.
+    #[test]
+    fn a_press_opens_the_search_and_the_cross_closes_it() {
+        let mut app = CharMapApp::new();
+        assert!(
+            probe::rect_of(&app, Target::SearchClose).is_none(),
+            "a closed search has a close mark"
+        );
+        probe::click(&mut app, Target::SearchBox);
+        assert!(app.search_active);
+        probe::click(&mut app, Target::SearchBox);
+        assert!(
+            app.search_active,
+            "a second press in the box closed the search"
+        );
+        probe::click(&mut app, Target::SearchClose);
+        assert!(!app.search_active, "the x did not close the search");
     }
 }

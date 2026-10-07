@@ -901,6 +901,19 @@ mod tests {
         fd
     }
 
+    /// A file's descriptor: what a sync request needs to succeed. (A
+    /// terminal, an eventfd or a pipe has nothing to sync, and `fsync` on
+    /// one is `EINVAL`, as on Linux; see
+    /// [`test_aio_fsync_of_what_has_no_storage_records_einval`].)
+    fn file_fd() -> i32 {
+        crate::fdtable::alloc_fd_with_flags(
+            crate::fdtable::HandleKind::File,
+            0xA10,
+            crate::fcntl::O_RDWR,
+        )
+        .expect("fd table full")
+    }
+
     fn write_request(fd: i32, value: &mut u64) -> Aiocb {
         let mut cb = blank();
         cb.aio_fildes = fd;
@@ -1109,7 +1122,7 @@ mod tests {
     #[test]
     fn test_aio_fsync_completes() {
         let mut cb = blank();
-        cb.aio_fildes = 0;
+        cb.aio_fildes = file_fd();
         assert_eq!(aio_fsync(0xDEAD, &raw mut cb), -1);
         assert_eq!(aio_error(&cb), 0);
         cb.return_value.store(99, Ordering::Relaxed);
@@ -1119,16 +1132,35 @@ mod tests {
         assert_eq!(aio_fsync(crate::fcntl::O_DSYNC, &raw mut cb), 0);
         assert_eq!(aio_return(&raw mut cb), 0);
         assert_ne!(crate::fcntl::O_SYNC, crate::fcntl::O_DSYNC);
+        assert!(crate::fdtable::close_fd(cb.aio_fildes).is_some());
     }
 
     /// A sync request's priority is not checked (glibc zeroes it).
     #[test]
     fn test_aio_fsync_ignores_priority() {
         let mut cb = blank();
-        cb.aio_fildes = 0;
+        cb.aio_fildes = file_fd();
         cb.aio_reqprio = -5;
         assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), 0);
         assert_eq!(aio_error(&cb), 0);
+        assert!(crate::fdtable::close_fd(cb.aio_fildes).is_some());
+    }
+
+    /// A terminal -- fd 0 here -- or an eventfd has nothing to sync: the
+    /// request is taken, and fails as glibc's worker's `fsync` would, with
+    /// `EINVAL` in its `aio_error`.
+    #[test]
+    fn test_aio_fsync_of_what_has_no_storage_records_einval() {
+        for fd in [0, eventfd()] {
+            let mut cb = blank();
+            cb.aio_fildes = fd;
+            assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), 0, "{fd}");
+            assert_eq!(aio_error(&cb), errno::EINVAL, "{fd}");
+            assert_eq!(aio_return(&raw mut cb), -1, "{fd}");
+            if fd != 0 {
+                crate::file::close(fd);
+            }
+        }
     }
 
     // -- aio_cancel --
@@ -1357,11 +1389,12 @@ mod tests {
         assert_eq!((aio_error64(&r), aio_return64(&raw mut r)), (0, 8));
         assert_eq!(got, 10, "an eventfd's counter sums its writes");
         assert_eq!(aio_cancel64(fd, core::ptr::null_mut()), AIO_ALLDONE);
+        crate::file::close(fd);
         let mut sync = blank();
-        sync.aio_fildes = fd;
+        sync.aio_fildes = file_fd();
         assert_eq!(aio_fsync64(crate::fcntl::O_SYNC, &raw mut sync), 0);
         assert_eq!(aio_error64(&sync), 0);
-        crate::file::close(fd);
+        assert!(crate::fdtable::close_fd(sync.aio_fildes).is_some());
 
         let null = core::ptr::null_mut::<Aiocb>();
         assert_eq!(outcome(|| aio_read64(null)), outcome(|| aio_read(null)));
@@ -1549,7 +1582,7 @@ mod tests {
     #[test]
     fn test_sigev_signal() {
         let mut cb = blank();
-        cb.aio_fildes = 0;
+        cb.aio_fildes = file_fd();
         with_sigevent(&mut cb, crate::time::SIGEV_SIGNAL, 0, None);
         assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), 0);
         assert_eq!(aio_error(&cb), 0);
@@ -1559,31 +1592,35 @@ mod tests {
         assert_eq!(errno::get_errno(), 3, "the caller's errno is kept");
         assert_eq!(aio_error(&cb), errno::EINVAL);
         assert_eq!(aio_return(&raw mut cb), -1);
+        assert!(crate::fdtable::close_fd(cb.aio_fildes).is_some());
     }
 
     /// SIGEV_THREAD with no function would call NULL in glibc; here it is
     /// the request's EFAULT.  With a function, the host cannot create the
-    /// thread, and says so through the request.
+    /// thread, and says so through the request.  (The sync itself succeeds,
+    /// so each failure is the notification's.)
     #[test]
     fn test_sigev_thread() {
         let mut cb = blank();
-        cb.aio_fildes = 0;
+        cb.aio_fildes = file_fd();
         with_sigevent(&mut cb, crate::time::SIGEV_THREAD, 0, None);
         assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), 0);
         assert_eq!(aio_error(&cb), errno::EFAULT);
         with_sigevent(&mut cb, crate::time::SIGEV_THREAD, 0, Some(never_called));
         assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), 0);
         assert_eq!(aio_error(&cb), errno::EAGAIN);
+        assert!(crate::fdtable::close_fd(cb.aio_fildes).is_some());
     }
 
     #[test]
     fn test_sigev_none_and_thread_id_notify_nothing() {
         for how in [crate::time::SIGEV_NONE, crate::time::SIGEV_THREAD_ID, 77] {
             let mut cb = blank();
-            cb.aio_fildes = 0;
+            cb.aio_fildes = file_fd();
             with_sigevent(&mut cb, how, 100_000, None);
             assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), 0);
             assert_eq!(aio_error(&cb), 0);
+            assert!(crate::fdtable::close_fd(cb.aio_fildes).is_some());
         }
     }
 

@@ -375,7 +375,7 @@ unsafe fn bytes<'a>(s: *const u8) -> &'a [u8] {
 fn program_name<'a>() -> &'a [u8] {
     // SAFETY: a plain read of the pointer, which `__libc_start_main` sets
     // once to argv[0]'s last component, or leaves at a static string.
-    let p = unsafe { core::ptr::addr_of!(crate::crt::__progname).read() };
+    let p = unsafe { crate::crt::progname_slot().read() };
     // SAFETY: the start-up string or the static one, both the process's.
     unsafe { bytes(p) }
 }
@@ -672,7 +672,7 @@ unsafe fn addr_info(ph: Option<ProgramHeaders>, addr: *const c_void, info: *mut 
         return 0;
     }
     // SAFETY: a plain read of the pointer `__libc_start_main` set to argv[0].
-    let name = unsafe { core::ptr::addr_of!(crate::crt::__progname_full).read() };
+    let name = unsafe { crate::crt::progname_full_slot().read() };
     // SAFETY: the caller's contract.
     unsafe {
         info.write(DlInfo {
@@ -1435,14 +1435,8 @@ mod tests {
             assert_eq!(
                 unsafe { CStr::from_ptr(info.dli_fname.cast()) }.to_bytes(),
                 // SAFETY: the same pointer, read directly.
-                unsafe {
-                    CStr::from_ptr(
-                        core::ptr::addr_of!(crate::crt::__progname_full)
-                            .read()
-                            .cast(),
-                    )
-                }
-                .to_bytes()
+                unsafe { CStr::from_ptr(crate::crt::progname_full_slot().read().cast()) }
+                    .to_bytes()
             );
         }
         for outside in [0x3f_ffff, 0x40_4800, 0x40_5000, 0x7fff_0000] {

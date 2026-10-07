@@ -1,0 +1,16 @@
+# Third-party code in this crate, for the image's notices (design-decisions 1433).
+#
+# src/ is a port of 7-Zip's 7z reader (CPP/7zip/Archive/7z/7zIn.cpp,
+# 7zDecode.cpp, Archive/Common/CoderMixer2.cpp) and codecs (C/LzmaDec.c,
+# C/Lzma2Dec.c, C/Lzma2DecMt.c, C/MtDec.c, C/Ppmd7.c, C/Ppmd7Dec.c,
+# C/Bcj2.c, C/Bra.c's ARM64 and RISC-V converters,
+# CPP/7zip/Compress/LzmaDecoder.cpp, Lzma2Decoder.cpp, PpmdDecoder.cpp,
+# Bcj2Coder.cpp, CPP/7zip/Crypto/7zAes.cpp) from the LZMA SDK 26.00, which
+# Igor Pavlov placed in the public domain (PPMd var.H by Dmitry Shkarin, also
+# public domain). AES and SHA-256 themselves are the workspace's `aes` and
+# `sha2` crates.
+lzma-sdk:
+  version: "26.00"
+  licence: LicenseRef-Public-Domain
+  texts:
+    - lzma-sdk-LICENSE.txt

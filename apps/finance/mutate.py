@@ -64,8 +64,8 @@ MUTATIONS = [
     ),
     (
         "any key answers the question yes",
-        "                .map_or(key.key == Key::Y, |c| c.eq_ignore_ascii_case(&'y'));",
-        "                .map_or(true, |_| true);",
+        "                key.single_char().map_or(key.key == Key::Y, typed_y)",
+        "                key.single_char().map_or(true, |_| true)",
         ["ctrl_d_asks_before_deleting_and_only_y_deletes"],
     ),
     (
@@ -353,7 +353,7 @@ MUTATIONS = [
     ),
     (
         "a failed save says nothing",
-        '            Err(err) => Some(format!("Not saved to {}: {err}", path.display())),',
+        '            Err(err) => Some(format!("Not saved to {}: {err}", path.shown())),',
         "            Err(_) => None,",
         ["a_save_that_fails_says_so_and_the_next_one_clears_it"],
     ),
@@ -380,6 +380,73 @@ MUTATIONS = [
         "                    .map(|t| t.id.saturating_add(1))",
         "                    .map(|_| 1)",
         ["what_is_entered_is_there_next_time"],
+    ),
+    (
+        "a chord works a form's own keys",
+        '        let plain = textline::is_plain(key.modifiers);\n        match key.key {\n            Key::Tab if plain => {',
+        '        let plain = true;\n        match key.key {\n            Key::Tab if plain => {',
+        ['a_chord_is_neither_a_finance_key_nor_typing'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if key.key == Key::F1 && plain {',
+        '        if key.key == Key::F1 {',
+        ['a_chord_is_neither_a_finance_key_nor_typing'],
+    ),
+    (
+        'a chorded Y answers the delete question',
+        '                textline::types_into_field(key) && key.single_char().is_some_and(typed_y)',
+        '                key.single_char().is_some_and(typed_y)',
+        ['a_chord_is_neither_a_finance_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '        if self.search_active && textline::types_into_field(key) {',
+        '        if self.search_active && !key.text.is_empty() {',
+        ['a_chord_is_neither_a_finance_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        let ctrl = textline::is_ctrl_chord(key.modifiers);',
+        '        let ctrl = key.modifiers.ctrl;',
+        ['a_chord_is_neither_a_finance_key_nor_typing'],
+    ),
+    (
+        'a Ctrl chord works a plain shortcut',
+        '        if ctrl && key.key != Key::D {',
+        '        if false {',
+        ['a_chord_is_neither_a_finance_key_nor_typing'],
+    ),
+    (
+        "Alt's and the Windows key's chords work the shortcuts",
+        '        if !ctrl && !plain && !textline::types_into_field(key) {',
+        '        if false {',
+        ['a_chord_is_neither_a_finance_key_nor_typing'],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        'the search box is drawn the same wherever the pointer is',
+        '                hovered: self.hover == Some(Target::Search),',
+        '                hovered: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the search box is not marked while it has the keyboard',
+        '                focused: self.search_active,',
+        '                focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'a form field is not marked while it has the keyboard',
+        '                hovered: self.hover == Some(Target::Field(field)),\n                focused,',
+        '                hovered: self.hover == Some(Target::Field(field)),\n                focused: false,',
+        ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        '        self.focus_ring_width = settings.focus_ring_width();',
+        '        let _ = settings;',
+        ['the_text_boxes_are_the_toolkits_fields'],
     ),
 ]
 

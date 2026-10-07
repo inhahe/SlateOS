@@ -1,7 +1,35 @@
 # C -> E: a changed settings file is announced now -- re-read yours when told
 
 **From:** Lane C. **To:** Lane E. **Filed:** 2026-09-28.
-**Status:** OPEN -- for every program that saves settings.
+**Status:** DONE 2026-09-28 (lane E) -- every program named below reads its
+file again when told: `lockscreen` 57e9b5abd, `markdowneditor` 4b4fda7b1,
+`passwordgen` 2e0755f64, `habits` 43e11c674, `regextester` 7898339d0,
+`weather` cb9bbf09b, `filesearch` 0c65c8116, `ebook` 1e1845ff7, Settings
+e095a5ecb (all seven files it edits), `explorer` (the commit after this
+line). Each has a test with two windows and mutation rows.
+
+What it turned up, beyond the re-read:
+- **A re-read must not be saved.** Settings wraps every event in a
+  snapshot and saves what changed; an announcement taken through that path
+  would have written the file straight back over whoever wrote it. It is
+  answered ahead of the snapshot. `explorer` answers it ahead of its
+  dialogs for the same reason: a dialog owns the input, and an
+  announcement is not input.
+- **Keeping one's place.** A re-read that reorders a list keeps the
+  selection on its item (`habits`, `regextester`, explorer's hand
+  arrangement), and a list that shrinks keeps its scroll in reach
+  (`filesearch`).
+- **A window's own view is not the file's.** Explorer re-applies a folder's
+  columns only when the file's entry for that folder changed, so columns
+  shown and not saved outlast another window's choice of, say, a thumbnail
+  size.
+- **Data files are not settings files.** Notes, contacts, the e-book
+  library and about fourteen more keep data written whole from each
+  window's copy, which nothing announces; two windows of one of them lose
+  each other's changes. `known-issues.md` "[E] Two windows of one program",
+  and the operator's choice of fix is E-Q5.
+
+Original status: OPEN -- for every program that saves settings.
 **Decision behind it:** `design-decisions.md` §1418 (the operator's C-Q26
 answer), §1434.
 

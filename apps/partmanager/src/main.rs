@@ -35,12 +35,16 @@ use appearance::Surface;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::field;
+use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::modal::{AlertDialog, DialogResult};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
+use guitk::text;
+use guitk::textedit;
 use guitk::wheel;
 use oswindow::app::Response;
 
@@ -1078,6 +1082,10 @@ pub struct PartitionManagerApp {
     /// Currently active dialog.
     /// Whether the shortcut card is up.
     pub show_help: bool,
+    /// How wide the mark is round the label box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    pub focus_ring_width: f32,
     pub dialog: ActiveDialog,
     /// Scroll offset for the partition list.
     pub partition_scroll: f32,
@@ -1123,6 +1131,7 @@ impl PartitionManagerApp {
             selected_item: SelectedItem::None,
             operation_queue: Vec::new(),
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             dialog: ActiveDialog::None,
             partition_scroll: 0.0,
             queue_scroll: 0.0,
@@ -2713,6 +2722,22 @@ fn render_confirm_dialog(tree: &mut RenderTree, app: &mut PartitionManagerApp) {
 // Rendering -- create-partition dialog
 // ============================================================================
 
+/// The size the create dialog's label is drawn at.
+const LABEL_TEXT_SIZE: f32 = 11.0;
+
+/// How the create dialog's label box is drawn: with the keyboard while the
+/// dialog is up -- every key that types goes to it -- unless the list of
+/// keys is over it. Never lit under the pointer: it has no press of its own.
+/// Never red: what cannot go in a label is not typed into it.
+fn label_box_state(app: &PartitionManagerApp) -> field::State {
+    field::State {
+        hovered: false,
+        focused: matches!(app.dialog, ActiveDialog::CreatePartition(_)) && !app.show_help,
+        disabled: false,
+        invalid: false,
+    }
+}
+
 fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let dialog = match &app.dialog {
         ActiveDialog::CreatePartition(d) => d,
@@ -2847,43 +2872,50 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     });
     fy += 18.0;
 
-    tree.push(RenderCommand::FillRect {
-        x: dx + 20.0,
-        y: fy,
-        width: dw - 40.0,
-        height: 26.0,
-        color: app.palette.base,
-        corner_radii: CornerRadii::all(4.0),
-    });
-    tree.push(RenderCommand::StrokeRect {
-        x: dx + 20.0,
-        y: fy,
-        width: dw - 40.0,
-        height: 26.0,
-        color: app.palette.surface2,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(4.0),
-    });
-    let label_display = if dialog.label.is_empty() {
-        String::from("Enter label...")
+    // The box the label is typed into: the toolkit's field, with the label
+    // and a caret after it -- typed and erased at its end, since Left and
+    // Right are the size's. It was a box with no caret at all.
+    let label_box = Rect::new(dx + 20.0, fy, dw - 40.0, 26.0);
+    let state = label_box_state(app);
+    field::draw(tree, &app.palette, label_box, state, app.focus_ring_width);
+    let line = text::line_height(LABEL_TEXT_SIZE, FontWeightHint::Regular);
+    let (tx, ty, tw) = (
+        label_box.x + 8.0,
+        label_box.y + (label_box.h - line) / 2.0,
+        (label_box.w - 16.0).max(0.0),
+    );
+    if dialog.label.is_empty() && !state.focused {
+        tree.push(RenderCommand::Text {
+            x: tx,
+            y: ty,
+            text: String::from("Enter label..."),
+            color: app.palette.subtext0,
+            font_size: LABEL_TEXT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(tw),
+            overflow: TextOverflow::Ellipsis,
+        });
     } else {
-        dialog.label.clone()
-    };
-    let label_color = if dialog.label.is_empty() {
-        app.palette.overlay0
-    } else {
-        app.palette.text
-    };
-    tree.push(RenderCommand::Text {
-        x: dx + 28.0,
-        y: fy + 6.0,
-        text: label_display,
-        color: label_color,
-        font_size: 11.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(dw - 56.0),
-        overflow: TextOverflow::Ellipsis,
-    });
+        textedit::draw(
+            tree,
+            &textedit::SingleLine {
+                text: &dialog.label,
+                cursor: text::TextCursor::from(dialog.label.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: LABEL_TEXT_SIZE,
+                weight: FontWeightHint::Regular,
+                color: app.palette.text,
+                selection_bg: app.palette.accent,
+                selection_fg: app.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+    }
 
     // Size slider representation
     fy += 38.0;
@@ -3286,6 +3318,21 @@ pub fn handle_event(app: &mut PartitionManagerApp, event: &Event) -> EventResult
 fn handle_mouse(app: &mut PartitionManagerApp, mouse: &guitk::event::MouseEvent) -> EventResult {
     let x = mouse.x;
     let y = mouse.y;
+
+    // The card is modal for the pointer as it is for the keys, and drawn
+    // over everything: a press, with any button, puts it away rather than
+    // reaching the disk, partition or button drawn under it, and the wheel
+    // scrolls nothing it covers.
+    if app.show_help {
+        match mouse.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                app.show_help = false;
+                return EventResult::Consumed;
+            }
+            MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+            _ => {}
+        }
+    }
 
     // If a dialog is open, route all mouse events to it
     if app.dialog.is_open() {
@@ -3881,60 +3928,66 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
         return EventResult::Ignored;
     }
 
-    if key_ev.key == Key::F1 {
+    // A binding on a key itself is taken plain, nothing held but Shift: Alt's
+    // chords are the window's and the Windows key's the desktop's, and each
+    // arrives carrying its key -- Alt+Delete queued a partition's removal.
+    let plain = textline::is_plain(key_ev.modifiers);
+    // A Ctrl chord is Ctrl without Alt or the Windows key: Ctrl+Alt is
+    // AltGr, which types -- AltGr+Enter applied the pending operations to
+    // the disk.
+    let ctrl = textline::is_ctrl_chord(key_ev.modifiers);
+
+    if key_ev.key == Key::F1 && plain {
         app.show_help = !app.show_help;
         return EventResult::Consumed;
     }
     if app.show_help {
         // Modal. Delete queues a partition removal.
-        if matches!(key_ev.key, Key::Escape | Key::Enter) {
+        if plain && matches!(key_ev.key, Key::Escape | Key::Enter) {
             app.show_help = false;
         }
         return EventResult::Consumed;
     }
 
     // Escape closes dialogs
-    if key_ev.key == Key::Escape && app.dialog.is_open() {
+    if key_ev.key == Key::Escape && plain && app.dialog.is_open() {
         app.dialog = ActiveDialog::None;
         return EventResult::Consumed;
     }
 
-    // If dialog open, handle text input for create-partition label
+    // If dialog open, handle text input for create-partition label. Left
+    // and Right are the size's, so the label is typed and erased at its end.
     if let ActiveDialog::CreatePartition(ref mut dialog) = app.dialog {
         match key_ev.key {
-            Key::Backspace => {
+            Key::Backspace if plain => {
                 dialog.label.pop();
-                return EventResult::Consumed;
             }
-            Key::Left => {
+            Key::Left if plain => {
                 dialog.size_percent = dialog.size_percent.saturating_sub(5).max(5);
-                return EventResult::Consumed;
             }
-            Key::Right => {
+            Key::Right if plain => {
                 dialog.size_percent = dialog.size_percent.saturating_add(5).min(100);
-                return EventResult::Consumed;
             }
-            Key::Tab => {
+            Key::Tab if plain => {
                 dialog.filesystem_index = FilesystemType::next_formattable(dialog.filesystem_index);
-                return EventResult::Consumed;
             }
-            _ => {
+            // A command arrives carrying its letter as text, and is no part
+            // of a label: Ctrl+A typed an `a`. AltGr types.
+            _ if textline::types_into_field(key_ev) => {
                 let allowed: String = key_ev
                     .typed()
                     .filter(|ch| ch.is_alphanumeric() || *ch == ' ' || *ch == '-' || *ch == '_')
                     .collect();
-                if !allowed.is_empty() {
-                    dialog.label.push_str(&allowed);
-                    return EventResult::Consumed;
-                }
+                dialog.label.push_str(&allowed);
             }
+            _ => {}
         }
         return EventResult::Consumed;
     }
 
     // If format dialog, Tab cycles filesystem
     if let ActiveDialog::Format(ref mut dialog) = app.dialog {
-        if key_ev.key == Key::Tab {
+        if key_ev.key == Key::Tab && plain {
             dialog.filesystem_index = FilesystemType::next_formattable(dialog.filesystem_index);
             return EventResult::Consumed;
         }
@@ -3943,31 +3996,31 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
 
     // Global shortcuts
     match key_ev.key {
-        Key::Delete => {
+        Key::Delete if plain => {
             if matches!(app.selected_item, SelectedItem::Partition(_)) {
                 let _ = execute_toolbar_action(app, 2); // Delete
                 return EventResult::Consumed;
             }
         }
-        Key::N if key_ev.modifiers.ctrl => {
+        Key::N if ctrl => {
             if matches!(app.selected_item, SelectedItem::Unallocated(_)) {
                 let _ = execute_toolbar_action(app, 1); // Create
                 return EventResult::Consumed;
             }
         }
-        Key::Z if key_ev.modifiers.ctrl => {
+        Key::Z if ctrl => {
             app.undo_last_operation();
             return EventResult::Consumed;
         }
-        Key::Enter if key_ev.modifiers.ctrl && app.has_pending_operations() => {
+        Key::Enter if ctrl && app.has_pending_operations() => {
             let _ = execute_toolbar_action(app, 9); // Apply
             return EventResult::Consumed;
         }
-        Key::Up => {
+        Key::Up if plain => {
             select_adjacent_region(app, true);
             return EventResult::Consumed;
         }
-        Key::Down => {
+        Key::Down if plain => {
             select_adjacent_region(app, false);
             return EventResult::Consumed;
         }
@@ -4023,6 +4076,10 @@ fn select_adjacent_region(app: &mut PartitionManagerApp, up: bool) {
 impl oswindow::app::App for PartitionManagerApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4226,6 +4283,80 @@ mod tests {
     /// list — the wheel accepted the header and the hover did not, so this
     /// point exercised a region no other consumer agreed was part of the list.
     const QUEUE_POINT: (f32, f32) = (400.0, 650.0);
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the disk or partition drawn under it. The
+    /// controls at the end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut app = app_with_long_lists();
+        assert!(app.disks.len() > 1, "the fixture needs a second disk");
+        let sidebar = DiskSidebar::of(&app);
+        let x = SIDEBAR_WIDTH / 2.0;
+        let y = (0..2000)
+            .map(|y| y as f32 / 2.0)
+            .find(|&y| {
+                sidebar.contains_column(x, y) && sidebar.row_at(y, app.disks.len()) == Some(1)
+            })
+            .expect("the second disk's row");
+        let mouse = |kind| guitk::event::MouseEvent { x, y, kind };
+        let wheel = guitk::event::MouseEvent {
+            x: LIST_POINT.0,
+            y: LIST_POINT.1,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        };
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        let disk = app.selected_disk;
+
+        handle_event(&mut app, &f1);
+        assert!(app.show_help);
+        handle_event(&mut app, &Event::Mouse(wheel.clone()));
+        assert_eq!(
+            app.partition_scroll, 0.0,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(
+            handle_event(
+                &mut app,
+                &Event::Mouse(mouse(MouseEventKind::Press(MouseButton::Left)))
+            ),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.selected_disk, disk,
+            "the press went through the card to a disk"
+        );
+
+        // Any button: the right one does nothing to a disk, but it is still a
+        // press on the card.
+        handle_event(&mut app, &f1);
+        handle_event(
+            &mut app,
+            &Event::Mouse(mouse(MouseEventKind::Press(MouseButton::Right))),
+        );
+        assert!(!app.show_help, "a right-button press left the card up");
+
+        handle_event(&mut app, &Event::Mouse(wheel));
+        assert!(
+            app.partition_scroll > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        handle_event(
+            &mut app,
+            &Event::Mouse(mouse(MouseEventKind::Press(MouseButton::Left))),
+        );
+        assert_eq!(
+            app.selected_disk, 1,
+            "control: the press does nothing even with the card down"
+        );
+    }
 
     #[test]
     fn one_notch_crosses_three_rows_of_whichever_list_is_under_the_pointer() {
@@ -6437,6 +6568,174 @@ mod tests {
                 "a body cell starts at {x}, which is no column's left edge ({header_x:?})"
             );
         }
+    }
+
+    /// A key `k` typing `text`, held with `modifiers`.
+    fn chord(k: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    const ALT: Modifiers = Modifiers {
+        shift: false,
+        ctrl: false,
+        alt: true,
+        super_key: false,
+    };
+
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// The sidebar index of the first unallocated region on the first disk.
+    fn first_unallocated(app: &PartitionManagerApp) -> usize {
+        app.current_disk()
+            .expect("a disk")
+            .regions()
+            .iter()
+            .position(|r| matches!(r, DiskRegion::Unallocated(_)))
+            .expect("unallocated space on the sample disk")
+    }
+
+    /// **A chord is none of the partition manager's keys**: a key bound to
+    /// itself is taken plain, and a Ctrl chord is Ctrl without Alt -- AltGr
+    /// arrives as Ctrl+Alt, and types. Alt+Delete queued a partition's
+    /// removal, AltGr+N opened New Partition, AltGr+Enter applied the queue to
+    /// the disk, and Ctrl+F1 raised the list of keys.
+    #[test]
+    fn a_chord_is_none_of_the_partition_managers_keys() {
+        let mut app = app_with_disks();
+        let part = app.disks[0].partitions[0].index;
+        app.selected_item = SelectedItem::Partition(part);
+        handle_event(&mut app, &chord(Key::Delete, "", ALT));
+        assert!(
+            !app.dialog.is_open() && !app.has_pending_operations(),
+            "Alt+Delete acted"
+        );
+
+        app.selected_item = SelectedItem::Unallocated(first_unallocated(&app));
+        handle_event(&mut app, &chord(Key::N, "n", ALTGR));
+        assert!(!app.dialog.is_open(), "AltGr+N opened New Partition");
+
+        app.enqueue_operation(PendingOperation::SetLabel {
+            disk_id: 0,
+            partition_index: part,
+            new_label: String::from("Test"),
+        });
+        let status = app.status_message.clone();
+        handle_event(&mut app, &chord(Key::Enter, "", ALTGR));
+        assert!(
+            !app.dialog.is_open() && app.status_message == status,
+            "AltGr+Enter applied the queue"
+        );
+        handle_event(&mut app, &chord(Key::Z, "z", ALTGR));
+        assert!(app.has_pending_operations(), "AltGr+Z undid");
+        handle_event(&mut app, &chord(Key::F1, "", Modifiers::ctrl()));
+        assert!(!app.show_help, "Ctrl+F1 raised the list of keys");
+
+        // Control: the keys themselves.
+        handle_event(&mut app, &chord(Key::Enter, "", Modifiers::ctrl()));
+        assert_ne!(
+            app.status_message, status,
+            "control: Ctrl+Enter applies nothing"
+        );
+        app.dialog = ActiveDialog::None;
+        handle_event(&mut app, &chord(Key::N, "n", Modifiers::ctrl()));
+        assert!(
+            matches!(app.dialog, ActiveDialog::CreatePartition(_)),
+            "control: Ctrl+N opens nothing"
+        );
+    }
+
+    /// **The label box is the toolkit's field, and a command is not typed
+    /// into it**: with the keyboard in the theme's mark at the user's width
+    /// while the dialog is up -- not under the list of keys -- and the label
+    /// drawn with a caret after it. Ctrl+A typed an `a`; AltGr types.
+    #[test]
+    fn the_label_box_is_the_toolkits_field_and_takes_no_command() {
+        let mut app = app_with_disks();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.selected_item = SelectedItem::Unallocated(first_unallocated(&app));
+        handle_event(&mut app, &chord(Key::N, "n", Modifiers::ctrl()));
+        assert!(matches!(app.dialog, ActiveDialog::CreatePartition(_)));
+
+        handle_event(&mut app, &chord(Key::A, "a", Modifiers::ctrl()));
+        handle_event(&mut app, &chord(Key::X, "x", ALT));
+        for c in "data".chars() {
+            handle_event(
+                &mut app,
+                &chord(Key::Unknown(0), &c.to_string(), Modifiers::NONE),
+            );
+        }
+        handle_event(&mut app, &chord(Key::S, "\u{15b}", ALTGR));
+        let label = match &app.dialog {
+            ActiveDialog::CreatePartition(d) => d.label.clone(),
+            other => panic!("the dialog went away: {other:?}"),
+        };
+        assert_eq!(
+            label, "data\u{15b}",
+            "a command typed its letter, or AltGr did not type"
+        );
+
+        let cmds = crate::render(&mut app).commands;
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if *text == label))
+            .expect("the label is not drawn in a field");
+        let (tx, ty) = match cmds.get(at) {
+            Some(RenderCommand::RichText { x, y, .. }) => (*x, *y),
+            _ => unreachable!("just matched"),
+        };
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the label: {other:?}"),
+        };
+        let end = tx + text::measure(&label, LABEL_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the label at {end}"
+        );
+        // The box the text sits in, as the dialog places it.
+        let ring = app.focus_ring_width;
+        let line = text::line_height(LABEL_TEXT_SIZE, FontWeightHint::Regular);
+        let has = |cmds: &[RenderCommand], s: field::State| {
+            // `dw - 40.0`, where the dialog is `DIALOG_WIDTH + 40.0` wide.
+            let rect = Rect::new(tx - 8.0, ty - (26.0 - line) / 2.0, DIALOG_WIDTH, 26.0);
+            let mut want: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut want, &p, rect, s, ring);
+            cmds.windows(want.len()).any(|w| w == want.as_slice())
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(has(&cmds, focused), "the label box has no keyboard mark");
+        app.show_help = true;
+        let cmds = crate::render(&mut app).commands;
+        assert!(
+            has(&cmds, field::State::default()) && !has(&cmds, focused),
+            "the label box keeps its mark under the list of keys"
+        );
     }
 
     // -- Event handling tests --

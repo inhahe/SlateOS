@@ -14,15 +14,15 @@
 //! - **Memory map viewer** — display virtual memory regions with color-coded
 //!   region types.
 // The environment and memory-map views are wired (the Environment and Memory
-// tabs, from /proc/<pid>). The rest is not yet: the window picker needs the
-// compositor to say which window is under the pointer, the blocking analyzer
-// needs the kernel to say what a process waits on, and the affinity and
-// priority controls need their system calls -- known-issues.md, "[E] The
+// tabs, from /proc/<pid>), and so is the window picker (the Identify button,
+// through the desktop's window pick). The rest is not yet: the blocking
+// analyzer needs the kernel to say what a process waits on, and the affinity
+// and priority controls need their system calls -- known-issues/, "[E] The
 // process explorer's window picker, blocking analyzer and affinity and
 // priority controls are unwired". `expect`, so this goes when they are.
 #![expect(
     dead_code,
-    reason = "the window picker, blocking analyzer, and affinity and priority controls are not wired yet"
+    reason = "the blocking analyzer, and affinity and priority controls are not wired yet"
 )]
 
 use appearance::{Palette, Surface};
@@ -84,12 +84,16 @@ pub enum ProcessAction {
 pub struct PickResult {
     /// Window identifier.
     pub window_id: u64,
-    /// PID of the process that owns the window.
-    pub pid: u32,
-    /// Name of the owning process.
+    /// PID of the process that owns the window: `None` when its program
+    /// reached the compositor over TCP, which cannot say.
+    pub pid: Option<u32>,
+    /// Name of the owning process, as the process list knows it; empty when
+    /// the list does not hold it.
     pub process_name: String,
     /// Title of the picked window.
     pub window_title: String,
+    /// The program the window says it belongs to; empty when it says nothing.
+    pub app_id: String,
 }
 
 /// State for the window-identification ("crosshair") mode.
@@ -149,9 +153,10 @@ impl WindowPicker {
     pub fn mock_pick() -> PickResult {
         PickResult {
             window_id: 0x1A3F,
-            pid: 203,
+            pid: Some(203),
             process_name: "editor".to_string(),
             window_title: "untitled.rs - Slate OS Editor".to_string(),
+            app_id: "editor".to_string(),
         }
     }
 
@@ -218,7 +223,11 @@ impl WindowPicker {
 
             let labels = [
                 ("Window", format!("{:#06X}", res.window_id)),
-                ("PID", res.pid.to_string()),
+                (
+                    "PID",
+                    res.pid
+                        .map_or_else(|| "cannot be named".to_string(), |p| p.to_string()),
+                ),
                 ("Process", res.process_name.clone()),
                 ("Title", res.window_title.clone()),
             ];
@@ -2581,7 +2590,7 @@ mod tests {
         picker.pick(WindowPicker::mock_pick());
         assert!(!picker.active);
         assert!(picker.result.is_some());
-        assert_eq!(picker.result.as_ref().map(|r| r.pid), Some(203));
+        assert_eq!(picker.result.as_ref().and_then(|r| r.pid), Some(203));
     }
 
     #[test]

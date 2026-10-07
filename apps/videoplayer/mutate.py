@@ -331,6 +331,61 @@ MUTATIONS = [
         "                5,",
         [SEEK],
     ),
+    (
+        'a plain binding answers the Windows key',
+        '            Self::Plain(key) => event.key == key && plain && !mods.shift,',
+        '            Self::Plain(key) => event.key == key && !mods.shift && !mods.ctrl && !mods.alt,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+    (
+        'a shifted binding answers the Windows key',
+        '            Self::Shift(key) => event.key == key && plain && mods.shift,',
+        '            Self::Shift(key) => event.key == key && mods.shift && !mods.ctrl && !mods.alt,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+    (
+        'a Ctrl binding answers the Windows key',
+        '            Self::Ctrl(key) => event.key == key && textline::is_ctrl_chord(mods),',
+        '            Self::Ctrl(key) => event.key == key && mods.ctrl && !mods.alt,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+    (
+        'a Ctrl binding answers AltGr',
+        '            Self::Ctrl(key) => event.key == key && textline::is_ctrl_chord(mods),',
+        '            Self::Ctrl(key) => event.key == key && mods.ctrl && !mods.super_key,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+    (
+        'the digits answer the Windows key',
+        '            Self::Digit => Self::digit_of(event.key).is_some() && plain,',
+        '            Self::Digit => Self::digit_of(event.key).is_some() && !mods.ctrl && !mods.alt,',
+        ['a_key_held_with_the_windows_key_is_not_the_players'],
+    ),
+]
+
+# F1 (2026-10-04): it did nothing, though the whole table was a tab away.
+F1 = "f1_shows_the_keys_and_goes_back"
+
+MUTATIONS += [
+    (
+        "F1 shows nothing",
+        "                    self.tab_before_keys = Some(self.active_tab);\n"
+        "                    self.active_tab = PlayerTab::Shortcuts;\n",
+        "                    self.tab_before_keys = Some(self.active_tab);\n",
+        [F1],
+    ),
+    (
+        "F1 does not go back where it came from",
+        "                    self.active_tab = self.tab_before_keys.take().unwrap_or(PlayerTab::Player);\n",
+        "                    self.active_tab = PlayerTab::Player;\n",
+        [F1],
+    ),
+    (
+        "? shows nothing",
+        "                Press::Shift(Key::Slash),\n",
+        "                Press::Shift(Key::F12),\n",
+        [F1],
+    ),
 ]
 
 if __name__ == "__main__":

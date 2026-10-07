@@ -116,7 +116,7 @@ MUTATIONS = [
     ),
     (
         "the search box records no hit box",
-        "        cmds.hit(Target::SearchBox, Rect::new(search_x, y + 6.0, 240.0, 24.0));",
+        "        cmds.hit(Target::SearchBox, search);",
         "",
         ["the_search_box_takes_the_keyboard_and_a_press_elsewhere_gives_it_back"],
     ),
@@ -331,6 +331,172 @@ MUTATIONS = [
         "        Some(first) if first.starts_with(\"slateos-feed-marks\\t\") => {",
         "        Some(first) if first.starts_with(\"slateos-feed-marks-never\\t\") => {",
         [ROUND],
+    ),
+    (
+        'AltGr is taken for Ctrl in the reader',
+        '        if textline::is_ctrl_chord(key.modifiers) {\n            return match key.key {\n                Key::F => {',
+        '        if key.modifiers.ctrl {\n            return match key.key {\n                Key::F => {',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        "a chord works the reader's keys",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chord answers a question',
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Consumed;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the search',
+        '            Key::Escape if plain => {\n                self.search_active = false;',
+        '            Key::Escape => {\n                self.search_active = false;',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chorded Enter closes the search',
+        '            Key::Enter if plain => {\n                self.search_active = false;',
+        '            Key::Enter => {\n                self.search_active = false;',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chorded Escape closes the prompt for a name',
+        '            Key::Escape if plain => {\n                self.text_entry = None;',
+        '            Key::Escape => {\n                self.text_entry = None;',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+    (
+        'a chorded Enter commits the prompt for a name',
+        '            Key::Enter if plain => {\n                self.commit_text_entry();',
+        '            Key::Enter => {\n                self.commit_text_entry();',
+        ['a_chord_is_neither_a_reader_key_nor_typing'],
+    ),
+]
+
+MODAL = "the_list_of_keys_takes_every_key_while_it_is_up"
+
+MUTATIONS += [
+    # The list of keys is modal for the keys (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches what the list of keys covers",
+        "        if self.show_help {\n"
+        "            let plain = textline::is_plain(key.modifiers);\n"
+        "            if plain\n"
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n"
+        "                    || key.key == Key::Slash && key.modifiers.shift)\n"
+        "            {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "",
+        [MODAL],
+    ),
+    (
+        "F1 does not put the list of keys away",
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                && (matches!(key.key, Key::Escape)\n",
+        [MODAL],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "                && (matches!(key.key, Key::F1 | Key::Escape)\n",
+        "                && (matches!(key.key, Key::F1)\n",
+        [MODAL],
+    ),
+    (
+        "? does not put the list of keys away",
+        "                    || key.key == Key::Slash && key.modifiers.shift)\n"
+        "            {\n"
+        "                self.show_help = false;\n",
+        ")\n"
+        "            {\n"
+        "                self.show_help = false;\n",
+        [MODAL],
+    ),
+]
+
+# The search box and the prompt's box are the toolkit's field, both edited
+# by textline's editor through `edit_box` (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+BOXES = "the_search_and_the_prompt_are_the_toolkits_field"
+CHORDS = "a_chord_is_neither_a_reader_key_nor_typing"
+
+MUTATIONS += [
+    (
+        # What the boxes did before the editor: Backspace with any chord.
+        "Alt+Backspace deletes from a box",
+        "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
+        "    if key.key == Key::Backspace {\n"
+        "        text.pop();\n"
+        "        return Some(true);\n"
+        "    }\n"
+        "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
+        [CHORDS],
+    ),
+    (
+        # What the boxes did before the editor: type whatever text a key
+        # carried, a command's letter among it.
+        "a box types a command's letter",
+        "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
+        "    if key.types_text() && !textline::types_into_field(key) {\n"
+        "        text.push_str(&key.text);\n"
+        "        return Some(true);\n"
+        "    }\n"
+        "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
+        [CHORDS],
+    ),
+    (
+        "a search that changes runs no search",
+        "                if changed {\n                    self.perform_search();\n                }\n",
+        "",
+        ["ctrl_f_searches_as_you_type_and_escape_clears_it"],
+    ),
+    (
+        "a press leaves the caret where it was",
+        "                    self.place_caret(t, rect, drawn, event.x);\n",
+        "                    let _ = (t, rect, drawn);\n",
+        [BOXES],
+    ),
+    (
+        "a press on the prompt's box asks for no frame",
+        "                Some(Target::EntryBox) => EventResult::Consumed,\n",
+        "",
+        [BOXES],
+    ),
+    (
+        "a box is never lit",
+        "            hovered: self.hover == Some(target) && !covered,\n",
+        "            hovered: false,\n",
+        [BOXES],
+    ),
+    (
+        "a box never has the keyboard's mark",
+        "            focused: focused && !covered,\n",
+        "            focused: false,\n",
+        [BOXES],
+    ),
+    (
+        "the search box is lit while the prompt is up",
+        "                overlay || self.prompt.is_some() || self.text_entry.is_some(),\n",
+        "                overlay || self.prompt.is_some(),\n",
+        [BOXES],
+    ),
+    (
+        "a search that finds nothing is not red",
+        "                !self.search_query.is_empty() && self.search_results.is_empty(),\n",
+        "                false,\n",
+        [BOXES],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [BOXES],
     ),
 ]
 

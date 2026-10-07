@@ -803,6 +803,17 @@ impl<T: Transport> Connection<T> {
         self.replies.remove(&seq)
     }
 
+    /// Whether the reply to `seq` has arrived and is waiting for
+    /// [`Self::take_reply`], which it leaves where it is.
+    ///
+    /// For a loop that must notice an answer arriving without being the code
+    /// that collects it: `oswindow`'s event loop wakes its application when
+    /// a window pick is answered, and the application takes the answer.
+    #[must_use]
+    pub fn has_reply(&self, seq: u32) -> bool {
+        self.replies.contains_key(&seq)
+    }
+
     /// Send a request and return the correlation id its reply will carry.
     ///
     /// Does not wait. Use this when several requests should go out before any
@@ -871,9 +882,12 @@ impl<T: Transport> Connection<T> {
         match self.round_trip(RequestBody::CreateWindow(spec))? {
             ResponseBody::WindowCreated { window } => Ok(window),
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
-            ResponseBody::Ok | ResponseBody::Display(_) | ResponseBody::WorkArea { .. } => {
-                Err(ClientError::Mismatched)
-            }
+            ResponseBody::Ok
+            | ResponseBody::Display(_)
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -907,9 +921,12 @@ impl<T: Transport> Connection<T> {
                 height,
             } => Ok((x, y, width, height)),
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
-            ResponseBody::Ok | ResponseBody::WindowCreated { .. } | ResponseBody::Display(_) => {
-                Err(ClientError::Mismatched)
-            }
+            ResponseBody::Ok
+            | ResponseBody::WindowCreated { .. }
+            | ResponseBody::Display(_)
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -929,7 +946,10 @@ impl<T: Transport> Connection<T> {
             ResponseBody::Error { message } => Err(ClientError::Refused(message)),
             ResponseBody::WindowCreated { .. }
             | ResponseBody::Display(_)
-            | ResponseBody::WorkArea { .. } => Err(ClientError::Mismatched),
+            | ResponseBody::WorkArea { .. }
+            | ResponseBody::Modifiers(_)
+            | ResponseBody::Clipboard(_)
+            | ResponseBody::Picked(_) => Err(ClientError::Mismatched),
         }
     }
 
@@ -1294,6 +1314,24 @@ mod tests {
             Some(ResponseBody::Display(_))
         ));
         assert_eq!(c.take_reply(first), None, "a reply is collected once");
+    }
+
+    /// Looking for a reply leaves it to be collected, and a reply collected
+    /// is no longer there to be seen.
+    #[test]
+    fn a_reply_can_be_seen_without_being_collected() {
+        let mut c = conn(vec![]);
+        let seq = c.send(RequestBody::PickWindow).unwrap();
+        assert!(!c.has_reply(seq), "seen before it arrived");
+        c.transport_mut()
+            .chunks
+            .push(reply(seq, ResponseBody::Picked(None)));
+        c.pump().unwrap();
+        assert!(c.has_reply(seq));
+        assert!(c.has_reply(seq), "looking took it");
+        assert!(!c.has_reply(seq.wrapping_add(1)), "another request's");
+        assert_eq!(c.take_reply(seq), Some(ResponseBody::Picked(None)));
+        assert!(!c.has_reply(seq), "seen after it was collected");
     }
 
     #[test]

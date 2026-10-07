@@ -21,5 +21,10 @@ ere = { path = "../../userspace/ere" }
 # never look the same; the tree's one renderer for an untrusted name.
 quoting = { path = "../../userspace/quoting" }
 
+# A rename that refuses rather than replaces an existing target -- atomic on
+# Slate OS (`RENAME_NOREPLACE`). One copy for the tree: its module says why a
+# second is how the bug comes back.
+coreutils = { path = "../../userspace/coreutils" }
+
 [lints]
 workspace = true

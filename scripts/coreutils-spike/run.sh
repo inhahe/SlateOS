@@ -142,6 +142,7 @@ done
 
 mkdir -p "$SPIKE_LIBS"
 cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
 
 # Take the link lines from coreutils' own build rather than reconstructing them.
 # coreutils links each utility from a different set of objects plus a shared
@@ -177,36 +178,29 @@ BAD=0
 while IFS= read -r line; do
     name="$(echo "$line" | grep -oE ' -o src/[A-Za-z0-9_-]+' | head -1 | sed 's|.* -o src/||')"
     [ -n "$name" ] || continue
-    # -nostdlib so we get SlateOS's libc, not zig's bundled musl. libc.a twice:
-    # it is Rust-built and its intra-archive references are not topologically
-    # ordered, so a second pass is cheaper than --start-group. libstubs.a is
-    # deliberately not linked — it and libc.a each carry a panic handler and
-    # collide on __rustc::rust_begin_unwind.
+    # The build's own link line, with two changes: the output goes to $OUT,
+    # and the compiler that begins it -- zig's cc, which configure was given
+    # -- becomes scripts/lib/worktree.sh's link wrapper: zig's ld.lld itself,
+    # given the line's own inputs and then our libc.a, with zig's C++ runtime
+    # ahead of it and zig's compiler runtime behind it, which is zig's own
+    # order (the wrapper's comment says why the order matters). Not zig's cc
+    # driver with -nostdlib, as until 2026-10-01: that puts zig's own musl
+    # libc.a behind every link, where it supplies whatever ours lacks instead
+    # of a missing symbol being reported (known-issues
+    # D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC). libstubs.a is deliberately not
+    # linked -- it and libc.a each carry a panic handler and collide on
+    # __rustc::rust_begin_unwind.
+    #
+    # The -l flags configure detected for what our libc.a holds -- -lpthread,
+    # -lrt, -lm and the rest -- the wrapper drops. Under zig's driver they were
+    # a second way in for musl, and the one that showed: `sort`, the only
+    # utility configure gave -lpthread, was the only one of 107 whose link
+    # reported musl's stdio colliding with ours, 11 duplicate symbols (fflush,
+    # fread, fwrite, feof, ferror, clearerr, fputs, __fpurge, putc_unlocked,
+    # __progname, __progname_full), each musl's member extracted for an
+    # `X_unlocked` name our libc then lacked, dragging its `X` in behind it.
     cmd="${line/ -o src\/$name/ -o $OUT/$name}"
-    # Drop the system-library flags configure detected, BEFORE appending ours.
-    #
-    # This is not tidying — leaving them in silently links a second, complete
-    # libc into a -nostdlib link. `zig cc --target=x86_64-linux-musl` resolves
-    # `-lpthread` against its own bundled musl, and musl folds pthread into
-    # libc.a, so that one flag puts all of musl on the line. Our libc.a is a
-    # single archive that already provides pthread/rt/dl/m/crypt, so nothing is
-    # lost by removing them.
-    #
-    # Measured, not assumed: `sort` is the only utility configure gave
-    # -lpthread, and it was the only one of the 107 to report musl's stdio
-    # colliding with ours — 11 duplicate symbols (fflush, fread, fwrite, feof,
-    # ferror, clearerr, fputs, __fpurge, putc_unlocked, __progname,
-    # __progname_full) that no other binary saw. Every one was musl's member
-    # being extracted for an `X_unlocked` name our libc lacks, dragging its `X`
-    # in behind it. Those 11 were an artifact of this script, not a fact about
-    # our libc, and reporting them as a libc defect would have been wrong.
-    #
-    # The `:a … ta` loop re-runs the substitution until it stops matching, so
-    # two adjacent flags (`-lpthread -lrt`) cannot hide one another by
-    # consuming the shared separating space.
-    cmd="$(printf '%s' "$cmd" \
-        | sed -E ':a; s/ -l(pthread|rt|dl|m|crypt|c)( |$)/ /; ta')"
-    cmd="$cmd -nostdlib -static $SPIKE_LIBS/libc.a $SPIKE_LIBS/libc.a $SPIKE_LIBS/libunwind.a"
+    cmd="$(printf '%q' "$SLATE_LINK_CC") ${cmd#* }"
     eval "$cmd" >"$WORK/link-$name.log" 2>&1
     if [ $? -eq 0 ] && [ -x "$OUT/$name" ]; then
         OK=$((OK + 1))
@@ -221,23 +215,25 @@ done <"$LINKS"
 echo "BINARIES_LINKED_OK=$OK"
 echo "BINARIES_FAILED=$BAD"
 
-# Assert the thing the -l stripping above is supposed to guarantee: that no link
-# consulted zig's bundled musl. If one did, then every symbol our libc lacks was
-# available from a second libc, and MISSING_COUNT below is an undercount of
-# unknown size — the run would be measuring "our libc plus musl", which is not a
-# question anyone asked.
+# Every binary must carry the SlateOS ABI note, which posix/src/crt.rs emits
+# beside _start: the kernel runs an ELF without it as a Linux program
+# (kernel/src/proc/elf.rs), so a binary that lacks it is not a SlateOS program,
+# whatever its link said.
 #
-# This is checked rather than assumed because the failure is silent: musl
-# quietly satisfying a missing symbol produces no diagnostic at all, and only
-# became visible here because a few of its members happened to also collide.
-FOREIGN="$(grep -l "cache/zig/o" "$WORK"/link-*.log 2>/dev/null | wc -l)"
-echo "LINKS_THAT_PULLED_ZIG_MUSL=$FOREIGN"
-if [ "$FOREIGN" -gt 0 ]; then
-    echo "WARNING — $FOREIGN link(s) resolved symbols against zig's bundled musl."
-    echo "          MISSING_COUNT is therefore a LOWER BOUND, not a measurement."
-    echo "          Offending binaries:"
-    grep -l "cache/zig/o" "$WORK"/link-*.log | sed 's|.*/link-|            |; s|\.log$||'
-fi
+# This replaces LINKS_THAT_PULLED_ZIG_MUSL, which until 2026-10-01 counted the
+# link logs naming zig's cache as the sign that musl had been consulted. A log
+# names it only when musl's member collides with ours, so a missing function
+# musl filled in silently was never counted; and the wrapper above links no
+# musl at all, while its C++ and compiler runtimes live in zig's cache too.
+NO_NOTE=0
+for b in "$OUT"/*; do
+    [ -x "$b" ] || continue
+    if ! readelf -n "$b" 2>/dev/null | grep -q SlateOS; then
+        NO_NOTE=$((NO_NOTE + 1))
+        echo "NO_SLATEOS_NOTE: ${b##*/}"
+    fi
+done
+echo "BINARIES_WITHOUT_SLATEOS_NOTE=$NO_NOTE"
 
 # Both counts are printed unconditionally, even when zero, and neither is
 # allowed to stand in for "the link succeeded". The make spike's first run
@@ -260,7 +256,7 @@ if [ "$BAD" -gt 0 ]; then
     head -25 "$WORK/link-$(head -1 "$FAILED").log"
 fi
 
-if [ "$OK" -gt 0 ]; then
+if [ "$OK" -gt 0 ] && [ "$NO_NOTE" -eq 0 ]; then
     sample="$(ls "$OUT" | head -1)"
     file "$OUT/$sample"
     readelf -h "$OUT/$sample" | grep -E "Type|Entry"
@@ -268,4 +264,5 @@ if [ "$OK" -gt 0 ]; then
     echo "SLATE_COREUTILS_LINKED"
 else
     echo "NO_SLATE_BINARIES"
+    exit 1
 fi

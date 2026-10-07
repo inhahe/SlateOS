@@ -80,6 +80,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::theme::with_alpha;
+use guitk::undo::{Travel, UndoHistory};
 use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng, seed_from_system};
 use std::process::ExitCode;
@@ -199,6 +200,11 @@ pub const TOTAL_CELLS: usize = GRID_SIZE * GRID_SIZE;
 pub const MAX_HINTS: usize = 5;
 /// How many moves back the undo history reaches.
 pub const MAX_UNDO: usize = 500;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 // ── Window and clock ───────────────────────────────────────────────────────
 
@@ -908,6 +914,10 @@ pub enum Intent {
     Undo,
     /// Put back the last undone change.
     Redo,
+    /// Go to the board before this one in time, on whichever branch.
+    Earlier,
+    /// Go to the board after this one in time, on whichever branch.
+    Later,
     /// Pause or resume.
     Pause,
     /// Deal a fresh puzzle at the same difficulty.
@@ -951,7 +961,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("P", "Pause, and hide the grid"),
     ("D", "Next difficulty"),
     ("Ctrl+1 / Ctrl+2 / Ctrl+3", "Easy / medium / hard"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The board before / after this one, on any branch",
+    ),
     ("F2", "New puzzle"),
     ("F1 / ?", "This list"),
 ];
@@ -963,8 +977,12 @@ pub struct SudokuApp {
     status: GameStatus,
     selected: (usize, usize),
     note_mode: bool,
-    undo_stack: Vec<Change>,
-    redo_stack: Vec<Change>,
+    /// The changes, kept as a tree: a change made after undoing starts a
+    /// branch beside what was undone, rather than throwing it away (C-Q24,
+    /// `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go back and forth
+    /// along the branch the board is on; Alt+Z and Alt+Shift+Z walk every
+    /// board it has been, in the order each was reached.
+    history: UndoHistory<Change>,
     elapsed_ms: u64,
     stats: Stats,
     seed_counter: u64,
@@ -1019,8 +1037,7 @@ impl SudokuApp {
             status: GameStatus::Playing,
             selected: (4, 4),
             note_mode: false,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             elapsed_ms: 0,
             stats: Stats::default(),
             seed_counter: 0,
@@ -1049,8 +1066,7 @@ impl SudokuApp {
         self.status = GameStatus::Playing;
         self.selected = (4, 4);
         self.note_mode = false;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        self.history.clear();
         self.elapsed_ms = 0;
     }
 
@@ -1159,16 +1175,17 @@ impl SudokuApp {
             .count()
     }
 
-    /// How many changes can still be taken back.
+    /// Whether there is a change to take back.
     #[must_use]
-    pub fn undo_depth(&self) -> usize {
-        self.undo_stack.len()
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
     }
 
-    /// How many undone changes can still be put back.
+    /// Whether there is an undone change to put back, on the branch the
+    /// board is on.
     #[must_use]
-    pub fn redo_depth(&self) -> usize {
-        self.redo_stack.len()
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
     }
 
     /// Every cell whose digit repeats one in its row, column or box.
@@ -1241,6 +1258,8 @@ impl SudokuApp {
             Intent::Hint => self.use_hint(),
             Intent::Undo => self.undo(),
             Intent::Redo => self.redo(),
+            Intent::Earlier => self.earlier(),
+            Intent::Later => self.later(),
             Intent::Pause
             | Intent::NewGame
             | Intent::CycleDifficulty
@@ -1374,10 +1393,58 @@ impl SudokuApp {
     }
 
     fn undo(&mut self) -> EventResult {
-        let Some(change) = self.undo_stack.pop() else {
+        let Some(change) = self.history.undo() else {
             return EventResult::Ignored;
         };
-        match change {
+        self.revert(&change);
+        EventResult::Consumed
+    }
+
+    fn redo(&mut self) -> EventResult {
+        let Some(change) = self.history.redo() else {
+            return EventResult::Ignored;
+        };
+        self.reapply(&change);
+        // A redo can fill the last empty cell, and used not to be able to win:
+        // `check_completion` was called from the two places that wrote a digit
+        // forwards and from neither of the two that wrote one back.
+        self.check_completion();
+        EventResult::Consumed
+    }
+
+    /// Go to the board as it was before this one was first reached, on
+    /// whichever branch -- Alt+Z.
+    fn earlier(&mut self) -> EventResult {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the board first reached after this one, on whichever branch --
+    /// Alt+Shift+Z.
+    fn later(&mut self) -> EventResult {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<Change>>) -> EventResult {
+        if steps.is_empty() {
+            return EventResult::Ignored;
+        }
+        for step in steps {
+            match step {
+                Travel::Undo(change) => self.revert(&change),
+                Travel::Redo(change) => self.reapply(&change),
+            }
+        }
+        // A journey can arrive at a full board as a redo can.
+        self.check_completion();
+        EventResult::Consumed
+    }
+
+    /// Take `change` back.
+    fn revert(&mut self, change: &Change) {
+        match *change {
             Change::SetValue {
                 row,
                 col,
@@ -1402,15 +1469,11 @@ impl SudokuApp {
                 c.origin = Origin::Player;
             }),
         }
-        self.redo_stack.push(change);
-        EventResult::Consumed
     }
 
-    fn redo(&mut self) -> EventResult {
-        let Some(change) = self.redo_stack.pop() else {
-            return EventResult::Ignored;
-        };
-        match change {
+    /// Make `change` again.
+    fn reapply(&mut self, change: &Change) {
+        match *change {
             Change::SetValue {
                 row,
                 col,
@@ -1432,12 +1495,6 @@ impl SudokuApp {
                 });
             }
         }
-        self.undo_stack.push(change);
-        // A redo can fill the last empty cell, and used not to be able to win:
-        // `check_completion` was called from the two places that wrote a digit
-        // forwards and from neither of the two that wrote one back.
-        self.check_completion();
-        EventResult::Consumed
     }
 
     /// Apply `edit` to the cell at `(row, col)`, doing nothing off the board.
@@ -1450,13 +1507,11 @@ impl SudokuApp {
         }
     }
 
-    /// Push a change onto the undo history, dropping the oldest if it is full.
+    /// Record a change as the next step. One made after undoing starts a
+    /// branch, and what was undone stays in the history; past [`MAX_UNDO`]
+    /// the oldest go, branches the board is not on first.
     fn record(&mut self, change: Change) {
-        self.undo_stack.push(change);
-        self.redo_stack.clear();
-        if self.undo_stack.len() > MAX_UNDO {
-            self.undo_stack.remove(0);
-        }
+        self.history.record(change);
     }
 
     fn check_completion(&mut self) {
@@ -1491,22 +1546,49 @@ impl SudokuApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // The shortcut list before anything else, because it is drawn over
+        // everything else, and modal: a plain F1, `?` or Escape puts it away
+        // and no other key reaches the board it covers. It took only those
+        // three, so a digit was written into the square under it, F2 dealt a
+        // new game behind it, and Alt+Z walked the board back through its
+        // history. Held with Ctrl, Alt or the Windows key, they are a chord.
+        if self.show_help {
+            let held = key.modifiers;
+            let closes = !held.ctrl
+                && !held.alt
+                && !held.super_key
+                && (matches!(key.key, Key::F1 | Key::Escape)
+                    || key.key == Key::Slash && held.shift);
+            if closes {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        // Alt+Z and Alt+Shift+Z: every board there has been, in the order
+        // each was reached -- the way back to a branch undone out of. Alt
+        // without Ctrl: Ctrl+Alt is AltGr.
+        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key
+        {
+            return self.apply(if key.modifiers.shift {
+                Intent::Later
+            } else {
+                Intent::Earlier
+            });
+        }
         if key.modifiers.alt || key.modifiers.super_key {
             return EventResult::Ignored;
         }
         // The shortcut list, before the chords: `F1` carries no modifier and
         // `?` is Shift and the slash key, so neither reaches the Ctrl block
         // below, and nothing in this program turns a keystroke into text.
+        // Only ever raises it: with the list up, the keys never get here.
         if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
-            self.show_help = !self.show_help;
-            return EventResult::Consumed;
-        }
-        if key.key == Key::Escape && self.show_help {
-            self.show_help = false;
+            self.show_help = true;
             return EventResult::Consumed;
         }
         if key.modifiers.ctrl {
             let intent = match key.key {
+                Key::Z if key.modifiers.shift => Intent::Redo,
                 Key::Z => Intent::Undo,
                 Key::Y => Intent::Redo,
                 Key::Num1 => Intent::SetDifficulty(Difficulty::Easy),
@@ -1542,6 +1624,19 @@ impl SudokuApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over the board: a press with any button puts it away and does
+        // nothing else, where it used to pick the square or press the button
+        // under it -- New game among them.
+        if self.show_help
+            && matches!(
+                event.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return EventResult::Ignored;
         };
@@ -2211,8 +2306,8 @@ impl SudokuApp {
             let live = self.status == GameStatus::Playing
                 && match target {
                     Target::Hint => self.hints_remaining() > 0,
-                    Target::Undo => !self.undo_stack.is_empty(),
-                    Target::Redo => !self.redo_stack.is_empty(),
+                    Target::Undo => self.history.can_undo(),
+                    Target::Redo => self.history.can_redo(),
                     _ => true,
                 };
             let on = target == Target::Notes && self.note_mode;
@@ -2617,8 +2712,7 @@ mod tests {
     /// exempt, as WCAG exempts an inactive control.
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (look, p) in gamechrome::legibility::looks() {
             // A switched-off key's label on a switched-off key's face: the
             // ink and the ground both, so a text that merely shares the
             // disabled grey -- the footer's, say -- is still held to the floor.
@@ -2666,7 +2760,7 @@ mod tests {
                 });
                 assert!(
                     bad.is_empty(),
-                    "sudoku, {what}, light: {light}: {:?}",
+                    "sudoku, {what}, {look}: {:?}",
                     bad.iter()
                         .map(|r| format!("{:?} {:.2}:1", r.text, r.ratio()))
                         .collect::<Vec<_>>()
@@ -2840,6 +2934,39 @@ mod tests {
     /// completes the board, the status becomes `Won`, and every intent after it
     /// is refused for a reason the test was not asking about. Half a dozen
     /// tests here passed against the wrong rule before the count went up.
+    /// How many changes can be taken back from here. The history keeps no
+    /// count, so it is counted by taking them all back and putting them all
+    /// again -- which leaves the board as it was: redo retraces the line.
+    ///
+    /// On `can_undo`, not on what `undo` answers, and never past the cap: a
+    /// mutant that answered Consumed with nothing to take back hung the
+    /// whole suite.
+    fn undo_depth(a: &mut SudokuApp) -> usize {
+        let mut n = 0;
+        while a.can_undo() && n <= MAX_UNDO {
+            a.undo();
+            n += 1;
+        }
+        for _ in 0..n {
+            a.redo();
+        }
+        n
+    }
+
+    /// How many undone changes can be put back from here, counted the same
+    /// way round.
+    fn redo_depth(a: &mut SudokuApp) -> usize {
+        let mut n = 0;
+        while a.can_redo() && n <= MAX_UNDO {
+            a.redo();
+            n += 1;
+        }
+        for _ in 0..n {
+            a.undo();
+        }
+        n
+    }
+
     fn playground() -> SudokuApp {
         board(&[idx(1, 7), idx(7, 1), idx(4, 0)])
     }
@@ -3824,14 +3951,14 @@ mod tests {
 
     #[test]
     fn a_fresh_game_starts_playing_with_the_clock_at_nothing() {
-        let a = SudokuApp::new();
+        let mut a = SudokuApp::new();
         assert_eq!(a.status(), GameStatus::Playing);
         assert_eq!(a.elapsed_ms(), 0);
         assert_eq!(a.elapsed_secs(), 0);
         assert_eq!(a.difficulty(), Difficulty::Easy);
         assert_eq!(a.selected(), (4, 4), "a fresh game starts in the middle");
-        assert_eq!(a.undo_depth(), 0);
-        assert_eq!(a.redo_depth(), 0);
+        assert_eq!(undo_depth(&mut a), 0);
+        assert_eq!(redo_depth(&mut a), 0);
         assert_eq!(a.hints_remaining(), MAX_HINTS);
         assert!(a.is_valid(), "a fresh puzzle contradicts itself");
     }
@@ -3871,8 +3998,8 @@ mod tests {
         assert_eq!(a.status(), GameStatus::Playing);
         assert_eq!(a.elapsed_ms(), 0, "the clock carried over");
         assert_eq!(a.selected(), (4, 4));
-        assert_eq!(a.undo_depth(), 0);
-        assert_eq!(a.redo_depth(), 0);
+        assert_eq!(undo_depth(&mut a), 0);
+        assert_eq!(redo_depth(&mut a), 0);
         assert_eq!(a.hints_remaining(), MAX_HINTS);
     }
 
@@ -3957,7 +4084,7 @@ mod tests {
             "a clue accepted a digit"
         );
         assert_eq!(a.value(1, 7), clue);
-        assert_eq!(a.undo_depth(), 0, "a refused write went on the history");
+        assert_eq!(undo_depth(&mut a), 0, "a refused write went on the history");
     }
 
     #[test]
@@ -3970,7 +4097,7 @@ mod tests {
             EventResult::Ignored,
             "rewriting the same digit still asked to be redrawn"
         );
-        assert_eq!(a.undo_depth(), 1, "a no-op went on the history");
+        assert_eq!(undo_depth(&mut a), 1, "a no-op went on the history");
     }
 
     #[test]
@@ -4033,7 +4160,7 @@ mod tests {
             EventResult::Ignored,
             "erasing nothing still asked to be redrawn"
         );
-        assert_eq!(a.undo_depth(), 0, "erasing nothing went on the history");
+        assert_eq!(undo_depth(&mut a), 0, "erasing nothing went on the history");
     }
 
     #[test]
@@ -4100,17 +4227,17 @@ mod tests {
         let mut a = playground();
         select(&mut a, 1, 7);
         a.apply(Intent::Digit(4));
-        assert_eq!(a.undo_depth(), 1);
+        assert_eq!(undo_depth(&mut a), 1);
 
         assert_eq!(a.apply(Intent::Undo), EventResult::Consumed);
         assert_eq!(a.value(1, 7), 0, "undo did not take the digit back");
-        assert_eq!(a.undo_depth(), 0);
-        assert_eq!(a.redo_depth(), 1);
+        assert_eq!(undo_depth(&mut a), 0);
+        assert_eq!(redo_depth(&mut a), 1);
 
         assert_eq!(a.apply(Intent::Redo), EventResult::Consumed);
         assert_eq!(a.value(1, 7), 4, "redo did not put the digit back");
-        assert_eq!(a.undo_depth(), 1);
-        assert_eq!(a.redo_depth(), 0);
+        assert_eq!(undo_depth(&mut a), 1);
+        assert_eq!(redo_depth(&mut a), 0);
     }
 
     #[test]
@@ -4120,20 +4247,23 @@ mod tests {
         assert_eq!(a.apply(Intent::Redo), EventResult::Ignored);
     }
 
+    /// A fresh move after an undo starts a branch: redo follows it, not the
+    /// move undone -- which is kept, and reached with Alt+Z
+    /// (`a_change_after_an_undo_keeps_the_undone_one_reachable_with_alt_z`).
     #[test]
-    fn a_fresh_move_throws_away_the_moves_that_were_undone() {
+    fn a_fresh_move_after_an_undo_is_what_redo_follows() {
         let mut a = playground();
         select(&mut a, 1, 7);
         a.apply(Intent::Digit(4));
         a.apply(Intent::Undo);
-        assert_eq!(a.redo_depth(), 1);
+        assert_eq!(redo_depth(&mut a), 1);
 
         select(&mut a, 7, 1);
         a.apply(Intent::Digit(8));
         assert_eq!(
-            a.redo_depth(),
+            redo_depth(&mut a),
             0,
-            "a new move left the abandoned future in place"
+            "a new move left redo pointing at the branch undone out of"
         );
     }
 
@@ -4205,13 +4335,18 @@ mod tests {
         // left the symmetry alone (`known-issues.md` lesson 59). So: one
         // toggle of mark 1, which is the change that has to fall off the end,
         // and then a full history's worth of toggles of mark 2 to push it off.
+        //
+        // The cap is written out, not read from `MAX_UNDO`: a test that counts
+        // to the constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 500;
         a.apply(Intent::Digit(1));
-        for _ in 0..MAX_UNDO {
+        for _ in 0..CAP {
             a.apply(Intent::Digit(2));
         }
         assert_eq!(
-            a.undo_depth(),
-            MAX_UNDO,
+            undo_depth(&mut a),
+            CAP,
             "the history grew past the cap it is supposed to keep"
         );
 
@@ -4220,10 +4355,10 @@ mod tests {
         // mark 2 comes off. A history that dropped its newest move instead has
         // kept mark 1's toggle and lost one of mark 2's, and both marks come
         // out the other way round.
-        for _ in 0..MAX_UNDO {
+        for _ in 0..CAP {
             a.apply(Intent::Undo);
         }
-        assert_eq!(a.undo_depth(), 0, "the history would not empty");
+        assert_eq!(undo_depth(&mut a), 0, "the history would not empty");
         assert!(
             a.cell(1, 7).has_note(1),
             "the history forgot its newest move rather than its oldest"
@@ -5432,6 +5567,85 @@ mod tests {
         );
     }
 
+    /// **The shortcut list is modal for the keys and the pointer alike.** It
+    /// took only F1, `?` and Escape: with it up, a digit was written into the
+    /// square under it, an arrow moved the selection and Alt+Z walked the
+    /// board's history; a press picked the square under it. The controls are
+    /// the same digit and press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on() {
+        let mut a = board(&[0, 1]);
+        select(&mut a, 0, 0);
+        let digit = KNOWN_SOLUTION[0];
+        let digit_key = [
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+        ][usize::from(digit) - 1];
+        let (x, y) = cell_point(&a, 0, 1);
+
+        // The keys.
+        key(&mut a, Key::F1);
+        assert!(a.show_help);
+        key(&mut a, digit_key);
+        key(&mut a, Key::Right);
+        handle_event(&mut a, &Event::Key(press_with(Key::Z, Modifiers::alt())));
+        assert!(
+            a.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert_eq!(a.value(0, 0), 0, "a digit was written under the list");
+        assert_eq!(
+            a.selected(),
+            (0, 0),
+            "an arrow moved the selection under it"
+        );
+        handle_event(
+            &mut a,
+            &Event::Key(press_with(Key::Escape, Modifiers::alt())),
+        );
+        assert!(a.show_help, "Alt+Escape, a chord, put the list away");
+        key(&mut a, Key::Escape);
+        assert!(!a.show_help, "Escape left the list up");
+        key(&mut a, Key::F1);
+        key(&mut a, Key::F1);
+        assert!(!a.show_help, "F1 left the list up");
+        key(&mut a, Key::F1);
+        handle_event(
+            &mut a,
+            &Event::Key(press_with(Key::Slash, Modifiers::shift())),
+        );
+        assert!(!a.show_help, "? left the list up");
+
+        // The pointer.
+        key(&mut a, Key::F1);
+        assert_eq!(
+            mouse(&mut a, x, y, MouseEventKind::Press(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!a.show_help, "the press did not put the list away");
+        assert_eq!(
+            a.selected(),
+            (0, 0),
+            "the press picked a square under the list"
+        );
+        key(&mut a, Key::F1);
+        mouse(&mut a, x, y, MouseEventKind::Press(MouseButton::Right));
+        assert!(!a.show_help, "a right-button press left the list up");
+
+        // The controls.
+        key(&mut a, digit_key);
+        assert_eq!(a.value(0, 0), digit, "control: a digit writes nothing");
+        mouse(&mut a, x, y, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(a.selected(), (0, 1), "control: the press picks nothing");
+    }
+
     #[test]
     fn only_the_left_button_plays_the_game() {
         let mut a = board(&[0]);
@@ -6107,5 +6321,93 @@ mod tests {
             "the probe drew both sizes the same"
         );
         assert_eq!(<SudokuApp as Probe>::SIZE, SIZE);
+    }
+
+    // ---- the changes as a tree (C-Q24, §1416) --------------------------------
+
+    fn alt_z(shift: bool) -> Event {
+        let mut ev = press(Key::Z);
+        ev.modifiers.alt = true;
+        ev.modifiers.shift = shift;
+        Event::Key(ev)
+    }
+
+    /// **A change made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every board there has been, in the order each was reached; Alt+Shift+Z
+    /// comes forward again.
+    #[test]
+    fn a_change_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut a = playground();
+        select(&mut a, 1, 7);
+        a.apply(Intent::Digit(4));
+        a.apply(Intent::Undo);
+        a.apply(Intent::Digit(5));
+        assert!(!a.can_redo(), "redo would go onto the branch left");
+        assert_eq!(handle_event(&mut a, &alt_z(false)), EventResult::Consumed);
+        assert_eq!(a.value(1, 7), 4, "the undone digit was lost");
+        handle_event(&mut a, &alt_z(false));
+        assert_eq!(a.value(1, 7), 0);
+        assert_eq!(
+            handle_event(&mut a, &alt_z(false)),
+            EventResult::Ignored,
+            "there is no board before the first"
+        );
+        handle_event(&mut a, &alt_z(true));
+        handle_event(&mut a, &alt_z(true));
+        assert_eq!(a.value(1, 7), 5);
+        assert_eq!(handle_event(&mut a, &alt_z(true)), EventResult::Ignored);
+    }
+
+    /// **A journey can win the game**, as a redo can
+    /// (`a_redo_can_win_the_game`): the winning move taken back, and the
+    /// board reached again by going forward in time.
+    #[test]
+    fn a_journey_can_win_the_game() {
+        let mut b = almost_done();
+        b.apply(Intent::Digit(9));
+        assert_eq!(b.status(), GameStatus::Won);
+        // Put the game back in play so the undo is answered.
+        b.status = GameStatus::Playing;
+        b.apply(Intent::Undo);
+        assert_eq!(b.value(8, 8), 0, "the undo did not empty the square");
+        handle_event(&mut b, &alt_z(true));
+        assert_eq!(b.value(8, 8), 9);
+        assert_eq!(
+            b.status(),
+            GameStatus::Won,
+            "a journey onto a full board did not win"
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut a = playground();
+        select(&mut a, 1, 7);
+        a.apply(Intent::Digit(4));
+        handle_event(&mut a, &Event::Key(ctrl_press(Key::Z)));
+        assert_eq!(a.value(1, 7), 0);
+        let mut redo = ctrl_press(Key::Z);
+        redo.modifiers.shift = true;
+        handle_event(&mut a, &Event::Key(redo));
+        assert_eq!(a.value(1, 7), 4);
+    }
+
+    /// **AltGr is not Alt+Z.** Ctrl+Alt is AltGr, which types a letter on
+    /// several layouts; it goes back in time no more than it undoes.
+    #[test]
+    fn altgr_z_is_neither_undo_nor_a_journey() {
+        let mut a = playground();
+        select(&mut a, 1, 7);
+        a.apply(Intent::Digit(4));
+        let mut altgr = press(Key::Z);
+        altgr.modifiers.ctrl = true;
+        altgr.modifiers.alt = true;
+        assert_eq!(
+            handle_event(&mut a, &Event::Key(altgr)),
+            EventResult::Ignored
+        );
+        assert_eq!(a.value(1, 7), 4);
     }
 }

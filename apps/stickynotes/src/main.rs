@@ -30,13 +30,17 @@ use std::time::Duration;
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text::{self, TextCursor};
 use guitk::textarea::{self, TextArea};
-use guitk::textinput::KeyEdit;
+use guitk::textedit;
+use guitk::textinput::{KeyEdit, TextInput};
+use guitk::theme::with_alpha;
+use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -352,64 +356,11 @@ pub enum EditAction {
     },
 }
 
-/// Undo/redo history for a note's text.
-#[derive(Clone, Debug)]
-pub struct UndoHistory {
-    undo_stack: Vec<EditAction>,
-    redo_stack: Vec<EditAction>,
-    max_depth: usize,
-}
-
-impl UndoHistory {
-    pub fn new(max_depth: usize) -> Self {
-        Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            max_depth,
-        }
-    }
-
-    pub fn push(&mut self, action: EditAction) {
-        self.redo_stack.clear();
-        self.undo_stack.push(action);
-        if self.undo_stack.len() > self.max_depth {
-            self.undo_stack.remove(0);
-        }
-    }
-
-    pub fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
-    }
-
-    pub fn pop_undo(&mut self) -> Option<EditAction> {
-        let action = self.undo_stack.pop()?;
-        self.redo_stack.push(action.clone());
-        Some(action)
-    }
-
-    pub fn pop_redo(&mut self) -> Option<EditAction> {
-        let action = self.redo_stack.pop()?;
-        self.undo_stack.push(action.clone());
-        Some(action)
-    }
-
-    pub fn clear(&mut self) {
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-    }
-
-    pub fn undo_count(&self) -> usize {
-        self.undo_stack.len()
-    }
-
-    pub fn redo_count(&self) -> usize {
-        self.redo_stack.len()
-    }
-}
+/// How many edits each note's history keeps.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(100) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 // ============================================================================
 // Note model
@@ -419,7 +370,7 @@ impl UndoHistory {
 pub type NoteId = u64;
 
 /// A sticky note.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Note {
     pub id: NoteId,
     pub title: String,
@@ -436,7 +387,10 @@ pub struct Note {
     pub font_size: FontSizePreset,
     pub created_at: u64,
     pub modified_at: u64,
-    pub undo_history: UndoHistory,
+    /// The note's edits, as a tree: an edit after an undo keeps what was
+    /// undone as a branch, reached with Alt+Z (C-Q24,
+    /// `design-decisions.md` §1416).
+    pub undo_history: UndoHistory<EditAction>,
 }
 
 impl Note {
@@ -457,7 +411,7 @@ impl Note {
             font_size: FontSizePreset::Medium,
             created_at: 0,
             modified_at: 0,
-            undo_history: UndoHistory::new(100),
+            undo_history: UndoHistory::new(UNDO_LIMIT),
         }
     }
 
@@ -558,7 +512,8 @@ impl Note {
             return;
         }
         let new = self.body.clone();
-        self.undo_history.push(EditAction::ReplaceBody { old, new });
+        self.undo_history
+            .record(EditAction::ReplaceBody { old, new });
     }
 
     /// Set the body from plain text, parsing bullet/checkbox markers.
@@ -602,7 +557,7 @@ impl Note {
             let col = Self::snap_col(&span.text, col);
             span.text.insert(col, ch);
             self.undo_history
-                .push(EditAction::InsertChar { line, col, ch });
+                .record(EditAction::InsertChar { line, col, ch });
         }
     }
 
@@ -620,7 +575,7 @@ impl Note {
             let col = Self::snap_col(&span.text, col);
             let ch = span.text.remove(col);
             self.undo_history
-                .push(EditAction::DeleteChar { line, col, ch });
+                .record(EditAction::DeleteChar { line, col, ch });
             return Some(ch);
         }
         None
@@ -629,7 +584,7 @@ impl Note {
     /// Insert a new line at the given index.
     pub fn insert_line(&mut self, index: usize, content: RichLine) {
         let idx = index.min(self.body.len());
-        self.undo_history.push(EditAction::InsertLine {
+        self.undo_history.record(EditAction::InsertLine {
             line: idx,
             content: content.clone(),
         });
@@ -640,7 +595,7 @@ impl Note {
     pub fn delete_line(&mut self, index: usize) -> Option<RichLine> {
         if index < self.body.len() && self.body.len() > 1 {
             let removed = self.body.remove(index);
-            self.undo_history.push(EditAction::DeleteLine {
+            self.undo_history.record(EditAction::DeleteLine {
                 line: index,
                 content: removed.clone(),
             });
@@ -661,12 +616,12 @@ impl Note {
             return;
         }
         let new = self.title.clone();
-        self.undo_history.push(EditAction::SetTitle { old, new });
+        self.undo_history.record(EditAction::SetTitle { old, new });
     }
 
     /// Undo the most recent recorded edit. Returns whether anything moved.
     pub fn undo(&mut self) -> bool {
-        match self.undo_history.pop_undo() {
+        match self.undo_history.undo() {
             Some(action) => {
                 self.revert(&action);
                 true
@@ -675,9 +630,10 @@ impl Note {
         }
     }
 
-    /// Redo the most recently undone edit. Returns whether anything moved.
+    /// Redo an edit undone, on the branch the note is on. Returns whether
+    /// anything moved.
     pub fn redo(&mut self) -> bool {
-        match self.undo_history.pop_redo() {
+        match self.undo_history.redo() {
             Some(action) => {
                 self.replay(&action);
                 true
@@ -686,12 +642,38 @@ impl Note {
         }
     }
 
+    /// Go to the note as it was before this version was first reached, on
+    /// whichever branch -- Alt+Z. Returns whether anything moved.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.undo_history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version of the note first reached after this one, on
+    /// whichever branch -- Alt+Shift+Z. Returns whether anything moved.
+    pub fn later(&mut self) -> bool {
+        let steps = self.undo_history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<EditAction>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(action) => self.revert(&action),
+                Travel::Redo(action) => self.replay(&action),
+            }
+        }
+        moved
+    }
+
     /// Apply an action's inverse **without recording it**.
     ///
     /// The recording methods above (`insert_char` and friends) cannot be
-    /// reused here: each of them pushes onto the undo stack, and
-    /// [`UndoHistory::push`] clears the redo stack — so an undo written in
-    /// terms of them would erase the redo it just created and then queue
+    /// reused here: each of them records a new edit, which starts a branch
+    /// of the history where the undo was to walk it -- so an undo written in
+    /// terms of them would leave the redo it should make behind and then queue
     /// itself to be undone again. That is why this walks the enum by hand.
     fn revert(&mut self, action: &EditAction) {
         match action {
@@ -916,7 +898,7 @@ pub enum DragState {
 // ============================================================================
 
 /// The core data store for all sticky notes.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct NoteStore {
     notes: Vec<Note>,
     next_id: NoteId,
@@ -1555,6 +1537,17 @@ const RESIZE_HANDLE: f32 = 16.0;
 const SIDEBAR_WIDTH: f32 = 240.0;
 /// Search bar height.
 const SEARCH_BAR_HEIGHT: f32 = 36.0;
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 13.0;
+/// How far the search box's text sits in from its left and right edges.
+const SEARCH_TEXT_INSET: f32 = 8.0;
+/// The most characters the search box holds.
+const SEARCH_CAPACITY: usize = 256;
+
+/// Where the search box is drawn, in the sidebar's top strip.
+fn search_box_rect() -> Rect {
+    Rect::new(4.0, 4.0, SIDEBAR_WIDTH - 8.0, SEARCH_BAR_HEIGHT - 8.0)
+}
 /// The strip of tag chips under the search box, drawn only when tags exist.
 const TAG_STRIP_H: f32 = 28.0;
 /// Height of one sidebar row.
@@ -1676,8 +1669,8 @@ pub type Frame = guitk::frame::Frame<Target>;
 /// Where the caret sits inside the note currently being drawn.
 #[derive(Clone, Copy, Debug)]
 enum Caret<'a> {
-    /// A byte offset into the title.
-    Title(usize),
+    /// A byte offset into the title, and where a selection in it began.
+    Title(usize, Option<usize>),
     /// The text being written, in the field that holds it.
     Body(&'a TextArea),
 }
@@ -1867,7 +1860,7 @@ fn draw_note(
         overflow: TextOverflow::Ellipsis,
     });
 
-    if let Some(Caret::Title(col)) = caret {
+    if let Some(Caret::Title(col, anchor)) = caret {
         // Measured against the *unprefixed* title, then shifted by the pin
         // marker: the caret indexes what the user is editing, and the `[P] `
         // is drawn by the renderer rather than typed.
@@ -1876,14 +1869,31 @@ fn draw_note(
         } else {
             0.0
         };
-        let cut = Note::snap_col(&note.title, col);
-        let cx = title_x
-            + lead
-            + text::measure(
-                note.title.get(..cut).unwrap_or(""),
-                title_font,
-                FontWeightHint::Bold,
-            );
+        let x_at = |at: usize| {
+            let cut = Note::snap_col(&note.title, at);
+            title_x
+                + lead
+                + text::measure(
+                    note.title.get(..cut).unwrap_or(""),
+                    title_font,
+                    FontWeightHint::Bold,
+                )
+        };
+        // The selection, over the title's words.
+        if let Some(anchor) = anchor
+            && anchor != col
+        {
+            let (from, to) = (x_at(anchor.min(col)), x_at(anchor.max(col)));
+            frame.push(RenderCommand::FillRect {
+                x: from,
+                y: note.y + 5.0,
+                width: (to - from).max(1.0),
+                height: title_font * 1.2,
+                color: with_alpha(pal.accent, 110),
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        let cx = x_at(col);
         frame.push(RenderCommand::Line {
             x1: cx,
             y1: note.y + 5.0,
@@ -2088,7 +2098,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+N", "A new note"),
     ("Ctrl+S", "Save"),
     ("Ctrl+E", "Export"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The note before / after this, on any branch",
+    ),
     // The text field's own keys. The toolkit's text area answers them and
     // draws nothing, so the application whose field it is names them
     // (scripts/key-survey-answered.txt, `textarea`); this one checks a paste
@@ -2111,9 +2125,18 @@ pub struct StickyNotesApp {
     /// starting guess — [`App::render`] writes the real one back.
     window_size: (f32, f32),
     focus: Option<Focus>,
-    /// The caret, as a line index and a byte offset into that line. The line
-    /// index is unused while the caret is in a title or in the search box.
-    caret: (usize, usize),
+    /// The caret and selection of the line the keyboard is in -- the search
+    /// box, or a note's title -- laid over that line's text, which stays the
+    /// truth: reloaded whenever the text changes under it. It was a byte
+    /// offset with no selection, edited by keys this file spelled out
+    /// itself: no Shift+arrow, no Ctrl+A, C, X or V.
+    line_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from a title or the search, for Ctrl+V.
+    line_clipboard: String,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    focus_ring_width: f32,
     /// The title as it read when the caret entered it, so that leaving the
     /// title records **one** undoable change rather than one per keystroke.
     title_before: String,
@@ -2177,7 +2200,9 @@ impl StickyNotesApp {
             autosave: AutoSave::new(AUTOSAVE_MS),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             focus: None,
-            caret: (0, 0),
+            line_editor: TextInput::new(),
+            line_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             title_before: String::new(),
             body: TextArea::new(),
             body_of: None,
@@ -2408,7 +2433,9 @@ impl StickyNotesApp {
                 // it, and the next key refills it the same way.
                 let fresh;
                 let caret = match self.focus {
-                    Some(Focus::Title(id)) if id == note.id => Some(Caret::Title(self.caret.1)),
+                    Some(Focus::Title(id)) if id == note.id => {
+                        Some(Caret::Title(self.line_cursor(), self.line_anchor()))
+                    }
                     Some(Focus::Body(id)) if id == note.id => {
                         Some(Caret::Body(if self.holds(note) {
                             &self.body
@@ -2464,7 +2491,8 @@ impl StickyNotesApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Search box.
+        // Search box: the toolkit's field, with its caret and selection. It was
+        // a strip whose edge turned blue, with a caret drawn by hand.
         let searching = self.focus == Some(Focus::Search);
         frame.push(RenderCommand::FillRect {
             x: 0.0,
@@ -2474,50 +2502,67 @@ impl StickyNotesApp {
             color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
-        if searching {
-            frame.push(RenderCommand::StrokeRect {
-                x: 1.0,
-                y: 1.0,
-                width: SIDEBAR_WIDTH - 2.0,
-                height: SEARCH_BAR_HEIGHT - 2.0,
-                color: self.palette.blue,
-                line_width: 1.0,
-                corner_radii: CornerRadii::ZERO,
-            });
-        }
+        let rect = search_box_rect();
         let query = self.store.search_query();
-        let (search_text, search_color) = if query.is_empty() && !searching {
-            (String::from("Search notes..."), self.palette.overlay0)
-        } else {
-            (query.to_string(), self.palette.text)
-        };
-        frame.push(RenderCommand::Text {
-            x: 10.0,
-            y: 10.0,
-            text: search_text,
-            color: search_color,
-            font_size: 13.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(SIDEBAR_WIDTH - 20.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        if searching {
-            let cut = query.len().min(self.caret.1);
-            let cx = 10.0
-                + text::measure(
-                    query.get(..cut).unwrap_or(query),
-                    13.0,
-                    FontWeightHint::Regular,
-                );
-            frame.push(RenderCommand::Line {
-                x1: cx,
-                y1: 9.0,
-                x2: cx,
-                y2: 27.0,
-                color: self.palette.text,
-                width: 1.0,
+        field::draw(
+            frame,
+            &self.palette,
+            rect,
+            field::State {
+                hovered: false,
+                focused: searching,
+                disabled: false,
+                invalid: !query.is_empty() && self.store.search_results().is_empty(),
+            },
+            self.focus_ring_width,
+        );
+        let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            rect.x + SEARCH_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+        );
+        let mut tree = RenderTree::new();
+        if query.is_empty() {
+            tree.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: String::from("Search notes..."),
+                color: self.palette.subtext0,
+                font_size: SEARCH_TEXT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
             });
+            if searching {
+                textedit::push_caret(&mut tree, tx, ty, line, self.palette.text, self.caret_width);
+            }
+        } else {
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: query,
+                    cursor: if searching {
+                        TextCursor::from(self.line_cursor())
+                    } else {
+                        TextCursor::default()
+                    },
+                    selection_anchor: if searching { self.line_anchor() } else { None },
+                    focused: searching,
+                    x: tx,
+                    y: ty,
+                    width: tw,
+                    line_height: line,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: self.caret_width,
+                },
+            );
         }
+        frame.extend(tree.commands);
         frame.hit(
             Target::SearchBox,
             Rect::new(0.0, 0.0, SIDEBAR_WIDTH, SEARCH_BAR_HEIGHT),
@@ -2755,7 +2800,7 @@ impl StickyNotesApp {
         {
             let kind = note
                 .body
-                .get(self.caret.0)
+                .get(self.body_caret_line(note.id))
                 .map_or(LineKind::Plain, |l| l.kind.clone());
             place(
                 frame,
@@ -2927,6 +2972,7 @@ impl StickyNotesApp {
             return;
         };
         if note.title == before {
+            self.title_before = before;
             return;
         }
         // `#word` in a title becomes a tag and leaves the title. The store has
@@ -2948,6 +2994,12 @@ impl StickyNotesApp {
         for tag in found {
             note.add_tag(&tag);
         }
+        // The title stays open, as the body's writing does: what the next
+        // commit compares against is the title this one recorded. Taking it
+        // and leaving it empty made the next -- a second Ctrl+Z, a save --
+        // record the title as typed over nothing, and undoing that blanked
+        // it.
+        self.title_before = note.title.clone();
         self.store.mark_dirty();
     }
 
@@ -3013,6 +3065,18 @@ impl StickyNotesApp {
             if let Some(note) = self.store.get_note(id) {
                 self.body_before = note.body.clone();
             }
+        }
+    }
+
+    /// [`refill_body`](Self::refill_body) for a title being typed, after the
+    /// history moved its note: the next commit compares against the title as
+    /// the move left it, or it would record the move as an edit of its own
+    /// -- and, as a new edit does, leave the redo behind.
+    fn refill_title(&mut self) {
+        if let Some(Focus::Title(id)) = self.focus
+            && let Some(note) = self.store.get_note(id)
+        {
+            self.title_before = note.title.clone();
         }
     }
 
@@ -3082,39 +3146,48 @@ impl StickyNotesApp {
         self.store.set_active(Some(id));
         self.store.bring_to_front(id);
         self.clamp_note(id, canvas);
-        self.focus = Some(Focus::Title(id));
         self.title_before = self
             .store
             .get_note(id)
             .map_or_else(String::new, |n| n.title.clone());
-        self.caret = (0, self.title_before.len());
+        self.focus_line(Focus::Title(id), self.title_before.len());
         self.status.clear();
         Action::Redraw
     }
 
     fn undo_active(&mut self) -> Action {
+        self.step_active(Note::undo)
+    }
+
+    fn redo_active(&mut self) -> Action {
+        self.step_active(Note::redo)
+    }
+
+    /// Alt+Z: the active note as it was before this version, on whichever
+    /// branch.
+    fn earlier_active(&mut self) -> Action {
+        self.step_active(Note::earlier)
+    }
+
+    /// Alt+Shift+Z: the version of the active note reached after this one.
+    fn later_active(&mut self) -> Action {
+        self.step_active(Note::later)
+    }
+
+    /// Move the active note through its history with `step`, after
+    /// recording what is being typed into it -- redo too, which did not: a
+    /// title being typed is the newest edit, and a redo played over it put
+    /// the redone title where the typing was, and leaving the title then
+    /// recorded that redone title a second time, as an edit of its own.
+    fn step_active(&mut self, step: fn(&mut Note) -> bool) -> Action {
         self.commit_focus();
         let Some(id) = self.store.active_note() else {
             return Action::None;
         };
-        let undone = self.store.get_note_mut(id).is_some_and(Note::undo);
-        if undone {
+        let moved = self.store.get_note_mut(id).is_some_and(step);
+        if moved {
             self.refill_body();
-            self.clamp_caret();
-            self.store.mark_dirty();
-            Action::Redraw
-        } else {
-            Action::None
-        }
-    }
-
-    fn redo_active(&mut self) -> Action {
-        let Some(id) = self.store.active_note() else {
-            return Action::None;
-        };
-        let redone = self.store.get_note_mut(id).is_some_and(Note::redo);
-        if redone {
-            self.refill_body();
+            self.refill_title();
             self.clamp_caret();
             self.store.mark_dirty();
             Action::Redraw
@@ -3128,15 +3201,99 @@ impl StickyNotesApp {
     /// An undo can shorten the line the caret is sitting past the end of; the
     /// renderer would then measure a prefix that no longer exists.
     fn clamp_caret(&mut self) {
-        let Some(focus) = self.focus else { return };
-        let col = self.caret.1;
-        let bound = match focus {
-            Focus::Search => self.store.search_query().len(),
-            Focus::Title(id) => self.store.get_note(id).map_or(0, |n| n.title.len()),
-            // The field keeps its own caret inside its own text.
-            Focus::Body(_) => return,
-        };
-        self.caret.1 = col.min(bound);
+        // The line's editor is reloaded from the line whenever the two
+        // differ, its caret at the end (`sync_line_editor`); the field keeps
+        // its own caret inside its own text.
+        self.sync_line_editor();
+    }
+
+    /// The text of the line the keyboard is in -- the search, or a note's
+    /// title -- or `None` with the keyboard in a note's text or nowhere.
+    fn line_text(&self) -> Option<String> {
+        match self.focus? {
+            Focus::Search => Some(self.store.search_query().to_owned()),
+            Focus::Title(id) => self.store.get_note(id).map(|n| n.title.clone()),
+            Focus::Body(_) => None,
+        }
+    }
+
+    /// Reload the line's editor from the line, if the line changed under it.
+    fn sync_line_editor(&mut self) {
+        if let Some(text) = self.line_text()
+            && self.line_editor.text() != text
+        {
+            self.line_editor.set_text(&text);
+        }
+    }
+
+    /// Put the keyboard in `focus` -- the search, or a note's title -- with
+    /// the caret at byte `at` of its text.
+    fn focus_line(&mut self, focus: Focus, at: usize) {
+        self.focus = Some(focus);
+        let text = self.line_text().unwrap_or_default();
+        self.line_editor.set_text(&text);
+        self.line_editor
+            .set_cursor(TextCursor::from(Note::snap_col(&text, at)));
+    }
+
+    /// Where the line's caret is drawn: the editor's, or the end of the line
+    /// if the line changed under the editor.
+    fn line_cursor(&self) -> usize {
+        match self.line_text() {
+            Some(text) if self.line_editor.text() == text => self.line_editor.cursor().byte,
+            Some(text) => text.len(),
+            None => 0,
+        }
+    }
+
+    /// Where a selection in the line began, while the editor holds the line.
+    fn line_anchor(&self) -> Option<usize> {
+        match self.line_text() {
+            Some(text) if self.line_editor.text() == text => self.line_editor.selection_anchor(),
+            _ => None,
+        }
+    }
+
+    /// Which of note `id`'s lines the toolbar's line kind is read from: the
+    /// one the caret is on while the note's text is being written, the first
+    /// otherwise. It was always the first.
+    fn body_caret_line(&self, id: NoteId) -> usize {
+        match self.focus {
+            Some(Focus::Body(at)) if at == id => {
+                let text = self.body.text();
+                let caret = self.body.cursor().byte.min(text.len());
+                text.get(..caret)
+                    .map_or(0, |before| before.matches('\n').count())
+            }
+            _ => 0,
+        }
+    }
+
+    /// `event` in the line the keyboard is in, through its editor
+    /// (`textline::apply_key`) -- the caret keys with Shift to select,
+    /// Backspace and Delete, Ctrl+A, C, X and V, and typing, at most
+    /// `capacity` characters -- the line's new text, if the key changed it,
+    /// and whether the key was the line's at all.
+    fn edit_line(
+        &mut self,
+        event: &KeyEvent,
+        capacity: usize,
+        size: f32,
+    ) -> (Option<String>, bool) {
+        self.sync_line_editor();
+        let before = self.line_editor.text().to_owned();
+        let edit = textline::apply_key(
+            &mut self.line_editor,
+            event,
+            capacity,
+            &self.line_clipboard,
+            size,
+        );
+        if let Some(copied) = edit.copied {
+            self.line_clipboard = copied;
+        }
+        let after = self.line_editor.text();
+        ((after != before).then(|| after.to_owned()), edit.handled)
     }
 
     // -- Mouse -------------------------------------------------------------
@@ -3232,10 +3389,27 @@ impl StickyNotesApp {
                 }
                 Action::Redraw
             }
+            // The caret under the pointer, measured against the box as it was
+            // drawn before the press. It went to the end, wherever the press.
             Target::SearchBox => {
+                let drawn = if self.focus == Some(Focus::Search) {
+                    TextCursor::from(self.line_cursor())
+                } else {
+                    TextCursor::default()
+                };
                 self.commit_focus();
-                self.focus = Some(Focus::Search);
-                self.caret = (0, self.store.search_query().len());
+                let rect = search_box_rect();
+                let query = self.store.search_query().to_owned();
+                let at = textedit::cursor_at_click(
+                    &query,
+                    drawn,
+                    (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+                    SEARCH_TEXT_SIZE,
+                    FontWeightHint::Regular,
+                    x - rect.x - SEARCH_TEXT_INSET,
+                )
+                .byte;
+                self.focus_line(Focus::Search, at);
                 Action::Redraw
             }
             Target::TagChip(index) => {
@@ -3343,7 +3517,7 @@ impl StickyNotesApp {
         if let Some(Focus::Body(id)) = self.focus {
             return self.cycle_line_kind_in_text(id);
         }
-        let line = self.caret.0;
+        let line = 0;
         self.with_active(|note| {
             if let Some(row) = note.body.get_mut(line) {
                 row.kind = next_line_kind(&row.kind);
@@ -3479,7 +3653,21 @@ impl StickyNotesApp {
             return action;
         }
 
-        if m.ctrl && !m.alt {
+        // Alt+Z and Alt+Shift+Z: every version of the note there has been,
+        // in the order each was made -- the way back to a branch undone out
+        // of. Alt alone: Ctrl+Alt is AltGr, and Windows+ keys the desktop's.
+        if event.key == Key::Z && m.alt && !m.ctrl && !m.super_key {
+            return if m.shift {
+                self.later_active()
+            } else {
+                self.earlier_active()
+            };
+        }
+
+        // Ctrl without Alt, as AltGr arrives as Ctrl+Alt; and without the
+        // Windows key, whose chords are the desktop's -- Ctrl+Windows+Q is
+        // no quit.
+        if textline::is_ctrl_chord(m) {
             let canvas = self.canvas_rect(size.0, size.1);
             return match event.key {
                 Key::Q => self.quit_requested(),
@@ -3495,13 +3683,15 @@ impl StickyNotesApp {
                     self.commit_focus();
                     self.export()
                 }
+                // Ctrl+Shift+Z redoes, as Ctrl+Y does.
+                Key::Z if m.shift => self.redo_active(),
                 Key::Z => self.undo_active(),
                 Key::Y => self.redo_active(),
                 Key::F => {
                     self.commit_focus();
                     self.store.set_sidebar_visible(true);
-                    self.focus = Some(Focus::Search);
-                    self.caret = (0, self.store.search_query().len());
+                    let at = self.store.search_query().len();
+                    self.focus_line(Focus::Search, at);
                     Action::Redraw
                 }
                 Key::B => self.activate(Target::ToggleSidebar, 0.0, 0.0, MouseButton::Left, size),
@@ -3511,8 +3701,28 @@ impl StickyNotesApp {
                     Action::Redraw
                 }
                 Key::L => self.cycle_line_kind(),
+                // A title's and the search's own chords, while either has
+                // the keyboard: the line's editor answers them.
+                Key::A | Key::C | Key::X | Key::V => match self.focus {
+                    Some(focus @ (Focus::Title(_) | Focus::Search)) => {
+                        self.type_into(focus, event, size)
+                    }
+                    _ => Action::None,
+                },
                 _ => Action::None,
             };
+        }
+
+        // What AltGr types goes into the title or the search. It arrives as
+        // Ctrl+Alt -- `ż` is AltGr+Z on a Polish keyboard -- and the guard
+        // below would take it for a chord. A command's letter, which it
+        // carries as text, goes the same way and is refused there: the line's
+        // editor takes no chord of Alt's or the Windows key's
+        // (`textline::apply_key`), and no Ctrl chord reaches this line.
+        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus
+            && event.types_text()
+        {
+            return self.type_into(focus, event, size);
         }
 
         // A bare key must stay bare: Alt-Tab and the Super menu belong to the
@@ -3565,128 +3775,49 @@ impl StickyNotesApp {
     }
 
     fn type_into_search(&mut self, event: &KeyEvent) -> Action {
-        let mut query = self.store.search_query().to_string();
-        let mut col = Note::snap_col(&query, self.caret.1);
-        match event.key {
-            Key::Enter | Key::Tab => {
-                self.focus = None;
-                return Action::Redraw;
-            }
-            Key::Backspace if col > 0 => {
-                let prev = query
-                    .get(..col)
-                    .and_then(|s| s.chars().next_back())
-                    .map_or(0, char::len_utf8);
-                col = col.saturating_sub(prev);
-                query.replace_range(col..col.saturating_add(prev), "");
-            }
-            Key::Delete => {
-                if let Some(ch) = query.get(col..).and_then(|s| s.chars().next()) {
-                    query.replace_range(col..col.saturating_add(ch.len_utf8()), "");
-                }
-            }
-            Key::Left => {
-                col = col.saturating_sub(
-                    query
-                        .get(..col)
-                        .and_then(|s| s.chars().next_back())
-                        .map_or(0, char::len_utf8),
-                );
-            }
-            Key::Right => {
-                col = col.saturating_add(
-                    query
-                        .get(col..)
-                        .and_then(|s| s.chars().next())
-                        .map_or(0, char::len_utf8),
-                );
-            }
-            Key::Home => col = 0,
-            Key::End => col = query.len(),
-            _ => {
-                let before = query.len();
-                for ch in event.typed() {
-                    query.insert(col, ch);
-                    col = col.saturating_add(ch.len_utf8());
-                }
-                if query.len() == before {
-                    return Action::None;
-                }
-            }
+        if matches!(event.key, Key::Enter | Key::Tab) {
+            self.focus = None;
+            return Action::Redraw;
         }
-        self.store.set_search(&query);
-        self.caret = (0, col);
-        self.sidebar_scroll = 0.0;
-        Action::Redraw
+        let (changed, handled) = self.edit_line(event, SEARCH_CAPACITY, SEARCH_TEXT_SIZE);
+        if let Some(query) = changed {
+            self.store.set_search(&query);
+            self.sidebar_scroll = 0.0;
+        }
+        if handled {
+            Action::Redraw
+        } else {
+            Action::None
+        }
     }
 
     fn type_into_title(&mut self, id: NoteId, event: &KeyEvent, size: (f32, f32)) -> Action {
         // Editing the title in place and folding the whole edit into one undo
         // when the caret leaves; see `commit_focus`.
-        let Some(note) = self.store.get_note_mut(id) else {
+        let Some(font) = self.store.get_note(id).map(|n| n.font_size.title_size()) else {
             self.focus = None;
             return Action::Redraw;
         };
-        let mut col = Note::snap_col(&note.title, self.caret.1);
-        match event.key {
-            Key::Enter | Key::Tab | Key::Down => {
-                // Enter moves on to the body, which is what a note is for.
-                self.commit_focus();
-                self.write_in(id, TextPlace::Start);
-                return Action::Redraw;
-            }
-            Key::Backspace if col > 0 => {
-                let prev = note
-                    .title
-                    .get(..col)
-                    .and_then(|s| s.chars().next_back())
-                    .map_or(0, char::len_utf8);
-                col = col.saturating_sub(prev);
-                note.title.replace_range(col..col.saturating_add(prev), "");
-            }
-            Key::Delete => {
-                if let Some(ch) = note.title.get(col..).and_then(|s| s.chars().next()) {
-                    note.title
-                        .replace_range(col..col.saturating_add(ch.len_utf8()), "");
-                }
-            }
-            Key::Left => {
-                col = col.saturating_sub(
-                    note.title
-                        .get(..col)
-                        .and_then(|s| s.chars().next_back())
-                        .map_or(0, char::len_utf8),
-                );
-            }
-            Key::Right => {
-                col = col.saturating_add(
-                    note.title
-                        .get(col..)
-                        .and_then(|s| s.chars().next())
-                        .map_or(0, char::len_utf8),
-                );
-            }
-            Key::Home => col = 0,
-            Key::End => col = note.title.len(),
-            _ => {
-                let before = note.title.len();
-                for ch in event.typed() {
-                    if note.title.chars().count() >= MAX_TITLE_LEN {
-                        break;
-                    }
-                    note.title.insert(col, ch);
-                    col = col.saturating_add(ch.len_utf8());
-                }
-                if note.title.len() == before {
-                    return Action::None;
-                }
-            }
+        if matches!(event.key, Key::Enter | Key::Tab | Key::Down) {
+            // Enter moves on to the body, which is what a note is for.
+            self.commit_focus();
+            self.write_in(id, TextPlace::Start);
+            return Action::Redraw;
         }
-        self.caret = (0, col);
-        self.store.mark_dirty();
-        let canvas = self.canvas_rect(size.0, size.1);
-        self.clamp_note(id, canvas);
-        Action::Redraw
+        let (changed, handled) = self.edit_line(event, MAX_TITLE_LEN, font);
+        if let Some(title) = changed {
+            if let Some(note) = self.store.get_note_mut(id) {
+                note.title = title;
+            }
+            self.store.mark_dirty();
+            let canvas = self.canvas_rect(size.0, size.1);
+            self.clamp_note(id, canvas);
+        }
+        if handled {
+            Action::Redraw
+        } else {
+            Action::None
+        }
     }
 
     /// A key while note `id`'s text is being written: the field's, apart
@@ -3707,9 +3838,9 @@ impl StickyNotesApp {
                 self.commit_focus();
                 if let Some(note) = self.store.get_note(id) {
                     self.title_before = note.title.clone();
-                    self.caret = (0, note.title.len());
                 }
-                self.focus = Some(Focus::Title(id));
+                let at = self.title_before.len();
+                self.focus_line(Focus::Title(id), at);
                 return Some(Action::Redraw);
             }
             // Tab leaves the note, as it leaves the title.
@@ -3836,13 +3967,13 @@ impl StickyNotesApp {
                         Some(Target::NoteTitle(id)) => {
                             self.store.end_drag();
                             self.select(id);
-                            self.focus = Some(Focus::Title(id));
                             self.title_before = self
                                 .store
                                 .get_note(id)
                                 .map_or_else(String::new, |n| n.title.clone());
                             let title_x = self.canvas_rect(clamped.0, clamped.1).x;
-                            self.caret = (0, self.column_in_title(id, mouse.x - title_x));
+                            let at = self.column_in_title(id, mouse.x - title_x);
+                            self.focus_line(Focus::Title(id), at);
                             Action::Redraw
                         }
                         // A double click on the text selects the word.
@@ -3948,6 +4079,7 @@ impl App for StickyNotesApp {
     /// The caret's width, the one appearance setting this window reads that
     /// is not a colour.
     fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
         self.caret_width = settings.caret_width();
     }
 
@@ -4011,9 +4143,14 @@ impl Probe for StickyNotesApp {
 
     /// A click is a press *and* a release, so a click on a title bar does not
     /// leave a move running that the next mouse motion would act on.
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
-        let pressed = self.handle_click(x, y, button, size);
-        let released = self.release(size);
+        let at = |kind| Event::Mouse(guitk::event::MouseEvent { x, y, kind });
+        let pressed = self.handle_event(&at(MouseEventKind::Press(button)), size);
+        let released = self.handle_event(&at(MouseEventKind::Release(button)), size);
         if pressed == Action::None {
             released
         } else {
@@ -4022,7 +4159,7 @@ impl Probe for StickyNotesApp {
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -4484,93 +4621,57 @@ mod tests {
         assert_eq!(note.body.len(), 1);
     }
 
-    // -- Undo/redo system ----------------------------------------------------
+    // -- Undo/redo system: a tree, walked with Alt+Z (C-Q24) -----------------
 
     #[test]
-    fn test_undo_history_push_and_pop() {
-        let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'a',
-        });
-        assert!(h.can_undo());
-        assert!(!h.can_redo());
-        let action = h.pop_undo();
-        assert!(action.is_some());
-        assert!(h.can_redo());
-        assert!(!h.can_undo());
+    fn a_note_undoes_and_redoes_an_edit() {
+        let mut note = Note::new(1, 0.0, 0.0);
+        assert!(!note.undo(), "a fresh note has nothing to undo");
+        note.insert_char(0, 0, 'a');
+        assert!(note.undo_history.can_undo());
+        assert!(note.undo());
+        assert_eq!(note.body_text(), "");
+        assert!(note.undo_history.can_redo());
+        assert!(note.redo());
+        assert_eq!(note.body_text(), "a");
+        assert!(!note.redo());
     }
 
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and `earlier` walks back through
+    /// every version of the note, in the order each was made; `later` comes
+    /// forward again.
     #[test]
-    fn test_undo_history_redo() {
-        let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'a',
-        });
-        h.pop_undo();
-        let action = h.pop_redo();
-        assert!(action.is_some());
-        assert!(h.can_undo());
+    fn a_note_edit_after_an_undo_keeps_the_undone_one_reachable() {
+        let mut note = Note::new(1, 0.0, 0.0);
+        note.insert_char(0, 0, 'a');
+        assert!(note.undo());
+        note.insert_char(0, 0, 'b');
+        assert!(!note.redo(), "redo went onto the branch left");
+        assert!(note.earlier());
+        assert_eq!(note.body_text(), "a", "the undone edit was lost");
+        assert!(note.earlier());
+        assert_eq!(note.body_text(), "");
+        assert!(!note.earlier(), "before the first version");
+        assert!(note.later());
+        assert!(note.later());
+        assert_eq!(note.body_text(), "b");
+        assert!(!note.later(), "past the newest version");
     }
 
+    /// A note keeps its last hundred edits and drops the oldest.
     #[test]
-    fn test_undo_history_push_clears_redo() {
-        let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'a',
-        });
-        h.pop_undo();
-        assert!(h.can_redo());
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'b',
-        });
-        assert!(!h.can_redo());
-    }
-
-    #[test]
-    fn test_undo_history_max_depth() {
-        let mut h = UndoHistory::new(3);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'a',
-        });
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 1,
-            ch: 'b',
-        });
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 2,
-            ch: 'c',
-        });
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 3,
-            ch: 'd',
-        });
-        assert_eq!(h.undo_count(), 3);
-    }
-
-    #[test]
-    fn test_undo_history_clear() {
-        let mut h = UndoHistory::new(10);
-        h.push(EditAction::InsertChar {
-            line: 0,
-            col: 0,
-            ch: 'x',
-        });
-        h.clear();
-        assert!(!h.can_undo());
-        assert!(!h.can_redo());
+    fn a_note_keeps_its_last_hundred_edits() {
+        let mut note = Note::new(1, 0.0, 0.0);
+        for col in 0..110 {
+            note.insert_char(0, col, 'x');
+        }
+        let mut undone = 0;
+        while undone <= 100 && note.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, 100);
+        assert_eq!(note.body_text(), "x".repeat(10));
     }
 
     // -- NoteStore CRUD ------------------------------------------------------
@@ -5330,6 +5431,238 @@ mod tests {
 
     /// An app with one note and the sidebar open, which is the state most of
     /// these start from.
+    /// Make the theme's keyboard mark a ring and the user's focus width
+    /// wider than the toolkit's. The palette drawn with.
+    fn ringed(app: &mut StickyNotesApp) -> Palette {
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(app, &p);
+        oswindow::app::App::appearance_changed(
+            app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        p
+    }
+
+    /// The window's commands, at its own size.
+    fn drawn_commands(app: &StickyNotesApp) -> Vec<RenderCommand> {
+        app.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands().to_vec()
+    }
+
+    /// Whether the window draws the toolkit's field at `rect` in `state` --
+    /// and, unless `state` has the keyboard, without the keyboard's mark.
+    fn draws_box(app: &StickyNotesApp, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, app.focus_ring_width);
+            v
+        };
+        let cmds = drawn_commands(app);
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// Where the carets drawn inside `rect` are: upright lines.
+    fn carets_in(app: &StickyNotesApp, rect: Rect) -> Vec<f32> {
+        drawn_commands(app)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, y1, x2, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The search box is the toolkit's field, and edits like one**: no
+    /// mark until it has the keyboard, then the theme's mark at the user's
+    /// width; the caret before what it is for while empty and after the
+    /// query; the caret keys, Backspace and Delete at the caret, Ctrl+A, X
+    /// and V; a press that puts the caret under the pointer; red while the
+    /// query finds no note. It was a strip whose edge turned blue, with keys
+    /// spelled out by hand: no selection and no clipboard.
+    #[test]
+    fn the_search_box_is_the_toolkits_field_and_edits_like_one() {
+        let (mut app, _) = app_with_note();
+        let p = ringed(&mut app);
+        let rect = search_box_rect();
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        let start = rect.x + SEARCH_TEXT_INSET;
+        assert!(
+            draws_box(&app, &p, rect, idle),
+            "the search box is not the toolkit's field, or has a mark"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::F));
+        assert!(
+            draws_box(&app, &p, rect, focused),
+            "the search box with the keyboard has no mark"
+        );
+        assert_eq!(
+            carets_in(&app, rect),
+            vec![start],
+            "the empty box has no caret at its start"
+        );
+
+        probe::type_str(&mut app, "orem");
+        probe::key(&mut app, &probe::press(Key::Home));
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(
+            app.store.search_query(),
+            "rem",
+            "Home and Delete did not edit the start"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::ctrl(Key::X));
+        assert_eq!(
+            app.store.search_query(),
+            "",
+            "Ctrl+A and Ctrl+X did not cut"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        assert_eq!(
+            app.store.search_query(),
+            "remrem",
+            "Ctrl+V did not paste what was cut"
+        );
+        let end = start + text::measure("remrem", SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            matches!(carets_in(&app, rect).as_slice(), [at] if (at - end).abs() < 0.5),
+            "the caret is not after the query: {:?}, not {end}",
+            carets_in(&app, rect)
+        );
+
+        app.click_at(
+            start + 1.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+        );
+        probe::type_str(&mut app, "L");
+        assert_eq!(
+            app.store.search_query(),
+            "Lremrem",
+            "the caret did not go where the press was"
+        );
+        assert!(
+            app.store.search_results().is_empty(),
+            "control: the query finds no note"
+        );
+        assert!(
+            draws_box(
+                &app,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a query that finds nothing is not red"
+        );
+    }
+
+    /// **A title edits like a field**: Shift and an arrow select, and the
+    /// selection is drawn; typing replaces it; Ctrl+A and C copy the title,
+    /// and Ctrl+V puts it into the search.
+    #[test]
+    fn a_title_edits_like_a_field() {
+        let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
+        app.title_before = app
+            .store
+            .get_note(id)
+            .map(|n| n.title.clone())
+            .unwrap_or_default();
+        app.focus_line(Focus::Title(id), 0);
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::press(Key::Delete));
+        probe::type_str(&mut app, "Milk");
+        probe::key(&mut app, &probe::shift(Key::Left));
+        probe::key(&mut app, &probe::shift(Key::Left));
+        let accent = with_alpha(app.palette.accent, 110);
+        assert!(
+            drawn_commands(&app)
+                .iter()
+                .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == accent)),
+            "the title's selection is not drawn"
+        );
+        probe::type_str(&mut app, "st");
+        let title = |app: &StickyNotesApp| app.store.get_note(id).map(|n| n.title.clone());
+        assert_eq!(
+            title(&app).as_deref(),
+            Some("Mist"),
+            "typing did not replace the selection"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        probe::key(&mut app, &probe::ctrl(Key::C));
+        assert_eq!(
+            title(&app).as_deref(),
+            Some("Mist"),
+            "Ctrl+C changed what it copied"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::F));
+        probe::key(&mut app, &probe::ctrl(Key::V));
+        assert_eq!(
+            app.store.search_query(),
+            "Mist",
+            "the copied title did not paste into the search"
+        );
+    }
+
+    /// **The toolbar names the kind of the line the caret is on**: it named
+    /// the first line's, wherever the caret was.
+    #[test]
+    fn the_toolbar_names_the_kind_of_the_line_the_caret_is_on() {
+        let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
+        app.write_in(id, TextPlace::Start);
+        probe::type_str(&mut app, "plain");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        probe::type_str(&mut app, "* item");
+        let shown = |app: &StickyNotesApp| -> Vec<String> {
+            drawn_commands(app)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } if text.starts_with("Line: ") => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            shown(&app),
+            vec![String::from("Line: Bullet")],
+            "the caret's line is a bullet"
+        );
+        probe::key(&mut app, &probe::press(Key::Up));
+        assert_eq!(
+            shown(&app),
+            vec![String::from("Line: Plain")],
+            "the caret's line is plain"
+        );
+    }
+
     fn app_with_note() -> (StickyNotesApp, NoteId) {
         let mut app = StickyNotesApp::new();
         app.store.set_sidebar_visible(true);
@@ -5648,9 +5981,8 @@ mod tests {
         if let Some(note) = app.store.get_note_mut(id) {
             note.title.clear();
         }
-        app.focus = Some(Focus::Title(id));
         app.title_before = String::new();
-        app.caret = (0, 0);
+        app.focus_line(Focus::Title(id), 0);
         probe::type_str(&mut app, "Milk #shopping");
         // Committed when the caret leaves, not per keystroke.
         probe::key(&mut app, &probe::press(Key::Escape));
@@ -5659,6 +5991,89 @@ mod tests {
             Some("Milk")
         );
         assert_eq!(app.store.all_tags(), vec![String::from("shopping")]);
+    }
+
+    fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **A title and the search take what AltGr types, and no command's
+    /// letter.** AltGr arrives as Ctrl+Alt -- `ż` is AltGr+Z on a Polish
+    /// keyboard -- and the guard that keeps a bare key bare took it for a
+    /// chord before either field saw it. A command carries its letter as
+    /// text on a real machine, and types none of it.
+    #[test]
+    fn a_title_and_the_search_take_altgr_letters_and_no_commands_letter() {
+        let commands = [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ];
+        let (mut app, id) = app_with_note();
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.title.clear();
+        }
+        app.title_before = String::new();
+        app.focus_line(Focus::Title(id), 0);
+        assert_eq!(
+            probe::key(&mut app, &held(Key::Z, ALTGR, "\u{17c}")),
+            Action::Redraw,
+            "AltGr+Z was refused by the title"
+        );
+        for (key, modifiers, text) in commands {
+            assert_eq!(
+                probe::key(&mut app, &held(key, modifiers, text)),
+                Action::None,
+                "{modifiers:?}+{key:?} went into the title"
+            );
+        }
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("\u{17c}")
+        );
+
+        app.focus_line(Focus::Search, 0);
+        assert_eq!(
+            probe::key(&mut app, &held(Key::Z, ALTGR, "\u{17c}")),
+            Action::Redraw,
+            "AltGr+Z was refused by the search"
+        );
+        for (key, modifiers, text) in commands {
+            assert_eq!(
+                probe::key(&mut app, &held(key, modifiers, text)),
+                Action::None,
+                "{modifiers:?}+{key:?} went into the search"
+            );
+        }
+        assert_eq!(app.store.search_query(), "\u{17c}");
+    }
+
+    /// **Ctrl held with the Windows key is no chord of the program's:**
+    /// Ctrl+Windows+Q is the desktop's, and quit.
+    #[test]
+    fn ctrl_with_the_windows_key_is_no_chord() {
+        let (mut app, _) = app_with_note();
+        let windows_ctrl = Modifiers {
+            super_key: true,
+            ..Modifiers::ctrl()
+        };
+        assert_eq!(
+            probe::key(&mut app, &probe::press_with(Key::Q, windows_ctrl)),
+            Action::None
+        );
     }
 
     #[test]
@@ -5670,7 +6085,10 @@ mod tests {
             .get_note(id)
             .map(|n| n.title.clone())
             .expect("a title");
-        app.caret = (0, app.title_before.len());
+        let at = app.title_before.len();
+        if let Some(focus) = app.focus {
+            app.focus_line(focus, at);
+        }
         probe::type_str(&mut app, "abcdef");
         probe::key(&mut app, &probe::press(Key::Escape));
         app.store.set_active(Some(id));
@@ -5713,7 +6131,6 @@ mod tests {
     fn the_line_chip_cycles_plain_bullet_checkbox() {
         let (mut app, id) = app_with_note();
         app.store.set_active(Some(id));
-        app.caret = (0, 0);
         for expected in [
             LineKind::Bullet,
             LineKind::Checkbox { checked: false },
@@ -5797,6 +6214,38 @@ mod tests {
         // A second click on the same chip clears it.
         probe::click(&mut app, Target::TagChip(0));
         assert!(probe::is_visible(&app, Target::SidebarItem(other)));
+    }
+
+    /// **A tag chosen while the search has the keyboard is what the next key
+    /// edits.** The chip writes the search under the box's editor, which is
+    /// reloaded from it: a key pressed next edits the tag, rather than
+    /// bringing back what had been typed before it -- and losing the filter.
+    #[test]
+    fn a_tag_chosen_while_typing_a_search_is_what_the_next_key_edits() {
+        let mut app = StickyNotesApp::new();
+        app.store.set_sidebar_visible(true);
+        let tagged = app.store.create_note(20.0, 20.0);
+        if let Some(note) = app.store.get_note_mut(tagged) {
+            note.add_tag("work");
+        }
+        app.focus_line(Focus::Search, 0);
+        for c in ["t", "a"] {
+            probe::key(&mut app, &held(Key::T, Modifiers::NONE, c));
+        }
+        assert_eq!(app.store.search_query(), "ta");
+        probe::click(&mut app, Target::TagChip(0));
+        assert_eq!(
+            app.focus,
+            Some(Focus::Search),
+            "the chip took the keyboard from the search"
+        );
+        assert_eq!(app.store.search_query(), "tag:work");
+        probe::key(&mut app, &probe::press(Key::Backspace));
+        assert_eq!(
+            app.store.search_query(),
+            "tag:wor",
+            "the key edited what had been typed before the tag was chosen"
+        );
     }
 
     #[test]
@@ -5889,6 +6338,223 @@ mod tests {
             assert_eq!(probe::key(&mut app, &event), Action::None);
             assert_eq!(app.store.total_count(), 0, "{modifiers:?} made a note");
         }
+    }
+
+    // -- The note's history from the keyboard (C-Q24) ------------------------
+
+    fn alt_z(shift: bool) -> KeyEvent {
+        probe::press_with(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    /// A note, active, with nothing being typed: an `a` written, undone, and
+    /// a `b` written instead -- a branch left behind.
+    fn app_with_a_branch() -> (StickyNotesApp, NoteId) {
+        let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.insert_char(0, 0, 'a');
+            note.undo();
+            note.insert_char(0, 0, 'b');
+        }
+        (app, id)
+    }
+
+    /// **Alt+Z walks the active note's history across its branches**, in
+    /// the order each version was made, and marks the notes changed;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn alt_z_walks_the_active_notes_history() {
+        let (mut app, id) = app_with_a_branch();
+        app.store.mark_clean();
+        assert_eq!(probe::key(&mut app, &alt_z(false)), Action::Redraw);
+        assert_eq!(text_of(&app, id), "a", "the undone edit was lost");
+        assert!(app.store.is_dirty(), "a journey did not mark the notes");
+        probe::key(&mut app, &alt_z(false));
+        assert_eq!(text_of(&app, id), "");
+        probe::key(&mut app, &alt_z(true));
+        probe::key(&mut app, &alt_z(true));
+        assert_eq!(text_of(&app, id), "b");
+        assert_eq!(
+            probe::key(&mut app, &alt_z(true)),
+            Action::None,
+            "past the newest version"
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does. It undid.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.insert_char(0, 0, 'a');
+        }
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(text_of(&app, id), "");
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            probe::key(&mut app, &probe::press_with(Key::Z, ctrl_shift)),
+            Action::Redraw
+        );
+        assert_eq!(text_of(&app, id), "a");
+    }
+
+    /// **AltGr+Z and Windows+Alt+Z walk nothing.** AltGr arrives as
+    /// Ctrl+Alt and types a letter -- ż on a Polish keyboard -- and a key
+    /// held with the Windows key is the desktop's.
+    #[test]
+    fn altgr_z_and_windows_alt_z_walk_nothing() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                alt: true,
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            let (mut app, id) = app_with_a_branch();
+            probe::key(&mut app, &probe::press_with(Key::Z, modifiers));
+            assert_eq!(text_of(&app, id), "b", "{modifiers:?}+Z moved the note");
+        }
+    }
+
+    /// **Redo keeps a title being typed.** The typing is the newest edit:
+    /// recorded first, as undo records it, it leaves nothing to redo past it,
+    /// and one undo takes it back. Redo used to play the next step over it.
+    #[test]
+    fn redo_keeps_a_title_being_typed() {
+        let (mut app, id) = app_with_note();
+        app.store.set_active(Some(id));
+        let title = |app: &StickyNotesApp| app.store.get_note(id).map(|n| n.title.clone());
+        // A name given and taken back, so there is a redo to be had.
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.title = String::from("Groceries");
+            note.commit_title(String::from("New Note"));
+            note.undo();
+        }
+        app.title_before = String::from("New Note");
+        app.focus_line(Focus::Title(id), app.title_before.len());
+        probe::type_str(&mut app, "!");
+        assert_eq!(title(&app).as_deref(), Some("New Note!"));
+        probe::key(&mut app, &probe::ctrl(Key::Y));
+        assert_eq!(
+            title(&app).as_deref(),
+            Some("New Note!"),
+            "redo wrote over the typing"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(title(&app).as_deref(), Some("New Note"));
+    }
+
+    /// Put the caret at the end of note `id`'s title, as a click there does.
+    fn typing_the_title(app: &mut StickyNotesApp, id: NoteId) {
+        app.store.set_active(Some(id));
+        app.focus = Some(Focus::Title(id));
+        app.title_before = app
+            .store
+            .get_note(id)
+            .map(|n| n.title.clone())
+            .expect("a title");
+        let at = app.title_before.len();
+        if let Some(focus) = app.focus {
+            app.focus_line(focus, at);
+        }
+    }
+
+    /// **A second Ctrl+Z while typing a title does not blank it.** The first
+    /// records the typing and takes it back; the second has nothing left to
+    /// take. The title's starting point was emptied by the first, and the
+    /// second recorded the title as typed over nothing, then undid that.
+    #[test]
+    fn a_second_undo_while_typing_a_title_does_not_blank_it() {
+        let (mut app, id) = app_with_note();
+        typing_the_title(&mut app, id);
+        probe::type_str(&mut app, "!");
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        let title = |app: &StickyNotesApp| app.store.get_note(id).map(|n| n.title.clone());
+        assert_eq!(title(&app).as_deref(), Some("New Note"));
+        assert_eq!(
+            probe::key(&mut app, &probe::ctrl(Key::Z)),
+            Action::None,
+            "a second undo found something to take back"
+        );
+        assert_eq!(
+            title(&app).as_deref(),
+            Some("New Note"),
+            "the title was blanked"
+        );
+    }
+
+    /// **A save while a title is being typed records the typing once.** The
+    /// save records what has been typed and the title stays open; what is
+    /// typed after is recorded against the saved title, so one undo takes
+    /// back only that -- not everything, to nothing, as it did when the save
+    /// emptied the title's starting point.
+    #[test]
+    fn a_save_while_typing_a_title_keeps_its_starting_point() {
+        let (mut app, id) = app_with_note();
+        typing_the_title(&mut app, id);
+        probe::type_str(&mut app, "!");
+        probe::key(&mut app, &probe::ctrl(Key::S));
+        probe::type_str(&mut app, "?");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("New Note!"),
+            "the typing after the save was recorded as typed over nothing"
+        );
+    }
+
+    /// **An undo with nothing yet typed keeps the title's starting point**,
+    /// so what is typed after it is recorded as typed over the title, and one
+    /// undo takes it back to the title rather than to nothing.
+    #[test]
+    fn an_undo_with_nothing_typed_keeps_the_titles_starting_point() {
+        let (mut app, id) = app_with_note();
+        typing_the_title(&mut app, id);
+        assert_eq!(probe::key(&mut app, &probe::ctrl(Key::Z)), Action::None);
+        probe::type_str(&mut app, "!");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("New Note"),
+            "the typing was recorded as typed over nothing"
+        );
+    }
+
+    /// **Leaving a title after undoing its typing keeps the redo.** The undo
+    /// moved the title; leaving compares against where the undo left it, so
+    /// the undo is not recorded again as an edit, which would leave the redo
+    /// behind on a branch of its own.
+    #[test]
+    fn leaving_a_title_after_undoing_its_typing_keeps_the_redo() {
+        let (mut app, id) = app_with_note();
+        typing_the_title(&mut app, id);
+        probe::type_str(&mut app, "!");
+        probe::key(&mut app, &probe::ctrl(Key::Z));
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert_eq!(probe::key(&mut app, &probe::ctrl(Key::Y)), Action::Redraw);
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("New Note!")
+        );
     }
 
     #[test]
@@ -6193,15 +6859,18 @@ mod tests {
     fn opening_a_note_and_leaving_it_changes_nothing() {
         let (mut app, id) = app_with_note();
         write_in_note(&mut app, id, "- dash");
-        let steps = app.store.get_note(id).map(|n| n.undo_history.undo_count());
+        // The text was put there unrecorded, so the history is empty: any
+        // step at all is one the opening made.
+        let can_undo = |app: &StickyNotesApp| {
+            app.store
+                .get_note(id)
+                .is_some_and(|n| n.undo_history.can_undo())
+        };
+        assert!(!can_undo(&app), "the note had a step before it was opened");
         probe::key(&mut app, &probe::press(Key::Right));
         probe::key(&mut app, &probe::press(Key::Escape));
         assert_eq!(text_of(&app, id), "* dash");
-        assert_eq!(
-            app.store.get_note(id).map(|n| n.undo_history.undo_count()),
-            steps,
-            "an untouched note gained an undo step"
-        );
+        assert!(!can_undo(&app), "an untouched note gained an undo step");
     }
 
     /// The caret is as wide as the user asked for.

@@ -1,0 +1,16 @@
+# meta_chapters.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+stream 0 track
+tag language=eng
+chapter 1 0 1000000000
+tag title=One
+chapter 2 2600000000 2800000000
+tag ARTIST=Chap
+tag TWICE=x
+chapter 6 2500000000 2600000000
+tag title=Six
+chapter -9223372036854775803 2800000000 2900000000
+tag title=Big
+tag BIG=yes
+chapter 7 2900000000 2950000000

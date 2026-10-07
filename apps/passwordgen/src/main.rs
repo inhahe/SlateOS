@@ -26,10 +26,12 @@ use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{DialogAction, FileDialog};
 use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::field;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SecretSource, SeededRng, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::textedit;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
@@ -1493,6 +1495,9 @@ const RULE_LINE_HEIGHT: f32 = 16.0;
 /// What the analyser draws for each character it is not showing.
 const MASK: &str = "\u{2022}";
 
+/// The size the password box's text is drawn at.
+const PASSWORD_TEXT_SIZE: f32 = 13.0;
+
 // ============================================================================
 // Main application
 // ============================================================================
@@ -1631,6 +1636,10 @@ pub struct PasswordApp {
     /// program was written and was called by nothing but its own test: the
     /// string had nowhere to go. This is the somewhere.
     pub dialog: Option<FileDialog>,
+    /// How wide the mark is round the password box while it has the
+    /// keyboard: the user's focus width (`App::appearance_changed`), the
+    /// toolkit's until it is known.
+    pub focus_ring_width: f32,
     /// What the last export did, shown in the status bar until the next one.
     ///
     /// Writing a file is the one thing this program does that the window does
@@ -1706,6 +1715,7 @@ impl PasswordApp {
             window_width: 1100.0,
             window_height: 700.0,
             dialog: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             status: None,
             last_error: None,
             rng,
@@ -1843,6 +1853,14 @@ impl PasswordApp {
     #[must_use]
     pub fn with_settings(mut self) -> Self {
         self.keeps_settings = true;
+        self.read_settings();
+        self
+    }
+
+    /// Read the rules from `passwordgen.yaml`, and say what in it could not
+    /// be used: when the window opens, and again whenever the desktop says
+    /// the file changed.
+    fn read_settings(&mut self) {
         let (rules, problems) = PasswordPolicy::from_settings(&settingsfile::load(CONFIG_NAME));
         self.policy = rules;
         if let Some(first) = problems.first() {
@@ -1856,7 +1874,19 @@ impl PasswordApp {
             });
         }
         self.settings_problems = problems;
-        self
+    }
+
+    /// Read the rules again after the desktop said `passwordgen.yaml`
+    /// changed -- another window's Rules tab, or a hand edit (§1418, §1434).
+    /// A window that keeps no settings, as a test's does not, reads none.
+    /// Whether what the window shows changed.
+    fn reread_settings(&mut self) -> bool {
+        if !self.keeps_settings {
+            return false;
+        }
+        let before = (self.policy.clone(), self.settings_problems.clone());
+        self.read_settings();
+        before != (self.policy.clone(), self.settings_problems.clone())
     }
 
     /// Move the Rules tab's cursor by `delta` rows.
@@ -1987,6 +2017,18 @@ impl PasswordApp {
 
     /// Route a compositor event into the app.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The rules on disk changed and the desktop says so. Before the
+        // picker, which would take this as it takes every event but a
+        // resize: a change to the file is not an input the dialog owns.
+        if let Event::SettingsChanged { group } = event
+            && group.file_name() == CONFIG_NAME
+        {
+            return if self.reread_settings() {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
         // The picker is modal and answers everything but a resize. Every key
         // on the generator tab produces a password, so a keystroke that fell
         // through to the tab behind would generate one while the user was
@@ -2104,7 +2146,10 @@ impl PasswordApp {
 
         // Before the analyser branch: on that tab every printable key is the
         // password being measured, and Ctrl+E must not be typed into it.
-        if key.modifiers.ctrl && key.key == Key::E {
+        // Ctrl without Alt: AltGr arrives as Ctrl+Alt, and AltGr+E is `€` on
+        // most European keyboards -- a character of the password, not a
+        // way to the export dialog.
+        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::E {
             return self.open_export_dialog();
         }
         if self.active_tab == ActiveTab::Analyzer {
@@ -2128,26 +2173,34 @@ impl PasswordApp {
                 Key::Tab => {}
                 // A dot for each character until asked: see
                 // `analyzer_revealed`.
-                Key::R if key.modifiers.ctrl => {
+                Key::R if textline::is_ctrl_chord(key.modifiers) => {
                     self.analyzer_revealed = !self.analyzer_revealed;
                     return EventResult::Consumed;
                 }
                 _ => {
                     // A control character is a key, not part of a password:
                     // an Enter that carries a "\r" must not be typed into it.
-                    if key.text.is_empty()
-                        || key.modifiers.ctrl
-                        || key.text.chars().any(char::is_control)
-                    {
+                    // What AltGr types is (`®` is AltGr+R on US
+                    // International); a command's letter, which it carries as
+                    // text, is not (`textline::types_into_field`).
+                    if !textline::types_into_field(key) {
                         return EventResult::Ignored;
                     }
                     let mut input = self.analyzer_input.clone();
-                    input.push_str(&key.text);
+                    input.extend(key.typed());
                     self.set_analyzer_input(&input);
                     self.analyze_input();
                     return EventResult::Consumed;
                 }
             }
+        }
+        // Every key from here on is a bare key, and one held with Ctrl, Alt
+        // or the Windows key is not this window's. Ctrl+C cleared the
+        // history as C does -- the key a user presses to copy a password --
+        // and Ctrl+P made a new one over the one on screen; the Windows
+        // key's are the desktop's, and AltGr types letters.
+        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
+            return EventResult::Ignored;
         }
         // On the Rules tab the arrows and Space are the rules'. Everything
         // else means what it means on any tab.
@@ -3054,6 +3107,85 @@ impl PasswordApp {
     /// Until 2026-09-27 this tab drew the generator here, so what was typed
     /// was never on screen at all: the meter measured a password nobody
     /// could see, and a typo in it could not be found.
+    /// How the password box is drawn: with the keyboard -- every printable
+    /// key on this tab is the password -- unless the list of keys or the
+    /// export dialog is over it. Never lit under the pointer: it has no
+    /// press of its own. Never red: what is in it is being measured, not
+    /// judged; the rules say what they make of it, below it.
+    fn password_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.active_tab == ActiveTab::Analyzer
+                && !self.show_help
+                && self.dialog.is_none(),
+            disabled: false,
+            invalid: false,
+        }
+    }
+
+    /// The password box at `rect`, holding `typed` characters: the toolkit's
+    /// field, with the password -- a dot a character until Ctrl+R shows it --
+    /// and the caret after it, scrolled so the end being typed stays in
+    /// view; a grey hint while it is empty. It was a card holding the text,
+    /// elided at its start, with no caret at all.
+    fn render_password_box(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        rect: guitk::frame::Rect,
+        typed: usize,
+    ) {
+        let state = self.password_box_state();
+        field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
+        let (size, weight) = (PASSWORD_TEXT_SIZE, FontWeightHint::Bold);
+        let line = text::line_height(size, weight);
+        let (tx, ty, tw) = (
+            rect.x + 8.0,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 16.0).max(0.0),
+        );
+        if typed == 0 && !state.focused {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "Type a password to measure it".to_owned(),
+                color: self.palette.subtext0,
+                font_size: size,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+        let shown = if self.analyzer_revealed {
+            self.analyzer_input.clone()
+        } else {
+            MASK.repeat(typed)
+        };
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &shown,
+                // Typed and erased at its end, so the end is where the caret
+                // is -- and what the scroll keeps in view.
+                cursor: text::TextCursor::from(shown.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: size,
+                weight,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
+    }
+
     fn render_analyzer_input(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         let lx = 12.0;
         let max_w = LEFT_PANEL_WIDTH - 24.0;
@@ -3066,39 +3198,8 @@ impl PasswordApp {
 
         cmds.push(heading(&self.palette, "PASSWORD TO MEASURE", lx, cy, max_w));
         cy += 18.0;
-        self.palette
-            .push_surface(cmds, lx, cy, max_w, 32.0, CORNER_RADIUS, Surface::Card);
         let typed = self.analyzer_input.chars().count();
-        let (shown, color, weight) = if typed == 0 {
-            (
-                "Type a password to measure it".to_owned(),
-                self.palette.subtext0,
-                FontWeightHint::Regular,
-            )
-        } else {
-            let whole = if self.analyzer_revealed {
-                self.analyzer_input.clone()
-            } else {
-                MASK.repeat(typed)
-            };
-            // The end is where the typing is, so a long one loses its start,
-            // and says so.
-            (
-                text::elide_start(&whole, max_w - 16.0, "…", 13.0, FontWeightHint::Bold),
-                self.palette.text,
-                FontWeightHint::Bold,
-            )
-        };
-        cmds.push(RenderCommand::Text {
-            x: lx + 8.0,
-            y: cy + 9.0,
-            text: shown,
-            color,
-            font_size: 13.0,
-            font_weight: weight,
-            max_width: Some(max_w - 16.0),
-            overflow: TextOverflow::Clip,
-        });
+        self.render_password_box(cmds, guitk::frame::Rect::new(lx, cy, max_w, 32.0), typed);
         cy += 44.0;
 
         let about = [
@@ -3276,6 +3377,10 @@ impl App for PasswordApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         "Password Generator".to_owned()
     }
@@ -3387,7 +3492,11 @@ mod tests {
         app.render_commands(1100.0, 760.0)
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
+                // The password box's text is the toolkit's field's, drawn as
+                // rich text.
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text.clone())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -4043,6 +4152,92 @@ rejects: {:?}",
         let mut app = seeded_app();
         app.clear_history();
         assert_eq!(app.handle_event(&press(Key::C)), EventResult::Ignored);
+    }
+
+    fn held(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **AltGr types into the analyser and runs no chord.** AltGr arrives
+    /// as Ctrl+Alt: `€` is AltGr+E on most European keyboards, and opened
+    /// the export dialog; `®` -- AltGr+R on US International -- showed the
+    /// password rather than going into it. A command carries its letter as
+    /// text on a real machine, and types none of it.
+    #[test]
+    fn altgr_types_into_the_analyser_and_runs_no_chord() {
+        let mut app = seeded_app();
+        // Something to export, or Ctrl+E would only say there is nothing.
+        app.handle_event(&press(Key::P));
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(app.active_tab, ActiveTab::Analyzer);
+        let revealed = app.analyzer_revealed;
+        for (k, text) in [(Key::E, "\u{20ac}"), (Key::R, "\u{ae}")] {
+            assert_eq!(
+                app.handle_event(&held(k, ALTGR, text)),
+                EventResult::Consumed,
+                "AltGr+{k:?} was not typed"
+            );
+        }
+        assert_eq!(app.analyzer_input, "\u{20ac}\u{ae}");
+        assert!(app.dialog.is_none(), "AltGr+E opened the export dialog");
+        assert_eq!(app.analyzer_revealed, revealed, "AltGr+R revealed it");
+        for (k, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::D, Modifiers::super_key(), "d"),
+        ] {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed"
+            );
+        }
+        assert_eq!(app.analyzer_input, "\u{20ac}\u{ae}");
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is no bare key.**
+    /// Ctrl+C -- the key a user presses to copy a password -- cleared the
+    /// history as C does, and Ctrl+P made a new password over the one on
+    /// screen; AltGr, Alt and the Windows key did the same.
+    #[test]
+    fn a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        let history = app.history.len();
+        let password = app.current_password.clone();
+        assert!(history > 0, "the test needs a history to clear");
+        for modifiers in [
+            Modifiers::ctrl(),
+            ALTGR,
+            Modifiers::alt(),
+            Modifiers::super_key(),
+        ] {
+            for k in [Key::C, Key::P] {
+                assert_eq!(
+                    app.handle_event(&held(k, modifiers, "")),
+                    EventResult::Ignored,
+                    "{modifiers:?}+{k:?}"
+                );
+            }
+            assert_eq!(app.history.len(), history, "{modifiers:?}+C cleared it");
+            assert_eq!(app.current_password, password, "{modifiers:?}+P made one");
+        }
+        // Bare, C still clears.
+        assert_eq!(app.handle_event(&press(Key::C)), EventResult::Consumed);
+        assert!(app.history.is_empty());
     }
 
     #[test]
@@ -4924,6 +5119,80 @@ rejects: {:?}",
         });
     }
 
+    /// **A rule changed in one window reaches the others**, when the desktop
+    /// says the file changed (§1434) -- while the export picker is up too,
+    /// which takes every other event. Another program's announcement is not
+    /// this one's; a window's own save announced back changes nothing; a
+    /// hand edit that cannot be used is said; a window that keeps no
+    /// settings reads none.
+    #[test]
+    fn a_rule_changed_in_one_window_reaches_the_others() {
+        settingsfile::testing::with_scratch_config("passwordgen-reread", |dir| {
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            let file = dir.join("slateos").join("passwordgen.yaml");
+            let mut first = seeded_app().with_settings();
+            let mut second = seeded_app().with_settings();
+            first.handle_event(&press(Key::Num4));
+            first.handle_event(&press(Key::Right));
+            assert_eq!(first.policy.min_length, 9);
+            assert_eq!(
+                second.policy.min_length, 8,
+                "the second window changed untold"
+            );
+
+            assert_eq!(
+                second.handle_event(&announce(b"notes")),
+                EventResult::Ignored
+            );
+            assert_eq!(
+                second.policy.min_length, 8,
+                "another program's file was read"
+            );
+            assert_eq!(
+                second.handle_event(&announce(b"passwordgen")),
+                EventResult::Consumed
+            );
+            assert_eq!(second.policy.min_length, 9, "the rule did not reach it");
+            assert_eq!(
+                first.handle_event(&announce(b"passwordgen")),
+                EventResult::Ignored,
+                "a window's own save, announced back, changed what it shows"
+            );
+
+            std::fs::write(&file, "rules:\n  shortest: banana\n").expect("a hand edit");
+            second.handle_event(&announce(b"passwordgen"));
+            assert!(
+                !second.settings_problems.is_empty(),
+                "a value that cannot be used was not said"
+            );
+
+            // Under the export picker, which takes every other event.
+            second.handle_event(&press(Key::P));
+            second.handle_event(&ctrl(Key::E));
+            assert!(second.dialog.is_some(), "the picker did not come up");
+            std::fs::write(&file, "rules:\n  shortest: 12\n").expect("a hand edit");
+            second.handle_event(&announce(b"passwordgen"));
+            assert_eq!(
+                second.policy.min_length, 12,
+                "the picker swallowed the news"
+            );
+
+            let mut quiet = seeded_app();
+            assert_eq!(
+                quiet.handle_event(&announce(b"passwordgen")),
+                EventResult::Ignored
+            );
+            assert_eq!(
+                quiet.policy.min_length, 8,
+                "a window that keeps no rules read them"
+            );
+        });
+    }
+
     #[test]
     fn a_window_a_test_builds_keeps_no_rules() {
         settingsfile::testing::with_scratch_config("passwordgen-quiet", |dir| {
@@ -5074,6 +5343,81 @@ rejects: {:?}",
             "Ctrl+R did not show it"
         );
         assert_eq!(app.analyzer_input, "hunter2", "Ctrl+R was typed");
+    }
+
+    /// **The password box is the toolkit's field**, with the keyboard in the
+    /// theme's mark at the user's width while the Analyzer tab is up -- every
+    /// printable key there is the password -- and not under the list of
+    /// keys; the password drawn with a caret after it. It was a card holding
+    /// the text, with no caret at all.
+    #[test]
+    fn the_password_box_is_the_toolkits_field() {
+        let mut app = seeded_app();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.handle_event(&press(Key::Num2));
+        for c in "hunter2".chars() {
+            app.handle_event(&typed(c));
+        }
+        let (w, h) = (1100.0, 760.0);
+        let cmds = app.render_commands(w, h);
+        // The box is where the field is drawn: the first field the window
+        // draws, found by its well -- then checked to be the toolkit's.
+        let has = |cmds: &[RenderCommand], want: &[RenderCommand]| {
+            cmds.windows(want.len()).any(|win| win == want)
+        };
+        let shown = MASK.repeat(7);
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if *text == shown))
+            .expect("the password is not drawn in a field");
+        let (tx, ty) = match cmds.get(at) {
+            Some(RenderCommand::RichText { x, y, .. }) => (*x, *y),
+            _ => unreachable!("just matched"),
+        };
+        // The box the text sits in, as `render_analyzer_input` places it.
+        let line = text::line_height(PASSWORD_TEXT_SIZE, FontWeightHint::Bold);
+        let rect = guitk::frame::Rect::new(
+            tx - 8.0,
+            ty - (32.0 - line) / 2.0,
+            LEFT_PANEL_WIDTH - 24.0,
+            32.0,
+        );
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+            v
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(has(&cmds, &seq(focused)), "the box has no keyboard mark");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the password: {other:?}"),
+        };
+        let end = tx + text::measure(&shown, PASSWORD_TEXT_SIZE, FontWeightHint::Bold);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the password at {end}"
+        );
+
+        app.show_help = true;
+        let cmds = app.render_commands(w, h);
+        assert!(
+            has(&cmds, &seq(field::State::default())) && !has(&cmds, &seq(focused)),
+            "the box keeps its mark under the list of keys"
+        );
     }
 
     #[test]

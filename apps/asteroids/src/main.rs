@@ -1000,6 +1000,16 @@ impl AsteroidsApp {
     /// it was already correct there, but the paused and game-over arms had to
     /// be guarded by hand. They still are, in one place rather than three.
     pub fn handle_key(&mut self, ev: &KeyEvent) -> EventResult {
+        // A key pressed with Ctrl, Alt or the Windows key is a chord -- the
+        // window's or the desktop's -- and arrives carrying its key: Alt+N
+        // threw the game away. Every binding here is on the key itself, so a
+        // press is the game's only when nothing but Shift is held. A release
+        // always is: letting go of a key pressed plainly must stop what it
+        // started whatever is held by then, or the ship turns on with the
+        // key up.
+        if ev.pressed && !textline::is_plain(ev.modifiers) {
+            return EventResult::Ignored;
+        }
         match self.state {
             GameState::Playing => self.handle_key_playing(ev.key, ev.pressed),
             GameState::Paused if ev.pressed => self.handle_key_paused(ev.key),
@@ -2226,13 +2236,12 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             for (what, a) in every_look(&p) {
                 let f = a.frame(a.size().0, a.size().1);
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -3549,6 +3558,52 @@ mod tests {
         let mut app = test_app();
         handle_event(&mut app, &Event::Key(probe::press(Key::Left)));
         assert!(app.input.left);
+    }
+
+    /// **A key pressed with Ctrl, Alt or the Windows key is not the game's**:
+    /// Alt+N threw the game away, the chord arriving carrying its key. A
+    /// release is always the game's, whatever is held by then, or a turn
+    /// begun plainly would never end.
+    #[test]
+    fn a_key_pressed_with_a_modifier_is_not_the_games() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = test_app();
+        app.score = 700;
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::N, Key::Left, Key::A, Key::Space, Key::P] {
+                assert_eq!(
+                    handle_event(&mut app, &Event::Key(probe::press_with(key, held))),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.score, 700, "a chord started a new game");
+        assert!(
+            !app.input.left && !app.input.shoot,
+            "a chord steered or fired"
+        );
+        assert_eq!(app.state, GameState::Playing, "a chord paused");
+
+        // Pressed plainly, let go with Alt held: the turn ends.
+        handle_event(&mut app, &Event::Key(probe::press(Key::Left)));
+        assert!(app.input.left);
+        let mut up = probe::release(Key::Left);
+        up.modifiers = Modifiers::alt();
+        handle_event(&mut app, &Event::Key(up));
+        assert!(
+            !app.input.left,
+            "a release with Alt held left the ship turning"
+        );
     }
 
     #[test]

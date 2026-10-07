@@ -4,7 +4,12 @@
 (`kernel/src/fs/dyndns.rs`). **Status:** OPEN -- lane E's half (the editor in
 Settings) follows once the shape below is agreed. Lane D agreed the shape
 2026-09-27, except where the token is kept (open-questions D-Q4) -- reply at
-the end.
+the end. **Lane D's half written 2026-10-06** -- `services/dyndns` and the
+provider crate `services/dyndns/providers`; `entries` became a mapping keyed
+by name (second reply at the end). **The router half too, the same day** --
+the router's internet address and the port forwards, over NAT-PMP or UPnP:
+`/etc/portforwards.yaml` in, `/run/portforwards.yaml` out (third reply at
+the end).
 
 **In short:** dynamic DNS keeps a hostname (`myhome.duckdns.org`) pointing at
 a home network whose address the internet provider keeps changing: every few
@@ -136,5 +141,171 @@ answers, `badauth` included); then the real transport when `net/httpclient`
 reaches the internet (lane A); UPnP/NAT-PMP address discovery and the port
 forwards after that, as you suggest, in the same service. `requests/` will
 say when each lands.
+
+— lane D
+
+---
+
+## Lane D — 2026-10-06: the service and the provider crate are written
+
+**`services/dyndns` exists** (design-decisions §1175), host-tested against a
+replayed network. It reads `/etc/dyndns.yaml` at start, and again within ten
+seconds of any change. It checks each entry every `every_minutes`, never
+less than 5, and writes `/run/dyndns.yaml` after every check. It journals
+each change of state. `dyndns --once` checks everything once, then exits.
+
+**The provider crate is lane D's:** `services/dyndns/providers`, crate
+`dyndnsproviders`. Lane D's notice of 07:02Z offered to write it if lane E
+had not started one. Lane D wrote it the same morning, before the hour the
+notice gave. If you had started one meanwhile, say so, and lane D will fold
+this one into yours. Settings links it with
+`dyndnsproviders = { path = "../../services/dyndns/providers" }`. It has:
+- `Provider::ALL`, `key()`, `label()` and `hostname_example()`;
+- `username()` and `secret()`, each a `Need` (`Required`, `Optional` or
+  `Unused`) with the field's label;
+- `takes_update_url()`;
+- `Target::incomplete()`, the sentence to show beside an entry that cannot
+  be used yet.
+It covers the request's six providers, Cloudflare included, which
+`remote.rs` lacks. `remote.rs`'s `ProviderSettings` can go once the page
+uses it.
+
+**One change to the file's shape: `entries` is a mapping, not a list.** The
+key is each entry's name:
+
+```yaml
+# Dynamic DNS: keep these hostnames pointing at this network's address.
+entries:
+  Home:
+    provider: duckdns        # dynu, noip, duckdns, cloudflare, freedns, custom
+    hostname: myhome.duckdns.org
+    username: ""             # the providers that sign in with a name or email
+    secret: dyndns/home      # the name the secret is kept under, never the secret
+    update_url: ""           # custom only: {hostname} {ip} {username} {secret}
+    every_minutes: 30
+    enabled: true
+```
+
+`yamldoc` reads no list of mappings, so Settings could not have edited the
+list form and kept the user's comments, and a key cannot repeat. A file in
+the list shape is reported as a problem in the status file, not silently
+ignored. `enabled` defaults to `true`, `every_minutes` to 30, and the rest
+to empty.
+
+**What Settings shows** (`/run/dyndns.yaml`):
+
+```yaml
+written_at: 2026-10-06T08:00:00Z
+problem: ...             # only when the file as a whole cannot be read
+entries:
+  Home:
+    provider: duckdns
+    hostname: myhome.duckdns.org
+    state: no-secret     # see below
+    message: a sentence to show beside the entry
+    answer: the provider's own words, when it said any
+    address: 203.0.113.7 # last published, when known
+    published_at: 2026-10-06T07:30:00Z
+    checked_at: 2026-10-06T07:55:00Z
+    next_check_at: 2026-10-06T08:25:00Z
+```
+
+`state` is one of:
+- `pending`, `disabled`;
+- `updated`, `current`, `accepted`: the name points here;
+- `held`: refused, and not tried again until the entry changes;
+- `refused`, `unreachable`, `no-address`, `unreadable`: tried again later;
+- `no-secret`;
+- `misconfigured`: the entry cannot be used as written.
+
+Each `message` is written to be shown as it is.
+
+**What it does on SlateOS today:** every entry that needs a password reports
+`no-secret`, naming D-Q4. Once there is a store, every provider would report
+`unreachable` ("this system cannot make HTTPS connections yet"): userspace
+has no TLS (`requests/d-a-nothing-in-userspace-can-make-an-https-connection.md`).
+Nothing is ever sent in the clear in its place.
+`known-issues/D-DYNAMIC-DNS-UPDATES-NOTHING-YET.md` tracks all of it. The
+"store this token" call waits on D-Q4, as before.
+
+**For lane A:** the kernel's table can be retired whenever you like
+(`kernel/src/fs/dyndns.rs`, `/proc/dyndns`). Nothing reads it any more once
+Settings reads `/run/dyndns.yaml`. The UPnP and NAT-PMP half comes to this
+service with the router query.
+
+— lane D
+
+---
+
+## Lane D — 2026-10-06, later: the router's address and the port forwards
+
+**The service now finds the router and keeps the forwards Settings lists**
+(design-decisions §1178). It asks the router -- the default gateway, and
+nothing else on the network -- over NAT-PMP, then UPnP. It learns the
+router's internet address, and asks for each forward in
+`/etc/portforwards.yaml`. A custom dynamic-DNS URL that names `{ip}` now
+takes that address. The protocols are a crate of their own,
+`services/dyndns/router` (`dyndnsrouter`); Settings need not link it.
+
+**The file Settings' Port Forwarding page writes:**
+
+```yaml
+# Port forwards: ask the router to pass these ports through to this computer.
+forwards:
+  SSH:
+    protocol: tcp          # tcp, udp, or both
+    port: 22               # this computer's port, or a range: 6881-6889
+    external_port: 2222    # the internet's side; the same as port when left out
+    enabled: true
+```
+
+- A mapping keyed by name, as `/etc/dyndns.yaml`'s entries are.
+- A range is at most 100 ports. `external_port` is then a range of the same
+  length, or its first port.
+- A port can be forwarded by one forward only. A second forward asking for
+  it is refused, naming the first, and so is one with a field missing or
+  wrong. The page can show `message` beside such a forward.
+
+**What it shows** (`/run/portforwards.yaml`):
+
+```yaml
+written_at: 2026-10-06T08:00:00Z
+router:
+  state: found           # found, none (no router answered), looking
+  address: 192.168.1.1   # the router: "can we detect what ip the router is at" (design.txt)
+  protocol: UPnP         # or NAT-PMP
+  name: OpenWrt Router, MiniUPnPd     # UPnP's only
+  internet_address: 81.2.69.142       # "show internet IP addresses" (design.txt)
+  public: true           # false: another router is in front of this one
+  message: a sentence to show as it is
+  checked_at: 2026-10-06T08:00:00Z
+forwards:
+  SSH:
+    protocol: tcp
+    port: "22"
+    external_port: "2222"
+    state: forwarded
+    message: the router forwards external port 2222 (TCP) to this computer's port 22
+    answer: the router's own words, when it refused (UPnP error 718, ...)
+    checked_at: 2026-10-06T08:00:00Z
+    next_check_at: 2026-10-06T08:30:00Z
+```
+
+`state` is one of:
+- `forwarded`: every port is forwarded;
+- `partial`: some are, and `message` says why the rest are not;
+- `pending`, `disabled`;
+- `refused`: asked again in 30 minutes, or at once when the forward is changed;
+- `unreachable`, `no-router`;
+- `misconfigured`: as written, it cannot be used.
+
+`router.address` is also what the design's "button to load that ip in the
+browser" opens. The page writes only the forwards file. A router that
+refuses because its owner turned UPnP off says so in `message`, and that
+is the sentence to show: turning it on is done on the router.
+
+**For lane A:** the kernel's `net/upnp.rs`, and the forwards half of
+`fs/dyndns.rs`, can go with the dynamic-DNS table once Settings reads these
+files (`requests/d-a-the-kernels-upnp-module-is-done-in-userspace-now.md`).
 
 — lane D

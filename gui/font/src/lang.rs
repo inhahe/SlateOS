@@ -43,6 +43,10 @@
 //! author intended for text they were not told about. A *wrong* language is
 //! worse than none — shaping English as Turkish suppresses `fi` — so a caller
 //! that is guessing should not guess.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-ot-tag.cc`, copyright
+//! © 2009 Red Hat, Inc. and © 2011 Google, Inc. Used under HarfBuzz's licence:
+//! see `gui/font/licenses/harfbuzz-COPYING`.
 
 use crate::lang_tables::{BLOCKED_3, COMPLEX, LANGUAGES_2, LANGUAGES_3, Rule};
 

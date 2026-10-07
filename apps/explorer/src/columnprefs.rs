@@ -17,7 +17,7 @@
 //! later version, or naming a column since removed, loses that one column and
 //! keeps the rest, rather than shifting every later column along by one.
 
-use crate::fileops::ConflictPolicy;
+use crate::fileops::{ConflictPolicy, ErrorPolicy};
 use std::path::Path;
 use yamldoc::Document;
 
@@ -266,6 +266,47 @@ pub fn conflict_policy(doc: &Document) -> ConflictPolicy {
 pub fn set_conflict_policy(doc: &mut Document, policy: ConflictPolicy) {
     if let Some((_, spelled, _)) = CONFLICT_CHOICES.iter().find(|(p, _, _)| *p == policy) {
         doc.set_str(&ON_CONFLICT, spelled);
+    }
+}
+
+/// What an operation does with a file it cannot carry out. Under
+/// `operations` rather than `paste`: a delete meets such a file too.
+const ON_FAILURE: [&str; 2] = ["operations", "on_failure"];
+
+/// The choices the folder menu offers for a file an operation cannot carry
+/// out, in its order: the policy, how the settings file spells it, and how
+/// the menu says it.
+pub const FAILURE_CHOICES: [(ErrorPolicy, &str, &str); 2] = [
+    (ErrorPolicy::Ask, "ask", "Ask each time"),
+    (
+        ErrorPolicy::SkipAndContinue,
+        "skip",
+        "Skip it and say so at the end",
+    ),
+];
+
+/// The saved choice -- Ask when there is none, or one this does not know.
+///
+/// Asking is the default for the reason it is at a taken name: it decides
+/// nothing on the user's behalf, and a file in use is usually free a moment
+/// later, which only a question can wait for. Skipping is for a copy left
+/// running with nobody there to answer (design-decisions §1228).
+#[must_use]
+pub fn failure_policy(doc: &Document) -> ErrorPolicy {
+    doc.get_str(&ON_FAILURE)
+        .and_then(|name| {
+            FAILURE_CHOICES
+                .iter()
+                .find(|(_, spelled, _)| *spelled == name)
+                .map(|(policy, _, _)| *policy)
+        })
+        .unwrap_or(ErrorPolicy::Ask)
+}
+
+/// Remember `policy` as what an operation does with a file it cannot do.
+pub fn set_failure_policy(doc: &mut Document, policy: ErrorPolicy) {
+    if let Some((_, spelled, _)) = FAILURE_CHOICES.iter().find(|(p, _, _)| *p == policy) {
+        doc.set_str(&ON_FAILURE, spelled);
     }
 }
 

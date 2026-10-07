@@ -11,6 +11,8 @@ guitk = { path = "../../gui/toolkit" }
 # `let _app = Game2048App::new();`. `oswindow` is what makes the difference
 # between a simulation and a program.
 oswindow = { path = "../../gui/window" }
+# The undo history: the toolkit's tree, kept of whole boards (C-Q24).
+statehistory = { path = "../statehistory" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

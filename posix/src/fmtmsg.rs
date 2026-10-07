@@ -596,8 +596,8 @@ fn process_env() -> Env<'static> {
     // table's reading of it.
     unsafe {
         Env {
-            msgverb: arg(crate::environ::getenv(c"MSGVERB".as_ptr().cast())),
-            sev_level: arg(crate::environ::getenv(c"SEV_LEVEL".as_ptr().cast())),
+            msgverb: arg(crate::environ::lookup(c"MSGVERB".as_ptr().cast())),
+            sev_level: arg(crate::environ::lookup(c"SEV_LEVEL".as_ptr().cast())),
         }
     }
 }

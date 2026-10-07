@@ -4539,6 +4539,16 @@
 
 ## Judgment Calls
 
+### 2026-10-04 (lane F) — a damaged Opus packet in a video is concealed,
+### not dropped as FFmpeg drops it
+
+`videocodec::Sound` follows FFmpeg in what it trims from a file's sound and
+how it times it, but where a packet does not decode it fills the packet's
+length with libopus's concealment instead of dropping it (FFmpeg's choice),
+so that the sound has no hole for a player's clock to fall into. Reverse in
+`gui/video/codec/src/sound.rs`, `Sound::decode`'s error arm, if matching
+FFmpeg matters more. Design-decisions §1351.
+
 ### 2026-10-01 (lane B) — a refused power change is not forced, and the
 ### service manager's method names were chosen by its clients
 
@@ -56578,7 +56588,16 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
-## Games: read every word under themes that leave no room (lane E, 2026-09-28) -- NEXT
+## ~~Games: read every word under themes that leave no room (lane E, 2026-09-28)~~ -- DONE 2026-09-28
+
+**Done:** `gamechrome::legibility::looks()` -- the stock palettes and four
+themes a user can put together that sit at the palette's floor (soft text,
+light and dark; pale hues on light; deep hues on dark), each in both surface
+looks -- and every game's legibility test reads all twelve. It found words
+in five games, each moved for its ground: battleship's message bar, 2048's
+score values, hangman's keys, tic-tac-toe's winning marks and wordle's
+keys and header buttons. Reversi's score-bar row came back and is caught.
+The original entry, for the record:
 
 The games' legibility tests read the four stock looks (light and dark, bordered
 and card). Those palettes' text and hues read on every ground a game fills
@@ -59075,19 +59094,6 @@ is already waiting, not whether the setter exists.
   `get_properties_by_udev`.
 ## Lane D — POSIX, libc & toolchain
 
-- **crypt: libxcrypt's other methods** (posix/src/crypt.rs).  Only $1$, $5$
-  and $6$ hash; every other setting gets the failure token "*0" with EINVAL,
-  as libxcrypt answers for a method it lacks.  Ubuntu 24.04's libxcrypt has,
-  probed 2026-09-26: traditional DES (two-character salt), BSDi DES ("_"),
-  bcrypt ($2b$), scrypt ($7$), yescrypt ($y$), gost-yescrypt ($gy$),
-  sha1crypt ($sha1$), SunMD5 ($md5$) and NT ($3$), and real DES behind
-  encrypt/setkey (compat symbols there; ours answer ENOSYS).  yescrypt comes
-  first: it is Ubuntu's default for new passwords, so an /etc/shadow brought
-  from Ubuntu does not verify here.  Port from libxcrypt 4.4.36 (source in
-  D:\refsrc\libxcrypt-4.4.36), per design-decisions.md §539: primitives
-  ported, not written.  (Replaces the DES follow-up of the 2026-05-29
-  crypt entry, deleted as done.)
-
 - **iconv: glibc's other character sets** (posix/src/iconv.rs).  UTF-8,
   ASCII, ISO-8859-1, UTF-16, UTF-32, UCS-2, UCS-4, UNICODE, WCHAR_T, UTF-7
   and UTF-7-IMAP, glibc's 141 table-driven 8-bit sets
@@ -59191,3 +59197,29 @@ is already waiting, not whether the setter exists.
   `requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md` item 3.
   **Then:** nothing to change here -- boot the repair entry with an account
   marked to sign in by itself and confirm the login screen shows.
+
+## Lane D — what waits on lane A's next two publishes (2026-10-01)
+
+- **Open, waiting on lane A's publish now pending** (it carries 1090, 1093,
+  1094 and the generic C-fixture rung). Lane D's halves are written and
+  host-tested in scratch: 157 (the exec close list, now naming kept-shared
+  handles too, as lane A asked), 158 (record locks, `lockf`, utmp's bounded
+  wait, `services/ctest-record-locks`), 160 (`flock` through the handle), the
+  fixtures `ctest-exec-cloexec` and `ctest-python-stdlib`.
+  **Trigger:** `origin/main` has `SYS_FS_RECORD_LOCK` in
+  `kernel/src/syscall/number.rs`. **Then:** merge it, apply them, boot,
+  publish. 160 must not land before: on a kernel without 1094, `flock`
+  answers `ENOSYS`.
+- **Open, same trigger: st_nlink of an unlinked open file.**
+  `stat.rs`'s `fill_from_fsstat` turns a reported link count of 0 into 1,
+  because 0 meant "not provided". After lane A's publish it means one thing:
+  the file's last name is gone and a handle still holds it (lane A checked
+  every filesystem's producer, 2026-10-01); SQLite and `tail -F` look for
+  exactly that 0. **Then:** drop the mapping and its test
+  (`test_fill_from_fsstat_zero_nlinks_defaults_to_one`), and check a native
+  `fstat` after `unlink` in a boot.
+- **Open, waiting on lane A's publish after that: `F_SETFL`'s `O_APPEND`.**
+  known-issues D-POSIX-APPEND-SET-BY-FCNTL-IS-A-SEEK-THEN-A-WRITE. **Trigger:**
+  `SYS_FS_SET_STATUS_FLAGS` (1095) on `origin/main`. **Then:** `F_SETFL`
+  sends the description's flags in native `OpenFlags` bits; `write` keeps its
+  `SEEK_END` only where the call answered `ENOSYS`.

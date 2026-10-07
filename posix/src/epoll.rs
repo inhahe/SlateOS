@@ -2784,6 +2784,40 @@ pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
     Ok(written)
 }
 
+/// Queue an event on the inotify instance `idx`, as the kernel's pump would:
+/// for the host tests, which have no kernel to raise one.
+#[cfg(test)]
+pub(crate) fn inotify_push_test_event(idx: u64, wd: i32, mask: u32, name: &[u8]) {
+    let _ = with_inotify_mut(idx, |inst| queue_push(inst, &make_event(wd, mask, name)));
+}
+
+/// The size of the record [`inotify_read`] would give next -- the overflow
+/// event's 16 bytes while one is pending, else the queue head's -- or `None`
+/// when nothing is queued. A read with no buffer takes exactly that one
+/// record, as Linux's `inotify_read` does: it copies one event, meets the
+/// fault, and stops.
+///
+/// # Errors
+///
+/// `EBADF` if `idx` does not name a live inotify instance.
+pub fn inotify_next_record_size(idx: u64) -> Result<Option<usize>, i32> {
+    // As `inotify_read`: what the kernel has queued since the last call
+    // counts.
+    pump_instance(idx);
+    with_inotify_mut(idx, |inst| {
+        if inst.overflow_pending {
+            return Some(16);
+        }
+        if inst.count == 0 {
+            return None;
+        }
+        inst.events
+            .get(inst.head as usize)
+            .map(|ev| 16usize.saturating_add(inotify_name_field(ev.name_len as usize)))
+    })
+    .ok_or(errno::EBADF)
+}
+
 /// The name field of an event record: 0 for no name, else the name and its
 /// NUL rounded up to a multiple of `sizeof (struct inotify_event)`, 16 --
 /// `round_event_name_len` (fs/notify/inotify/inotify_user.c:154).
@@ -3345,7 +3379,7 @@ mod tests {
     /// from `test_eventfd_read_null_returns_efault` (which asserted
     /// the pre-Phase-144 buggy ordering) and re-tasked to pin the
     /// new precedence. The matched-EFAULT case lives in
-    /// `test_eventfd_read_phase144_valid_fd_null_pointer_is_efault`.
+    /// `test_eventfd_read_phase144_valid_fd_null_pointer_faults_after_taking_the_count`.
     #[test]
     fn test_eventfd_read_bad_fd_beats_null_pointer_efault() {
         errno::set_errno(0);
@@ -7008,31 +7042,46 @@ mod tests {
     }
 
     #[test]
-    fn test_eventfd_read_phase144_wrong_kind_fd_null_ptr_is_efault() {
+    fn test_eventfd_read_phase144_wrong_kind_fd_null_ptr_is_reads_answer() {
         // Wrong-kind real fd with NULL: glibc's eventfd_read is
         // `read(fd, value, 8)`, which does not care what kind of file fd
-        // is, so the verdict is read's own for a NULL buffer.  This
-        // asserted an EINVAL "kind mismatch" until 2026-09-25, attributed
-        // to the kernel; no such check exists.
-        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        // is, so the verdict is read's own.  This asserted an EINVAL "kind
+        // mismatch" until 2026-09-25, attributed to the kernel; no such
+        // check exists.  And read's own verdict is not a NULL-buffer one:
+        // a timerfd with no expiry has nothing to copy, so non-blocking it
+        // is EAGAIN -- and blocking it waits, as Linux's does (6.6,
+        // measured).  This asserted EFAULT, of a blocking one, until
+        // 2026-10-06; read in Linux's order, that wait never ends.
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, TFD_NONBLOCK);
         assert!(tfd >= 0);
         errno::set_errno(0);
         let ret = eventfd_read(tfd, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EAGAIN);
         crate::file::close(tfd);
     }
 
     #[test]
-    fn test_eventfd_read_phase144_valid_fd_null_pointer_is_efault() {
-        // Post-Phase-144 third stage reachable: real eventfd + NULL
-        // → EFAULT.
-        let efd = eventfd(0, 0);
+    fn test_eventfd_read_phase144_valid_fd_null_pointer_faults_after_taking_the_count() {
+        // glibc's eventfd_read is `read(fd, value, 8)`, and Linux's
+        // `eventfd_read` takes the counter before it copies: a NULL value
+        // is EFAULT with the count gone, and an empty non-blocking counter
+        // EAGAIN, the buffer never looked at (Linux 6.6, measured). This
+        // asserted EFAULT whatever the counter until 2026-10-06.
+        let efd = eventfd(1, EFD_NONBLOCK);
         assert!(efd >= 0);
         errno::set_errno(0);
-        let ret = eventfd_read(efd, core::ptr::null_mut());
-        assert_eq!(ret, -1);
+        assert_eq!(eventfd_read(efd, core::ptr::null_mut()), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
+        // The count was taken.
+        let mut val: u64 = 0;
+        errno::set_errno(0);
+        assert_eq!(eventfd_read(efd, &raw mut val), -1);
+        assert_eq!(errno::get_errno(), errno::EAGAIN);
+        // Empty: EAGAIN, before any fault.
+        errno::set_errno(0);
+        assert_eq!(eventfd_read(efd, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EAGAIN);
         crate::file::close(efd);
     }
 
@@ -7188,10 +7237,11 @@ mod tests {
         // {NULL ptr, valid ptr}.  Pins every outcome.  Every one of them is
         // read(2)'s, since glibc's eventfd_read is a read of 8 bytes.  The
         // timerfd is non-blocking so the wrong-kind read cannot wait for an
-        // expiry that never comes.
+        // expiry that never comes, and the eventfd holds one count, so that a
+        // read takes it rather than waiting (Linux 6.6's answers, measured).
         let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, TFD_NONBLOCK);
         assert!(tfd >= 0);
-        let efd = eventfd(0, 0);
+        let efd = eventfd(1, EFD_NONBLOCK);
         assert!(efd >= 0);
         let mut val: u64 = 0;
 
@@ -7207,11 +7257,12 @@ mod tests {
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
 
-        // wrong-kind × NULL → EFAULT: read's NULL-buffer verdict
+        // wrong-kind × NULL → EAGAIN: an unarmed non-blocking timerfd has
+        // no expiry to take, so nothing to copy and nothing to fault on
         errno::set_errno(0);
         let r = eventfd_read(tfd, core::ptr::null_mut());
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EAGAIN);
 
         // wrong-kind × valid → the read happens: an unarmed non-blocking
         // timerfd has no expiry to report, so EAGAIN (not a refusal)
@@ -7220,24 +7271,17 @@ mod tests {
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EAGAIN);
 
-        // eventfd × NULL → EFAULT
+        // eventfd × NULL → EFAULT, after the count is taken
         errno::set_errno(0);
         let r = eventfd_read(efd, core::ptr::null_mut());
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
 
-        // eventfd × valid → 0 (we just made a fresh eventfd with
-        // counter 0; in nonblocking modes this would EAGAIN, but
-        // the default is blocking and the kernel returns the
-        // counter — which the host stub also satisfies).  Skip
-        // asserting the value; only assert success or EAGAIN.
+        // eventfd × valid → EAGAIN: the NULL read took the one count
         errno::set_errno(0);
         let r = eventfd_read(efd, &raw mut val);
-        let e = errno::get_errno();
-        assert!(
-            r == 0 || (r == -1 && e == errno::EAGAIN),
-            "got r={r} errno={e}, expected 0 or EAGAIN",
-        );
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EAGAIN);
 
         crate::file::close(tfd);
         crate::file::close(efd);

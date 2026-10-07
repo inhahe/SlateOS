@@ -1,0 +1,8 @@
+# unknown_sizes.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 snow 1/1000
+packet 0 3 10 4 155 K__ da6c56969ff19daf215df520e6739e19 -
+packet 0 80 7 6 192 K__ bdd3e94149661121af88d1a34b0bb052 -
+packet 0 100 10 6 209 ___ 8e1a98044bccaa279c524736d1a4f5ef -
+packet 0 115 10 6 226 ___ 9ca01725a37718f3e71f4cd258364a0a -
+packet 0 140 10 6 244 ___ a8a52dcc44320417bafc88f7cfcc7fc4 -
+packet 0 200 10 5 264 K__ c05d1bf984a2aee36c987605e2d7e625 -

@@ -1,0 +1,6 @@
+# meta_seek_mismatch.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+tag READ_AS=tags
+stream 0 track
+tag language=eng

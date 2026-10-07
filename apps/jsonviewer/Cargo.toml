@@ -15,6 +15,8 @@ oswindow = { path = "../../gui/window" }
 
 # Saving: a file is replaced whole or not at all, never left half written.
 safeio = { path = "../safeio" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a key of the window nor typing.
+textline = { path = "../textline" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
 # The raw view's text, edited as it is: its caret, selection and keys.

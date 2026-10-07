@@ -1,0 +1,13 @@
+# laced.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 snow 1/1000
+packet 0 0 10 3 130 K__ d8f42eac494a5891c0151dd92c039506 -
+packet 0 10 10 300 130 K__ ecbe2f481dc81d61fea4712e8955ce3c -
+packet 0 20 10 5 130 K__ ad8d909fc06685233115895303e00415 -
+packet 0 30 10 6 448 K__ 8e1a98044bccaa279c524736d1a4f5ef -
+packet 0 40 10 6 448 K__ 9ca01725a37718f3e71f4cd258364a0a -
+packet 0 50 10 6 448 K__ a8a52dcc44320417bafc88f7cfcc7fc4 -
+packet 0 60 10 4 473 K__ 961006ee4501824485bcf9dc8a74808f -
+packet 0 70 10 9 473 K__ 7afe3d238ea486d7276a4fe434a492ce -
+packet 0 80 10 2 473 K__ 0c5670894ecc89af4069d3853f57caaf -
+packet 0 90 10 7 473 K__ 65040811fa00cff0867a5b4b61a70c66 -
+packet 0 100 10 8 505 K__ a7419abe046fc70d47c5fc8a21dc3152 -

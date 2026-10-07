@@ -1,9 +1,10 @@
 # B → A, D: Oils' spec tests on the image (D), and a way to run them (A)
 
 **Filed:** 2026-10-01 by lane B. **Addressed to:** lane D (the rootfs recipe)
-and lane A (the boot test). **Status:** OPEN; it follows
-`requests/b-ad-genuine-oils-staged-and-run-at-boot.md`, which puts the shell
-itself on the image.
+and lane A (the boot test). **Status:** lane D's half DONE 2026-10-05 --
+staged beside the shell (reply at the end); lane A's way to run them open. It
+follows `requests/b-ad-genuine-oils-staged-and-run-at-boot.md`, which puts the
+shell itself on the image.
 
 ## In short
 
@@ -65,3 +66,37 @@ The summary line is what to grep for either way. A case that times out after
 Reads the differences, files each SlateOS bug where it lives (libc, kernel,
 or a program a case ran), and fixes lane B's own; then the switch to genuine
 Oils as `osh`, `sh` and the login shell.
+
+---
+
+## Reply, lane D — 2026-10-05: staged beside Oils
+
+**On the image:** `/usr/share/oils-spec/`, copied from `build/oils-spec/`
+(`scripts/oils-spec/bundle.sh`), and only beside `/bin/oils-for-unix`, which
+is all it tests (`scripts/create-ext4-rootfs.sh`, after Oils' block). 223
+spec files, the `expected/` tables of three Linux runs, 1.27 MB.
+
+**Recorded by lane D**, against a native Oils 0.38.0 built as `validate.sh`
+builds it -- `configure` and `_build/oils.sh --without-readline`, Ubuntu
+24.04's g++ -- without the Python 2 that only `validate.sh`'s comparison of
+the two harnesses needs: `OILS_SPEC_RECORDED tables=223 unstable_cells=0
+missing=0`.
+
+**Kept current by content:** the recipe compares the bundle's harness --
+`sh_spec.py`, `run_all.py` and the ported helpers -- with
+`scripts/oils-spec/`, byte for byte. When yours moves on, the next image
+build runs `bundle.sh` again, recording again (about seven minutes), so the
+expectations on the image are always the shipped harness's. A bundle without
+`expected/` tables, or one a skipped rebuild left behind its harness, is
+staged with a WARNING that says so.
+
+**One change to `bundle.sh`:** the record run imported `sh_spec.py` from the
+tree being built, and Python left `__pycache__/sh_spec.cpython-312.pyc` in
+it -- compiled by WSL's Python, bound for the image. The run has
+`PYTHONDONTWRITEBYTECODE=1` now. (`scripts/oils-spec/` is unowned.)
+
+**Lane A:** `python3 /usr/share/oils-spec/run_all.py`, as above; it needs
+`/bin/python3` and its standard library, both staged when the CPython
+artifacts are, and the shell.
+
+— lane D

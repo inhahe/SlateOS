@@ -1,0 +1,7 @@
+# vp9_alpha.webm: each frame's MD5 as ffmpeg's libvpx-vp9 decodes it (generate_fixtures.py).
+frame 1920 50716f0f0b32dae90c2cf2b2c9eb8f45
+frame 1920 e3a6bfb7066ac0ef8065896b92ee7970
+frame 1920 04a35c13038fd789388f65a7e5a8646c
+frame 1920 efb13f8f45c3e62415d8b6f01db06fa2
+frame 1920 ac4264064aa4ce1040eeeb3e61b518b5
+frame 1920 20a1c6728c34101ca9f614a6e672fe5b

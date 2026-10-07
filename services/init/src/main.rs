@@ -6,6 +6,12 @@
 //! ## Current Functionality
 //!
 //! - Prints a welcome banner via `SYS_CONSOLE_WRITE`.
+//! - Names the machine from `/etc/hostname`, before any service starts
+//!   (systemd's `hostname_setup()`; the reading is `lib.rs`'s).
+//! - Starts the login records: `/var/run/utmp` emptied with this boot's
+//!   `BOOT_TIME` record, which `/var/log/wtmp` gains too, and `btmp` and
+//!   `lastlog` made if missing (systemd's `utmp_put_reboot`; the record is
+//!   `lib.rs`'s).
 //! - Runs a poll-based main loop that interleaves keyboard input with
 //!   service health monitoring.
 //! - Built-in commands: `help`, `echo`, `exit`, `ls`, `cat`, `stat`,
@@ -80,13 +86,13 @@ const SYS_SLEEP: u64 = 11;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_CONSOLE_READ_CHAR: u64 = 101;
 const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
-const SYS_PROCESS_SPAWN: u64 = 500;
+const SYS_CAP_QUERY: u64 = 400;
 const SYS_PROCESS_WAIT: u64 = 501;
 const SYS_PROCESS_TRY_WAIT: u64 = 507;
 #[allow(dead_code)] // Services call this, not init itself.
 const SYS_NOTIFY_READY: u64 = 508;
 const SYS_PROCESS_IS_READY: u64 = 509;
-const SYS_PROCESS_SPAWN_EX: u64 = 517;
+const SYS_PROCESS_SPAWN_EX2: u64 = 559;
 const SYS_MMAP: u64 = 20;
 const SYS_MUNMAP: u64 = 21;
 const SYS_FS_READ_FILE: u64 = 600;
@@ -97,6 +103,10 @@ const SYS_FS_MKDIR: u64 = 604;
 const SYS_FS_RMDIR: u64 = 605;
 const SYS_FS_STAT: u64 = 606;
 const SYS_LOG_READ: u64 = 102;
+const SYS_HOSTNAME_SET: u64 = 1072;
+const SYS_CLOCK_REALTIME: u64 = 14;
+const SYS_FS_SET_PERMS: u64 = 631;
+const SYS_FS_APPEND: u64 = 643;
 
 /// Directory entry size from kernel (name[256] + size[4] + type[1] + pad[3]).
 const FS_DIR_ENTRY_SIZE: usize = 264;
@@ -260,6 +270,11 @@ fn clock_monotonic() -> i64 {
     syscall0(SYS_CLOCK_MONOTONIC)
 }
 
+/// The real-time clock: nanoseconds since the epoch.
+fn clock_realtime() -> i64 {
+    syscall0(SYS_CLOCK_REALTIME)
+}
+
 /// Map anonymous memory pages.  Returns the virtual address or
 /// negative error.  `size` is rounded up to the 16 KiB frame size.
 fn mmap(size: u64) -> i64 {
@@ -298,6 +313,29 @@ fn fs_write_file(path: &[u8], data: &[u8]) -> i64 {
     )
 }
 
+/// Append data to the end of a file, creating it if it is missing; nothing
+/// appended still creates it.  Returns 0 or negative error.
+fn fs_append(path: &[u8], data: &[u8]) -> i64 {
+    syscall4(
+        SYS_FS_APPEND,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        data.as_ptr() as u64,
+        data.len() as u64,
+    )
+}
+
+/// Set a file's permission bits (the low 0o7777).  Returns 0 or negative
+/// error.
+fn fs_set_perms(path: &[u8], mode: u64) -> i64 {
+    syscall3(
+        SYS_FS_SET_PERMS,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        mode,
+    )
+}
+
 /// Delete a file.  Returns 0 or negative error.
 fn fs_delete(path: &[u8]) -> i64 {
     syscall2(SYS_FS_DELETE, path.as_ptr() as u64, path.len() as u64)
@@ -324,22 +362,11 @@ fn fs_rmdir(path: &[u8]) -> i64 {
     syscall2(SYS_FS_RMDIR, path.as_ptr() as u64, path.len() as u64)
 }
 
-/// Spawn a new process from ELF data in memory (simple variant).
-/// Returns the child PID (positive) or negative error.
-#[allow(dead_code)]
-fn process_spawn(elf: &[u8], name: &[u8]) -> i64 {
-    syscall4(
-        SYS_PROCESS_SPAWN,
-        elf.as_ptr() as u64,
-        elf.len() as u64,
-        name.as_ptr() as u64,
-        name.len() as u64,
-    )
-}
-
-/// Extended spawn arguments struct (matches kernel's SpawnExArgs layout).
+/// `SYS_PROCESS_SPAWN_EX2`'s argument: the kernel's `SpawnEx2Args`
+/// (`kernel/src/proc/spawn.rs`), every field a `u64`, its own size first.
 #[repr(C)]
-struct SpawnExArgs {
+struct SpawnEx2Args {
+    struct_size: u64,
     elf_ptr: u64,
     elf_len: u64,
     name_ptr: u64,
@@ -352,27 +379,67 @@ struct SpawnExArgs {
     envp_ptr: u64,
     envp_len: u64,
     envc: u64,
+    /// [`SPAWN_CAP_MODE_SUBSET`]: the child holds exactly `cap_ptr`'s list.
+    cap_mode: u64,
+    cap_ptr: u64,
+    cap_count: u64,
+    /// No directory of its own: the child starts in init's.
+    cwd_ptr: u64,
+    cwd_len: u64,
 }
 
-/// Spawn a process with arguments and environment variables.
+/// `SpawnEx2Args::cap_mode`: the child holds exactly the listed
+/// capabilities, each one the caller holds itself.
+const SPAWN_CAP_MODE_SUBSET: u64 = 1;
+
+/// The kernel's `PermissionDenied`: from a spawn, a `caps:` entry init does
+/// not hold.
+const ERR_PERMISSION_DENIED: i64 = -400;
+
+/// The most capabilities init hands one child: its class-wide grants -- six
+/// today -- and a service's `caps:`, up to `init::MAX_SVC_CAPS`.
+const MAX_CHILD_CAPS: usize = 32;
+
+/// How much of init's own capability table is read on the stack. It grows
+/// by a `Process` entry for each child init starts; a larger table is read
+/// into a mapping.
+const STACK_HELD_CAPS: usize = 64;
+
+/// Start a process from the ELF in `elf`: `argv_data` and `envp_data` are
+/// packed NUL-terminated strings, `argc` and `envc` of them. It holds the
+/// capabilities `init::child_caps` picks -- init's class-wide grants, less
+/// the kinds init holds only to pass on, plus `grants`, a service's `caps:`
+/// (design-decisions 1174). Every process init starts comes through here,
+/// so none is handed what init holds for one service.
 ///
-/// `elf`: raw ELF binary data.
-/// `name`: process name.
-/// `argv_data`: packed null-terminated argument strings.
-/// `argc`: number of arguments.
-/// `envp_data`: packed null-terminated environment strings.
-/// `envc`: number of environment variables.
-///
-/// Returns: child PID (positive) or negative error.
-fn process_spawn_ex(
+/// Returns the child's pid, or a negative error: the kernel's -- with
+/// [`ERR_PERMISSION_DENIED`] for a grant init does not hold -- or `-1` when
+/// init's own capabilities could not be read or are too many to pass on.
+fn process_spawn(
     elf: &[u8],
     name: &[u8],
     argv_data: &[u8],
     argc: usize,
     envp_data: &[u8],
     envc: usize,
+    grants: &[init::CapGrant],
 ) -> i64 {
-    let args = SpawnExArgs {
+    let mut child = [init::CapEntryInfo::default(); MAX_CHILD_CAPS];
+    let count = match with_own_caps(|held| init::child_caps(held, grants, &mut child)) {
+        Ok(Some(n)) => n,
+        Ok(None) => {
+            print("[init] more capabilities to pass on than a spawn can carry\n");
+            return -1;
+        }
+        Err(e) => {
+            print("[init] could not read init's own capabilities: error ");
+            print_i64(e);
+            print("\n");
+            return -1;
+        }
+    };
+    let args = SpawnEx2Args {
+        struct_size: core::mem::size_of::<SpawnEx2Args>() as u64,
         elf_ptr: elf.as_ptr() as u64,
         elf_len: elf.len() as u64,
         name_ptr: name.as_ptr() as u64,
@@ -385,8 +452,62 @@ fn process_spawn_ex(
         envp_ptr: envp_data.as_ptr() as u64,
         envp_len: envp_data.len() as u64,
         envc: envc as u64,
+        cap_mode: SPAWN_CAP_MODE_SUBSET,
+        cap_ptr: child.as_ptr() as u64,
+        cap_count: count as u64,
+        cwd_ptr: 0,
+        cwd_len: 0,
     };
-    syscall1(SYS_PROCESS_SPAWN_EX, &args as *const SpawnExArgs as u64)
+    syscall1(SYS_PROCESS_SPAWN_EX2, &args as *const SpawnEx2Args as u64)
+}
+
+/// Run `f` over init's own capability table, as `SYS_CAP_QUERY` reads it:
+/// into a stack buffer when it fits, else into a mapping unmapped after.
+/// Only init's own thread changes its table -- each spawn adds the child's
+/// `Process` entry -- so the count and the read agree; a table that grew
+/// between them anyway is the kernel's `BufferTooSmall`, returned.
+fn with_own_caps<R>(f: impl FnOnce(&[init::CapEntryInfo]) -> R) -> Result<R, i64> {
+    let count = syscall2(SYS_CAP_QUERY, 0, 0);
+    if count < 0 {
+        return Err(count);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let count = count as usize;
+    if count <= STACK_HELD_CAPS {
+        let mut buf = [init::CapEntryInfo::default(); STACK_HELD_CAPS];
+        let n = syscall2(
+            SYS_CAP_QUERY,
+            buf.as_mut_ptr() as u64,
+            STACK_HELD_CAPS as u64,
+        );
+        if n < 0 {
+            return Err(n);
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let n = (n as usize).min(STACK_HELD_CAPS);
+        return Ok(f(&buf[..n]));
+    }
+    let size = count.saturating_mul(core::mem::size_of::<init::CapEntryInfo>()) as u64;
+    let mapped = mmap(size);
+    if mapped < 0 {
+        return Err(mapped);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let addr = mapped as u64;
+    let n = syscall2(SYS_CAP_QUERY, addr, count as u64);
+    let result = if n < 0 {
+        Err(n)
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        let n = (n as usize).min(count);
+        // SAFETY: the mapping is `size` writable bytes, page-aligned, room
+        // for `count` entries; the kernel wrote `n` of them, `n <= count`,
+        // and `CapEntryInfo` is plain integers, valid for any bytes.
+        let held = unsafe { core::slice::from_raw_parts(addr as *const init::CapEntryInfo, n) };
+        Ok(f(held))
+    };
+    munmap(addr, size);
+    result
 }
 
 /// Wait for a child process to exit.
@@ -467,6 +588,90 @@ fn fs_stat(path: &[u8], out: &mut [u8; 80]) -> i64 {
         );
     }
     ret
+}
+
+/// The kernel's `NotFound`: a path names nothing.
+const ERR_NOT_FOUND: i64 = -500;
+
+/// [`with_whole_file`]'s own failure: the file changed size each time it
+/// was read.
+const ERR_KEPT_CHANGING: i64 = -1;
+
+/// Read the file at `path` whole, and hand its bytes to `use_it`.
+///
+/// `SYS_FS_READ_FILE` stops at the end of the buffer it is given, and says
+/// nothing about what it left: a buffer the size `fs_stat` gave is filled
+/// whether or not the file grew in between, and whatever lay past it is
+/// lost without a sign. So the buffer here is one byte longer than the file
+/// was, and a read that fills it means the file grew -- it is read again,
+/// three times at most, then [`ERR_KEPT_CHANGING`].  A file shorter than
+/// `STACK` bytes is read into a buffer on the stack; a longer one into a
+/// mapping of its own, unmapped before this returns.
+///
+/// Until 2026-10-06 init read `/etc/startup.conf` into 2 KiB and parsed
+/// whatever came back, so a longer file lost its last services -- the line
+/// it was cut in could start a service with a cut argument -- and it gave
+/// a service's ELF the size `fs_stat` had said, whatever the read returned.
+fn with_whole_file<const STACK: usize, R>(
+    path: &[u8],
+    use_it: impl FnOnce(&[u8]) -> R,
+) -> Result<R, i64> {
+    let mut use_it = Some(use_it);
+    for _ in 0..3 {
+        let mut stat_out = [0u8; 80];
+        let ret = fs_stat(path, &mut stat_out);
+        if ret < 0 {
+            return Err(ret);
+        }
+        let mut size = [0u8; 8];
+        size.copy_from_slice(&stat_out[..8]);
+        let cap = usize::try_from(u64::from_le_bytes(size))
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        let read = if cap <= STACK {
+            let mut buf = [0u8; STACK];
+            read_once(path, &mut buf[..cap], &mut use_it)
+        } else {
+            let mapped = mmap(cap as u64);
+            if mapped < 0 {
+                return Err(mapped);
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let addr = mapped as u64;
+            // SAFETY: `mmap` returned a fresh writable mapping of at least
+            // `cap` bytes, which nothing else refers to until the `munmap`
+            // below, after the last use of this slice.
+            let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, cap) };
+            let read = read_once(path, buf, &mut use_it);
+            munmap(addr, cap as u64);
+            read
+        };
+        match read {
+            Ok(Some(answer)) => return Ok(answer),
+            Ok(None) => {} // The file grew: read it again.
+            Err(e) => return Err(e),
+        }
+    }
+    Err(ERR_KEPT_CHANGING)
+}
+
+/// One read of `path` into `buf`: what `use_it` makes of the bytes, or
+/// `None` when they filled `buf` -- the file is longer than it was.
+fn read_once<F: FnOnce(&[u8]) -> R, R>(
+    path: &[u8],
+    buf: &mut [u8],
+    use_it: &mut Option<F>,
+) -> Result<Option<R>, i64> {
+    let n = fs_read_file(path, buf);
+    if n < 0 {
+        return Err(n);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let n = n as usize;
+    if n >= buf.len() {
+        return Ok(None);
+    }
+    Ok(use_it.take().map(|f| f(&buf[..n])))
 }
 
 // ---------------------------------------------------------------------------
@@ -592,26 +797,13 @@ fn split_first_word(s: &[u8]) -> (&[u8], &[u8]) {
 /// Maximum number of managed services.
 const MAX_SERVICES: usize = 16;
 
-/// Maximum length of a service name.
-const MAX_SVC_NAME: usize = 32;
-
-/// Maximum length of a service path (filesystem path to ELF binary).
-const MAX_SVC_PATH: usize = 128;
-
-/// Maximum number of dependencies per service.
-const MAX_DEPS: usize = 4;
-
-/// Maximum number of extra arguments per service (argv[1..]).
-const MAX_SVC_ARGS: usize = 8;
-
-/// Maximum length of a single service argument.
-const MAX_SVC_ARG_LEN: usize = 64;
-
-/// Maximum number of per-service environment variables.
-const MAX_SVC_ENV: usize = 4;
-
-/// Maximum length of a single environment variable (KEY=VALUE).
-const MAX_SVC_ENV_LEN: usize = 128;
+// What a service's fields hold: `lib.rs`'s, where `/etc/startup.conf`'s
+// lines and `svc start`'s path are held to them before anything is stored,
+// so the registry below never has to cut anything to fit.
+use init::{
+    MAX_DEPS, MAX_SVC_ARG_LEN, MAX_SVC_ARGS, MAX_SVC_ENV, MAX_SVC_ENV_LEN, MAX_SVC_NAME,
+    MAX_SVC_PATH,
+};
 
 /// Initial restart delay in nanoseconds (1 second).
 const BACKOFF_INITIAL_NS: u64 = 1_000_000_000;
@@ -635,8 +827,11 @@ const BACKOFF_RESET_THRESHOLD_NS: u64 = 10_000_000_000;
 /// forever at the supervisor's tick rate.
 const MAX_WAIT_ERRORS: u32 = 5;
 
-/// Maximum size of packed argv/envp data for `process_spawn_ex()`.
+/// Maximum size of packed argv/envp data for `process_spawn()`.
 const MAX_PACKED_ARGS: usize = 1024;
+
+/// The most words the `spawn` command passes as argv, its path included.
+const MAX_SPAWN_ARGS: usize = 32;
 
 /// Default environment passed to spawned processes.
 /// Packed null-terminated format: "PATH=/bin\0".
@@ -710,6 +905,11 @@ struct Service {
     svc_env: [[u8; MAX_SVC_ENV_LEN]; MAX_SVC_ENV],
     svc_env_lens: [usize; MAX_SVC_ENV],
     svc_env_count: usize,
+
+    /// Capabilities beyond init's usual ones, from `caps:` in
+    /// /etc/startup.conf: the first `svc_cap_count` (design-decisions 1174).
+    svc_caps: [init::CapGrant; init::MAX_SVC_CAPS],
+    svc_cap_count: usize,
 }
 
 impl Service {
@@ -738,8 +938,21 @@ impl Service {
             svc_env: [[0u8; MAX_SVC_ENV_LEN]; MAX_SVC_ENV],
             svc_env_lens: [0; MAX_SVC_ENV],
             svc_env_count: 0,
+            svc_caps: [init::CapGrant::NONE; init::MAX_SVC_CAPS],
+            svc_cap_count: 0,
         }
     }
+}
+
+/// Why [`ServiceRegistry::register`] would not take a service.
+#[derive(Clone, Copy)]
+enum Refusal<'a> {
+    /// The path is not one init can run.
+    Line(init::LineError<'a>),
+    /// A registered service has this name already.
+    Duplicate(&'a [u8]),
+    /// All [`MAX_SERVICES`] slots are taken.
+    Full,
 }
 
 /// The service registry.  Fixed-size, no heap.
@@ -773,53 +986,30 @@ impl ServiceRegistry {
         }
     }
 
-    /// Register a new service by filesystem path.  Extracts the filename
-    /// as the service name.  Returns the slot index or `None` if full.
-    fn register(&mut self, path: &[u8]) -> Option<usize> {
-        if self.count >= MAX_SERVICES || path.is_empty() {
-            return None;
+    /// Register a new service by filesystem path; its name is the path's
+    /// last component.  Returns the slot index, or why not:
+    ///
+    /// - a path init cannot run ([`init::check_path`]) -- until 2026-10-06
+    ///   one too long was cut short, and a name too long cut to 32 bytes;
+    /// - a name another registered service has -- `depends:` and `svc` find
+    ///   a service by its name, and with two of one name they found
+    ///   whichever came first;
+    /// - no free slot.
+    fn register<'p>(&mut self, path: &'p [u8]) -> Result<usize, Refusal<'p>> {
+        init::check_path(path).map_err(Refusal::Line)?;
+        let name = init::service_name(path);
+        if self.find_by_name(name).is_some() {
+            return Err(Refusal::Duplicate(name));
         }
-
-        // Find a free slot (prefer the first unused).
-        let mut slot = None;
-        let mut i = 0;
-        while i < MAX_SERVICES {
-            if !self.services[i].active {
-                slot = Some(i);
-                break;
-            }
-            i += 1;
-        }
-        let idx = slot?;
+        let idx = (0..MAX_SERVICES)
+            .find(|&i| !self.services[i].active)
+            .ok_or(Refusal::Full)?;
 
         let svc = &mut self.services[idx];
-
-        // Copy path.
-        let plen = if path.len() > MAX_SVC_PATH {
-            MAX_SVC_PATH
-        } else {
-            path.len()
-        };
-        svc.path[..plen].copy_from_slice(&path[..plen]);
-        svc.path_len = plen;
-
-        // Extract filename from path as service name.
-        let mut last_slash = 0;
-        let mut j = 0;
-        while j < plen {
-            if path[j] == b'/' {
-                last_slash = j + 1;
-            }
-            j += 1;
-        }
-        let name_src = &path[last_slash..plen];
-        let nlen = if name_src.len() > MAX_SVC_NAME {
-            MAX_SVC_NAME
-        } else {
-            name_src.len()
-        };
-        svc.name[..nlen].copy_from_slice(&name_src[..nlen]);
-        svc.name_len = nlen;
+        svc.path[..path.len()].copy_from_slice(path);
+        svc.path_len = path.len();
+        svc.name[..name.len()].copy_from_slice(name);
+        svc.name_len = name.len();
 
         svc.active = true;
         svc.auto_restart = true;
@@ -828,14 +1018,28 @@ impl ServiceRegistry {
         svc.started_at_ns = 0;
         svc.restart_after_ns = 0;
         svc.crash_count = 0;
+        svc.wait_err_count = 0;
         svc.ready = false;
         svc.dep_count = 0;
         svc.waiting_on_deps = false;
         svc.svc_arg_count = 0;
         svc.svc_env_count = 0;
+        svc.svc_cap_count = 0;
 
         self.count += 1;
-        Some(idx)
+        Ok(idx)
+    }
+
+    /// Set the capabilities a registered service gets beyond init's usual
+    /// ones (`caps:`). `parse_service_line` has already refused more than
+    /// the slots hold, so all of `caps` fits.
+    fn set_caps(&mut self, idx: usize, caps: &[init::CapGrant]) {
+        let Some(svc) = self.services.get_mut(idx) else {
+            return;
+        };
+        let n = caps.len().min(init::MAX_SVC_CAPS);
+        svc.svc_caps[..n].copy_from_slice(&caps[..n]);
+        svc.svc_cap_count = n;
     }
 
     /// Set extra arguments (argv[1..]) for a registered service.
@@ -1009,6 +1213,34 @@ impl ServiceRegistry {
         true // All deps ready.
     }
 
+    /// Say which waiting services wait on a name no registered service has,
+    /// or on themselves.  They go on waiting -- `svc start` may yet register
+    /// the one they need -- but until 2026-10-06 they waited without a word.
+    fn report_unmet_dependencies(&self) {
+        for svc in self
+            .services
+            .iter()
+            .filter(|s| s.active && s.waiting_on_deps)
+        {
+            let own = &svc.name[..svc.name_len];
+            for d in 0..svc.dep_count {
+                let dep = &svc.dep_names[d][..svc.dep_name_lens[d]];
+                let what = if bytes_eq(dep, own) {
+                    "`, which is itself; it never starts\n"
+                } else if self.find_by_name(dep).is_none() {
+                    "`, which no service is called; it starts once one is (svc start)\n"
+                } else {
+                    continue;
+                };
+                print("[init] ");
+                console_write(own);
+                print(" waits on `");
+                console_write(dep);
+                print(what);
+            }
+        }
+    }
+
     /// Find a service by name.  Returns the slot index or `None`.
     fn find_by_name(&self, name: &[u8]) -> Option<usize> {
         let mut i = 0;
@@ -1026,7 +1258,48 @@ impl ServiceRegistry {
 
     /// Start a service (read ELF from VFS, spawn process).
     /// Returns the child PID or a negative error code.
+    ///
+    /// A start that fails is tried again after the backoff, which doubles,
+    /// as after a crash (`schedule_retry`).  Until 2026-10-06 a failed
+    /// *restart* left the restart time in the past, so every poll -- ten or
+    /// twenty a second -- tried again and printed why it failed, for as long
+    /// as the cause lasted; and a failed *first* start was never tried again.
     fn start_service(&mut self, idx: usize) -> i64 {
+        let pid = self.spawn_service(idx);
+        if pid < 0 {
+            #[allow(clippy::cast_sign_loss)]
+            self.schedule_retry(idx, clock_monotonic() as u64);
+        }
+        pid
+    }
+
+    /// After a start of service `idx` that failed at `now_ns`: try again
+    /// after the backoff, and double the backoff (to its cap) for the next
+    /// time -- unless the service is not to be restarted.
+    fn schedule_retry(&mut self, idx: usize, now_ns: u64) {
+        let Some(svc) = self.services.get_mut(idx) else {
+            return;
+        };
+        if !svc.active || !svc.auto_restart || svc.pid != 0 {
+            return;
+        }
+        // Never 0, which means "no restart pending".
+        svc.restart_after_ns = now_ns.saturating_add(svc.backoff_ns).max(1);
+        print("[svc] Will try ");
+        console_write(&svc.name[..svc.name_len]);
+        print(" again in ");
+        print_u64(svc.backoff_ns / 1_000_000_000);
+        print("s\n");
+        svc.backoff_ns = svc
+            .backoff_ns
+            .checked_shl(BACKOFF_MULTIPLIER)
+            .unwrap_or(BACKOFF_MAX_NS)
+            .min(BACKOFF_MAX_NS);
+    }
+
+    /// [`start_service`](Self::start_service)'s work: read the ELF and
+    /// spawn it, saying why not.
+    fn spawn_service(&mut self, idx: usize) -> i64 {
         if idx >= MAX_SERVICES || !self.services[idx].active {
             return -1;
         }
@@ -1064,92 +1337,14 @@ impl ServiceRegistry {
             e += 1;
         }
 
+        let caps_copy = self.services[idx].svc_caps;
+        let cap_count = self.services[idx].svc_cap_count.min(init::MAX_SVC_CAPS);
+
         let path = &path_buf[..path_len];
         let name = &name_buf[..name_len];
 
-        // Stat the ELF binary to get its size.
-        let mut stat_out = [0u8; 80];
-        let stat_ret = fs_stat(path, &mut stat_out);
-        if stat_ret < 0 {
-            print("[svc] Failed to stat ");
-            console_write(path);
-            print(": error ");
-            print_i64(stat_ret);
-            print("\n");
-            return stat_ret;
-        }
-        let file_size = u64::from_le_bytes([
-            stat_out[0],
-            stat_out[1],
-            stat_out[2],
-            stat_out[3],
-            stat_out[4],
-            stat_out[5],
-            stat_out[6],
-            stat_out[7],
-        ]) as usize;
-
-        if file_size == 0 {
-            print("[svc] Empty ELF: ");
-            console_write(path);
-            print("\n");
-            return -1;
-        }
-
-        // Read the ELF binary.  For files ≤ 64 KiB, use a stack buffer
-        // to avoid the mmap/munmap overhead.  Larger files use mmap.
-        let mut stack_buf = [0u8; STACK_ELF_MAX];
-        let (elf_ptr, elf_mmap_addr, elf_mmap_size): (*const u8, u64, u64);
-
-        if file_size <= STACK_ELF_MAX {
-            let result = fs_read_file(path, &mut stack_buf);
-            if result < 0 {
-                print("[svc] Failed to read ");
-                console_write(path);
-                print(": error ");
-                print_i64(result);
-                print("\n");
-                return result;
-            }
-            elf_ptr = stack_buf.as_ptr();
-            elf_mmap_addr = 0;
-            elf_mmap_size = 0;
-        } else {
-            // Allocate a buffer via mmap for large ELFs.
-            let mapped = mmap(file_size as u64);
-            if mapped < 0 {
-                print("[svc] mmap failed for ");
-                console_write(path);
-                print(": error ");
-                print_i64(mapped);
-                print("\n");
-                return mapped;
-            }
-            #[allow(clippy::cast_sign_loss)]
-            let addr = mapped as u64;
-            // SAFETY: mmap returned a valid writable buffer of at least
-            // `file_size` bytes.  We use it as a &mut [u8] for reading.
-            let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, file_size) };
-            let result = fs_read_file(path, buf);
-            if result < 0 {
-                munmap(addr, file_size as u64);
-                print("[svc] Failed to read ");
-                console_write(path);
-                print(": error ");
-                print_i64(result);
-                print("\n");
-                return result;
-            }
-            elf_ptr = addr as *const u8;
-            elf_mmap_addr = addr;
-            elf_mmap_size = file_size as u64;
-        }
-
-        // SAFETY: elf_ptr points to `file_size` valid bytes (either
-        // stack_buf or mmap'd region).
-        let elf_data = unsafe { core::slice::from_raw_parts(elf_ptr, file_size) };
-
-        // Build packed argv: [path\0arg1\0arg2\0...]
+        // Build packed argv: [path\0arg1\0arg2\0...] -- before the ELF is
+        // read, so that its buffer is held no longer than the spawn.
         let mut argv_buf = [0u8; MAX_PACKED_ARGS];
         let mut argc: usize = 0;
 
@@ -1200,25 +1395,55 @@ impl ServiceRegistry {
             e += 1;
         }
 
-        let pid = process_spawn_ex(
-            elf_data,
-            name,
-            &argv_buf[..argv_pos],
-            argc,
-            &envp_buf[..envp_pos],
-            envc,
-        );
-
-        // Free mmap'd buffer now that spawn has copied the ELF data.
-        if elf_mmap_addr != 0 {
-            munmap(elf_mmap_addr, elf_mmap_size);
-        }
+        // Read the ELF whole (`with_whole_file` says why `fs_stat`'s size
+        // alone is not trusted) and spawn it while it is held: the kernel
+        // copies it, and the buffer goes when the read returns.
+        let spawned = with_whole_file::<STACK_ELF_MAX, _>(path, |elf_data| {
+            if elf_data.is_empty() {
+                return None;
+            }
+            Some(process_spawn(
+                elf_data,
+                name,
+                &argv_buf[..argv_pos],
+                argc,
+                &envp_buf[..envp_pos],
+                envc,
+                &caps_copy[..cap_count],
+            ))
+        });
+        let pid = match spawned {
+            Ok(Some(pid)) => pid,
+            Ok(None) => {
+                print("[svc] Empty ELF: ");
+                console_write(path);
+                print("\n");
+                return -1;
+            }
+            Err(e) => {
+                print("[svc] Failed to read ");
+                console_write(path);
+                print(": error ");
+                print_i64(e);
+                if e == ERR_KEPT_CHANGING {
+                    print(" (it kept changing size while it was read)");
+                }
+                print("\n");
+                return e;
+            }
+        };
 
         if pid < 0 {
             print("[svc] Failed to spawn ");
             console_write(name);
             print(": error ");
             print_i64(pid);
+            if pid == ERR_PERMISSION_DENIED && cap_count > 0 {
+                // The kernel hands a child only what its parent holds, with
+                // the same id: a class grant passes on the class, not one
+                // object of it, and one object does not pass on the class.
+                print(" -- init does not hold a capability its caps: names, at that id");
+            }
             print("\n");
             return pid;
         }
@@ -1660,119 +1885,20 @@ fn cmd_spawn(args: &[u8]) {
 
     // First word is the ELF path, remaining words are arguments.
     let (path, remaining_args) = split_first_word(args);
+    let name = init::service_name(path);
 
-    // Stat the file to get its size.
-    let mut stat_out = [0u8; 80];
-    let stat_ret = fs_stat(path, &mut stat_out);
-    if stat_ret < 0 {
-        print("spawn: failed to stat ");
-        console_write(path);
-        print(": error ");
-        print_i64(stat_ret);
-        print("\n");
-        return;
-    }
-    let file_size = u64::from_le_bytes([
-        stat_out[0],
-        stat_out[1],
-        stat_out[2],
-        stat_out[3],
-        stat_out[4],
-        stat_out[5],
-        stat_out[6],
-        stat_out[7],
-    ]) as usize;
-    if file_size == 0 {
-        print("spawn: empty file\n");
-        return;
-    }
-
-    // Read the ELF binary.  Stack buffer for small files, mmap for large.
-    let mut stack_buf = [0u8; STACK_ELF_MAX];
-    let (elf_ptr, elf_mmap_addr, elf_mmap_size): (*const u8, u64, u64);
-
-    if file_size <= STACK_ELF_MAX {
-        let result = fs_read_file(path, &mut stack_buf);
-        if result < 0 {
-            print("spawn: failed to read ");
-            console_write(path);
-            print(": error ");
-            print_i64(result);
-            print("\n");
-            return;
-        }
-        elf_ptr = stack_buf.as_ptr();
-        elf_mmap_addr = 0;
-        elf_mmap_size = 0;
-    } else {
-        let mapped = mmap(file_size as u64);
-        if mapped < 0 {
-            print("spawn: mmap failed: error ");
-            print_i64(mapped);
-            print("\n");
-            return;
-        }
-        #[allow(clippy::cast_sign_loss)]
-        let addr = mapped as u64;
-        // SAFETY: mmap returned a valid writable buffer.
-        let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, file_size) };
-        let result = fs_read_file(path, buf);
-        if result < 0 {
-            munmap(addr, file_size as u64);
-            print("spawn: failed to read ");
-            console_write(path);
-            print(": error ");
-            print_i64(result);
-            print("\n");
-            return;
-        }
-        elf_ptr = addr as *const u8;
-        elf_mmap_addr = addr;
-        elf_mmap_size = file_size as u64;
-    }
-
-    // SAFETY: elf_ptr points to file_size valid bytes.
-    let elf_data = unsafe { core::slice::from_raw_parts(elf_ptr, file_size) };
-
-    // Extract filename from path for the process name.
-    let name = {
-        let mut last_slash = 0;
-        let mut i = 0;
-        while i < path.len() {
-            if path[i] == b'/' {
-                last_slash = i + 1;
-            }
-            i += 1;
-        }
-        &path[last_slash..]
-    };
-
-    // Build packed argv: [path\0arg1\0arg2\0...]
+    // Build packed argv: [path\0arg1\0arg2\0...] -- all of it, or nothing:
+    // a word that does not fit is refused, never dropped (until 2026-10-06
+    // a 33rd word was left off without a word, and so was a path of a
+    // kilobyte, which left the program no argv[0]).
     let mut argv_data = [0u8; MAX_PACKED_ARGS];
     let mut argv_pos: usize = 0;
     let mut argc: usize = 0;
-
-    // argv[0] = path.
-    if path.len() < MAX_PACKED_ARGS {
-        argv_data[argv_pos..argv_pos + path.len()].copy_from_slice(path);
-        argv_pos += path.len();
-        argv_data[argv_pos] = 0;
-        argv_pos += 1;
-        argc += 1;
-    }
-
-    // Parse remaining arguments (space-separated).
+    let mut word = path;
     let mut rest = remaining_args;
-    while !rest.is_empty() && argc < 32 {
-        let (word, next) = split_first_word(rest);
-        if word.is_empty() {
-            break;
-        }
-        if argv_pos + word.len() + 1 > MAX_PACKED_ARGS {
+    loop {
+        if argc >= MAX_SPAWN_ARGS || argv_pos + word.len() + 1 > MAX_PACKED_ARGS {
             print("spawn: argument list too long\n");
-            if elf_mmap_addr != 0 {
-                munmap(elf_mmap_addr, elf_mmap_size);
-            }
             return;
         }
         argv_data[argv_pos..argv_pos + word.len()].copy_from_slice(word);
@@ -1780,7 +1906,12 @@ fn cmd_spawn(args: &[u8]) {
         argv_data[argv_pos] = 0;
         argv_pos += 1;
         argc += 1;
-        rest = next;
+        let (next_word, next_rest) = split_first_word(rest);
+        if next_word.is_empty() {
+            break;
+        }
+        word = next_word;
+        rest = next_rest;
     }
 
     print("Spawning ");
@@ -1792,23 +1923,41 @@ fn cmd_spawn(args: &[u8]) {
         print_u64(extra);
         print(" arg(s)");
     }
-    print(" (");
-    print_u64(file_size as u64);
-    print(" bytes)...\n");
+    print("...\n");
 
-    let pid = process_spawn_ex(
-        elf_data,
-        name,
-        &argv_data[..argv_pos],
-        argc,
-        DEFAULT_ENVP,
-        DEFAULT_ENVP_COUNT,
-    );
-
-    // Free mmap'd buffer after spawn has copied the ELF.
-    if elf_mmap_addr != 0 {
-        munmap(elf_mmap_addr, elf_mmap_size);
-    }
+    // Read the ELF whole and spawn it while it is held.
+    let spawned = with_whole_file::<STACK_ELF_MAX, _>(path, |elf_data| {
+        if elf_data.is_empty() {
+            return None;
+        }
+        Some(process_spawn(
+            elf_data,
+            name,
+            &argv_data[..argv_pos],
+            argc,
+            DEFAULT_ENVP,
+            DEFAULT_ENVP_COUNT,
+            &[],
+        ))
+    });
+    let pid = match spawned {
+        Ok(Some(pid)) => pid,
+        Ok(None) => {
+            print("spawn: empty file\n");
+            return;
+        }
+        Err(e) => {
+            print("spawn: failed to read ");
+            console_write(path);
+            print(": error ");
+            print_i64(e);
+            if e == ERR_KEPT_CHANGING {
+                print(" (it kept changing size while it was read)");
+            }
+            print("\n");
+            return;
+        }
+    };
 
     if pid < 0 {
         print("spawn: error ");
@@ -1879,10 +2028,14 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
             return;
         }
         match registry.register(rest) {
-            Some(idx) => {
+            Ok(idx) => {
                 registry.start_service(idx);
             }
-            None => print("svc start: registry full or invalid path\n"),
+            Err(refusal) => {
+                print("svc start: ");
+                print_refusal(refusal);
+                print("\n");
+            }
         }
     } else if bytes_eq(sub, b"stop") {
         if rest.is_empty() {
@@ -2187,6 +2340,128 @@ const POLL_INTERVAL_IDLE_NS: u64 = 50_000_000;
 /// 100 ms — balance between responsiveness and CPU usage.
 const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
 
+/// Name the machine from `/etc/hostname`, as systemd's `hostname_setup()`
+/// does: before anything that reads the name once and keeps it -- a service's
+/// first log line, a shell's `$HOSTNAME` -- since every boot otherwise comes
+/// up `localhost`, the kernel's default, whatever the machine was named
+/// (`requests/b-d-init-should-set-the-host-name-from-etc-hostname.md`).
+///
+/// No file, or one with no name in it, leaves the kernel's name, as systemd
+/// falls back to its default; a line that is not a host name is reported
+/// and leaves it too ([`init::read_etc_hostname`] says why).
+fn apply_etc_hostname() {
+    let mut buf = [0u8; 1024];
+    let n = fs_read_file(b"/etc/hostname", &mut buf);
+    let Ok(len) = usize::try_from(n) else {
+        return;
+    };
+    let file = buf.get(..len).unwrap_or(&[]);
+    match init::read_etc_hostname(file) {
+        init::EtcHostname::Name(name) => {
+            let rc = syscall2(SYS_HOSTNAME_SET, name.as_ptr() as u64, name.len() as u64);
+            if rc < 0 {
+                print("[init] /etc/hostname: the kernel refused the name (error ");
+                print_i64(rc);
+                print(")\n");
+            } else {
+                print("[init] Host name set to ");
+                console_write(name);
+                print(" (/etc/hostname)\n");
+            }
+        }
+        init::EtcHostname::Empty => {}
+        init::EtcHostname::Invalid(line) => {
+            print("[init] /etc/hostname: \"");
+            console_write(line);
+            print("\" is not a host name; keeping the kernel's\n");
+        }
+    }
+}
+
+/// Start this boot's login records, as an init does before anything can log
+/// in (`requests/d-b-utmp-is-a-real-file-now-create-it-and-write-logins.md`,
+/// item 1): `/var/run/utmp` emptied -- its records describe the running
+/// system, so last boot's are wrong -- and a `BOOT_TIME` record written to it
+/// and appended to the history in `/var/log/wtmp`, as systemd's
+/// `utmp_put_reboot` writes it ([`init::boot_record`]). `login` and
+/// util-linux leave a missing file alone, so `/var/log/btmp` and
+/// `/var/log/lastlog` are made here if they are missing, and kept if not.
+///
+/// The modes are Linux's: `utmp` and `wtmp` 0664, `lastlog` 0644, and `btmp`
+/// 0600 -- it records whatever was typed at a failed login's name prompt,
+/// which is sometimes a password.
+///
+/// The C library never creates these files (glibc does not either): every
+/// `getutxent`, `pututxline` and `getlogin` answers `ENOENT` until they
+/// exist, and `login` says once per session that it is not in the records.
+/// So a step that fails is reported, and the boot goes on.
+fn start_login_records() {
+    for dir in [b"/var" as &[u8], b"/var/run", b"/var/log"] {
+        if fs_mkdir(dir) < 0 {
+            // Already there is the usual case; anything else is a failure,
+            // and the files below will say so too.
+            let mut st = [0u8; 80];
+            if fs_stat(dir, &mut st) < 0 {
+                report_record_failure(dir, b"cannot be made");
+                return;
+            }
+        }
+    }
+
+    let (sec, usec) = init::boot_time(clock_realtime(), clock_monotonic());
+    let mut release_buf = [0u8; 65];
+    let n = fs_read_file(b"/proc/sys/kernel/osrelease", &mut release_buf);
+    let release = usize::try_from(n)
+        .ok()
+        .and_then(|n| release_buf.get(..n))
+        .map_or(&[][..], trim);
+    let record = init::boot_record(sec, usec, release);
+
+    let steps: [(&[u8], i64, u64); 4] = [
+        (
+            b"/var/run/utmp",
+            fs_write_file(b"/var/run/utmp", &record),
+            0o664,
+        ),
+        (
+            b"/var/log/wtmp",
+            fs_append(b"/var/log/wtmp", &record),
+            0o664,
+        ),
+        (b"/var/log/btmp", fs_append(b"/var/log/btmp", &[]), 0o600),
+        (
+            b"/var/log/lastlog",
+            fs_append(b"/var/log/lastlog", &[]),
+            0o644,
+        ),
+    ];
+    let mut written = 0usize;
+    for (path, rc, mode) in steps {
+        if rc < 0 {
+            report_record_failure(path, b"cannot be written");
+            continue;
+        }
+        if fs_set_perms(path, mode) < 0 {
+            report_record_failure(path, b"keeps the mode it was made with");
+        }
+        written = written.saturating_add(1);
+    }
+    if written == steps.len() {
+        print("[init] Login records started: /var/run/utmp, /var/log/wtmp (boot at ");
+        print_i64(sec);
+        print(")\n");
+    }
+}
+
+/// `[init] <path> <what>`, for a login-record step that failed.
+fn report_record_failure(path: &[u8], what: &[u8]) {
+    print("[init] ");
+    console_write(path);
+    print(" ");
+    console_write(what);
+    print("; logins will not be recorded in it\n");
+}
+
 /// Load the startup service list from `/etc/startup.conf`.
 ///
 /// Not `/etc/services`: that name is the IANA port/protocol database that
@@ -2200,176 +2475,198 @@ const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
 /// /bin/logger args:--verbose,-d
 /// /bin/network args:--dhcp depends:logger
 /// /bin/webserver args:--port,8080 env:PORT=8080 depends:logger,network
+/// /bin/compositor depends:logger caps:InputDevice/0/r,Service/0/w
 /// ```
 ///
 /// Each non-empty, non-comment line is a path optionally followed by
-/// keyword sections:
+/// keyword sections, in any order:
 ///   - `args:a,b,c` — extra arguments (argv[1..])
 ///   - `env:K=V,K2=V2` — per-service environment variables
 ///   - `depends:svc1,svc2` — dependency names
+///   - `caps:Type/id/rights,...` — capabilities beyond init's usual ones
+///     (design-decisions 1174; `init::parse_caps` says what it takes)
 ///
-/// Keywords can appear in any order.  Services with no dependencies
-/// are started immediately.  Services with dependencies are queued
-/// and started automatically once all deps have signaled ready.
+/// A line init cannot read -- an unknown keyword, one given twice, a
+/// `caps:` entry it does not know -- is refused: its service is not started,
+/// and the console says which word. Services with no dependencies are
+/// started immediately; services with dependencies are queued and started
+/// once all of them have signaled ready.
 ///
 /// If the file doesn't exist, this is a no-op.
 fn load_startup_services(registry: &mut ServiceRegistry) {
-    let mut buf = [0u8; 2048];
-    let result = fs_read_file(b"/etc/startup.conf", &mut buf);
-    if result < 0 {
-        // File not found or other error — silently skip.
-        return;
-    }
-
-    let data = &buf[..result as usize];
-    print("[init] Loading startup services from /etc/startup.conf\n");
-
-    // Parse line by line.  Lines are separated by '\n'.
-    let mut start = 0;
-    while start < data.len() {
-        // Find end of line.
-        let mut end = start;
-        while end < data.len() && data[end] != b'\n' {
-            end += 1;
+    // The whole file, however long (`with_whole_file`): until 2026-10-06 it
+    // was read into 2 KiB, and the services past that were never started.
+    let read = with_whole_file::<STARTUP_CONF_STACK, _>(b"/etc/startup.conf", |data| {
+        print("[init] Loading startup services from /etc/startup.conf\n");
+        for line in data.split(|&b| b == b'\n') {
+            let line = trim(line);
+            // Skip empty lines and comments.
+            if line.is_empty() || line.first() == Some(&b'#') {
+                continue;
+            }
+            match init::parse_service_line(line) {
+                Ok(parsed) => register_startup_service(registry, &parsed),
+                Err(e) => report_refused_line(line, e),
+            }
         }
+        registry.report_unmet_dependencies();
+    });
+    match read {
+        // No file is no services, which is not worth a word.
+        Ok(()) | Err(ERR_NOT_FOUND) => {}
+        Err(e) => {
+            // Anything else is: until 2026-10-06 a file init could not read
+            // started nothing, and said nothing.
+            print("[init] /etc/startup.conf could not be read (error ");
+            print_i64(e);
+            if e == ERR_KEPT_CHANGING {
+                print(": it kept changing size while it was read");
+            }
+            print("); no service started from it\n");
+        }
+    }
+}
 
-        let line = trim(&data[start..end]);
+/// How much of `/etc/startup.conf` is read on the stack; a longer file is
+/// read into a mapping.
+const STARTUP_CONF_STACK: usize = 4096;
 
-        // Skip empty lines and comments.
-        if !line.is_empty() && line[0] != b'#' {
-            let parsed = parse_service_line(line);
+/// Register one service `/etc/startup.conf` names, and start it unless it
+/// waits on others.
+fn register_startup_service(registry: &mut ServiceRegistry, parsed: &init::ServiceLine<'_>) {
+    match registry.register(parsed.path) {
+        Ok(idx) => {
+            if !parsed.deps.is_empty() {
+                registry.set_dependencies(idx, parsed.deps);
+            }
+            if !parsed.args.is_empty() {
+                registry.set_arguments(idx, parsed.args);
+            }
+            if !parsed.env.is_empty() {
+                registry.set_env(idx, parsed.env);
+            }
+            registry.set_caps(idx, parsed.caps());
 
-            match registry.register(parsed.path) {
-                Some(idx) => {
-                    if !parsed.deps.is_empty() {
-                        registry.set_dependencies(idx, parsed.deps);
-                    }
-                    if !parsed.args.is_empty() {
-                        registry.set_arguments(idx, parsed.args);
-                    }
-                    if !parsed.env.is_empty() {
-                        registry.set_env(idx, parsed.env);
-                    }
+            if registry.services[idx].dep_count > 0 {
+                // Has dependencies — don't start yet, mark as waiting.
+                registry.services[idx].waiting_on_deps = true;
+                print("[init] ");
+                console_write(parsed.path);
+                print(" waiting on dependencies\n");
+            } else {
+                // No dependencies — start immediately.
+                registry.start_service(idx);
+            }
+        }
+        Err(refusal) => {
+            print("[init] /etc/startup.conf: not starting `");
+            console_write(parsed.path);
+            print("`: ");
+            print_refusal(refusal);
+            print("\n");
+        }
+    }
+}
 
-                    if registry.services[idx].dep_count > 0 {
-                        // Has dependencies — don't start yet, mark as waiting.
-                        registry.services[idx].waiting_on_deps = true;
-                        print("[init] ");
-                        console_write(parsed.path);
-                        print(" waiting on dependencies\n");
-                    } else {
-                        // No dependencies — start immediately.
-                        registry.start_service(idx);
-                    }
+/// Say on the console why a line of `/etc/startup.conf` starts nothing.
+fn report_refused_line(line: &[u8], e: init::LineError<'_>) {
+    print("[init] /etc/startup.conf: not starting `");
+    console_write(line);
+    print("`: ");
+    print_line_error(e);
+    print("\n");
+}
+
+/// Why [`ServiceRegistry::register`] took no service, after a prefix the
+/// caller printed.
+fn print_refusal(refusal: Refusal<'_>) {
+    match refusal {
+        Refusal::Line(e) => print_line_error(e),
+        Refusal::Duplicate(name) => {
+            print("a service named `");
+            console_write(name);
+            print("` is registered already -- services are known by their file's name");
+        }
+        Refusal::Full => {
+            print("init keeps ");
+            print_u64(MAX_SERVICES as u64);
+            print(" services, and has that many");
+        }
+    }
+}
+
+/// What is wrong with a line, or a path, init was given, after a prefix the
+/// caller printed.
+fn print_line_error(e: init::LineError<'_>) {
+    // The limit on one keyword's entries, and on each entry's bytes.
+    let limits = |keyword: &[u8]| match keyword {
+        b"args" => (MAX_SVC_ARGS, MAX_SVC_ARG_LEN),
+        b"env" => (MAX_SVC_ENV, MAX_SVC_ENV_LEN),
+        _ => (MAX_DEPS, MAX_SVC_NAME),
+    };
+    match e {
+        init::LineError::UnknownKeyword(word) => {
+            print("no keyword init knows in `");
+            console_write(word);
+            print("` (args:, env:, depends:, caps:)");
+        }
+        init::LineError::Repeated(word) => {
+            print("a keyword given twice, at `");
+            console_write(word);
+            print("`");
+        }
+        init::LineError::BadCap(entry) => {
+            print("caps: entry `");
+            console_write(entry);
+            print("` is not Type/id/rights, with a type init passes on (");
+            let mut first = true;
+            for &(name, _) in init::DELEGATED_TYPES {
+                if !first {
+                    print(", ");
                 }
-                None => {
-                    print("[init] Warning: could not register ");
-                    console_write(parsed.path);
-                    print(" (registry full?)\n");
-                }
+                console_write(name);
+                first = false;
             }
+            print("), a decimal id, and rights from r and w, named once");
         }
-
-        start = end + 1;
-    }
-}
-
-/// Parsed fields from a service config line.
-struct ServiceLine<'a> {
-    path: &'a [u8],
-    args: &'a [u8],
-    env: &'a [u8],
-    deps: &'a [u8],
-}
-
-/// Find a keyword prefix (`"keyword:"`) in `line` and return the
-/// value after the colon (up to the next space or end of line) and
-/// the line with that keyword section removed.  Used by
-/// `parse_service_line` to extract `args:`, `env:`, `depends:`.
-fn find_keyword<'a>(line: &'a [u8], keyword: &[u8]) -> (Option<&'a [u8]>, &'a [u8]) {
-    let kw_len = keyword.len();
-    let mut i = 0;
-    while i + kw_len <= line.len() {
-        let mut matches = true;
-        let mut k = 0;
-        while k < kw_len {
-            if line[i + k] != keyword[k] {
-                matches = false;
-                break;
-            }
-            k += 1;
+        init::LineError::TooManyCaps => {
+            print("more caps: entries than init passes on to one service");
         }
-        if matches {
-            // Find end of value (next space or end of line).
-            let val_start = i + kw_len;
-            let mut val_end = val_start;
-            while val_end < line.len() && line[val_end] != b' ' && line[val_end] != b'\t' {
-                val_end += 1;
-            }
-            let value = trim(&line[val_start..val_end]);
-            // Return the portion before this keyword as the remaining
-            // line.  Keywords always appear after the path, so the
-            // path is preserved.  We can't concatenate slices without
-            // allocation, so each caller gets progressively shorter
-            // remaining text — but since keywords don't overlap, this
-            // correctly isolates the path.
-            let before = trim(&line[..i]);
-            return (Some(value), before);
+        init::LineError::BadPath(path) => {
+            print("`");
+            console_write(path);
+            print("` is not an absolute path to a program");
         }
-        i += 1;
-    }
-    (None, line)
-}
-
-/// Parse a service config line into components.
-///
-/// Format: `/path/to/binary [args:a,b,c] [env:K=V,K2=V2] [depends:svc1,svc2]`
-///
-/// Keywords can appear in any order after the path.  Values after
-/// each keyword run until the next whitespace.
-///
-/// Examples:
-/// ```text
-/// /bin/logger
-/// /bin/logger args:--verbose
-/// /bin/network args:--dhcp depends:logger
-/// /bin/webserver args:--port,8080 env:PORT=8080 depends:logger,network
-/// ```
-fn parse_service_line(line: &[u8]) -> ServiceLine<'_> {
-    let mut remaining = line;
-    let mut deps: &[u8] = &[];
-    let mut args: &[u8] = &[];
-    let mut env: &[u8] = &[];
-
-    // Extract depends: keyword.
-    let (d, rest) = find_keyword(remaining, b"depends:");
-    if let Some(d_val) = d {
-        deps = d_val;
-        remaining = rest;
-    }
-
-    // Extract args: keyword.
-    let (a, rest) = find_keyword(remaining, b"args:");
-    if let Some(a_val) = a {
-        args = a_val;
-        remaining = rest;
-    }
-
-    // Extract env: keyword.
-    let (e, rest) = find_keyword(remaining, b"env:");
-    if let Some(e_val) = e {
-        env = e_val;
-        remaining = rest;
-    }
-
-    // What's left (trimmed) is the path.
-    let path = trim(remaining);
-
-    ServiceLine {
-        path,
-        args,
-        env,
-        deps,
+        init::LineError::PathTooLong(_) => {
+            print("the program's path is longer than ");
+            print_u64(MAX_SVC_PATH as u64);
+            print(" bytes");
+        }
+        init::LineError::NameTooLong(name) => {
+            print("the program's name `");
+            console_write(name);
+            print("` is longer than ");
+            print_u64(MAX_SVC_NAME as u64);
+            print(" bytes");
+        }
+        init::LineError::TooMany(keyword) => {
+            console_write(keyword);
+            print(": names more than ");
+            print_u64(limits(keyword).0 as u64);
+        }
+        init::LineError::EntryTooLong(keyword, entry) => {
+            console_write(keyword);
+            print(": entry `");
+            console_write(entry);
+            print("` is longer than ");
+            print_u64(limits(keyword).1 as u64);
+            print(" bytes");
+        }
+        init::LineError::BadEnv(entry) => {
+            print("env: entry `");
+            console_write(entry);
+            print("` is not KEY=VALUE");
+        }
     }
 }
 
@@ -2391,6 +2688,9 @@ pub extern "C" fn _start() -> ! {
     print("  Userspace init process (PID 1)\n");
     print("=======================================\n");
     print("\n");
+
+    apply_etc_hostname();
+    start_login_records();
 
     let mut registry = ServiceRegistry::new();
 

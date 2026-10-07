@@ -15,6 +15,9 @@ guitk = { path = "../../gui/toolkit" }
 # The window and its event loop. Without this the whole program was
 # unreachable: `fn main` was empty.
 oswindow = { path = "../../gui/window" }
+# Whether a key types or is a command: a chord arrives carrying its letter,
+# and AltGr arrives as Ctrl+Alt and types.
+textline = { path = "../textline" }
 # What the clock shows, as the Settings program's Screen Lock page wrote it
 # (`lockscreen.yaml`, C-Q26).
 settingsfile = { path = "../../gui/settingsfile" }
@@ -47,6 +50,8 @@ loginusers = { path = "../../gui/loginusers" }
 # would make each assert against the other's data. Same reason `authlib` uses
 # it. See that crate's module docs.
 [dev-dependencies]
+# A settings test reads and writes a scratch folder, never the real one.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 # Key derivation is a *test* dependency now. The shipped lock screen hands the
 # typed password to `authlib` and never computes anything over it -- shape A of
 # requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md. What

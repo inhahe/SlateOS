@@ -17,6 +17,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textarea::{self, TextArea};
 use guitk::textinput::KeyEdit;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
 // ============================================================================
@@ -57,8 +59,8 @@ use yamldoc::Document;
 //
 // *The picker joins the shared popup shadow; a widget's own shadow does not.*
 // The picker is a panel that sits on top of everything else, so its
-// `rgba(0, 0, 0, 100)` became `Palette::shadow()` -- the same move
-// `context_ext` made, for the same reason.  The per-widget shadow keeps
+// `rgba(0, 0, 0, 100)` became `Palette::shadow()` -- the same move the
+// shell's other menus made, for the same reason.  The per-widget shadow keeps
 // `rgba(0, 0, 0, bg_opacity / 3)` deliberately: its depth is a function of the
 // widget's own translucency, so a widget you can see through casts a shadow you
 // can see through, and pinning it to one shared depth would make a nearly
@@ -442,6 +444,7 @@ impl WidgetInstance {
             WidgetKind::Weather => 600_000,
             WidgetKind::RssFeed => 300_000,
             WidgetKind::BatteryStatus => 30_000,
+            WidgetKind::PhotoFrame => FRAME_INTERVAL_MS,
             _ => 0,
         };
         Self {
@@ -649,10 +652,12 @@ pub struct LiveReadings {
     /// processor is idle" is a different claim from "nothing measured the
     /// processor". The widget says which.
     ///
-    /// Nothing supplies these yet -- `gui/desktop` has no `procinfo` -- so the
-    /// widget reports that it is not measuring. The day the shell reads
-    /// `/proc/stat` and `/proc/meminfo`, filling these in is the whole of the
-    /// change, and it is a typed seam rather than a plausible number.
+    /// Processor and memory are measured: the shell reads `/proc/stat` and
+    /// `/proc/meminfo` once a second (`DesktopShell::sample_system`, through
+    /// `procinfo`), and the first second reports `None` -- a fraction is a
+    /// ratio over an interval, and there is no interval yet. Disk has no
+    /// source anywhere in the tree (`DesktopShell::live_readings` says why),
+    /// so it stays `None` and the meter says it is not measuring.
     pub cpu_fraction: Option<f32>,
     /// Memory in use, 0.0 to 1.0. `None` when nothing has measured it.
     pub memory_fraction: Option<f32>,
@@ -699,6 +704,96 @@ pub struct DesktopWidgetManager {
     caret_width: f32,
     /// The icons the widgets drew, by image id, for the session to upload.
     icon_registry: crate::IconRegistry,
+    /// What each photo frame shows and wants, by its widget id: the part of
+    /// a frame that is not saved with the layout, since it is found again by
+    /// looking in the folder.
+    frames: BTreeMap<WidgetInstanceId, FrameState>,
+}
+
+/// How long a photo frame shows each picture: a gadget's pace -- slower
+/// than a slideshow over the whole screen, since a frame is read in passing.
+pub const FRAME_INTERVAL_MS: u64 = 30_000;
+
+/// The bit every photo frame's picture id carries.
+///
+/// The desktop's surface holds three kinds of picture under one set of ids,
+/// and uploading one under another's id would replace it:
+///
+/// | whose | id |
+/// |---|---|
+/// | the wallpaper's | numbered from one, far below bit 61 |
+/// | an icon's | bit 62 set (`appearance::icons::ICON_ID_TAG`), and any bits below -- 61 included |
+/// | a frame's | bit 62 clear, bit 61 set, numbered below it |
+///
+/// So bit 61 alone does not say "a frame's": an icon's id may carry it too.
+/// [`is_frame_picture`] asks both bits.
+pub const FRAME_PICTURE_TAG: u64 = 1 << 61;
+
+/// Whether `id` names a photo frame's picture -- bit 61 set and bit 62, an
+/// icon's, clear (see [`FRAME_PICTURE_TAG`]).
+#[must_use]
+pub const fn is_frame_picture(id: u64) -> bool {
+    id & appearance::icons::ICON_ID_TAG == 0 && id & FRAME_PICTURE_TAG != 0
+}
+
+/// A picture up on a photo frame: from which file, under which image id, and
+/// how many pixels it came back -- the frame fits it by its own proportions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FramePicture {
+    /// The file it was decoded from.
+    pub path: PathBuf,
+    /// The id it is uploaded under, tagged [`FRAME_PICTURE_TAG`].
+    pub image_id: u64,
+    /// Its width, in pixels, as decoded.
+    pub width: u32,
+    /// Its height, in pixels, as decoded.
+    pub height: u32,
+}
+
+/// What a photo frame shows, and what it is to show next.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FrameState {
+    /// The picture on screen, once one is up. The old one stays until the
+    /// next is: a frame going blank between pictures would flicker at every
+    /// step.
+    pub shown: Option<FramePicture>,
+    /// The picture it is to show: to be asked for while it is not the one
+    /// shown.
+    pub wanted: Option<PathBuf>,
+    /// Why it shows nothing, when it has nothing to show: no pictures in its
+    /// folder, or the one it wanted would not open.
+    pub problem: Option<String>,
+    /// Whether it has looked in its folder yet: a frame just placed looks at
+    /// once, rather than an interval later.
+    looked: bool,
+    /// Whether its interval has ended since it last looked.
+    due: bool,
+}
+
+/// The picture after `after` in `pictures` -- a folder's pictures, in the
+/// stable order they were listed in -- wrapping to the first past the last;
+/// the first when there is no `after`, or when it is gone.
+///
+/// "After" by the order, not by position: a picture added to the folder or
+/// deleted from it between two steps moves no other picture's turn.
+fn next_picture(pictures: &[PathBuf], after: Option<&Path>) -> Option<PathBuf> {
+    after
+        .and_then(|after| pictures.iter().find(|p| p.as_path() > after))
+        .or_else(|| pictures.first())
+        .cloned()
+}
+
+/// A `width` by `height` picture fitted inside the `(x, y, w, h)` box, its
+/// proportions kept and centred: where to draw it, `(x, y, w, h)`.
+fn fit_within(width: u32, height: u32, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a picture's side is at most the compositor's ceiling, exact in f32"
+    )]
+    let (pw, ph) = (width.max(1) as f32, height.max(1) as f32);
+    let scale = (w / pw).min(h / ph).max(0.0);
+    let (dw, dh) = (pw * scale, ph * scale);
+    (x + (w - dw) / 2.0, y + (h - dh) / 2.0, dw, dh)
 }
 
 /// A note open for writing: which widget, and the field its text is in.
@@ -751,6 +846,7 @@ impl DesktopWidgetManager {
             note: None,
             caret_width: guitk::textedit::CARET_WIDTH,
             icon_registry: crate::IconRegistry::default(),
+            frames: BTreeMap::new(),
         }
     }
 
@@ -957,6 +1053,43 @@ impl DesktopWidgetManager {
         NoteKey::Changed
     }
 
+    /// The open note's right-click menu (`guitk::editmenu`): Undo and Redo,
+    /// Cut, Copy, Paste, Delete and Select all, each dimmed when it would do
+    /// nothing and saying why while the pointer rests on it. `None` when no
+    /// note is open.
+    #[must_use]
+    pub fn note_edit_menu(&self) -> Option<guitk::menu::ContextMenu> {
+        self.note.as_ref().map(|note| note.area.edit_menu())
+    }
+
+    /// Do what a row of [`note_edit_menu`](Self::note_edit_menu) says to the
+    /// open note, as the key that does the same would: `Changed` when its
+    /// text changed -- the layout needs saving, the text being the widget's
+    /// at once, as a typed change's is -- else `Handled` (a row that is none
+    /// of the note's changes nothing); `NotWriting` with no note open, and
+    /// `Closed` if its widget has gone.
+    pub fn note_edit_command(&mut self, row: guitk::menu::MenuItemId) -> NoteKey {
+        let Some(id) = self.writing_note() else {
+            return NoteKey::NotWriting;
+        };
+        let Some((_, _, m)) = self.note_box(id) else {
+            // The widget has gone: nothing is open any more.
+            self.note = None;
+            return NoteKey::Closed;
+        };
+        let Some(note) = self.note.as_mut() else {
+            return NoteKey::NotWriting;
+        };
+        if note.area.edit_command(row, &m) != KeyEdit::Changed {
+            return NoteKey::Handled;
+        }
+        let text = note.area.text().to_string();
+        if let Some(w) = self.get_mut(id) {
+            w.state_text = text;
+        }
+        NoteKey::Changed
+    }
+
     /// Add a widget. Returns the instance ID, or None if rejected.
     pub fn add_widget(&mut self, kind: WidgetKind, position: GridPos) -> Option<WidgetInstanceId> {
         if self.widgets.len() >= self.max_widgets {
@@ -983,7 +1116,198 @@ impl DesktopWidgetManager {
         if self.writing_note() == Some(id) {
             self.note = None;
         }
+        // A frame's picture goes with it; the session releases the upload
+        // once no frame shows it (`frame_image_ids`).
+        self.frames.remove(&id);
         self.widgets.len() < len_before
+    }
+
+    // ---- photo frames ----
+
+    /// What the photo frame `id` shows and wants, if it is one that has
+    /// looked in its folder.
+    #[must_use]
+    pub fn frame_state(&self, id: WidgetInstanceId) -> Option<&FrameState> {
+        self.frames.get(&id)
+    }
+
+    /// The folder chosen for the photo frame `id`, if one was: kept with
+    /// the layout as the frame's state (`pathcodec`, since a folder's name
+    /// need not be text). `None` for a frame showing the Pictures folder, and
+    /// for anything that is not a photo frame.
+    #[must_use]
+    pub fn frame_folder(&self, id: WidgetInstanceId) -> Option<PathBuf> {
+        self.get(id).and_then(Self::chosen_folder)
+    }
+
+    /// The folder chosen for `w`, if it is a photo frame one was chosen for.
+    fn chosen_folder(w: &WidgetInstance) -> Option<PathBuf> {
+        (matches!(w.kind, WidgetKind::PhotoFrame) && !w.state_text.is_empty())
+            .then(|| pathcodec::decode_path(&w.state_text))
+    }
+
+    /// Show `folder` in the photo frame `id` from now on: it looks there at
+    /// once and starts at the first picture, keeping the one it shows until
+    /// that is up. Answers whether anything changed -- the layout to save.
+    pub fn set_frame_folder(&mut self, id: WidgetInstanceId, folder: &Path) -> bool {
+        let encoded = pathcodec::encode_path(folder);
+        let Some(w) = self
+            .widgets
+            .iter_mut()
+            .find(|w| w.id == id && matches!(w.kind, WidgetKind::PhotoFrame))
+        else {
+            return false;
+        };
+        if w.state_text == encoded {
+            return false;
+        }
+        w.state_text = encoded;
+        let state = self.frames.entry(id).or_default();
+        state.looked = false;
+        state.wanted = None;
+        state.problem = None;
+        true
+    }
+
+    /// Choose the next picture of each photo frame that is due one -- never
+    /// yet looked, or its interval ended since it last did: the picture after
+    /// the one it last chose, in the order `pictures` lists its folder,
+    /// wrapping at the end (`next_picture`). A picture from another folder
+    /// -- the one it showed before its folder was changed -- is not "last
+    /// chosen" here, so a new folder starts at its first.
+    ///
+    /// A frame's folder is the one chosen for it ([`frame_folder`](Self::frame_folder)),
+    /// or `default` -- the user's Pictures -- or, with neither, none: it says
+    /// so. `pictures` is the session's directory read (`ShellSession::
+    /// pictures_in`): this layer does no filesystem work of its own, which is
+    /// also what lets its tests hand it any folder they like. Each folder is
+    /// read once however many frames show it.
+    ///
+    /// A folder with no pictures leaves a frame showing nothing and saying so
+    /// -- not the last picture of a folder that has since been emptied.
+    /// Answers whether any frame's wanted picture changed.
+    pub fn step_frames(
+        &mut self,
+        default: Option<&Path>,
+        pictures: &dyn Fn(&Path) -> Vec<PathBuf>,
+    ) -> bool {
+        let mut listings: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+        let mut changed = false;
+        for w in self
+            .widgets
+            .iter()
+            .filter(|w| matches!(w.kind, WidgetKind::PhotoFrame))
+        {
+            let folder = Self::chosen_folder(w).or_else(|| default.map(Path::to_path_buf));
+            let state = self.frames.entry(w.id).or_default();
+            if state.looked && !state.due {
+                continue;
+            }
+            state.looked = true;
+            state.due = false;
+            let Some(folder) = folder else {
+                changed |= state.wanted.is_some();
+                state.shown = None;
+                state.wanted = None;
+                state.problem = Some("No Pictures folder to show".to_owned());
+                continue;
+            };
+            let listed = listings
+                .entry(folder.clone())
+                .or_insert_with(|| pictures(&folder));
+            let after = state
+                .wanted
+                .clone()
+                .or_else(|| state.shown.as_ref().map(|s| s.path.clone()))
+                .filter(|last| last.parent() == Some(folder.as_path()));
+            let next = next_picture(listed, after.as_deref());
+            if next.is_none() {
+                state.shown = None;
+                state.problem = Some(format!(
+                    "No pictures in {}",
+                    folder.file_name().map_or_else(
+                        || folder.display().to_string(),
+                        |name| Path::new(name).display().to_string()
+                    )
+                ));
+            } else {
+                state.problem = None;
+            }
+            changed |= state.wanted != next;
+            state.wanted = next;
+        }
+        changed
+    }
+
+    /// The pictures photo frames want and do not show yet, with the size
+    /// each is drawn at in pixels -- what to decode it to fit: `(frame, file,
+    /// (width, height))`.
+    #[must_use]
+    pub fn frames_to_fetch(&self) -> Vec<(WidgetInstanceId, PathBuf, (u32, u32))> {
+        self.widgets
+            .iter()
+            .filter_map(|w| {
+                let state = self.frames.get(&w.id)?;
+                let wanted = state.wanted.as_ref()?;
+                if state.shown.as_ref().is_some_and(|s| &s.path == wanted) {
+                    return None;
+                }
+                let (_, _, width, height) = self.content_of(w);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a widget's box is a few hundred pixels, positive by `content_of`"
+                )]
+                let fit = ((width.ceil() as u32).max(1), (height.ceil() as u32).max(1));
+                Some((w.id, wanted.clone(), fit))
+            })
+            .collect()
+    }
+
+    /// Whether the photo frame `id` still wants `path`: a picture decoded
+    /// for it is worth uploading only then.
+    #[must_use]
+    pub fn frame_wants(&self, id: WidgetInstanceId, path: &Path) -> bool {
+        self.frames
+            .get(&id)
+            .and_then(|s| s.wanted.as_deref())
+            .is_some_and(|wanted| wanted == path)
+    }
+
+    /// The picture the photo frame `id` wanted is up: show it, in place of
+    /// the one it showed -- which the session releases once no frame shows it
+    /// (`frame_image_ids`). Nothing when the frame is gone or wants another;
+    /// the caller asked [`frame_wants`](Self::frame_wants) first.
+    ///
+    /// What it last said needs no clearing here: the step that chose this
+    /// picture already cleared it, and a failure is only ever recorded for
+    /// the picture wanted, which is not asked for again.
+    pub fn frame_picture_ready(&mut self, id: WidgetInstanceId, picture: FramePicture) {
+        if let Some(state) = self.frames.get_mut(&id)
+            && state.wanted.as_ref() == Some(&picture.path)
+        {
+            state.shown = Some(picture);
+        }
+    }
+
+    /// The picture the photo frame `id` wanted would not open: say why, and
+    /// keep what it shows -- the next step moves on past it.
+    pub fn frame_picture_failed(&mut self, id: WidgetInstanceId, path: &Path, why: String) {
+        if let Some(state) = self.frames.get_mut(&id)
+            && state.wanted.as_deref() == Some(path)
+        {
+            state.problem = Some(why);
+        }
+    }
+
+    /// The image ids every photo frame shows: what the session keeps
+    /// uploaded, releasing the rest.
+    #[must_use]
+    pub fn frame_image_ids(&self) -> Vec<u64> {
+        self.frames
+            .values()
+            .filter_map(|s| s.shown.as_ref().map(|p| p.image_id))
+            .collect()
     }
 
     /// Move a widget to a new grid position.
@@ -1140,6 +1464,12 @@ impl DesktopWidgetManager {
             if matches!(w.kind, WidgetKind::Notes) && !w.state_text.is_empty() {
                 doc.set_str(&["widgets", &key, "text"], &w.state_text);
             }
+            // A photo frame's folder, when one was chosen for it: already in
+            // `pathcodec`'s form, which a YAML string holds whatever bytes
+            // the folder's name is.
+            if matches!(w.kind, WidgetKind::PhotoFrame) && !w.state_text.is_empty() {
+                doc.set_str(&["widgets", &key, "folder"], &w.state_text);
+            }
         }
     }
 
@@ -1155,6 +1485,9 @@ impl DesktopWidgetManager {
     /// invariant as true for a hand-written file as for a dragged one.
     pub fn read_from(&mut self, doc: &Document) {
         self.widgets.clear();
+        // The widgets come back under new ids, so what a frame showed is
+        // nobody's: the session releases it, and each frame looks afresh.
+        self.frames.clear();
         let mut keys = doc.keys(&["widgets"]);
         keys.sort();
         for key in keys {
@@ -1197,6 +1530,12 @@ impl DesktopWidgetManager {
                 && matches!(w.kind, WidgetKind::Notes)
             {
                 w.state_text = text;
+            }
+            if let Some(folder) = doc.get_str(&["widgets", &key, "folder"])
+                && let Some(w) = self.get_mut(id)
+                && matches!(w.kind, WidgetKind::PhotoFrame)
+            {
+                w.state_text = folder;
             }
         }
     }
@@ -1246,6 +1585,11 @@ impl DesktopWidgetManager {
         for w in &mut self.widgets {
             if w.needs_update(now_ms) {
                 w.last_updated = now_ms;
+                // A photo frame's interval ending is its next picture being
+                // due, chosen by `step_frames` when the session next paints.
+                if matches!(w.kind, WidgetKind::PhotoFrame) {
+                    self.frames.entry(w.id).or_default().due = true;
+                }
                 any = true;
             }
         }
@@ -1559,6 +1903,43 @@ impl DesktopWidgetManager {
                     },
                 );
                 commands.extend(tree.commands);
+            }
+            // A mat, and on it the picture, fitted by its own proportions and
+            // centred -- or, with none up, what the frame has to say: an
+            // empty folder, a file that would not open. Nothing while the
+            // first picture is still on its way, which is a moment.
+            WidgetKind::PhotoFrame => {
+                commands.push(RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: Color::rgba(p.crust.r, p.crust.g, p.crust.b, alpha),
+                    corner_radii: CornerRadii::all(4.0),
+                });
+                let state = self.frames.get(&w.id);
+                if let Some(picture) = state.and_then(|s| s.shown.as_ref()) {
+                    let (px, py, pw, ph) =
+                        fit_within(picture.width, picture.height, x, y, width, height);
+                    commands.push(RenderCommand::Image {
+                        x: px,
+                        y: py,
+                        width: pw,
+                        height: ph,
+                        image_id: picture.image_id,
+                    });
+                } else if let Some(problem) = state.and_then(|s| s.problem.as_ref()) {
+                    commands.push(RenderCommand::Text {
+                        x: x + 8.0,
+                        y: y + height / 2.0 - 7.0,
+                        text: problem.clone(),
+                        font_size: 12.0,
+                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some((width - 16.0).max(0.0)),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
             }
             WidgetKind::BatteryStatus => {
                 let b = &live.battery;
@@ -3478,5 +3859,503 @@ mod tests {
         let (mut mgr, _, _) = one_note();
         assert!(!mgr.note_press(5_000.0, 5_000.0, 1));
         assert_eq!(mgr.writing_note(), None);
+    }
+
+    // ---- photo frames ----
+
+    fn folder() -> PathBuf {
+        PathBuf::from("/home/someone/Pictures")
+    }
+
+    fn picture(name: &str) -> PathBuf {
+        folder().join(name)
+    }
+
+    /// A folder holding `names`, listed as the session lists one: sorted.
+    fn listing(names: &'static [&'static str]) -> impl Fn(&Path) -> Vec<PathBuf> {
+        move |_| {
+            let mut all: Vec<PathBuf> = names.iter().map(|n| picture(n)).collect();
+            all.sort();
+            all
+        }
+    }
+
+    /// A manager holding one photo frame, and its id.
+    fn one_frame() -> (DesktopWidgetManager, WidgetInstanceId) {
+        let mut mgr = make_mgr();
+        let id = mgr
+            .add_widget(WidgetKind::PhotoFrame, GridPos::new(0, 0))
+            .expect("fits");
+        (mgr, id)
+    }
+
+    /// The picture `path` as the session would hand it up, under `image_id`.
+    fn up(path: PathBuf, image_id: u64) -> FramePicture {
+        FramePicture {
+            path,
+            image_id: FRAME_PICTURE_TAG | image_id,
+            width: 400,
+            height: 300,
+        }
+    }
+
+    /// **A frame just placed looks at once, and wants its folder's first
+    /// picture**, to be fetched at its own size; it is due again only when
+    /// its interval ends, and then wants the next, wrapping past the last.
+    #[test]
+    fn a_frame_shows_its_folders_pictures_in_turn() {
+        let (mut mgr, id) = one_frame();
+        let list = listing(&["b.png", "a.jpg", "c.png"]);
+        assert!(mgr.step_frames(Some(&folder()), &list));
+        assert_eq!(mgr.frame_state(id).unwrap().wanted, Some(picture("a.jpg")));
+        let fetch = mgr.frames_to_fetch();
+        assert_eq!(fetch.len(), 1);
+        let (_, _, content_w, content_h) = mgr.content_rect(id).unwrap();
+        assert_eq!(fetch[0].0, id);
+        assert_eq!(fetch[0].1, picture("a.jpg"));
+        assert_eq!(
+            fetch[0].2,
+            (content_w.ceil() as u32, content_h.ceil() as u32),
+            "fetched at the size it is drawn"
+        );
+
+        // Not due: nothing moves, and the folder is not read.
+        let read = std::cell::Cell::new(0);
+        let counting = |p: &Path| {
+            read.set(read.get() + 1);
+            list(p)
+        };
+        assert!(!mgr.step_frames(Some(&folder()), &counting));
+        assert_eq!(read.get(), 0, "the folder was read with nothing due");
+
+        mgr.frame_picture_ready(id, up(picture("a.jpg"), 1));
+        assert!(
+            mgr.frames_to_fetch().is_empty(),
+            "the one shown is fetched again"
+        );
+        // A moment short of the interval is not due; the interval is.
+        assert!(!mgr.tick(FRAME_INTERVAL_MS - 1));
+        let mut now = 0;
+        for (n, want) in ["b.png", "c.png", "a.jpg"].into_iter().enumerate() {
+            now += FRAME_INTERVAL_MS;
+            assert!(mgr.tick(now), "the frame was not due at {now}");
+            assert!(mgr.step_frames(Some(&folder()), &list));
+            assert_eq!(mgr.frame_state(id).unwrap().wanted, Some(picture(want)));
+            // Stepped once for the interval, not at every paint after it.
+            assert!(
+                !mgr.step_frames(Some(&folder()), &list),
+                "the frame moved on again with no interval ended"
+            );
+            assert_eq!(mgr.frame_state(id).unwrap().wanted, Some(picture(want)));
+            mgr.frame_picture_ready(id, up(picture(want), n as u64 + 2));
+        }
+    }
+
+    /// **"Next" is by name, not by place**: a picture added to the folder or
+    /// taken from it between two steps moves no other picture's turn.
+    #[test]
+    fn the_next_picture_is_the_next_name_not_the_next_place() {
+        let names = |n: &[&str]| n.iter().map(|x| picture(x)).collect::<Vec<_>>();
+        let a = picture("a.png");
+        assert_eq!(
+            next_picture(&names(&["a.png", "c.png"]), Some(&a)),
+            Some(picture("c.png"))
+        );
+        // "b" arrived: it is next after "a".
+        assert_eq!(
+            next_picture(&names(&["a.png", "b.png", "c.png"]), Some(&a)),
+            Some(picture("b.png"))
+        );
+        // "a" itself was deleted: the one after where it was.
+        assert_eq!(
+            next_picture(&names(&["b.png", "c.png"]), Some(&a)),
+            Some(picture("b.png"))
+        );
+        // Past the last, round to the first; with nothing before, the first.
+        assert_eq!(
+            next_picture(&names(&["a.png", "b.png"]), Some(&picture("z.png"))),
+            Some(a.clone())
+        );
+        assert_eq!(next_picture(&names(&["a.png"]), None), Some(a));
+        assert_eq!(next_picture(&[], None), None);
+    }
+
+    /// **An empty folder says so, and a frame that had a picture lets it
+    /// go** rather than go on showing a picture from a folder since emptied.
+    #[test]
+    fn an_empty_folder_says_so_and_shows_nothing() {
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&["a.png"]));
+        mgr.frame_picture_ready(id, up(picture("a.png"), 1));
+        assert_eq!(mgr.frame_image_ids(), [FRAME_PICTURE_TAG | 1]);
+        mgr.tick(u64::MAX / 2);
+        mgr.step_frames(Some(&folder()), &listing(&[]));
+        let state = mgr.frame_state(id).unwrap();
+        assert_eq!(state.shown, None);
+        assert_eq!(state.wanted, None);
+        assert_eq!(state.problem.as_deref(), Some("No pictures in Pictures"));
+        assert!(
+            mgr.frame_image_ids().is_empty(),
+            "the picture is still held"
+        );
+
+        let drawn = mgr.render(&Palette::for_mode(false), &sample_readings());
+        assert!(
+            drawn.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "No pictures in Pictures")),
+            "the frame did not say why it is empty"
+        );
+        assert!(!drawn.iter().any(
+            |c| matches!(c, RenderCommand::Image { image_id, .. } if is_frame_picture(*image_id))
+        ));
+    }
+
+    /// **A picture is shown only while it is the one wanted, fitted inside
+    /// the frame by its own proportions**; one that would not open is said,
+    /// and the one shown before stays.
+    #[test]
+    fn a_frame_shows_only_the_picture_it_wants_fitted() {
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&["a.png", "b.png"]));
+        assert!(mgr.frame_wants(id, &picture("a.png")));
+        assert!(!mgr.frame_wants(id, &picture("b.png")));
+        mgr.frame_picture_ready(id, up(picture("b.png"), 9));
+        assert_eq!(
+            mgr.frame_state(id).unwrap().shown,
+            None,
+            "an unwanted picture was shown"
+        );
+
+        let wide = FramePicture {
+            width: 800,
+            height: 200,
+            ..up(picture("a.png"), 1)
+        };
+        mgr.frame_picture_ready(id, wide);
+        let (cx, cy, cw, ch) = mgr.content_rect(id).unwrap();
+        let drawn = mgr.render(&Palette::for_mode(false), &sample_readings());
+        let image = drawn
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    image_id,
+                } if is_frame_picture(*image_id) => Some((*x, *y, *width, *height, *image_id)),
+                _ => None,
+            })
+            .expect("the picture is drawn");
+        let (x, y, w, h, image_id) = image;
+        assert_eq!(image_id, FRAME_PICTURE_TAG | 1);
+        assert!(
+            (w / h - 4.0).abs() < 0.01,
+            "its proportions were not kept: {w}x{h}"
+        );
+        assert!(
+            (w - cw).abs() < 0.01,
+            "a wide picture fills the frame's width"
+        );
+        assert!(x >= cx - 0.01 && y >= cy - 0.01 && y + h <= cy + ch + 0.01);
+        assert!((y - (cy + (ch - h) / 2.0)).abs() < 0.01, "not centred");
+
+        mgr.tick(u64::MAX / 2);
+        mgr.step_frames(Some(&folder()), &listing(&["a.png", "b.png"]));
+        mgr.frame_picture_failed(id, &picture("b.png"), "b.png: not a picture".to_owned());
+        let state = mgr.frame_state(id).unwrap();
+        assert_eq!(state.problem.as_deref(), Some("b.png: not a picture"));
+        assert_eq!(
+            state.shown.as_ref().map(|s| s.image_id),
+            Some(FRAME_PICTURE_TAG | 1)
+        );
+        // A failure for a picture no longer wanted says nothing.
+        mgr.frame_picture_failed(id, &picture("a.png"), "stale".to_owned());
+        assert_ne!(
+            mgr.frame_state(id).unwrap().problem.as_deref(),
+            Some("stale")
+        );
+        // The next picture that does open clears what the last one said.
+        mgr.tick(u64::MAX / 2 + FRAME_INTERVAL_MS);
+        mgr.step_frames(Some(&folder()), &listing(&["a.png", "b.png"]));
+        mgr.frame_picture_ready(id, up(picture("a.png"), 3));
+        assert_eq!(
+            mgr.frame_state(id).unwrap().problem,
+            None,
+            "a stale failure outlived a picture"
+        );
+    }
+
+    /// **A frame removed, or a layout read afresh, lets its picture go**:
+    /// the session keeps uploaded only what some frame shows.
+    #[test]
+    fn a_removed_frame_lets_its_picture_go() {
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&["a.png"]));
+        mgr.frame_picture_ready(id, up(picture("a.png"), 1));
+        assert!(mgr.remove_widget(id));
+        assert!(mgr.frame_image_ids().is_empty());
+        assert!(mgr.frame_state(id).is_none());
+
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&["a.png"]));
+        mgr.frame_picture_ready(id, up(picture("a.png"), 1));
+        mgr.read_from(&Document::parse(""));
+        assert!(mgr.frame_image_ids().is_empty());
+    }
+
+    /// **A frame shows the folder chosen for it, starting at its first
+    /// picture** -- not at the one after the picture it showed from its old
+    /// folder, which it keeps until the new one is up -- and each folder is
+    /// read once however many frames show it.
+    #[test]
+    fn a_frame_shows_the_folder_chosen_for_it() {
+        let (mut mgr, id) = one_frame();
+        let other = mgr
+            .find_free_position(WidgetKind::PhotoFrame.default_size())
+            .and_then(|at| mgr.add_widget(WidgetKind::PhotoFrame, at))
+            .expect("room for a second frame");
+        let trips = PathBuf::from("/home/someone/Trips");
+        let reads = std::cell::RefCell::new(Vec::new());
+        let lister = |f: &Path| {
+            reads.borrow_mut().push(f.to_path_buf());
+            ["x.png", "y.png"].iter().map(|n| f.join(n)).collect()
+        };
+        mgr.step_frames(Some(&folder()), &lister);
+        assert_eq!(*reads.borrow(), [folder()], "the folder was read per frame");
+        mgr.frame_picture_ready(id, up(folder().join("x.png"), 1));
+
+        assert!(mgr.set_frame_folder(id, &trips));
+        assert!(
+            !mgr.set_frame_folder(id, &trips),
+            "the same folder again changed something"
+        );
+        assert_eq!(mgr.frame_folder(id), Some(trips.clone()));
+        assert_eq!(
+            mgr.frame_folder(other),
+            None,
+            "the other frame's folder moved too"
+        );
+        mgr.step_frames(Some(&folder()), &lister);
+        let state = mgr.frame_state(id).unwrap();
+        assert_eq!(
+            state.wanted,
+            Some(trips.join("x.png")),
+            "not the new folder's first"
+        );
+        assert_eq!(
+            state.shown.as_ref().map(|s| s.path.clone()),
+            Some(folder().join("x.png")),
+            "the old picture went before the new one was up"
+        );
+        assert_eq!(reads.borrow().last(), Some(&trips));
+        assert_eq!(
+            mgr.frame_state(other).unwrap().wanted,
+            Some(folder().join("x.png"))
+        );
+    }
+
+    /// **A chosen folder is kept with the layout** -- whatever its name,
+    /// the percent and the space included -- and read back to the frame it
+    /// was chosen for. A widget that is not a frame has no folder to set.
+    #[test]
+    fn a_frames_folder_is_kept_with_the_layout() {
+        let (mut mgr, id) = one_frame();
+        let odd = PathBuf::from("/home/someone/My 100% Photos");
+        assert!(mgr.set_frame_folder(id, &odd));
+        let mut doc = Document::parse("");
+        mgr.write_into(&mut doc);
+        let saved = doc
+            .keys(&["widgets"])
+            .into_iter()
+            .find_map(|k| doc.get_str(&["widgets", &k, "folder"]))
+            .expect("the folder was not saved");
+        assert_eq!(saved, pathcodec::encode_path(&odd));
+
+        let mut back = make_mgr();
+        back.read_from(&doc);
+        let frame = back.all_widgets()[0].id;
+        assert_eq!(back.frame_folder(frame), Some(odd));
+
+        let clock = mgr
+            .find_free_position(WidgetKind::Clock.default_size())
+            .and_then(|at| mgr.add_widget(WidgetKind::Clock, at))
+            .expect("room for a clock");
+        assert!(!mgr.set_frame_folder(clock, Path::new("/tmp")));
+        assert_eq!(mgr.frame_folder(clock), None);
+    }
+
+    /// A lister that answers `x.png` and `y.png` in whatever folder it is
+    /// asked about, and records each folder asked.
+    fn two_pictures_in(reads: &std::cell::RefCell<Vec<PathBuf>>) -> impl Fn(&Path) -> Vec<PathBuf> {
+        move |f: &Path| {
+            reads.borrow_mut().push(f.to_path_buf());
+            ["x.png", "y.png"].iter().map(|n| f.join(n)).collect()
+        }
+    }
+
+    /// **Two frames showing two folders, due at once, each get their own
+    /// folder's pictures** -- each folder read once -- and not the first
+    /// folder's listing handed to both.
+    #[test]
+    fn two_frames_due_together_read_their_own_folders() {
+        let (mut mgr, id) = one_frame();
+        let other = mgr
+            .find_free_position(WidgetKind::PhotoFrame.default_size())
+            .and_then(|at| mgr.add_widget(WidgetKind::PhotoFrame, at))
+            .expect("room for a second frame");
+        let trips = PathBuf::from("/home/someone/Trips");
+        assert!(mgr.set_frame_folder(id, &trips));
+        let reads = std::cell::RefCell::new(Vec::new());
+        mgr.step_frames(Some(&folder()), &two_pictures_in(&reads));
+        assert_eq!(
+            mgr.frame_state(id).unwrap().wanted,
+            Some(trips.join("x.png"))
+        );
+        assert_eq!(
+            mgr.frame_state(other).unwrap().wanted,
+            Some(folder().join("x.png"))
+        );
+        let mut read = reads.borrow().clone();
+        read.sort();
+        assert_eq!(read, [folder(), trips], "each folder read once");
+    }
+
+    /// **A frame moved from a folder to the one above it starts at the
+    /// first picture there** -- not at the picture that sorts after the
+    /// sub-folder it was showing, which in the folder above is somewhere in
+    /// the middle.
+    #[test]
+    fn a_frame_moved_up_a_folder_starts_at_the_top() {
+        let (mut mgr, id) = one_frame();
+        let below = folder().join("m");
+        assert!(mgr.set_frame_folder(id, &below));
+        let names = |f: &Path| -> Vec<PathBuf> {
+            if f == folder() {
+                // "a.png" sorts before the sub-folder "m", "z.png" after it.
+                vec![folder().join("a.png"), folder().join("z.png")]
+            } else {
+                vec![f.join("x.png")]
+            }
+        };
+        mgr.step_frames(Some(&folder()), &names);
+        mgr.frame_picture_ready(id, up(below.join("x.png"), 1));
+
+        assert!(mgr.set_frame_folder(id, &folder()));
+        mgr.step_frames(Some(&folder()), &names);
+        assert_eq!(
+            mgr.frame_state(id).unwrap().wanted,
+            Some(folder().join("a.png")),
+            "carried on from the old folder's place"
+        );
+    }
+
+    /// **A new folder drops what the old one had in hand**: a picture of the
+    /// old folder still being decoded is no longer wanted, and what the old
+    /// folder said -- that it was empty -- is no longer said, from the
+    /// moment the folder changes rather than from the next step.
+    #[test]
+    fn a_new_folder_drops_the_old_ones_picture_and_its_word() {
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&["a.png"]));
+        assert!(mgr.frame_wants(id, &picture("a.png")));
+        assert!(mgr.set_frame_folder(id, Path::new("/home/someone/Trips")));
+        assert!(
+            !mgr.frame_wants(id, &picture("a.png")),
+            "the old folder's picture would still be shown when it arrived"
+        );
+        assert!(mgr.frames_to_fetch().is_empty());
+
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&[]));
+        assert!(mgr.frame_state(id).unwrap().problem.is_some());
+        assert!(mgr.set_frame_folder(id, Path::new("/home/someone/Trips")));
+        assert_eq!(mgr.frame_state(id).unwrap().problem, None);
+    }
+
+    /// **A layout's `folder` belongs to photo frames**: one found under a
+    /// note -- a hand-edited file, or a widget whose kind was changed -- is
+    /// not taken for the note's words.
+    #[test]
+    fn a_folder_under_a_note_in_the_layout_is_not_its_words() {
+        let (mut mgr, _, (x, y)) = one_note();
+        assert!(mgr.note_press(x, y, 1));
+        mgr.note_key(&typed("shopping"));
+        let mut doc = Document::parse("");
+        mgr.write_into(&mut doc);
+        let key = doc
+            .keys(&["widgets"])
+            .into_iter()
+            .next()
+            .expect("the note was saved");
+        doc.set_str(&["widgets", &key, "folder"], "/home/someone/Trips");
+
+        let mut back = make_mgr();
+        back.read_from(&doc);
+        let read = back.all_widgets()[0].id;
+        assert_eq!(
+            back.get(read).map(|w| w.state_text.as_str()),
+            Some("shopping")
+        );
+        assert_eq!(back.frame_folder(read), None);
+    }
+
+    /// **Only a photo frame has a folder.** A note keeps its words where a
+    /// frame keeps its folder (`state_text`), so a note whose words read as
+    /// a path must still answer no folder -- and cannot be given one.
+    #[test]
+    fn a_notes_words_are_not_a_folder() {
+        let (mut mgr, note, (x, y)) = one_note();
+        assert!(mgr.note_press(x, y, 1));
+        mgr.note_key(&typed("/home/someone/Trips"));
+        assert_eq!(
+            mgr.get(note).map(|w| w.state_text.as_str()),
+            Some("/home/someone/Trips"),
+            "the note did not take the words, so this proves nothing"
+        );
+        assert_eq!(mgr.frame_folder(note), None);
+        assert!(!mgr.set_frame_folder(note, Path::new("/tmp")));
+        assert_eq!(
+            mgr.get(note).map(|w| w.state_text.as_str()),
+            Some("/home/someone/Trips"),
+            "setting a folder on a note overwrote its words"
+        );
+    }
+
+    /// **With no Pictures folder and none chosen, a frame says so**, and
+    /// reads nothing.
+    #[test]
+    fn a_frame_with_no_folder_says_so() {
+        let (mut mgr, id) = one_frame();
+        let read = std::cell::Cell::new(false);
+        mgr.step_frames(None, &|_| {
+            read.set(true);
+            Vec::new()
+        });
+        assert!(!read.get(), "a folder was read with none to read");
+        let state = mgr.frame_state(id).unwrap();
+        assert_eq!(state.problem.as_deref(), Some("No Pictures folder to show"));
+        assert_eq!(state.wanted, None);
+    }
+
+    /// **A frame is due at its interval, and its tag keeps its pictures
+    /// apart from the icons' and the wallpaper's**.
+    #[test]
+    fn a_frame_is_due_at_its_interval_under_its_own_tag() {
+        let (mgr, id) = one_frame();
+        let w = mgr.get(id).unwrap();
+        assert_eq!(w.update_interval_ms, FRAME_INTERVAL_MS);
+        // Every id a frame is given is a frame's, and no icon's is -- though
+        // an icon's may carry bit 61 below its own tag.
+        let frame_ids = [
+            FRAME_PICTURE_TAG | 1,
+            FRAME_PICTURE_TAG | (FRAME_PICTURE_TAG - 1),
+        ];
+        assert!(frame_ids.into_iter().all(is_frame_picture));
+        let icon = appearance::icons::ICON_ID_TAG | FRAME_PICTURE_TAG | 7;
+        assert!(!is_frame_picture(icon), "an icon's id read as a frame's");
+        assert!(
+            !is_frame_picture(1) && !is_frame_picture(u64::from(u32::MAX)),
+            "a wallpaper's id read as a frame's"
+        );
     }
 }

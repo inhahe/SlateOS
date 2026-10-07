@@ -8,11 +8,14 @@ lacks some of them (`-I posix/include` -- zig's driver searches its own libc
 headers before any `-isystem` directory); the overlay header includes musl's
 (`#include_next`) and declares the rest, under the feature macros
 glibc declares them under. It also has whole headers for the families musl
-has none of (<fts.h>, <error.h>, <execinfo.h> ...), and one in place of musl's:
-<glob.h>, whose glob_t must name the fields musl's hides (a struct is declared
-once, so it cannot be musl's with more after it). A C program written for
-glibc compiles against it, then, as it does against glibc -- which is the
-claim this gate holds it to.
+has none of (<fts.h>, <error.h>, <execinfo.h> ...), and two in place of
+musl's, because a struct is declared once and so cannot be musl's with more
+after it: <glob.h>, whose glob_t must name the fields musl's hides, and
+<crypt.h>, whose struct crypt_data is libxcrypt's 32 KiB rather than musl's
+260 bytes. (glibc 2.39 has no <crypt.h>: a glibc system's is libxcrypt's,
+and so is the reference's, below.) A C program written for glibc compiles
+against it, then, as it does against glibc -- which is the claim this gate
+holds it to.
 
 What it checks
 --------------
@@ -178,6 +181,14 @@ OVERLAY_TYPES: dict[str, str] = {
     "regmatch_t": "regex.h",
     "struct obstack": "obstack.h",
     "struct _obstack_chunk": "obstack.h",
+    "struct argp_option": "argp.h",
+    "struct argp": "argp.h",
+    "struct argp_child": "argp.h",
+    "struct argp_state": "argp.h",
+    "struct printf_info": "printf.h",
+    "struct mount_attr": "sys/mount.h",
+    "struct prof": "sys/profil.h",
+    "struct crypt_data": "crypt.h",
 }
 
 # C type -> (glibc's layout as the reference has it, the overlay's, why), each
@@ -231,8 +242,14 @@ TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t", "utmp": "utm
 # compiler's own record, and a probe that names `struct __va_list_tag`
 # declares a new, incomplete struct of that name instead, which no `va_list`
 # is compatible with. (<stdio.h>'s obstack_vprintf was the overlay's first
-# declaration with one, 2026-09-30.)
-TYPE_PHRASES = {"union pthread_attr_t": "pthread_attr_t", "struct __va_list_tag *": "va_list"}
+# declaration with one, 2026-09-30.) A pointer to one -- `va_list *`, which
+# clang writes `struct __va_list_tag (*)[1]` -- is said as `va_list *`, for
+# the same reason (<printf.h>'s printf_va_arg_function, 2026-10-05).
+TYPE_PHRASES = {
+    "union pthread_attr_t": "pthread_attr_t",
+    "struct __va_list_tag *": "va_list",
+    "struct __va_list_tag (*)[1]": "va_list *",
+}
 
 # name -> (glibc's type as the reference has it, the overlay's in musl's
 # names, why they differ): where the two libraries' typedefs are of different
@@ -246,6 +263,12 @@ TYPE_OVERRIDES: dict[str, tuple[str, str, str]] = {
         "int (pthread_t, void **, clockid_t, const struct timespec *)",
         "glibc's pthread_t is `unsigned long`, musl's `struct __pthread *`: a thread's "
         "8-byte handle either way",
+    ),
+    "pthread_sigqueue": (
+        "int (unsigned long, int, union sigval)",
+        "int (pthread_t, int, union sigval)",
+        "as pthread_clockjoin_np's: glibc's pthread_t is `unsigned long`, musl's "
+        "`struct __pthread *`",
     ),
     # And the GNU regex calls, whose regoff_t is wider on purpose: POSIX's,
     # as wide as ssize_t, where glibc's default is an int -- glibc's own

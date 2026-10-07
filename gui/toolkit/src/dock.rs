@@ -57,7 +57,9 @@ use crate::tabs::{TAB_BAR_HEIGHT, Tab, TabPosition, TabRect, TabView};
 pub const DRAG_THRESHOLD: f32 = 5.0;
 
 /// The smallest a group may be made, along either axis, by dragging a
-/// divider: its tab bar and a little of its contents.
+/// divider: its tab bar and a little of its contents. At the default text
+/// size: a drag holds groups to it at the user's, as the bar grows with it
+/// ([`crate::text::scaled`]).
 pub const MIN_GROUP: f32 = TAB_BAR_HEIGHT + 48.0;
 
 /// The share of a group's contents, from each edge, where a dropped tab
@@ -878,7 +880,7 @@ impl Dock {
         };
         match self.node_mut(split) {
             Some(Node::Split { fractions, .. }) => {
-                let min = vec![MIN_GROUP; fractions.len()];
+                let min = vec![crate::text::scaled(MIN_GROUP); fractions.len()];
                 splitter::resize(fractions, index, position, span, splitter::DIVIDER, &min)
             }
             _ => false,
@@ -1377,7 +1379,7 @@ impl Layout {
 fn lay_out(node: &Node, area: Rect, kinds: &[PanelKind], path: &mut Vec<usize>, out: &mut Layout) {
     match node {
         Node::Group(group) => {
-            let bar = TAB_BAR_HEIGHT.min(area.h);
+            let bar = crate::tabs::bar_height().min(area.h);
             let strip = Rect::new(area.x, area.y, area.w, bar);
             let content = Rect::new(area.x, area.y + bar, area.w, (area.h - bar).max(0.0));
             let tabs = tab_view(group, kinds).tab_rects(strip.x, strip.y);

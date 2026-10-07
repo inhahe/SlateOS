@@ -97,6 +97,36 @@ MUTATIONS = [
         "                let _ = over;",
         ["the_pointer_lights_the_tab_it_is_over"],
     ),
+    (
+        'an announced change is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['a_unit_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['a_unit_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read starts from the units it had, so a deleted file keeps them',
+        '        let before = std::mem::take(&mut self.settings);',
+        '        let before = self.settings.clone();',
+        ['a_unit_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != self.settings\n    }',
+        '        false\n    }',
+        ['a_unit_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        "a chord works the window's keys",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_windows'],
+    ),
 ]
 
 if __name__ == "__main__":

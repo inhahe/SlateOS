@@ -1799,6 +1799,9 @@ pub struct QrApp {
     color_dialog: Option<(Swatch, ColorPickerDialog)>,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
+    /// The user's focus width, which the input boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
     /// Every box the last paint recorded, for hover and the wheel.
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder.
@@ -1847,6 +1850,7 @@ impl QrApp {
             picker: FilePicker::default(),
             color_dialog: None,
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
         }
@@ -3191,20 +3195,19 @@ impl QrApp {
             max_width: Some(rect.w),
             overflow: TextOverflow::Ellipsis,
         });
-        let mut paint = self.palette.surface_paint(Surface::Card);
-        paint.border = Some(if focused {
-            self.palette.blue
-        } else {
-            paint.border.unwrap_or(self.palette.surface2)
-        });
-        self.palette.push_paint_radii(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             f,
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            CornerRadii::all(CORNER_RADIUS),
-            paint,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(field)),
+                focused,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
         );
         let value = if focused && self.editor.text() == self.field_text(field) {
             self.editor.text()
@@ -3229,10 +3232,17 @@ impl QrApp {
                 &mut tree,
                 &textedit::SingleLine {
                     text: value,
+                    // An idle box shows the start of its text, as
+                    // `place_caret` measures a press on one: drawn with the
+                    // caret at the end, a long text was scrolled to its end,
+                    // and a press landed as many characters from what was
+                    // under it as the scroll had hidden.
                     cursor: if editing {
                         self.editor.cursor()
-                    } else {
+                    } else if focused {
                         TextCursor::from(value.len())
+                    } else {
+                        TextCursor::default()
                     },
                     selection_anchor: if editing {
                         self.editor.selection_anchor()
@@ -3611,6 +3621,10 @@ impl QrApp {
 impl App for QrApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5008,6 +5022,74 @@ mod tests {
 
     use guitk::probe::{self, Probe};
 
+    /// The input boxes are the toolkit's fields (lane C,
+    /// c-e-a-theme-can-shape-the-controls): the one the keys type into marked
+    /// at the user's focus width, the one under the pointer lit.
+    #[test]
+    fn the_input_boxes_are_the_toolkits_fields() {
+        let mut app = QrApp::new();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        probe::click(&mut app, Target::Mode(InputMode::Wifi));
+        let draws = |app: &QrApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame(app.window_width, app.window_height);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let ssid = probe::rect_of(&app, Target::Field(Field::Ssid)).expect("the network name");
+        let password = probe::rect_of(&app, Target::Field(Field::Password)).expect("the password");
+        assert_eq!(app.focused_field(), Field::Ssid);
+        let keyed = guitk::field::State {
+            focused: true,
+            ..guitk::field::State::default()
+        };
+        assert!(
+            draws(&app, ssid, keyed),
+            "the box the keys type into is not marked at the user's width"
+        );
+        let (x, y) = password.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..guitk::field::State::default()
+        };
+        assert!(
+            draws(&app, password, lit),
+            "the box under the pointer is not lit"
+        );
+        assert!(
+            draws(&app, ssid, keyed),
+            "the box the pointer left is still lit"
+        );
+    }
+
     impl Probe for QrApp {
         type Target = Target;
         type Outcome = EventResult;
@@ -5295,6 +5377,50 @@ mod tests {
         app.handle_key(&ctrl_key(Key::A));
         app.handle_key(&ctrl_key(Key::X));
         assert!(app.vcard_info.first_name.is_empty(), "cut left the text");
+    }
+
+    /// **A press in an idle box lands on the character drawn under it**,
+    /// however long the text. The idle box was drawn with its caret at the
+    /// end, so a text longer than the box showed its end -- and a press was
+    /// measured as if it showed its start, putting the caret as many
+    /// characters off as the scroll had hidden.
+    #[test]
+    fn a_press_in_an_idle_box_lands_on_the_character_drawn_under_it() {
+        let mut app = QrApp::new();
+        probe::click(&mut app, Target::Mode(InputMode::VCard));
+        let long = "a-name-far-longer-than-its-box-will-ever-show-at-once";
+        app.vcard_info.email = String::from(long);
+        let rect = probe::rect_of(&app, Target::Field(Field::Email)).expect("the email box");
+        let frame = probe::Probe::draw(&app, <QrApp as probe::Probe>::SIZE);
+        let origin = frame
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::RichText { text, x, .. } if text == long => Some(*x),
+                _ => None,
+            })
+            .expect("the email is drawn");
+        assert!(
+            (origin - (rect.x + 8.0)).abs() < 0.5,
+            "the idle box is drawn scrolled: its text starts at {origin}, the box at {}",
+            rect.x + 8.0
+        );
+
+        // A press just inside the box's left edge: before the first
+        // character drawn there, which is the text's first.
+        let left = MouseEvent {
+            x: rect.x + 9.0,
+            y: rect.centre().1,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        app.handle_event(&Event::Mouse(left));
+        assert_eq!(app.focused_field(), Field::Email);
+        probe::type_str(&mut app, "X");
+        assert!(
+            app.vcard_info.email.starts_with("Xa-name"),
+            "the caret went somewhere else: {}",
+            app.vcard_info.email
+        );
     }
 
     #[test]

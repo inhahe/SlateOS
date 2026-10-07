@@ -81,18 +81,18 @@ const DIR_BUF_INITIAL: usize = 8 * 1024;
 /// nowhere to put it and `linux_dirent64` has no such field either, so
 /// keeping it would be an unread copy.  It is still accounted for in
 /// [`PackedEntry::record_len`], which is what the caller advances by.
-struct PackedEntry<'a> {
+pub(crate) struct PackedEntry<'a> {
     /// Kernel type code — one of the `KERNEL_TYPE_*` constants below, which
     /// is **not** a `DT_*` value; run it through [`kernel_type_to_dt`].
-    kernel_type: u8,
+    pub(crate) kernel_type: u8,
     /// The entry's name, exactly as the filesystem stores it.  Not
     /// NUL-terminated and not required to be UTF-8.
-    name: &'a [u8],
+    pub(crate) name: &'a [u8],
     /// The filesystem's inode number, or `0` where it has no stable
     /// per-object identity.  Passed to callers verbatim; see the module doc.
-    ino: u64,
+    pub(crate) ino: u64,
     /// Bytes this record occupies, i.e. how far to advance to reach the next.
-    record_len: usize,
+    pub(crate) record_len: usize,
 }
 
 /// Decode the record at the front of `buf`, if a whole one is there.
@@ -106,7 +106,7 @@ struct PackedEntry<'a> {
 ///
 /// A pure function over bytes so it can be tested on the host, where the
 /// syscall that produces these records answers `ENOSYS` and cannot be.
-fn decode_packed_entry(buf: &[u8]) -> Option<PackedEntry<'_>> {
+pub(crate) fn decode_packed_entry(buf: &[u8]) -> Option<PackedEntry<'_>> {
     let kernel_type = *buf.first()?;
     let name_len_bytes: [u8; 4] = buf.get(1..5)?.try_into().ok()?;
     let name_len = usize::try_from(u32::from_le_bytes(name_len_bytes)).ok()?;
@@ -331,6 +331,31 @@ impl Dir {
 // ---------------------------------------------------------------------------
 // Reading a listing through a descriptor
 // ---------------------------------------------------------------------------
+
+/// The listing of the directory of descriptors, in a `malloc`ed buffer as
+/// [`slurp_listing`] returns the kernel's: `.`, `..`, and one link per open
+/// descriptor, named by its number (`crate::fdname::listing`). Sized for a
+/// full table, so a descriptor opened while it is made cannot overrun it.
+fn descriptor_listing() -> Option<(*mut u8, usize)> {
+    let cap = crate::fdname::listing_len(crate::fdtable::MAX_FDS)?;
+    let buf = crate::malloc::malloc(cap);
+    if buf.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return None;
+    }
+    // SAFETY: `malloc` just returned `cap` bytes at `buf`, owned here.
+    let out = unsafe { core::slice::from_raw_parts_mut(buf, cap) };
+    let max = i32::try_from(crate::fdtable::MAX_FDS).unwrap_or(i32::MAX);
+    let open = (0..max).filter(|&fd| crate::fdtable::get_fd(fd).is_some());
+    if let Some(len) = crate::fdname::listing(open, out) {
+        return Some((buf, len));
+    }
+    // Unreachable: the buffer holds a full table's worth.
+    // SAFETY: `buf` came from `malloc` above and is not published.
+    unsafe { crate::malloc::free(buf) };
+    errno::set_errno(errno::ENOMEM);
+    None
+}
 
 /// Read the complete listing of the directory `handle` denotes.
 ///
@@ -997,8 +1022,18 @@ pub extern "C" fn fdopendir(fd: i32) -> *mut Dir {
 
     // Read the listing *before* claiming a pool slot, so a slow syscall never
     // holds one of the eight streams hostage and a failure needs no unwind.
-    let Some((buf, len)) = slurp_listing(handle) else {
-        return core::ptr::null_mut(); // errno set by `slurp_listing`.
+    //
+    // The directory of descriptors lists this process's descriptors, which
+    // only this library knows (`crate::fdname`) -- not the kernel's
+    // `/proc/<pid>/fd` it was opened on, which lists nothing for a native
+    // process.
+    let listed = if crate::fdname::is_descriptor_dir(fd) {
+        descriptor_listing()
+    } else {
+        slurp_listing(handle)
+    };
+    let Some((buf, len)) = listed else {
+        return core::ptr::null_mut(); // errno set by the listing.
     };
 
     let dir_ptr = alloc_dir();

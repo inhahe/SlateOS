@@ -14,6 +14,10 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+TREE = "a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"
+CTRL_Y = "ctrl_z_and_ctrl_y_take_back_and_make_again"
+HELD = "a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_games"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # -- Layout -------------------------------------------------------
@@ -311,14 +315,14 @@ MUTATIONS = [
     ),
     (
         "a push is not counted as a push",
-        "            self.pushes = self.pushes.saturating_add(1);",
-        "",
+        "            self.pushes = self.pushes.saturating_add(1);\n        }\n        self.history.record(",
+        "        }\n        self.history.record(",
         ["a_crate_with_floor_behind_it_is_pushed_and_counts_a_push"],
     ),
     (
         "a move is not counted as a move",
-        "        self.moves = self.moves.saturating_add(1);",
-        "",
+        "        self.player = dest;\n        self.moves = self.moves.saturating_add(1);",
+        "        self.player = dest;",
         ["a_step_onto_floor_moves_the_player_and_counts_a_move"],
     ),
     (
@@ -357,10 +361,10 @@ MUTATIONS = [
     # -- Undo ---------------------------------------------------------
     (
         "undo on an empty stack claims to have taken a move back",
-        "        let Some(entry) = self.undo_stack.pop_back() else {\n"
+        "        let Some(entry) = self.history.undo() else {\n"
         "            return false;\n"
         "        };",
-        "        let Some(entry) = self.undo_stack.pop_back() else {\n"
+        "        let Some(entry) = self.history.undo() else {\n"
         "            return true;\n"
         "        };",
         ["undo_on_an_untouched_level_does_nothing_and_says_so"],
@@ -391,16 +395,14 @@ MUTATIONS = [
     ),
     (
         "the move is never recorded, so nothing can be undone",
-        "        self.undo_stack.push_back(UndoEntry {\n            player: self.player,\n            push,\n        });",
+        "        self.history.record(UndoEntry {\n            player: self.player,\n            dest,\n            push,\n        });",
         "",
         ["undo_takes_back_a_step"],
     ),
     (
         "the undo stack grows without a cap",
-        "        if self.undo_stack.len() > MAX_UNDO {\n"
-        "            self.undo_stack.pop_front();\n"
-        "        }",
-        "",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO + 100) {",
         ["the_undo_stack_stops_growing_at_its_cap"],
     ),
     # -- Winning ------------------------------------------------------
@@ -667,15 +669,15 @@ MUTATIONS = [
         ["a_warehouse_shortcut_with_a_modifier_held_is_handed_on"],
     ),
     (
-        "the menu cursor runs off the bottom of the list",
-        "            Key::Down | Key::S => self.cursor = self.cursor.saturating_add(1).min(last),",
-        "            Key::Down | Key::S => self.cursor = self.cursor.saturating_add(1),",
-        ["up_and_down_walk_the_menu_and_stop_at_the_ends"],
+        "S runs the menu cursor off the bottom of the list",
+        "            Key::S => self.cursor = self.cursor.saturating_add(1).min(last),",
+        "            Key::S => self.cursor = self.cursor.saturating_add(1),",
+        ["the_page_keys_move_the_menu_a_page_at_a_time"],
     ),
     (
         "End does not reach the last level",
-        "            Key::End => self.cursor = last,",
-        "            Key::End => self.cursor = 0,",
+        "movement.target(Some(self.cursor), self.level_count(), page)",
+        "movement.target(Some(self.cursor), self.level_count().saturating_sub(1), page)",
         ["home_and_end_jump_to_the_ends_of_the_list"],
     ),
     (
@@ -955,7 +957,166 @@ MUTATIONS = [
         "            self.button(f, r, name, size, false, true, self.colours.mantle);",
         ["undo_is_switched_off_with_nothing_to_take_back"],
     ),
+    (
+        "the cap is ten moves more",
+        "const MAX_UNDO: usize = 1000;",
+        "const MAX_UNDO: usize = 1010;",
+        ["the_undo_stack_stops_growing_at_its_cap"],
+    ),
+    # -- The history: a tree, walked with Alt+Z (C-Q24) -----------------
+    (
+        "ctrl+z is not an undo",
+        "                HistoryKey::Undo => self.undo(),",
+        "                HistoryKey::Undo => false,",
+        [CTRL_Y],
+    ),
+    (
+        "ctrl+y is not a redo",
+        "                HistoryKey::Redo => self.redo(),",
+        "                HistoryKey::Redo => self.undo(),",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z goes forward",
+        "                HistoryKey::Earlier => self.earlier(),",
+        "                HistoryKey::Earlier => self.later(),",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "                HistoryKey::Later => self.later(),",
+        "                HistoryKey::Later => self.earlier(),",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let Some(entry) = self.history.redo() else {",
+        "        let Some(entry) = self.history.undo() else {",
+        [CTRL_Y, TREE],
+    ),
+    (
+        "alt+z only undoes",
+        "        let steps = self.history.earlier();",
+        "        let steps: Vec<Travel<UndoEntry>> =\n"
+        "            self.history.undo().map(Travel::Undo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let steps = self.history.later();",
+        "        let steps: Vec<Travel<UndoEntry>> =\n"
+        "            self.history.redo().map(Travel::Redo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "a journey takes its steps back the wrong way",
+        "                Travel::Undo(entry) => self.take_back(entry),",
+        "                Travel::Undo(entry) => self.make_again(entry),",
+        [TREE],
+    ),
+    (
+        "a move made again leaves the keeper where the undo put them",
+        "        self.player = entry.dest;",
+        "        self.player = entry.player;",
+        [TREE, CTRL_Y],
+    ),
+    (
+        "a push made again leaves its crate",
+        "            self.move_box(from, to);\n            self.pushes = self.pushes.saturating_add(1);\n        }\n    }",
+        "            self.pushes = self.pushes.saturating_add(1);\n        }\n    }",
+        [CTRL_Y],
+    ),
+    (
+        "a push made again is not counted",
+        "            self.move_box(from, to);\n            self.pushes = self.pushes.saturating_add(1);\n        }\n    }",
+        "            self.move_box(from, to);\n        }\n    }",
+        [CTRL_Y],
+    ),
+    (
+        "a held key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [HELD, "a_warehouse_shortcut_with_a_modifier_held_is_handed_on"],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {",
+        "        if m.ctrl || m.alt {",
+        [HELD],
+    ),
+    (
+        "the header says undo can go when it cannot",
+        '                    if self.history.can_undo() { "yes" } else { "no" }',
+        '                    if true { "yes" } else { "no" }',
+        ["the_header_says_which_level_and_how_it_is_going"],
+    ),
+    (
+        'F1 does not raise the list',
+        '        if help::raises(ev) {\n            self.show_help = true;',
+        '        if false {\n            self.show_help = true;',
+        ["the_list_of_keys_reaches_the_window", "every_advertised_key_does_something", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'the list is not drawn',
+        '        if self.show_help {\n            guitk::shortcut::render_card(',
+        '        if false {\n            guitk::shortcut::render_card(',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        'nothing puts the list away',
+        '            if help::closes(ev) {\n                self.show_help = false;',
+        '            if false {\n                self.show_help = false;',
+        ["the_list_of_keys_reaches_the_window", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a key under the list reaches the board',
+        '                self.show_help = false;\n            }\n            return EventResult::Consumed;\n        }\n        if help::raises(ev) {',
+        '                self.show_help = false;\n            }\n        }\n        if help::raises(ev) {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click under the list plays',
+        '        if self.show_help {\n            if let MouseEventKind::Press(_) = ev.kind {',
+        '        if false {\n            if let MouseEventKind::Press(_) = ev.kind {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click leaves the list up',
+        '            if let MouseEventKind::Press(_) = ev.kind {\n                self.show_help = false;',
+        '            if let MouseEventKind::Press(_) = ev.kind {\n',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        "the warehouse's footer does not say how to raise the list",
+        '    "Arrows/WASD: move   Z: undo   R: restart   F1: all keys",',
+        '    "Arrows/WASD: move   Z: undo   Ctrl+Y: redo   R: restart",',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        'the level menu reads no list key',
+        '        if let Some(movement) = ListKey::of(ev) {',
+        '        if let Some(movement) = ListKey::of(ev).filter(|_| false) {',
+        ['the_page_keys_move_the_menu_a_page_at_a_time', 'the_menu_scrolls_the_cursor_into_view'],
+    ),
+    (
+        'a page of the level menu is one row',
+        '            let page = self.layout().list_rows();',
+        '            let page = 1;',
+        ['the_page_keys_move_the_menu_a_page_at_a_time'],
+    ),
+    (
+        'W does not step the level menu up',
+        '            Key::W => self.cursor = self.cursor.saturating_sub(1),\n',
+        '',
+        ['the_page_keys_move_the_menu_a_page_at_a_time'],
+    ),
+    (
+        'S does not step the level menu down',
+        '            Key::S => self.cursor = self.cursor.saturating_add(1).min(last),\n',
+        '',
+        ['the_page_keys_move_the_menu_a_page_at_a_time'],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "sokoban", timeout=120))
+    sys.exit(sweep(SRC, MUTATIONS, "sokoban", timeout=120, only=sys.argv[1:] or None))

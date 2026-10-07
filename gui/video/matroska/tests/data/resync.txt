@@ -1,0 +1,5 @@
+# resync.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vp9 1/1000
+stream 1 opus 1/1000
+packet 0 0 40 6 343 K__ 2f44417567bc123bd7c60de8c2a2b444 -
+packet 0 1000 40 5 413 K__ 632a2406bbcbcd553eec45ac14b40a0a -

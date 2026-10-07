@@ -1,7 +1,7 @@
 {
-    "sha": "1dfd7d9a2",
-    "date": "2026-10-01T13:39:53+00:00",
+    "sha": "7b70dd3cb",
+    "date": "2026-10-06T04:35:46+00:00",
     "boot_number": null,
     "baselined_failures": [],
-    "note": "Set from release boot 1dfd7d9a2 (2026-10-01T13:39:53Z, lane B): BOOT_OK after 188s, release/none on QEMU TCG, clean tree, every gate green and no self-test failed. 1dfd7d9a2 is lane-b with origin/main ad07cdc73 merged (929ed25a8): lane B's design-decisions 1045 triage, the one character-width table (1042), the getconf port and the notices manifests; 084fc8324 is its history row. PRUNED, per the rule the previous note set: 'CPython interactive REPL over a pty (ring 3)' PASSED in this boot ('6*7 evaluated to 42: OK'), so it is no longer baselined and the list is empty -- a boot with any failure at all is not covered by this marker and must not advance it. The convention is unchanged from a8cebf3d1's note: this field is read by scripts/check-release-staleness.py and scripts/hooks/pre-push only; merge-readiness.py's ratchet reads bench/boot-history.jsonl. Supersedes 75a054730 (2026-09-27)."
+    "note": "Set from release boot 7b70dd3cb (2026-10-06T04:35:46Z, lane C): BOOT_OK after 253s, release/none on QEMU TCG, clean tree, every gate green and no self-test failed. 7b70dd3cb is lane-c with origin/main 05a998ca9 merged (f002181ad): lane C's system sounds (design-decisions 1476, 1477), the shell's event sounds and the day's desktop repairs; ab05b57dc and 7b70dd3cb are the debug boots' history rows (the first died at a kernel timing self-test under host load, the rerun was green), and ed70b7a0b is this boot's. Run because the pre-push release-staleness gate refused lane C's publish at 105 kernel-touching commits since 1dfd7d9a2 (threshold 100). The convention is unchanged from a8cebf3d1's note: this field is read by scripts/check-release-staleness.py and scripts/hooks/pre-push only; merge-readiness.py's ratchet reads bench/boot-history.jsonl. Supersedes 1dfd7d9a2 (2026-10-01)."
 }

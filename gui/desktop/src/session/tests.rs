@@ -249,24 +249,27 @@ fn centre(r: Rect) -> (f32, f32) {
 // ---- the surfaces ----
 
 #[test]
-fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
+fn the_shell_opens_a_background_a_panel_a_menu_a_notifications_and_an_overlay_surface() {
     let (session, desktop, _turn) = session();
     let specs = created(&desktop);
-    assert_eq!(specs.len(), 5, "a shell is five surfaces, not one");
+    assert_eq!(specs.len(), 6, "a shell is six surfaces, not one");
 
     // The band each one is in is the load-bearing part: a taskbar in
     // `Layer::Normal` vanishes behind the first window the user opens.
     assert_eq!(specs[0].layer, oswindow::Layer::Background);
-    assert_eq!(specs[1].layer, oswindow::Layer::Overlay);
-    assert_eq!(specs[2].layer, oswindow::Layer::Overlay);
-    assert_eq!(specs[3].layer, oswindow::Layer::Overlay);
-    assert_eq!(specs[4].layer, oswindow::Layer::Overlay);
+    for spec in &specs[1..] {
+        assert_eq!(spec.layer, oswindow::Layer::Overlay, "{}", spec.title);
+    }
 
-    // The login screen is created *last* of the five, which is what puts it
-    // above the other three within the band. Order is the only thing that says
+    // The login screen is created *last* of the six, which is what puts it
+    // above the others within the band. Order is the only thing that says
     // so -- there is no layer above `Overlay` -- so it is asserted here rather
-    // than left to the reading order of `start`.
-    assert_eq!(specs[4].title, "Login");
+    // than left to the reading order of `start`. The notifications' surface
+    // comes after the menus' and before the overlays': a toast pops up over an
+    // open menu, and a volume report is read over a toast.
+    assert_eq!(specs[5].title, "Login");
+    assert_eq!(specs[3].title, "Notifications");
+    assert_eq!(specs[4].title, "Shell overlays");
 
     // None of them is a window in the ordinary sense.
     for spec in &specs {
@@ -285,8 +288,11 @@ fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
     assert_eq!(specs[1].height, bar.h.round() as u32);
     assert_eq!((specs[0].width, specs[0].height), (2560, 1440));
     assert_eq!((specs[2].width, specs[2].height), (2560, 1440));
-    assert_eq!((specs[3].width, specs[3].height), (2560, 1440));
     assert_eq!((specs[4].width, specs[4].height), (2560, 1440));
+    assert_eq!((specs[5].width, specs[5].height), (2560, 1440));
+    // The notifications' surface is as big as the stack of toasts on it, and
+    // there are none yet.
+    assert_eq!((specs[3].width, specs[3].height), (1, 1));
 
     // And the origins the session will translate by say the same thing.
     assert_eq!(session.background().origin(), (0.0, 0.0));
@@ -313,9 +319,10 @@ fn only_the_overlay_surface_refuses_the_mouse() {
         .map(|s| s.title.as_str())
         .collect();
     assert_eq!(click_through, ["Shell overlays"]);
-    // And it is the last one created, so it is above the menus: an overlay is a
-    // report, and a report under the start menu is a report nobody reads.
-    assert!(specs[3].input_transparent);
+    // And it is created after the menus and the toasts, so it is above them:
+    // an overlay is a report, and a report under the start menu is a report
+    // nobody reads.
+    assert!(specs[4].input_transparent);
 }
 
 /// **What the settings watch reports is announced to every window, each file
@@ -779,6 +786,81 @@ fn a_program_started_from_its_pin_is_recently_used() {
     });
 }
 
+/// **A command run from the Run box is there the next session**: the
+/// session writes the box's history once the box has run something, and a
+/// session started again reads it back (`C-RUN-HISTORY-IS-NOT-PERSISTED`).
+/// Both halves through sessions, for the reason
+/// `a_session_starts_with_what_was_saved` gives: a loader nothing calls is
+/// tested and lost.
+#[test]
+fn a_command_run_from_the_run_box_is_there_next_session() {
+    settingsfile::testing::with_scratch_config("session-run-history", |_root| {
+        let (mut first, _d1, _turn) = session();
+        {
+            let shell = first.shell_mut();
+            shell.run_dialog.show();
+            let press = |key: Key, text: &str| guitk::event::KeyEvent {
+                key,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: text.to_owned(),
+            };
+            for ch in "/bin/ls".chars() {
+                drop(shell.handle_hotkey(&press(Key::Unknown(0), &ch.to_string())));
+            }
+            let outcome = shell.handle_hotkey(&press(Key::Enter, ""));
+            assert_eq!(outcome.launches.len(), 1, "the box ran nothing");
+        }
+        first.pump().expect("pump");
+        drop(first);
+
+        let (restarted, _d2, _turn) = session();
+        assert_eq!(
+            restarted.shell().run_dialog.history(),
+            [std::ffi::OsString::from("/bin/ls")],
+            "the command did not come back"
+        );
+    });
+}
+
+/// **A notification is still in the pane after the desktop restarts**: the
+/// session writes the notifications once they change, and a session started
+/// again reads them back -- both halves through sessions, for the reason
+/// `a_session_starts_with_what_was_saved` gives.
+#[test]
+fn a_notification_is_still_there_after_the_desktop_restarts() {
+    settingsfile::testing::with_scratch_config("session-notif-history", |_root| {
+        let (mut first, _d1, _turn) = session();
+        first.shell_mut().notify(crate::notif_pane::Notification {
+            id: 0,
+            app_name: "Mail".to_owned(),
+            title: "Kept across a restart".to_owned(),
+            body: String::new(),
+            timestamp: datetimesettings::clock::now_utc_secs(),
+            priority: crate::notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        });
+        first.pump().expect("pump");
+        drop(first);
+
+        // As a user's desktop starts (`start_for_user`): the saved settings,
+        // the notification rules among them, and then what they keep.
+        let (mut restarted, _d2, _turn) = session();
+        restarted.load_appearance();
+        assert!(
+            restarted
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .any(|n| n.title == "Kept across a restart"),
+            "the notification did not come back"
+        );
+    });
+}
+
 /// **"Show desktop" asks for every window**: a press on the strip sends the
 /// compositor one request per window, not the first alone.
 #[test]
@@ -886,6 +968,37 @@ fn right_clicking_the_bare_bar_draws_its_menu() {
     });
 }
 
+/// **A notification's menu is put on the screen** -- the popup surface's
+/// part list has it, as the bar's menu's must
+/// (`right_clicking_the_bare_bar_draws_its_menu`): a menu opened in the
+/// shell's model and missing from that list is a right-click that does
+/// nothing anyone can see.
+#[test]
+fn a_notifications_menu_is_put_on_the_screen() {
+    settingsfile::testing::with_scratch_config("session-notification-menu-drawn", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let popups = session.popups().window();
+        let before = desktop.borrow().seen.len();
+
+        session
+            .shell_mut()
+            .open_notification_menu("Chat".to_owned(), 300.0, 300.0, false);
+        // Opened by a call rather than an event, so nothing marked the
+        // screen as needing a paint; an event would have.
+        session.dirty = true;
+        session.pump().expect("pump");
+
+        assert!(
+            desktop.borrow().seen[before..].iter().any(|r| r.body
+                == RequestBody::SetVisible {
+                    window: popups,
+                    visible: true
+                }),
+            "a notification's menu opened with nothing to draw it on"
+        );
+    });
+}
+
 /// **The tray's overflow list is seen.** It was drawn -- onto the popup
 /// surface, which was mapped only for the things on a second list, and the
 /// list was not on it. So the chevron opened a list nobody could see.
@@ -894,12 +1007,7 @@ fn the_trays_overflow_list_is_put_on_the_screen() {
     let (mut session, desktop, _turn) = session();
     let popups = session.popups().window();
     let icons: Vec<guiremote::tray::TrayIcon> = (1..=200)
-        .map(|id| guiremote::tray::TrayIcon {
-            owner: 99,
-            id,
-            glyph: "T".to_string(),
-            tooltip: format!("Program {id}"),
-        })
+        .map(|id| guiremote::tray::TrayIcon::new(99, id, "T", format!("Program {id}")))
         .collect();
     session.shell_mut().apply_tray_icons(icons);
     session.pump().expect("pump");
@@ -1899,6 +2007,94 @@ fn changing_the_fit_alone_does_not_reload_the_picture() {
         session.wallpaper_mut().current_image_id(),
         id,
         "the picture was issued a new id, so it will be decoded again"
+    );
+}
+
+/// **The position named in the settings is the part of the picture shown,
+/// and moving it re-reads nothing** -- `design.txt`'s "let the user scroll
+/// the image up/down or right/left to center it on the desktop how they
+/// want".
+#[test]
+fn the_wallpaper_shows_the_part_the_settings_say() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    let id = session.wallpaper_mut().current_image_id();
+    assert_eq!(session.wallpaper_mut().config.position, (0.5, 0.5));
+
+    session.shell_mut().appearance.wallpaper_position = (0.0, 1.0);
+    session.sync_wallpaper();
+    assert_eq!(session.wallpaper_mut().config.position, (0.0, 1.0));
+    assert_eq!(
+        session.wallpaper_mut().current_image_id(),
+        id,
+        "moving the picture issued it a new id, so it will be decoded again"
+    );
+}
+
+/// **Once a picture is up the shell knows how far it can move, and a move
+/// reaches the screen as it is made**: the session records the room on each
+/// background paint, and a position the shell changes mid-move is the one the
+/// next background frame draws -- with no new image id.
+#[test]
+fn a_wallpaper_being_moved_is_drawn_as_it_moves() {
+    settingsfile::testing::with_scratch_config("session-wallpaper-move", |_root| {
+        let (mut session, _desktop, _turn) = session();
+        session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+        session.sync_wallpaper();
+        session.pump().expect("pump");
+        session.settle_pictures().expect("the picture went up");
+        session.pump().expect("pump");
+        let room = session
+            .shell()
+            .wallpaper_room
+            .expect("a picture filling a wide screen has room to move");
+        assert!(room.0.abs() >= 0.5 || room.1.abs() >= 0.5, "{room:?}");
+
+        let id = session.wallpaper_mut().current_image_id();
+        let drawn_at = |s: &Session| {
+            s.background_drawn.as_ref().and_then(|tree| {
+                tree.commands.iter().find_map(|c| match c {
+                    RenderCommand::Image { image_id, x, y, .. } if *image_id == id => {
+                        Some((*x, *y))
+                    }
+                    _ => None,
+                })
+            })
+        };
+        let before = drawn_at(&session).expect("the picture is drawn");
+        session.shell_mut().appearance.wallpaper_position = (0.0, 0.0);
+        session.dirty = true;
+        session.pump().expect("pump");
+        let after = drawn_at(&session).expect("the picture is still drawn");
+        assert_ne!(before, after, "the picture did not move on the screen");
+        assert_eq!(after, (0.0, 0.0), "its top-left corner is at the screen's");
+        assert_eq!(session.wallpaper_mut().current_image_id(), id);
+    });
+}
+
+/// **A rotating folder is placed as the settings say too.** Only the fixed
+/// picture's path applied the fit: a folder kept whatever fit was in force
+/// before it started, whatever the user chose after.
+#[test]
+fn a_rotating_folder_is_placed_as_the_settings_say() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper_folder = Some(std::env::temp_dir());
+    session.shell_mut().appearance.wallpaper_fit = appearance::ImageFit::Fit;
+    session.shell_mut().appearance.wallpaper_position = (0.25, 0.75);
+    session.sync_wallpaper();
+    assert_eq!(
+        session.wallpaper_mut().config.fit,
+        appearance::ImageFit::Fit
+    );
+    assert_eq!(session.wallpaper_mut().config.position, (0.25, 0.75));
+
+    session.shell_mut().appearance.wallpaper_fit = appearance::ImageFit::Center;
+    session.sync_wallpaper();
+    assert_eq!(
+        session.wallpaper_mut().config.fit,
+        appearance::ImageFit::Center,
+        "a fit chosen while the folder rotates did not take"
     );
 }
 
@@ -3541,6 +3737,60 @@ fn a_scheduled_wallpaper_wins_over_a_picture_and_a_folder() {
     );
 }
 
+/// **A theme's wallpaper is the one shown, for the mode the desktop is drawn
+/// in** -- its night picture in dark mode and its day picture in light, where
+/// the fixed picture would be -- while a time-of-day schedule still comes
+/// first, and the built-in theme, which recommends none, leaves the user's
+/// own picture (design-decisions §1471).
+#[test]
+fn a_themes_wallpaper_is_shown_for_the_mode() {
+    let (mut session, _desktop, _turn) = session();
+    let (own, night, day, scheduled) = (
+        fixture("rgba8"),
+        fixture("rgb8"),
+        fixture("gray8"),
+        fixture("palette8_trns"),
+    );
+    {
+        let appearance = &mut session.shell_mut().appearance;
+        appearance.wallpaper = Some(own.clone());
+        appearance.wallpaper_theme = appearance::themes::WallpaperTheme::from_pictures(
+            "aurora",
+            Some(night.clone()),
+            Some(day.clone()),
+        );
+        appearance.theme_mode = appearance::ThemeMode::Dark;
+    }
+    session.sync_wallpaper();
+    let shown = |session: &mut Session| {
+        session
+            .wallpaper_mut()
+            .current_image_path()
+            .map(std::path::Path::to_path_buf)
+    };
+    assert_eq!(shown(&mut session), Some(night.clone()), "dark mode");
+
+    session.shell_mut().appearance.theme_mode = appearance::ThemeMode::Light;
+    session.sync_wallpaper();
+    assert_eq!(shown(&mut session), Some(day), "light mode");
+
+    session.shell_mut().appearance.wallpaper_schedule = vec![appearance::ScheduledWallpaper {
+        from: appearance::TimeOfDay::MIDNIGHT,
+        image: scheduled.clone(),
+    }];
+    session.sync_wallpaper();
+    assert_eq!(
+        shown(&mut session),
+        Some(scheduled),
+        "the schedule comes first"
+    );
+
+    session.shell_mut().appearance.wallpaper_schedule.clear();
+    session.shell_mut().appearance.wallpaper_theme = appearance::themes::WallpaperTheme::built_in();
+    session.sync_wallpaper();
+    assert_eq!(shown(&mut session), Some(own), "the user's own picture");
+}
+
 /// **A schedule with two pictures wakes the desktop at its next edge**, and
 /// no later: nothing else would change the picture at 18:00 on a desktop
 /// nobody is touching.
@@ -3685,6 +3935,7 @@ fn installed_programs_are_in_the_start_menu() {
         crate::hotkeys::Launch {
             program: std::path::PathBuf::from("sketch"),
             args: vec![std::ffi::OsString::from("--new")],
+            dir: None,
         }
     );
 }
@@ -4360,12 +4611,12 @@ fn an_idle_desktop_is_woken_to_show_a_tooltip_and_repainted_to_hide_it() {
     let osd = session.osd().window();
     session
         .shell_mut()
-        .apply_tray_icons(vec![guiremote::tray::TrayIcon {
-            owner: 99,
-            id: 1,
-            glyph: "B".to_string(),
-            tooltip: "Battery: 84%".to_string(),
-        }]);
+        .apply_tray_icons(vec![guiremote::tray::TrayIcon::new(
+            99,
+            1,
+            "B",
+            "Battery: 84%",
+        )]);
     let icon = session.shell().tray_icon_rects()[0];
     let pointer_at = |x: f32, y: f32| {
         InputEvent::new(
@@ -4410,6 +4661,152 @@ fn an_idle_desktop_is_woken_to_show_a_tooltip_and_repainted_to_hide_it() {
             }),
         "the pointer left and the tooltip stayed on the screen"
     );
+}
+
+/// A picture `width` by `height`, of one colour, written as a PNG into
+/// `folder` as `name`.
+fn plain_png(folder: &std::path::Path, name: &str, width: u32, height: u32, argb: u32) {
+    let pixels = vec![argb; (width * height) as usize];
+    let bytes = imagecodec::encode_png(width, height, &pixels).expect("encodes");
+    std::fs::write(folder.join(name), bytes).expect("the temp directory is not writable");
+}
+
+/// **A photo frame on the desktop shows its folder's pictures in turn**:
+/// the first as soon as it is placed, decoded to the frame's size rather
+/// than its own; the next when the loop is woken at the frame's interval,
+/// the old one released only after the frame that stops naming it is sent;
+/// and a frame removed lets its picture go.
+#[test]
+fn a_photo_frame_shows_its_folders_pictures_in_turn() {
+    // A scratch configuration, since placing a widget saves the layout.
+    settingsfile::testing::with_scratch_config("session-photo-frame", |_root| {
+        photo_frame_in_turn();
+    });
+}
+
+fn photo_frame_in_turn() {
+    use crate::widgets::{FRAME_INTERVAL_MS, WidgetKind, is_frame_picture};
+
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    let folder = scratch_dir().join("photo-frame-pictures");
+    std::fs::create_dir_all(&folder).expect("the temp directory is not writable");
+    // Larger than any frame, so a picture sent at its own size would show.
+    plain_png(&folder, "a.png", 1600, 1200, 0xFF_20_40_80);
+    plain_png(&folder, "b.png", 1200, 1600, 0xFF_80_40_20);
+    std::fs::write(folder.join("notes.txt"), b"not a picture").expect("writable");
+    session.set_frame_folder(Some(folder.clone()));
+
+    // Placed as a user places one: the desktop menu's "Add widget".
+    session
+        .shell_mut()
+        .activate_desktop_menu_item(DesktopShell::MENU_ADD_PHOTO_FRAME);
+    let frame = session
+        .shell()
+        .widgets
+        .all_widgets()
+        .iter()
+        .find(|w| matches!(w.kind, WidgetKind::PhotoFrame))
+        .map(|w| w.id)
+        .expect("the menu placed no photo frame");
+    session.paint_background().expect("paint");
+    // A second paint before the answer: the picture is asked for once, so
+    // it goes up under the first id there is.
+    session.paint_background().expect("paint");
+    session
+        .settle_pictures()
+        .expect("the first picture went up");
+
+    let frame_uploads = |desktop: &Desktop| -> Vec<(u64, u64, u32, u32, u32, usize)> {
+        uploads(desktop)
+            .into_iter()
+            .filter(|u| is_frame_picture(u.1))
+            .collect()
+    };
+    let sent = frame_uploads(&desktop);
+    assert_eq!(sent.len(), 1, "one picture for one frame: {sent:?}");
+    let (window, first, width, height, _, _) = sent[0];
+    assert_eq!(window, background);
+    assert_eq!(
+        first,
+        crate::widgets::FRAME_PICTURE_TAG | 1,
+        "the picture was asked for again at the second paint"
+    );
+    let (_, _, content_w, content_h) = session.shell().widgets.content_rect(frame).unwrap();
+    assert!(
+        f64::from(width) <= f64::from(content_w).ceil()
+            && f64::from(height) <= f64::from(content_h).ceil(),
+        "sent at {width}x{height}, not fitted to the frame's {content_w}x{content_h}"
+    );
+    assert!(
+        background_names(&session, first),
+        "no frame names the picture"
+    );
+    assert_eq!(
+        session
+            .shell()
+            .widgets
+            .frame_state(frame)
+            .unwrap()
+            .shown
+            .as_ref()
+            .map(|s| s.path.clone()),
+        Some(folder.join("a.png"))
+    );
+
+    // The loop arms for the frame's interval, and woken then, the frame
+    // shows the next picture.
+    woken_after(&mut session, &desktop, 16);
+    let until = armed_in(&mut session).expect("a frame registered no wake-up");
+    assert!(
+        until <= std::time::Duration::from_millis(FRAME_INTERVAL_MS),
+        "the wake-up is not the frame's next picture: {until:?}"
+    );
+    woken_after(&mut session, &desktop, FRAME_INTERVAL_MS);
+    session.settle_pictures().expect("the next picture went up");
+    let sent = frame_uploads(&desktop);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    let second = sent[1].1;
+    assert_ne!(second, first, "the next picture reused the id");
+    assert!(background_names(&session, second));
+    assert!(!background_names(&session, first));
+    // Released, and only after the frame that stops naming it went out.
+    let order = picture_order(&desktop);
+    let uploaded = order
+        .iter()
+        .position(|e| *e == ("UploadImage", second))
+        .expect("uploaded");
+    let dropped = order
+        .iter()
+        .position(|e| *e == ("DropImage", first))
+        .expect("the first picture was never released");
+    assert!(
+        uploaded < dropped,
+        "released before its replacement: {order:?}"
+    );
+
+    // A frame removed lets its picture go.
+    assert!(session.shell_mut().widgets.remove_widget(frame));
+    session.paint_background().expect("paint");
+    assert!(
+        drops(&desktop).contains(&(background, second)),
+        "a removed frame's picture is still held"
+    );
+}
+
+/// **A photo frame shows the folder the start menu's Pictures place opens**
+/// -- one definition, so the two cannot come to name different folders --
+/// and, with no home to find it in, none.
+#[test]
+fn a_photo_frame_shows_the_folder_the_pictures_place_opens() {
+    let home = std::path::Path::new("/home/someone");
+    let place = crate::StartShortcut::Pictures
+        .launch(Some(home))
+        .expect("the Pictures place opens a folder");
+    let folder = DesktopShell::photo_frame_folder(Some(home)).expect("a folder");
+    assert_eq!(place.args, [std::ffi::OsString::from(&folder)]);
+    assert!(folder.starts_with(home));
+    assert_eq!(DesktopShell::photo_frame_folder(None), None);
 }
 
 /// **An idle desktop with a slideshow sleeps until its next picture, and
@@ -4695,6 +5092,16 @@ fn a_compositor_that_refuses_the_picture_still_gets_a_painted_desktop() {
     session
         .wallpaper_mut()
         .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    // The harness refuses *every* request once told to, where a compositor
+    // refuses the one upload over its budget. The notice the refusal posts
+    // would pop up, and moving the toasts' surface into place is a request a
+    // real compositor grants and this harness refuses -- so the notice is
+    // kept quiet, which files it in the pane and shows nothing, and the test
+    // stays about the upload.
+    session
+        .shell_mut()
+        .focus
+        .set_mode(crate::focus_assist::FocusMode::TotalSilence);
     desktop.borrow_mut().refuse = Some("image budget exhausted".to_string());
 
     session
@@ -5334,8 +5741,18 @@ fn opening_the_run_box_maps_the_surface_it_is_drawn_on() {
 /// worked without this: the box opened, took the text, resolved it and reported
 /// an `Execute` — which the shell then had no channel to hand back, so the
 /// command was resolved and dropped.
+///
+/// In a scratch configuration, since running a command writes the box's
+/// history.
 #[test]
 fn a_command_confirmed_with_enter_reaches_the_launcher() {
+    settingsfile::testing::with_scratch_config("session-run-box-enter", |_root| {
+        a_command_confirmed_with_enter_reaches_the_launcher_here();
+    });
+}
+
+/// The body of [`a_command_confirmed_with_enter_reaches_the_launcher`].
+fn a_command_confirmed_with_enter_reaches_the_launcher_here() {
     let (mut session, desktop, _turn) = session();
     let panel = session.panel().window();
 
@@ -6209,6 +6626,7 @@ fn a_power_choice_is_launched_like_any_program() {
         [crate::hotkeys::Launch {
             program: crate::power::POWERCTL.into(),
             args: vec!["shutdown".into()],
+            dir: None,
         }]
     );
     assert!(session.take_launches().is_empty(), "draining it empties it");
@@ -6422,7 +6840,7 @@ fn an_icon_layout_that_cannot_be_saved_says_so_once_beside_a_failing_widget_layo
                 .notifications
                 .notifications()
                 .iter()
-                .filter(|n| n.title == "Desktop layout not saved")
+                .filter(|n| n.title == super::NOT_SAVED_TITLE)
                 .map(|n| n.body.clone())
                 .collect()
         };
@@ -6501,7 +6919,7 @@ fn a_widget_layout_that_cannot_be_saved_says_so_once_and_not_as_the_wallpaper() 
                 .notifications
                 .notifications()
                 .iter()
-                .filter(|n| n.title == "Desktop layout not saved")
+                .filter(|n| n.title == super::NOT_SAVED_TITLE)
                 .map(|n| n.body.clone())
                 .collect()
         };
@@ -6771,6 +7189,30 @@ fn a_session_started_for_a_user_starts_in_their_settings() {
     });
 }
 
+/// **A session started for a user says so aloud**: `desktop-login`, the last
+/// thing it does, once their settings are read -- so in their sound theme, at
+/// their volume, or not at all when they have turned sounds off, as here.
+#[test]
+fn a_session_started_for_a_user_sounds_its_start() {
+    settingsfile::testing::with_scratch_config("session-login-sound", |_root| {
+        let mut look = appearance::AppearanceFile::load();
+        look.settings.sounds.enabled = false;
+        look.save().expect("save");
+
+        let _turn = settingsfile::testing::config_turn();
+        let (events, _desktop) = wired();
+        let session = ShellSession::start_for_user(events).expect("the harness refused a surface");
+        assert_eq!(
+            session.shell().event_sounds.recent().last(),
+            Some(&crate::event_sounds::Asked {
+                event: "desktop-login".to_string(),
+                choice: appearance::sounds::SoundChoice::Silent,
+            }),
+            "asked for in the user's settings, which turn sounds off"
+        );
+    });
+}
+
 /// And `start` itself still reads nothing of the kind -- the contract every
 /// test that builds a session relies on, so that none of them depends on what
 /// is in the configuration directory of the machine running it.
@@ -6787,6 +7229,14 @@ fn a_bare_session_does_not_read_the_users_appearance_or_clock() {
         let (session, _desktop, _turn) = session();
         assert_ne!(session.shell().appearance.accent_color, AccentColor::Teal);
         assert_eq!(session.shell().datetime.zone, None);
+        assert!(
+            session
+                .shell()
+                .event_sounds
+                .recent()
+                .all(|asked| asked.event != "desktop-login"),
+            "nobody signed in to a bare session"
+        );
     });
 }
 
@@ -6821,6 +7271,79 @@ fn an_edit_to_the_chosen_theme_reaches_the_shell() {
             rgb(session.shell().theme.taskbar_bg),
             (0x10, 0x20, 0x30),
             "the edit did not reach the shell"
+        );
+    });
+}
+
+/// **A wallpaper saved over under the same name is read again at the next
+/// announcement**, though no setting changed -- a new image is asked for --
+/// and an announcement with nothing saved over asks for nothing.
+#[test]
+fn a_wallpaper_saved_over_under_the_same_name_is_read_again() {
+    settingsfile::testing::with_scratch_config("session-wallpaper-replaced", |root| {
+        let picture = root.join("wall.png");
+        std::fs::write(&picture, b"the first picture").expect("write the picture");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.wallpaper = Some(picture.clone());
+        file.save().expect("save");
+
+        let (mut session, desktop, _turn) = session();
+        session.load_appearance();
+        let first = session.wallpaper.current_image_id();
+        assert_ne!(first, 0, "the wallpaper was not set");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        assert_eq!(
+            session.wallpaper.current_image_id(),
+            first,
+            "read again with nothing changed"
+        );
+
+        std::fs::write(&picture, b"a second picture, saved over the first").expect("save over it");
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        assert_ne!(
+            session.wallpaper.current_image_id(),
+            first,
+            "the picture saved over it was not read again"
+        );
+    });
+}
+
+/// **And the login screen's picture**: one saved over under the same name is
+/// asked for again at the next announcement.
+#[test]
+fn a_login_picture_saved_over_under_the_same_name_is_read_again() {
+    settingsfile::testing::with_scratch_config("session-login-picture-replaced", |root| {
+        let picture = root.join("greeter.png");
+        std::fs::write(&picture, b"the first picture").expect("write the picture");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.login_background = appearance::LoginBackground::CustomImage(picture.clone());
+        file.save().expect("save");
+
+        let (mut session, _desktop, _dir, _turn) = session_with_login();
+        session.load_appearance();
+        session.repaint().expect("paint");
+        let asked = |session: &Session| session.login_image.as_ref().map(|(id, _)| *id);
+        let first = asked(&session).expect("the greeter asked for its picture");
+
+        // An announcement with nothing saved over asks for nothing.
+        session.adopt_appearance_change();
+        session.repaint().expect("paint");
+        assert_eq!(
+            asked(&session),
+            Some(first),
+            "asked again with nothing changed"
+        );
+
+        std::fs::write(&picture, b"a second picture, saved over the first").expect("save over it");
+        session.adopt_appearance_change();
+        session.repaint().expect("paint");
+        let again = asked(&session).expect("the greeter asked for its picture again");
+        assert_ne!(
+            again, first,
+            "the picture saved over it was not asked for again"
         );
     });
 }
@@ -7053,6 +7576,118 @@ fn logging_out_after_signing_in_by_itself_stays_at_the_login_screen() {
     assert_eq!(session.shell().user_name(), "");
 }
 
+/// The events `session`'s shell has asked to sound, oldest first.
+fn heard(session: &Session) -> Vec<String> {
+    session
+        .shell()
+        .event_sounds
+        .recent()
+        .map(|asked| asked.event.clone())
+        .collect()
+}
+
+/// **The login screen a log-out brings back is drawn as the user chose** --
+/// the login background in their settings, not the default. The greeter
+/// built at log-out started from the default, and only a start told a
+/// greeter the setting.
+#[test]
+fn the_login_screen_a_log_out_brings_back_has_the_chosen_background() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(!session.is_locked());
+    let chosen = appearance::LoginBackground::SolidColor(guitk::color::Color::rgb(10, 20, 30));
+    session.shell_mut().appearance.login_background = chosen.clone();
+    session.act(crate::ShellAction::LogOut).expect("log out");
+    assert_eq!(
+        session.login().expect("a login screen").config.background,
+        chosen,
+        "the greeter came back in the default background"
+    );
+}
+
+/// **A settings change announced while the login screen is up is adopted** --
+/// it used to stop at the screen with the keys and clicks, and was taken up
+/// only at the first announcement after someone signed in -- while a key
+/// still reaches nothing but the screen.
+#[test]
+fn a_settings_change_while_the_login_screen_is_up_is_adopted() {
+    settingsfile::testing::with_scratch_config("session-locked-settings", |_root| {
+        let (mut session, desktop, _dir, _turn) = session_with_login();
+        assert!(session.is_locked());
+        let mut look = appearance::AppearanceFile::load();
+        assert_ne!(look.settings.accent_color, AccentColor::Teal);
+        look.settings.accent_color = AccentColor::Teal;
+        let colour = appearance::LoginBackground::SolidColor(guitk::color::Color::rgb(10, 20, 30));
+        look.settings.login_background = colour.clone();
+        look.save().expect("save");
+
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        assert_eq!(
+            session.shell().appearance.accent_color,
+            AccentColor::Teal,
+            "the change stopped at the login screen"
+        );
+        assert_eq!(
+            session.login().expect("a login screen").config.background,
+            colour,
+            "the login screen up kept its old background"
+        );
+        assert!(session.is_locked(), "a settings change let someone in");
+    });
+}
+
+/// **A start with a login screen up says nothing until someone signs in**:
+/// the start's chime is for a desktop someone is in, and a login screen is
+/// nobody yet -- the password accepted says it.
+#[test]
+fn a_start_at_the_login_screen_says_nothing_until_someone_signs_in() {
+    settingsfile::testing::with_scratch_config("session-start-locked-sound", |_root| {
+        let (mut session, desktop, _dir, _turn) = session_with_login();
+        session
+            .take_up_the_users_settings()
+            .expect("the harness refused a frame");
+        assert!(session.is_locked());
+        assert!(heard(&session).is_empty(), "a sign-in heard with nobody in");
+        type_password(&desktop, &mut session, "password");
+        assert_eq!(heard(&session), ["desktop-login"]);
+    });
+}
+
+/// **Signing in and out are heard**: `desktop-login` when a password lets
+/// someone in, `desktop-logout` when they leave -- and nothing while the
+/// login screen waits, nor for a password it refuses.
+#[test]
+fn signing_in_and_out_are_heard() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    assert!(heard(&session).is_empty(), "nobody has signed in");
+    type_password(&desktop, &mut session, "not the password");
+    assert!(session.is_locked());
+    assert!(
+        heard(&session).is_empty(),
+        "a refused password let nobody in"
+    );
+    // A key first, which a refused screen takes to mean "again"
+    // (`LoginScreen::retry`) rather than typing it.
+    type_password(&desktop, &mut session, "");
+    type_password(&desktop, &mut session, "password");
+    assert!(!session.is_locked());
+    assert_eq!(heard(&session), ["desktop-login"]);
+    session.act(crate::ShellAction::LogOut).expect("log out");
+    assert_eq!(heard(&session), ["desktop-login", "desktop-logout"]);
+}
+
+/// **A sign-in by itself at a bare start is not heard** -- `start` reads no
+/// appearance settings to sound it in; `start_for_user` sounds it once it has
+/// (`a_session_started_for_a_user_sounds_its_start`).
+#[test]
+fn a_bare_start_signing_in_by_itself_is_not_heard() {
+    let (session, _desktop, _dir, _turn) =
+        session_signing_in_by_itself(crate::autologin::StartConditions::default(), true, "");
+    assert!(!session.is_locked());
+    assert!(heard(&session).is_empty());
+}
+
 // ---- the power menu --------------------------------------------------------
 
 /// **Log out returns to the login screen** -- the one the session started
@@ -7182,6 +7817,94 @@ fn a_note_is_written_through_the_desktop_and_saved_as_it_is_written() {
             .filter_map(|k| saved.get_str(&["widgets", k, "text"]))
             .collect();
         assert_eq!(texts, ["milk"], "the note is not on disk while it is open");
+    });
+}
+
+/// **A note's right-click menu is put on the screen, its Paste is saved as
+/// typing is, and the typing after it is the note's** -- though it arrives on
+/// the popup surface the menu was chosen on, which is where the compositor
+/// leaves the keyboard after a click there. A session that handed a note
+/// only the desktop's own keys would type the rest of it into nothing.
+#[test]
+fn a_notes_menu_is_drawn_and_the_typing_after_it_is_the_notes() {
+    settingsfile::testing::with_scratch_config("desktop-note-menu", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let (id, body) = {
+            let shell = session.shell_mut();
+            let _ = shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_NOTE);
+            let id = shell
+                .widgets
+                .all_widgets()
+                .iter()
+                .find(|w| matches!(w.kind, crate::widgets::WidgetKind::Notes))
+                .map(|w| w.id)
+                .expect("the menu placed a note");
+            let (x, y, w, h) = shell.widgets.content_rect(id).expect("placed");
+            (id, (x + w / 2.0, y + h / 2.0))
+        };
+        session.pump().expect("pump");
+        guitk::clipboard::set_text("eggs");
+        let popups = session.popups();
+        let before = desktop.borrow().seen.len();
+
+        right_click_at(&desktop, session.background(), body.0, body.1);
+        session.pump().expect("pump");
+        assert_eq!(
+            session.shell().widgets.writing_note(),
+            Some(id),
+            "the right-click did not open the note"
+        );
+        assert!(
+            desktop.borrow().seen[before..].iter().any(|r| r.body
+                == RequestBody::SetVisible {
+                    window: popups.window(),
+                    visible: true
+                }),
+            "the note's menu opened with nothing to draw it on"
+        );
+
+        let (x, y) = {
+            let (menu, _) = session
+                .shell()
+                .field_menu
+                .as_ref()
+                .expect("the note's menu is open");
+            let paste = menu
+                .items()
+                .iter()
+                .position(|i| {
+                    matches!(i, guitk::menu::MenuItem::Action { label, .. } if label == "Paste")
+                })
+                .expect("a Paste row");
+            let r = menu.item_rect(paste).expect("shown");
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        press_at(&desktop, popups, x, y);
+        release_at(&desktop, popups, x, y);
+        desktop.borrow_mut().send_input(&[InputEvent::new(
+            popups.window(),
+            guitk::event::Event::Key(KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: "!".to_string(),
+            }),
+        )]);
+        session.pump().expect("pump");
+
+        assert!(session.shell().field_menu.is_none());
+        assert_eq!(
+            session.shell().widgets.get(id).expect("placed").state_text,
+            "eggs!",
+            "the paste, or the typing after it, did not reach the note"
+        );
+        let saved = appearance::config::load(DesktopShell::WIDGETS_CONFIG_NAME);
+        let texts: Vec<String> = saved
+            .keys(&["widgets"])
+            .iter()
+            .filter_map(|k| saved.get_str(&["widgets", k, "text"]))
+            .collect();
+        assert_eq!(texts, ["eggs!"], "the note's new words are not on disk");
     });
 }
 
@@ -7574,4 +8297,603 @@ fn an_appearance_change_drops_the_icons_and_the_next_frame_sends_new_ones() {
             );
         }
     });
+}
+
+// ============================================================================
+// Notifications pop up (design-decisions 1447)
+// ============================================================================
+
+/// A notification from `app`, with `action` to launch when it is opened.
+fn toast_notif(app: &str, action: Option<&str>) -> crate::notif_pane::Notification {
+    crate::notif_pane::Notification {
+        id: 0,
+        app_name: app.to_owned(),
+        title: format!("From {app}"),
+        body: String::from("Something happened."),
+        timestamp: 0,
+        priority: crate::notif_pane::NotifPriority::Normal,
+        read: false,
+        action: action.map(str::to_owned),
+        silent: false,
+    }
+}
+
+/// A press at `(x, y)` on the screen, delivered to the toasts' surface in its
+/// own coordinates -- as the compositor would deliver it.
+fn press_toasts_at(session: &mut Session, x: f32, y: f32) {
+    let surface = session.toasts;
+    let (ox, oy) = surface.origin();
+    deliver(
+        session,
+        surface.window(),
+        guitk::event::Event::Mouse(guitk::event::MouseEvent {
+            x: x - ox,
+            y: y - oy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }),
+    );
+}
+
+/// **A notice the desktop posts pops up, slides in, waits its time without
+/// waking the desktop every frame, and goes** -- and the toasts' surface is
+/// mapped exactly while there is a toast.
+#[test]
+fn a_notice_pops_up_and_goes_by_itself() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-a-notice-pops-up-and-goes-by-itself",
+        |_root| a_notice_pops_up_and_goes_by_itself_here(),
+    );
+}
+
+/// The body of [`a_notice_pops_up_and_goes_by_itself`].
+fn a_notice_pops_up_and_goes_by_itself_here() {
+    let (mut session, _desktop, _turn) = session();
+    let panel = session.panel().window();
+    assert!(!session.toasts_shown, "a surface up with no toast on it");
+
+    session.post_desktop_notice("Wallpaper could not be shown", "It is not a picture.");
+    session.finish_batch().expect("paint");
+    assert_eq!(session.shell().toasts.ids().len(), 1, "nothing popped up");
+    assert!(session.toasts_shown, "the toasts' surface was not mapped");
+    assert!(
+        session.events_mut().is_waking(panel),
+        "no frame for the slide"
+    );
+
+    // The slide in, then nothing moves: the next wake-up is the toast's time.
+    for _ in 0..30 {
+        frame(&mut session, 16);
+    }
+    assert!(!session.shell().toasts.is_moving());
+    assert!(
+        session.events_mut().is_waking(panel),
+        "nothing woke the desktop for the toast's time to come up"
+    );
+    // Its time comes up: it slides out, and the surface goes with it.
+    frame(&mut session, 6_000);
+    for _ in 0..30 {
+        frame(&mut session, 16);
+    }
+    assert!(!session.shell().toasts.is_showing(), "the toast never left");
+    assert!(
+        !session.toasts_shown,
+        "the surface stayed up with nothing on it"
+    );
+    // It is still in the pane, unread.
+    assert_eq!(session.shell().notifications.unread_count(), 1);
+}
+
+/// **The toasts' surface is exactly the stack**: where the shell says the
+/// toasts need to be drawn, at a whole pixel, and what is drawn on it is
+/// translated by that.
+#[test]
+fn the_toasts_surface_is_exactly_the_stack() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-the-toasts-surface-is-exactly-the-stack",
+        |_root| the_toasts_surface_is_exactly_the_stack_here(),
+    );
+}
+
+/// The body of [`the_toasts_surface_is_exactly_the_stack`].
+fn the_toasts_surface_is_exactly_the_stack_here() {
+    let (mut session, _desktop, _turn) = session();
+    session.post_desktop_notice("One", "First.");
+    session.post_desktop_notice("Two", "Second.");
+    for _ in 0..40 {
+        frame(&mut session, 16);
+    }
+    let extent = session
+        .shell_mut()
+        .toast_extent()
+        .expect("toasts are showing");
+    assert_eq!(session.toasts_at, Some(extent));
+    assert_eq!(
+        session.toasts.origin(),
+        (extent.x.round(), extent.y.round())
+    );
+    let screen_w = session.shell().screen_width as f32;
+    assert!((extent.x + extent.w - screen_w).abs() < 0.01);
+    assert!((extent.y + extent.h - session.shell().taskbar_rect().y).abs() < 0.01);
+
+    // A third arrives after the first two have settled: the stack grows,
+    // and the surface goes with it.
+    session.post_desktop_notice("Three", "Third.");
+    for _ in 0..40 {
+        frame(&mut session, 16);
+    }
+    let grown = session
+        .shell_mut()
+        .toast_extent()
+        .expect("toasts are showing");
+    assert!(grown.h > extent.h, "the stack did not grow");
+    assert_eq!(
+        session.toasts_at,
+        Some(grown),
+        "the surface stayed where it was"
+    );
+    assert_eq!(session.toasts.origin(), (grown.x.round(), grown.y.round()));
+}
+
+/// **A press on a toast opens its notification**: the program it names is
+/// asked for, the notification is read in the pane, and the toast goes. A
+/// press on its close button leaves the notification unread.
+#[test]
+fn a_press_on_a_toast_opens_its_notification() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-a-press-on-a-toast-opens-its-notificatio",
+        |_root| a_press_on_a_toast_opens_its_notification_here(),
+    );
+}
+
+/// The body of [`a_press_on_a_toast_opens_its_notification`].
+fn a_press_on_a_toast_opens_its_notification_here() {
+    let (mut session, _desktop, _turn) = session();
+    let id = session
+        .shell_mut()
+        .notify(toast_notif("Mail", Some("/usr/bin/mail")));
+    session.finish_batch().expect("paint");
+    for _ in 0..30 {
+        frame(&mut session, 16);
+    }
+    let placed = session.shell().toasts.placed();
+    let (x, y) = centre(placed[0].rect);
+    press_toasts_at(&mut session, x, y);
+    let launched = session.take_launches();
+    assert_eq!(launched.len(), 1, "the program was not asked for");
+    assert_eq!(
+        launched[0],
+        crate::hotkeys::Launch::program("/usr/bin/mail")
+    );
+    let read = session
+        .shell()
+        .notifications
+        .notifications()
+        .iter()
+        .find(|n| n.id == id)
+        .map(|n| n.read);
+    assert_eq!(read, Some(true), "opening the toast did not read it");
+
+    // And the close button: gone, still unread.
+    let other = session.shell_mut().notify(toast_notif("Chat", None));
+    session.finish_batch().expect("paint");
+    for _ in 0..40 {
+        frame(&mut session, 16);
+    }
+    let close = session
+        .shell()
+        .toasts
+        .placed()
+        .into_iter()
+        .find(|p| p.id == other)
+        .expect("the second toast")
+        .close;
+    press_toasts_at(&mut session, close.x + 2.0, close.y + 2.0);
+    assert!(session.take_launches().is_empty());
+    for _ in 0..40 {
+        frame(&mut session, 16);
+    }
+    assert!(!session.shell().toasts.ids().contains(&other));
+    let unread = session
+        .shell()
+        .notifications
+        .notifications()
+        .iter()
+        .find(|n| n.id == other)
+        .map(|n| n.read);
+    assert_eq!(unread, Some(false), "closing a toast read its notification");
+}
+
+/// **Do Not Disturb files a notification and shows nothing**: silenced is
+/// exactly "do not show me".
+#[test]
+fn do_not_disturb_files_a_notification_and_pops_up_nothing() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-do-not-disturb-files-a-notification-and-",
+        |_root| do_not_disturb_files_a_notification_and_pops_up_nothing_here(),
+    );
+}
+
+/// The body of [`do_not_disturb_files_a_notification_and_pops_up_nothing`].
+fn do_not_disturb_files_a_notification_and_pops_up_nothing_here() {
+    let (mut session, _desktop, _turn) = session();
+    session
+        .shell_mut()
+        .focus
+        .set_mode(crate::focus_assist::FocusMode::TotalSilence);
+    session.post_desktop_notice("Quiet", "Not now.");
+    session.finish_batch().expect("paint");
+    assert!(!session.shell().toasts.is_showing());
+    assert!(!session.toasts_shown);
+    assert_eq!(
+        posted(&session),
+        [("Quiet".to_owned(), "Not now.".to_owned())]
+    );
+}
+
+/// **Opening the pane takes the toasts away**, and what arrives while it is
+/// open is in it, not popped up over it.
+#[test]
+fn the_open_pane_takes_the_place_of_the_toasts() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-the-open-pane-takes-the-place-of-the-toa",
+        |_root| the_open_pane_takes_the_place_of_the_toasts_here(),
+    );
+}
+
+/// The body of [`the_open_pane_takes_the_place_of_the_toasts`].
+fn the_open_pane_takes_the_place_of_the_toasts_here() {
+    let (mut session, _desktop, _turn) = bound_session();
+    let panel = session.panel().window();
+    session.post_desktop_notice("Before", "Popped up.");
+    session.finish_batch().expect("paint");
+    assert!(session.shell().toasts.is_showing());
+    deliver(&mut session, panel, super_n());
+    assert!(session.shell().notifications.pane_state().is_visible());
+    assert!(
+        !session.shell().toasts.is_showing(),
+        "a toast over the pane"
+    );
+    session.post_desktop_notice("During", "In the pane.");
+    session.finish_batch().expect("paint");
+    assert!(
+        !session.shell().toasts.is_showing(),
+        "popped up over the pane"
+    );
+    assert_eq!(posted(&session).len(), 2);
+}
+
+/// **Nothing pops up on the login screen**: a notification's words are not
+/// for whoever is at it. It is filed, and waits.
+#[test]
+fn nothing_pops_up_on_the_login_screen() {
+    // A notification is written down as it changes: in a scratch
+    // configuration, not the developer's own.
+    settingsfile::testing::with_scratch_config(
+        "session-nothing-pops-up-on-the-login-screen",
+        |_root| nothing_pops_up_on_the_login_screen_here(),
+    );
+}
+
+/// The body of [`nothing_pops_up_on_the_login_screen`].
+fn nothing_pops_up_on_the_login_screen_here() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+    assert!(session.is_locked());
+    session.post_desktop_notice("Private", "For the user only.");
+    session.finish_batch().expect("paint");
+    assert!(!session.toasts_shown, "a toast over the login screen");
+    assert_eq!(posted(&session).len(), 1);
+}
+
+// ---- what programs add to a file's right-click menu (design-decisions §1448) ----
+
+/// A service menu for PNG pictures, one item.
+const ROTATE_MENU: &str = "[Desktop Entry]\nMimeType=image/png;\nActions=rotate;\n\n\
+                           [Desktop Action rotate]\nName=Rotate right\nExec=mogrify -rotate 90 %f\n";
+
+/// A file on disk with an icon for it at the desktop's first cell, and where
+/// a press lands on it, in screen coordinates.
+fn file_icon(session: &mut Session, path: &std::path::Path) -> (f32, f32) {
+    std::fs::write(path, b"x").expect("write");
+    let (x, y) = session.shell.icons.cell_origin(0, 0);
+    let id = session.shell.icons.add_icon(
+        "photo.png",
+        crate::icons::IconType::File,
+        crate::icons::IconAction::OpenPath(path.to_path_buf()),
+        x,
+        y,
+    );
+    let icon = session.shell.icons.get_icon(id).expect("added");
+    let grid = session.shell.icons.grid();
+    #[allow(clippy::cast_precision_loss, reason = "a test's small cell sizes")]
+    let centre = (
+        icon.x as f32 + grid.cell_width() as f32 / 2.0,
+        icon.y as f32 + grid.cell_height() as f32 / 2.0,
+    );
+    centre
+}
+
+/// The open desktop menu's labels, submenus' included.
+fn open_menu_labels(session: &Session) -> Vec<String> {
+    fn walk(items: &[guitk::menu::MenuItem], out: &mut Vec<String>) {
+        for item in items {
+            match item {
+                guitk::menu::MenuItem::Action { label, .. } => out.push(label.clone()),
+                guitk::menu::MenuItem::Submenu {
+                    label, children, ..
+                } => {
+                    out.push(label.clone());
+                    walk(children, out);
+                }
+                guitk::menu::MenuItem::Separator => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(session.shell().desktop_menu.items(), &mut out);
+    out
+}
+
+/// **A service menu installed while the desktop is up is offered at the
+/// next right-click on a file**, without a login -- and one that cannot be
+/// used is reported, with why.
+#[test]
+fn a_service_menu_installed_while_the_desktop_is_up_is_offered() {
+    let (mut session, desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-service-menus");
+    let data = scratch.dir().join("share");
+    let menus = data.join("kio").join("servicemenus");
+    std::fs::create_dir_all(&menus).expect("mkdir");
+    session.set_service_dirs(servicemenus::Dirs {
+        user: None,
+        system: vec![data],
+    });
+    assert!(session.take_service_menu_problems().is_empty());
+    let (x, y) = file_icon(&mut session, &scratch.dir().join("photo.png"));
+
+    // Installed now, after the session read the directory.
+    std::fs::write(menus.join("rotate.desktop"), ROTATE_MENU).expect("write");
+    std::fs::write(
+        menus.join("broken.desktop"),
+        "[Desktop Entry]\nMimeType=all/all;\n",
+    )
+    .expect("write");
+
+    right_click_at(&desktop, session.background(), x, y);
+    session.pump().expect("pump");
+    assert!(
+        session.shell().desktop_menu.is_visible(),
+        "the premise: the menu opened"
+    );
+    assert!(
+        open_menu_labels(&session).contains(&String::from("Rotate right")),
+        "the menu opened without the service menu installed since the last read: {:?}",
+        open_menu_labels(&session)
+    );
+    let problems = session.take_service_menu_problems();
+    assert!(
+        problems
+            .iter()
+            .any(|(path, why)| path.ends_with("broken.desktop") && why.contains("lists no actions")),
+        "{problems:?}"
+    );
+    assert!(
+        session.take_service_menu_problems().is_empty(),
+        "taken, so each is said once"
+    );
+}
+
+/// **Turning a menu on in the Settings application reaches the next
+/// right-click**: `context-menus.yaml` is read again when its change is
+/// announced.
+#[test]
+fn a_menu_turned_on_elsewhere_is_offered_at_the_next_right_click() {
+    // Writes the settings file, so in a scratch configuration of its own --
+    // the session started inside it, so its first read is of that one too.
+    settingsfile::testing::with_scratch_config("session-service-choices", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let scratch = scratchdir::ScratchDir::new("session-service-choices");
+        let data = scratch.dir().join("share");
+        let menus = data.join("kio").join("servicemenus");
+        std::fs::create_dir_all(&menus).expect("mkdir");
+        std::fs::write(menus.join("mine.desktop"), ROTATE_MENU).expect("write");
+        let dirs = servicemenus::Dirs {
+            user: Some(data),
+            system: Vec::new(),
+        };
+        session.set_service_dirs(dirs.clone());
+        let (x, y) = file_icon(&mut session, &scratch.dir().join("photo.png"));
+
+        right_click_at(&desktop, session.background(), x, y);
+        session.pump().expect("pump");
+        assert!(
+            !open_menu_labels(&session).contains(&String::from("Rotate right")),
+            "a menu of the user's own is off until turned on"
+        );
+        session.shell.desktop_menu.hide();
+
+        // The Settings application turns it on, and the change is announced.
+        let found = servicemenus::scan(&dirs, None);
+        let mut file = servicemenus::ChoicesFile::load();
+        file.choices.set(&found.menus[0], true);
+        file.save().expect("save");
+        let name = guitk::event::SettingsName::new(servicemenus::CONFIG_NAME.as_bytes())
+            .expect("a settings name");
+        desktop.borrow_mut().send_input(&[InputEvent::new(
+            session.background().window(),
+            guitk::event::Event::SettingsChanged {
+                group: SettingsGroup::Program(name),
+            },
+        )]);
+        session.pump().expect("pump");
+
+        right_click_at(&desktop, session.background(), x, y);
+        session.pump().expect("pump");
+        assert!(
+            open_menu_labels(&session).contains(&String::from("Rotate right")),
+            "{:?}",
+            open_menu_labels(&session)
+        );
+    });
+}
+
+/// **The user's window rules are read when the session starts and again when
+/// their file changes, and a rule that cannot be read says so** -- in a notice
+/// naming it, on each read that finds it. A file removed is the defaults.
+#[test]
+fn window_rules_are_read_at_start_and_on_change_and_a_bad_one_says_so() {
+    settingsfile::testing::with_scratch_config("session-window-rules", |_root| {
+        let path = settingsfile::path_for(windowrules::file::CONFIG_NAME).expect("a settings path");
+        std::fs::create_dir_all(path.parent().expect("a folder")).expect("mkdir");
+        std::fs::write(
+            &path,
+            "rules:\n  mail on desktop 2:\n    app: mail\n    desktop: 2\n  \
+             typo:\n    app: notes\n    can-clos: false\n",
+        )
+        .expect("write");
+        let (mut session, desktop, _turn) = session();
+        let names = |session: &Session| -> Vec<String> {
+            session
+                .shell()
+                .rules
+                .rules()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect()
+        };
+        let notices = |session: &Session| -> Vec<(String, String)> {
+            session
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .filter(|n| n.title.contains("window rule"))
+                .map(|n| (n.title.clone(), n.body.clone()))
+                .collect()
+        };
+        let announce = |session: &Session| {
+            let name = guitk::event::SettingsName::new(windowrules::file::CONFIG_NAME.as_bytes())
+                .expect("a settings name");
+            desktop.borrow_mut().send_input(&[InputEvent::new(
+                session.background().window(),
+                guitk::event::Event::SettingsChanged {
+                    group: SettingsGroup::Program(name),
+                },
+            )]);
+        };
+
+        // Read at start: the good rule held, the typo told.
+        assert_eq!(names(&session), ["mail on desktop 2"]);
+        let said = notices(&session);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert_eq!(said[0].0, "A window rule is not applied");
+        assert!(said[0].1.starts_with("\"typo\": "), "{said:?}");
+
+        // Settings writes the rules, and the change is announced and read. A
+        // file with nothing wrong in it says nothing.
+        std::fs::write(
+            &path,
+            "rules:\n  notes:\n    app: notes\n    taskbar: false\n",
+        )
+        .expect("write");
+        announce(&session);
+        session.pump().expect("pump");
+        assert_eq!(names(&session), ["notes"]);
+        assert_eq!(notices(&session).len(), 1);
+
+        // The typo is back: said again, since the file was read again with it.
+        std::fs::write(
+            &path,
+            "rules:\n  typo:\n    app: notes\n    can-clos: false\n",
+        )
+        .expect("write");
+        announce(&session);
+        session.pump().expect("pump");
+        assert!(
+            names(&session).is_empty(),
+            "the rules are what the file says"
+        );
+        assert_eq!(notices(&session).len(), 2);
+
+        // An announcement with no change to the file is not news.
+        announce(&session);
+        session.pump().expect("pump");
+        assert_eq!(notices(&session).len(), 2);
+
+        // The file removed: the defaults.
+        std::fs::remove_file(&path).expect("rm");
+        announce(&session);
+        session.pump().expect("pump");
+        let defaults: Vec<String> = windowrules::default_rules()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names(&session), defaults);
+    });
+}
+
+/// **Ctrl+click on a desktop icon adds it to the selection**, and a plain
+/// click replaces it. The Ctrl arrives stamped on the click's envelope by
+/// the compositor, never as a key: the desktop's surface hardly ever has the
+/// keyboard when a click lands on it.
+#[test]
+fn ctrl_click_adds_a_desktop_icon_to_the_selection() {
+    let (mut session, desktop, _turn) = session();
+    let add = |session: &mut Session, name: &str, y: i32| {
+        session.shell_mut().icons.add_icon(
+            name,
+            crate::icons::IconType::File,
+            crate::icons::IconAction::Custom(name.into()),
+            0,
+            y,
+        )
+    };
+    let first = add(&mut session, "one.txt", 0);
+    let second = add(&mut session, "two.txt", 200);
+    let third = add(&mut session, "three.txt", 400);
+    session.paint_background().expect("paint");
+    let surface = session.background();
+    let centre = |session: &Session, id| {
+        let icon = session.shell().icons.get_icon(id).expect("the icon");
+        (icon.x as f32 + 20.0, icon.y as f32 + 20.0)
+    };
+    let click_with = |session: &mut Session, id, modifiers: Modifiers| {
+        let (x, y) = centre(session, id);
+        let (ox, oy) = surface.origin();
+        desktop.borrow_mut().send_input(&[
+            InputEvent::new(
+                surface.window(),
+                guitk::event::Event::Mouse(click(x - ox, y - oy)),
+            )
+            .with_modifiers(modifiers),
+            InputEvent::new(
+                surface.window(),
+                guitk::event::Event::Mouse(guitk::event::MouseEvent {
+                    x: x - ox,
+                    y: y - oy,
+                    kind: MouseEventKind::Release(MouseButton::Left),
+                }),
+            )
+            .with_modifiers(modifiers),
+        ]);
+        session.pump().expect("pump");
+        let mut selected = session.shell().icons.selected_ids();
+        selected.sort_by_key(|id| id.0);
+        selected
+    };
+    let mut both = vec![first, second];
+    both.sort_by_key(|id| id.0);
+    assert_eq!(click_with(&mut session, first, Modifiers::NONE), [first]);
+    assert_eq!(click_with(&mut session, second, Modifiers::ctrl()), both);
+    // A plain click replaces what was selected.
+    assert_eq!(click_with(&mut session, third, Modifiers::NONE), [third]);
 }

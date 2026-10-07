@@ -26,6 +26,9 @@ DELETE = "backspace_and_delete_take_one_character_each_way"
 CLIP = "copy_and_cut_hand_back_the_selection_and_paste_types_the_clipboard"
 PASTE = "a_paste_leaves_line_breaks_out_and_stops_at_the_capacity_in_characters"
 NOTHING = "a_key_that_types_nothing_is_not_the_fields_and_keeps_the_selection"
+ALTGR = "altgr_types_where_a_ctrl_chord_would_select_copy_cut_or_paste"
+COMMAND = "a_command_types_nothing_though_it_carries_its_letter"
+TABLE = "a_chord_a_command_and_typing_by_modifiers"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -55,9 +58,9 @@ MUTATIONS = [
     ),
     (
         "a copy takes nothing",
-        "        Key::C if ctrl => {\n            if input.has_selection() {\n"
+        "        Key::C if chord => {\n            if input.has_selection() {\n"
         "                copied = Some(input.selected_text().to_string());",
-        "        Key::C if ctrl => {\n            if input.has_selection() {\n"
+        "        Key::C if chord => {\n            if input.has_selection() {\n"
         "                copied = None;",
         [CLIP],
     ),
@@ -70,21 +73,63 @@ MUTATIONS = [
     ),
     (
         "a paste types nothing",
-        "        Key::V if ctrl => insert_limited(input, clipboard, capacity),",
-        "        Key::V if ctrl => {}",
+        "        Key::V if chord => insert_limited(input, clipboard, capacity),",
+        "        Key::V if chord => {}",
         [CLIP, PASTE],
     ),
     (
         "a chord nobody bound types its letter",
-        "            if ctrl || !key.text.chars().any(|c| !c.is_control()) {",
-        "            if !key.text.chars().any(|c| !c.is_control()) {",
-        [NOTHING],
+        "    key.pressed && !is_command(key.modifiers) && key.types_text()",
+        "    key.pressed && key.types_text()",
+        [NOTHING, COMMAND, TABLE],
     ),
     (
         "a key that types nothing is the field's",
-        "            if ctrl || !key.text.chars().any(|c| !c.is_control()) {",
-        "            if ctrl {",
-        [NOTHING],
+        "    key.pressed && !is_command(key.modifiers) && key.types_text()",
+        "    key.pressed && !is_command(key.modifiers)",
+        [NOTHING, TABLE],
+    ),
+    (
+        "the field types a command's letter",
+        "            if !types_into_field(key) {",
+        "            if !key.types_text() {",
+        [NOTHING, COMMAND],
+    ),
+    (
+        "a release types",
+        "    key.pressed && !is_command(key.modifiers) && key.types_text()",
+        "    !is_command(key.modifiers) && key.types_text()",
+        [TABLE],
+    ),
+    (
+        "AltGr is a Ctrl chord",
+        "    modifiers.ctrl && !modifiers.alt && !modifiers.super_key\n}",
+        "    modifiers.ctrl && !modifiers.super_key\n}",
+        [ALTGR, TABLE],
+    ),
+    (
+        "a Ctrl chord held with the Windows key is the program's",
+        "    modifiers.ctrl && !modifiers.alt && !modifiers.super_key\n}",
+        "    modifiers.ctrl && !modifiers.alt\n}",
+        [COMMAND, TABLE],
+    ),
+    (
+        "AltGr is a command",
+        "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
+        "    modifiers.super_key || modifiers.ctrl || modifiers.alt",
+        [ALTGR, TABLE],
+    ),
+    (
+        "a key held with Alt alone types",
+        "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
+        "    modifiers.super_key || (modifiers.ctrl && !modifiers.alt)",
+        [COMMAND, TABLE],
+    ),
+    (
+        "a key held with the Windows key types",
+        "    modifiers.super_key || modifiers.ctrl != modifiers.alt",
+        "    modifiers.ctrl != modifiers.alt",
+        [COMMAND, TABLE],
     ),
     (
         "a paste of nothing eats the selection",
@@ -109,6 +154,54 @@ MUTATIONS = [
         "    if input.has_selection() {\n        input.delete_selection();\n    }\n    for ch in typed.chars() {",
         "    for ch in typed.chars() {",
         [TYPING],
+    ),
+    (
+        'a key held with Ctrl is plain',
+        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
+        '    !modifiers.alt && !modifiers.super_key',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        'a key held with Alt is plain',
+        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
+        '    !modifiers.ctrl && !modifiers.super_key',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        'a key held with the Windows key is plain',
+        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
+        '    !modifiers.ctrl && !modifiers.alt',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        'AltGr is plain',
+        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
+        '    modifiers.ctrl == modifiers.alt && !modifiers.super_key',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        "AltGr is Alt's",
+        '    (modifiers.alt && !modifiers.ctrl) || modifiers.super_key\n}',
+        '    modifiers.alt || modifiers.super_key\n}',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        "Alt alone is not Alt's",
+        '    (modifiers.alt && !modifiers.ctrl) || modifiers.super_key\n}',
+        '    modifiers.super_key\n}',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        "the Windows key is not the desktop's",
+        '    (modifiers.alt && !modifiers.ctrl) || modifiers.super_key\n}',
+        '    modifiers.alt && !modifiers.ctrl\n}',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        'a key held with Alt or the Windows key edits the field',
+        '    if is_alt_or_windows_chord(key.modifiers) {\n        return LineEdit::default();\n    }\n',
+        '',
+        ['a_key_held_with_alt_or_the_windows_key_edits_nothing'],
     ),
 ]
 

@@ -1,0 +1,21 @@
+# opus_one_page.opus: what the Ogg demuxer makes of it (generate_fixtures.py).
+stream 0 opus 1/48000
+packet 0 -312 960 120 121 _ 6f088cf05290e92b2226bac9185c3c7c 312 0 -
+packet 0 N/A 960 80 121 _ da9bbf1244a543dd82a5b06642d852e9 0 0 -
+packet 0 N/A 960 69 121 _ 97877a6654f74000166236c94d4d1364 0 0 -
+packet 0 N/A 960 64 121 _ baca405b355c938745f2303368bf249b 0 0 -
+packet 0 N/A 960 74 121 _ 53312254ae7d10b209b4ee4e8b9f7989 0 0 -
+packet 0 N/A 960 80 121 _ efb359f8e68af03d81149be6feafc2bc 0 0 -
+packet 0 N/A 960 75 121 _ 44b51eda944e37bbfc98e57c763bbf74 0 0 -
+packet 0 N/A 960 65 121 _ 366d562fa4049791a9eb7941f329473a 0 0 -
+packet 0 N/A 960 69 121 _ 43850d4950cec5654c54c7d1faff4d22 0 0 -
+packet 0 N/A 960 73 121 _ b4fc191628755e1b95680618273e070a 0 0 -
+packet 0 N/A 960 72 121 _ e096fcfc89e6bb1d006ee2fd7514db55 0 0 -
+packet 0 N/A 960 75 121 _ 4539f58fc6ead41cf077d00ad2fd15a7 0 0 -
+packet 0 N/A 960 71 121 _ 44c65df424d756753a89fe28cd3b83fa 0 0 -
+packet 0 N/A 960 64 121 _ a17dff7bc7d8856397d7bc3022557d5a 0 0 -
+packet 0 N/A 960 69 121 _ 057aeb77f1baf9b6024dbed5ff2a2b22 0 0 -
+packet 0 N/A 960 71 121 _ ba3804ddc086051b35a19ed5991fc54e 0 0 -
+packet 0 N/A 960 73 121 _ 40a6507534e199745a1adb6a69077cdb 0 0 -
+packet 0 N/A 960 73 121 _ 195099cc7ef92360be1bf2e911a90301 0 0 -
+packet 0 N/A 792 112 121 _ 5548f955b0ff3af7a734e2bcb02b0358 0 168 -

@@ -69,9 +69,7 @@ fn emit(out: *mut u8, fmt: *const u8, args: &mut printf::Args, with_errno: bool)
     let saved_errno = errno::get_errno();
     crate::stdio::flockfile(out.cast());
     // SAFETY: a plain read of the pointer `__libc_start_main` set.
-    put_cstr(out, unsafe {
-        core::ptr::addr_of!(crate::crt::__progname).read()
-    });
+    put_cstr(out, unsafe { crate::crt::progname_slot().read() });
     put(out, b": ");
     if !fmt.is_null() {
         // What a failed write loses is the message itself, as in `put`.
@@ -179,8 +177,8 @@ mod tests {
 
     /// The short name in the host's messages: `crt`'s default.
     fn short() -> String {
-        // SAFETY: a plain read of a static C string's pointer.
-        let p = unsafe { core::ptr::addr_of!(crate::crt::__progname).read() };
+        // SAFETY: a plain read of this thread's name, a C string's pointer.
+        let p = unsafe { crate::crt::progname_slot().read() };
         // SAFETY: a C string.
         unsafe { core::ffi::CStr::from_ptr(p.cast()) }
             .to_string_lossy()

@@ -1,0 +1,4 @@
+# meta_chapters.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 snow 1/1000
+packet 0 0 N/A 12 568 K__ bf5175560d3263fb51365bd8ba40b374 -
+packet 0 40 N/A 12 586 ___ 6b3d1a94339550725351f2fd3abf82d1 -

@@ -148,7 +148,22 @@ def package_dir(crate):
 _PACKAGE_DIRS = {}
 
 
-def build_tests(crate, timeout=1800):
+def cargo_test_command(crate, targets=(), *last):
+    """`cargo test` of `crate` on the host target -- of its test targets
+    `targets` only (`--lib`, `--test NAME`) when there are any, all of them
+    otherwise -- and `last` after.
+
+    `targets` is for a crate whose suite holds tests far slower than any a
+    table names: `gui/video/codec`'s pictures take ten minutes to decode,
+    every run, where its subtitle tests take seconds, so a sweep of its
+    subtitle readers over the whole suite costs hours. A table that narrows
+    the targets must name only tests in them, or its rows score "SURVIVED"
+    for tests that never ran.
+    """
+    return ["cargo", "test", "-p", crate, "--target", "x86_64-pc-windows-gnu", *targets, *last]
+
+
+def build_tests(crate, timeout=1800, targets=()):
     """Compile the crate's test binaries without running them.
 
     The per-mutation timeout exists to catch a mutant that loops forever, so it
@@ -176,13 +191,7 @@ def build_tests(crate, timeout=1800):
             "--poll",
             "60",
             str(timeout),
-            "cargo",
-            "test",
-            "-p",
-            crate,
-            "--target",
-            "x86_64-pc-windows-gnu",
-            "--no-run",
+            *cargo_test_command(crate, targets, "--no-run"),
         ],
         cwd=REPO,
         env=cargo_env(),
@@ -205,18 +214,25 @@ def failed_tests(stdout):
     unread the same way until 2026-09-27, when `apps/snapstore`'s store tests
     were the first a table named; they are read from the summary block that
     follows `failures:`, where every line is a test's name.
+
+    And a test in a module not called `tests` -- `apps/editor`'s
+    `undo_tests::name`, `external_merge_tests::name` -- went unread until
+    2026-09-28: the pattern above wants `tests::` as a whole path component.
+    Its rows were scored caught by a crash, or by whichever `tests::` test
+    also failed, as "WRONG TESTS".  Every line of the summary block is a
+    failed test's whole path, so the name is the part after its last `::`,
+    whatever the modules above it are called.
     """
     failed = set(re.findall(r"^    (?:[A-Za-z0-9_]+::)*tests::(\S+)$", stdout, re.M))
     for block in re.findall(r"^failures:\n((?:    \S+\n)+)", stdout, re.M):
         for line in block.splitlines():
-            name = line.strip()
-            if "::" not in name:
-                failed.add(name)
+            failed.add(line.strip().rsplit("::", 1)[-1])
     return failed
 
 
-def run_tests(crate, timeout):
-    """Run one crate's suite and classify what happened to it.
+def run_tests(crate, timeout, targets=()):
+    """Run one crate's suite -- its test targets `targets`, when any -- and
+    classify what happened to it.
 
     Returns `(compiled, ran, failed, timed_out, crashed, out)`, where `failed` is
     the set of test names that reported a failure and `ran` says whether a test
@@ -227,19 +243,13 @@ def run_tests(crate, timeout):
             "python",
             "scripts/run-timeout.py",
             str(timeout),
-            "cargo",
-            "test",
-            "-p",
-            crate,
-            "--target",
-            "x86_64-pc-windows-gnu",
             # Every test binary runs even when one fails. Cargo stops at the
             # first failing binary otherwise, so a crate with integration
             # tests had a mutant caught by `tests/audit.rs` never reach the
             # test the table named in `tests/store.rs` -- scored WRONG TESTS
             # for a row whose named test was never run. A crate with one test
             # binary is unaffected.
-            "--no-fail-fast",
+            *cargo_test_command(crate, targets, "--no-fail-fast"),
         ],
         capture_output=True,
         text=True,
@@ -400,11 +410,12 @@ def check_the_table(original, mutations, src_dir=None, test_dirs=()):
     return problems
 
 
-def sweep(src, mutations, crate, timeout=240, only=None):
+def sweep(src, mutations, crate, timeout=240, only=None, targets=()):
     """Apply each mutation in turn and report which tests noticed.
 
     `src` is the file to mutate, `mutations` the `(name, old, new, expect)`
-    table, `crate` the cargo package whose suite to run.  `only` filters the
+    table, `crate` the cargo package whose suite to run -- its test targets
+    `targets` alone when given (`cargo_test_command`).  `only` filters the
     table by substring, defaulting to the command line.  Returns a process exit
     code: 0 only if every mutation ran and was caught by the tests named for it.
     """
@@ -478,7 +489,7 @@ def sweep(src, mutations, crate, timeout=240, only=None):
     # single test.  One run against the unmutated source, up front, is the
     # cheapest possible check and it is the one that catches that whole class.
     print(f"warm-up: building {crate}'s tests, outside the sweep's timeout ...")
-    b = build_tests(crate)
+    b = build_tests(crate, targets=targets)
     if b.returncode != 0:
         bak.unlink(missing_ok=True)
         # The compiler's own diagnostics are already above this line: the build
@@ -487,7 +498,7 @@ def sweep(src, mutations, crate, timeout=240, only=None):
         return 2
 
     print(f"baseline: running {crate}'s suite against the unmutated source ...")
-    compiled, ran, failed, timed_out, crashed, out = run_tests(crate, timeout)
+    compiled, ran, failed, timed_out, crashed, out = run_tests(crate, timeout, targets)
     if not (compiled and ran and not failed and out.returncode == 0):
         bak.unlink(missing_ok=True)
         print("\nThe suite does not pass on the unmutated source, so no verdict")
@@ -517,13 +528,13 @@ def sweep(src, mutations, crate, timeout=240, only=None):
             # "caught by a hang", and neither had hung.  A hang verdict never
             # checks the expected tests, so a cascade of them silently retires
             # the coverage the table was written to prove.
-            b = build_tests(crate)
+            b = build_tests(crate, targets=targets)
             if b.returncode != 0:
                 verdicts.append((name, "SKIP did not compile"))
                 print(f"[skip] {name}: mutant did not compile")
                 src.write_text(original, encoding="utf-8", newline="")
                 continue
-            compiled, ran, failed, timed_out, crashed, out = run_tests(crate, timeout)
+            compiled, ran, failed, timed_out, crashed, out = run_tests(crate, timeout, targets)
             if timed_out:
                 # A timeout is scored `[ok]`, so it is the one verdict that can
                 # award coverage to a test that did nothing -- and the clock is
@@ -542,7 +553,7 @@ def sweep(src, mutations, crate, timeout=240, only=None):
                 # costs one extra run per timeout, and timeouts are rare -- the
                 # price is paid only where the verdict was going to be doubtful.
                 print(f"[....] {name}: timed out; re-running to tell a hang from a slow machine")
-                compiled, ran, failed, timed_out, crashed, out = run_tests(crate, timeout)
+                compiled, ran, failed, timed_out, crashed, out = run_tests(crate, timeout, targets)
             if timed_out:
                 verdicts.append((name, "caught by a hang"))
                 print(f"[ok]   {name}: caught \u2014 the suite hung twice")

@@ -60,6 +60,7 @@ use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::textinput::TextInput;
+use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -116,7 +117,14 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("PageUp / PageDown", "Move the selected rule up / down"),
     ("Ctrl+Backspace", "Remove every rule"),
     ("Enter", "Rename the selected files"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo the rename"),
+    (
+        "Ctrl+Z / Ctrl+Y",
+        "Undo / redo the rename; Ctrl+Shift+Z redoes too",
+    ),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The names before / after these, on any branch",
+    ),
     ("Ctrl+O", "Open a folder"),
     ("/", "Search the file names"),
     ("Ctrl+E", "Show only one extension"),
@@ -210,7 +218,7 @@ fn find_replace_detail(find: &str, replace: &str, width: f32) -> String {
 
 const MAX_FILES: usize = 10_000;
 const MAX_OPERATIONS: usize = 50;
-const MAX_UNDO: usize = 100;
+const MAX_UNDO: core::num::NonZeroUsize = core::num::NonZeroUsize::MIN.saturating_add(99);
 const MAX_HISTORY: usize = 50;
 
 // ============================================================================
@@ -610,8 +618,18 @@ struct RenameStep {
     to: String,
 }
 
+/// What a set of renames comes to: the steps to take, in order, and the
+/// renames that cannot be made at all -- each onto a name a file holds that no
+/// rename in the set moves out of the way.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct RenamePlan {
+    steps: Vec<RenameStep>,
+    refused: Vec<(String, String)>,
+}
+
 /// Order a set of renames so that no step overwrites a file a later step still
-/// needs, inserting temporary names where a cycle makes that impossible.
+/// needs, inserting temporary names where a cycle makes that impossible -- and
+/// refusing a rename onto a name held by a file that is not moving at all.
 ///
 /// `existing` is every filename present in the directory right now;
 /// `renames` is the `(from, to)` set the user asked for, in any order.
@@ -624,16 +642,24 @@ struct RenameStep {
 /// order at all, and needs one of them parked under a temporary name first.
 ///
 /// The algorithm is the obvious one: repeatedly emit every rename whose
-/// destination is currently free; when a full pass emits nothing, everything
-/// left is part of a cycle, so break one link by renaming its source to an
-/// unused temporary name and re-queue the rest of that rename. Breaking a link
-/// always frees the name some other queued rename wants — that is what being a
-/// cycle means — so each break makes progress and the loop terminates.
+/// destination is currently free. When a full pass emits nothing, a rename
+/// whose destination no queued rename will vacate can never go, and is
+/// refused; what is left after that is in a cycle, so break one link by
+/// renaming its source to an unused temporary name and re-queue the rest of
+/// that rename. Breaking a link frees a name some other queued rename wants --
+/// that is what being in a cycle means -- so each break leads to progress and
+/// the loop terminates.
+///
+/// **The refusal is what makes that last sentence true.** The planner took
+/// every stall for a cycle, and a rename blocked by a file nothing moves is no
+/// cycle: parking its source freed a name nobody wanted, the rename came back
+/// as blocked as before, and the loop minted temporary names until memory ran
+/// out. An undo that met a file made since under the old name did it.
 ///
 /// Note it is `fs::rename`'s *overwriting* that makes this necessary. Slate OS
 /// paths are case-sensitive, so `a.txt` → `A.txt` is a real rename between two
 /// distinct names and needs no special handling here.
-fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameStep> {
+fn rename_plan(existing: &[String], renames: &[(String, String)]) -> RenamePlan {
     let mut occupied: BTreeSet<String> = existing.iter().cloned().collect();
     let mut pending: Vec<(String, String)> = renames
         .iter()
@@ -641,7 +667,9 @@ fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameS
         .cloned()
         .collect();
     let mut steps = Vec::new();
+    let mut refused = Vec::new();
     let mut temp_counter: usize = 0;
+    let mut parks: usize = 0;
 
     while !pending.is_empty() {
         let mut blocked = Vec::new();
@@ -662,9 +690,31 @@ fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameS
             continue;
         }
 
+        // Nothing moved. A rename waiting on a name that no rename left will
+        // vacate can never go: refuse it, and go round again with the rest.
+        let sources: BTreeSet<String> = pending.iter().map(|(from, _)| from.clone()).collect();
+        let (cyclic, stuck): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|(_, to)| sources.contains(to));
+        pending = cyclic;
+        if !stuck.is_empty() {
+            refused.extend(stuck);
+            continue;
+        }
+
         // Everything left is in a cycle. Park one source under a name nothing
         // uses, which frees its old name for whichever rename was waiting on
         // it, and re-queue the second half of the move.
+        //
+        // Every park is followed by progress, so no plan needs more parks
+        // than it has renames. One that would has met a case the reasoning
+        // above missed: what is left is refused rather than looped on -- a
+        // refusal loses nothing, and a loop mints names until memory runs out.
+        if parks >= renames.len() {
+            refused.append(&mut pending);
+            break;
+        }
+        parks = parks.saturating_add(1);
         let (from, to) = pending.remove(0);
         let temp = unused_temp_name(&occupied, &mut temp_counter);
         occupied.remove(&from);
@@ -676,7 +726,43 @@ fn rename_plan(existing: &[String], renames: &[(String, String)]) -> Vec<RenameS
         pending.push((temp, to));
     }
 
-    steps
+    RenamePlan { steps, refused }
+}
+
+/// Rename `from` to `to`, refusing rather than replacing a file already at
+/// `to` -- coreutils' `noreplace`, atomic on Slate OS. A plan is made from a
+/// listing, and another program can make a file under a name between the
+/// listing and the rename; `fs::rename` would destroy it without a word.
+///
+/// The one `to` that may be there is `from` itself, spelt in another case, on
+/// a filesystem that does not tell case apart -- the Windows host the tests
+/// run on, where `a.txt` to `A.txt` finds its own file at the name.
+fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    match coreutils::rename::noreplace(from, to) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && only_case_differs(from, to) => {
+            std::fs::rename(from, to)
+        }
+        answer => answer,
+    }
+}
+
+/// Whether `a` and `b` are one file whose names differ only in case: in one
+/// folder, spelt alike but for case, and one place once resolved. On a
+/// filesystem that tells case apart they are two files, and resolve apart.
+fn only_case_differs(a: &Path, b: &Path) -> bool {
+    let (Some(a_name), Some(b_name)) = (a.file_name(), b.file_name()) else {
+        return false;
+    };
+    let alike = match (a_name.to_str(), b_name.to_str()) {
+        (Some(x), Some(y)) => x != y && x.to_lowercase() == y.to_lowercase(),
+        _ => false,
+    };
+    alike
+        && a.parent() == b.parent()
+        && matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(x), Ok(y)) if x == y
+        )
 }
 
 /// A name that no file in `occupied` has, for parking one side of a rename
@@ -1055,10 +1141,12 @@ struct RenamerApp {
     files: Vec<FileEntry>,
     /// Active rename operations (applied in order).
     operations: Vec<RenameOp>,
-    /// Undo stack of rename records.
-    undo_stack: Vec<RenameRecord>,
-    /// Redo stack.
-    redo_stack: Vec<RenameRecord>,
+    /// The renames done, kept as a tree: a rename done after undoing starts
+    /// a branch beside what was undone, rather than throwing it away (C-Q24,
+    /// `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go back and forth
+    /// along the branch the folder is on; Alt+Z and Alt+Shift+Z walk every
+    /// set of names it has had, in the order each was made.
+    undo: UndoHistory<RenameRecord>,
     /// The first file row shown.
     ///
     /// Was `scroll_offset: f32`, which nothing but the folder loader ever
@@ -1109,6 +1197,9 @@ struct RenamerApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1122,14 +1213,14 @@ impl RenamerApp {
     fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             folder: None,
             picker: FilePicker::default(),
             last_width: WINDOW_WIDTH_PX as f32,
             last_height: WINDOW_HEIGHT_PX as f32,
             files: Vec::new(),
             operations: Vec::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            undo: UndoHistory::new(MAX_UNDO),
             file_scroll: 0,
             files_wheel: wheel::Accumulator::default(),
             ops_scroll: 0.0,
@@ -1176,11 +1267,10 @@ impl RenamerApp {
         // what a person wants to run over the next, and opening a folder used
         // to throw them away without a word.
         //
-        // The stacks describe renames in the old folder. Undo across a folder
-        // change would look up names that are not here and silently do
-        // nothing, which reads exactly like an undo that failed.
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        // The history describes renames in the old folder. Undo across a
+        // folder change would look up names that are not here and silently
+        // do nothing, which reads exactly like an undo that failed.
+        self.undo.clear();
         self.selected_file = 0;
         self.file_scroll = 0;
 
@@ -1396,15 +1486,10 @@ impl RenamerApp {
         // Ordered so that no step overwrites a name a later step still
         // needs; see `rename_plan`. The order matters to the filesystem, not
         // to the preview, which is why it was built before there was one.
-        let plan = rename_plan(&self.current_names(), &record.renames);
-        let (done, failures) = self.perform(&plan);
+        let (done, failures) = self.carry_out(&record.renames);
 
         if done > 0 {
-            self.undo_stack.push(record.clone());
-            if self.undo_stack.len() > MAX_UNDO {
-                self.undo_stack.remove(0);
-            }
-            self.redo_stack.clear();
+            self.undo.record(record.clone());
 
             self.history.push(record);
             if self.history.len() > MAX_HISTORY {
@@ -1450,7 +1535,7 @@ impl RenamerApp {
                 .map_or_else(|| OsString::from(&step.from), |f| f.raw_name.clone());
             let from = folder.join(&from_raw);
             let to = folder.join(&step.to);
-            match std::fs::rename(&from, &to) {
+            match rename_without_replacing(&from, &to) {
                 Ok(()) => {
                     done = done.saturating_add(1);
                     if let Some(file) = self.files.iter_mut().find(|f| f.original_name == step.from)
@@ -1458,6 +1543,13 @@ impl RenamerApp {
                         file.original_name.clone_from(&step.to);
                         file.raw_name = OsString::from(&step.to);
                     }
+                }
+                // Something took the name after the plan was made.
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    failures.push(format!(
+                        "{} -> {}: a file named {} is already there",
+                        step.from, step.to, step.to
+                    ));
                 }
                 Err(err) => failures.push(format!("{} -> {}: {err}", step.from, step.to)),
             }
@@ -1504,45 +1596,157 @@ impl RenamerApp {
     /// touched `original_path`, so an undone rename left the path naming the
     /// file it had just been renamed *away* from.
     fn undo(&mut self) {
-        if let Some(record) = self.undo_stack.pop() {
-            let reversed: Vec<(String, String)> = record
-                .renames
-                .iter()
-                .map(|(old, new)| (new.clone(), old.clone()))
-                .collect();
-            let plan = rename_plan(&self.current_names(), &reversed);
-            let (done, failures) = self.perform(&plan);
-
-            // The record goes to the redo stack only if something was undone.
-            // Moving it regardless would offer to redo a rename that never
-            // came back, and the redo would then fail against names that are
-            // still in place.
-            if done > 0 {
-                self.redo_stack.push(record);
-            }
-            self.status_message = match Self::describe(done, &failures) {
-                m if done > 0 && failures.is_empty() => m.replace("Renamed", "Put back"),
-                m => m,
-            };
-            self.apply_operations();
+        let Some(record) = self.undo.undo() else {
+            return;
+        };
+        let (done, failures) = self.put_back(&record);
+        // Nothing came back: the history steps forward again, to where the
+        // files still are, so the undo can be tried again. Left where it was,
+        // it would offer to redo a rename that never came back, and the redo
+        // would fail against names that are still in place.
+        if done == 0 {
+            let _ = self.undo.redo();
         }
+        self.status_message = match Self::describe(done, &failures) {
+            m if done > 0 && failures.is_empty() => m.replace("Renamed", "Put back"),
+            m => m,
+        };
+        self.apply_operations();
     }
 
-    /// Redo the last undone rename.
+    /// Redo the last undone rename, on the branch the folder is on -- the
+    /// one undone out of, or the one made since.
     fn redo(&mut self) {
-        if let Some(record) = self.redo_stack.pop() {
-            let plan = rename_plan(&self.current_names(), &record.renames);
-            let (done, failures) = self.perform(&plan);
-
-            if done > 0 {
-                self.undo_stack.push(record);
-            }
-            self.status_message = match Self::describe(done, &failures) {
-                m if done > 0 && failures.is_empty() => m.replace("Renamed", "Redid"),
-                m => m,
-            };
-            self.apply_operations();
+        let Some(record) = self.undo.redo() else {
+            return;
+        };
+        let (done, failures) = self.do_again(&record);
+        // As in `undo`: a redo that renamed nothing leaves the history where
+        // the files are.
+        if done == 0 {
+            let _ = self.undo.undo();
         }
+        self.status_message = match Self::describe(done, &failures) {
+            m if done > 0 && failures.is_empty() => m.replace("Renamed", "Redid"),
+            m => m,
+        };
+        self.apply_operations();
+    }
+
+    /// Go to the names the folder had before these were first reached, on
+    /// whichever branch -- Alt+Z.
+    fn earlier(&mut self) {
+        let steps = self.undo.earlier();
+        self.travel(
+            steps,
+            "Nothing earlier to go back to",
+            "Back to the names before these",
+        );
+    }
+
+    /// Go to the names first reached after these, on whichever branch --
+    /// Alt+Shift+Z.
+    fn later(&mut self) {
+        let steps = self.undo.later();
+        self.travel(
+            steps,
+            "These are the newest names",
+            "On to the names after these",
+        );
+    }
+
+    /// Carry out a journey through the history, one batch of renames at a
+    /// time, and say what came of it.
+    ///
+    /// **A step that does not go through whole ends the journey and the
+    /// history.** It means the folder has changed outside the renamer, so
+    /// the history no longer describes its files: going on would rename by
+    /// names that are not there, and keeping it would offer the same. It is
+    /// cleared, and the status says why. (A single undo or redo that renames
+    /// nothing is simpler -- one step is put back where the files are.)
+    fn travel(&mut self, steps: Vec<Travel<RenameRecord>>, nowhere: &str, done_note: &str) {
+        if steps.is_empty() {
+            self.status_message = nowhere.to_string();
+            return;
+        }
+        for step in steps {
+            let (done, failures) = match &step {
+                Travel::Undo(record) => self.put_back(record),
+                Travel::Redo(record) => self.do_again(record),
+            };
+            if done == 0 || !failures.is_empty() {
+                self.undo.clear();
+                let why = failures
+                    .first()
+                    .map_or_else(String::new, |f| format!(" {f}"));
+                self.status_message = format!(
+                    "The folder changed outside the renamer, so the undo history no longer \
+                     matched its files and was cleared.{why}"
+                );
+                self.apply_operations();
+                return;
+            }
+        }
+        self.status_message = done_note.to_string();
+        self.apply_operations();
+    }
+
+    /// Rename `record`'s files back to the names they had before it.
+    ///
+    /// Goes through [`rename_plan`]: putting a batch back is itself a batch,
+    /// and reversing a swap or a shifted sequence by walking the pairs in
+    /// stored order clobbers exactly as the forward direction would.
+    fn put_back(&mut self, record: &RenameRecord) -> (usize, Vec<String>) {
+        let reversed: Vec<(String, String)> = record
+            .renames
+            .iter()
+            .map(|(old, new)| (new.clone(), old.clone()))
+            .collect();
+        self.carry_out(&reversed)
+    }
+
+    /// Rename `record`'s files to the names it gave them again.
+    fn do_again(&mut self, record: &RenameRecord) -> (usize, Vec<String>) {
+        self.carry_out(&record.renames)
+    }
+
+    /// Ctrl+Y or Ctrl+Shift+Z: redo, or nothing to draw when there is none.
+    fn redo_key(&mut self) -> EventResult {
+        if !self.undo.can_redo() {
+            return EventResult::Ignored;
+        }
+        self.redo();
+        EventResult::Consumed
+    }
+
+    /// Plan `renames` against the folder as it is now and carry the plan out:
+    /// how many went, and what did not -- the renames the plan refused first,
+    /// since each is why others waiting on it could not go either.
+    fn carry_out(&mut self, renames: &[(String, String)]) -> (usize, Vec<String>) {
+        let plan = rename_plan(&self.names_on_disk(), renames);
+        let mut failures: Vec<String> = plan
+            .refused
+            .iter()
+            .map(|(from, to)| format!("{from} -> {to}: a file named {to} is already there"))
+            .collect();
+        let (done, more) = self.perform(&plan.steps);
+        failures.extend(more);
+        (done, failures)
+    }
+
+    /// The names in the folder as it is now, for planning: the files the list
+    /// shows, and whatever another program has put there since. A plan made
+    /// from the list alone renamed over a file it did not know was there. A
+    /// name that is not text is left out: every name this program makes is
+    /// text, so none can be one of them.
+    fn names_on_disk(&self) -> Vec<String> {
+        let mut names = self.current_names();
+        if let Some(folder) = &self.folder
+            && let Ok(listing) = std::fs::read_dir(folder)
+        {
+            names.extend(listing.filter_map(|entry| entry.ok()?.file_name().into_string().ok()));
+        }
+        names
     }
 
     /// The name every file in the list currently has on disk.
@@ -1693,7 +1897,10 @@ impl RenamerApp {
         if self.focus != Focus::List && !matches!(key.key, Key::F1) {
             return self.handle_key_in_box(key);
         }
-        let ctrl = key.modifiers.ctrl;
+        // Ctrl without Alt: Ctrl+Alt is AltGr, which types a letter on
+        // several layouts.
+        let ctrl = key.modifiers.ctrl && !key.modifiers.alt;
+        let alt = key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key;
         match key.key {
             // Panels.
             Key::Tab => {
@@ -1793,20 +2000,25 @@ impl RenamerApp {
                 self.open_folder();
                 EventResult::Consumed
             }
+            // Every set of names the folder has had, in the order each was
+            // made: the way back to a rename undone out of.
+            Key::Z if alt => {
+                if key.modifiers.shift {
+                    self.later();
+                } else {
+                    self.earlier();
+                }
+                EventResult::Consumed
+            }
+            Key::Z if ctrl && key.modifiers.shift => self.redo_key(),
             Key::Z if ctrl => {
-                if self.undo_stack.is_empty() {
+                if !self.undo.can_undo() {
                     return EventResult::Ignored;
                 }
                 self.undo();
                 EventResult::Consumed
             }
-            Key::Y if ctrl => {
-                if self.redo_stack.is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.redo();
-                EventResult::Consumed
-            }
+            Key::Y if ctrl => self.redo_key(),
             // The shortcut list. Before the unguarded `Key::Slash` below,
             // which would otherwise take a shifted slash and open the search
             // box -- a guard narrows only the arm it is on.
@@ -2809,7 +3021,9 @@ enum Focus {
 /// Returns whether the key was an editing key.
 fn edit_text(input: &mut TextInput, key: &KeyEvent) -> bool {
     let shift = key.modifiers.shift;
-    let ctrl = key.modifiers.ctrl;
+    // Ctrl without Alt: Ctrl+Alt is AltGr, and what it types is text -- a
+    // box refused it, and AltGr+A (Polish's ą) selected everything instead.
+    let ctrl = key.modifiers.ctrl && !key.modifiers.alt;
     match key.key {
         Key::Left => input.move_cursor_left(shift, NORMAL_TEXT, FontWeightHint::Regular),
         Key::Right => input.move_cursor_right(shift, NORMAL_TEXT, FontWeightHint::Regular),
@@ -3373,22 +3587,22 @@ impl RenamerApp {
         invalid: bool,
         target: Target,
     ) {
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        if focused || invalid {
-            f.push(RenderCommand::FillRect {
-                x: rect.x,
-                y: rect.bottom() - 2.0,
-                width: rect.w,
-                height: 2.0,
-                color: if invalid {
-                    self.palette.red
-                } else {
-                    self.palette.blue
-                },
-                corner_radii: CornerRadii::ZERO,
-            });
-        }
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls): the well, its edge -- red for a
+        // value the rule cannot take, while it is being typed as at any other
+        // time -- and the focus mark at the user's width.
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(target),
+                focused,
+                disabled: false,
+                invalid,
+            },
+            self.focus_ring_width,
+        );
         let mut tree = RenderTree::new();
         let (cursor, anchor) = if focused {
             (self.draft.cursor(), self.draft.selection_anchor())
@@ -3927,7 +4141,7 @@ impl RenamerApp {
             }
             Target::Rename => self.rename_selected(),
             Target::Undo => {
-                if self.undo_stack.is_empty() {
+                if !self.undo.can_undo() {
                     self.status_message = "Nothing to undo".to_string();
                 } else {
                     self.undo();
@@ -3935,7 +4149,7 @@ impl RenamerApp {
                 EventResult::Consumed
             }
             Target::Redo => {
-                if self.redo_stack.is_empty() {
+                if !self.undo.can_redo() {
                     self.status_message = "Nothing to redo".to_string();
                 } else {
                     self.redo();
@@ -4208,6 +4422,10 @@ impl App for RenamerApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         let selected = self.files.iter().filter(|f| f.selected).count();
         if selected == 0 {
@@ -4365,7 +4583,7 @@ mod tests {
             renamed.handle_event(e);
         }
         assert!(
-            !renamed.undo_stack.is_empty(),
+            renamed.undo.can_undo(),
             "nothing was renamed, so the undo state this test needs was never reached"
         );
 
@@ -5249,7 +5467,7 @@ mod tests {
             replace_all: false,
         });
         app.execute_rename();
-        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app.undo.can_undo());
         assert_eq!(app.history.len(), 1);
         // The undo stack used to be pushed whether or not anything happened,
         // which is what made an undo of nothing report "Undid rename of 1
@@ -5268,7 +5486,7 @@ mod tests {
         app.execute_rename();
 
         assert!(
-            app.undo_stack.is_empty(),
+            !app.undo.can_undo(),
             "queued an undo for a rename that did not happen"
         );
         assert!(app.history.is_empty());
@@ -6264,7 +6482,8 @@ mod tests {
                 ("2.jpg".to_string(), "3.jpg".to_string()),
                 ("3.jpg".to_string(), "4.jpg".to_string()),
             ],
-        );
+        )
+        .steps;
         assert_eq!(
             plan,
             vec![
@@ -6292,7 +6511,8 @@ mod tests {
                 ("a.txt".to_string(), "b.txt".to_string()),
                 ("b.txt".to_string(), "a.txt".to_string()),
             ],
-        );
+        )
+        .steps;
         // Three steps, because no two-step order exists: whichever ran first
         // would overwrite the other file.
         assert_eq!(plan.len(), 3);
@@ -6405,7 +6625,8 @@ mod tests {
                 ("a.txt".to_string(), "b.txt".to_string()),
                 ("b.txt".to_string(), "a.txt".to_string()),
             ],
-        );
+        )
+        .steps;
         // The parking name must be one nothing in the directory holds, or the
         // cycle-breaker destroys an innocent bystander.
         assert_eq!(plan[0].to, ".renamer-tmp-1");
@@ -6413,6 +6634,152 @@ mod tests {
             plan.iter()
                 .all(|s| s.from != ".renamer-tmp-0" && s.to != ".renamer-tmp-0")
         );
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+            .collect()
+    }
+
+    /// `rename_plan` on a thread, failing the test rather than hanging it if
+    /// the plan never comes: a planner that loops on a stall mints temporary
+    /// names for ever.
+    fn plan_in_time(existing: &[&str], renames: &[(&str, &str)]) -> RenamePlan {
+        let (existing, renames) = (names(existing), pairs(renames));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The receiver is gone only when the test has already failed.
+            let _ = tx.send(rename_plan(&existing, &renames));
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("the planner never finished: it looped on a stall")
+    }
+
+    /// **A rename onto a name held by a file nothing moves is refused, not
+    /// looped on.** The planner took any stall for a cycle and parked the
+    /// source under a temporary name -- which frees nothing anyone wants --
+    /// so the rename came back blocked, and temporaries were minted until
+    /// memory ran out.
+    #[test]
+    fn a_rename_onto_a_name_a_file_keeps_is_refused_not_looped_on() {
+        let plan = plan_in_time(&["b.txt", "a.txt"], &[("b.txt", "a.txt")]);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(plan.refused, pairs(&[("b.txt", "a.txt")]));
+    }
+
+    /// A chain whose last link is refused is refused whole: nothing in it
+    /// can be vacated.
+    #[test]
+    fn a_chain_ending_on_a_kept_name_is_refused_whole() {
+        let plan = plan_in_time(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
+        assert!(plan.steps.is_empty(), "{:?}", plan.steps);
+        assert_eq!(plan.refused.len(), 2);
+    }
+
+    /// What can go still goes beside what is refused, and a cycle still
+    /// goes by way of a temporary name.
+    #[test]
+    fn a_refusal_leaves_the_rest_of_the_plan_alone() {
+        let plan = plan_in_time(
+            &["a", "b", "x", "y", "kept"],
+            &[("a", "b"), ("b", "a"), ("x", "z"), ("y", "kept")],
+        );
+        assert_eq!(plan.refused, pairs(&[("y", "kept")]));
+        assert_eq!(plan.steps.len(), 4, "{:?}", plan.steps);
+    }
+
+    /// **An undo never renames over a file made since under the old name**:
+    /// it is refused and said, and both files are as they were. Planned
+    /// from the list alone, the undo renamed over the new file -- the list
+    /// did not know it was there -- and `fs::rename` replaces without a word.
+    #[test]
+    fn an_undo_onto_a_name_taken_since_leaves_both_files() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::write(dir.join("a.txt"), b"someone else's").expect("write");
+        app.undo();
+        assert_eq!(on_disk(&app), vec!["a.txt", "b.txt"]);
+        assert_eq!(
+            std::fs::read(dir.join("a.txt")).expect("read"),
+            b"someone else's",
+            "the undo renamed over another program's file"
+        );
+        assert!(
+            app.status_message.contains("already there"),
+            "{}",
+            app.status_message
+        );
+        assert!(app.undo.can_undo(), "the undo cannot be tried again");
+    }
+
+    /// Nor does a rename: a file another program put under the new name
+    /// between the preview and the rename is left alone.
+    #[test]
+    fn a_rename_never_replaces_a_file_the_list_does_not_know() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::write(dir.join("b.txt"), b"someone else's").expect("write");
+        app.execute_rename();
+        assert_eq!(on_disk(&app), vec!["a.txt", "b.txt"]);
+        assert_eq!(
+            std::fs::read(dir.join("b.txt")).expect("read"),
+            b"someone else's"
+        );
+    }
+
+    /// **The rename itself refuses a file already at the name**, so a file
+    /// made between the plan and the rename is not replaced either.
+    #[test]
+    fn a_rename_refuses_a_file_already_at_the_name() {
+        let dir = scratch("noreplace");
+        std::fs::write(dir.join("a.txt"), b"a").expect("write");
+        std::fs::write(dir.join("b.txt"), b"b").expect("write");
+        let err = rename_without_replacing(&dir.join("a.txt"), &dir.join("b.txt"))
+            .expect_err("it replaced b.txt");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(dir.join("a.txt")).expect("read"), b"a");
+        assert_eq!(std::fs::read(dir.join("b.txt")).expect("read"), b"b");
+    }
+
+    /// **The plan is made from the folder, not the list**: a swap goes
+    /// through whatever another program has left under the temporary name the
+    /// list would have chosen, and that file is left alone.
+    #[test]
+    fn a_swap_goes_round_a_file_left_under_the_temporary_name() {
+        let mut app = app_with(&["a.txt", "b.txt"]);
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::write(dir.join(".renamer-tmp-0"), b"theirs").expect("write");
+        preview(&mut app, &["b.txt", "a.txt"]);
+        app.execute_rename();
+        assert_eq!(
+            std::fs::read(dir.join("a.txt")).expect("read"),
+            b"b.txt",
+            "{}",
+            app.status_message
+        );
+        assert_eq!(std::fs::read(dir.join("b.txt")).expect("read"), b"a.txt");
+        assert_eq!(
+            std::fs::read(dir.join(".renamer-tmp-0")).expect("read"),
+            b"theirs"
+        );
+    }
+
+    /// A rename that changes only case goes through -- on the Windows host,
+    /// whose filesystem finds the file itself at the new name.
+    #[test]
+    fn a_rename_that_changes_only_case_goes_through() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["A.txt"]);
+        app.execute_rename();
+        assert_eq!(on_disk(&app), vec!["A.txt"], "{}", app.status_message);
     }
 
     #[test]
@@ -6426,7 +6793,8 @@ mod tests {
                 ("a.txt".to_string(), "a.txt".to_string()),
                 ("b.txt".to_string(), "c.txt".to_string()),
             ],
-        );
+        )
+        .steps;
         assert_eq!(
             plan,
             vec![RenameStep {
@@ -6446,7 +6814,7 @@ mod tests {
             .iter()
             .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
             .collect();
-        let plan = rename_plan(&existing, &pairs);
+        let plan = rename_plan(&existing, &pairs).steps;
 
         let mut disk: BTreeSet<String> = existing.iter().cloned().collect();
         for step in &plan {
@@ -6677,6 +7045,82 @@ mod tests {
         assert_eq!(app.operations.len(), 1);
         probe::key(&mut app, &probe::press(Key::Escape));
         assert_eq!(app.focus, Focus::List);
+    }
+
+    /// The text boxes are the toolkit's fields, in the theme's shape (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, marked at
+    /// the user's focus width while they have the keyboard, and red for a
+    /// value the rule cannot take -- while it is being typed, which is when
+    /// it is being fixed.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = app_listing(&["abcdef.txt"]);
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &RenamerApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let cmds = Probe::draw(app, RenamerApp::SIZE).commands().to_vec();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's commands
+            // begin a focused one's under a ring or an underline, so finding them
+            // alone says nothing about the mark.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+
+        let search = probe::rect_of(&app, Target::SearchBox).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        app.on_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+
+        add_from_menu(&mut app, "Remove Characters");
+        probe::type_str(&mut app, "1");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::type_str(&mut app, "x");
+        let count = probe::rect_of(&app, Target::Field(Slot::B)).expect("the count box");
+        let wrong = guitk::field::State {
+            focused: true,
+            invalid: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, count, wrong),
+            "the count box is not marked red at the user's width while an x is in it"
+        );
     }
 
     /// A counting box refuses what is not a number, keeps the rule's last good
@@ -7081,6 +7525,180 @@ mod tests {
         assert!(
             probe::is_visible_sized(&app, Target::Field(Slot::E), size),
             "the last box of the editor cannot be reached"
+        );
+    }
+
+    // ---- the renames as a tree, and the keys (C-Q24, §1416) ----------------
+
+    fn alt_z(shift: bool) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// `a.txt` renamed to `b.txt`, undone, then renamed to `c.txt`.
+    fn a_rename_undone_and_another_done() -> RenamerApp {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        app.undo();
+        assert_eq!(on_disk(&app), vec!["a.txt"]);
+        preview(&mut app, &["c.txt"]);
+        app.execute_rename();
+        assert_eq!(on_disk(&app), vec!["c.txt"]);
+        app
+    }
+
+    /// **A rename done after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z renames the files back
+    /// through every set of names they have had, in the order each was made;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_rename_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut app = a_rename_undone_and_another_done();
+        assert!(!app.undo.can_redo(), "redo would go onto the branch left");
+        app.handle_event(&alt_z(false));
+        assert_eq!(on_disk(&app), vec!["b.txt"], "the undone rename was lost");
+        app.handle_event(&alt_z(false));
+        assert_eq!(on_disk(&app), vec!["a.txt"]);
+        app.handle_event(&alt_z(false));
+        assert_eq!(app.status_message, "Nothing earlier to go back to");
+        app.handle_event(&alt_z(true));
+        app.handle_event(&alt_z(true));
+        assert_eq!(on_disk(&app), vec!["c.txt"]);
+        app.handle_event(&alt_z(true));
+        assert_eq!(app.status_message, "These are the newest names");
+    }
+
+    /// **A journey through a folder changed outside the renamer ends, and
+    /// the history with it** -- it no longer describes the files, and going
+    /// on would rename by names that are not there.
+    #[test]
+    fn a_journey_through_a_folder_changed_outside_clears_the_history_and_says_so() {
+        let mut app = a_rename_undone_and_another_done();
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::rename(dir.join("c.txt"), dir.join("elsewhere.txt")).expect("rename");
+        app.handle_event(&alt_z(false));
+        assert!(
+            app.status_message.contains("changed outside the renamer"),
+            "{}",
+            app.status_message
+        );
+        assert!(!app.undo.can_undo() && !app.undo.can_redo());
+        assert_eq!(on_disk(&app), vec!["elsewhere.txt"]);
+    }
+
+    /// **An undo that renames nothing can be tried again**, and does not
+    /// offer to redo a rename that never came back.
+    #[test]
+    fn an_undo_that_renames_nothing_can_be_tried_again() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::rename(dir.join("b.txt"), dir.join("moved.txt")).expect("rename");
+        app.undo();
+        assert!(app.undo.can_undo(), "the undo cannot be tried again");
+        assert!(
+            !app.undo.can_redo(),
+            "it offers to redo what never came back"
+        );
+        std::fs::rename(dir.join("moved.txt"), dir.join("b.txt")).expect("rename");
+        app.undo();
+        assert_eq!(on_disk(&app), vec!["a.txt"]);
+    }
+
+    /// And a redo that renames nothing, the same way round.
+    #[test]
+    fn a_redo_that_renames_nothing_can_be_tried_again() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        app.undo();
+        let dir = app.folder.clone().expect("a folder is open");
+        std::fs::rename(dir.join("a.txt"), dir.join("moved.txt")).expect("rename");
+        app.redo();
+        assert!(app.undo.can_redo(), "the redo cannot be tried again");
+        std::fs::rename(dir.join("moved.txt"), dir.join("a.txt")).expect("rename");
+        app.redo();
+        assert_eq!(on_disk(&app), vec!["b.txt"]);
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        app.handle_event(&press_ctrl(Key::Z));
+        assert_eq!(on_disk(&app), vec!["a.txt"]);
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        }));
+        assert_eq!(on_disk(&app), vec!["b.txt"]);
+    }
+
+    /// **AltGr types into a box, and is not Ctrl.** AltGr arrives as
+    /// Ctrl+Alt: the boxes refused what it typed, and AltGr+A -- Polish's ą
+    /// -- selected everything instead.
+    #[test]
+    fn an_altgr_letter_is_typed_into_a_box() {
+        let mut app = app_with(&["a.txt"]);
+        app.handle_event(&press(Key::Slash));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: "\u{105}".to_string(),
+        }));
+        assert_eq!(app.search_text, "\u{105}");
+    }
+
+    /// AltGr+Z in the file list does not undo the rename.
+    #[test]
+    fn altgr_z_does_not_undo_a_rename() {
+        let mut app = app_with(&["a.txt"]);
+        preview(&mut app, &["b.txt"]);
+        app.execute_rename();
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: "\u{17c}".to_string(),
+        }));
+        assert_eq!(on_disk(&app), vec!["b.txt"], "AltGr+Z undid the rename");
+    }
+
+    /// The shortcut list names the new keys.
+    #[test]
+    fn the_shortcut_list_names_the_history_keys() {
+        assert!(SHORTCUTS.iter().any(|(k, _)| *k == "Alt+Z / Alt+Shift+Z"));
+        assert!(
+            SHORTCUTS
+                .iter()
+                .any(|(_, what)| what.contains("Ctrl+Shift+Z"))
         );
     }
 }

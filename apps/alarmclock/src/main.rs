@@ -1903,12 +1903,19 @@ pub struct AlarmClockApp {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// What the pointer is over, which is drawn lit.
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl AlarmClockApp {
     pub fn new() -> Self {
         Self {
             show_help: false,
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: ActiveTab::default(),
             time_format: TimeFormat::default(),
@@ -2726,15 +2733,19 @@ impl AlarmClockApp {
         // Label.
         let label_rect = Rect::new(x, row_y, w, label_h);
         let focused = self.focus == Some(Focus::Label);
-        fill(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             f,
+            &self.palette,
             label_rect,
-            if focused {
-                self.palette.surface2
-            } else {
-                self.palette.surface1
+            guitk::field::State {
+                hovered: self.hover == Some(Target::EditLabel),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            6.0,
+            self.focus_ring_width,
         );
         let body = if editor.label.is_empty() && !focused {
             "Label…".to_string()
@@ -2857,15 +2868,19 @@ impl AlarmClockApp {
             let fx = content.x + i as f32 * (field_w + CHIP_GAP);
             let rect = Rect::new(fx, custom_y, field_w, CUSTOM_H);
             let focused = self.focus == Some(Focus::Custom(hms));
-            fill(
+            // The toolkit's field, in the theme's shape (lane C,
+            // c-e-a-theme-can-shape-the-controls).
+            guitk::field::draw(
                 f,
+                &self.palette,
                 rect,
-                if focused {
-                    self.palette.surface2
-                } else {
-                    self.palette.surface1
+                guitk::field::State {
+                    hovered: self.hover == Some(Target::CustomField(hms)),
+                    focused,
+                    disabled: false,
+                    invalid: false,
                 },
-                6.0,
+                self.focus_ring_width,
             );
             let entry = self.custom.get(hms.index()).map_or("", String::as_str);
             let (body, color) = if entry.is_empty() {
@@ -3262,8 +3277,36 @@ impl AlarmClockApp {
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
         match event {
             Event::Mouse(mouse) => match mouse.kind {
+                // The card is modal for the pointer as it is for the keys: a
+                // press, with any button, puts it away rather than reaching
+                // the control drawn under it, and the wheel does not scroll
+                // what it covers. A move is still followed, so the light is
+                // right when the card goes.
+                MouseEventKind::Press(_) if self.show_help => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                MouseEventKind::Scroll { .. } if self.show_help => Action::None,
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
                 MouseEventKind::Scroll { dx: _, dy } => self.scroll(mouse.x, mouse.y, dy, size),
+                // What is under the pointer is drawn lit; only a change in it
+                // is worth a redraw.
+                MouseEventKind::Move => {
+                    let over = self.frame(size.0, size.1).hit_test(mouse.x, mouse.y);
+                    if over == self.hover {
+                        Action::None
+                    } else {
+                        self.hover = over;
+                        Action::Redraw
+                    }
+                }
+                MouseEventKind::Leave => {
+                    if self.hover.take().is_some() {
+                        Action::Redraw
+                    } else {
+                        Action::None
+                    }
+                }
                 _ => Action::None,
             },
             Event::Key(key) => self.handle_key(key, size),
@@ -3451,6 +3494,10 @@ impl App for AlarmClockApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         "Clock".to_string()
     }
@@ -3521,6 +3568,120 @@ impl App for AlarmClockApp {
     }
 }
 
+#[cfg(test)]
+mod field_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use guitk::event::MouseEvent;
+    use guitk::probe;
+
+    /// The alarm's label and the timer's fields are the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, out when it
+    /// leaves, and marked at the user's focus width while they have the
+    /// keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = AlarmClockApp::new();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let size = AlarmClockApp::SIZE;
+        let draws = |app: &AlarmClockApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |app: &mut AlarmClockApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size)
+        };
+
+        probe::click(&mut app, Target::AddAlarm);
+        let label = probe::rect_of(&app, Target::EditLabel).expect("the label field");
+        assert!(
+            draws(&app, label, idle),
+            "the label field is not the toolkit's"
+        );
+        let (x, y) = label.centre();
+        assert_eq!(
+            pointer(&mut app, x, y, MouseEventKind::Move),
+            Action::Redraw
+        );
+        assert_eq!(
+            pointer(&mut app, x + 1.0, y, MouseEventKind::Move),
+            Action::None,
+            "a move that changed nothing redrew the window"
+        );
+        assert!(
+            draws(&app, label, lit),
+            "the field under the pointer is not lit"
+        );
+        assert_eq!(
+            pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave),
+            Action::Redraw
+        );
+        assert!(
+            draws(&app, label, idle),
+            "the field stayed lit after the pointer left"
+        );
+        probe::click(&mut app, Target::EditLabel);
+        assert!(
+            draws(&app, label, keyed),
+            "the field with the keyboard is not marked at the user's width"
+        );
+        probe::click(&mut app, Target::EditCancel);
+
+        probe::click(&mut app, Target::Tab(ActiveTab::Timer));
+        let minutes = probe::rect_of(&app, Target::CustomField(HmsField::Minutes))
+            .expect("the timer's minutes");
+        probe::click(&mut app, Target::CustomField(HmsField::Minutes));
+        let (mx, my) = minutes.centre();
+        pointer(&mut app, mx, my, MouseEventKind::Move);
+        assert!(
+            draws(
+                &app,
+                minutes,
+                guitk::field::State {
+                    hovered: true,
+                    ..keyed
+                }
+            ),
+            "the timer's field is not the toolkit's, lit and marked"
+        );
+    }
+}
+
 impl Probe for AlarmClockApp {
     type Target = Target;
     type Outcome = Action;
@@ -3531,12 +3692,23 @@ impl Probe for AlarmClockApp {
         self.frame(size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(guitk::event::MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -4449,6 +4621,79 @@ mod tests {
         assert!(
             app.editor.is_some(),
             "control: N does nothing even with the card down"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = AlarmClockApp::SIZE;
+        let mut app = AlarmClockApp::new();
+        for minute in 0..30 {
+            app.create_alarm(7, minute);
+        }
+        let mouse = |app: &mut AlarmClockApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(guitk::event::MouseEvent { x, y, kind }), size)
+        };
+        let card_up = |app: &AlarmClockApp| drawn(app).contains("F1 closes this");
+        let (ax, ay) = probe::rect_of(&app, Target::AddAlarm)
+            .expect("the Add Alarm button")
+            .centre();
+        let list = AlarmClockApp::alarm_list_rect(AlarmClockApp::content_rect(size.0, size.1));
+        let (lx, ly) = list.centre();
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        assert!(card_up(&app));
+        mouse(
+            &mut app,
+            lx,
+            ly,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            app.alarm_scroll.abs() < f32::EPSILON,
+            "the wheel scrolled the list under the card"
+        );
+        assert!(card_up(&app), "a turn of the wheel put the card away");
+        assert_eq!(
+            mouse(&mut app, ax, ay, MouseEventKind::Press(MouseButton::Left)),
+            Action::Redraw
+        );
+        assert!(!card_up(&app), "the press did not put the card away");
+        assert!(
+            app.editor.is_none(),
+            "the press went through the card and opened the new alarm"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        probe::key(&mut app, &probe::press(Key::F1));
+        mouse(&mut app, ax, ay, MouseEventKind::Press(MouseButton::Right));
+        assert!(!card_up(&app), "a right-button press left the card up");
+
+        // A move under the card is not a press, and leaves it up.
+        probe::key(&mut app, &probe::press(Key::F1));
+        mouse(&mut app, ax, ay, MouseEventKind::Move);
+        assert!(card_up(&app), "a move put the card away");
+        probe::key(&mut app, &probe::press(Key::F1));
+
+        mouse(
+            &mut app,
+            lx,
+            ly,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            app.alarm_scroll > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut app, ax, ay, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            app.editor.is_some(),
+            "control: the press does nothing even with the card down"
         );
     }
 

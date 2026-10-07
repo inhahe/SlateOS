@@ -1605,6 +1605,10 @@ live.
   **Still open: the other ~56 crates.** 987 `const NAME: Color` declarations
   over 68 crates was the original count; the twelve were the visible end of it.
   Thirteen more crates already have a `Palette` in scope and are nearly free.
+  *(2026-10-05: those crates are all under `apps/`, lane E's since the
+  six-lane split, so what is left of this item is lane E's to do; lane C's
+  part -- `appearance::palette_check::assert_drawn_from`, the check each
+  crate adopts as its fix and its guard -- is done and on `main`.)*
 
   **The ~43 games are C-Q16 and are not part of this.** Their chrome follows
   the theme either way; whether the *board* should is a question about taste
@@ -1776,7 +1780,12 @@ live.
   would (a whole-line path opened, otherwise the words split POSIX-style),
   which is the "and running" half. Super chords, and keys the field does not
   use, still reach their shortcuts with the menu up. The field sits where the
-  "Applications" title was.
+  "Applications" title was. **And what a program can do** (2026-09-29,
+  `design-decisions.md` §1451): a search finds a program's actions -- the
+  rows of its jump list -- by name, ranked with the programs, so "display"
+  lists Settings' "Display settings" first and a click or Enter opens the
+  page; the row names its program after the action, dimmer, and is not
+  carried anywhere by a drag.
 
 - `[C]` **A file name that is not text is drawn so it can be told apart** --
   done 2026-09-25 (`design-decisions.md` §873, proposed by lane E). The file
@@ -1823,6 +1832,14 @@ live.
   (`TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE`). Waiting on others:
   the Settings page (lane E), the relay that makes a change reach a running
   shell (lane F), and the libc and `osh` adopting `tz_source` (lanes D, B).
+  **Corrected 2026-10-01** (`design-decisions.md` §1458): `tz_source`'s order
+  was not glibc's -- it took a rule before a zoneinfo file of the same name, so
+  `TZ=EST5EDT` read an hour off from Linux for years under the old US rules
+  (lane B's report). `tzrules::tz_plan` is glibc's order and the clock reads
+  through it; the libc's move (lane D) and `localtime`'s (lane B) are in
+  `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`,
+  after which `tz_source` is deleted. **Deleted 2026-10-05**: the libc reads
+  `TZ` through glibc's own code, ported (lane D), and nothing else called it.
 
 - `[C]` **"System (Auto)" switches between light and dark by the clock** --
   done 2026-09-25 (`design-decisions.md` §876). It had always meant dark. It is
@@ -1870,8 +1887,12 @@ live.
   the left with the search field at their foot, and a places column on the
   right -- who is signed in (the account's display name, from the login),
   Home, Documents, Pictures, Music, Downloads, Settings, a terminal, and the
-  power button at the foot. Next: the pinned programs as tiles, jump lists,
-  and a Shut down button with the rest behind a caret.
+  power button at the foot. The rest done 2026-09-26 and -27: jump lists (a
+  program's right-click menu starts with its desktop entry's actions),
+  "Shut down" in one click with the rest behind a caret (§1405), and the
+  pinned programs -- as rows, not tiles: the reference's stylesheet has a
+  tile grid its markup never uses, and draws its pins as rows like the rest
+  (`roadmap-detailed.md` → Start menu).
 
 - `[C]` **Icon themes, and the start menu drawn with them** -- done
   2026-09-26 (`design-decisions.md` §880). `appearance::icons` finds an icon
@@ -2010,15 +2031,43 @@ live.
   the git common directory beside the halts. The `CLAUDE.md` paragraph that
   would make it a rule is put to the operator as C-Q31.
 
-- `[C]` **A program may ask the password manager for a password -- with a key
-  for it, and the user's consent** -- open, **waiting on lane A for the
-  capability's shape** (C-Q25, §1417;
-  `requests/c-a-a-capability-to-ask-the-credential-service-for-a-password.md`).
-  In the credential service (`gui/credentials`): the request over the service's
-  IPC (`SYS_SERVICE_CONNECT`), refused without the capability, and a prompt
-  naming the asking program (`SYS_CHANNEL_PEER_CRED`) to allow or refuse. The
-  service today is an in-process model with no transport, and its vault waits on
-  the ported cipher and password hash (lane E's question to lane A).
+- `[-] [C]` **A program may ask the password manager for a password -- with a
+  key for it, and the user's consent** (C-Q25, §1417, §1464). Lane A built the
+  key (§1518: the kernel answers whether a connection's peer holds the
+  service's key). **Built** in `gui/credentials`' library: the protocol, a
+  program's `ask`, and the service's judgement -- key, then the user asked
+  (once / until the vault locks / refuse, the master password typed into the
+  same prompt), quiet after a refusal, the best login -- tested against
+  stand-ins for the kernel, the vault and the prompt. The prompt's windows
+  are built too (`gui/credentialsd`): the program and what it asks for,
+  shown whole with nothing invisible left unspelled, a password field that
+  keeps the master password as a `Secret` (`guitk::secretinput`), and no
+  key or click taken for the first 600 ms. **Left:** the vault, **waiting
+  on lane E** to share the password manager's
+  (`requests/c-e-share-the-password-vault-with-the-credential-service.md`);
+  then the daemon that registers the service, and deleting the old store's
+  own vault and cipher (`gui/credentials/src/main.rs`).
+
+- `[C]` **Window rules are kept, in a file the desktop reads** -- done
+  2026-10-05 (`design-decisions.md` §1465). The rules that place a program's
+  windows as they open lived only while the desktop ran. They are kept in
+  `window-rules.yaml` now -- each rule under its name, the one nearest the
+  top winning -- read when the desktop starts and again whenever the file
+  changes; a rule that cannot be read is left out whole and said in a
+  notification. The model, the engine and the file moved to their own crate,
+  `gui/windowrules`, so Settings can use them without the shell. **Lane E:**
+  the page in Settings (`requests/c-e-a-window-rules-page-in-settings.md`),
+  after which the shell's undrawn panel is deleted.
+
+- `[C]` **A user can send any program to the system tray** -- done
+  2026-10-05 (`design-decisions.md` §1467). A window rule's `tray` sends a
+  program's windows to the tray when they are minimised, and with `state:
+  minimized` starts them there -- `design.txt`'s "always start in system
+  tray, always in taskbar, or neither". In the tray a window is an icon of the
+  shell's own: its program's picture and title; a click brings it back, a
+  right click opens its menu. **Lane F:** a flag by which a program can ask
+  for the same itself (`requests/c-f-let-a-window-say-it-goes-to-the-tray.md`),
+  which lane C then honours under the user's rules.
 
 - `[C]` **A settings service that tells open windows when a setting
   changes** -- **done 2026-09-28** (C-Q26, §1418, §1434). Beside
@@ -2073,9 +2122,257 @@ live.
   `guitk::field`), the check box, the switch (a box in the pill's room under
   `toggle: checkbox`, in the shell's settings too) and the scrollbars
   (`guitk::scrollbar::draw`, in a column every theme shares), and the shell's
-  own text fields; button padding through the alert dialog's layout. **Lane
-  E:** the Settings picker for the axis and its applications' own fields and
-  scrollbars (`requests/c-e-a-theme-can-shape-the-controls.md`).
+  own text fields; button padding through the alert dialog's layout.
+
+- `[C]` **A file opens in its kind's default, and "Open with" offers every
+  program that opens it** (`design-decisions.md` §1449) -- done 2026-09-29.
+  A file nobody chose a program for opens in the one SlateOS names for its
+  kind (`programs::default_for`, a kind of text falling back to plain
+  text's) instead of saying nothing is set; a file's right-click menu on the
+  desktop has **Open with**: every program whose desktop entry lists the
+  kind, the one Open would start first, each with its picture, started as
+  its own command line says. **Lane E:** the file manager's own Open With
+  list was asked for in `requests/c-e-read-the-one-list-of-programs.md`.
+
+- `[-]` `[C]` **Programs add to a file's right-click menu**
+  (`design-decisions.md` §1448; `roadmap-detailed.md` → *Context menu
+  extension API*) -- the shell's half done 2026-09-29: KDE's service-menu
+  files, read from where KDE reads them (`gui/servicemenus`), each item's
+  command run as KDE runs it -- a port of KDE's own expansion and splitting,
+  so `sh -c "cd %d && make"`, `%f` in quotes and a pipe all do what they do
+  there, a file's name never read as shell -- one program per file where
+  the command takes one at a time, in the file's folder. A right-click on a
+  desktop icon offers them after Open, laid out as KDE lays them out
+  (submenus, `Important` and `TopLevel`, an "Actions" submenu past four
+  rows). Installed menus are on until turned off, the user's own off until
+  turned on (`context-menus.yaml`); a menu that cannot be used is reported
+  with why. **Lane E:** the file manager's menus and the Settings page that
+  lists and switches them
+  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). Menu rows
+  draw their pictures since the same day -- an item's, a submenu's, a jump
+  list action's (`ContextMenu::render_with_icons`).
+
+- `[-]` `[C]` **Notifications pop up** (`design-decisions.md` §1447,
+  open question C-Q32) -- the shell's half done 2026-09-29: every
+  notification the desktop files pops up at the bottom-right corner above
+  the taskbar for a few seconds (low 4, normal 6, high 10; urgent until
+  closed), the pointer holding them, at most three stacked with the newest
+  nearest the bell; a press opens it (read, its program started), its close
+  button leaves it unread in the pane; nothing while Do Not Disturb silences
+  it, while the pane is open, or at the login screen. They slide along the
+  desktop's motion and wake the desktop once when their time is up, not
+  every frame. On a surface of their own the size of the stack, so a press
+  beside a toast reaches the window under it. **Next:** programs cannot send
+  a notification yet -- the channel is lane F's or lane D's to build, asked
+  for once C-Q32 settles which of the two notification systems stays (the
+  separate `gui/notifications` program is started by nothing).
+
+- `[x]` `[C]` **Notifications outlive the desktop** (`design-decisions.md`
+  §1468) -- done 2026-10-05. What the notification pane holds is written to
+  the user's data directory whenever it changes -- one arriving, read,
+  dismissed, cleared -- and put back when the desktop next starts, read or
+  unread as it was left, without popping up again. A notification older
+  than a week is forgotten; how long is `history.days` in
+  `notifications.yaml` (0 to 365, 0 keeping nothing), honoured on disk the
+  moment it is saved. **Next:** a control for it on the Settings
+  application's Notifications page, asked of lane E
+  (`requests/c-e-a-setting-for-how-long-notifications-are-kept.md`).
+
+- `[x]` `[C]` **A theme is checked before it is installed or shared**
+  (`design-decisions.md` §1469; `roadmap-detailed.md` §4.6, *Automated
+  Validation*) -- done 2026-10-05. `themecheck FOLDER...` (and
+  `appearance::themecheck::check` for an installer) says what in a theme the
+  desktop would refuse, ignore or adjust, judged by the desktop's own readers:
+  errors for a program or script, an SVG with a script or an outside
+  reference, a link out of the folder, a file past a reader's limit, an icon
+  or cursor it cannot read, a screenshot that is no picture; warnings for
+  what the theme file's reader ignores, sections and keys nothing reads,
+  `meta.supports` against what the theme covers, text the palette must
+  darken to read, files nothing reads; `--strict` fails on warnings, as a
+  repository would. **Next:** the repository and its CI, which do not exist.
+
+- `[x]` `[C]` **A theme brings its own wallpapers** (`design-decisions.md`
+  §1471; `roadmap-detailed.md` *Tier 3 -- Wallpaper Integration*) -- done
+  2026-10-05. A theme bundles pictures in a `wallpapers` folder and names one
+  for dark mode and one for light in a `wallpapers` section; chosen as the
+  other parts of a theme are, `theme.wallpaper: <name>`, the desktop shows
+  the picture for the mode it is drawn in, so a day and a night picture
+  follow the automatic mode. A time-of-day schedule and a rotating folder
+  still come first. The theme checker decodes them. **Lane E:** the
+  Background page that chooses it
+  (`requests/c-e-a-themes-wallpapers-on-the-background-page.md`).
+
+- `[-]` `[C]` **A theme recommends its fonts** (`design-decisions.md` §1472;
+  `roadmap-detailed.md` *Tier 2 -- Font Preferences*) -- lane C's half done
+  2026-10-05. A theme names the families it was designed with in a `fonts`
+  section -- for the desktop's text and for code, each a list tried in order
+  -- without shipping them, as a font's licence seldom allows; chosen as
+  `theme.fonts: <name>`, the first of each list the machine has takes the
+  place of the user's own font, and the user's own stays where none is
+  installed. Read, listed (`ThemeInfo::fonts`), checked by `themecheck` and
+  resolved (`AppearanceSettings::fonts_with_theme`). **Not drawn yet**:
+  `fonts_in_use()`, which the shell applies, answers with the user's own
+  until the compositor and the applications' event loop apply through it
+  too, so that no two processes measure and draw in different faces.
+  **Lane F:** those two lines (`requests/c-f-apply-the-fonts-in-use.md`);
+  lane C then turns the theme on in one place. **Lane E:** the Fonts page
+  that chooses it and offers to install what is missing
+  (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`).
+
+- `[x]` `[C]` **A disabled control says why** (`design-decisions.md` §1473;
+  `roadmap-detailed.md` §3.5 *Enable/disable controls API*) -- done
+  2026-10-05. Rest the pointer on a greyed button or menu row and, after the
+  tooltip delay, its reason appears: `ContextMenu::explain` for a menu's
+  rows, `guitk::disabled::WhyDisabled` for a window's controls. The text
+  fields' menus explain theirs ("Select some text first", "Nothing has
+  been copied"), the desktop's included. **Lane E:** the programs' own
+  (`requests/c-e-say-why-a-control-is-disabled.md`).
+
+- `[x]` `[C]` **The toolkit's controls follow the user's text size**
+  (`design-decisions.md` §1474; `roadmap-detailed.md` *Tier 2 -- Font
+  Preferences*) -- done 2026-10-05. The size chosen in Settings reached
+  the desktop's own text and the window titles and stopped there: every
+  menu, tooltip, dialog, tab and menu bar, button, check box, drop-down and
+  switch drew at 13 pixels. Each now draws its text at the user's size and
+  is laid out round it, the Run box with them. **Lane E:** programs laying
+  out from the toolkit's sizes (`requests/c-e-lay-out-from-the-text-size.md`).
+  **Operator:** where the display's scale is applied (C-Q34) -- programs
+  apply none today.
+
+- `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
+  -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
+  pictures -- the folder the start menu's Pictures place opens -- in name
+  order, one every thirty seconds and round again, each decoded to the
+  frame's size on the decoding thread and fitted in it; an empty folder says
+  so. The old picture is released only after the frame that stops naming it
+  is sent. "Choose folder…" on the frame's menu picks another folder in
+  the shell's chooser, saved with the layout -- and its test found and
+  fixed that opening a folder in the toolkit's folder picker chose it, a
+  fix the seven lane E applications already using the picker share.
+
+- `[C]` **The toolkit's widget tree draws in the user's theme** -- done
+  2026-10-01 (`known-issues.md`
+  `TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING`).
+  `guitk::widget`'s declarative tree, which lays out as Flexbox and Grid do
+  (§1455), now draws every control through the toolkit's own module for it
+  in the palette its program gives it, and its five silent kinds work: a
+  multi-line text field, radio buttons in groups, a scroll view, a slider
+  and a picture. Buttons and boxes light under the pointer. A program can
+  build a form from it rather than drawing one by hand.
+
+- `[C]` **Icons' gradients are drawn** (`roadmap-detailed.md` → *SVG
+  rendering support*; `design-decisions.md` §1462) -- done 2026-10-01. The toolkit's SVG renderer paints a
+  fill or stroke of `url(#id)` with that linear or radial gradient, wherever
+  the document defines it: both units, `gradientTransform`, pad, reflect and
+  repeat, a focal point, one gradient inheriting another's stops through
+  `href`, and the fallback colour after a missing one; stops mix as SVG 2
+  says, unpremultiplied. `fill-opacity` and `stroke-opacity` are inherited
+  from groups, which they were not. Found on the way and fixed: `rotate()`
+  turned the drawing the wrong way and `matrix()` read its numbers
+  transposed. Then `<use>` and `<symbol>` -- an element drawn again where a
+  `<use>` names it, a symbol in the viewport the `<use>` sizes -- with each
+  element built once and a document that names itself, loops or multiplies
+  itself bounded; drawings fitted to the pixels as `preserveAspectRatio`
+  says instead of stretched; inner `<svg>`s placed in their own viewports;
+  and a document nested past 128 levels refused, where one 100 000 deep
+  overflowed the stack of whatever drew it. And clip paths -- what an
+  element draws cut to the shapes of the `<clipPath>` it names, in either
+  units, by its `clip-rule`, clips within clips multiplying. And `<style>`
+  sheets, so a drawing coloured by CSS classes, as Illustrator writes them,
+  is no longer drawn in black; and masks, the shine glossy icons fade
+  through a gradient; and (2026-10-05) patterns, a tile repeated to paint a
+  shape -- the checkerboard behind an image editor's picture -- and XML
+  namespaces, so a document written `<svg:rect>` is drawn. And (2026-10-05,
+  §1466) filters -- every Filter Effects 1 primitive, from the soft shadow
+  under an icon to lighting and turbulence, and CSS's `blur()`,
+  `drop-shadow()`, `grayscale()` and the rest -- with a faded group now
+  faded as a whole, its overlapping parts no darker where they overlap.
+  And markers -- arrowheads and vertex dots, turned along the path -- and
+  embedded pictures, an `<image>` of a `data:` PNG, JPEG, GIF, WebP, BMP,
+  ICO or TIFF. Still not drawn: text, waiting on lane F
+  (`requests/c-f-an-outline-for-each-shaped-glyph.md`)
+  (`TD-C-THE-SVG-RENDERER-DRAWS-NO-TEXT-MARKERS-OR-PICTURES`).
+
+- `[C]` **The run box wears the theme's window frame** (`design-decisions.md`
+  §1461) -- done 2026-10-01. `desktop::dialog_frame` draws a shell dialog's
+  frame from the window-decorations axis -- its title bar, title, close button,
+  border and shadow, in the frame's colours, with the windows' geometry
+  (`DecorationStyle::title_bar`) -- and the run box lays its content out
+  inside it; its close button cancels. The security prompt and the print
+  dialog take it when they are wired up (`TD-C-THE-SHELLS-OTHER-DIALOGS-DRAW-FRAMES-OF-THEIR-OWN`).
+
+- `[C]` **The taskbar's glass and spacing are a theme axis**
+  (`roadmap-detailed.md` → *Tier 2 — Taskbar/Panel Styling*;
+  `design-decisions.md` §1460) -- done 2026-10-01. A theme's `taskbar-panel`
+  section sets how much of the Aero glass the taskbar wears -- 0 is a flat bar
+  in the theme's colour, its tiles their edges -- and the gaps between its
+  tiles; `theme.taskbar_panel` chooses it, and the desktop draws and lays out
+  the taskbar from it. Whether the bar is see-through stays the user's.
+  **Lane E:** a chooser in Settings (`requests/c-e-choose-the-taskbar-panel-in-settings.md`).
+
+- `[C]` **Cursor themes** (`roadmap-detailed.md` → *Tier 1 — Cursor
+  Theme*; `design-decisions.md` §1459) -- lane C's half done 2026-10-01.
+  `theme.cursors` chooses a cursor theme in the format every Linux desktop
+  uses -- XCursor files by name, with `index.theme` inheritance -- so
+  Adwaita, Breeze or Bibata install as they are; `appearance::cursors` reads
+  any pointer shape at the nearest size, every frame of an animated one, each
+  file checked before it is believed. **Waiting on others:** the compositor
+  drawing the pictures (lane F, `requests/c-f-draw-the-pointer-from-the-cursor-theme.md`)
+  and a chooser in Settings (lane E, `requests/c-e-choose-the-cursor-theme-in-settings.md`).
+
+- `[C]` **Window frames are a theme axis** (`design-decisions.md` §1456) --
+  lane C's half done 2026-10-01: a theme's `window-decorations` section sets
+  the title bar (height, alignment, weight, how a long title is cut), its
+  buttons (side, order, shape, size, gap), the border and the shadow, with
+  the geometry drawing and clicking share (`DecorationStyle::title_bar`).
+  The taskbar cuts window labels as titles are cut. **Waiting on others:** the
+  compositor drawing from it (lane F, `requests/c-f-draw-window-frames-from-the-theme.md`)
+  and its chooser (lane E, `requests/c-e-choose-the-window-frames-in-settings.md`).
+
+- `[C]` **The toolkit lays out as CSS Flexbox and Grid do**
+  (`design-decisions.md` §1455) -- done 2026-10-01. `guitk::layout`: flex
+  lines, wrapping, growing and shrinking with min/max freezing, margins,
+  baselines and `align-content`; `layout::grid` with sparse auto-placement and
+  `Px`/`Auto`/`Fr`/`MinMax` tracks; `fit_image` for contain, cover, stretch
+  and natural size. The widget tree lays out and routes clicks through it.
+
+- `[C]` **A right-click on a text field offers what its keys do**
+  (`design-decisions.md` §1454) -- done 2026-10-01: Cut, Copy, Paste, Delete
+  and Select All in every toolkit text field and the code editor, and in the
+  desktop's own fields (the run box, start-menu search, a note, a rename).
+  **And the wallpaper moves** (§1457): a picture that overflows the screen
+  is dragged into place from the desktop's menu, and the login screen shows
+  the same part.
+
+- `[C]` **A ribbon in the toolkit** (`roadmap-detailed.md` → *Ribbon
+  Widget*; `design-decisions.md` §1453) -- done 2026-09-30. `guitk::ribbon`:
+  tabs of named groups of controls -- large, medium and small buttons,
+  toggles, split buttons, dropdowns, galleries -- with contextual tabs
+  shown while the application's context is active, groups folding into one
+  button each (lowest priority first) when the window is narrow and what
+  fits nowhere behind `»`, and minimizing to the tabs alone (a double click
+  on a tab, or Ctrl+F1). Key tips from F10 (digits on the tabs and letters
+  on the commands, one layer), and tooltips that say why a disabled command
+  cannot be used. Deliberately not Office's where Microsoft licenses the
+  arrangement: no staged shrinking, no gallery preview, no set header above
+  contextual tabs, no layered key tips. A Quick Access Toolbar over or under
+  the ribbon, and the user's changes -- commands onto the toolbar, into and
+  out of groups, tabs hidden and moved -- from a right-click or the
+  "Customize the ribbon…" dialog, kept as one line of text the application
+  saves. The strip is the title bar's colour, accented title bars included,
+  from the one answer the window manager's bar is drawn from
+  (`Palette::title_bar`). **Lane E:** its applications onto it
+  (`requests/c-e-the-toolkit-has-a-ribbon.md`).
+
+- `[x]` `[C]` **A notification's right-click menu turns its program off**
+  (`design.txt`: "option for any notification to not show notifications from
+  that application again"; `design-decisions.md` §1450) -- done 2026-09-29.
+  A right-click on a card in the pane, or on a pop-up, offers "Turn off
+  notifications from *program*" (the program's rule becomes `Silent`, as the
+  Settings switch makes it; its pop-ups go, its cards stay) -- "Turn on ..."
+  for a program already off -- and "Notification settings" (`settings --page
+  notifications`). Over the pane, which stays open; beside the pop-ups, which
+  it holds while it is up.
 
 - `[-]` `[C]` **A theme sets how the desktop moves, and every moving thing
   follows it** (`roadmap-detailed.md` → *Tier 3 — Animation Tuning*,
@@ -2089,11 +2386,11 @@ live.
   daemon, which until now ignored the speed setting outright: Off still faded
   and slid them. A slide turned round mid-way starts from where it is drawn,
   under every curve; the taskbar no longer jumps to hidden when the pointer
-  comes back mid-slide. **Lane E:** the Settings picker for the axis
-  (`requests/c-e-a-theme-can-set-the-motion.md`). **Lane F:** window
+  comes back mid-slide. **Lane F:** window
   animations, when the compositor has them, take their curve from the
-  palette. **Lane C next:** the toast daemon's colours
-  (`TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`).
+  palette. The toast daemon's colours followed the same day
+  (`TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`, fixed); whether the
+  daemon runs at all is C-Q32.
 
 - `[C]` **A code editor in the toolkit** (`roadmap-detailed.md` →
   *Code-Aware TextEdit Widget*) -- done 2026-09-28: `guitk::textbuffer` (a
@@ -2119,8 +2416,8 @@ live.
   shell script), C, C++, CSS, diffs (a change's lines in kinds of their
   own), Dockerfiles, DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
   systemd units), Java, JavaScript (JSX included), JSON, linker scripts
-  (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), PowerShell, Python,
-  Rust, SQL (PostgreSQL's, MySQL's and SQLite's in one grammar), TOML, TypeScript and TSX (§1441: their query after JavaScript's)
+  (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), Nushell (the default shell's scripts),
+  PowerShell, Python, Rust, SQL (PostgreSQL's, MySQL's and SQLite's in one grammar), TOML, tree-sitter queries (the language every grammar's highlight query is written in: `.scm`), TypeScript and TSX (§1441: their query after JavaScript's)
   XML (SVG, XSLT, plists, project files) and YAML (every settings file),
   each passing its authors' test corpus (XML's save one example, which has
   valid XML be an error: `grammars/xml.rs`). **Injections** (a language inside another): a Markdown code fence
@@ -2435,6 +2732,10 @@ D's to act on once answered).
       parsed its own uninitialised buffer (known-issues.md,
       `D-POSIX-STDIN-WAS-A-NULL-POINTER`; fixed 2026-09-27). The line stays
       until a run answers 42.
+      **It answers 42** (lane D's boot of `b876bf1d5`, 2026-10-01): isatty
+      true on the pty slave, the interactive branch taken, the typed line
+      delivered and `6*7` evaluated -- "CPython ran interactively on
+      SlateOS" in the serial log. Done.
       The expression is `6*7` rather than `1+1` because a pty echoes what is
       typed: a scan for `2` would match the echo of `print(1+1)` and pass
       without the interpreter evaluating anything.
@@ -2634,6 +2935,58 @@ D's to act on once answered).
       both is `services/ctest-sysvipc`, run by lane A on request.
   Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
   its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
+  **A broken pipe raises `SIGPIPE` -- 2026-10-06 (lane D).** A write into a
+  pipe or stream socket with no reader sends `SIGPIPE` to the writer, then
+  fails with `EPIPE`, as Linux's kernel does (design-decisions §1176), so a
+  C program behind `| head -1` ends as on Linux. `MSG_NOSIGNAL` and an
+  ignored signal leave `EPIPE` alone. With it, these now answer as Linux 6.6
+  does (measured):
+  - TCP sockets never connected, and listening ones, for read, write, send
+    and receive;
+  - `sendto` and `recvfrom` on unix-domain stream sockets.
+
+  The ring-3 check is `services/ctest-sigpipe`. The Linux ABI's half is
+  asked of lane A (`requests/d-a-linux-programs-never-get-sigpipe.md`).
+  **`read` and `write` of the library's own files -- 2026-10-06 (lane D).**
+  These now answer a NULL buffer and a zero count as Linux 6.6 does
+  (measured): eventfds, timerfds, inotify queues, epoll, and sockets with no
+  connection. Each makes its own checks first and faults only at the copy.
+  The kernel's files wait on lane A
+  (`requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`),
+  the NULL-pointer audit's last item.
+  **`getrusage` is the caller's own -- 2026-10-06 (lane D).** It reported
+  the machine's system and interrupt time as the caller's, and nothing for
+  `RUSAGE_CHILDREN`, for seven weeks after the kernel's per-process call
+  landed. It now reads that call (`SYS_PROCESS_GET_RUSAGE`) through the
+  converter `wait4` uses. The ring-3 check is `services/ctest-rusage`.
+  **Priority-inheritance mutexes -- 2026-10-06 (lane D).**
+  `PTHREAD_PRIO_INHERIT` was refused with `ENOTSUP`, though the kernel has
+  PI futexes. Such a mutex is now one, so a waiter lends its priority to the
+  holder. Every lock and unlock goes through the kernel for now, because
+  the kernel keeps no record of a holder that took its word in userspace
+  (design-decisions §1177;
+  `requests/d-a-pi-futex-owners-taken-in-userspace-are-invisible-to-the-kernel.md`).
+  The Linux `futex()` call's PI commands answer as Linux's:
+  - `FUTEX_LOCK_PI`'s deadline is honoured; it was judged and then ignored;
+  - `FUTEX_TRYLOCK_PI` and `FUTEX_LOCK_PI2` are new;
+  - an unlock by a non-owner is `EPERM`.
+
+  The ring-3 check is `services/ctest-pi-mutex`; it times a holder against
+  medium-priority threads. Priority ceilings (`PTHREAD_PRIO_PROTECT`) and
+  robust mutexes are still `ENOTSUP`.
+  **`system()` is glibc's -- 2026-10-06 (lane D).** It ran its shell with no
+  environment -- no `PATH`, no `HOME` -- the bug the `exec` family had until
+  2026-09-24. It now passes the caller's environment and `--`, and handles
+  signals as POSIX requires: `SIGINT` and `SIGQUIT` ignored and `SIGCHLD`
+  blocked while it waits, and the shell given its defaults and the old mask
+  (`known-issues-resolved/D-SYSTEM-RAN-ITS-SHELL-WITH-NO-ENVIRONMENT.md`).
+  The ring-3 check is `services/ctest-system`.
+  **Real-time scheduling is refused, not faked -- 2026-10-06 (lane D).**
+  `sched_setscheduler` told a permitted caller asking for `SCHED_FIFO` or
+  `SCHED_RR` that it had them, and changed nothing; it answers `EPERM` now.
+  The scheduler has no real-time class to give
+  (`known-issues/D-REAL-TIME-SCHEDULING-HAS-NO-CLASS.md`; asked of lane A in
+  `requests/d-a-real-time-scheduling-has-no-class-to-run-in.md`).
 
 - `[x]` `[D]` **The image carries fonts -- 2026-09-26**, lane D's half of
   `requests/f-cd-the-os-image-ships-no-fonts-so-slateos-draws-every-word-in-the-8x16-bitmap-face.md`.
@@ -2702,6 +3055,16 @@ D's to act on once answered).
   in libc — see design-decisions.md §345 for the alternative and why it fails.
 
 - `[D]` Translate POSIX calls to native syscalls (line ~1738)
+  - `[-]` **`mmap` of a file, for native programs** (2026-10-06). It gave
+    anonymous memory -- zeros, with no error -- because the native
+    `SYS_MMAP` takes no file and the library passed the descriptor where
+    nothing reads it. The library now copies the file into the mapping
+    (`posix/src/mman/file_map.rs`): the bytes are right, but read at once,
+    and a writable `MAP_SHARED` mapping is refused with `ENODEV`.
+    `services/ctest-mmap-file` checks it on SlateOS. The real fix is native
+    file mappings in the kernel
+    (`requests/d-a-a-native-program-cannot-map-a-file.md`;
+    `known-issues/D-POSIX-A-NATIVE-FILE-MAPPING-IS-A-COPY.md`).
 
 - `[D]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
 
@@ -2723,6 +3086,31 @@ D's to act on once answered).
   half linted as every crate's is; **not yet on the image, not started at
   boot, and not confining**, for three reasons in other lanes' trees
   (`known-issues.md` -> `D-SCHEDULED-BACKUPS-STILL-DO-NOT-RUN`).
+
+- `[-]` `[D]` **The dynamic-DNS service** (2026-10-06; lane E's
+  `requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`,
+  design-decisions §1175). `services/dyndns` keeps each entry of
+  `/etc/dyndns.yaml` pointed at this network and reports what happened to
+  `/run/dyndns.yaml` and the journal. `services/dyndns/providers`
+  (`dyndnsproviders`) is what each provider is, which Settings shares:
+  Dynu, No-IP, DuckDNS, Cloudflare, FreeDNS and a custom URL. Written and
+  tested on the host against each provider's documented answers.
+  **It updates nothing on SlateOS yet**, for three reasons
+  (`known-issues/D-DYNAMIC-DNS-UPDATES-NOTHING-YET.md`):
+  - its passwords have nowhere to be kept (D-Q4);
+  - nothing in userspace speaks TLS
+    (`requests/d-a-nothing-in-userspace-can-make-an-https-connection.md`);
+  - it is not on the image or started at boot.
+
+  **The router half, 2026-10-06** (design-decisions §1178): the same service
+  finds the router (the default gateway, asked over NAT-PMP, then UPnP),
+  learns its internet address -- which a custom URL naming `{ip}` now
+  takes -- and keeps the port forwards of `/etc/portforwards.yaml`,
+  reporting to `/run/portforwards.yaml`. The protocols are
+  `services/dyndns/router` (`dyndnsrouter`), tested against a router
+  simulated in memory; no real router has been asked yet. Settings' page
+  for it is lane E's (the request's third reply), and the kernel's own
+  UPnP module can go (`requests/d-a-the-kernels-upnp-module-is-done-in-userspace-now.md`).
 
 Known-issues: the POSIX/libc entries that lane B's list above still names —
 `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S` (blocked only on the operator's Q48;
@@ -2810,9 +3198,153 @@ word; text inside them that says "lane C" is history.
   (`gamechrome::Ink`, `Chrome::on(ground)`). Wordle's help is the
   toolkit's shortcut card, still see-through under the bordered look
   (lane C's, `requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md`).
-  **Next:** the same test under themes that leave no room -- soft text,
-  pale and deep hues (todo.txt) -- then the fixed-size boards (match-3,
-  pinball; known-issues).
+  Then the same test under themes a user can put together that leave no
+  room -- text only as dark as the page needs, pale hues on light, deep
+  hues on dark (`gamechrome::legibility::looks()`, §1227) -- which found
+  words in five more games: battleship's message bar, 2048's score values,
+  hangman's keys, tic-tac-toe's winning marks, wordle's keys and header
+  buttons. Match-3 is laid out from the window's size now (2026-09-28),
+  its controls the toolkit's buttons, and pinball's scene is fitted to its
+  window whole -- scaled by the largest factor at which all of it shows,
+  since its physics is measured in the table's own units: every game fits
+  every window.
+
+- `[-]` `[E]` **The editing keys and the redo tree in every program** —
+  **C-Q24**, answered by the operator (`design-decisions.md` §1416;
+  `requests/c-e-the-operators-answers-to-c-q24-c-q25-c-q26.md` part 1).
+  **The redo tree, done** (2026-09-28): every program with an undo of its own
+  keeps it as a tree -- an edit after an undo keeps what was undone as a
+  branch -- with Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, and Alt+Z / Alt+Shift+Z
+  walking every state in the order it was reached. Programs that keep steps
+  use lane C's `guitk::undo::UndoHistory` (editor, markdown and hex editors,
+  renamer, sudoku, spreadsheet, whiteboard, mind map, sticky notes, towers,
+  klotski, rush, sokoban); programs that keep whole states use lane E's
+  `apps/statehistory` on top of it (paint, diagram, slides, 2048, connect
+  four, gomoku, solitaire, freecell, mahjong) -- the card games, mahjong and
+  the two with an opponent moved to whole states because a redo written by
+  hand would have been a second, forward copy of every rule their undo
+  already had wrong at the edges. The ten games read their keys through
+  `gamechrome::HistoryKey`. On the way: AltGr, which arrives as Ctrl+Alt,
+  was Ctrl in most of them (AltGr+Z, Polish's ż, undid), and nine let keys
+  held with Alt or the Windows key through to their bare-key bindings;
+  `statehistory` took an edit's `before` from the state an undo left rather
+  than the one the program was in (slides undid onto the wrong slide);
+  sticky notes' title typing lost its starting point on a second commit;
+  paint's layer operations could not be undone; several cap tests counted
+  to their own constant and unwound with unbounded loops.
+  **The keys pass, part done** (2026-09-28). *AltGr typing:* the rule is
+  `apps/textline`'s -- `is_ctrl_chord` (Ctrl without Alt or the Windows key),
+  `is_command` (Ctrl or Alt alone, or the Windows key: a command, though on
+  real hardware it carries its letter as text), `types_into_field` -- and
+  `textline`, `textarea`, diagram's labels, logviewer's search, notes'
+  fields, the mind map's names and search, slides' boxes, passwordgen's
+  analyser, pomodoro's task, taskscheduler's form and sticky notes' title and
+  search ask it; passwordgen's Ctrl+C no longer clears the history. The
+  toolkit's own fields type a command's letter on real hardware:
+  `requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`.
+  *F1:* every game raises a list of keys with F1 or ? (`gamechrome::help`);
+  gomoku, klotski, rush, sokoban, solitaire, freecell and mahjong had none,
+  2048 and connect four answered only H. *Ctrl+F4:* the editor, named in its
+  menu.
+  **Still open:** Ctrl+F4 in the other programs with tabs or documents (by
+  survey); the rest of the typing sites -- 124 in `apps/` append typed text,
+  counted 2026-09-28, most without asking whether the key is a command --
+  and the Ctrl shortcuts matched on Ctrl alone in the 64 programs that take
+  text and test Ctrl somewhere without Alt (notes' body, and every field on
+  `TextInput::edit_key`, wait on the request above). *The Alt/Super guard:*
+  done 2026-10-03 for all sixty programs of the 2026-09-29 survey, each with
+  a test and mutation rows, published to main 2026-10-03
+  (`known-issues-resolved/E-a-key-held-with-alt-or-the-windows-key-works-a-programs-bare-key-binding.md`
+  lists them); most had the AltGr-as-Ctrl fault too and many typed a
+  command's letter, both fixed alongside; and `textline::apply_key` and
+  `TextArea::apply_key` themselves now refuse Alt's and the Windows key's
+  chords on their editing keys, as their docs said they did;
+  Page Up/Down, Home/End and Ctrl+Home/End through
+  `guitk::listview::ListKey` for programs with lists of their own (done
+  2026-09-29 for pomodoro's log, rush's puzzle sheet, sokoban's level menu
+  and taskscheduler's task list and history -- which answered Home alone;
+  logviewer already answered all of them; the rest by survey); a test
+  pressing every row of 2048's
+  and connect four's sheets (done 2026-09-29: 2048's split into keys and
+  rules as towers' is, Esc given its own row; connect four's "1 - 7" was a
+  label the parser could not read, now "1-7").
+
+- `[ ]` `[E]` **Lane C's requests of 2026-09-27/28** — what lane C's toolkit
+  and desktop work asks of the programs, one request each (all in
+  `requests/`, from lane C unless said):
+  - ~~every program that keeps a settings file re-reads it on
+    `Event::SettingsChanged` (`c-e-a-changed-settings-file-is-announced-now.md`)~~
+    **done 2026-09-28**: the nine programs and Settings' seven files, each
+    with a two-window test. It turned up that data files (notes, contacts,
+    the e-book library, fourteen more) have the same lost update and are
+    not announced: `known-issues.md` "[E] Two windows of one program",
+    E-Q5;
+  - ~~four programs read the one list of programs, `gui/programs`, instead of
+    their own (`c-e-read-the-one-list-of-programs.md`, the operator's C-Q20)~~
+    **done 2026-09-29**: the launcher, Settings' Default Apps page (every
+    job and what does it), the file manager (the default when nothing is
+    chosen, Open With) and File Associations; the three copies of "installed
+    programs with SlateOS's behind them" are asked of lane C as one
+    (`e-c-the-installed-and-built-in-programs-belong-in-gui-programs.md`);
+  - ~~an About page in Settings that shows the third-party notices
+    (`c-e-show-the-third-party-notices.md`)~~ **done 2026-09-29**
+    (3ae172794): `settings --page about`, each notice's attribution on a
+    line of its own and its texts read when opened; lane C may delete
+    `gui/desktop/src/about.rs`;
+  - ~~the controls' shapes: a picker in Settings, the programs' own text
+    fields and scrollbars, the user's focus width
+    (`c-e-a-theme-can-shape-the-controls.md`)~~ **done 2026-10-04**: the
+    Controls and Motion pickers; every hand-drawn scrollbar (explorer,
+    terminal and tmux's panes, the dictionary's -- now pressable); the
+    explorer's address bar and dialogs at the user's focus width; the text
+    boxes of every program that draws its own, seventy-one of them
+    (terminal, tmux and typingtutor left, the reasons in the request's last
+    reply). Nothing of lane E's animates a transition of its own, so the
+    motion request's second part had nothing to convert
+    (`c-e-a-theme-can-set-the-motion.md`, done);
+  - ~~day and night wallpapers on Settings' Wallpaper page
+    (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`)~~ **done
+    2026-09-29** (3a7073848): a morning and an evening picture, each with
+    its time, and the picture and the rotation saying when a schedule hides
+    them;
+  - the editor and the markdown editor onto the toolkit's code editor
+    (`c-e-the-toolkit-has-a-code-editor.md`);
+  - adoption, program by program: the slider, the switch, checkbox, radio
+    button and drop-down, and the dock (`c-e-the-toolkit-has-a-slider-now.md`,
+    `c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`,
+    `c-e-the-toolkit-has-a-dock.md`);
+  - lane B's two, forwarded by lane C (`c-b-your-two-requests-to-c-are-lane-es.md`;
+    the requests themselves are on lane B's branch): the terminal answers
+    how wide it will draw a run of text -- **done** (e99d960e6, OSC 7730,
+    §1224; answered in `e-b-the-terminal-answers-how-wide-it-will-draw-text.md`)
+    -- and the password manager's CSV export survives any password, the
+    operator's own words "make sure you don't mess that up": the export
+    quotes every field and is tested by round trip through a strict reader,
+    answered in `e-b-the-password-export-survives-any-password.md`
+    (f3b7eef15);
+  - standing: a notices manifest beside any code ported into a lane E crate
+    (`c-abdef-third-party-code-needs-a-notices-manifest.md`).
+  Done 2026-09-28: `safeio`'s rename on Windows while a scanner holds the
+  file (f661f4c01); the three modules lane C's palette refusal waited on
+  (16d1a710a).
+
+- `[ ]` `[E]` **The video player plays** -- lane F's `videocodec` turns a
+  file into frames, and lane F's Matroska reader stays as the tree's one
+  (`requests/f-e-two-matroska-demuxers-which-stays.md`, answered
+  2026-10-04):
+  - `[ ]` `apps/videoplayer` plays through `videocodec::Video` -- open,
+    `next_frame`, `seek`, late pictures dropped through `next_picture`
+    without their conversion -- keeping timing and display its own;
+  - `[ ]` `apps/mediaprobe` reads its track list from `matroska::Demuxer`,
+    and `mkv/demux.rs` is retired with its mutation rows -- once lane F's
+    port of its test cases and its mutation sweep is on `main`.
+
+- `[-]` `[E]` **Text boxes with a caret** --
+  `known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box.md`:
+  twenty-nine programs' boxes take typing only at their end, with no caret,
+  selection or clipboard. One program at a time onto `textline::apply_key`
+  over a `TextInput`, as netscan's and sysmonitor's; emojipicker done
+  2026-10-04.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task
@@ -3018,6 +3550,42 @@ word; text inside them that says "lane C" is history.
   answered rather than drawn. Without a connection nothing is pretended --
   a command says it was not sent. The window says "plain text" while
   connected (see E-Q2). Tested end to end against a loopback server.
+
+- `[-]` `[E]` **The archive codecs leave the kernel binary** — 2026-10-03,
+  lane A's answer to `requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md`:
+  lane E ports the codecs into root crates any program can link, and lane A
+  switches the kernel's `fs/` copies to shims. Each is a port of the
+  reference implementation, held to that implementation's own output and
+  verdicts by its tests. **Done:** `bzip2/` (libbzip2 1.0.8, compressor
+  byte-identical, decoder verdict-identical on 2,943 corruptions), and the
+  archive manager reads and writes TAR.BZ2 through it; `xz/` decoders
+  (liblzma 5.2.5: `.xz` with every check and filter, `.lzma`, raw
+  LZMA/LZMA2), and the archive manager reads TAR.XZ through it. Both handed
+  to lane A (`requests/e-a-the-bzip2-crate-is-ready-for-the-kernel-shim.md`,
+  `requests/e-a-the-xz-crate-is-ready-and-xz-compress-loses-files.md` --
+  the second reports that the kernel's `xz_compress` writes unreadable
+  streams past 64 KiB compressed). Then liblzma's encoder in `xz/`: every
+  match finder, the fast and normal choosers, every preset and extreme
+  preset, `.xz`, `.lzma` and raw -- held to `xz` 5.2.5's bytes for 136
+  settings and inputs -- and the archive manager writes TAR.XZ through it.
+  Then `sevenz/` (7z: 7-Zip 26.00's own reader, ported from the
+  public-domain LZMA SDK; names kept as UTF-16 units), which reads every
+  method 7-Zip writes: LZMA and LZMA2 by 7-Zip's own decoders, ported
+  (`LzmaDec.c`, `Lzma2Dec.c` and the multi-threaded driver, decision 1230,
+  because liblzma's part from them on damaged data); PPMd, BCJ2, every
+  branch filter (ARM64 and RISC-V included), Delta and Copy; BZip2 and
+  Deflate by 7-Zip's rules rather than libbzip2's and zlib's, and Deflate64,
+  through a decoder of its own (decision 1231, 7-Zip's being LGPL); and
+  AES-256 with a password. Every one-byte corruption of ten small archives
+  and the chunk headers and edges of two multi-chunk LZMA2 archives
+  (18,198 mutants), and 12 crafted archives, get 7-Zip's own verdict, file
+  by file, as 7-Zip with several threads and with one gives it. The archive
+  manager lists, extracts and tests 7z through it -- read-only, an
+  encrypted one listed and its files refused until it asks for a password
+  -- and `sevenz` is handed to lane A
+  (`requests/e-a-the-sevenz-crate-is-ready-for-the-kernel-shim.md`: the
+  kernel's copy checks no CRC). **Remaining, lane A's:** the three kernel
+  shims.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
@@ -3497,6 +4065,24 @@ lane C's `guitk`.
   own buckets, matched on signature rather than by string so a regression
   cannot hide inside an exemption; that is what took `differ` from 1178 to 2
   and made the last two findable at all.
+  Strings the corpus had never asked found four more disagreements
+  (2026-10-05, §1359):
+  - A legacy `kern` table is now read across marks, as `hb_kern_machine_t`
+    reads it with `IgnoreMarks`, and inside the positioning pass, so an
+    attached accent stays on its letter. About ninety faces kern `T́o`
+    differently otherwise.
+  - A never-drawn glyph loses its advance before the attachments are
+    resolved. Otherwise an accent after an undrawable VS16 landed a letter
+    to the left, in 157 faces.
+  - Where a face classifies its glyphs, mark-ness comes from the `GDEF` class
+    alone. Linux Libertine's Graphite build and DejaVu Sans Mono Bold Oblique
+    then keep their accents' widths, as HarfBuzz does.
+  - Syriac's shaper is called off by `DFLT` alone, and a run whose shaper is
+    called off takes no joining forms.
+  The corpus gains those strings, words of N'Ko, Syriac and Mongolian, and
+  emoji sequences: a ZWJ family, a flag, a keycap and a skin tone. That makes
+  556 faces × 122 strings, with `differ` 0 and `misplaced` 1 (the same
+  survivor), at the em, at 16 ppem and at `wght=700`.
 
 - `[F]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619). **Measured 2026-09-13: this is the only way
@@ -3512,12 +4098,88 @@ lane C's `guitk`.
   `known-issues.md` TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET and
   `compositor::tests::bench_fill_floor`.
 
-- `[F]` Video-encoded capture fallback (lines ~4623, ~5060): **VP9**,
+- `[-]` `[F]` Video-encoded capture fallback (lines ~4623, ~5060): **VP9**,
   decided 2026-09-27 (design-decisions.md §1332). A port of libvpx for
   encoding and decoding on the CPU, threaded across every core. Hardware VP9
   (Intel's media driver, AMD's through Mesa, both over VA-API) comes once the
   GPU stack exists. The encoder films buffer-backed windows for the
   compositor's capture stream; the decoder serves SlateOS's remote viewer.
+  How it is built: §1339.
+  - `[x]` The decoder, libvpx v1.17.0's, in safe Rust (`gui/video/vp9`):
+    every picture of all 314 of libvpx's conformance vectors hashes to the
+    MD5 libvpx publishes -- profiles 0 to 3, every subsampling, tiles,
+    segmentation, lossless, compound and scaled-reference prediction,
+    intra-only and show-existing frames. 91 small vectors are committed
+    (`tests/data`); the rest are fetched by `tools/fetch_vectors.py` and run
+    with `--ignored`.
+  - `[x]` Threads, one per core (§1332). `[x]` Tile columns, each into a
+    strip of its own and put together in column order, so the pictures are
+    the same on any number of threads (the suite runs at 1 and 4). `[x]` The
+    loop filter's superblock rows as libvpx's wavefront, which also helps
+    video with one tile column -- done the same way, bit-exact.
+  - `[-]` Speed. `[x]` A committed benchmark against libvpx
+    (`tests/bench.rs`); motion compensation and the loop filter rewritten to
+    vectorise for SSE2, exact in 16-bit lanes; `opt-level = 3` for the crate.
+    One thread on libvpx's 1080p vector: 32 fps, libvpx's C 17, its SIMD 77
+    (an i7-8700K). `[x]` The loop filter's threads (above) and frame-buffer
+    reuse. The rest of the gap to libvpx's SIMD on one core needs SSSE3/AVX2
+    chosen at run time, so `unsafe`: `open-questions/F-Q5.md`.
+  - `[-]` The encoder: libvpx's realtime path (`vpxenc --rt --cpu-used=8`,
+    CBR), to be byte-identical to `vpxenc` (§1339). `[x]` The forward
+    transforms and quantisers, bit-exact against libvpx's C; the bitstream
+    writer, tokenizer and probability updates; block coding and
+    reconstruction (`vp9::Encoder`). Key frames with fixed decisions decode
+    to exactly the encoder's reconstruction, at random partitions, modes and
+    transform sizes too, and the encoder counts what the decoder counts.
+    `[x]` libvpx's one-pass CBR rate control and the frame loop around it.
+    `[x]` libvpx's key-frame decisions (variance partitioning, the realtime
+    intra mode search): the reference encode's first frame
+    (`tests/data/encoder/rt8.ivf`) is byte-identical to `vpxenc`'s.
+    `[x]` Inter frames coded from given decisions: references, inter headers,
+    vector prediction and coding, sub-8x8 inter, segment-map prediction --
+    random decisions decode to the encoder's reconstruction, counts agree.
+    `[x]` libvpx's inter decisions: the speed-8 variance partitioning with
+    its copy-partition shortcut, the realtime inter mode search
+    (`vp9_pick_inter_mode`: the fast diamond, sub-pixel and
+    integral-projection searches, the filter search, the encode breakout),
+    cyclic refresh's band and segment updates, source SAD, scene, noise and
+    skin detection. All 30 frames of the reference encode are byte-identical
+    to `vpxenc`'s from the encoder's own decisions, and a trace of every
+    decision matches libvpx's line for line. `[x]` A second reference encode
+    for the paths that clip never reaches (`tests/data/encoder/rt8cut.ivf`,
+    150 pictures of 651x357): two scene cuts coded at the overshoot
+    quantiser, the noise estimate rising to Medium, three golden refreshes,
+    a fade, blocks over the picture's right and bottom edges. All 150 frames
+    are byte-identical from the encoder's own decisions and from libvpx's
+    replayed; the decision traces agree on all 867,893 lines.
+    `[x]` The learned partitioning libvpx uses at 352x288 and below
+    (`nonrd_pick_partition` trimmed by `ml_predict_var_partitioning`'s
+    networks, with glibc's `logf` as x86-64 runs it, §1341): a third
+    reference encode at 350x286 (`tests/data/encoder/rt8small.ivf`) is
+    byte-identical for all 90 frames, the traces agreeing on all 152,823
+    lines. Every frame size now makes `vpxenc`'s frames.
+    `[x]` Threads (§1342): each tile column on a thread of its own, into a
+    strip with its own copy of the decisions' state, put together in column
+    order, and its bitstream written on a thread of its own as libvpx's
+    realtime `encode_tiles_mt` writes it -- the same bytes on any number of
+    threads, and `vpxenc`'s with the same `--tile-columns` (two more
+    reference encodes, four columns at 1280x720 and two at 651x357, match on
+    one to four threads). By default a picture has as many columns as its
+    width allows, as `vpxenc`'s does.
+    `[-]` Speed: the hot paths rewritten to vectorise for SSE2, exactly --
+    the sub-pixel variance, the quantisers (raster order and inverse scans),
+    the 8x8 DCT (eight columns at once in 32 bits), the block measures; 2.3x
+    fewer instructions for the first reference (callgrind). Encoding speed in
+    `tests/bench.rs` (`bench_vp9_encode`).
+  - `[x]` The fallback in the compositor's stream (§1343): a window
+    presenting a buffer -- a game's, a video player's -- streams to a remote
+    viewer as VP9, one stream per window per session (scene protocol version
+    3), coded when a new buffer arrives and timed by the capture's clock
+    (`Encoder::encode_timed`), its colour through `vp9::rgb`; the viewer
+    queues the frames to decode. Tested end to end, compositor to decoded
+    pixels. `[ ]` The remote desktop service that reads the stream, and with
+    it coding off the compositor's thread
+    (`known-issues/F-the-capture-stream-codes-video-on-the-compositors-thread.md`).
 
 - `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
@@ -3540,27 +4202,299 @@ lane C's `guitk`.
     durations, a finite loop and an alpha track that ends early), in order and
     out of it, bit-exact against Pillow. Playing them in the viewer is lane
     E's (`requests/f-bce-avif-pictures-open-and-animate.md`).
-  - `[ ]` Frames coded at another size than their `ispe`, rescaled as libavif
-    rescales them (known-issues.md, "[F] An AVIF frame coded at another
-    size").
+  - `[x]` Frames coded at another size than their `ispe`, rescaled as libavif
+    rescales them (`gui/video/yuv/src/scale.rs`): libyuv's `ScalePlane` and
+    `ScalePlane_12` with `kFilterBox`, every method they choose by the sizes,
+    as libyuv's C computes it (design-decisions §1344). Held to libyuv 1924
+    built with its x86 code off on 62,208 size combinations and 57 larger
+    cases at 8, 10 and 12 bits, and to Pillow -- 12.1.1 and 12.3.0 agree --
+    byte for byte on 28 fixtures made here
+    (`tests/data/generate_avif_rescale.py`).
   - `[-]` Speed: the committed benchmark is in (`bench_avif_decode`: about
     twice dav1d's time, one thread); making rav1d faster waits on
     `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
     (known-issues.md, "[F] AVIF decoding has no committed benchmark").
 
-- `[F]` **A display transport over channel IPC** for local clients, beside
-  the TCP one (`gui/remote/src/socket.rs` planned it "when SlateOS's own
-  channel IPC becomes reachable from a userspace application", which it now
-  is). The point is the peer's identity: the kernel attests a channel's peer
-  (`SYS_CHANNEL_PEER_CRED`), a TCP peer cannot say what process it is, and
-  today's `client_pid` is a per-connection number. Unblocks the process
-  explorer's window picker (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`,
-  part 3), `open-questions.md` F-Q3's option B, and per-program (rather than
-  per-connection) grouping on the taskbar. **Blocked on lane A**
-  (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`):
-  a Linux-ABI program -- every Rust `std` one, the compositor included --
-  cannot reach channels at all; nothing can wait on channels beside sockets;
-  and until channel handles are unforgeable the peer's pid proves nothing.
+- `[-]` `[F]` **Video files** (`roadmap-detailed.md` §3.2, "OS-level video
+  codec support"): the video player (`apps/videoplayer`, lane E) has its
+  window and a file's description (`apps/mediaprobe`), and nothing that
+  opens a file's pictures.
+  - `[x]` Matroska and WebM, demultiplexed (`gui/video/matroska`,
+    design-decisions §1345): written from RFC 9559 with FFmpeg's behaviour
+    where the RFC leaves a choice -- every packet of 48 fixtures and 97
+    seeks held to `ffprobe`'s, and every frame of VP9, VP9 with alpha and
+    AV1 played through it held to ffmpeg's decoders. The tree's one
+    Matroska demuxer: `apps/mediaprobe`'s cases moved into its suite
+    (`requests/f-e-two-matroska-demuxers-which-stays.md`), with a mutation
+    sweep (`mutate.py`). A seek without Cues walks only as far as it must;
+    with them, it goes by the Cues alone (§1348). What it leaves out:
+    `known-issues/F-the-matroska-demuxer-leaves-out-what-no-webm-file-needs.md`.
+    - `[x]` Chapters, tags and attachments (2026-10-05, §1358): the file's,
+      each track's, chapter's and attachment's metadata as FFmpeg gives it
+      -- keys, values and their order, eleven files and 660 truncations held
+      to ffprobe's -- chapters with FFmpeg's ends, attachments (cover art,
+      fonts) read when asked for. For lane E's player and probe:
+      `requests/f-e-matroska-gives-chapters-tags-and-attachments.md`.
+    - `[x]` One track read alone (2026-10-05, §1361): `select_tracks` passes
+      over the other tracks' blocks unread, as FFmpeg passes over a
+      discarded stream's, and `set_read_ahead` suits the reading to it;
+      `videocodec`'s sound and subtitle readers read 4% of a 1080p film, not
+      all of it again beside the pictures. MP4's demuxer the same.
+  - `[x]` A frame-level API for a player (`gui/video/codec`, crate
+    `videocodec`, design-decisions §1346): `Video::open(file)`, then
+    `next_frame()` -- each picture in order with its time, duration and
+    key-frame flag, as `0xAARRGGBB` pixels (imagecodec's form) -- and
+    `seek(time, Exact | KeyFrame)`; `next_picture()` for a player that drops
+    late pictures before paying for their conversion; `Decoder` beneath it
+    for packets from elsewhere. VP9 (every profile, WebM's alpha), AV1.
+    Colour by the stream's own matrix and range -- the bitstream's word, then
+    the file's, then mpv's guess from the size -- through the same libavif
+    conversion as AVIF stills (`gui/video/yuv`); crop and display aspect
+    from the file. Fifteen fixtures, every frame's pixels held to libavif
+    1.3.0 converting ffmpeg's decoded planes and every time to ffprobe
+    (`tests/data/generate_fixtures.py`, `tools/libavif_reformat_reference.c`),
+    with seeks, damage and a playback thread. What it leaves to colour
+    management: `known-issues/F-video-is-shown-without-colour-management.md`.
+  - `[x]` VP8 video (libvpx's decoder, ported as VP9's was), and MP4
+    (`apps/mediaprobe` reads its headers; the sample tables are like
+    AVIF's sequences').
+    - `[x]` The decoder, `gui/video/vp8`: libvpx v1.17.0's, every picture
+      of all 62 of its test vectors hashing to libvpx's MD5s
+      (`tests/vectors.rs`), and 446 damaged copies of them decoding to
+      libvpx's pictures, corruption marks and errors frame by frame
+      (`tests/damage.rs`, from `tools/damage_reference.c`).
+    - `[x]` Faster than libvpx's C: motion compensation and the loop
+      filter written in lanes the compiler vectorises, 1.99 G instructions
+      for 20 frames of 1080p against libvpx C's 6.46 G (its SIMD's 0.86 G;
+      `tests/bench.rs`). On one thread about 60% of its SIMD's speed:
+      `known-issues/F-vp8-on-one-thread-is-about-60-percent-of-libvpx-simd.md`.
+    - `[x]` Rows on threads, as libvpx's: a frame of several token
+      partitions decodes its macroblock rows on up to one thread a core,
+      the single thread's pictures bit for bit (every vector and damage case
+      at several thread counts, every buffer compared); 2.9 times as fast on
+      eight threads as on one at 1080p, 1.6 at 360p, smaller pictures left
+      on one. Each row in a band of its own, rows exchanging edges through
+      mailboxes of atomic words: no `unsafe`. design-decisions.md §1356.
+    - `[x]` A frame of one partition -- encoders' default, on one thread in
+      libvpx -- has its loop filter on a second thread, a row behind its
+      macroblocks: 1.3 times as fast at 1080p, the same pictures.
+      design-decisions.md §1357.
+    - `[x]` In `videocodec`: WebM's VP8, alpha included, coloured as FFmpeg
+      reads VP8 (BT.601 at any size, its clamping bit the range); five
+      fixtures held to ffmpeg and libavif frame by frame.
+    - `[x]` MP4.
+      - `[x]` The demuxer, `gui/video/mp4`: FFmpeg's `mov.c` translated --
+        edit lists, negative composition offsets, sound's priming,
+        fragmented files, damage -- every packet of 31 files and 14 sets of
+        seeks held to ffprobe's, and every byte of six files damaged in
+        turn; and what a track says of its picture (colour, pixel shape,
+        display matrix, clean aperture), held to ffprobe over 28 files more.
+        It carries FFmpeg's licence (LGPL): open-questions F-Q7.
+      - `[x]` A file's claims held to its length: its tracks index at most a
+        sample a byte of it between them, FFmpeg's own ceilings kept exactly
+        -- after the fuzzer found a 734-byte file that asked for 46 GB.
+        Eighteen files claiming more than they hold or FFmpeg can index,
+        each read as ffprobe reads it; a fuzz target of the demuxer's own.
+        design-decisions §1364.
+      - `[x]` In `videocodec`: a file opened by what it is -- EBML's magic,
+        or FFmpeg's MP4 probe -- and played the same way through one
+        container layer: MP4's edit lists obeyed (frames before a cut
+        decoded and not shown, AV1's by a tag dav1d carries), its colour,
+        pixel shape and clean aperture taken. Eight MP4 fixtures held to
+        ffmpeg and libavif frame by frame, with seeks and damage.
+      - `[x]` Pictures turned and mirrored as the file asks -- MP4's display
+        matrix, Matroska's projection pose (now read by
+        `gui/video/matroska`, its 22 cases held to ffprobe) -- as ffmpeg's
+        autorotate turns them; seven fixtures, each turn checked against
+        ffmpeg's own.
+    - What MP4 still lacks -- above all H.264 and HEVC, which most MP4
+      files hold: `known-issues/F-mp4-plays-only-in-the-codecs-webm-has.md`.
+  - `[ ]` H.264 and HEVC video, which phones, cameras and most of the web
+    write into MP4: `videocodec` refuses them by name today. A decoder for
+    each, held to its reference as VP8's and VP9's are. Whether to include
+    one, and which code to start from, is the operator's:
+    `open-questions/F-Q8.md` (H.264), F-Q1 (HEVC).
+  - `[-]` Sound: a WebM file's is Opus or Vorbis.
+    - `[x]` The Opus decoder, `gui/video/opus`: libopus 1.5.2's fixed-point
+      decoder ported -- SILK, hybrid and CELT, concealment, in-band FEC,
+      DTX, multistream and ambisonics, the `OpusHead` -- and held to
+      libopus sample for sample: streams of its own decoded a thousand ways
+      (every rate and channel count; lost, damaged, reset; each setting;
+      the errors and the decoder's state as well as the sound), the RFC
+      8251 vectors when present, and its parsers and filters over millions
+      of made-up inputs. design-decisions §1350.
+    - `[x]` The Vorbis decoder, `gui/video/vorbis`: Tremor, Xiph's integer
+      decoder, ported -- every codebook form, floors 0 and 1, residues 0 to
+      2, submaps and coupling, every block size -- and held to Tremor
+      sample for sample: 44 streams of its own (20 encoded by libvorbis and
+      FFmpeg, 24 with made-up setups no encoder writes) decoded whole, with
+      damaged packets and with damaged setup headers, 1496 results in all,
+      refusals included. design-decisions §1352.
+    - `[x]` The FLAC decoder, `gui/video/flac`: libFLAC 1.5.0's decoder
+      ported -- every bit depth 4 to 32 (the 33-bit side channel), one to
+      eight channels, every predictor, Rice and Rice2, wasted bits, every
+      header code; metadata (tags, pictures, seek table); a native-file
+      reader with seeking and the MD5 check; libFLAC's handling of damage.
+      Held to libFLAC line for line on 47 files made here (encoder settings,
+      odd depths and rates, damage of nine kinds, with seeks) and on all 86
+      of the IETF's conformance files (`tools/ietf.py`). design-decisions
+      §1354.
+    - `[x]` FLAC in `videocodec::Sound`: `.flac` files through libFLAC's
+      reader (damage met as libFLAC meets it, seeks to the sample), and FLAC
+      in Ogg, Matroska and MP4 a frame a packet; blocks are `i32` samples at
+      the stream's depth now (`SoundInfo::bits_per_sample`), so 24-bit FLAC
+      stays 24-bit. Five fixtures, bit-exact after seeks. design-decisions
+      §1351, §1354.
+    - `[x]` The MP3 decoder, `gui/video/mp3`: minimp3's decoder ported --
+      MPEG-1, -2 and -2.5, Layers I, II and III, free format, every stereo
+      mode -- and held to minimp3 (built without SIMD) sample for sample,
+      its sync and resync included: 42 files made here (LAME, shine,
+      FFmpeg's MP2 encoder, twolame, Layer I made up field by field; damage
+      of seven kinds), minimp3's 83 vectors (`tests/vectors.rs`), 600
+      fuzzed files. Two misread bits read as the standard says, the
+      reference patched to match. design-decisions §1355.
+    - `[x]` MP3 in `videocodec::Sound`: `.mp3`, `.mp2` and `.mp1` files
+      taken apart as FFmpeg takes them apart (`mp3::Reader`: ID3v2 tags,
+      the Xing/Info/VBRI frame, FFmpeg's MPEG audio parser simulated, held
+      to ffprobe's packets on 45 files), the LAME tag's gapless delay and
+      padding trimmed as FFmpeg trims them, exact seeks past the bit
+      reservoir; MP3 in Matroska and MP4. Five fixtures held to ffprobe's
+      blocks and minimp3's samples, with seeks. design-decisions §1351,
+      §1355.
+    - `[-]` In `videocodec`, and out to the speakers: a file's sound decoded
+      beside its pictures.
+      - `[x]` `videocodec::Sound`: a Matroska or WebM file's Opus track,
+        block by block on the pictures' clock -- the codec delay and the
+        discard padding dropped and every block timed as FFmpeg does, four
+        fixtures held to ffprobe's blocks and libopus's samples; a damaged
+        packet concealed; a seek pre-rolled by `SeekPreRoll`.
+        design-decisions §1351.
+      - `[x]` A Vorbis track in `videocodec::Sound`: its three headers from
+        the track's Xiph-laced private data, at the stream's own rate, timed
+        and trimmed as FFmpeg does (the first packet only primes; the codec
+        delay played, as FFmpeg plays it); three fixtures held to ffprobe's
+        blocks and Tremor's samples; damage concealed with silence; a seek
+        pre-rolled a long block. design-decisions §1351.
+      - `[x]` Ogg files' sound: `gui/video/ogg`, a demuxer of its own (pages,
+        CRCs, packets across pages, each stream's codec and headers, chained
+        files found by bisection and played as one timeline, seeks by
+        bisection on granule positions), timed as FFmpeg times Ogg packets
+        but where FFmpeg is wrong (a mid-page Vorbis packet it puts 10 ms
+        late, a one-page Vorbis stream it starts a packet late, a lost page
+        it splices, a chained file's restarting clock). 26 demuxer fixtures
+        held to ffprobe with each correction checked against Tremor, seeks
+        held to a read-through; seven `Sound` fixtures (Opus, Vorbis, one
+        page, chained). design-decisions §1353, §1351.
+      - `[ ]` Out to the speakers: the kernel's PCM interface
+        (`kernel/src/audio_alsa.rs`) reachable from a program, which is
+        lane A's (`requests/e-ad-no-application-can-reach-the-sound-device.md`,
+        lane E's request); then the video player plays its sound, which is
+        lane E's.
+      - `[-]` MP4's sound.
+        - `[x]` Opus in MP4: its `dOps` made the `OpusHead` FFmpeg makes of
+          it; the edit list's priming as FFmpeg's demuxer gives it,
+          replacing the decoder's own pre-skip (which drops it where there
+          is no edit list), packets wholly before the edit decoded and
+          dropped. Four fixtures (stereo, 5.1, no edit list, an edit list
+          leaving out two whole packets) held to ffprobe's blocks and
+          libopus's samples, with seeks. design-decisions §1351.
+        - `[ ]` AAC, which most MP4 files carry: a decoder of its own. Waits on open-questions F-Q9 (whether to include one, and from which code).
+  - `[x]` Subtitles (2026-10-05, design-decisions §1360):
+    `videocodec::Subtitles`, a Matroska, WebM or MP4 film's text subtitles
+    cue by cue -- start, end, and the text as SRT markup whatever the
+    format, in the form `ffmpeg -c:s srt` writes, which lane E's player
+    draws (agreed with lane E). SubRip as ffmpeg reads it; ASS and SSA as
+    libass shows them -- styles from the script, sizes scaled to SRT's 288
+    lines, libass's resets, weights and alignments, drawings and comments
+    hidden; WebVTT, WebM's and Matroska's, as its specification reads it,
+    its cue settings placing the cue; MP4's 3GPP timed text (`tx3g`) as
+    ffmpeg's `mov_text` decoder reads it. Twelve fixtures (ffmpeg- and
+    mkvmerge-muxed, and timed text written box by box; 387 cues) held to
+    ffmpeg's SRT cue for cue but for 72 departures, each checked against
+    libass, HTML or the specification; seeks give the cues still showing.
+    - `[x]` Blu-ray's PGS, pictures of text (2026-10-05, design-decisions
+      §1362): cues of images (`Cue::images`, `CueImage`) -- RGBA on the
+      film's canvas, forced ones marked -- FFmpeg's pixels to the bit, its
+      rules read off its output probe by probe (epochs, palettes, the first
+      two objects, run-length damage, its 10-bit fixed-point colours), but
+      that a crop is made as a Blu-ray player makes it. A seek reads from
+      the start of the epoch the time falls in. Four fixtures written
+      segment by segment, held to FFmpeg's sub2video pictures at every
+      change, with every subtitle and with the forced alone.
+    - `[x]` DVD's VobSub (2026-10-05, design-decisions §1363): the same cues
+      of images, FFmpeg's pixels to the bit (its trimming, its grey ramps
+      without a palette, its leniency without a start or a stop), but each
+      control sequence takes effect at its date -- fades, colour changes, a
+      second start -- and a transparent subpicture clears, as a DVD player
+      shows them. One reader for both kinds of pictures: timed changes, a
+      new block superseding an old one's later changes; a seek steps back
+      one subpicture. Five fixtures written subpicture by subpicture (an
+      MPEG program stream and its index), held to FFmpeg's pictures.
+    - `[x]` DVB's subtitles, TV recordings' pictures (2026-10-05,
+      design-decisions §1365): the same cues of images, a receiver's as
+      FFmpeg's `dvbsub` draws them read as a receiver reads -- the
+      service's own pages, the standard's default CLUT -- its rules read
+      off its output probe by probe (pages, regions kept between sets,
+      objects drawn when their data comes, CLUT and display versions, map
+      tables, the display window, timeouts, damage), but four departures
+      where FFmpeg's drawing is not a receiver's: an entry for several
+      CLUTs, a region's background before its objects, the non-modifying
+      colour, several display sets in a block. Five fixtures written
+      segment by segment, in a Matroska file of the generator's own.
+    - `[x]` MP4's WebVTT (`wvtt`, 2026-10-05, design-decisions §1367): what
+      DASH and HLS segments carry, which FFmpeg does not read. Each sample
+      the cues showing through it, a cue cut wherever another begins or
+      ends; the pieces joined again and read as WebM's cues are. Held to
+      the same cues in WebM, through MP4Box (GPAC, the format's reference
+      implementation, built from source): plain, overlapping, fragmented,
+      and a seek.
+    - `[x]` MP4's TTML (`stpp`, 2026-10-05, design-decisions §1368): IMSC 1,
+      what broadcasters' DASH segments carry, which FFmpeg cannot decode.
+      Each sample a whole document shown for its own stretch, read as
+      ttconv reads it (timing, regions, styles, white space), each
+      paragraph's stretches joined across samples; a sample that is no XML
+      counted, as GPAC and ttconv count it. Each paragraph worked out only
+      where it changes, the whole-document reading held equal to it over
+      thousands of random documents; a document made to be slow given up
+      on. Held to ttconv's reading of each fixture's samples: MP4Box's, and
+      written box by box in samples of 2 s, 1.5 s and one, and a seek.
+    - `[ ]` CEA-608 captions in MP4 (`c608`)
+      (`known-issues/F-subtitles-leave-out-pictures-of-text-and-mp4s-rarer-text.md`).
+
+- `[-]` `[F]` **A display transport over channel IPC** for local clients,
+  beside the TCP one. The point is the peer's identity: the kernel attests a
+  channel's peer, a TCP peer cannot say what process it is, and `client_pid`
+  is a per-connection number. Unblocks the process explorer's window picker
+  (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`, part 3),
+  `open-questions.md` F-Q3's option B, per-program grouping on the taskbar,
+  and the shell gate (`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`).
+  design-decisions §1336.
+  - `[x]` The transport (`gui/remote/src/channel.rs`, `socket.rs`): a
+    `Socket` runs over TCP or a channel from the service registry, through
+    lane A's channel descriptors (`slate_service_*`, 1000-1005). The default
+    display on SlateOS is the service `org.slateos.Display`, with TCP only
+    when no compositor serves it; `SLATE_DISPLAY=service:NAME` names one.
+  - `[x]` The compositor serves both, records each local client's
+    kernel-attested pid, uid, gid and whether it holds the display service's
+    key (`ClientLink::peer`), and has the shell gate
+    (`--require-shell-key`).
+  - `[ ]` Live on SlateOS: lane A's descriptors reach `main` with lane A's
+    next green boot; then the session must grant the compositor `(Service,
+    WRITE)` and the shell the display service's key, and pass the flag
+    (`requests/f-bd-the-display-service-needs-two-grants-and-a-flag-from-the-session.md`).
+  - `[x]` The window picker (e-adf part 3, design-decisions §1337):
+    `PickWindow` arms a one-shot pick under a compositor-drawn crosshair, the
+    next click names the window -- title, program, attested pid -- and
+    reaches no window; started only by the focused program; Escape, another
+    button or `CancelPick` gives up. `oswindow::EventLoop::pick_window`, and
+    for applications under `app::drive`, `App::take_pick` /
+    `App::window_picked` (2026-10-04,
+    `requests/e-f-the-window-picker-has-no-route-through-oswindow-app.md`);
+    the answer, which comes with no event, wakes the loop
+    (`Dispatch::Answered`).
+  - `[x]` The attested pid in the window list (`WindowInfo::process`,
+    window list version 6), for per-program grouping on the taskbar; `pid`
+    stays the per-connection number.
 
 - `[F]` Port FreeRDP (line ~5058)
 
@@ -3652,6 +4586,17 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 ### 1.4 IPC and syscalls
 
 ### 1.5 Capability / security model
+- [-] "Request capability from user" dialog mechanism -- *2026-10-05: the kernel's half is done; the user is never asked until the desktop's dialog is (the sub-item below), so the mechanism as a whole is not.*
+  - [x] Capability request broker (kernel-side queue, approve/deny/cancel/timeout)
+  - [x] Auto-deny fail-safe when no policy handler registered
+  - [x] Per-process request limit (4 pending max)
+  - [x] System-wide request limit (32 pending max)
+  - [x] Audit trail for all requests (pending/approved/denied/timed-out/cancelled)
+  - [x] Handler register/unregister with auto-deny on unregister
+  - [x] Kshell `capreq`/`cr` command (list/approve/deny/handler/test)
+  - [x] Self-test (7 tests: auto-deny, pending, approve, deny, cancel, limits, unregister)
+  - [x] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL)
+  - [-] `[C]` GUI security dialog integration (security_dialog.rs: UAC-style modal prompt, risk-level assessment, remember decisions, queue system, keyboard nav, 26 tests) -- *corrected 2026-09-30 (lane C): the dialog is written and tested and constructed by nothing, and cannot be yet: no syscall lets a userspace process answer requests, so every one is auto-denied, and approving one -- in the kernel shell, the only place it can be done -- grants nothing. Asked of lanes A, B and F in `requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`; `known-issues.md` `TD-C-A-PROGRAM-ASKING-FOR-A-CAPABILITY-REACHES-NO-ONE`.*
 - [~] `[A]` Enable LLVM CFI as default for C/C++ compilation — **blocked by an
   operator decision, not by remaining work.** `design-decisions.md` §201 defers
   it ("not yet", 2026-08-15); it waits in `deferred-questions.md` → **DQ2**,
@@ -4496,6 +5441,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Wall-clock time (CRITICAL bugfix): clock_gettime(CLOCK_REALTIME)/gettimeofday()/time() all read SYS_CLOCK_MONOTONIC (boot-relative ns), so they returned "seconds since boot" instead of "seconds since 1970" — breaking file mtimes, `date`, logs, `make`, TLS cert validity, cron. The kernel already had timekeeping::clock_realtime() (CMOS RTC + TSC) but no syscall exposed it. Added kernel SYS_CLOCK_REALTIME=14 (handler sys_clock_realtime + dispatch self-test); posix clock_gettime now routes CLOCK_REALTIME/CLOCK_REALTIME_COARSE to it via is_realtime_clock(), and gettimeofday()/time() use it. Monotonic/boottime/cputime clocks and all timeout/uptime callers stay on SYS_CLOCK_MONOTONIC. 17097 posix tests pass; kernel + bare-metal posix build clean. clock_settime/settimeofday now wired via SYS_CLOCK_SETTIME=15 (absolute set), and adjtimex's ADJ_SETOFFSET clock step via SYS_CLOCK_ADJTIME=16 (signed-delta adjust, backed by atomic timekeeping::adjust_realtime).
   - [x] Memory: mmap, munmap, mprotect
   - [x] Strings: memcpy, memmove, memset, memcmp, memchr, strlen, strnlen, strcmp, strncmp, strcpy, strncpy, strchr, strrchr
+    - [x] Fast (2026-10-06): they were byte loops at ~1.5 GB/s -- and every Rust `Vec`/`String` copy goes through this `memcpy`, the sysroot's `compiler_builtins` having no `mem` feature. Now SSE2 and `rep movsb` (memory primitives, 12-37 GB/s) and 16-byte SSE2 scanners (`strchr`, `strrchr`, `strnlen`, `strcmp`, ... 5-14 GB/s); the copies are length + `memcpy`; `strspn`'s family a 256-bit set; `strstr`, `memmem`, `strcasestr` and `wcsstr` the Two-Way search, linear where they took the needle's length times the haystack's. `posix/benches/mem.rs` measures them; `string.rs` "The engines" and "The scanners" explain them.
   - [x] Directory: opendir, readdir, closedir — each stream a heap snapshot of the listing, up to `dirent::MAX_OPEN_DIRS` (64) open at once (was a static pool of 8)
   - [x] Misc: getcwd, chdir (full CWD tracking with path normalization + resolve_path() wired into all file ops), isatty, getuid/geteuid/getgid/getegid, sysconf, abort
   - [x] Fcntl: O_* flags, SEEK_*, access mode flags, S_IF* file type bits
@@ -4553,7 +5499,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] wait3/wait4: waitpid wrappers with zeroed rusage
   - [x] mkstemp/tmpfile: temporary file creation with unique name generation
   - [x] glob/globfree: pathname pattern expansion using fnmatch + opendir/readdir, sorted results, GLOB_APPEND/GLOB_NOCHECK/GLOB_MARK/GLOB_ERR flags
-  - [x] syslog: openlog/syslog/closelog/setlogmask (writes to stderr with priority prefix, LOG_PID support, mask filtering); `syslog`/`vsyslog` printf-expand the format string via asm-trampoline + snprintf engine (previously printed the format literally and dropped args) and accept a real va_list
+  - [x] syslog: openlog/syslog/closelog/setlogmask -- since 2026-10-01 glibc 2.39's `syslog.c` (to `/dev/log`, and to the journal while `AF_UNIX` is unsupported; design-decisions §1166), before that to stderr with a priority prefix; `syslog`/`vsyslog` printf-expand the format string via asm-trampoline + snprintf engine (previously printed the format literally and dropped args) and accept a real va_list
   - [x] string additions: stpcpy, stpncpy, strsep, strverscmp
   - [x] regex: regcomp/regexec/regfree/regerror — compiled regex with BRE and ERE (REG_EXTENDED), case-insensitive (REG_ICASE), anchors, character classes, groups, alternation, quantifiers (*+?), REG_NEWLINE support
   - [x] stdio additions: fdopen, freopen, ungetc (per-fd pushback buffer), getc/putc, setvbuf/setbuf (stubs), popen/pclose (stubs), BUFSIZ/_IONBF/_IOLBF/_IOFBF constants
@@ -4587,7 +5533,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pthread cancel stubs: pthread_setcancelstate/setcanceltype/testcancel/cancel (accepted but no actual cancellation)
   - [x] pthread mutex attributes: pthread_mutexattr_init/destroy/settype/gettype (NORMAL/RECURSIVE/ERRORCHECK types accepted)
   - [x] sem_timedwait: semaphore decrement with absolute timeout (clock_gettime + spin-yield)
-  - [x] POSIX timers: timer_create/settime/gettime/delete/getoverrun stubs (timer IDs allocated, never fire — no signal delivery)
+  - [~] POSIX timers (lane D; blocked by lane A's native per-process timers, `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`): timer_create answers ENOSYS after Linux's argument checks, and settime/gettime/delete/getoverrun EINVAL, as the kernel's Linux ABI does (§1170). Until 2026-10-05 they were stubs that allocated ids, reported success and never fired
   - [x] iconv: character encoding conversion (iconv_open/iconv/iconv_close) — glibc 2.39's conversion steps and answers for UTF-8, ASCII, ISO-8859-1, UTF-16/UTF-32 (and LE/BE), UCS-2/UCS-4, UNICODE, WCHAR_T, UTF-7/UTF-7-IMAP and glibc's 141 table-driven 8-bit sets (ISO-8859-x, CP125x, KOI8, IBM/DOS, Mac, EBCDIC -- generated from glibc's charmaps, design-decisions.md §1117), with glibc's //TRANSLIT (its C-locale table) and //IGNORE (known-issues.md → B-D-ICONV-WAS-NOT-GLIBCS, B-D-ICONV-HAD-THREE-CHARSETS; design-decisions.md §1116). glibc's other character sets: todo.txt, lane D
   - [x] iconv CP1255 and CP1258 (lane D, 2026-09-27): Hebrew and Vietnamese with their combining marks -- a letter kept back, from call to call, to compose with a following point or tone mark; precomposed characters written decomposed; a reset writes the letter kept back -- glibc's cp1255.c and cp1258.c, the tables read out of them (posix/tools/gen_iconv_combining.py)
   - [x] iconv TCVN5712-1 (lane D, 2026-09-27): Vietnamese's national standard (TCVN, TCVN-5712, TCVN5712-1:1993) -- CP1258's composition, with letters among the C0 controls and every byte a character -- glibc's tcvn5712-1.c, its tables read out by posix/tools/gen_iconv_combining.py
@@ -4616,7 +5562,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] stat() ABI translation (CRITICAL bugfix): SYS_FS_STAT/LSTAT/FSTAT write a compact 16-byte FsStatResult (size u64 @0, entry_type u8 @8, nlinks u32 @12), not a POSIX `struct stat` — callers had been handing the syscall a `struct stat` pointer directly, leaving st_size (offset 48) and st_mode (offset 24) zeroed, so every stat returned garbage. This broke chdir() (always ENOTDIR), posix_spawn/load_elf (always st_size==0 → ENOEXEC for every binary), and epoll/inotify size-diffing. Added `crate::stat::fill_from_fsstat()` + `KERNEL_STAT_LEN` (posix/src/stat.rs) translating the raw bytes into struct stat (type→S_IFREG|0644/S_IFDIR|0755/S_IFLNK|0777, st_size, st_nlink 0→1, st_blksize=4096, st_blocks=ceil(size/512)). Routed all field-reading callers through it: file.rs stat()/lstat()/fstat(), unistd.rs chdir(), epoll.rs stat_self(), spawn.rs load_elf(); fts/ftw/statx/posix_fallocate fixed transitively via the public wrappers. Timestamps/uid/gid/ino/real-perms remain zeroed/synthesized — widening the kernel stat ABI to convey the fs::FileMeta the kernel already tracks is deferred (see todo.txt; requires updating every FsStatResult consumer in lockstep).
   - [x] statvfs/statfs ABI wiring (CRITICAL bugfix): statvfs/fstatvfs/statfs/fstatfs had NEVER called the kernel's SYS_FS_STATVFS=608 — they returned hardcoded fake defaults (10 GiB total / 1 GiB free / 16 KiB block), so df and all disk-space checks saw fiction. Same ABI-mistranslation class as the stat fix. The kernel writes a 64-byte FS_STATVFS struct (block_size u64 @0, total_blocks @8, free_blocks @16, total_inodes @24, free_inodes @32, max_name_len @40, read_only u8 @48; LE). Added `KERNEL_STATVFS_LEN`=64 + pure translators `fill_statvfs_from_raw`/`fill_statfs_from_raw`/`rd_u64` (gated cfg(any(target_os="none", test))) and bare-metal-only `query_statvfs`/`query_statfs` (resolve_path → syscall3 → errno::translate → translate). All four entry points are cfg-split: target_os="none" queries the kernel (fstat* get_fd_path the fd, fall back to defaults if no path stored), host build keeps the old defaults so existing tests stay valid. Zero block_size/name_max guard to DEFAULT_BLOCK_SIZE/DEFAULT_NAMEMAX. 5 host tests; full suite 17094 pass; bare-metal clean.
   - [x] d_type translation (CRITICAL bugfix): SYS_FS_LIST_DIR writes a compact kernel type code at byte 260 of each entry (0=file, 1=dir, 2=volume-label[filtered], 3=symlink), but readdir()/getdents64() copied it raw into d_type, and dirent.rs defined a third bogus DT_* set (DT_REG=1/DT_DIR=2/DT_LNK=3) matching neither the kernel codes nor the Linux ABI. So directories surfaced as DT_REG, regular files as DT_UNKNOWN — breaking every d_type-based directory test: fts (find/rm -rf/du) treated dirs as files, glob GLOB_MARK never marked dirs, userspace/sftp (hardcodes Linux DT_DIR=4/DT_LNK=10) never saw dirs/links, epoll/inotify child snapshot compared the raw byte to 2 (never true for dirs). Fix: dirent.rs now re-exports canonical Linux DT_* from linux_dirent_types (single source of truth), adds KERNEL_TYPE_{FILE,DIR,VOLLABEL,SYMLINK} + kernel_type_to_dt(); readdir()/parse_kernel_entry() translate the kernel byte → DT_* (readdir_r/scandir inherit via readdir); epoll.rs compares to KERNEL_TYPE_DIR. fts/glob keep using dirent::DT_* (now correct values). 17096 host tests pass; bare-metal clean.
-  - [x] ftw/nftw: file tree walk — recursive directory traversal with user callback, FTW struct with base offset and depth. Both entry points drive one `Walker` differing only in how an entry is delivered; they were two near-identical recursions, which is how FTW_PHYS came to be parsed and then never consulted (every symlink followed, including descending into symlinked directories — so a recursive delete under FTW_PHYS emptied link targets). FTW_PHYS and FTW_DEPTH are now honoured; FTW_MOUNT/FTW_CHDIR are rejected with EINVAL rather than accepted and ignored (design-decisions.md §761). Nothing is skipped in silence: an unopenable directory reports FTW_DNR — a flag this module defined, asserted the value of, and had never once produced — the nopenfd/MAX_DEPTH limit reports FTW_DNR with ENOMEM, and an over-long child path ends the walk with ENAMETOOLONG. One path buffer lives in the walker and is mutated in place, instead of a `[u8; PATH_MAX]` local per recursion level (4 KiB/level, 128 KiB at the cap the module's own header blamed on stack overflow).
+  - [x] ftw/nftw: file tree walk — recursive directory traversal with user callback, FTW struct with base offset and depth. Both entry points drive one `Walker` differing only in how an entry is delivered; they were two near-identical recursions, which is how FTW_PHYS came to be parsed and then never consulted (every symlink followed, including descending into symlinked directories — so a recursive delete under FTW_PHYS emptied link targets). FTW_PHYS and FTW_DEPTH are now honoured; FTW_CHDIR is rejected with EINVAL rather than accepted and ignored (design-decisions.md §761); FTW_MOUNT was too, until files reported their filesystem, and is honoured since 2026-10-01 as glibc's is, measured over a tmpfs mounted in a tree (§1168). Nothing is skipped in silence: an unopenable directory reports FTW_DNR — a flag this module defined, asserted the value of, and had never once produced — the nopenfd/MAX_DEPTH limit reports FTW_DNR with ENOMEM, and an over-long child path ends the walk with ENAMETOOLONG. One path buffer lives in the walker and is mutated in place, instead of a `[u8; PATH_MAX]` local per recursion level (4 KiB/level, 128 KiB at the cap the module's own header blamed on stack overflow).
   - [x] fts: cursor-style file tree traversal (fts_open/read/set/close) — replaces ENOSYS stubs; FTS_PHYSICAL/LOGICAL traversal modes, FTS_NOSTAT for d_type-based classification, FTS_COMFOLLOW root-follow, FTS_NOCHDIR (always-on). Yields pre-order FTS_D + post-order FTS_DP for directories, FTS_F/FTS_SL/FTS_NS/FTS_SLNONE/FTS_ERR/FTS_DEFAULT for entries. Each frame holds its own Dir stream open for the life of the frame and reads children on demand, so no directory is too large to traverse (a Dir is itself an opendir-time snapshot, so keeping it open is exactly as mutation-independent as copying its entries was; the pool is 64 slots, comfortably above 2 streams × 8 levels). fts_set supports FTS_SKIP (skip directory descent), FTS_AGAIN (re-yield current entry), FTS_FOLLOW (accepted, no-op). fts_children returns ENOSYS (caller can iterate via fts_read). A descent that cannot be made — opendir refused, or the 8-level stack full — re-yields the same entry re-typed FTS_DNR with an errno (glibc's shape), rather than skipping it silently. Limits: 2 concurrent streams × 8 levels deep × 256-byte component names (= dirent's d_name capacity, asserted at compile time); no limit on entries per directory. Used by find(1), rm -rf, du, chmod -R, etc.
   - [x] getdents64: raw Linux directory entry syscall — replaces ENOSYS stub; per-fd snapshot cache (4-slot pool) lazily populated via SYS_FS_LIST_DIR on first call; emits packed `linux_dirent64` records (ino/off/reclen/type/name) into caller buffer with 8-byte record alignment; EOF frees the cache slot; returns EINVAL if buffer too small for any record; legacy `getdents` (32-bit-ino variant) deliberately remains ENOSYS — glibc/musl ship no wrapper for it and our 64-bit inodes don't fit the legacy struct. Used by language runtimes and `ls -f` implementations that bypass libc dir streams.
   - [x] aio: POSIX asynchronous I/O (`<aio.h>`) — replaces ENOSYS stubs with a synchronous wrapper. `aio_read`/`aio_write` perform the underlying `pread`/`pwrite` immediately; completion status (errno + byte count) is recorded in a 16-slot static table keyed by aiocb pointer, with oldest-record eviction on overflow. `aio_error`/`aio_return` read the recorded status. `aio_suspend` always returns immediately (ops are already complete). `aio_fsync` does a sync fsync. `aio_cancel` always reports AIO_ALLDONE. `lio_listio` iterates the list synchronously, supporting both LIO_WAIT and LIO_NOWAIT (identical semantics here). POSIX-conformant for correctness but offers no true asynchrony — programs needing real async I/O should use the io_uring-style interface instead.
@@ -4754,6 +5700,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] copy_file_range: cross-file copy (userspace read+write loop), offset tracking
   - [x] epoll stubs: epoll_create/create1/ctl/wait/pwait (all ENOSYS), EpollEvent struct, EPOLLIN/OUT/ERR/HUP/ET constants
   - [x] strftime/strptime expansion: 22 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s + ISO 8601 %V/%G/%g), strptime month/weekday name parsing (%b/%B/%a/%A case-insensitive)
+  - [x] strftime and wcsftime as glibc's (lane D, 2026-10-06): one engine for both widths (posix/src/strftime.rs), glibc 2.39's __strftime_internal step for step -- the flags _ - 0 ^ #, field widths to INT_MAX, the E/O modifiers, negative and out-of-range fields, unknown conversions copied back, %Z's tzname fallback, a NULL buffer counting, partial writes on a buffer too small; wcsftime no longer masks its format to 7 bits; replayed against glibc 2.39 for 12,849 calls (posix/tools/oracle/strftime_harness.py; D-STRFTIME-IGNORED-FLAGS-WIDTHS-AND-MODIFIERS)
+  - [x] pthread_sigqueue, posix_spawnattr_get/setcgroup_np, posix_spawn_file_actions_addtcsetpgrp_np (lane D, 2026-10-06): glibc's checks and storage; a real queued send answers ENOSYS (no value travels with a signal here), a spawn asking for a cgroup ENOTSUP, one handing a terminal's foreground to the child ENOSYS until the kernel's spawn can (requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md). Two names glibc's headers declare are left: pthread_attr_get/setsigmask_np, which wait on per-thread signal masks
+  - [x] rcmd, rexec, ruserok, iruserok, rresvport and their _af forms (lane D, 2026-10-06): the BSD remote-execution calls glibc's <netdb.h> declares, as glibc 2.39's (posix/src/rcmd.rs) -- the reserved ports, the stderr channel's circuit setup, the retries and messages, /etc/hosts.equiv and ~/.rhosts with their ownership and mode checks and netgroups, ~/.netrc for rexec -- with __rcmd_errstr, __check_rhosts_file and rexecoptions exported; replayed against glibc 2.39 for 1,176 calls against a server of the oracle's own (posix/tools/oracle/rcmd_harness.py). On the way: the get*ent enumerations no longer leak a failed open's errno (D-NSS-ENUMERATIONS-LEAKED-THE-ERRNO-OF-A-FAILED-OPEN)
   - [x] strptime as glibc's (lane D, 2026-09-28): every conversion -- %c %D %F %r %R %T %x %X %s %U %W %C and the E/O modifiers, which it lacked -- with glibc's digit, range and white-space rules, all-or-nothing composites, and the weekday, day of the year and week-number dates worked out after a match; replayed against glibc 2.39 for 4,073 format/input pairs from two starting struct tms (posix/tools/oracle/strptime_harness.py; D-POSIX-STRPTIME-PARSED-HALF-OF-WHAT-GLIBCS-DOES)
   - [x] getdate, getdate_r, getdate_err (lane D, 2026-09-28): the input, trimmed, against each strptime template in DATEMSK's file; what the match left out filled from the present as POSIX says (a weekday alone is the next such day, a month the next such month, an hour the next such hour), normalised by mktime; POSIX's error numbers 1-8. Replayed against glibc 2.39 for 196 calls in two zones, each at the second glibc's ran in (posix/tools/oracle/getdate_harness.py)
   - [x] <ucontext.h>: getcontext, setcontext, makecontext, swapcontext (lane D, 2026-09-28) -- the last of the 104 functions musl's headers declare that libc.a lacked; musl's ucontext_t layout, checked against its headers; the switches in assembly, the signal mask and x87/SSE control state carried as glibc carries them; host tests switch with swapcontext (makecontext's eight arguments, a coroutine, the mask and rounding), and services/ctest-ucontext tests getcontext's second return in C (checked against glibc: exit 42), for lane A to run (requests/d-a-run-ctest-ucontext.md)
@@ -5414,19 +6363,13 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] `[F]` **JPEG is libjpeg-turbo, ported** — JPEG decoded to within 3 levels of what every other program shows, and some kinds (CMYK, RGB-coded, arithmetic-coded, separate-scan sequential) wrongly or not at all. `gui/imagecodec/src/jpeg/` is now a port of libjpeg-turbo 3.1.1's decompressor -- markers, Huffman, progressive and arithmetic decoding, block smoothing, the accurate integer and reduced inverse DCTs, fancy upsampling, colour conversion, and its handling of damaged data -- with Chrome's choices on top (colour space, CMYK formula, 100 scans). Every JPEG test is exact now; 146 seeds at four sizes and 32,000 mutants agree with libjpeg-turbo to the bit. Faster too: 0.76 s for a 21-megapixel photograph, from 1.42 s. Lossless JPEG as well (`jdlhuff.c`, `jddiffct.c`, `jdlossls.c`), held by 56 fixtures of its own and 20,000 lossless mutants. design-decisions.md §1318.
   - [x] `[F]` **An application can decline a close to ask about unsaved work** — a window's close button closed it whatever the application answered, so every editor threw away unsaved changes without a word. `Response::KeepOpen` (and `EventResponse::KeepOpen`) keeps the window open and redraws, so the application can show its "Save changes?" question and exit itself when the user answers; any other answer still closes, so no window can have an X that does nothing. Lane E's request. design-decisions.md §1309.
   - [x] `[F]` **Double clicks reach applications** — double-clicking did nothing inside any application (the file picker could not open a file by double-clicking it; a double click selected no word), because the compositor sends single presses by design and nothing paired them. Every application's event loop (`oswindow::EventLoop::poll`) now delivers `DoubleClick` after the press that completes one, at the user's double-click speed from `input.yaml`, by design-decisions §502's rules plus a four-pixel slop. Timed by a stamp the compositor now puts on every input event (input protocol v7), so a busy application still pairs clicks by when they were made. Lane E's request. design-decisions.md §1310.
-  - [ ] `[F]` Video-encoded capture fallback (VP9 for games/video, §1332: libvpx, threaded; hardware where found)
+  - [-] `[F]` Video-encoded capture fallback (VP9 for games/video, §1332: libvpx, threaded; hardware where found) -- *(Lane F 2026-10-04: the compositor's stream codes buffer windows as VP9, §1343; the service that reads it is not built.)*
 
 ### 3.4 Window manager / desktop shell
-- [x] Desktop with draggable icons (snap-to-grid or free placement)
-  - [x] Grid snapping (cells sized by the icon-size setting), free placement + auto-arrange modes, chosen from the desktop menu's View submenu and saved in `deskicons.yaml` — **really done 2026-09-25**: this line was ticked from the start while the only modes were a snap and an always-sorted arrange, with no way to choose; see lane C's entry above and `design-decisions.md` §869
-  - [-] Rubber-band selection (done), Ctrl+A select all (done), Ctrl+Click toggle (**not reachable yet**: the icon layer implements it, but the desktop is never told that Ctrl is held -- `known-issues.md` → `TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION`. Corrected 2026-09-25)
-  - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
-  - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
-  - [x] Double-click activate, right-click context menu, F2 rename, Delete -- **really done 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Rename, Pin to taskbar, Remove from desktop), Delete and F2 rename in place are all real now.
 - [ ] Theme color API for applications — **was marked `[x]` on the strength of a `ThemeColors` helper no application ever held**, deleted 2026-09-03 with the rest (§810). Unchecked 2026-09-03: applications do *not* get their colours from an API, they each write out their own copy of the dark palette — 2,258 `const NAME: Color` across 135 files, tracked as `TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO`, which is what actually has to be done for this item to be true. The API it should be built on is `appearance::Palette`, not a toolkit type.
 
 ### 3.5 GUI toolkit / widget API
-- [x] Advanced features:
+- [-] `[C]` Advanced features:
   - [x] Clipboard (multi-format: text, HTML, image, structured data, history)
     - [x] System clipboard service with 7 formats (PlainText/RichText/Html/ImagePng/ImageBmp/FilePaths/Custom)
     - [x] History (50 entries), pinning, search, format conversion (HTML→text, RTF→text)
@@ -5436,7 +6379,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
     - [x] DragDropManager state machine (Idle→Dragging→OverTarget)
     - [x] Drop target registration, hit testing, format compatibility, effect negotiation
     - [x] Drag threshold, cancel support, DragEvent lifecycle events
-  - [-] File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. Decided 2026-09-27 (`design-decisions.md` §1415): the explorer will show the window for every program and hand back only the file chosen.*
+  - [-] `[C]` File picker / save dialog (reuses file explorer component) -- *corrected 2026-09-27: the dialog works, but it does not reuse the explorer; `guitk::dialog` is its own, plainer implementation. Decided 2026-09-27 (`design-decisions.md` §1415): the explorer will show the window for every program and hand back only the file chosen.* **Lane C's half done 2026-10-05** (§1463): `gui/filechooser` -- a program asks the service `org.slateos.FileChooser` through `filechooser::Picker` (the toolkit picker's calls), the explorer answers through `filechooser::service`, and where nothing serves the name the toolkit's dialog is drawn as before. **Remaining, other lanes':** the explorer serving it and the applications asking through it (lane E, `requests/c-e-serve-every-programs-open-and-save-window.md`), the chooser kept above the asking window (lane F, `requests/c-f-the-file-choosers-window-belongs-to-the-program-that-asked.md`), the file handed open rather than named (lanes A and D, `requests/c-ad-hand-a-program-the-file-it-chose-not-its-name.md`).
     - [x] Open/Save/SelectFolder modes with builder API
     - [x] Directory navigation (back/forward/up), quick-access sidebar
     - [x] Sortable file list, extension filters, auto-extension append
@@ -5462,52 +6405,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver desktop._
 
 ### 4.1 Core applications
-- [x] File explorer:
-  - [x] Navigation with back/forward history, breadcrumb address bar
-  - [x] Detail view with columns (name, size, modified, type)
-  - [x] File type detection (18+ extensions), icon assignment
-  - [x] View modes (Details/List/Icons), sort by name/size/date/type
-  - [x] Toolbar, sidebar with quick-access locations, status bar
-  - [x] Path bar with autocomplete (pathbar.rs: breadcrumb + edit mode, Tab completion, overflow, validation)
-  - [x] Thumbnails (thumbs.rs: LRU cache, BMP/PNG/GIF/JPEG parsing, downscale, text preview, folder preview, batch queue) — **and, as of 2026-08-26, the picture actually appears**: PNG is decoded through `imagecodec` rather than swatched, the cache's own evictions drive `Drop`s so the compositor's copy stays bounded (§559), the image id is keyed on path+mtime+length like the cache key (§560), and the pixels are byte-order-converted for the wire (§561)
-  - [x] A window: `impl oswindow::app::App` — clicks and double-clicks hit-tested against the rectangles the renderer registered, a navigation/selection keyboard map, and a frame clock that runs only while thumbnails are outstanding. Editing keys (`TD-C-EXPLORER-HAS-NO-EDITING-KEYS`) and scrolling (`TD-C-EXPLORER-DOES-NOT-SCROLL`) are logged, not built.
-  - [x] Custom columns per file type, app-extensible columns (columns.rs: 5 providers, auto-detect, sort/resize/reorder)
-  - [x] Drop zones for drag-and-drop (dropzone.rs: hit-testing, operation selection, nested prevention, feedback)
-  - [x] Atomic copy/move/delete with undo, resume on interruption (fileops.rs: journal, recycle bin, conflict policies, progress)
-  - [x] `[E]` **What a paste or a drop does with a name the folder already has is the user's** (2026-09-27, C-Q26) -- the folder menu's *When the name is taken*: keep both (the default, and all there was before), skip, replace if newer, replace; kept in `explorer.yaml`.
-  - [x] `[E]` **Ask, at the moment of the conflict** (2026-09-27) -- the executor waits at a taken name (`waiting_on`/`answer`) instead of skipping it, and the window asks: keep both, replace, skip or stop, with "do the same for every other taken name". Asking is the default and first on the menu (design-decisions §1221).
-  - [x] `[E]` **Links are never followed** (2026-09-27) -- copy, move, delete and the recycle bin carry a link as the link; deleting a folder no longer deletes what a link inside it reaches (design-decisions §1220, known-issues).
-  - [x] `[E]` **The recycle bin can be seen** (2026-09-27, lane C's `c-e-the-recycle-bin-icon-has-nowhere-to-open`) -- `explorer --recycle-bin` and the sidebar's *Recycle Bin* show the bin in the file pane: one row per item under its original name and the folder it was deleted from, when it was deleted and its size; Restore (a taken name is kept beside, and said), Delete permanently and Empty, both asked first. Nothing done in the view reaches the folder behind it. `recyclebin` gained `delete`, an `empty` that reports what it could not delete, one-name ids, and never looks through a link (design-decisions §1223).
-  - [x] `[E]` **The listing scrolls to what you chose** (2026-09-27) -- the listing's viewport was never told how many rows fit (only the tests set it), so the first arrow press in a long folder scrolled the row it had just chosen off the top, the wheel ran past the last page and spent notches coming back, and a grid's short last row could not be reached. It is fitted on every event and frame now, the selection is kept in sight in rows of the view showing, and the rows, the scrollbar and the column header are the listing's part of the pane -- the bar sat over the preview when it was open on the right.
-  - [x] `[C]` **Queue a copy/move against a drive another operation is already using, instead of running both at once.** When the user starts a directory copy or move whose source *or* destination is on a drive that an in-flight operation is already reading from or writing to, do not start it -- put it in a queue and run it when the operation ahead of it finishes. Two reasons, and the second is the important one: concurrent operations on one drive are *slower* than the same work done one after another (they interleave two access patterns into one device queue, which on a spinning disk means seeking between them and on any device means neither stream gets a contiguous run), and a machine with fewer operations in flight has fewer that can be left half-done by a crash, a power loss or an accidental abort. Queued operations are visible in the "File Operations" / Transfers view with what they are waiting on, and the user can reorder them, start one anyway, or cancel it. Full description in `roadmap-detailed.md` section 4.1. — **done 2026-09-14.** Four parts, and the first three were prerequisites nobody had noticed. **(a)** `OperationExecutor` ran the whole operation in one call *inside an event handler*, so the explorer froze for the length of any copy, the progress it was already computing could never be drawn, and there was no such thing as an operation in flight to arbitrate between — split into `begin`/`step`/`finish`, with the loop body and the Move source-deletion phase *moved rather than retyped*, since that phase deletes the user's sources and its guard records an earlier version that deleted the wrong ones. **(b)** A step was a whole *file*, so one large file still held the window — a `CopyCursor` and a megabyte chunk fixed that, with the chunk **filled** rather than read once, because `Read::read` may return short at any time so only a short *fill* is the end of a file; the partial bytes stay in the temporary until the last one lands, so a cancelled copy leaves nothing wearing the real name. **(c)** `same_device` existed **twice** and both copies compared the path's first component — which on a Unix-shaped filesystem is `/` for every absolute path, so every drag resolved to "same device" and therefore to **Move**, including a drag off a camera card. The test that covered it asserted the gap rather than closing it (*"on our OS different mount points would have different first components"* — they would not), and it only passed because the host is Windows, where a drive letter *is* the first component. `apps/explorer/src/drives.rs` resolves it once, properly, and `same_drive` answers `Option<bool>` because the two callers want **opposite** conservative readings of not knowing: a drag that cannot tell should Copy (a duplicate is recoverable, a move off a card is not) and a queue that cannot tell should serialise. **(d)** Then the rule itself: `OperationPlan::drives` resolves both ends of every path into a `DriveSet` (one `stat` per directory, not per file), `start_operation` admits an operation that shares no drive and queues one that does, `admit_pending` scans *past* a blocked operation so one on a free drive does not wait behind it, and the frame's eight milliseconds are split between however many run. Escape stops everything — the running operations, which end with every file wholly moved or wholly not and their journals kept for a resume, and the waiting ones, which cost nothing because nothing was written. **A claim withdrawn on the way, which is the part worth keeping:** this was filed as blocked on threading, on the reasoning that `fs::copy` blocks and the explorer has one thread so the drive rule "would be a rule with no effect". That skipped a step — writes go to a page cache, so interleaved copies *can* keep two devices busy, and whether they do here is **unmeasured**. No threads were needed. What is still open is only the throughput question, and the correctness half never depended on it. Not yet done from 4.1's description: reordering the queue and starting a queued operation early, which want a Transfers view rather than a status line. 363 explorer tests; design ties in `known-issues.md`.
-  - [x] `[C]` **Six programs stopped inventing what they showed you** — a sweep, not a feature, and every one was found by the same question: *what fills this?* **`apps/settings` on five pages.** Sound listed devices that do not exist. **Updates** said "Your device is up to date" in green, unconditionally, from code that had never looked; its "Check for Updates" button ran `self.checking_for_updates = !self.checking_for_updates` and nothing else; and it listed four installed updates with Windows-style KB numbers, one of them a *failed* GPU driver update and one a "Cumulative update for .NET runtime" on a system with no .NET. **The failed entry is what set the priority:** a fabricated success is a lie about nothing, and a fabricated failure sends someone hunting a problem on their own machine that never happened, with no way to learn it was never real. **Accounts** listed Alice, Bob and Charlie with `@example.com` addresses, login counts of 142/56/23 and one marked a child account under "Screen time limits and content filters are active"; this one was **wired rather than gutted** — `gui/loginusers` already reads the real database for the login screen and lockscreen — with `new()` left pure and `main` calling `load_user_accounts`, matching the existing `load_appearance`/`load_input`/`load_notifications` split, because a constructor that reads a file makes every test depend on the machine it runs on. Email, login count and the child account had no source and went. **Privacy** drew a tick-and-cross table over nine non-existent programs — `Browser` ticked for Camera — and **could not be finished, only removed**: `design.txt` specifies capability security with no ambient authority, so a per-application permission list is not this system's model half-built but Windows' model borrowed, and completing it meant building a store the kernel does not consult. **Network** showed `eth0` connected at 192.168.1.100 with a green link dot on a system that cannot enumerate interfaces; its address and DNS fields would have been dead anyway, since `net/dns` defines a `ResolverConfig` and parses `resolv.conf` and no program loads one. **`apps/photomanager` was the sixth and the sharpest**, because the fabrication was not a panel but the whole application: `main` called `seeded_library()` — two albums, three photos, and `ExifData::sample`, a Canon EOS R5 with GPS coordinates in San Francisco — under a comment saying "so the first window is not an empty grid". It had no file picker at all, so that library was the only content it could ever hold, while `parse_exif_from_bytes` sat written and tested and had never been given a file that existed. Import now opens guitk's `FileDialog` filled by `list_directory` (widget pure, host reads the directory), reads the bytes, parses the EXIF and imports; a failed read says so in the status bar, because an import that changes no count and offers no reason cannot be told from one that never happened. Then the seven EXIF fields the parser decoded and never displayed — focal length, flash, GPS altitude, software, copyright, exposure program, exposure bias — became rows, in that order deliberately: "show them or stop reading them" had no answer until the app could open a real photograph, and displaying them first would have surfaced more of the Canon. **Two findings about tests came out of it.** Emptying the accounts list turned six tests red at once, every one of which had silently been using the three invented accounts as its fixture — and they only surfaced because the list became *empty* rather than merely different; three real accounts would have kept them green against whatever the machine had. And removing the network adapters killed three tests genuinely about adapters plus six that clicked an adapter row only as a *vehicle* for testing the shipped `run` loop, which were re-pointed at an account row rather than deleted with the feature. **Tooling:** `check-fields-written-never-read.py` now also reports a field read by **nobody** — its condition required a test read, so the stricter case fell outside a detector named for it — and `dead_code` cannot see those either, because a `#[derive(Debug)]` reads every field. Baseline 54 → 47. 5,000+ lines deleted across the six. known-issues.md `TD-C-THE-UPDATE-PAGE-INVENTED-ITS-HISTORY-AND-A-FAILURE`, `TD-C-THE-ACCOUNTS-PAGE-INVENTED-THREE-PEOPLE`, `TD-C-THE-PRIVACY-PAGE-TOLD-YOU-A-BROWSER-HAD-YOUR-CAMERA`, `TD-C-THE-NETWORK-PAGE-LISTED-THREE-ADAPTERS-THIS-SYSTEM-CANNOT-SEE`.
-  - [x] `[C]` **Four applications can open a real file, and the reason none of them could is one missing capability** — a follow-on from the fabrication sweep above, and the more important half. Asking *how many other programs are in the state the photo manager was in* gave **115 of the 139 apps with a `main.rs` have no filesystem access at all**: no file picker, no `std::fs`, no `safeio`. Games are a fair part of that number, so the sharper measure is an app with no file access whose own code mentions save, load, export, document or filename ten or more times — **28 of them**, and the list reads like a list of document editors. **`apps/filesearch` cannot search files**: its dependencies are `globmatch`, `guitk`, `oswindow` and `appearance`, its search machinery is complete — name, glob, regular expression, category, sorting — and `index.add` was called from tests and from `populate_sample_index` only. `apps/filediff` cannot read files. `apps/email` has neither network nor storage. **So the invented data is the symptom, not the disease:** a window with no way to have content will be given content, and three authors independently wrote the same comment saying so — photomanager's *"so the first window is not an empty grid"*, filesearch's *"until a real index exists this is what there is to search"*, hexeditor's *"until a file can be opened this is what there is to edit"*. None was wrong about the reasoning; all three were wrong about the blocker, and filesearch's names the wrong dependency outright — it waits for the `indexer` service, and the filesystem was nearer. **Fixed four**, each with the same three pieces that already existed in the toolkit: `photomanager` (a picker, a real EXIF read, and the seven decoded fields it never showed), `filesearch` (Ctrl+O, a bounded recursive walk), `hexeditor` (Ctrl+O, a bounded read) and `jsonviewer` (Ctrl+O, a new tab per file). The recipe is written down in `known-issues.md` so the remaining 24 are cheaper. **Three things cost more than the recipe suggests, and two of them are the same bug by different routes.** In `hexeditor` I wrote a *comment* saying the picker was drawn above a `render` that did not draw it — it compiled, 189 tests passed, and it would have shipped a dialog swallowing every keystroke while invisible; in `jsonviewer` the picker had to join a `state_fingerprint` tuple, because that app decides redraws by comparing state before and after a handler that reports nothing, so the dialog would have been invisible until something else moved. Both are now pinned by tests that count render commands before and after opening. The third is that **bounds must announce themselves**: `filesearch` caps its walk at 20,000 entries and `hexeditor` a read at 16 MiB, and both say so, because "no results" from a search tool reads as "no such file" and a truncated hex view lies about a specific address. **And names are bytes**: `guitk`'s `DirEntry` is deliberately `OsString` because decoding lossily *"could make it match one it should not"*, which in a search tool is the whole game — so non-UTF-8 names are skipped and *counted*, with the real limit recorded (`globmatch` takes `&str`). **Every one of the four had tests resting on the invented data**, going red together the moment it went: six, sixteen, sixteen and six. Production fixture data is always load-bearing for tests nobody recorded as depending on it. known-issues.md `TD-C-ONE-HUNDRED-AND-FIFTEEN-OF-THE-HUNDRED-AND-THIRTY-NINE-APPS-CANNOT-OPEN-A-FILE`.
-  - [x] `[C]` **Four programs reported acts they never performed, and a fifth reported a measurement it never took** -- the top of the fabrication ordering, ranked by what believing the program costs rather than by how much of it is invented. `apps/undelete` reported files recovered with byte counts and destination paths; `apps/partmanager` reported "Applied N operation(s) successfully" for queued formats and deletions; `apps/netscan` reported hosts up, ports open and service banners; `apps/speedtest` reported ~450 Mbps down, ~120 Mbps up and ~12.5 ms. **None of the four has any access to the thing it describes** -- no `std::fs`, no `std::net`, no socket syscall. **What separates the first three from the twenty-odd settings pages fixed the same day is that they are acted upon, and the action is often irreversible:** someone told recovery *failed* keeps looking, and someone told it *succeeded* stops and may reformat the disk; someone told a format was *applied* believes a drive was wiped, which is the belief acted on before selling it. In each case the false **success** is worse than the false failure, by a margin the usual "it is only a stub" reasoning does not cover. **`netscan` is the one worth studying**: it was not a constant list but tuned probabilities -- 60% for a host being up, 50% for SSH and HTTP, 25% for RDP and SMB, a fabricated banner 40% of the time -- so **two runs disagreed, which is exactly what a real scan does**, and repeating it could never expose it. A plausible distribution is a stronger disguise than a plausible value. **The second half of each fix is the one that is easy to miss** (lane B's point, and it generalised): removing the invented source leaves an empty result, and an empty result is read as a finding rather than as silence. An empty partition list claims the machine has no disks; an empty scan claims the network is quiet; a blank speed strip is read as **0 Mbps, which says the line is dead** -- a worse untruth than the one being fixed. All four screens now say outright that nothing was examined, and speedtest's says "unknown, not zero" in as many words. `partmanager` **keeps its queue** after a failed apply, deliberately: clearing it would leave a window indistinguishable from one where the work was done. **Two smaller inventions surfaced inside the fixes, and one was mine** -- undelete's "Data blocks partially overwritten" named a physical cause never established, and I first wrote `RecycleBinReader::scan` as a *clear*, which asserts the bin is empty; it is a no-op now. **24, 40, 9 and 15 tests rested on the invented data**, the fifth through eighth applications in a row; several asserted the fabricated behaviour directly (`test_engine_recovery` required that "at least some should succeed") and were correct about the behaviour -- the behaviour was the defect. speedtest keeps its whole measurement machinery, which is real and computes over `record_sample`/`record_bytes`, the two doors a network stack will come through; only the RNG-fed producer became `#[cfg(test)]`. known-issues.md `TD-C-THE-THREE-TOOLS-THAT-REPORT-ACTS-THEY-DID-NOT-PERFORM` and `TD-C-A-SPEED-TEST-THAT-NEVER-SENT-A-PACKET`.
-  - [x] `[C]` **A network manager that cannot see the network, and eleven benchmarks whose names still said they were fake** -- two follow-ons the same day. `apps/netmanager` has no `std::net`, no socket syscall and no filesystem access, and showed three interfaces with addresses and link speeds, five Wi-Fi networks with signal strengths and **security types**, three VPN configurations, sixty seconds of throughput history, and a diagnostic report in which the gateway answered in 1.2 ms and packet loss was 0% over 100 pings. **The worst single line initialised the VPN states to `[Disconnected, Connected, Disconnected]`, so opening the app showed a VPN as connected** -- of every false belief in this sweep, the one acted on by *transmitting* something, and not recoverable afterwards. **The diagnostic report is the second worst for a subtler reason: it passed.** A diagnostic is what somebody runs *while troubleshooting*, so a fabricated pass does not merely misinform, it redirects the search away from the fault. Eight acts now refuse. **Two refusals generalised:** a **switch must not move** -- every other refusal leaves a list empty, but a control that flips is a claim that the thing it controls moved with it, which is stronger than a list that fills; and **a clear is a claim** -- Refresh leaves the Wi-Fi list alone, because emptying it would assert "the networks that were here are gone", the same mistake I made in `undelete`'s `scan` hours earlier. A no-op and a clear look identical in a diff and mean opposite things. **66 of 139 tests rested on the data** (ninth app in a row, largest share yet): 48 were interaction tests that needed *some* interfaces and moved to a fixture, 18 asserted the fabricated acts and were rewritten to assert the refusals. Separately, **`apps/benchmark` had eleven functions still named `simulate_*` a day after they started timing real work**, and a section header claiming the disk and graphics tests "are NOT measured and still return constants", naming a function that had been deleted. **That is the third description in that one file to outlive the behaviour it described.** A stale comment about a fabrication is the same defect pointed at the next reader instead of the user: it invites someone to delete a real measurement or to distrust a genuine regression. known-issues.md `TD-C-A-NETWORK-MANAGER-THAT-CANNOT-SEE-THE-NETWORK`.
-  - [x] `[C]` **A recorder that ran a clock over no audio, and a device manager that invented the machine** -- the two highest-cost findings of the fabrication sweep, and the first is the worst of the whole day. **`apps/soundrecorder`:** `process_samples` is the door audio comes in through and nothing in production calls it, so every take captured nothing -- while the clock climbed through 00:03:47, the auto-save fired on schedule and incremented its count, the state read "Recording", and the device menu listed three microphones from `mock_devices()`. **Every other fabrication in this sweep misreports something that still exists to be checked; this one destroys an unrepeatable event**, and destroys it while displaying the one reassurance a careful person looks for. The only honest signal on screen was the flat VU meter, which is indistinguishable from a quiet room. Fixed by refusing at the *start* of the take rather than warning during it -- a take that begins and then reports trouble has already cost the user the recording. A second fabrication in the same file: a time-remaining countdown of `-01:26:48`, computed from `available_bytes` initialised to a flat gigabyte nothing had measured; now `Option<u64>` reading `--:--:--`, deliberately not `00:00:00` (which says the disk is filling) and not an omitted field (read as however much room you like). **`apps/devicemanager`:** listed a Virtio GPU at IRQ 11 with an MMIO range, a driver version and a date, with no `/sys` reader and no syscall that could enumerate a bus. **What makes this a uniquely bad host for invented data is who opens one** -- a device manager is where somebody goes *when hardware is not working*, the thing they came to find is the device that is missing or faulted, and **an invented inventory cannot be missing anything**; every device in it was Working. Six acts refused, of which **Uninstall** matters most: removing a driver, seeing it gone and rebooting for a fresh install means the user has now *eliminated* the real fault from their search. Export now builds its report and says how many bytes it would have written, rather than discarding it in silence. **13 of 133 and 51 of 137 tests rested on the invented data** (ninth and tenth apps in a row). `check-fields-written-never-read` caught `blocked_reason` mid-fix -- the third field of mine in one day that production writes and nothing draws. known-issues.md `TD-C-A-RECORDER-THAT-RAN-A-CLOCK-OVER-NO-AUDIO` and `TD-C-A-DEVICE-MANAGER-THAT-INVENTED-THE-MACHINE`.
-  - [x] `[C]` **Four more: a screen recorder, a mail client, a weather app and a startup manager** -- applications eleven through fourteen of the fabrication sweep. **`screenrecorder`** counted frames and bytes computed from the *resolution* rather than from captured pixels, showed a growing file size, and on Stop **filed a history entry naming a path and a size**; `App::new` pre-loaded two more. The history entry is what makes it worse than the sound recorder: the user keeps a durable list, with sizes, that survives the session and may be acted on days later. **`email`** opened on an account for `user@gmail.com` and an inbox nobody received -- a *configured account* is read as credentials stored and a server reached -- while its own source already noted that twenty IMAP/SMTP builders "have nowhere to send a string because this tree has no network". **It is the only one of fourteen apps where removing the fabrication broke no tests**, and the reason is structural: **its seeding lived in `main()`, not `new()`**, so tests had to ask for it. The same fabrication one call frame higher costs nothing to remove. **`weather`** invented an observation, a forecast, a default location of "New York, NY" and a **"Thunderstorm Watch -- Thunderstorms expected this afternoon. Stay alert."** The alert outranks the forecast for a non-obvious reason: a fabricated warning **teaches the user that this app has an alert channel**, so its silence tomorrow reads as "no warnings in force" rather than "not connected" -- the false alert is a one-day problem, the false confidence outlives it and fails exactly when trusted. `current` became `Option<CurrentWeather>` because a default renders as a plausible 0 degrees and Clear. **`startupmanager`** listed benign system components it had never read. **Together with `devicemanager` this names a class: for a *diagnostic* tool invented data is worse than for a display tool, because the user is looking for an absence or an anomaly and fabricated data is neither -- a wrong forecast is a wrong fact, a wrong startup list is a wrong conclusion.** Disable greyed the row while the program still launched at every login. **Fixture placement predicted the blast radius exactly**: 13 of 14 apps wired the fixture into the constructor and broke 6-66 tests each; the one that wired it into `main` broke none. known-issues.md `TD-C-FOUR-MORE-PROGRAMS-THAT-REPORTED-WHAT-THEY-COULD-NOT-SEE`.
-  - [x] `[C]` **Four clients for services they could not reach, and a correlation that came out exact** -- applications fifteen through eighteen. **`remotedesktop`** opened on a session already marked `Connected` and wrote a history entry with `success: true` **at the moment Connect was pressed**, before any outcome was known -- a defect even with a working network, because an outcome written at the start of an attempt records what was *intended* where somebody will later read it as what happened. **`rssreader`** built articles from a constant XML document *fed through the real parser*, so **everything downstream of the parse was genuine and everything upstream of it was invented**; `ingest_feed_xml` is now `pub` and deliberately not `#[cfg(test)]`, because it is the door a fetcher comes through and gating it would hide the honest state. It also advertises F5 as "Refresh all feeds" with nothing dispatching it. **`podcast`** marked episodes `Downloaded` **and added their file size to `used_disk_bytes`** -- the disk figure outlives the session (deleting the podcasts frees nothing), and the Downloaded mark fails on a plane, **at the exact moment there is no connection to fall back on**, which is `weather`'s alert channel again: the failure is deferred to the situation the feature existed for. **`videoplayer`** played a two-hour film from a path with no file, with subtitles on cue over a black rectangle, because sample content existed "so the first window is not an empty black rectangle" -- **the fourth author in this sweep to reach that conclusion** after `torrent`, `photomanager` and `filesearch`. All four were right about the symptom and wrong about the remedy: the answer to a window that looks broken is to say why it is empty, not to fill it. **The fixture-placement correlation is now exact across eighteen apps**: sixteen wired the fixture into the constructor and broke 6-66 tests each; the two that called it from `main()` broke zero. known-issues.md `TD-C-FOUR-CLIENTS-FOR-SERVICES-THEY-COULD-NOT-REACH`.
-  - [x] `[C]` **The fabrication sweep, and what it taught** -- thirty-nine application and library directories in one day, and the general findings are worth more than any of them. **Rank by what the program tells the user to believe and what believing it costs**, not by how much is invented; a `--help` line and a window are the same thing. **For a diagnostic tool invented data is worse than for a display tool**, because the user is looking for an absence or an anomaly and fabricated data is neither -- a wrong forecast is a wrong fact, a wrong startup list is a wrong conclusion. **Absent is not empty, and the empty state is sometimes the dangerous one**: for a measurement the empty value is a specific alarming reading (0 Mbps says the line is dead), and for an alert channel silence is an all-clear whose failure is deferred to the exact situation the feature existed for. **A fabrication is a claim about something the program cannot observe; bundled content is not** -- `ebook` keeps its books and `spreadsheet` its worked example, while a *path* (`left.rs`, `sample.db`) and anything in *the slot where the user's own record goes* (a notebook called "Work", a contact, a dated check-in) had to go. **A careful fixture is harder to notice than a careless one**: `reminders` made its dates relative, `habits` used a plausible 70%, `contacts` used reserved non-routable numbers -- each identified a real hazard, handled it well, and never asked whether the record should exist. **"An empty window looks broken" appeared in seven authors' words and none reached the remedy**, which is to say why it is empty rather than fill it. Smaller rules learned by getting them wrong: a fix that promises a capability the program lacks is the same defect pointed forward (`finance`); a distinction can be drawn correctly at the data layer and collapsed in a format string (`diskimager`, found by lane A); an outcome written at the start of an attempt is not a record of what happened (`remotedesktop`). **The one measurement: fixture placement predicts the blast radius exactly** -- every app that wired its fixture into the constructor broke 6-66 tests, every app that called it from `main()` broke zero, and the fix was otherwise identical. known-issues.md `TD-C-WHAT-THE-FABRICATION-SWEEP-ACTUALLY-TAUGHT`.
-  - [x] `[C]` **The other half: ten programs that say too little** -- after the fabrication sweep, a second scanner (`scripts/find-silent-incapacity.py`) for the failure the first one is structurally blind to: a program with **no** fixture has nothing for a fixture scanner to find. It asks whether a crate reaches anything outside its own process and, if not, whether it admits that **in a string the user could read** -- literals only, because a comment is not an admission. It **accused two honest programs on its first run** (`diskanalyzer`'s "Could not scan", `pdfviewer`'s "none can be opened") because its vocabulary was narrower than the language, and was widened before a line of its output was acted on; a tool that accuses honest code is one the next reader learns to skip. Fixed: `clipmanager` (nothing watches the clipboard, so the history is empty forever and reads as "you copied nothing"), **`alarmclock`** (the alarm fires but there is no sound and no notification -- **an alarm that changes a pixel in an unfocused window will not wake anyone**), `diagram`/`whiteboard`/`mindmap` (drawings cannot be saved), `logviewer` (**an empty log view is not a quiet system** -- its failure is immediate and reads as evidence, unlike the editors' prospective one), `defrag`, `flashcards` (**spaced repetition is defined by history**; a scheduler that forgets fails invisibly) and `calendar`. **The near-miss worth keeping: `defrag`.** Its `main` explains the gap, its Analyze button is greyed to match, the issue is tracked -- and the one sentence the user read was "No drive selected", an *instruction* asking them to pick from an empty list. I nearly dismissed the finding because the surrounding code was conspicuously thoughtful: **care taken nearby is not evidence about the thing in front of you.** The two scanners are not a majority vote -- `flashcards` was reached by both and they disagreed usefully, its decks staying because "the capital of France is Paris" claims nothing the program cannot observe. known-issues.md `TD-C-THE-OTHER-HALF-PROGRAMS-THAT-SAY-TOO-LITTLE`.
-  - [-] `[E]` **Doors for finished serialisers** -- `scripts/find-stranded-serialisers.py`, the third scanner, asks which crates define something that turns their data into text or bytes while having no way to read or write a file. **92 such functions across 37 crates**, including complete interchange formats: `contacts` had full vCard, `calendar` full iCalendar, `podcast` and `rssreader` OPML, `musicplayer` M3U, `dbviewer` CSV/JSON/SQL. `apps/spreadsheet` prompted it by **saying so in its own module doc** -- "nothing can reach them: they take and return a `String`, and this program has no file dialog" -- an accurate description of a consumer with no producer that had sat there as a description rather than a task. **Six doors built** (`notes` Markdown, `spreadsheet` CSV, `contacts` vCard, `calendar` iCalendar, `rssreader` feed/OPML, `dbviewer` CSV/JSON/SQL), all on `apps/editor`'s pattern: `FileDialog` plus `safeio::write_str_atomically`, never `fs::write`, which truncates before writing. **What the doors needed that the formats did not:** refuse to write nothing (an `.ics` with only `BEGIN:VCALENDAR` is *valid*, so it imports silently as nothing); add rather than replace; bound the read and say so when it bites (`parse_ics` and `import_vcards` stop at a truncation without complaining, and **a calendar missing an appointment looks exactly like a calendar that never had one**); report the read rather than the parse; and **a round-trip test is not a conformance test** -- it passes against any format that is its own inverse, including a wrong one. **`rssreader` is the one where the two formats mean different things to the user:** a feed file is articles and the only content this program can ever obtain, since nothing in it fetches, while an OPML file is a list of *addresses and no articles at all* -- so importing one into a reader that cannot fetch fills the sidebar with names under which nothing will appear, and **an empty feed reads as "this site has posted nothing", which is a claim about the site.** The import says so in as many words. The file is identified by **content, not extension**, because on the way in the extension is a claim by whoever named the file; `dbviewer` suggests one on the way *out*, where there is no content yet and the typed name is the only statement of intent -- the same principle landing in opposite places. **`dbviewer` was not unreachable**: it routed both directions through the SQL editor, the one text surface the window had, and in doing so **assigned the serialised table to `sql_input`, destroying any query the user was composing.** A stopgap that cost real work to use. **All remaining findings triaged 2026-09-17, and none is a door waiting to be built.** The scanner reports 37 functions across 20 crates, not the 80 written here before: about half are field and protocol formatters the scan cannot distinguish from file formats (`to_wire`, `to_rwx`, `from_extension`, a cron `to_string_repr`; `qrcode`'s `to_bytes` is a method on the encoder's internal `BitBuffer`), and most of the rest are exports over data the program cannot gather -- `netscan`, `speedtest`, `devicemanager` and `systemrestore` each depend on nothing but `appearance`/`guitk`/`oswindow`, so a door there writes a real file of invented contents, which outlives the window that would have shown it was a mock. `soundrecorder` is the same shape caught earlier: a genuine WAV writer whose `process_samples` nothing calls, fixed 2026-09-15 by refusing a take with no input. One is blocked on an answer: `credmanager`, whose `export_csv` writes every password in clear and whose `serialize_backup` writes a "backup" holding none -- **C-Q25**. So what is left behind this item is not door building; it is scanner precision and the shared I/O gap. known-issues.md `TD-C-FINISHED-SERIALISERS-THAT-NOBODY-COULD-REACH`.
-  - [x] `[C]` **Three authoring apps that could not author** -- `notes` could not make a note, `slides` could not put a word on a slide, `diagram` could not say what a box means. Each had its entire periphery built and was missing only the act it exists for: notes had notebooks, tags, versions, search and three export formats, and **exported notes it could not create**; slides had themes, transitions, a sorter view and undo, with every box reading "New Text" forever; diagram had templates, layers and alignment guides, and its 32 reachable `add_template_node` calls built a flowchart reading Start/Process/Decision? and an org chart of "CEO" and "VP Eng" -- **so a user's diagram of their own system was always a diagram of ours.** All three fixed: `Ctrl+N`/`Ctrl+Shift+N`/`Enter` in notes, `Enter`/`F2` in slides, `F2`/`Enter` in diagram. **Why the earlier sweeps missed it, which is the transferable part:** a sweep for written-but-unreachable operations asks which *written* functions lack a caller, and in slides nobody had written `set_element_text` for it to find, while in diagram it *did* report `set_node_label` -- as two rows among fifteen, indistinguishable from `next_slide` (a redundant duplicate of working navigation) and `light` (an unused theme constructor). **The periphery being thorough is what hides a hole at the centre**, and I had fixed slides' shapes, images, themes and transitions and built notes' whole pointer layer without noticing either. The question that finds it has to be asked per app and cannot be automated: *what is this program for, and can a user do that.* **Every one of the three end-to-end tests failed on its first run, each on something a unit test of the key handler would have passed** -- notes needed a notebook invented for the first note (the app starts with none and `create_note` takes an id); slides produced "New TextHi", because seeding the buffer from the box is right for an edit and wrong for a box still holding a prompt (`PLACEHOLDER_TEXT` now lists the seven, and a box still holding one starts empty); diagram drew "New" on the canvas and "Old" in the properties panel *at the same moment*. The guard that matters most is `backspace_while_labelling_does_not_delete_the_node`: `Backspace` in diagram deletes the selection, so a typo while naming a box would have deleted the box with the undo stack the only record -- **a text mode is not finished when it accepts text, it is finished when it stops the keys underneath it**, the same shape as `rssreader`'s digits and `spreadsheet`'s bare `T`. Also corrected design-decisions 862, which had named `notes` as an app that may stay quiet when empty "because you can make a note": the premise had been checked against its `TextEntry`, which handles typing for search terms, tags and notebook names and not for a note. known-issues.md `TD-C-AUTHORING-APPS-THAT-CANNOT-AUTHOR`.
-  - [x] `[C]` **A removal is finished when the claim is gone, not when the data is** -- the fabrication sweeps deleted invented *data*; this pass found the sentences still wrapped around it. **`netscan`** had its invented hosts removed on 2026-09-15 and kept the report: pressing Scan printed "Scanned 254 IPs | 0 hosts up | 0 open ports | 12.3s", put "0 hosts up on 192.168.1.0/24" in the **window title**, and filed a history entry stamped "2026-05-18 12:07:13" -- a constant derived from the scan id, not a clock. The crate depends on `appearance`, `guitk` and `oswindow` and nothing else, so the address count is a count of what it *would* have tried, the duration is an estimate, and **"0 hosts up" is a finding about the user's network that reached the taskbar.** The tell was internal inconsistency: `run_traceroute`, `run_whois` and `send_wol` in the same file already refused and said why -- the scan was the one of four missed, and the one with a durable history behind it. `start_scan` now parses the target first so a typo is still named as a typo, then refuses; four existing tests were *changed rather than deleted* because what they asserted is the record of the defect (`test_app_start_scan` asserted `results.is_some()` and `!history.is_empty()`, both true and both the bug). **`podcast`**, found by sweeping production code for hardcoded dates, carried the literal `"2026-05-18 10:00"` at both `listened_at` assignment sites, both reachable, and drew it -- a listening history whose rows all happened at the same minute of the same day. Now reads the clock, returning `None` rather than a fallback date, because a row saying "time unknown" is awkward and true and one saying 1 January 1970 is neither. **`hexeditor`**'s `case_sensitive` was honoured by `match_at` and had no writer, so every search was case-sensitive in a tool for finding a sequence somebody half remembers; `Ctrl+I` toggles it and the bar says which way it is set. **`slides`** could add a textbox and nothing else -- no shape, no image, no way to delete an element without deleting the slide around it -- while printing "Theme:" once and "Transition:" twice, neither changeable. **`metronome`**'s practice increment and measure count were drawn as settings directly beneath a line advertising its own keys, and neither had a writer. **The scanner this class does not get:** `find-silent-incapacity.py` asks whether a program admits it cannot reach anything, and netscan *does*, for three of four operations -- so the gap is internal inconsistency, and the query for it returns almost entirely enum labels (`PeerStatus::Connected`, `EpisodeStatus::Downloaded`), which name a state rather than claiming it was reached. No scanner is proposed; netscan was found by reading. known-issues.md `TD-C-A-SCAN-REPORT-OUTLIVED-THE-SCAN-IT-DESCRIBED`, `TD-C-SLIDES-CAN-ADD-A-TEXTBOX-AND-NOTHING-ELSE`, `TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING`.
-  - [x] `[C]` **Settings the program obeys and nothing can change** -- the mirror of pre-push gate 50, and the worse half of the pair. A write-only field is state nobody reads: dead weight, no user affected. A **frozen** field is read and *obeyed*, so the feature is live, visible and stuck -- and usually displayed, which makes it a false offer rather than a missing one. Found by chasing why `rssreader`'s three filed operations had no callers, which turned out not to be about those operations at all: **`sidebar_selection` had no production writer**, so no feed or folder could ever be selected, the `Feed`/`Folder`/`Starred` arms of the article filter were unreachable, four highlight branches were dead, and the three operations simply had no subject to act on. `is_expanded`, `sidebar_visible` and `sort_order` were frozen too -- the window displayed **"Sort: Date (newest first)", a label that could not say anything else**, above a `sort_by` that worked perfectly. **The overlay is what made it a lie rather than a gap:** pressing `?` listed twenty-one shortcuts of which about four worked, and three named operations that existed **nowhere in the crate** -- refresh (this reader has no transport), open in browser (there is no browser), quit (the framework gives an app no way to close its own window, which is also why `apps/paint`'s `should_quit` is a dead flag). All of it is now bound over machinery that already existed; the impossible rows are gone and four real ones it had never mentioned are added; `A` adds a feed by address, giving the app a whole subscription workflow -- add, rename, file, export OPML -- none of which needs the fetching it cannot do. **`every_advertised_shortcut_does_something` is the guard, and it caught a defect on its first run**: `Space` was a silent no-op unless a folder was selected. Then the same shape elsewhere: **`passwordgen`**, where `length` was the only field of `password_opts` with a writer, so every password contained symbols -- unusable on the many sites that forbid them -- and ambiguous characters could never be excluded; turning off the last class is refused, since `generate_password` answers an empty pool with an empty string. **`pdfviewer`**, whose `dark_mode` was `true` at construction with no writer, so `page_color` returned `rgb(40,42,54)` for every page of every document and **no key restored the white page**, though the comment beside it calls this "the viewer's own `dark_mode` for reading". **`calendar`**, where every month grid began on Monday for everyone. A probe found 157 frozen bools across 47 apps; **most are not defects** and no gate is proposed, because "frozen" is not decidable from the text -- `fontmanager`'s `system` ("whether this is a system font (cannot be uninstalled)") is the worked false positive, and a 157-entry baseline of mostly-correct code teaches people to add to the baseline. The five remaining are all frozen at the *safe* value (autosave on, verify-after-write on), which is luck as much as design: **nothing in the code knows the field is frozen, so nothing chose which way it was stuck.** known-issues.md `TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`.
-  - [x] `[C]` **A finding withdrawn, and the check that would have prevented it** -- I reported `apps/weather` as drawing a full dashboard over an empty model, corrected the report once, and **both versions were wrong**. `render_commands` returns through `render_cannot_fetch` when there is no weather, printing four lines that end *"It cannot deliver severe-weather alerts either. Silence here is not an all-clear"* -- better than what I was about to propose, and the same move `apps/partmanager` makes for disks (*"This is not a finding that you have none"*). I had checked the constructor, the fields and the callers, and never the render path, **which is the only thing that could answer the question I was asking**; the correction repeated the false premise in stronger words and put it into the source file too. **A model check tells you what an app has; only the draw tells you what an app claims**, and the two differ exactly when the app is handling emptiness well -- so the method was blindest precisely where the code was best, and would have gone on reporting careful apps as broken ones. Recorded as design-decision 862, which makes the convention binding: an app that *cannot* look says so and returns before drawing; an app that looked and found nothing may simply show nothing. Thirteen apps had converged on it independently with nothing making it binding on the fourteenth. C-Q26 was raised and withdrawn the same day to `deferred-questions.md` -- the app is harmless while empty and `net/httpclient` has no transport, so asking the operator to choose a weather provider would be asking them to choose a supplier for a delivery we cannot receive.
-  - [x] `[C]` **A banner that denies a capability the program has** -- the fourth scanner, `scripts/find-stale-admissions.py`, for the failure the other three are structurally unable to see: not a program saying too much, nor too little, but one saying something that **used to be true**. `apps/dbviewer` prompted it -- "No database open -- this program cannot open one" was written honestly and became false the moment Import could reach a file. **This is the more expensive direction of falsehood:** a false promise is discovered by trying it, while a false denial is not discovered at all, because the user reads it, believes it and never presses anything -- the feature might as well not have been built, and no bug report is ever filed. It found three more within minutes, **all of them mine, from the same day**: `calendar`, `contacts` and `spreadsheet` each gained a file dialog in this sweep and each still said "this app has no filesystem access, so anything you write here is gone". The warning underneath was real and stays -- none of them autosaves -- so the sentence now names the remedy instead of denying the capability. **The test that should have caught it asserted the banner contained the words "Nothing is saved between runs", and stayed green throughout:** the words were still there and were simply no longer true. **A test that pins wording keeps passing for exactly as long as the wording is wrong.** It now asserts the property. Report-only; the one standing report is `gui/compositor`'s "never sent", which is a display mode-set and not a packet, named in the docstring so nobody investigates it twice. known-issues.md `TD-C-A-BANNER-THAT-DENIES-A-CAPABILITY-THE-PROGRAM-HAS`.
-  - [x] `[C]` **Four ways a checker reported less and never said so** -- `find-silent-incapacity.py` went from 36 findings to 58 with no change to what it looks for. Every one of the four bugs made it report *fewer* crates, and none made it report an error. **That asymmetry is the point:** a checker that accuses honest code is argued with and the noise is visible; one that excuses code it should have reported still prints a plausible list, and **nobody goes looking for what a tool did not print.** This script is doubly exposed, because it skips a crate that looks *capable* and skips it again if it looks like it *admits*. (1) Literals pulled with `re.findall('"(...)"')` -- a quote in a `//` comment pairs with the next one in code, so any comment containing "cannot" cleared a crate; 7. (2) Concatenate-then-truncate at the first `mod tests` discarded every file sorting after it, putting **`apps/editor`, the door model of this whole sweep, on the list of programs with no door**; 2. (3) Test code cut rather than blanked per item, so **a test's own assertion message** counted as a user-facing admission -- `chess` excused by "the king cannot move at all"; 18. (4) The capability regex read comments as code, so `apps/undelete`'s module doc saying the crate "contains no reference to `std::fs`" was **itself the evidence that it had it**; 7. All four are one fix: ask the question of the right text, via `scripts/rustlex.py`. **Which I nearly destroyed** -- I wrote a second lexer over the top of the existing 408-line one whose opening line is "One Rust lexer for the checkers", and only the pre-push hook caught it, through a caller whose self-test I had broken. Restored; `string_literals` is an addition deriving its spans from the two passes already there. known-issues.md `TD-C-A-CHECKER-THAT-REPORTS-LESS-NEVER-SAYS-SO`.
-  - [x] `[C]` **One file picker for thirteen callers** -- eight doors built in this sweep and five that predated it each held an `Option<FileDialog>`, a saving flag, routing that matched the same four `DialogAction` arms, and an intercept at the top of the event handler. **Only one arm of those thirteen differed** -- what to do with the chosen path -- so `guitk::dialog::FilePicker` returns that arm rather than handling it, and `safeio::read_to_string_capped` collects the bounded read eight of them hand-rolled. 184 lines net out of six apps alone. **The count was wrong twice before it was right**: the first grep (`fn apply_dialog_action`) missed the two using a `file_dialog_event` helper, and a later one matched a *test name*. Searching for one spelling finds the callers that spell it that way, and the number it returns reads as complete. **Collecting the copies is how the disagreement surfaced** -- see `TD-C-A-DIALOG-THAT-STOPPED-THE-CLOCK` for the five frozen clocks it exposed, and `scripts/find-swallowed-ticks.py` for the sixth that no reading would have found. **And the abstraction then lost something a caller needed:** `Picked::Handled` conflated "consumed a keystroke, still up" with "closed itself", so `fileassoc`'s parallel `ActiveDialog` enum stayed on `ChooseFile` with no picker on screen after Escape. `Picked::Cancelled` is a separate variant rather than folded in, precisely so **a caller with parallel state is made to say what it does about cancellation**; the twelve with none write `Picked::Handled | Picked::Cancelled`. The picker owns the *routing* and not the dialog -- `dialog_mut()` is the documented escape hatch, because re-exporting `set_filename`, `entries` and `select_entry` would be a second API to keep in step with the first, and the second is always the one that drifts. `navigate_to` exists as one operation because navigate-without-relist leaves the previous directory's contents under the new directory's name: **a listing that is wrong rather than empty.**
-  - [x] `[C]` **A scanner for the swallowed tick, and the file manager it caught** -- every earlier instance of "a dialog stops the clock" was found by reading the thirteen apps that hold a `file_dialog`. `apps/explorer` holds a `modal`, so **no search for a dialog field would ever have reached it** -- and by then the caller count had been wrong twice, both times from searching one spelling of a thing and reading the number back as complete. `scripts/find-swallowed-ticks.py` looks for the shape of the **consequence** instead: a `match event` whose arms mention `Event::Tick`, with a `return` reachable before it. 72 dispatchers have a tick arm; 6 can return before reaching one. **It found the worst case of the five:** explorer's tick retires a batch of a running file operation, so **a paste stopped making progress for as long as any confirmation was on screen** -- the other four froze something the user *looks at*, this one froze something the user is *waiting for*. Most of the 6 hits are correct and the docstring says so above the results; `apps/diskimager` is the model, being the only place in this tree that **names the distinction between input and time** (`matches!(event, Event::Key(_) | Event::Mouse(_))`, with the dialog ticked separately above it). `filesearch` and `hexeditor` are not reported at all, correctly: they write the intercept as guard arms on the outer match, **a shape in which the wrong answer cannot be expressed.** known-issues.md `TD-C-A-DIALOG-THAT-STOPPED-THE-CLOCK`.
-  - [x] `[C]` **Four tests that pinned a phrase and passed while it went false** -- `contacts`, `diagram`, `flashcards` and `mindmap` each asserted that a warning contained a particular form of words ("Nothing is saved between runs", "gone when the window closes", "review schedule resets"). Every one of those sentences became untrue when the app gained a door, and **every one of those tests went on passing, because the words were still there.** Three were found only because the banner edit made them fail; the fourth by reading the other three. The shape is easy to write because the constant sits a few lines above the test, so asserting on the literal *feels* like asserting on the thing -- but **a phrase is an implementation of a promise, and a test that pins the implementation cannot fail when the promise stops being kept.** Worse than an untested banner, because it reads as coverage: a passing `the_window_says_what_it_cannot_do` invites the conclusion that it still does. All four now assert the load-bearing part -- that the message names the remedy and the limit that remains -- so an edit that does not break the promise stays green and one that does goes red. **The general form is not about banners:** it is the same failure as a fixture with nothing to act on, and as a checker whose green was computed over the wrong corpus. The question worth asking of any passing assertion is *what would have to change in the program for this to fail?* -- and if the answer is "an edit that does not matter", it is pinned to the wrong thing. known-issues.md `TD-C-A-TEST-THAT-PINS-WORDING-PASSES-UNTIL-THE-WORDING-IS-WRONG`.
-  - [x] `[C]` **Eight pickers drawn with nothing asserting it, and a sabotage that lied twice** -- `apps/flashcards` shipped a dialog that took every keystroke and painted nothing; `apps/kanban` would have, because removing its `picker.render` line reddened no test. Eight more apps were in the same state. **The first version of the new test was green for the wrong reason** -- it asserted the frame grew, and `apps/fileassoc` draws a *scrim* in the same arm, so the count grew with the picker removed entirely. It now asks the picker what it draws and requires the frame to contain at least that much, with an `own > 0` control that refuses to pass when the measured quantity is trivially zero. **The verification lied twice too:** deleting render calls by regex left dangling syntax, so a build error was read as "the test did not notice" and reported five false failures -- a build error is not a red test, the second time this session; and sabotaging one call site says nothing about the other seven, so the fix is to break the SHARED implementation, which reddens every caller at once and cannot be confused with a compile failure. Seven of the eight happened to pass with the weaker assertion and were strengthened anyway: *happening to* pass is the defect, not a mitigating circumstance. known-issues.md `TD-C-A-SABOTAGE-THAT-DOES-NOT-SABOTAGE`.
-- [x] Backup program (snapshot-based, with all common backup types) — Rust userspace binary
-  - [-] `[E]` **Scheduled backups that happen** (2026-09-27, C-Q21, design-decisions §1426) -- lane E's half done: schedules are kept in `<config>/backup/schedules.json`, where one program can find them all, with a time and a day (`--at`, `--on`); `backup run-due` runs each that is due -- one missed while the machine was off runs once, as soon as it is run -- and records it; `schedules` lists them, `unschedule` removes one. Waiting on lanes D and B for the service that runs `backup run-due` at boot and every few minutes (`requests/e-db-the-backup-service-runs-backup-run-due.md`).
-  - [x] Full and incremental backup with SHA-256 content hashing
-  - [x] Manifest-based tracking (file, directory, symlink entries)
-  - [x] Restore with selective file filtering
-  - [x] Verify command with integrity checking
-  - [x] List, show, and delete backup management
-  - [x] --exclude flag for skip patterns
+- [-] `[E]` **Scheduled backups that happen** (2026-09-27, C-Q21, design-decisions §1426) -- lane E's half done: schedules are kept in `<config>/backup/schedules.json`, where one program can find them all, with a time and a day (`--at`, `--on`); `backup run-due` runs each that is due -- one missed while the machine was off runs once, as soon as it is run -- and records it; `schedules` lists them, `unschedule` removes one. Waiting on lanes D and B for the service that runs `backup run-due` at boot and every few minutes (`requests/e-db-the-backup-service-runs-backup-run-due.md`).
 - [-] Weather dashboard (apps/weather: layouts for current conditions, hourly/daily forecast, alerts, temperature graph and air quality, all real and tested; unit cycling (T/U/W/P) works. **It has no weather and says so** -- `render_cannot_fetch` draws four lines instead of the dashboard, because there is no transport to fetch from and the invented forecast was rightly deleted. The five location operations are `#[cfg(test)]` and there is nothing to attach a location to until a source exists; tracked in `deferred-questions.md`, not as a live question)
 - [-] Weather dashboard (apps/weather: see the fuller line above -- the layouts are built and unit settings work; the app has no weather source and states that in its own window rather than drawing an empty dashboard)
 
@@ -5521,10 +6419,10 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
 - [ ] `[E]` Port Thunderbird (email client)
 
 ### 4.4 Development tools
-- [-] `[D]` gcc, cmake, make, pkg-config (via POSIX layer) — **pkg-config half is proven at link level**: upstream pkgconf 2.3.0 cross-compiles and links against `toolchain/sysroot/lib/libc.a` with zero source changes, zero shims and **zero missing symbols** on the first attempt (53 distinct libc symbols, all already present, including the BSD-isms `strlcpy`/`strlcat`/`reallocarray`). See `scripts/pkgconf-spike/`. **On the image since 2026-08-16** as `/bin/pkgconf` + `/bin/pkg-config`, staged by `scripts/create-ext4-rootfs.sh` under the same staleness gate as bash; until then the only copy of the binary was left in `/tmp`, so a port called "proven" since 2026-08-14 had never once been in an image. ~~Still deliberately *not* `[x]`: **shipped is not run** — the binary has never executed under the kernel, so `realpath`/`lstat`/`opendir` behaviour on our VFS and the 0x1000/0x2000 segment alignment vs our 16 KiB pages are unverified.~~ **CORRECTION 2026-09-13 — pkgconf's “shipped is not run” above is also WRONG.** The rung landed on 2026-08-16 as `self_test_pkgconf_on_slateos_libc` (`kernel/src/proc/spawn.rs`, called from `kernel/src/main.rs`) and it names itself “pkgconf 2.3.0 linked against OUR libc.a (ring 3)”. It drives exactly the three fixtures lane B staged: `--modversion slateos-simple` must print `1.2.3`, `--cflags slateos-simple` must print `-I/opt/slateos/include`, `--exists slateos-dep` must succeed and `--exists slateos-badver` must FAIL — the negative case, without which the rung would pass against a pkgconf with version comparison stubbed out. So `realpath`/`lstat`/`opendir` on our VFS and the segment alignment against our 16 KiB pages are all verified, on every boot. `requests/b-a-pkgconf-self-test-rung.md` has said LANDED since the day it was answered; this entry was never re-read. **Lane B's half of that test is done (2026-08-16):** three `.pc` fixtures are staged in `/usr/lib/pkgconfig` by `scripts/create-ext4-rootfs.sh` — `slateos-simple` (nested variable expansion), `slateos-dep` (a satisfiable `Requires` version constraint) and `slateos-badver` (an unsatisfiable one, so the suite cannot pass with version comparison stubbed out). They are driven with `PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig`, which *replaces* the compiled-in search path rather than prepending to it, so the rung does not depend on a `./configure` default we never pass. This matters because `--version` alone opens no `.pc` file, and parsing `.pc` files is the whole of what pkgconf does. **The `make` half is now also proven at link level (2026-08-20)**: GNU make 4.4.1 unmodified configures and builds clean against zig's musl headers and links `-nostdlib` against our `libc.a` with **zero missing symbols on the first attempt** — see `scripts/make-spike/`. Getting there took two fixes, and the second is far bigger than make: (1) `bsd_signal` was genuinely absent and is now in `posix/src/signal.rs` alongside `sysv_signal`; (2) `libc.a` was built at rustc's default `codegen-units = 16`, which merged unrelated modules into 16 archive members, so `getopt` shared an object with `sem_wait`, `glob` with `printf`, `fnmatch` with `fopen` and `error` with `getenv` — the four names gnulib supplies replacements for, i.e. the four that *every* GNU package defines itself. The member was always extracted, so the duplicate was unavoidable from the caller's side and **every gnulib-using C port would have hit it**. `-C codegen-units=4096` in `toolchain/build-sysroot.ps1` restores glibc's one-object-per-module granularity; duplicates went 11 → 0. See `design-decisions.md` §339. **That turned out to be only half the fix (2026-08-20).** The flag buys one member per *module*, and it worked for those four families only because each already happened to be its own module — nothing made that true in general. Writing the check that asserts the property (`scripts/check-libc-shape.py`) immediately found four more members with the identical defect: `asprintf`/`vasprintf` riding with `printf`, `canonicalize_file_name` with `abort`, `getline`/`getdelim`/`fseeko`/`ftello` with `fopen`, and ten string functions (`strndup`, `strverscmp`, `stpcpy`, `stpncpy`, `mempcpy`, `strchrnul`, `memrchr`, `rawmemchr`, `strcasestr`, `strnlen`) with `memcpy` and `strlen`. make missed them only because its `./configure` did not compile in those particular gnulib modules; coreutils and tar would have hit them. All seventeen now sit in one-function inline `mod gnu_<name>` blocks (576 archive members → 593), and the shape is no longer a convention but an assertion: `build-sysroot.ps1` runs the check after assembling `libc.a` and fails the build if it regresses, verified by deliberately rebuilding at `codegen-units=16` and confirming it reports the old shape. See `design-decisions.md` §340. **On the image since 2026-08-20** as `/bin/make`, under the same staleness gate as bash and pkgconf. ~~Same caveat as pkgconf and for the same reason — **shipped is not run**: make leans on the OS far harder than either, and a link verifies none of it.~~ The spike read make's own `src/config.h` rather than guessing which facilities it would use, and two lines decide the shape of the on-target test: `HAVE_POSIX_SPAWN 1` (recipes launch via **`posix_spawn`, not `fork`+`exec`**, so whatever is true of our `fork` is not the question) and `MAKE_JOBSERVER 1` with `HAVE_MKFIFO 1` and no `HAVE_NAMED_SEMAPHORES` (a `-j` build coordinates over a **FIFO**, not a named semaphore). **Lane B's half of the on-target test is done (2026-08-20):** five makefile fixtures staged in `/usr/share/make-selftest` by `scripts/create-ext4-rootfs.sh` — `01-recipe` (does a recipe run at all: spawn → `/bin/sh` → reap), `02-order` (a three-deep chain, asserted on the exact output sequence), `03-mtime` (build, re-run unchanged, rewrite the input, re-run — the only VFS assertion, and the one that would expose a coarse or constant `st_mtime`), `04-vars` (expansion plus `$(shell …)`, a *second* spawn path that captures through a pipe) and `05-failure` (a recipe exiting 1 must make `make` exit non-zero and, via `.DELETE_ON_ERROR`, unlink the partial target — the negative test, without which the suite still passes against a make that decodes every wait status as success). Every asserted behaviour was run against real GNU make 4.3 before being written down, which corrected two wrong claims in the first draft. The ring-3 rung itself lives in Lane A's tree — requested in `requests/b-a-make-self-test-rung.md`. gcc/cmake remain untouched. **CORRECTION 2026-09-13 — make's “shipped is not run” above is WRONG, and has been since the rung landed.** `scripts/create-ext4-rootfs.sh` wrote `$STAGE/bin/make` TWICE: the host's glibc make early on, and our own `make-slateos.elf` far later. The later copy silently won on every tree where the spike artifact exists, so `/bin/make` in the image is OURS — and lane A's `self_test_linux_real_glibc_make` (renamed `self_test_linux_slateos_make` on 2026-09-16, for this reason) copies `/mnt/bin/make` (the same file) and runs it on every boot. The rung's name, its comments and the `ld-linux`/`libc.so.6` it stages beside the binary all describe a glibc PIE it is not executing. The corroboration is the bug that rung found: it died inside `posix_spawn_file_actions_init` writing 4,624 bytes into an 80-byte object, which is **our** `posix` crate — a genuine glibc make calls glibc's `posix_spawn` and could never have reached that code. That blocker was fixed on 2026-09-10 (`test_file_actions_matches_musl_layout`, size 80/align 8/all four offsets, passing). The precedence in the rootfs script is now explicit rather than decided by `cp` ordering. ~~What is still unverified is whether the rung is GREEN since the fix — that needs a boot run, which is lane A's, and they have been told.~~ **Verified GREEN by lane A on boot `a17b8e0fa` (2026-09-18)**, alongside `make_cc` and both hosted-tcc rungs — on a boot that later died elsewhere (`sched::test_sleep_ns`, since fixed), thousands of lines after these rungs ran; see `requests/a-b-the-make-rungs-are-green-and-cmake-is-blocked-on-a-gitignored-artifact.md`. **The cmake half is now proven at link level too (2026-09-11)**: upstream CMake 4.4.3, unmodified, cross-configures and builds clean against zig's musl headers (19 static archives, first attempt) and links `-nostdlib` against our `libc.a` plus zig's C++ runtime with **zero missing and zero duplicate symbols** — after implementing the twenty libc symbols the first run named. See `scripts/cmake-spike/`. This is the first C++ program of real size to reach our libc, and **none of the twenty came from libc++ or the C++ ABI**, which is what design-decisions.md §73 predicted from a toy translation unit. Fourteen of the twenty were the `_l` locale family — POSIX's locale-parameterised spelling of classifiers we already had, and one job rather than fourteen. The other six: `lutimes` (whose plumbing was already here, its `no_follow` argument written for it and named in its doc comment), `in6addr_any`, and `pthread_get/setschedparam` plus `recvmmsg`/`sendmmsg`, the last three of which REFUSE what they cannot deliver rather than succeeding silently. Closing the twenty revealed no second layer. Staged at 22,519,240 bytes `--strip-debug` (274 MB unstripped, which would not fit the 384 MB image). Still deliberately not `[x]`: **shipped is not run** — the same caveat pkgconf and make carry, and cmake leans on the OS harder than either, forking and waiting and opening pipes to compilers. **cmake is the only one of the four whose “shipped is not run” is still true**, and the only one for which no rung was ever requested — now filed as `requests/b-a-cmake-needs-a-ring-3-rung-like-the-other-three.md`, and **lane B's half of that is already done**: five `-P` script fixtures staged in `/usr/share/cmake-selftest` by `scripts/create-ext4-rootfs.sh` — a write, an evaluate, a `file(READ)`, a `file(GLOB)` over a directory, and a `message(FATAL_ERROR)` negative case that asserts both the non-zero exit and the file after it never being written. Every expectation was measured against a real cmake first, which is how the trap was found: `message()` in script mode writes to **stderr**, so a rung modelled on make's — which asserts stdout — would fail forever against a working cmake. The fixtures state their results by writing files instead. It is also the hardest of the four to prove and therefore the most worth proving: pkgconf parses text files, make spawns `/bin/sh`, and cmake does both plus walking directory trees, writing generated build systems and opening pipes to compilers. `gcc` remains the one unmeasured quarter, and its prerequisites (gmp, mpfr, mpc) are not vendored — a dependency gate rather than an effort one.
-- [ ] `[D]` Rust toolchain (for kernel recompilation)
+- [-] `[D]` gcc, cmake, make, pkg-config (via POSIX layer) — **pkg-config half is proven at link level**: upstream pkgconf 2.3.0 cross-compiles and links against `toolchain/sysroot/lib/libc.a` with zero source changes, zero shims and **zero missing symbols** on the first attempt (53 distinct libc symbols, all already present, including the BSD-isms `strlcpy`/`strlcat`/`reallocarray`). See `scripts/pkgconf-spike/`. **On the image since 2026-08-16** as `/bin/pkgconf` + `/bin/pkg-config`, staged by `scripts/create-ext4-rootfs.sh` under the same staleness gate as bash; until then the only copy of the binary was left in `/tmp`, so a port called "proven" since 2026-08-14 had never once been in an image. ~~Still deliberately *not* `[x]`: **shipped is not run** — the binary has never executed under the kernel, so `realpath`/`lstat`/`opendir` behaviour on our VFS and the 0x1000/0x2000 segment alignment vs our 16 KiB pages are unverified.~~ **CORRECTION 2026-09-13 — pkgconf's “shipped is not run” above is also WRONG.** The rung landed on 2026-08-16 as `self_test_pkgconf_on_slateos_libc` (`kernel/src/proc/spawn.rs`, called from `kernel/src/main.rs`) and it names itself “pkgconf 2.3.0 linked against OUR libc.a (ring 3)”. It drives exactly the three fixtures lane B staged: `--modversion slateos-simple` must print `1.2.3`, `--cflags slateos-simple` must print `-I/opt/slateos/include`, `--exists slateos-dep` must succeed and `--exists slateos-badver` must FAIL — the negative case, without which the rung would pass against a pkgconf with version comparison stubbed out. So `realpath`/`lstat`/`opendir` on our VFS and the segment alignment against our 16 KiB pages are all verified, on every boot. `requests/b-a-pkgconf-self-test-rung.md` has said LANDED since the day it was answered; this entry was never re-read. **Lane B's half of that test is done (2026-08-16):** three `.pc` fixtures are staged in `/usr/lib/pkgconfig` by `scripts/create-ext4-rootfs.sh` — `slateos-simple` (nested variable expansion), `slateos-dep` (a satisfiable `Requires` version constraint) and `slateos-badver` (an unsatisfiable one, so the suite cannot pass with version comparison stubbed out). They are driven with `PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig`, which *replaces* the compiled-in search path rather than prepending to it, so the rung does not depend on a `./configure` default we never pass. This matters because `--version` alone opens no `.pc` file, and parsing `.pc` files is the whole of what pkgconf does. **The `make` half is now also proven at link level (2026-08-20)**: GNU make 4.4.1 unmodified configures and builds clean against zig's musl headers and links `-nostdlib` against our `libc.a` with **zero missing symbols on the first attempt** — see `scripts/make-spike/`. Getting there took two fixes, and the second is far bigger than make: (1) `bsd_signal` was genuinely absent and is now in `posix/src/signal.rs` alongside `sysv_signal`; (2) `libc.a` was built at rustc's default `codegen-units = 16`, which merged unrelated modules into 16 archive members, so `getopt` shared an object with `sem_wait`, `glob` with `printf`, `fnmatch` with `fopen` and `error` with `getenv` — the four names gnulib supplies replacements for, i.e. the four that *every* GNU package defines itself. The member was always extracted, so the duplicate was unavoidable from the caller's side and **every gnulib-using C port would have hit it**. `-C codegen-units=4096` in `toolchain/build-sysroot.ps1` restores glibc's one-object-per-module granularity; duplicates went 11 → 0. See `design-decisions.md` §339. **That turned out to be only half the fix (2026-08-20).** The flag buys one member per *module*, and it worked for those four families only because each already happened to be its own module — nothing made that true in general. Writing the check that asserts the property (`scripts/check-libc-shape.py`) immediately found four more members with the identical defect: `asprintf`/`vasprintf` riding with `printf`, `canonicalize_file_name` with `abort`, `getline`/`getdelim`/`fseeko`/`ftello` with `fopen`, and ten string functions (`strndup`, `strverscmp`, `stpcpy`, `stpncpy`, `mempcpy`, `strchrnul`, `memrchr`, `rawmemchr`, `strcasestr`, `strnlen`) with `memcpy` and `strlen`. make missed them only because its `./configure` did not compile in those particular gnulib modules; coreutils and tar would have hit them. All seventeen now sit in one-function inline `mod gnu_<name>` blocks (576 archive members → 593), and the shape is no longer a convention but an assertion: `build-sysroot.ps1` runs the check after assembling `libc.a` and fails the build if it regresses, verified by deliberately rebuilding at `codegen-units=16` and confirming it reports the old shape. See `design-decisions.md` §340. **On the image since 2026-08-20** as `/bin/make`, under the same staleness gate as bash and pkgconf. ~~Same caveat as pkgconf and for the same reason — **shipped is not run**: make leans on the OS far harder than either, and a link verifies none of it.~~ The spike read make's own `src/config.h` rather than guessing which facilities it would use, and two lines decide the shape of the on-target test: `HAVE_POSIX_SPAWN 1` (recipes launch via **`posix_spawn`, not `fork`+`exec`**, so whatever is true of our `fork` is not the question) and `MAKE_JOBSERVER 1` with `HAVE_MKFIFO 1` and no `HAVE_NAMED_SEMAPHORES` (a `-j` build coordinates over a **FIFO**, not a named semaphore). **Lane B's half of the on-target test is done (2026-08-20):** five makefile fixtures staged in `/usr/share/make-selftest` by `scripts/create-ext4-rootfs.sh` — `01-recipe` (does a recipe run at all: spawn → `/bin/sh` → reap), `02-order` (a three-deep chain, asserted on the exact output sequence), `03-mtime` (build, re-run unchanged, rewrite the input, re-run — the only VFS assertion, and the one that would expose a coarse or constant `st_mtime`), `04-vars` (expansion plus `$(shell …)`, a *second* spawn path that captures through a pipe) and `05-failure` (a recipe exiting 1 must make `make` exit non-zero and, via `.DELETE_ON_ERROR`, unlink the partial target — the negative test, without which the suite still passes against a make that decodes every wait status as success). Every asserted behaviour was run against real GNU make 4.3 before being written down, which corrected two wrong claims in the first draft. The ring-3 rung itself lives in Lane A's tree — requested in `requests/b-a-make-self-test-rung.md`. gcc/cmake remain untouched. **CORRECTION 2026-09-13 — make's “shipped is not run” above is WRONG, and has been since the rung landed.** `scripts/create-ext4-rootfs.sh` wrote `$STAGE/bin/make` TWICE: the host's glibc make early on, and our own `make-slateos.elf` far later. The later copy silently won on every tree where the spike artifact exists, so `/bin/make` in the image is OURS — and lane A's `self_test_linux_real_glibc_make` (renamed `self_test_linux_slateos_make` on 2026-09-16, for this reason) copies `/mnt/bin/make` (the same file) and runs it on every boot. The rung's name, its comments and the `ld-linux`/`libc.so.6` it stages beside the binary all describe a glibc PIE it is not executing. The corroboration is the bug that rung found: it died inside `posix_spawn_file_actions_init` writing 4,624 bytes into an 80-byte object, which is **our** `posix` crate — a genuine glibc make calls glibc's `posix_spawn` and could never have reached that code. That blocker was fixed on 2026-09-10 (`test_file_actions_matches_musl_layout`, size 80/align 8/all four offsets, passing). The precedence in the rootfs script is now explicit rather than decided by `cp` ordering. ~~What is still unverified is whether the rung is GREEN since the fix — that needs a boot run, which is lane A's, and they have been told.~~ **Verified GREEN by lane A on boot `a17b8e0fa` (2026-09-18)**, alongside `make_cc` and both hosted-tcc rungs — on a boot that later died elsewhere (`sched::test_sleep_ns`, since fixed), thousands of lines after these rungs ran; see `requests/a-b-the-make-rungs-are-green-and-cmake-is-blocked-on-a-gitignored-artifact.md`. **The cmake half is now proven at link level too (2026-09-11)**: upstream CMake 4.4.3, unmodified, cross-configures and builds clean against zig's musl headers (19 static archives, first attempt) and links `-nostdlib` against our `libc.a` plus zig's C++ runtime with **zero missing and zero duplicate symbols** — after implementing the twenty libc symbols the first run named. See `scripts/cmake-spike/`. This is the first C++ program of real size to reach our libc, and **none of the twenty came from libc++ or the C++ ABI**, which is what design-decisions.md §73 predicted from a toy translation unit. Fourteen of the twenty were the `_l` locale family — POSIX's locale-parameterised spelling of classifiers we already had, and one job rather than fourteen. The other six: `lutimes` (whose plumbing was already here, its `no_follow` argument written for it and named in its doc comment), `in6addr_any`, and `pthread_get/setschedparam` plus `recvmmsg`/`sendmmsg`, the last three of which REFUSE what they cannot deliver rather than succeeding silently. Closing the twenty revealed no second layer. Staged at 22,519,240 bytes `--strip-debug` (274 MB unstripped, which would not fit the 384 MB image). Still deliberately not `[x]`: **shipped is not run** — the same caveat pkgconf and make carry, and cmake leans on the OS harder than either, forking and waiting and opening pipes to compilers. **cmake is the only one of the four whose “shipped is not run” is still true**, and the only one for which no rung was ever requested — now filed as `requests/b-a-cmake-needs-a-ring-3-rung-like-the-other-three.md`, and **lane B's half of that is already done**: five `-P` script fixtures staged in `/usr/share/cmake-selftest` by `scripts/create-ext4-rootfs.sh` — a write, an evaluate, a `file(READ)`, a `file(GLOB)` over a directory, and a `message(FATAL_ERROR)` negative case that asserts both the non-zero exit and the file after it never being written. Every expectation was measured against a real cmake first, which is how the trap was found: `message()` in script mode writes to **stderr**, so a rung modelled on make's — which asserts stdout — would fail forever against a working cmake. The fixtures state their results by writing files instead. **Configured against our libc since 2026-10-06:** its configure probes link through `slate_make_link_wrappers`, so cmake now uses `close_range`, `closefrom` and `arc4random` from our library, and KWSys its backtraces (`known-issues/D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL.md`). It is also the hardest of the four to prove and therefore the most worth proving: pkgconf parses text files, make spawns `/bin/sh`, and cmake does both plus walking directory trees, writing generated build systems and opening pipes to compilers. `gcc` remains the one unmeasured quarter, and its prerequisites (gmp, mpfr, mpc) are not vendored — a dependency gate rather than an effort one.
+- [-] `[D]` Rust toolchain (for kernel recompilation) — **LLVM's half is on the image (2026-10-05):** LLVM 20.1.8's `opt`, `llc` and `ld.lld` -- the optimizer, code generator and linker rustc drives -- cross-built and linked against `toolchain/sysroot/lib/libc.a` alone, 0 undefined and 0 duplicate symbols, staged as `/bin/opt`, `/bin/llc`, `/bin/ld.lld` with the `libc.a` they link (`scripts/llvm-spike/`). Not yet run on SlateOS: `services/ctest-llvm-tools` waits for lane A's generic C rung. rustc itself, the standard library and cargo are next.
 - [-] `[D]` CPython (latest, for ecosystem compatibility and fastpy bootstrapping) — **CPython 3.12.3 is on the image and RUNS ON TARGET.** It references 478 external symbols and `libc.a` provides all 478 (`scripts/cpython-spike/`; nineteen of them were implemented for it). Staged by `scripts/create-ext4-rootfs.sh` as `/bin/python3` with the standard library as one `/usr/local/lib/python312.zip`, which is `sys.path[0]` so `zipimport` serves every import. Unlike pkgconf, make and cmake, **this one is not “shipped is not run”**: lane A's `self_test_cpython_on_slateos_libc()` (`kernel/src/proc/spawn.rs`, called from `kernel/src/main.rs`) executes it in ring 3 every boot and asserts exit 0 with exact output — version, `zipimport`, a bytes literal, a dict, a tuple and a final marker — so a libc or VFS regression that breaks the interpreter fails the boot rather than being discovered later. `requests/b-a-cpython-path-z-self-test.md` is DONE (2026-08-21). Not `[x]` because the roadmap item is the ecosystem port, not the interpreter: no third-party C extension has been built, and fastpy bootstrapping is untouched.
-- [ ] `[D]` fastpy compiler (Python AOT compiler — first-class language for OS userspace components)
+- [-] `[D]` fastpy compiler (Python AOT compiler — first-class language for OS userspace components) — **the LLVM tools it compiles through are on the image (2026-10-05):** `opt`, `llc` and `ld.lld`, LLVM 20.1.8, the version llvmlite 0.47 carries (`scripts/llvm-spike/`; `requests/b-d-fastpy-on-slateos-needs-llvm-tools.md`). fastpy itself running on SlateOS is lane B's rung, next.
 
 ### 4.5 Remote desktop
 - [ ] `[F]` Port FreeRDP (working remote desktop early)

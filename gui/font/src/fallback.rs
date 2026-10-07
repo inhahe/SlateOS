@@ -54,6 +54,10 @@
 //! canonical ordering, not a place on the glyph, so they have to be mapped
 //! onto the "above/below/left/right" classes before the geometry means
 //! anything. [`attach_class`] is that map.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-ot-shape-fallback.cc`
+//! and `src/hb-ot-shaper.hh`, copyright © 2010, 2011, 2012 Google, Inc. Used
+//! under HarfBuzz's licence: see `gui/font/licenses/harfbuzz-COPYING`.
 
 use crate::norm;
 use crate::script::ScriptTags;
@@ -174,6 +178,18 @@ pub(crate) fn shaped_as_default(tags: Option<ScriptTags>, gsub: Option<[u8; 4]>)
     // A run with no script, or with a simple one, is already on the default
     // shaper; there is nothing for the face to call off.
     let Some(tags) = tags else { return false };
+    // Syriac goes to HarfBuzz's Arabic shaper, whose arm calls it off for
+    // `DFLT` only, not for `latn` as the Indic and USE arms do:
+    //
+    //     if ((gsub_script != HB_OT_TAG_DEFAULT_SCRIPT ||
+    //          script == HB_SCRIPT_ARABIC) && HB_DIRECTION_IS_HORIZONTAL (...))
+    //       return &_hb_ot_shaper_arabic;
+    //
+    // Arabic itself is never called off, and is not in `COMPLEX_SCRIPTS`; the
+    // difference is whether the run's letters take their joining forms.
+    if tags.preferred == *b"syrc" {
+        return gsub == Some(*b"DFLT");
+    }
     if COMPLEX_SCRIPTS.binary_search(&tags.preferred).is_err()
         || ALWAYS_COMPLEX.binary_search(&tags.preferred).is_ok()
     {
@@ -735,6 +751,26 @@ mod tests {
             );
         }
         assert!(!shaped_as_default(None, Some(*b"DFLT")));
+    }
+
+    /// Syriac reaches HarfBuzz's Arabic shaper, whose arm calls it off for
+    /// `DFLT` and for nothing else -- not for `latn`, which calls off every
+    /// Indic and USE script, and not for a face with no `GSUB` (HarfBuzz's
+    /// `HB_TAG_NONE`). Arabic is never called off at all.
+    #[test]
+    fn syriac_is_called_off_by_dflt_alone() {
+        let syriac = Some(ScriptTags::exactly(*b"syrc"));
+        assert!(shaped_as_default(syriac, Some(*b"DFLT")));
+        assert!(!shaped_as_default(syriac, Some(*b"latn")));
+        assert!(!shaped_as_default(syriac, Some(*b"syrc")));
+        assert!(!shaped_as_default(syriac, None));
+        let arabic = Some(ScriptTags::exactly(*b"arab"));
+        assert!(!shaped_as_default(arabic, Some(*b"DFLT")));
+        assert!(!shaped_as_default(arabic, Some(*b"latn")));
+        // N'Ko is a USE script: `latn` calls it off too.
+        let nko = Some(ScriptTags::exactly(*b"nko "));
+        assert!(shaped_as_default(nko, Some(*b"DFLT")));
+        assert!(shaped_as_default(nko, Some(*b"latn")));
     }
 
     /// The point of the whole exercise: a Devanagari run in a face that

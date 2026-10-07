@@ -54,7 +54,11 @@ paths are held to the same results by its test suite.
    calls (`src/wrap_fn_ptr.rs`, allowed on the item), a struct nothing
    constructs (`src/internal.rs`, allowed on the item), and -- in a release
    build only -- a method only the debug build's overlap checks call
-   (`Bounds::overlaps`, `src/disjoint_mut.rs`, now compiled with them). Its
+   (`Bounds::overlaps`, `src/disjoint_mut.rs`, now compiled with them, as
+   is its test, `test_range_overlap`, so the crate's tests build in release
+   too), and in the release build's own test, `test_pointer_write_release`,
+   three `unsafe` blocks around `DisjointMut::index`, which this release
+   made safe (removed). Its
    clippy also asks for a safety comment on four `unsafe impl Send`/`Sync`
    (`src/internal.rs`) that upstream marks with a TODO to remove once the
    types are thread-safe; those are allowed on the item as upstream wrote
@@ -71,6 +75,19 @@ paths are held to the same results by its test suite.
    test that decodes every byte-damaged copy of its AVIF fixtures
    (`a_damaged_file_decodes_or_is_refused_but_never_panics`); worth reporting
    to rav1d.
+7. **CDEF borrows only the pixels it reads.** `padding` (`src/cdef.rs`)
+   borrowed each top and bottom row from two pixels left of the block and
+   read from `x_start` -- which, without a left edge, is two pixels further
+   on. At the frame's left edge those two unread pixels are the end of the
+   CDEF line buffer's previous row, which another worker thread's
+   `backup2lines` (`src/cdef_apply.rs`) may be writing at that moment; the
+   borrow overlapped its `&mut`, and `DisjointMut`'s debug checks stopped the
+   decoder. No byte was read, but a shared reference over memory another
+   thread writes is undefined behaviour in Rust whether or not it is read.
+   The rows are now borrowed from `x_start`. Found by `gui/video/codec`'s
+   test that plays byte-damaged copies of its AV1 fixtures on several
+   threads (`a_damaged_file_plays_what_it_can_and_never_panics`), in a debug
+   build; worth reporting to rav1d.
 
 Every change is marked in the source with `SlateOS (VENDORED.md, change N)`,
 except the formatting and the lifetimes.
@@ -78,7 +95,7 @@ except the formatting and the lifetimes.
 ## Updating
 
 `vendor.py` does step 1 and the copying: `python vendor.py <new .crate>
-<empty directory>`, after updating the checksum it holds. Carry changes 2 to 6
+<empty directory>`, after updating the checksum it holds. Carry changes 2 to 7
 across from this copy (`git diff` of this directory against a fresh run shows
 exactly them), drop any the new release makes unnecessary, and update this
 file's table.

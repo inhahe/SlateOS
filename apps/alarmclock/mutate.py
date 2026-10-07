@@ -61,9 +61,9 @@ MUTATIONS = [
         "                break;\n"
         "            }\n"
         "            if y - self.alarm_scroll + card_h > list.y {\n"
-        "                alarm.draw(f, list.x, y, list.w, self.time_format);\n"
+        "                alarm.draw(&self.palette, f, list.x, y, list.w, self.time_format);\n"
         "            }\n",
-        "            alarm.draw(f, list.x, y, list.w, self.time_format);\n",
+        "            alarm.draw(&self.palette, f, list.x, y, list.w, self.time_format);\n",
         ["nothing_is_painted_entirely_outside_the_clip_in_force"],
     ),
     (
@@ -321,6 +321,59 @@ MUTATIONS = [
         "            Target::AlarmSnooze(id) => self.snooze_alarm(id),",
         "            }\n            Target::AlarmSnooze(id) => self.snooze_alarm(id),",
         ["deleting_the_content_under_a_scrolled_pane_pulls_it_back"],
+    ),
+    # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
+    (
+        "the label field is drawn the same wherever the pointer is",
+        "                hovered: self.hover == Some(Target::EditLabel),",
+        "                hovered: false,",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "a timer field is drawn the same wherever the pointer is",
+        "                    hovered: self.hover == Some(Target::CustomField(hms)),",
+        "                    hovered: false,",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the pointer is not followed",
+        "                    let over = self.frame(size.0, size.1).hit_test(mouse.x, mouse.y);",
+        "                    let over = None::<Target>;",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the pointer leaving the window leaves its control lit",
+        "                    if self.hover.take().is_some() {",
+        "                    if self.hover.is_some() {",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    (
+        "the text boxes take the toolkit's focus width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();",
+        "        let _ = settings;",
+        ["the_text_boxes_are_the_toolkits_fields"],
+    ),
+    # -- the shortcut card's hold on the pointer
+    (
+        "a press goes through the shortcut card",
+        "                MouseEventKind::Press(_) if self.show_help => {\n"
+        "                    self.show_help = false;\n"
+        "                    Action::Redraw\n"
+        "                }\n",
+        "",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "only the left button puts the card away",
+        "                MouseEventKind::Press(_) if self.show_help => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) if self.show_help => {\n",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
+    ),
+    (
+        "the wheel scrolls what the card covers",
+        "                MouseEventKind::Scroll { .. } if self.show_help => Action::None,\n",
+        "",
+        ["the_shortcut_card_takes_a_press_rather_than_passing_it_on"],
     ),
 ]
 

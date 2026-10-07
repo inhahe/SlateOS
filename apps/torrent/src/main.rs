@@ -2636,6 +2636,9 @@ pub struct TorrentApp {
     clipboard: String,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
     /// Every box the last paint recorded, for hover and the wheel.
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder.
@@ -2833,6 +2836,7 @@ impl TorrentApp {
             transfer_scroll: 0,
             clipboard: String::new(),
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
             status_message: "Ready".to_string(),
@@ -3086,9 +3090,14 @@ impl TorrentApp {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // A key on its own is taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Delete removed the selected
+        // transfer and Alt+Space paused it.
+        let plain = textline::is_plain(key.modifiers);
         // Above the Ctrl branch, which returns for every Ctrl chord: placed
         // after it, Ctrl+P would pause every transfer from behind the card.
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
@@ -3096,7 +3105,7 @@ impl TorrentApp {
             // Modal. Delete removes the selected transfer, and doing that
             // from behind a list the reader is consulting is the reason this
             // does not let keys through.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
@@ -3110,7 +3119,9 @@ impl TorrentApp {
         if self.search_active {
             return self.handle_search_key(key);
         }
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+P
+        // -- whatever the layout types there -- paused every transfer.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::U => {
                     self.open_magnet_dialog();
@@ -3142,6 +3153,9 @@ impl TorrentApp {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+        if !plain {
+            return EventResult::Ignored;
         }
 
         match key.key {
@@ -3600,26 +3614,20 @@ impl TorrentApp {
         let keys = Rect::new(width - 12.0 - 84.0, 8.0, 84.0, 32.0);
         self.button(f, keys, "Keys (F1)", Target::Help, true);
         let search = Rect::new((keys.x - 8.0 - 220.0).max(bx), 8.0, 220.0, 32.0);
-        self.palette.push_surface(
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
             f,
-            search.x,
-            search.y,
-            search.w,
-            search.h,
-            6.0,
-            Surface::Card,
+            &self.palette,
+            search,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Search),
+                focused: self.search_active,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
         );
-        if self.search_active {
-            f.push(RenderCommand::StrokeRect {
-                x: search.x,
-                y: search.y,
-                width: search.w,
-                height: search.h,
-                color: self.palette.blue,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-        }
         let placeholder = self.search_query.is_empty() && !self.search_active;
         f.push(RenderCommand::Text {
             x: search.x + 10.0,
@@ -4665,17 +4673,23 @@ impl TorrentApp {
             overflow: TextOverflow::Ellipsis,
         });
         let field = Rect::new(card.x + 20.0, card.y + 50.0, (card.w - 40.0).max(0.0), 32.0);
-        self.palette
-            .push_surface(f, field.x, field.y, field.w, field.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: field.x,
-            y: field.y,
-            width: field.w,
-            height: field.h,
-            color: self.palette.blue,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        // It has the keyboard while the dialog is up, and is red while the
+        // link in it is one this client cannot read -- as the line under it
+        // says, while it is being fixed.
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            field,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::MagnetField),
+                focused: true,
+                disabled: false,
+                invalid: self.magnet_error.is_some(),
+            },
+            self.focus_ring_width,
+        );
         if self.magnet_input.text().is_empty() {
             f.push(RenderCommand::Text {
                 x: field.x + 8.0,
@@ -4992,14 +5006,16 @@ impl TorrentApp {
         }
     }
 
-    /// Keys while the magnet dialog is up.
+    /// Keys while the magnet dialog is up. Its Enter and Escape are plain --
+    /// Alt+Enter added the link -- and the field knows a command from typing.
     fn handle_dialog_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.close_magnet_dialog();
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 if self.magnet_input.text().trim().is_empty() {
                     return EventResult::Ignored;
                 }
@@ -5043,23 +5059,28 @@ impl TorrentApp {
     }
 
     /// Keys while the search box has them.
+    ///
+    /// Its own keys are plain, and it types what was typed: AltGr, which
+    /// arrives as Ctrl+Alt, typed nothing, and Alt+X typed an `x`.
+    /// Backspace is refused only to Alt and the Windows key.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.search_active = false;
                 self.search_query.clear();
             }
-            Key::Enter | Key::Tab => self.search_active = false,
-            Key::Backspace => {
+            Key::Enter | Key::Tab if plain => self.search_active = false,
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
                 if self.search_query.pop().is_none() {
                     return EventResult::Ignored;
                 }
             }
             _ => {
-                if key.modifiers.ctrl {
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                let typed: String = key.text.chars().filter(|c| !c.is_control()).collect();
+                let typed: String = key.typed().collect();
                 if typed.is_empty() {
                     return EventResult::Ignored;
                 }
@@ -5099,6 +5120,10 @@ pub fn format_duration(seconds: u64) -> String {
 impl App for TorrentApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5633,10 +5658,6 @@ about anything -- it drew {} text command(s)",
         }
     }
 
-    /// **The status bar says what the list is sorted by, and how to change it.**
-    ///
-    /// Without this the two keys are as unreachable as the fields were: the
-    /// sidebar shows its own selection, but nothing else on screen mentions
     /// **Every key the card advertises is answered by this window.**
     ///
     /// Two filter states, and the reason is the one that took longest to
@@ -5725,6 +5746,10 @@ about anything -- it drew {} text command(s)",
         );
     }
 
+    /// **The status bar says what the list is sorted by, and how to change it.**
+    ///
+    /// Without this the two keys are as unreachable as the fields were: the
+    /// sidebar shows its own selection, but nothing else on screen mentions
     /// the sort at all.
     #[test]
     fn the_status_bar_names_the_sort_and_its_keys() {
@@ -5954,6 +5979,103 @@ about anything -- it drew {} text command(s)",
             app.handle_event(&press(Key::Down));
         }
         assert_eq!(app.selected_torrent, ids.last().copied());
+    }
+
+    /// **A chord is neither a torrent key nor typing, and AltGr is not
+    /// Ctrl**: a chord with Alt or the Windows key carries its key --
+    /// Alt+Delete removed the selected transfer, Alt+2 changed the filter,
+    /// Alt+Tab the tab and Alt+S the download order, and Alt+X typed an `x`
+    /// into the search; and AltGr, which arrives as Ctrl+Alt, opened the
+    /// magnet dialog on AltGr+U and typed nothing into the search.
+    ///
+    /// Space and Ctrl+P and Ctrl+R are left out: they start and stop
+    /// transfers, which talk to a tracker.
+    #[test]
+    fn a_chord_is_neither_a_torrent_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        assert!(app.selected_torrent.is_some(), "control: a selection");
+        let state = |app: &TorrentApp| {
+            (
+                (app.torrents.len(), app.selected_torrent, app.active_tab),
+                (app.filter, app.sort_column, app.sort_ascending),
+                app.torrents
+                    .iter()
+                    .map(|t| (t.sequential_download, t.label.clone()))
+                    .collect::<Vec<_>>(),
+                (
+                    app.search_active,
+                    app.show_add_dialog,
+                    app.picker.is_open(),
+                    app.show_help,
+                ),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Delete,
+                Key::Num2,
+                Key::Tab,
+                Key::S,
+                Key::L,
+                Key::C,
+                Key::Down,
+                Key::Enter,
+                Key::Slash,
+                Key::F1,
+                Key::U,
+                Key::O,
+            ] {
+                assert_eq!(
+                    app.handle_event(&chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the list");
+            }
+        }
+
+        // The search types what was typed, AltGr's `@` among it.
+        app.handle_event(&press(Key::Slash));
+        assert!(app.search_active, "control: / opens the search");
+        app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&chord(Key::Q, "@", altgr));
+        app.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
+        app.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
+        assert!(app.search_active, "a chorded Enter or Escape closed it");
+        assert_eq!(app.search_query, "@", "a command's letter, or AltGr lost");
+        app.handle_event(&press(Key::Escape));
+
+        // The magnet dialog's Enter and Escape are plain.
+        app.handle_event(&key_ev(Key::U, true));
+        assert!(app.show_add_dialog, "control: Ctrl+U opens it");
+        app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_add_dialog, "Alt+Escape closed it");
+        app.handle_event(&chord(Key::Enter, "", Modifiers::super_key()));
+        assert!(app.show_add_dialog, "Windows+Enter answered it");
+
+        // And the list of keys.
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help, "control: F1 raises it");
+        app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put it away");
     }
 
     /// Delete removes the entry and keeps the files: deleting someone's
@@ -7197,6 +7319,100 @@ about anything -- it drew {} text command(s)",
         probe::key(&mut app, &probe::press(Key::Escape));
         assert!(!app.show_add_dialog);
         assert_eq!(app.torrents.len(), 1, "Escape added the link");
+    }
+
+    /// The search box and the magnet-link field are the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, marked at
+    /// the user's focus width with the keyboard, and the link field red while
+    /// what is in it is not a link this client reads.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = seeded();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &TorrentApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame(app.win_width, app.win_height);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+        probe::click(&mut app, Target::Search);
+        assert!(
+            draws(
+                &app,
+                search,
+                guitk::field::State {
+                    focused: true,
+                    ..lit
+                }
+            ),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+
+        probe::click(&mut app, Target::AddMagnet);
+        let link = probe::rect_of(&app, Target::MagnetField).expect("the link field");
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(draws(&app, link, keyed), "the link field is not marked");
+        probe::type_str(&mut app, "not a link");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(app.magnet_error.is_some(), "the junk was taken");
+        assert!(
+            draws(
+                &app,
+                link,
+                guitk::field::State {
+                    invalid: true,
+                    ..keyed
+                }
+            ),
+            "a link this client cannot read is not marked red"
+        );
     }
 
     #[test]

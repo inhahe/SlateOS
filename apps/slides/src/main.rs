@@ -14,7 +14,8 @@
 //! - Slide numbering
 //! - Export to self-contained HTML slideshow
 //! - Copy/paste/duplicate slides, reorder (move up/down)
-//! - Undo/redo stack
+//! - Undo/redo, kept as a tree: Alt+Z reaches what an edit after an undo
+//!   would have lost
 //! - Keyboard shortcuts (Ctrl+N, Ctrl+D, Ctrl+Z, Ctrl+Y, Ctrl+E, etc.)
 //! - Multi-panel UI: slide thumbnail sidebar, main canvas, properties panel
 //!
@@ -44,17 +45,22 @@ use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::{Frame, Rect};
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::textedit;
+use guitk::theme::with_alpha;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use statehistory::StateHistory;
+use std::num::NonZeroUsize;
 use std::process::ExitCode;
 use std::time::Duration;
+use textarea::TextArea;
 use unsaved::{Choice, Question};
-
-use std::collections::VecDeque;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -76,10 +82,24 @@ const STATUS_BAR_HEIGHT: f32 = 24.0;
 const THUMBNAIL_PAD: f32 = 8.0;
 /// Height of the notes editor area below the main canvas.
 const NOTES_HEIGHT: f32 = 80.0;
+/// The most characters a box, a list, an image's label or the notes hold.
+const EDIT_CAPACITY: usize = 8192;
+/// The most characters the deck's name holds.
+const TITLE_CAPACITY: usize = 256;
+/// Where the deck's name is drawn on the toolbar -- its box, a press on which
+/// renames the deck.
+const TITLE_BOX: (f32, f32, f32, f32) = (6.0, 6.0, 202.0, 28.0);
+/// How many lines of the notes the panel shows.
+const NOTES_ROOM: usize = 3;
 /// Aspect ratio of a slide (16:9).
 const SLIDE_ASPECT: f32 = 16.0 / 9.0;
 /// Maximum undo/redo steps.
 const MAX_UNDO: usize = 100;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: NonZeroUsize = match NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => NonZeroUsize::MIN,
+};
 /// Corner radius for panels and buttons.
 const CORNER_R: f32 = 4.0;
 /// Default slide width in logical units.
@@ -689,7 +709,8 @@ impl Slide {
 // Undo/Redo
 // ============================================================================
 
-/// A snapshot of the entire slide deck for undo/redo.
+/// The whole deck as it stood at one point in its history: what an undo puts
+/// back.
 ///
 /// The theme is part of it: a theme change restyles every element, and an
 /// undo that brought the old colours back under the new theme would leave the
@@ -699,57 +720,6 @@ struct Snapshot {
     slides: Vec<Slide>,
     current_index: usize,
     theme: SlideTheme,
-}
-
-/// Undo/redo manager using a snapshot stack.
-#[derive(Debug)]
-struct UndoManager {
-    undo_stack: VecDeque<Snapshot>,
-    redo_stack: Vec<Snapshot>,
-    max_depth: usize,
-}
-
-impl UndoManager {
-    fn new(max_depth: usize) -> Self {
-        Self {
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
-            max_depth,
-        }
-    }
-
-    /// Save the current state before a mutation. Clears the redo stack.
-    fn save(&mut self, now: Snapshot) {
-        if self.undo_stack.len() >= self.max_depth {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(now);
-        self.redo_stack.clear();
-    }
-
-    /// Undo: return the previous snapshot, saving the current state to redo.
-    fn undo(&mut self, now: Snapshot) -> Option<Snapshot> {
-        let prev = self.undo_stack.pop_back()?;
-        self.redo_stack.push(now);
-        Some(prev)
-    }
-
-    /// Redo: return the next snapshot, saving the current state to undo.
-    fn redo(&mut self, now: Snapshot) -> Option<Snapshot> {
-        let next = self.redo_stack.pop()?;
-        self.undo_stack.push_back(now);
-        Some(next)
-    }
-
-    /// True if there is something to undo.
-    fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
-    }
-
-    /// True if there is something to redo.
-    fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
-    }
 }
 
 // ============================================================================
@@ -824,11 +794,17 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+D", "Duplicate this slide"),
     ("Ctrl+C / Ctrl+V", "Copy / paste a slide"),
     ("Ctrl+PgUp / Ctrl+PgDn", "Move this slide up / down"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The deck before / after this, on any branch",
+    ),
     ("G", "Next background for this slide"),
     ("Ctrl+R", "Next transition into this slide"),
-    ("Ctrl+T", "Next theme"),
-    ("Ctrl+Shift+T", "Name the deck"),
+    // One row for the two, which leaves the list fitting a 720-pixel
+    // window: past that the card names the rows left over rather than
+    // showing them.
+    ("Ctrl+T / Ctrl+Shift+T", "Next theme / name the deck"),
     ("N / B", "Type / show or hide the speaker notes"),
     ("1 / 2", "Edit view / sorter view"),
     ("F5 / Shift+F5", "Present from the start / from this slide"),
@@ -1052,6 +1028,151 @@ pub enum EditTarget {
     Notes,
 }
 
+/// One line of the words being typed, as drawn: the bytes of the words it
+/// shows, and where its first glyph is drawn in the window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DrawnLine {
+    start: usize,
+    end: usize,
+    x: f32,
+    y: f32,
+}
+
+/// The words being typed, as drawn: their lines, the size and weight they
+/// are drawn at, how far apart the lines are, and the caret's colour.
+#[derive(Clone, Debug, PartialEq)]
+struct EditLayout {
+    lines: Vec<DrawnLine>,
+    size: f32,
+    weight: FontWeightHint,
+    line_h: f32,
+    caret_color: Color,
+}
+
+impl EditLayout {
+    /// Which line offset `at` is drawn on: the last that starts at or before
+    /// it, so a caret at a line's end is drawn at that end.
+    fn line_of(&self, at: usize) -> usize {
+        self.lines
+            .iter()
+            .rposition(|line| line.start <= at)
+            .unwrap_or(0)
+    }
+
+    /// Where offset `at`, on `line` of `words`, is drawn across the window.
+    fn x_of(&self, words: &str, line: &DrawnLine, at: usize) -> f32 {
+        let upto = at.clamp(line.start, line.end);
+        line.x
+            + words
+                .get(line.start..upto)
+                .map_or(0.0, |s| text::measure(s, self.size, self.weight))
+    }
+
+    /// Where offset `at` of `words` is drawn: its line's top, and across.
+    fn point_of(&self, words: &str, at: usize) -> (f32, f32) {
+        self.lines
+            .get(self.line_of(at))
+            .map_or((0.0, 0.0), |line| (self.x_of(words, line, at), line.y))
+    }
+
+    /// The offset on line `i` of `words` nearest the window's `x`.
+    fn offset_on(&self, words: &str, i: usize, x: f32) -> usize {
+        let Some(line) = self.lines.get(i) else {
+            return words.len();
+        };
+        let shown = words.get(line.start..line.end).unwrap_or("");
+        let within =
+            text::cursor_at_in(shown, x - line.x, self.size, self.weight, FontFamily::Ui).byte;
+        line.start.saturating_add(within.min(shown.len()))
+    }
+
+    /// The offset under the window's `(x, y)`: on the line drawn there, or
+    /// the nearest line above or below the words.
+    fn offset_at(&self, words: &str, x: f32, y: f32) -> usize {
+        let i = self.lines.iter().rposition(|line| line.y <= y).unwrap_or(0);
+        self.offset_on(words, i, x)
+    }
+
+    /// Move `area`'s caret for `key` -- Up and Down, Page Up and Page Down,
+    /// Home and End -- through the lines as they are drawn, Shift extending
+    /// the selection: a box's words wrap at its edge, and the editor's own
+    /// moves know only the lines Enter made. Ctrl+Home and Ctrl+End go to the
+    /// ends.
+    fn step(&self, area: &mut TextArea, key: &KeyEvent) {
+        let shift = key.modifiers.shift;
+        let chord = textline::is_ctrl_chord(key.modifiers);
+        let words = area.text().to_owned();
+        let caret = area.caret();
+        let i = self.line_of(caret);
+        let last = self.lines.len().saturating_sub(1);
+        let (x, _) = self.point_of(&words, caret);
+        let page = NOTES_ROOM.max(1);
+        let to = match key.key {
+            Key::Home if chord => 0,
+            Key::End if chord => words.len(),
+            Key::Home => self.lines.get(i).map_or(0, |line| line.start),
+            Key::End => self.lines.get(i).map_or(words.len(), |line| line.end),
+            Key::Up if i == 0 => 0,
+            Key::Up => self.offset_on(&words, i.saturating_sub(1), x),
+            Key::Down if i >= last => words.len(),
+            Key::Down => self.offset_on(&words, i.saturating_add(1), x),
+            Key::PageUp => self.offset_on(&words, i.saturating_sub(page), x),
+            Key::PageDown => self.offset_on(&words, i.saturating_add(page).min(last), x),
+            _ => return,
+        };
+        area.move_to(to, shift);
+    }
+}
+
+/// The byte ranges of the lines `text` is drawn in, `width` wide at `size`
+/// and `weight`: each line Enter made, broken where `guitk::text::wrap`
+/// breaks it. The space at a break is in neither line, as it is drawn in
+/// neither.
+fn line_ranges(text: &str, width: f32, size: f32, weight: FontWeightHint) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut start: usize = 0;
+    for hard in text.split('\n') {
+        let end = start.saturating_add(hard.len());
+        if hard.is_empty() || text::measure(hard, size, weight) <= width {
+            out.push((start, end));
+        } else {
+            let mut at = start;
+            for piece in text::wrap(hard, width, size, weight) {
+                match text.get(at..end).and_then(|rest| rest.find(piece.as_str())) {
+                    Some(offset) => {
+                        let from = at.saturating_add(offset);
+                        let to = from.saturating_add(piece.len());
+                        out.push((from, to));
+                        at = to;
+                    }
+                    // A piece the wrapper changed: the rest of the line, as
+                    // one, so that no byte is lost from the drawing.
+                    None => {
+                        out.push((at, end));
+                        at = end;
+                        break;
+                    }
+                }
+            }
+            if at == start {
+                out.push((start, end));
+            }
+        }
+        start = end.saturating_add(1);
+    }
+    out
+}
+
+/// How many of the notes' drawn lines `lines` to skip, for the caret at
+/// `caret` to be in the panel's three.
+fn notes_skip(lines: &[(usize, usize)], caret: usize) -> usize {
+    let at = lines
+        .iter()
+        .rposition(|&(start, _)| start <= caret)
+        .unwrap_or(0);
+    at.saturating_sub(NOTES_ROOM - 1)
+}
+
 /// The main presentation application state.
 #[derive(Debug)]
 pub struct SlidesApp {
@@ -1079,8 +1200,12 @@ pub struct SlidesApp {
     window_height: f32,
     /// Current view mode.
     view: ViewMode,
-    /// Undo/redo manager.
-    undo_mgr: UndoManager,
+    /// Every deck there has been since this one was begun or opened, as a
+    /// tree: an edit after an undo keeps what was undone as a branch, reached
+    /// with Alt+Z (C-Q24, `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go
+    /// back and forth along the branch the deck is on; Alt+Z and Alt+Shift+Z
+    /// walk every deck there has been, in the order each was made.
+    undo_mgr: StateHistory<Snapshot>,
     /// Clipboard (for slide copy/paste).
     clipboard: Clipboard,
     /// Currently selected element ID on the active slide (if any).
@@ -1097,7 +1222,18 @@ pub struct SlidesApp {
     /// forever. The buffer is held here rather than written straight into the
     /// element so that `Escape` and `Enter` can mean different things -- and
     /// the element is named by id, because the selection can move.
-    editing: Option<(EditTarget, String)>,
+    ///
+    /// The words are a `TextArea`, with a caret and a selection: they were a
+    /// string typed onto the end of, and Backspace from the end was the only
+    /// edit -- no arrow key moved anything, and a press on the words did
+    /// nothing.
+    editing: Option<(EditTarget, TextArea)>,
+    /// What Ctrl+C or Ctrl+X last took from the words being typed, for Ctrl+V.
+    edit_clipboard: String,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    focus_ring_width: f32,
     /// Title of the presentation.
     title: String,
     /// The user's colours, replaced whenever the theme changes.
@@ -1163,12 +1299,14 @@ impl SlidesApp {
             window_width: width,
             window_height: height,
             view: ViewMode::Edit,
-            undo_mgr: UndoManager::new(MAX_UNDO),
+            undo_mgr: StateHistory::new(UNDO_LIMIT),
             clipboard: Clipboard::Empty,
             selected_element: None,
             show_notes: true,
             show_help: false,
             editing: None,
+            edit_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             title: String::from("Untitled Presentation"),
             deck_path: None,
             dirty: false,
@@ -1393,7 +1531,7 @@ impl SlidesApp {
 
     // ---- Undo/Redo ---------------------------------------------------------
 
-    /// The deck as it is, for the undo stack.
+    /// The deck as it is, for the history.
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             slides: self.slides.clone(),
@@ -1406,7 +1544,7 @@ impl SlidesApp {
     /// that it has changed since it was saved.
     fn checkpoint(&mut self) {
         let now = self.snapshot();
-        self.undo_mgr.save(now);
+        self.undo_mgr.begin(now);
         self.dirty = true;
     }
 
@@ -1419,20 +1557,45 @@ impl SlidesApp {
         self.selected_element = None;
     }
 
-    /// Undo the last action.
-    pub fn undo(&mut self) {
+    /// Undo the last action. Returns whether there was one.
+    pub fn undo(&mut self) -> bool {
         let now = self.snapshot();
-        if let Some(snap) = self.undo_mgr.undo(now) {
-            self.restore(snap);
-        }
+        let snap = self.undo_mgr.undo(now);
+        self.put_back(snap)
     }
 
-    /// Redo the last undone action.
-    pub fn redo(&mut self) {
+    /// Redo an action undone, on the branch the deck is on. Returns whether
+    /// there was one.
+    pub fn redo(&mut self) -> bool {
         let now = self.snapshot();
-        if let Some(snap) = self.undo_mgr.redo(now) {
-            self.restore(snap);
-        }
+        let snap = self.undo_mgr.redo(now);
+        self.put_back(snap)
+    }
+
+    /// Go to the deck as it was before this one was first reached, on
+    /// whichever branch -- Alt+Z. Returns whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let now = self.snapshot();
+        let snap = self.undo_mgr.earlier(now);
+        self.put_back(snap)
+    }
+
+    /// Go to the deck first reached after this one, on whichever branch --
+    /// Alt+Shift+Z. Returns whether there was one.
+    pub fn later(&mut self) -> bool {
+        let now = self.snapshot();
+        let snap = self.undo_mgr.later(now);
+        self.put_back(snap)
+    }
+
+    /// [`restore`](Self::restore) the deck the history handed back, if it
+    /// handed one back.
+    fn put_back(&mut self, snap: Option<Snapshot>) -> bool {
+        let Some(snap) = snap else {
+            return false;
+        };
+        self.restore(snap);
+        true
     }
 
     // ---- Theme -------------------------------------------------------------
@@ -1467,8 +1630,15 @@ impl SlidesApp {
         let Some(words) = self.element_words(eid) else {
             return EventResult::Ignored;
         };
-        self.editing = Some((EditTarget::Element(eid), words));
+        self.editing = Some((EditTarget::Element(eid), Self::area_of(&words)));
         EventResult::Consumed
+    }
+
+    /// The words `seed` to be typed into, the caret after them.
+    fn area_of(seed: &str) -> TextArea {
+        let mut area = TextArea::new(14.0);
+        area.set_text(seed);
+        area
     }
 
     /// The words typing into element `eid` starts from, or `None` for an
@@ -1541,7 +1711,7 @@ impl SlidesApp {
         let seed = self.current_notes().to_owned();
         // Shown while they are typed, whether or not the panel was up.
         self.show_notes = true;
-        self.editing = Some((EditTarget::Notes, seed));
+        self.editing = Some((EditTarget::Notes, Self::area_of(&seed)));
         EventResult::Consumed
     }
 
@@ -1556,43 +1726,313 @@ impl SlidesApp {
         } else {
             self.title.clone()
         };
-        self.editing = Some((EditTarget::DeckTitle, seed));
+        self.editing = Some((EditTarget::DeckTitle, Self::area_of(&seed)));
         EventResult::Consumed
     }
 
     /// Keys while a text box is being typed into.
+    ///
+    /// Escape and Enter, plain, leave and keep the words; Shift+Enter is the
+    /// second line, where the words can have one. The arrows, Home and End
+    /// move through the lines as they are drawn -- wrapped at the box's edge
+    /// -- and every other key is the words' editor's (`TextArea::apply_key`):
+    /// Left and Right, Backspace and Delete at the caret, Ctrl+A, C, X and V,
+    /// and typing, which knows a command from AltGr -- Polish `ż` is AltGr+Z
+    /// -- and takes no control character: Tab's `\t` is no part of a box.
     fn handle_editing_key(&mut self, key: &KeyEvent) -> EventResult {
-        let Some((target, mut buf)) = self.editing.clone() else {
+        let Some((target, mut area)) = self.editing.clone() else {
             return EventResult::Ignored;
         };
-        match key.key {
-            // Leaving keeps the words, on either key. Losing what was typed
-            // because the exit key was the cancelling one is the worst thing
-            // an editor can do, and `Escape` is how anyone leaves a box.
-            Key::Escape | Key::Enter if !key.modifiers.shift => {
-                self.commit_editing(target, &buf);
-                self.editing = None;
-                EventResult::Consumed
+        let plain = textline::is_plain(key.modifiers);
+        let shift = key.modifiers.shift;
+        // Leaving keeps the words, on either key. Losing what was typed
+        // because the exit key was the cancelling one is the worst thing an
+        // editor can do, and `Escape` is how anyone leaves a box.
+        if plain && !shift && matches!(key.key, Key::Escape | Key::Enter) {
+            self.commit_editing(target, area.text());
+            self.editing = None;
+            return EventResult::Consumed;
+        }
+        let capacity = if target == EditTarget::DeckTitle {
+            TITLE_CAPACITY
+        } else {
+            EDIT_CAPACITY
+        };
+        let moves = matches!(
+            key.key,
+            Key::Up | Key::Down | Key::Home | Key::End | Key::PageUp | Key::PageDown
+        );
+        let handled = if key.key == Key::Enter {
+            // Shift+Enter is the second line -- where there can be one. A
+            // deck's name and an image's label are one line each.
+            if plain && shift && !self.one_line(target) {
+                area.insert("\n", capacity);
             }
-            // Shift+Enter is the second line.
-            Key::Enter => {
-                buf.push('\n');
-                self.editing = Some((target, buf));
-                EventResult::Consumed
-            }
-            Key::Backspace => {
-                buf.pop();
-                self.editing = Some((target, buf));
-                EventResult::Consumed
-            }
-            _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
-                    return EventResult::Ignored;
+            true
+        } else if moves && !textline::is_alt_or_windows_chord(key.modifiers) {
+            match self.edit_layout() {
+                Some(layout) => {
+                    layout.step(&mut area, key);
+                    true
                 }
-                buf.push_str(&key.text);
-                self.editing = Some((target, buf));
-                EventResult::Consumed
+                None => false,
             }
+        } else {
+            let edit = area.apply_key(key, capacity, &self.edit_clipboard, 1);
+            if let Some(copied) = edit.copied {
+                self.edit_clipboard = copied;
+            }
+            edit.handled
+        };
+        self.editing = Some((target, area));
+        if handled {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Whether the words typed into `target` are one line: the deck's name,
+    /// and an image's label.
+    fn one_line(&self, target: EditTarget) -> bool {
+        match target {
+            EditTarget::DeckTitle => true,
+            EditTarget::Notes => false,
+            EditTarget::Element(eid) => matches!(
+                self.slides
+                    .get(self.current_index)
+                    .and_then(|slide| slide.element_by_id(eid)),
+                Some(SlideElement::Image { .. })
+            ),
+        }
+    }
+
+    /// The words being typed, as they are drawn: each line's bytes and
+    /// where it starts. One answer for the drawing, the caret, a press and
+    /// the arrows -- or `None` with nothing being typed.
+    fn edit_layout(&self) -> Option<EditLayout> {
+        let (target, area) = self.editing.as_ref()?;
+        let words = area.text();
+        match *target {
+            EditTarget::DeckTitle => Some(EditLayout {
+                lines: vec![DrawnLine {
+                    start: 0,
+                    end: words.len(),
+                    x: TITLE_BOX.0 + 6.0,
+                    y: 12.0,
+                }],
+                size: 14.0,
+                weight: FontWeightHint::Bold,
+                line_h: 14.0 * 1.25,
+                caret_color: self.palette.text,
+            }),
+            EditTarget::Notes => {
+                let notes_y = self.window_height - STATUS_BAR_HEIGHT - NOTES_HEIGHT;
+                let notes_w = (self.window_width - SIDEBAR_WIDTH - PROPERTIES_WIDTH).max(0.0);
+                let width = (notes_w - 20.0).max(1.0);
+                let ranges = line_ranges(words, width, 12.0, FontWeightHint::Regular);
+                let skip = notes_skip(&ranges, area.caret());
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a line count far below f32's integer-exact range"
+                )]
+                let lines = ranges
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(start, end))| DrawnLine {
+                        start,
+                        end,
+                        x: SIDEBAR_WIDTH + 10.0,
+                        y: notes_y + 24.0 + (i as f32 - skip as f32) * 16.0,
+                    })
+                    .collect();
+                Some(EditLayout {
+                    lines,
+                    size: 12.0,
+                    weight: FontWeightHint::Regular,
+                    line_h: 16.0,
+                    caret_color: self.palette.text,
+                })
+            }
+            EditTarget::Element(eid) => {
+                let element = self.slides.get(self.current_index)?.element_by_id(eid)?;
+                let (ox, oy, scale) = self.canvas_geometry();
+                match element {
+                    SlideElement::TextBox {
+                        x,
+                        y,
+                        width,
+                        font_size,
+                        color,
+                        bold,
+                        centered,
+                        ..
+                    } => {
+                        let (fx, fy, fw, fs) = (
+                            ox + x * scale,
+                            oy + y * scale,
+                            width * scale,
+                            font_size * scale,
+                        );
+                        let weight = if *bold {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        };
+                        let line_h = fs * 1.25;
+                        #[allow(
+                            clippy::cast_precision_loss,
+                            reason = "a line count far below f32's integer-exact range"
+                        )]
+                        let lines = line_ranges(words, fw, fs, weight)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, (start, end))| {
+                                let line = words.get(start..end).unwrap_or("");
+                                DrawnLine {
+                                    start,
+                                    end,
+                                    x: if *centered {
+                                        text::center_x(line, fx + fw / 2.0, fs, weight).max(fx)
+                                    } else {
+                                        fx
+                                    },
+                                    y: fy + i as f32 * line_h,
+                                }
+                            })
+                            .collect();
+                        Some(EditLayout {
+                            lines,
+                            size: fs,
+                            weight,
+                            line_h,
+                            caret_color: *color,
+                        })
+                    }
+                    SlideElement::BulletList {
+                        x,
+                        y,
+                        width,
+                        font_size,
+                        color,
+                        ..
+                    } => {
+                        let (bx, by, bw, fs) = (
+                            ox + x * scale,
+                            oy + y * scale,
+                            width * scale,
+                            font_size * scale,
+                        );
+                        let line_h = fs * 1.6;
+                        let indent = text::measure("\u{2022} ", fs, FontWeightHint::Regular);
+                        let mut lines = Vec::new();
+                        let mut item_start: usize = 0;
+                        for item in words.split('\n') {
+                            for (start, end) in line_ranges(
+                                item,
+                                (bw - indent).max(1.0),
+                                fs,
+                                FontWeightHint::Regular,
+                            ) {
+                                #[allow(
+                                    clippy::cast_precision_loss,
+                                    reason = "a line count far below f32's integer-exact range"
+                                )]
+                                let line_y = by + lines.len() as f32 * line_h;
+                                lines.push(DrawnLine {
+                                    start: item_start.saturating_add(start),
+                                    end: item_start.saturating_add(end),
+                                    x: bx + indent,
+                                    y: line_y,
+                                });
+                            }
+                            item_start = item_start.saturating_add(item.len()).saturating_add(1);
+                        }
+                        Some(EditLayout {
+                            lines,
+                            size: fs,
+                            weight: FontWeightHint::Regular,
+                            line_h,
+                            caret_color: *color,
+                        })
+                    }
+                    SlideElement::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => {
+                        let (ix, iy, iw, ih) = (
+                            ox + x * scale,
+                            oy + y * scale,
+                            width * scale,
+                            height * scale,
+                        );
+                        let size = 14.0 * scale;
+                        Some(EditLayout {
+                            lines: vec![DrawnLine {
+                                start: 0,
+                                end: words.len(),
+                                x: text::center_x(
+                                    words,
+                                    ix + iw / 2.0,
+                                    size,
+                                    FontWeightHint::Regular,
+                                )
+                                .max(ix),
+                                y: iy + ih * 0.45,
+                            }],
+                            size,
+                            weight: FontWeightHint::Regular,
+                            line_h: size * 1.25,
+                            caret_color: self.palette.subtext0,
+                        })
+                    }
+                    SlideElement::Shape { .. } => None,
+                }
+            }
+        }
+    }
+
+    /// Draw the caret and the selection of the words being typed, over the
+    /// words -- each where `edit_layout` says it is drawn.
+    fn render_edit_overlay(
+        &self,
+        f: &mut Frame<Target>,
+        layout: &EditLayout,
+        area: &TextArea,
+        clip: Rect,
+    ) {
+        let words = area.text();
+        if let Some((a, b)) = area.selection() {
+            for line in &layout.lines {
+                let (from, to) = (a.max(line.start), b.min(line.end));
+                if from >= to || line.y < clip.y || line.y + layout.size > clip.bottom() {
+                    continue;
+                }
+                let x1 = layout.x_of(words, line, from);
+                let x2 = layout.x_of(words, line, to);
+                f.push(RenderCommand::FillRect {
+                    x: x1,
+                    y: line.y,
+                    width: (x2 - x1).max(1.0),
+                    height: layout.size,
+                    color: with_alpha(self.palette.accent, 110),
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
+        }
+        let (cx, cy) = layout.point_of(words, area.caret());
+        if cy >= clip.y && cy + layout.size <= clip.bottom() + 0.5 {
+            f.push(RenderCommand::FillRect {
+                x: cx,
+                y: cy,
+                width: textedit::CARET_WIDTH,
+                height: layout.size,
+                color: layout.caret_color,
+                corner_radii: CornerRadii::ZERO,
+            });
         }
     }
 
@@ -2379,7 +2819,7 @@ impl SlidesApp {
     fn request_close(&mut self) -> bool {
         // Words being typed into a box are part of the deck.
         if let Some((edit, buf)) = self.editing.take() {
-            self.commit_editing(edit, &buf);
+            self.commit_editing(edit, buf.text());
         }
         if !self.dirty {
             return true;
@@ -2458,7 +2898,7 @@ impl SlidesApp {
                 self.current_index = 0;
                 self.selected_element = None;
                 self.editing = None;
-                self.undo_mgr = UndoManager::new(MAX_UNDO);
+                self.undo_mgr.clear();
                 self.deck_path = Some(path.to_path_buf());
                 self.dirty = false;
                 self.view = ViewMode::Edit;
@@ -2665,6 +3105,22 @@ impl SlidesApp {
     fn handle_command_key(&mut self, key: &KeyEvent, ctrl: bool, shift: bool) -> EventResult {
         let editing_view = self.view == ViewMode::Edit;
         match key.key {
+            // Alt+Z and Alt+Shift+Z: every deck there has been, in the order
+            // each was made -- the way back to a branch undone out of.
+            Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key => {
+                let moved = if shift { self.later() } else { self.earlier() };
+                if moved {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // Any other key held with Alt or the Windows key is not this
+            // window's: Windows+ keys are the desktop's, and AltGr -- which
+            // arrives as Ctrl+Alt -- types a letter (Polish AltGr+Z is ż),
+            // which is no chord and must not be taken for the shape on its
+            // plain key either.
+            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,
             // The shortcut list. `F1` raises it in every app in this tree,
             // including `apps/spreadsheet`, where `?` is a character the
             // program has to be able to type into a cell -- so somebody who
@@ -2872,7 +3328,7 @@ impl SlidesApp {
     /// anything open over the editor is put away.
     fn present(&mut self, from: usize) -> EventResult {
         if let Some((edit, buf)) = self.editing.take() {
-            self.commit_editing(edit, &buf);
+            self.commit_editing(edit, buf.text());
         }
         self.layout_menu = None;
         self.show_help = false;
@@ -3152,28 +3608,63 @@ impl SlidesApp {
             width: 1.0,
         });
 
-        // The deck's name, which a press lets you change (Ctrl+Shift+T).
-        let title = Rect::new(6.0, 6.0, 202.0, 28.0);
-        if self.hover == Some(Target::Tool(Tool::Title)) {
-            f.push(RenderCommand::FillRect {
-                x: title.x,
-                y: title.y,
-                width: title.w,
-                height: title.h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_R),
+        // The deck's name, which a press lets you change (Ctrl+Shift+T). While
+        // it is typed it is the toolkit's field, holding what is typed: the
+        // toolbar showed the old name until Enter, so the new one was typed
+        // blind.
+        let title = Rect::new(TITLE_BOX.0, TITLE_BOX.1, TITLE_BOX.2, TITLE_BOX.3);
+        if let Some((EditTarget::DeckTitle, area)) = &self.editing {
+            let mut tree = RenderTree::new();
+            field::draw(
+                &mut tree,
+                &self.palette,
+                title,
+                field::State {
+                    hovered: false,
+                    focused: !self.show_help,
+                    disabled: false,
+                    invalid: false,
+                },
+                self.focus_ring_width,
+            );
+            for command in tree.commands {
+                f.push(command);
+            }
+            f.push(RenderCommand::Text {
+                x: title.x + 6.0,
+                y: 12.0,
+                text: area.text().to_owned(),
+                color: self.palette.text,
+                font_size: 14.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(title.w - 12.0),
+                overflow: TextOverflow::Clip,
+            });
+            if let Some(layout) = self.edit_layout() {
+                self.render_edit_overlay(f, &layout, area, title);
+            }
+        } else {
+            if self.hover == Some(Target::Tool(Tool::Title)) {
+                f.push(RenderCommand::FillRect {
+                    x: title.x,
+                    y: title.y,
+                    width: title.w,
+                    height: title.h,
+                    color: self.palette.surface0,
+                    corner_radii: CornerRadii::all(CORNER_R),
+                });
+            }
+            f.push(RenderCommand::Text {
+                x: 12.0,
+                y: 12.0,
+                text: self.title.clone(),
+                color: self.palette.text,
+                font_size: 14.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(192.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
-        f.push(RenderCommand::Text {
-            x: 12.0,
-            y: 12.0,
-            text: self.title.clone(),
-            color: self.palette.text,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(192.0),
-            overflow: TextOverflow::Ellipsis,
-        });
         f.hit(Target::Tool(Tool::Title), title);
 
         for (tool, rect, label, enabled) in self.tool_rects() {
@@ -3583,6 +4074,11 @@ impl SlidesApp {
             self.render_element(f, element, cx, cy, scale);
             f.hit(Target::Element(element.id()), self.element_rect(element));
         }
+        if let Some((EditTarget::Element(_), area)) = &self.editing
+            && let Some(layout) = self.edit_layout()
+        {
+            self.render_edit_overlay(f, &layout, area, slide_rect);
+        }
         f.unclip();
 
         // The selection, with a handle at each corner for resizing.
@@ -3640,15 +4136,10 @@ impl SlidesApp {
     /// box typed with Shift+Enter showed its lines run together, and a long
     /// line was cut with an ellipsis instead of wrapping.
     fn box_lines(text: &str, width: f32, size: f32, weight: FontWeightHint) -> Vec<String> {
-        let mut out = Vec::new();
-        for line in text.split('\n') {
-            if line.is_empty() || guitk::text::measure(line, size, weight) <= width {
-                out.push(line.to_owned());
-            } else {
-                out.extend(guitk::text::wrap(line, width, size, weight));
-            }
-        }
-        out
+        line_ranges(text, width, size, weight)
+            .into_iter()
+            .map(|(start, end)| text.get(start..end).unwrap_or("").to_owned())
+            .collect()
     }
 
     /// Render a single slide element at the given offset and scale.
@@ -3665,7 +4156,7 @@ impl SlidesApp {
         // the element would leave the user typing at a slide that never
         // changes.
         let typing = match &self.editing {
-            Some((EditTarget::Element(eid), buf)) if *eid == elem.id() => Some(buf.as_str()),
+            Some((EditTarget::Element(eid), area)) if *eid == elem.id() => Some(area.text()),
             _ => None,
         };
         match elem {
@@ -3693,7 +4184,6 @@ impl SlidesApp {
                 let line_h = fs * 1.25;
                 let lines = Self::box_lines(words, fw, fs, weight);
                 let mut line_y = fy;
-                let mut last_end = fx;
                 for line in &lines {
                     // Centred on the box: it was nudged a tenth of the way in
                     // and called centred, which no line of any length was.
@@ -3702,7 +4192,6 @@ impl SlidesApp {
                     } else {
                         fx
                     };
-                    last_end = lx + guitk::text::measure(line, fs, weight).min(fw);
                     f.push(RenderCommand::Text {
                         x: lx,
                         y: line_y,
@@ -3718,18 +4207,8 @@ impl SlidesApp {
                     });
                     line_y += line_h;
                 }
-                if typing.is_some() {
-                    // Where the next character goes.
-                    let caret_y = (line_y - line_h).max(fy);
-                    f.push(RenderCommand::FillRect {
-                        x: last_end + 1.0,
-                        y: caret_y,
-                        width: 2.0,
-                        height: fs,
-                        color: self.palette.sky,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
+                // The caret and the selection are drawn over the slide by
+                // `render_edit_overlay`, from the same lines.
             }
             SlideElement::Shape {
                 kind,
@@ -4225,7 +4704,7 @@ impl SlidesApp {
         let nx = SIDEBAR_WIDTH;
         let panel = Rect::new(nx, notes_y, notes_w, NOTES_HEIGHT);
         let typing = match &self.editing {
-            Some((EditTarget::Notes, buf)) => Some(buf.as_str()),
+            Some((EditTarget::Notes, area)) => Some(area.text()),
             _ => None,
         };
 
@@ -4271,14 +4750,16 @@ impl SlidesApp {
         } else {
             Self::box_lines(words, width, 12.0, FontWeightHint::Regular)
         };
-        // Three lines fit. While typing, the last three -- where the words
-        // are going; otherwise the first three, the last of them marked if
-        // there is more.
-        const ROOM: usize = 3;
-        let skip = if typing.is_some() {
-            lines.len().saturating_sub(ROOM)
-        } else {
-            0
+        // Three lines fit. While typing, the three round the caret -- where
+        // the words are going; otherwise the first three, the last of them
+        // marked if there is more.
+        const ROOM: usize = NOTES_ROOM;
+        let skip = match &self.editing {
+            Some((EditTarget::Notes, area)) => notes_skip(
+                &line_ranges(area.text(), width, 12.0, FontWeightHint::Regular),
+                area.caret(),
+            ),
+            _ => 0,
         };
         let more = typing.is_none() && lines.len() > ROOM;
         for (i, line) in lines.iter().skip(skip).take(ROOM).enumerate() {
@@ -4301,6 +4782,11 @@ impl SlidesApp {
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
             });
+        }
+        if let Some((EditTarget::Notes, area)) = &self.editing
+            && let Some(layout) = self.edit_layout()
+        {
+            self.render_edit_overlay(f, &layout, area, panel);
         }
         f.hit(Target::Notes, panel);
     }
@@ -4670,13 +5156,22 @@ impl SlidesApp {
                 if let Some((edit, buf)) = self.editing.clone() {
                     let inside = match (edit, target) {
                         (EditTarget::Element(eid), Some(Target::Element(on))) => eid == on,
-                        (EditTarget::Notes, Some(Target::Notes)) => true,
+                        (EditTarget::Notes, Some(Target::Notes))
+                        | (EditTarget::DeckTitle, Some(Target::Tool(Tool::Title))) => true,
                         _ => false,
                     };
                     if inside {
-                        return EventResult::Ignored;
+                        // A press on the words puts the caret under the
+                        // pointer. It did nothing.
+                        if let Some(layout) = self.edit_layout()
+                            && let Some((_, area)) = self.editing.as_mut()
+                        {
+                            let at = layout.offset_at(area.text(), event.x, event.y);
+                            area.move_to(at, false);
+                        }
+                        return EventResult::Consumed;
                     }
-                    self.commit_editing(edit, &buf);
+                    self.commit_editing(edit, buf.text());
                     self.editing = None;
                     finished = true;
                 }
@@ -5397,6 +5892,10 @@ impl App for SlidesApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     /// A leading `*` while there are changes that are not saved.
     fn title(&self) -> String {
         format!(
@@ -5852,6 +6351,396 @@ mod tests {
             format!("{elem:?}").contains("\"Hi\""),
             "the words are not in the element: {elem:?}"
         );
+    }
+
+    /// **A box takes what AltGr types, and no command's letter.** AltGr
+    /// arrives as Ctrl+Alt -- `ż` is AltGr+Z on a Polish keyboard -- and was
+    /// refused with every key held with Ctrl. A command carries its letter
+    /// as text on a real machine (Ctrl+K arrives as `k`, Alt+F as `f`), and
+    /// Alt's and the Windows key's were typed; so was Tab's `\t`.
+    #[test]
+    fn a_box_takes_altgr_letters_and_no_commands_letter() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+        let seed = app
+            .editing
+            .clone()
+            .expect("Enter began typing")
+            .1
+            .text()
+            .to_owned();
+        let held = |key: Key, modifiers: Modifiers, text: &str| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed,
+            "AltGr+Z was refused"
+        );
+        for (key, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+            (Key::Tab, Modifiers::NONE, "\t"),
+        ] {
+            assert_eq!(
+                app.handle_event(&held(key, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?} was typed"
+            );
+        }
+        let typed = app.editing.clone().expect("still typing").1;
+        assert_eq!(typed.text(), format!("{seed}\u{17c}"));
+    }
+
+    /// The words being typed.
+    fn words(app: &SlidesApp) -> String {
+        app.editing
+            .as_ref()
+            .map(|(_, area)| area.text().to_owned())
+            .expect("nothing is being typed")
+    }
+
+    /// The caret's offset in the words being typed.
+    fn caret(app: &SlidesApp) -> usize {
+        app.editing
+            .as_ref()
+            .map(|(_, area)| area.caret())
+            .expect("nothing is being typed")
+    }
+
+    /// `k` held with Ctrl.
+    fn ctrl_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// A left press at `(x, y)`.
+    fn press_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// Whether the caret is drawn where the layout puts it: a fill the
+    /// caret's width at the caret's point.
+    fn caret_is_drawn(app: &SlidesApp) -> bool {
+        let layout = app.edit_layout().expect("nothing is being typed");
+        let (x, y) = layout.point_of(&words(app), caret(app));
+        app.render_commands().iter().any(|c| {
+            matches!(c, RenderCommand::FillRect { x: cx, y: cy, width, .. }
+                if (cx - x).abs() < 0.01
+                    && (cy - y).abs() < 0.01
+                    && (width - textedit::CARET_WIDTH).abs() < 0.01)
+        })
+    }
+
+    /// **Typing into a box edits at a caret that moves**: Left, Home and End,
+    /// Backspace and Delete at the caret, Shift to select and typing over the
+    /// selection, Ctrl+A, X and V, and Shift+Enter's second line -- with the
+    /// caret drawn where the words are going. The words were a string typed
+    /// onto the end of; Backspace from the end was the only edit.
+    #[test]
+    fn typing_into_a_box_edits_at_a_caret_that_moves() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("hello world"));
+        assert!(caret_is_drawn(&app), "no caret after the words");
+        for _ in 0..5 {
+            app.handle_event(&press(Key::Left));
+        }
+        app.handle_event(&types("X"));
+        assert_eq!(words(&app), "hello Xworld", "Left did not move the caret");
+        assert!(caret_is_drawn(&app), "the caret is not drawn where it is");
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&types("A"));
+        assert_eq!(words(&app), "Ahello Xworld", "Home did not go to the start");
+        app.handle_event(&press(Key::End));
+        app.handle_event(&press(Key::Backspace));
+        assert_eq!(
+            words(&app),
+            "Ahello Xworl",
+            "End or Backspace did not edit the end"
+        );
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            words(&app),
+            "hello Xworl",
+            "Delete did not delete at the caret"
+        );
+        app.handle_event(&press_shift(Key::End));
+        app.handle_event(&types("bye"));
+        assert_eq!(words(&app), "bye", "typing did not replace the selection");
+        app.handle_event(&ctrl_key(Key::A));
+        app.handle_event(&ctrl_key(Key::X));
+        assert_eq!(words(&app), "", "Ctrl+A and Ctrl+X did not cut");
+        app.handle_event(&ctrl_key(Key::V));
+        app.handle_event(&ctrl_key(Key::V));
+        assert_eq!(words(&app), "byebye", "Ctrl+V did not paste what was cut");
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("2"));
+        assert_eq!(words(&app), "byebye\n2", "Shift+Enter made no second line");
+        assert!(caret_is_drawn(&app), "the caret is not on the second line");
+
+        app.handle_event(&press(Key::Escape));
+        assert!(app.editing.is_none(), "control: Escape leaves");
+        assert_eq!(
+            app.element_words(app.selected_element.expect("a box")),
+            Some(String::from("byebye\n2")),
+            "the words were not kept"
+        );
+    }
+
+    /// **The arrows move through the lines as they are drawn**: a box's words
+    /// wrap at its edge, so Down from the first line goes to the second as
+    /// drawn, and Home and End go to the ends of the line the caret is on.
+    #[test]
+    fn the_arrows_move_through_the_lines_as_drawn() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types(&"word ".repeat(40)));
+        let layout = app.edit_layout().expect("typing");
+        assert!(
+            layout.lines.len() >= 3,
+            "the fixture does not wrap: {:?}",
+            layout.lines
+        );
+
+        app.handle_event(&ctrl_key(Key::Home));
+        assert_eq!(caret(&app), 0, "Ctrl+Home did not go to the start");
+        app.handle_event(&press(Key::Down));
+        let layout = app.edit_layout().expect("typing");
+        assert_eq!(
+            layout.line_of(caret(&app)),
+            1,
+            "Down did not go to the drawn second line"
+        );
+        assert!(
+            caret_is_drawn(&app),
+            "the caret is not drawn on the second line"
+        );
+        app.handle_event(&press(Key::End));
+        assert_eq!(
+            caret(&app),
+            layout.lines[1].end,
+            "End did not go to the line's end"
+        );
+        app.handle_event(&press(Key::Home));
+        assert_eq!(
+            caret(&app),
+            layout.lines[1].start,
+            "Home did not go to the line's start"
+        );
+        app.handle_event(&press(Key::Up));
+        assert_eq!(caret(&app), 0, "Up did not go back to the first line");
+        app.handle_event(&ctrl_key(Key::End));
+        assert_eq!(
+            caret(&app),
+            words(&app).len(),
+            "Ctrl+End did not go to the end"
+        );
+        app.handle_event(&press_shift(Key::Up));
+        let selected = app
+            .editing
+            .as_ref()
+            .and_then(|(_, area)| area.selection())
+            .expect("Shift+Up selected nothing");
+        assert!(selected.1 == words(&app).len() && selected.0 < selected.1);
+    }
+
+    /// **A press on the words puts the caret under the pointer.** It did
+    /// nothing.
+    #[test]
+    fn a_press_on_the_words_puts_the_caret_there() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("abcdef"));
+        let layout = app.edit_layout().expect("typing");
+        let line = layout.lines[0];
+        let x = line.x + text::measure("ab", layout.size, layout.weight);
+        app.handle_event(&press_at(x, line.y + layout.size / 2.0));
+        assert!(
+            app.editing.is_some(),
+            "a press on the words stopped the typing"
+        );
+        assert_eq!(caret(&app), 2, "the caret is not where the press was");
+        app.handle_event(&types("X"));
+        assert_eq!(words(&app), "abXcdef");
+    }
+
+    /// **A list being typed into shows its caret.** A text box drew one; a
+    /// list drew none, so the words of a bullet went in with nothing to say
+    /// where.
+    #[test]
+    fn a_list_being_typed_into_shows_its_caret() {
+        let mut app = fresh();
+        app.handle_event(&press_ctrl(Key::N));
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Tab));
+        assert!(matches!(
+            app.selected(),
+            Some(SlideElement::BulletList { .. })
+        ));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("Alpha"));
+        assert!(caret_is_drawn(&app), "no caret in the list");
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("Be"));
+        let layout = app.edit_layout().expect("typing");
+        assert_eq!(
+            layout.line_of(caret(&app)),
+            1,
+            "the caret is not on the second bullet"
+        );
+        assert!(caret_is_drawn(&app), "no caret on the second bullet");
+        // Where the second bullet's words are drawn, measured from what is
+        // on it: the layout's own offsets cannot vouch for themselves.
+        let line = layout.lines[1];
+        let (x, _) = layout.point_of(&words(&app), caret(&app));
+        let want = line.x + text::measure("Be", layout.size, layout.weight);
+        assert!(
+            (x - want).abs() < 0.5,
+            "the caret is at {x}, after `Be` is {want}"
+        );
+        let first = layout.lines[0];
+        let bullet = text::measure("\u{2022} ", layout.size, FontWeightHint::Regular);
+        let rows = app.render_commands();
+        let alpha_x = rows.iter().find_map(|c| match c {
+            RenderCommand::Text { text, x, .. } if text.ends_with("Alpha") => Some(*x),
+            _ => None,
+        });
+        assert!(
+            alpha_x.is_some_and(|ax| (ax + bullet - first.x).abs() < 0.5),
+            "the words' line is not where the bullet's words are drawn"
+        );
+    }
+
+    /// **The deck's name is typed in a field on the toolbar**: the toolkit's
+    /// field, with the keyboard's mark at the user's width, holding what is
+    /// typed -- the toolbar showed the old name until Enter, so the new one
+    /// was typed blind -- and one line long.
+    #[test]
+    fn the_decks_name_is_typed_in_a_field_on_the_toolbar() {
+        let mut app = seeded();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.handle_event(&press_ctrl_shift(Key::T));
+        app.handle_event(&types("Plan"));
+        app.handle_event(&press_shift(Key::Enter));
+        assert_eq!(words(&app), "Plan", "the deck's name took a second line");
+
+        let cmds = app.render_commands();
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, y, .. } if *y < TOOLBAR_HEIGHT => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.contains(&"Plan"),
+            "the name being typed is not on the toolbar: {texts:?}"
+        );
+        assert!(
+            !texts.contains(&"Untitled Presentation"),
+            "the toolbar still shows the old name"
+        );
+        let rect = Rect::new(TITLE_BOX.0, TITLE_BOX.1, TITLE_BOX.2, TITLE_BOX.3);
+        let mut want: Vec<RenderCommand> = Vec::new();
+        field::draw(
+            &mut want,
+            &p,
+            rect,
+            field::State {
+                focused: true,
+                ..field::State::default()
+            },
+            app.focus_ring_width,
+        );
+        assert!(
+            cmds.windows(want.len()).any(|w| w == want.as_slice()),
+            "the name is not typed in the toolkit's field with the keyboard's mark"
+        );
+        assert!(caret_is_drawn(&app), "no caret in the name");
+
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.title, "Plan", "control: Enter names the deck");
+    }
+
+    /// **The notes panel follows the caret**: three lines fit, and they are
+    /// the three round the caret -- not always the last three.
+    #[test]
+    fn the_notes_panel_follows_the_caret() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::N));
+        assert!(
+            matches!(app.editing, Some((EditTarget::Notes, _))),
+            "control: N types notes"
+        );
+        app.handle_event(&ctrl_key(Key::A));
+        app.handle_event(&press(Key::Delete));
+        for (i, line) in ["one", "two", "three", "four", "five"].iter().enumerate() {
+            if i > 0 {
+                app.handle_event(&press_shift(Key::Enter));
+            }
+            app.handle_event(&types(line));
+        }
+        let shown = |app: &SlidesApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            shown(&app).contains(&String::from("five")),
+            "the caret's line is not shown"
+        );
+        assert!(
+            !shown(&app).contains(&String::from("one")),
+            "control: four lines do not fit"
+        );
+        app.handle_event(&ctrl_key(Key::Home));
+        assert!(
+            shown(&app).contains(&String::from("one")),
+            "the notes did not follow the caret up"
+        );
+        assert!(caret_is_drawn(&app), "no caret in the notes");
     }
 
     /// The slide shows the words as they are typed.
@@ -6562,76 +7451,167 @@ mod tests {
         assert!(s.remove_element(99999).is_none());
     }
 
-    // ---- UndoManager tests -------------------------------------------------
+    // ---- The history: a tree, walked with Alt+Z (C-Q24) --------------------
 
-    /// A snapshot of `slides` at `current_index`, in the Mocha theme.
-    fn snap(slides: &[Slide], current_index: usize) -> Snapshot {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        Snapshot {
-            slides: slides.to_vec(),
-            current_index,
-            theme: SlideTheme::mocha(&pal),
+    fn with_modifiers(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn alt_z(shift: bool) -> Event {
+        with_modifiers(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every deck there has been, in the order each was made, marking it
+    /// changed; Alt+Shift+Z comes forward again.
+    #[test]
+    fn an_edit_after_an_undo_keeps_the_undone_deck_reachable_with_alt_z() {
+        let mut app = fresh();
+        let before = element_count(&app);
+        app.handle_event(&press(Key::T));
+        assert!(app.undo());
+        assert_eq!(element_count(&app), before);
+        app.add_slide(SlideLayout::Blank);
+        assert!(!app.redo(), "redo went onto the branch left");
+        app.dirty = false;
+        assert_eq!(app.handle_event(&alt_z(false)), EventResult::Consumed);
+        assert_eq!(app.slide_count(), 1);
+        assert_eq!(
+            element_count(&app),
+            before + 1,
+            "the undone text box was lost"
+        );
+        assert!(app.dirty, "a journey did not mark the deck changed");
+        app.handle_event(&alt_z(false));
+        assert_eq!(element_count(&app), before);
+        app.handle_event(&alt_z(true));
+        app.handle_event(&alt_z(true));
+        assert_eq!(app.slide_count(), 2);
+        assert_eq!(
+            app.handle_event(&alt_z(true)),
+            EventResult::Ignored,
+            "past the newest deck"
+        );
+    }
+
+    /// **AltGr is not Ctrl.** It arrives as Ctrl+Alt; what it types -- ż on
+    /// a Polish keyboard -- is not a chord, so AltGr+Z undoes nothing.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        let with_box = element_count(&app);
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, altgr));
+        assert_eq!(element_count(&app), with_box, "AltGr+Z undid");
+    }
+
+    /// **Alt+Z held with the Windows key is the desktop's**, not a journey.
+    #[test]
+    fn alt_z_with_the_windows_key_goes_nowhere() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        let with_box = element_count(&app);
+        let super_alt = Modifiers {
+            alt: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, super_alt));
+        assert_eq!(element_count(&app), with_box, "Super+Alt+Z went back");
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is no shortcut
+    /// here.** T adds a text box; AltGr+T (Ctrl+Alt+T, a letter on some
+    /// layouts), Alt+T and Windows+T must not.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            let mut app = fresh();
+            let before = element_count(&app);
+            assert_eq!(
+                app.handle_event(&with_modifiers(Key::T, modifiers)),
+                EventResult::Ignored,
+                "{modifiers:?}"
+            );
+            assert_eq!(element_count(&app), before, "{modifiers:?}+T added a box");
         }
     }
 
+    /// **An edit made on another slide after an undo is undone onto that
+    /// slide.** Going to a slide is no edit, and the history once took the
+    /// edit's `before` from where the undo had left the deck -- so undoing
+    /// the edit jumped back to the slide the undo had shown.
     #[test]
-    fn test_undo_redo_basic() {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let theme = SlideTheme::mocha(&pal);
-        let mut id_gen = IdGen::new(700);
-        let s1 = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
-        let s2 = Slide::new(2, SlideLayout::TitleSlide, &theme, &mut id_gen);
-
-        let mut mgr = UndoManager::new(10);
-        assert!(!mgr.can_undo());
-        assert!(!mgr.can_redo());
-
-        // Save state [s1], then mutate to [s1, s2].
-        mgr.save(snap(std::slice::from_ref(&s1), 0));
-        let slides_after = vec![s1.clone(), s2];
-
-        // Undo: should restore [s1].
-        let back = mgr.undo(snap(&slides_after, 1));
-        assert!(back.is_some());
-        let back = back.unwrap();
-        assert_eq!(back.slides.len(), 1);
-        assert_eq!(back.current_index, 0);
-
-        // Can redo now.
-        assert!(mgr.can_redo());
-        let redo_snap = mgr.redo(snap(&back.slides, back.current_index));
-        assert!(redo_snap.is_some());
-        let redo_snap = redo_snap.unwrap();
-        assert_eq!(redo_snap.slides.len(), 2);
+    fn an_edit_after_an_undo_is_undone_onto_its_own_slide() {
+        let mut app = fresh();
+        app.add_slide(SlideLayout::Blank);
+        app.add_slide(SlideLayout::Blank);
+        assert!(app.undo());
+        assert_eq!(app.slide_count(), 2);
+        app.handle_event(&press(Key::Home));
+        assert_eq!(app.current_index(), 0);
+        let before = element_count(&app);
+        app.handle_event(&press(Key::T));
+        assert_eq!(element_count(&app), before + 1);
+        assert!(app.undo());
+        assert_eq!(
+            app.current_index(),
+            0,
+            "the edit was undone onto the slide the earlier undo showed"
+        );
+        assert_eq!(element_count(&app), before);
     }
 
+    /// **The history keeps the last hundred edits** and drops the oldest:
+    /// each holds a whole deck.
     #[test]
-    fn test_undo_max_depth() {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let theme = SlideTheme::mocha(&pal);
-        let mut id_gen = IdGen::new(800);
-        let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
-        let mut mgr = UndoManager::new(3);
-
-        for _ in 0..5 {
-            mgr.save(snap(std::slice::from_ref(&s), 0));
+    fn the_history_keeps_the_last_hundred_edits() {
+        let mut app = fresh();
+        for _ in 0..110 {
+            app.add_slide(SlideLayout::Blank);
         }
-        // Only 3 saved (max depth).
-        assert_eq!(mgr.undo_stack.len(), 3);
-    }
-
-    #[test]
-    fn test_save_clears_redo() {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let theme = SlideTheme::mocha(&pal);
-        let mut id_gen = IdGen::new(900);
-        let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
-        let mut mgr = UndoManager::new(10);
-        mgr.save(snap(std::slice::from_ref(&s), 0));
-        let _ = mgr.undo(snap(std::slice::from_ref(&s), 0));
-        assert!(mgr.can_redo());
-        mgr.save(snap(std::slice::from_ref(&s), 0));
-        assert!(!mgr.can_redo());
+        let mut undone = 0;
+        while undone <= MAX_UNDO && app.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, MAX_UNDO);
+        assert_eq!(
+            app.slide_count(),
+            11,
+            "not the deck before the oldest edit kept"
+        );
     }
 
     // ---- SlidesApp tests ---------------------------------------------------
@@ -7572,7 +8552,10 @@ mod tests {
         let Some((_, seed)) = &app.editing else {
             panic!("Enter did not start typing into the list");
         };
-        assert!(seed.is_empty(), "the list's prompts were kept: {seed:?}");
+        assert!(
+            seed.text().is_empty(),
+            "the list's prompts were kept: {seed:?}"
+        );
         app.handle_event(&types("Alpha"));
         app.handle_event(&press_shift(Key::Enter));
         app.handle_event(&press_shift(Key::Enter));
@@ -7583,7 +8566,7 @@ mod tests {
         };
         assert_eq!(items, &vec![String::from("Alpha"), String::from("Beta")]);
         app.handle_event(&press(Key::Enter));
-        assert!(matches!(&app.editing, Some((_, words)) if words == "Alpha\nBeta"));
+        assert!(matches!(&app.editing, Some((_, words)) if words.text() == "Alpha\nBeta"));
     }
 
     /// An image placeholder's label can be typed.
@@ -7976,6 +8959,30 @@ mod tests {
         assert_eq!(describe(&other), describe(&app));
         assert!(!other.dirty);
         assert_eq!(other.current_index, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An opened deck's history starts with it.** An undo reaching back
+    /// into the deck open before would put that one under the opened file's
+    /// name, for Ctrl+S to write over the file.
+    #[test]
+    fn an_opened_deck_cannot_be_undone_into_the_one_before() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("opened.slides");
+        let said = seeded().write_deck(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+        let mut app = fresh();
+        app.add_slide(SlideLayout::Blank);
+        let said = app.read_deck(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        let opened = describe(&app);
+        assert!(!app.undo(), "undo reached the deck before");
+        assert_eq!(
+            app.handle_event(&alt_z(false)),
+            EventResult::Ignored,
+            "Alt+Z reached the deck before"
+        );
+        assert_eq!(describe(&app), opened);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

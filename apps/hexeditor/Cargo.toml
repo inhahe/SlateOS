@@ -17,6 +17,9 @@ oswindow = { path = "../../gui/window" }
 safeio = { path = "../safeio" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
+# Whether a key types or is a command: a chord arrives carrying its letter,
+# and AltGr arrives as Ctrl+Alt and types.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

@@ -36,11 +36,15 @@ use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::listview::ListKey;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -1828,12 +1832,59 @@ pub struct SchedulerUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
+    /// The text box the pointer is over, if any, so it is drawn lit (lane C,
+    /// c-e-a-theme-can-shape-the-controls).
+    hover: Option<Target>,
+    /// Whether the list of keys is up.
+    pub show_help: bool,
+    /// The editor of the box with the keyboard: its caret and selection over
+    /// the box's text.
+    editor: TextInput,
+    /// Which box the editor was loaded for. A box the keyboard moves to is
+    /// loaded afresh even when it holds the same text as the last one, so
+    /// its caret starts after what it holds and not where the last box's
+    /// stood.
+    editor_for: Option<FormField>,
+    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
+    clipboard: String,
 }
+
+/// The most a box holds, in characters: a task's name or command, a cron
+/// expression.
+const FIELD_CAPACITY: usize = 1024;
+/// How far a box's text sits in from its left and right edges.
+const FIELD_TEXT_INSET: f32 = 6.0;
+
+/// The keys this window answers, as the F1 list shows them.
+///
+/// It had no list: F1 did nothing, and every key here could be found only by
+/// pressing it -- Delete, which puts a task's deletion to the user, and
+/// Space, which turns a task off, among them.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Ctrl+N", "A new task"),
+    ("Enter", "Edit the task, or save the dialog"),
+    ("Space", "Turn the task on or off"),
+    ("Delete", "Delete the task (it asks first)"),
+    ("Up / Down", "Move through the list"),
+    ("PageUp / PageDown", "A page at a time"),
+    ("Home / End", "The first or the last"),
+    ("Tab", "The other tab, or the next box"),
+    ("Escape", "Close the dialog"),
+];
 
 impl SchedulerUI {
     pub fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            hover: None,
+            show_help: false,
+            editor: TextInput::new(),
+            editor_for: None,
+            clipboard: String::new(),
             tab: UiTab::Tasks,
             dialog: UiDialog::None,
             scheduler: TaskScheduler::new(),
@@ -2099,91 +2150,156 @@ impl SchedulerUI {
         });
     }
 
-    /// Append `ch` to the focused field.
-    ///
-    /// The numeric fields take digits only and are parsed rather than stored
-    /// as text, so the form can never hold a "day of month" that is not a
-    /// number. A digit that would push the value past what the field can hold
-    /// is dropped rather than wrapping the value round to something small --
-    /// silently rescheduling a monthly job from the 31st to the 3rd is the
-    /// kind of edit a user would not notice until it had already run.
-    pub fn type_char(&mut self, ch: char) -> bool {
-        let Some(field) = self.focus else {
-            return false;
+    /// What `field`'s box shows: its text, or a number's digits -- nothing
+    /// for 0, which no day of the month or interval is, so that deleting
+    /// every digit empties the box rather than leaving a 0 typed after.
+    fn field_text(&self, field: FormField) -> String {
+        let digits = |n: u32| {
+            if n == 0 { String::new() } else { n.to_string() }
         };
         match field {
-            FormField::Name => {
-                self.form.name.push(ch);
-                true
-            }
-            FormField::Command => {
-                self.form.command.push(ch);
-                true
-            }
+            FormField::Name => self.form.name.clone(),
+            FormField::Command => self.form.command.clone(),
             FormField::Param => match self.form.frequency_index {
-                3 => {
-                    let mut value = u32::from(self.form.monthly_day);
-                    let changed = Self::push_digit(&mut value, ch, 31);
-                    self.form.monthly_day = u8::try_from(value).unwrap_or(self.form.monthly_day);
-                    changed
-                }
-                5 => {
-                    let mut value = self.form.interval_minutes;
-                    // A minute count past a year is not a schedule anybody
-                    // means; the cap is there to stop the multiply below from
-                    // having to think about overflow, not to be a policy.
-                    let changed = Self::push_digit(&mut value, ch, MAX_INTERVAL_MINUTES);
-                    self.form.interval_minutes = value;
-                    changed
-                }
-                6 => {
-                    self.form.cron_expr.push(ch);
-                    true
-                }
-                _ => false,
+                3 => digits(u32::from(self.form.monthly_day)),
+                5 => digits(self.form.interval_minutes),
+                6 => self.form.cron_expr.clone(),
+                _ => String::new(),
             },
         }
     }
 
-    /// Append `ch` to a numeric field, refusing anything that is not a digit
-    /// or that would take the value past `max`.
-    fn push_digit(value: &mut u32, ch: char, max: u32) -> bool {
-        let Some(digit) = ch.to_digit(10) else {
-            return false;
+    /// Write `text` to `field`, if the field can hold it, and say whether it
+    /// did. The numeric fields take digits only and are parsed rather than
+    /// stored as text, so the form can never hold a "day of month" that is
+    /// not a number; and an edit that would push the value past what the
+    /// field can hold is refused whole rather than wrapping the value round
+    /// to something small -- silently rescheduling a monthly job from the
+    /// 31st to the 3rd is the kind of edit a user would not notice until it
+    /// had already run. An empty number box is 0.
+    fn set_field_text(&mut self, field: FormField, text: &str) -> bool {
+        let number = |max: u32| -> Option<u32> {
+            if !text.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            if text.is_empty() {
+                return Some(0);
+            }
+            text.parse::<u32>().ok().filter(|n| *n <= max)
         };
-        let Some(next) = value.checked_mul(10).and_then(|v| v.checked_add(digit)) else {
-            return false;
-        };
-        if next > max {
-            return false;
+        match field {
+            FormField::Name => text.clone_into(&mut self.form.name),
+            FormField::Command => text.clone_into(&mut self.form.command),
+            FormField::Param => match self.form.frequency_index {
+                3 => {
+                    let Some(day) = number(31).and_then(|n| u8::try_from(n).ok()) else {
+                        return false;
+                    };
+                    self.form.monthly_day = day;
+                }
+                5 => {
+                    // A minute count past a year is not a schedule anybody
+                    // means; the cap is there to stop arithmetic downstream
+                    // from having to think about overflow, not to be a
+                    // policy.
+                    let Some(minutes) = number(MAX_INTERVAL_MINUTES) else {
+                        return false;
+                    };
+                    self.form.interval_minutes = minutes;
+                }
+                6 => text.clone_into(&mut self.form.cron_expr),
+                _ => return false,
+            },
         }
-        *value = next;
         true
     }
 
-    /// Delete the last character of the focused field.
-    pub fn backspace(&mut self) -> bool {
+    /// Load `field`'s text into the editor if the editor holds another box's,
+    /// or this box's text changed under it -- the caret after the text.
+    fn sync_editor(&mut self, field: FormField) {
+        let text = self.field_text(field);
+        if self.editor_for != Some(field) || self.editor.text() != text {
+            self.editor.set_text(&text);
+            self.editor_for = Some(field);
+        }
+    }
+
+    /// Where `field`'s caret is drawn, over `text`, what the box holds: the
+    /// editor's while the box has the keyboard and the editor holds its
+    /// text, after the text if not, at its start without the keyboard. One
+    /// answer for the drawing and for a press.
+    fn field_cursor(&self, field: FormField, text: &str) -> TextCursor {
+        if self.focus != Some(field) {
+            TextCursor::default()
+        } else if self.editor_for == Some(field) && self.editor.text() == text {
+            self.editor.cursor()
+        } else {
+            TextCursor::from(text.len())
+        }
+    }
+
+    /// A key for the box with the keyboard: the caret keys, Backspace and
+    /// Delete at the caret, Ctrl+A, C, X and V, and typing -- AltGr's among
+    /// it, and no command's letter: Ctrl-N while filling in the Name field
+    /// must not put an `n` in it. An edit the box cannot hold is refused
+    /// whole (`set_field_text`). Whether anything changed.
+    ///
+    /// The boxes took typing at their end and Backspace from it, and nothing
+    /// else.
+    fn edit_field(&mut self, key: &KeyEvent) -> bool {
         let Some(field) = self.focus else {
             return false;
         };
-        match field {
-            FormField::Name => self.form.name.pop().is_some(),
-            FormField::Command => self.form.command.pop().is_some(),
-            FormField::Param => match self.form.frequency_index {
-                3 => {
-                    let was = self.form.monthly_day;
-                    self.form.monthly_day = was / 10;
-                    was != self.form.monthly_day
-                }
-                5 => {
-                    let was = self.form.interval_minutes;
-                    self.form.interval_minutes = was / 10;
-                    was != self.form.interval_minutes
-                }
-                6 => self.form.cron_expr.pop().is_some(),
-                _ => false,
-            },
+        self.sync_editor(field);
+        let before = self.field_text(field);
+        let kept = self.editor.clone();
+        let edit = textline::apply_key(
+            &mut self.editor,
+            key,
+            FIELD_CAPACITY,
+            &self.clipboard,
+            FONT_SIZE,
+        );
+        let typed = self.editor.text().to_owned();
+        if typed != before && !self.set_field_text(field, &typed) {
+            self.editor = kept;
+            return false;
         }
+        if let Some(copied) = edit.copied {
+            self.clipboard = copied;
+        }
+        edit.handled
+    }
+
+    /// A press on `field`'s box at `x`: it takes the keyboard, if it is on
+    /// screen, with the caret under the pointer, measured against the box as
+    /// it was drawn.
+    fn press_field(&mut self, field: FormField, x: f32) -> bool {
+        let text = self.field_text(field);
+        let drawn = self.field_cursor(field, &text);
+        let was = (self.focus, self.editor.cursor());
+        self.focus_field(field);
+        if self.focus != Some(field) {
+            return false;
+        }
+        let Some(rect) = self
+            .frame(self.window_width, self.window_height)
+            .rect_of(|t| *t == Target::Field(field))
+        else {
+            return was.0 != self.focus;
+        };
+        self.sync_editor(field);
+        let cursor = textedit::cursor_at_click(
+            &text,
+            drawn,
+            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
+            FONT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - FIELD_TEXT_INSET,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+        true
     }
 
     // -- rendering ------------------------------------------------------------
@@ -2246,6 +2362,21 @@ impl SchedulerUI {
             }
         }
 
+        // The list of keys over everything, the dialog included: it is the
+        // one thing on screen a reader asked for explicitly. Nothing under it
+        // takes a press.
+        if self.show_help {
+            frame.discard_hits();
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (layout.window.w, layout.window.h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
+
         frame
     }
 
@@ -2258,6 +2389,18 @@ impl SchedulerUI {
     pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
         self.frame(self.window_width, self.window_height)
             .hit_test(x, y)
+    }
+
+    /// Follow the pointer over the text boxes: `Some` where it has moved to,
+    /// `None` when it has left the window. Answers whether the box under it
+    /// changed.
+    fn point_at(&mut self, at: Option<(f32, f32)>) -> bool {
+        let over = at
+            .and_then(|(x, y)| self.target_at(x, y))
+            .filter(|t| matches!(t, Target::Field(_)));
+        let changed = over != self.hover;
+        self.hover = over;
+        changed
     }
 
     fn render_header(&self, frame: &mut Frame, layout: &Layout) {
@@ -3097,7 +3240,19 @@ impl SchedulerUI {
         // a row cut down to nothing would have moved it to the window's corner;
         // `cut` is applied where the rectangle is drawn from. An empty
         // rectangle draws nothing -- see `render_text_field`.
-        let cut = |r: Rect| r.intersect(dialog).unwrap_or(Rect::EMPTY);
+        //
+        // Cut to the dialog less the focus mark's width, which the toolkit's
+        // field draws outside its box: a box run up to the dialog's edge
+        // would have its mark painted over the edge -- and past the window,
+        // in a window the dialog fills.
+        let ring = self.focus_ring_width.max(0.0).ceil();
+        let room = Rect::new(
+            dialog.x + ring,
+            dialog.y + ring,
+            (dialog.w - 2.0 * ring).max(0.0),
+            (dialog.h - 2.0 * ring).max(0.0),
+        );
+        let cut = |r: Rect| r.intersect(room).unwrap_or(Rect::EMPTY);
         let mut label = |frame: &mut Frame, text: &str| {
             let y = field_y;
             if let Some(band) = Rect::new(dialog.x, y, dialog.w, FONT_SIZE).intersect(dialog) {
@@ -3119,20 +3274,10 @@ impl SchedulerUI {
         };
 
         let rect = label(frame, "Name:");
-        self.render_text_field(
-            frame,
-            Target::Field(FormField::Name),
-            cut(rect),
-            &self.form.name,
-        );
+        self.render_text_field(frame, FormField::Name, cut(rect));
 
         let rect = label(frame, "Command:");
-        self.render_text_field(
-            frame,
-            Target::Field(FormField::Command),
-            cut(rect),
-            &self.form.command,
-        );
+        self.render_text_field(frame, FormField::Command, cut(rect));
 
         // The frequency is picked, not typed, so it takes no caret: the field
         // it is drawn as is a button that happens to look like one.
@@ -3154,33 +3299,16 @@ impl SchedulerUI {
                 self.render_picker(frame, Target::ParamCycle, cut(rect), day);
             }
             3 => {
-                let day_text = self.form.monthly_day.to_string();
                 let rect = label(frame, "Day of month:");
-                self.render_text_field(
-                    frame,
-                    Target::Field(FormField::Param),
-                    cut(rect),
-                    &day_text,
-                );
+                self.render_text_field(frame, FormField::Param, cut(rect));
             }
             5 => {
-                let min_text = self.form.interval_minutes.to_string();
                 let rect = label(frame, "Minutes:");
-                self.render_text_field(
-                    frame,
-                    Target::Field(FormField::Param),
-                    cut(rect),
-                    &min_text,
-                );
+                self.render_text_field(frame, FormField::Param, cut(rect));
             }
             6 => {
                 let rect = label(frame, "Cron:");
-                self.render_text_field(
-                    frame,
-                    Target::Field(FormField::Param),
-                    cut(rect),
-                    &self.form.cron_expr,
-                );
+                self.render_text_field(frame, FormField::Param, cut(rect));
             }
             _ => {}
         }
@@ -3372,7 +3500,14 @@ impl SchedulerUI {
     /// insertion point is: this form appends and backspaces rather than
     /// offering a movable cursor, so a caret anywhere else would promise an
     /// edit the field cannot make.
-    fn render_text_field(&self, frame: &mut Frame, target: Target, rect: Rect, value: &str) {
+    fn render_text_field(&self, frame: &mut Frame, field: FormField, rect: Rect) {
+        let text = self.field_text(field);
+        self.render_text_field_with(frame, field, rect, &text);
+    }
+
+    /// [`render_text_field`](Self::render_text_field) with the text given --
+    /// for the containment sweep, which needs a text wider than the box.
+    fn render_text_field_with(&self, frame: &mut Frame, field: FormField, rect: Rect, text: &str) {
         // A control with no area draws nothing and answers nothing. Returning
         // here rather than pushing zero-sized commands is the difference
         // between a field that has been squeezed out of the dialog and one
@@ -3380,70 +3515,77 @@ impl SchedulerUI {
         if rect.is_empty() {
             return;
         }
-        let focused = matches!(target, Target::Field(f) if self.focus == Some(f));
+        let target = Target::Field(field);
+        let focused = self.focus == Some(field) && !self.show_help;
 
-        frame.push(RenderCommand::FillRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: self.palette.base,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        frame.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface2
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls): lit under the pointer, marked
+        // at the user's focus width while the keys type into it.
+        guitk::field::draw(
+            frame,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(target),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+            self.focus_ring_width,
+        );
 
-        let text_y = centre_line(rect, FONT_SIZE);
-        let text_span = span(rect, rect.x + 6.0, rect.w - 12.0);
-        if let (Some(y), Some((x, w))) = (text_y, text_span) {
-            frame.push(RenderCommand::Text {
-                x,
-                y,
-                text: value.to_string(),
-                color: self.palette.text,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w),
-                overflow: TextOverflow::Ellipsis,
-            });
+        // The text, and with the keyboard the caret and the selection where
+        // they are, drawn by the toolkit's editor and clipped to the box. The
+        // caret was a bar drawn at the end of the measured text, because the
+        // end was the only place it could be.
+        let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + FIELD_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
+        );
+        let mut tree = RenderTree::new();
+        if text.is_empty() {
+            if focused {
+                textedit::push_caret(
+                    &mut tree,
+                    x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+            }
+        } else {
+            let editing = self.focus == Some(field)
+                && self.editor_for == Some(field)
+                && self.editor.text() == text;
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text,
+                    cursor: self.field_cursor(field, text),
+                    selection_anchor: if editing {
+                        self.editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused,
+                    x,
+                    y,
+                    width,
+                    line_height: line,
+                    font_size: FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
         }
-
-        if focused && let (Some(y), Some((x, _))) = (text_y, text_span) {
-            // Measured, not counted: a caret placed at `len * average_width`
-            // drifts off the end of the text on anything but a monospace
-            // font. `.min` keeps it inside the field's own right edge, which a
-            // measured position does not do by itself -- `text::measure` sizes
-            // the *unelided* value, so a value wider than the field puts the
-            // caret past its right edge.
-            //
-            // The size is a literal on purpose, and the mutation sweep is why:
-            // clamping it as well read like prudence but could not be reached.
-            // The caret is drawn only where `text_y` and `text_span` both
-            // answered, and those two say the field is at least FONT_SIZE tall
-            // and more than six points wide, while the `.min` above leaves
-            // three points to the caret's right. A clamp that no input can
-            // make bind is not a guard, it is a claim the tests cannot check.
-            let caret_x = (x + text::measure(value, FONT_SIZE, FontWeightHint::Regular))
-                .min(rect.right() - 3.0);
-            frame.push(RenderCommand::FillRect {
-                x: caret_x,
-                y,
-                width: 1.5,
-                height: FONT_SIZE,
-                color: self.palette.text,
-                corner_radii: CornerRadii::ZERO,
-            });
+        for command in tree.commands {
+            frame.push(command);
         }
 
         frame.hit(target, rect);
@@ -3645,11 +3787,7 @@ impl SchedulerUI {
                 }
                 true
             }
-            Target::Field(field) => {
-                let changed = self.focus != Some(field);
-                self.focus_field(field);
-                changed
-            }
+            Target::Field(field) => self.press_field(field, x),
             Target::FrequencyCycle => {
                 self.cycle_frequency();
                 true
@@ -3738,6 +3876,24 @@ impl SchedulerUI {
         if !key.pressed {
             return false;
         }
+        // The list of keys first: it is drawn over everything, and modal while
+        // it is up -- a plain F1, `?` or Escape puts it away, and no other key
+        // reaches what it covers, where Delete would ask to delete a task.
+        let plain = textline::is_plain(key.modifiers);
+        let question = key.key == Key::Slash && key.modifiers.shift;
+        if self.show_help {
+            if plain && (matches!(key.key, Key::F1 | Key::Escape) || question) {
+                self.show_help = false;
+            }
+            return true;
+        }
+        // F1 raises it from anywhere, a dialog's box included, because it is
+        // never typed; `?` is typed in a box, so it raises the list only where
+        // no box has the keyboard.
+        if plain && (key.key == Key::F1 || question && self.focus.is_none()) {
+            self.show_help = true;
+            return true;
+        }
         if matches!(self.dialog, UiDialog::None) {
             return self.handle_key_main(key);
         }
@@ -3746,6 +3902,17 @@ impl SchedulerUI {
 
     /// Keys that act on the main window, with no dialog open.
     fn handle_key_main(&mut self, key: &KeyEvent) -> bool {
+        // A key held with Alt or the Windows key is not this window's: the
+        // Windows key's are the desktop's, and AltGr -- which arrives as
+        // Ctrl+Alt -- types a letter, which the main window has nowhere to
+        // put: AltGr+N (`ń` on a Polish keyboard) opened a new task as Ctrl+N
+        // does.
+        if key.modifiers.alt || key.modifiers.super_key {
+            return false;
+        }
+        if let Some(movement) = ListKey::of(key) {
+            return self.move_through_list(movement);
+        }
         match key.key {
             Key::Tab => {
                 // The two tabs, not a focus ring: there is nothing else here
@@ -3755,16 +3922,6 @@ impl SchedulerUI {
                     UiTab::History => UiTab::Tasks,
                 });
                 true
-            }
-            Key::Up => self.move_selection(-1),
-            Key::Down => self.move_selection(1),
-            Key::Home => {
-                let before = self.list_scroll();
-                match self.tab {
-                    UiTab::Tasks => self.scroll_task_list_to_top(),
-                    UiTab::History => self.scroll_history_to_top(),
-                }
-                before != self.list_scroll()
             }
             Key::Delete => {
                 let Some(id) = self.selected_task_id else {
@@ -3809,86 +3966,77 @@ impl SchedulerUI {
                 self.focus_next();
                 true
             }
-            Key::Backspace => self.backspace(),
             Key::Enter => match self.dialog {
                 UiDialog::ConfirmDelete(id) => self.confirm_delete_task(id),
                 _ => self.save_dialog(),
             },
-            _ => {
-                // A keystroke with Ctrl or Alt held is a shortcut, not text:
-                // Ctrl-N while filling in the Name field must not put an `n`
-                // in it. Everything else goes through `KeyEvent::typed`, which
-                // is the layout's own answer to what was typed -- Enter, Tab
-                // and Escape all *produce* text on most layouts, and a field
-                // that appended `key.text` raw would fill with control bytes.
-                if key.modifiers.ctrl || key.modifiers.alt {
-                    return false;
-                }
-                let mut typed = false;
-                for ch in key.typed() {
-                    typed |= self.type_char(ch);
-                }
-                typed
-            }
+            _ => self.edit_field(key),
         }
     }
 
-    /// Where the showing list is scrolled to, in rows.
-    fn list_scroll(&self) -> usize {
-        match self.tab {
-            UiTab::Tasks => self.task_list_scroll,
-            UiTab::History => self.history_scroll,
-        }
-    }
-
-    /// Move the selection `delta` rows through the task list.
+    /// Move through the list showing, as every list in the shell moves
+    /// (`guitk::listview::ListKey`): Up and Down, Home and End, and Page Up
+    /// and Down a list's height at a time.
     ///
-    /// Only on the Tasks tab: the History tab has no selection to move, and
-    /// silently moving the hidden one would leave the toolbar acting on a task
-    /// the user cannot see.
-    fn move_selection(&mut self, delta: isize) -> bool {
-        if self.tab != UiTab::Tasks {
-            return false;
+    /// The Tasks tab moves its selection, and keeps it on screen; the History
+    /// tab, which has no selection, scrolls. Home scrolled the task list to
+    /// the top without choosing the first task, End and the page keys went
+    /// nowhere, and the history answered Home alone.
+    ///
+    /// With nothing chosen, every key but End chooses the first task -- the
+    /// shell's rule, and a way onto the list either way.
+    fn move_through_list(&mut self, movement: ListKey) -> bool {
+        let page = self.list_capacity();
+        if self.tab == UiTab::History {
+            let offered = self.scheduler.history.recent(HISTORY_ROWS_OFFERED).len();
+            let last_top = offered.saturating_sub(page);
+            let before = self.history_scroll;
+            let from = before.min(last_top);
+            self.history_scroll = match movement {
+                ListKey::Previous => from.saturating_sub(1),
+                ListKey::Next => from.saturating_add(1).min(last_top),
+                ListKey::PageUp => from.saturating_sub(page),
+                ListKey::PageDown => from.saturating_add(page).min(last_top),
+                ListKey::First => 0,
+                ListKey::Last => last_top,
+            };
+            return before != self.history_scroll;
         }
         let tasks = self.scheduler.list_tasks();
-        if tasks.is_empty() {
-            return false;
-        }
-        let last = tasks.len().saturating_sub(1);
         let current = self
             .selected_task_id
             .and_then(|id| tasks.iter().position(|t| t.id == id));
-        let next = match (current, delta) {
-            // Nothing selected: Down picks the first row and Up the last, so
-            // either arrow gets a keyboard user onto the list.
-            (None, d) if d >= 0 => 0,
-            (None, _) => last,
-            (Some(i), d) if d >= 0 => i.saturating_add(1).min(last),
-            (Some(i), _) => i.saturating_sub(1),
-        };
-        let Some(task) = tasks.get(next) else {
+        let Some(next) = movement.target(current, tasks.len(), page) else {
             return false;
         };
-        let id = task.id;
+        let Some(id) = tasks.get(next).map(|t| t.id) else {
+            return false;
+        };
         let changed = self.selected_task_id != Some(id);
+        let scrolled = self.task_list_scroll;
         self.select_task(id);
         // Keep the newly selected row on screen. Without this the selection
         // walks off the bottom of the viewport and the arrow keys appear to
         // stop working.
         self.reveal_row(next);
-        changed
+        changed || scrolled != self.task_list_scroll
     }
 
-    /// Scroll the task list so that row `index` is inside the viewport.
-    fn reveal_row(&mut self, index: usize) {
+    /// How many whole rows the list showing has room for: what
+    /// `scroll_window::visible` draws, and so what a page is.
+    fn list_capacity(&self) -> usize {
         let content = Layout::new(
             self.window_width,
             self.window_height,
             self.status_message.is_some(),
         )
         .content;
-        let capacity =
-            scroll_window::capacity(ROW_HEIGHT, content.h - ROW_HEIGHT - LIST_MORE_HEIGHT);
+        scroll_window::capacity(ROW_HEIGHT, content.h - ROW_HEIGHT - LIST_MORE_HEIGHT)
+    }
+
+    /// Scroll the task list so that row `index` is inside the viewport.
+    fn reveal_row(&mut self, index: usize) {
+        let capacity = self.list_capacity();
         if capacity == 0 {
             return;
         }
@@ -3915,9 +4063,23 @@ fn handle_event(ui: &mut SchedulerUI, event: &Event) -> EventResult {
     }
 
     match event {
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else, and the
+        // wheel scrolls nothing it covers.
+        Event::Mouse(m) if ui.show_help => match m.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                ui.show_help = false;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        },
         Event::Mouse(m) => match m.kind {
             MouseEventKind::Press(MouseButton::Left) => result(ui.handle_click(m.x, m.y)),
             MouseEventKind::Scroll { dy, .. } => result(ui.handle_scroll(dy)),
+            // Which text box the pointer is over, so it is drawn lit. Only a
+            // change is a repaint.
+            MouseEventKind::Move => result(ui.point_at(Some((m.x, m.y)))),
+            MouseEventKind::Leave => result(ui.point_at(None)),
             _ => EventResult::Ignored,
         },
         Event::Key(k) => result(ui.handle_key(k)),
@@ -3940,6 +4102,11 @@ fn handle_event(ui: &mut SchedulerUI, event: &Event) -> EventResult {
 impl App for SchedulerUI {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -4095,6 +4262,7 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::event::Modifiers;
     use guitk::probe;
 
     // -- CronField tests ----------------------------------------------------
@@ -5319,6 +5487,91 @@ mod tests {
         assert_eq!(drawn.last().map(String::as_str), Some("T003"));
     }
 
+    /// **The task list moves as every list in the shell does**: Home and End
+    /// choose the first and last task and bring them on screen, and Page Up
+    /// and Down move a list's height. Home only scrolled, choosing nothing,
+    /// and End and the page keys went nowhere.
+    #[test]
+    fn the_task_list_moves_as_every_list_does() {
+        let mut ui = ui_with_tasks(100);
+        let ids: Vec<u64> = ui.scheduler.list_tasks().iter().map(|t| t.id).collect();
+        let page = ui.list_capacity();
+        assert!(page > 1 && page < 99, "{page} rows: nothing to page");
+        let chosen = |ui: &SchedulerUI| ids.iter().position(|&id| Some(id) == ui.selected_task_id);
+        let shown =
+            |ui: &SchedulerUI, row: usize| probe::rect_of(ui, Target::TaskRow(ids[row])).is_some();
+
+        // With nothing chosen, Up chooses the first task, as Down does.
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Up)),
+            EventResult::Consumed
+        );
+        assert_eq!(chosen(&ui), Some(0));
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::End)),
+            EventResult::Consumed
+        );
+        assert_eq!(chosen(&ui), Some(99));
+        assert!(shown(&ui, 99), "the last task is not on screen");
+        probe::key(&mut ui, &probe::press(Key::PageUp));
+        assert_eq!(chosen(&ui), Some(99 - page));
+        assert!(shown(&ui, 99 - page));
+        probe::key(&mut ui, &probe::press(Key::Home));
+        assert_eq!(chosen(&ui), Some(0));
+        assert!(shown(&ui, 0), "the first task is not on screen");
+        probe::key(&mut ui, &probe::press(Key::PageDown));
+        assert_eq!(chosen(&ui), Some(page));
+        assert!(shown(&ui, page));
+
+        // The chosen task scrolled away by the wheel: the key that brings it
+        // back changes what is shown, though not what is chosen.
+        probe::key(&mut ui, &probe::press(Key::Home));
+        ui.scroll_task_list_by(30);
+        assert!(!shown(&ui, 0));
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Home)),
+            EventResult::Consumed,
+            "bringing the chosen task back on screen was not a change"
+        );
+        assert!(shown(&ui, 0));
+    }
+
+    /// **The history scrolls with the same keys** -- it has no selection to
+    /// move -- and stops at both ends. It answered Home alone.
+    #[test]
+    fn the_history_scrolls_with_the_list_keys() {
+        let mut ui = ui_with_history(100);
+        let page = ui.list_capacity();
+        assert!(page > 1 && page < 50, "{page} rows: nothing to page");
+        let last_top = 100 - page;
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Down)),
+            EventResult::Consumed
+        );
+        assert_eq!(ui.history_scroll, 1);
+        probe::key(&mut ui, &probe::press(Key::End));
+        assert_eq!(ui.history_scroll, last_top);
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Down)),
+            EventResult::Ignored,
+            "the history scrolled past its end"
+        );
+        probe::key(&mut ui, &probe::press(Key::PageUp));
+        assert_eq!(ui.history_scroll, last_top - page);
+        probe::key(&mut ui, &probe::press(Key::Up));
+        assert_eq!(ui.history_scroll, last_top - page - 1);
+        probe::key(&mut ui, &probe::press(Key::Home));
+        assert_eq!(ui.history_scroll, 0);
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Up)),
+            EventResult::Ignored,
+            "the history scrolled past its top"
+        );
+        probe::key(&mut ui, &probe::press(Key::PageDown));
+        assert_eq!(ui.history_scroll, page);
+        assert_eq!(ui.selected_task_id, None, "the history chose a task");
+    }
+
     /// Scrolling up from the top stays at the top rather than wrapping.
     #[test]
     fn scrolling_a_list_up_from_the_top_stays_at_the_top() {
@@ -5491,6 +5744,90 @@ mod tests {
              field that is missing"
         );
         assert!(ui.scheduler.list_tasks().is_empty());
+    }
+
+    /// **The dialog's boxes are the toolkit's fields** (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer and out when
+    /// it goes, marked at the user's focus width while the keys type into
+    /// them.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        let size = <SchedulerUI as Probe>::SIZE;
+        let mut ui = SchedulerUI::new();
+        let mut palette = ui.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut ui, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut ui, &settings);
+        let seq = |rect: Rect, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            want
+        };
+        let draws = |ui: &SchedulerUI, rect: Rect, s: State| {
+            let frame = ui.frame(size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            has(&seq(rect, s)) && (s.focused || !has(&seq(rect, State { focused: true, ..s })))
+        };
+        let pointer = |ui: &mut SchedulerUI, rect: Rect, kind: MouseEventKind| {
+            let (x, y) = rect.centre();
+            handle_event(ui, &Event::Mouse(MouseEvent { x, y, kind }));
+        };
+        let idle = State::default();
+        let lit = State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = State {
+            focused: true,
+            ..idle
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        probe::click(&mut ui, Target::Add);
+        let name = probe::rect_of(&ui, Target::Field(FormField::Name)).expect("the Name box");
+        let command =
+            probe::rect_of(&ui, Target::Field(FormField::Command)).expect("the Command box");
+        assert!(
+            draws(&ui, name, keyed),
+            "the Name box is not marked with the keys"
+        );
+        assert!(
+            draws(&ui, command, idle),
+            "the Command box is marked without the keys"
+        );
+        pointer(&mut ui, command, MouseEventKind::Move);
+        assert!(
+            draws(&ui, command, lit),
+            "the Command box does not light under the pointer"
+        );
+        assert!(
+            draws(&ui, name, keyed),
+            "the Name box lit with the pointer elsewhere"
+        );
+        pointer(&mut ui, command, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            draws(&ui, command, both),
+            "a press did not give the Command box the keys"
+        );
+        assert!(draws(&ui, name, idle), "the Name box kept its mark");
+        pointer(&mut ui, command, MouseEventKind::Leave);
+        assert!(
+            draws(&ui, command, keyed),
+            "the light stayed after the pointer left"
+        );
     }
 
     /// The whole path a user actually takes, through the hit boxes rather than
@@ -5676,6 +6013,77 @@ mod tests {
         probe::click(&mut ui, Target::DeleteConfirm);
         assert_eq!(ui.scheduler.list_tasks().len(), 2);
         assert_eq!(ui.selected_task_id, None);
+    }
+
+    fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **The form takes what AltGr types, and no command's letter.** AltGr
+    /// arrives as Ctrl+Alt -- `ł` is AltGr+L on a Polish keyboard -- and the
+    /// form refused every key held with Ctrl or Alt. The Windows key's
+    /// letters, which a real machine sends with the key, were typed.
+    #[test]
+    fn the_form_takes_altgr_letters_and_no_commands_letter() {
+        let mut ui = SchedulerUI::new();
+        probe::click(&mut ui, Target::Add);
+        assert_eq!(
+            probe::key(&mut ui, &held(Key::L, ALTGR, "\u{142}")),
+            EventResult::Consumed,
+            "AltGr+L was refused"
+        );
+        for (key, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            assert_eq!(
+                probe::key(&mut ui, &held(key, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?} was typed"
+            );
+        }
+        assert_eq!(ui.form.name, "\u{142}");
+    }
+
+    /// **A key held with Alt or the Windows key is not the main window's.**
+    /// AltGr+N -- `ń` on a Polish keyboard, arriving as Ctrl+Alt -- opened a
+    /// new task as Ctrl+N does; Alt+Delete and Windows+Delete asked to delete
+    /// the selected task, Alt+Enter opened it, and Alt+Space switched it off.
+    #[test]
+    fn a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows() {
+        let mut ui = ui_with_tasks(3);
+        probe::key(&mut ui, &probe::press(Key::Down));
+        let id = ui.selected_task_id.expect("Down selected a task");
+        let enabled = ui.scheduler.get_task(id).is_some_and(|t| t.enabled);
+        for modifiers in [ALTGR, Modifiers::alt(), Modifiers::super_key()] {
+            for key in [Key::N, Key::Delete, Key::Enter, Key::Space] {
+                assert_eq!(
+                    probe::key(&mut ui, &held(key, modifiers, "")),
+                    EventResult::Ignored,
+                    "{modifiers:?}+{key:?}"
+                );
+            }
+            assert_eq!(ui.dialog, UiDialog::None, "{modifiers:?} opened a dialog");
+            assert_eq!(
+                ui.scheduler.get_task(id).is_some_and(|t| t.enabled),
+                enabled,
+                "{modifiers:?}+Space switched the task"
+            );
+        }
     }
 
     /// A key release is not a second press. Acting on both edges would run
@@ -5975,10 +6383,20 @@ mod tests {
         // from fills, which is why the top-level test above can only ask about
         // fills. Here each pass is handed an *unclipped* frame, so all three
         // witnesses are available.
-        fn check(state: &str, pass: &str, region: Rect, f: &Frame) {
+        /// `margin` is how far a pass may fill outside its box, and only a
+        /// text field has one: the toolkit's field draws its focus mark that
+        /// far outside the box it is given (`guitk::field::draw`). Its text,
+        /// its caret and its hit box are still held to the box itself.
+        fn check(state: &str, pass: &str, region: Rect, margin: f32, f: &Frame) {
+            let ink = Rect::new(
+                region.x - margin,
+                region.y - margin,
+                region.w + 2.0 * margin,
+                region.h + 2.0 * margin,
+            );
             for r in rects(f) {
                 assert!(
-                    inside(region, r),
+                    inside(ink, r),
                     "{state}: the {pass} pass, given {region:?}, filled {r:?}"
                 );
             }
@@ -6091,7 +6509,7 @@ mod tests {
                 for (pass, region, draw) in panels {
                     let mut f = Frame::new(w, h);
                     draw(&ui, &mut f);
-                    check(&state, pass, region, &f);
+                    check(&state, pass, region, 0.0, &f);
                 }
             }
 
@@ -6106,15 +6524,15 @@ mod tests {
             type Control = fn(&SchedulerUI, &mut Frame, Rect);
             let controls: [(&'static str, Control); 6] = [
                 ("text field", |u, f, r| {
-                    u.render_text_field(
+                    u.render_text_field_with(
                         f,
-                        Target::Field(FormField::Name),
+                        FormField::Name,
                         r,
                         "a value far wider than the field",
                     );
                 }),
                 ("empty text field", |u, f, r| {
-                    u.render_text_field(f, Target::Field(FormField::Name), r, "");
+                    u.render_text_field_with(f, FormField::Name, r, "");
                 }),
                 ("picker", |u, f, r| {
                     u.render_picker(f, Target::FrequencyCycle, r, "Every N minutes");
@@ -6134,10 +6552,15 @@ mod tests {
                 }),
             ];
             for (pass, draw) in controls {
+                let margin = if pass.ends_with("text field") {
+                    ui.focus_ring_width.max(0.0).ceil()
+                } else {
+                    0.0
+                };
                 for region in squeezes(Rect::new(40.0, 60.0, FIELD_WIDTH, FIELD_HEIGHT)) {
                     let mut f = Frame::new(800.0, 600.0);
                     draw(&ui, &mut f, region);
-                    check(name, pass, region, &f);
+                    check(name, pass, region, margin, &f);
 
                     // "No area means no ink and no hit box" is what each
                     // control's opening guard promises, and containment alone
@@ -6255,6 +6678,360 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // -- The list of keys ------------------------------------------------------
+
+    fn key_of(k: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    fn hit(ui: &mut SchedulerUI, k: Key, modifiers: Modifiers) -> EventResult {
+        handle_event(ui, &Event::Key(key_of(k, modifiers, "")))
+    }
+
+    fn mouse(ui: &mut SchedulerUI, x: f32, y: f32, kind: MouseEventKind) -> EventResult {
+        handle_event(ui, &Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    fn task_ids(ui: &SchedulerUI) -> Vec<u64> {
+        ui.scheduler.list_tasks().iter().map(|t| t.id).collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window**,
+    /// over a long list with a task chosen in the middle of it -- Escape with
+    /// a dialog up, the only place it is a key.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut ui = ui_with_tasks(40);
+                let ids = task_ids(&ui);
+                ui.select_task(ids[10]);
+                if *label == "Escape" {
+                    ui.open_add_dialog();
+                }
+                assert_eq!(
+                    handle_event(&mut ui, &Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window**, and goes on F1, `?` or a plain
+    /// Escape -- not on Alt+Escape, which is the desktop's.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut ui = ui_with_tasks(3);
+        assert!(
+            !drawn_text(&ui)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            hit(&mut ui, Key::F1, chord);
+            assert!(
+                !ui.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        let missing = guitk::shortcut::missing_rows(&drawn_text(&ui), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        hit(&mut ui, Key::Escape, Modifiers::alt());
+        assert!(ui.show_help, "Alt+Escape put the list away");
+        hit(&mut ui, Key::Escape, Modifiers::NONE);
+        assert!(!ui.show_help, "Escape left the list up");
+        handle_event(
+            &mut ui,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(ui.show_help, "? raised nothing");
+        handle_event(
+            &mut ui,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(!ui.show_help, "? left the list up");
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        assert!(!ui.show_help, "F1 left the list up");
+    }
+
+    /// **`?` is typed into a box**, where it is a character, and F1 raises the
+    /// list from there, where it never is -- over the dialog.
+    #[test]
+    fn a_question_mark_is_typed_into_a_box_and_f1_still_raises_the_list() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        assert_eq!(ui.focus, Some(FormField::Name));
+        handle_event(
+            &mut ui,
+            &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
+        );
+        assert!(!ui.show_help, "? raised the list from the name box");
+        assert_eq!(ui.form.name, "?", "? was not typed");
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        assert!(ui.show_help, "F1 did not raise the list from the name box");
+        assert!(
+            drawn_text(&ui)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the list is not drawn over the dialog"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of the
+    /// wheel reaches what it covers -- where Delete would ask to delete the
+    /// task and Space would turn it off. The controls are the same with it
+    /// down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut ui = ui_with_tasks(40);
+        let ids = task_ids(&ui);
+        ui.select_task(ids[0]);
+        let row = probe::rect_of(&ui, Target::TaskRow(ids[3])).expect("a fourth row");
+        let (rx, ry) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+        let enabled = |ui: &SchedulerUI| ui.scheduler.list_tasks()[0].enabled;
+        let was = enabled(&ui);
+
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        for (k, m) in [
+            (Key::Delete, Modifiers::NONE),
+            (Key::Space, Modifiers::NONE),
+            (Key::Down, Modifiers::NONE),
+            (Key::Tab, Modifiers::NONE),
+            (Key::N, Modifiers::ctrl()),
+        ] {
+            assert_eq!(
+                hit(&mut ui, k, m),
+                EventResult::Consumed,
+                "{k:?} was not taken"
+            );
+        }
+        assert!(
+            ui.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert!(
+            matches!(ui.dialog, UiDialog::None),
+            "a dialog opened under the list"
+        );
+        assert_eq!(
+            enabled(&ui),
+            was,
+            "Space turned the task off under the list"
+        );
+        assert_eq!(
+            ui.selected_task_id,
+            Some(ids[0]),
+            "Down moved under the list"
+        );
+        assert_eq!(ui.tab, UiTab::Tasks, "Tab switched the tab under the list");
+        assert_eq!(
+            mouse(
+                &mut ui,
+                rx,
+                ry,
+                MouseEventKind::Scroll { dx: 0.0, dy: -3.0 }
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            ui.task_list_scroll, 0,
+            "the wheel scrolled the tasks under it"
+        );
+        assert!(ui.show_help, "the wheel put the list away");
+        mouse(&mut ui, rx, ry, MouseEventKind::Press(MouseButton::Left));
+        assert!(!ui.show_help, "the press did not put the list away");
+        assert_eq!(
+            ui.selected_task_id,
+            Some(ids[0]),
+            "the press chose a task under it"
+        );
+        hit(&mut ui, Key::F1, Modifiers::NONE);
+        mouse(&mut ui, rx, ry, MouseEventKind::Press(MouseButton::Right));
+        assert!(!ui.show_help, "a right-button press left the list up");
+
+        // The controls.
+        mouse(&mut ui, rx, ry, MouseEventKind::Press(MouseButton::Left));
+        assert_eq!(ui.selected_task_id, Some(ids[3]));
+        hit(&mut ui, Key::Space, Modifiers::NONE);
+        assert_ne!(
+            ui.scheduler.list_tasks()[3].enabled,
+            was,
+            "Space does not turn a task off at all"
+        );
+    }
+
+    // -- The boxes edit at a caret ----------------------------------------------
+
+    fn type_text(ui: &mut SchedulerUI, text: &str) {
+        for c in text.chars() {
+            handle_event(
+                ui,
+                &Event::Key(key_of(Key::A, Modifiers::NONE, &c.to_string())),
+            );
+        }
+    }
+
+    /// The x of every caret drawn in `rect`.
+    fn caret_xs_in(ui: &SchedulerUI, rect: Rect) -> Vec<f32> {
+        commands(ui)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, x2, y1, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1 + 1.0) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn carets_in(ui: &SchedulerUI, rect: Rect) -> usize {
+        caret_xs_in(ui, rect).len()
+    }
+
+    /// **A box edits at a caret**: the arrows, Home and End move it, typing
+    /// goes where it is, Delete deletes at it, Ctrl+A, C, X and V select, copy,
+    /// cut and paste, a press puts it where it lands -- and it is drawn there.
+    /// The boxes took typing at their end and Backspace from it, and nothing
+    /// else.
+    #[test]
+    fn a_box_edits_at_a_caret() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        let name = probe::rect_of(&ui, Target::Field(FormField::Name)).expect("the name box");
+        assert_eq!(
+            carets_in(&ui, name),
+            1,
+            "the empty box with the keyboard draws no caret"
+        );
+        type_text(&mut ui, "Bakup");
+        for _ in 0..3 {
+            hit(&mut ui, Key::Left, Modifiers::NONE);
+        }
+        type_text(&mut ui, "c");
+        assert_eq!(ui.form.name, "Backup", "the caret did not move");
+        let at =
+            name.x + FIELD_TEXT_INSET + text::measure("Bac", FONT_SIZE, FontWeightHint::Regular);
+        let carets = caret_xs_in(&ui, name);
+        assert_eq!(carets.len(), 1, "no caret is drawn in the box");
+        assert!(
+            carets.iter().all(|x| (x - at).abs() < 0.5),
+            "the caret is drawn at {carets:?}, not after the `Bac` it follows at {at}"
+        );
+        hit(&mut ui, Key::Home, Modifiers::NONE);
+        hit(&mut ui, Key::Delete, Modifiers::NONE);
+        assert_eq!(ui.form.name, "ackup", "Delete at the caret");
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        hit(&mut ui, Key::C, Modifiers::ctrl());
+        hit(&mut ui, Key::Tab, Modifiers::NONE);
+        assert_eq!(ui.focus, Some(FormField::Command));
+        hit(&mut ui, Key::V, Modifiers::ctrl());
+        assert_eq!(ui.form.command, "ackup", "Ctrl+V");
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        hit(&mut ui, Key::X, Modifiers::ctrl());
+        assert_eq!(ui.form.command, "", "Ctrl+X");
+
+        // A press past the name's end puts the caret at its end, and one at
+        // its start puts it there.
+        let mid = name.y + name.h / 2.0;
+        mouse(
+            &mut ui,
+            name.right() - 2.0,
+            mid,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        type_text(&mut ui, "!");
+        assert_eq!(ui.form.name, "ackup!");
+        mouse(
+            &mut ui,
+            name.x + FIELD_TEXT_INSET,
+            mid,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        type_text(&mut ui, "B");
+        assert_eq!(
+            ui.form.name, "Backup!",
+            "the press did not put the caret there"
+        );
+    }
+
+    /// **A number box edits its digits at a caret, and refuses the rest
+    /// whole**: a letter, and a digit that would take the day of the month
+    /// past 31. Deleting every digit empties the box.
+    #[test]
+    fn a_number_box_edits_its_digits_and_refuses_the_rest() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        ui.form.frequency_index = 3;
+        ui.focus_field(FormField::Param);
+        assert_eq!(ui.focus, Some(FormField::Param));
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        type_text(&mut ui, "3");
+        assert_eq!(ui.form.monthly_day, 3);
+        type_text(&mut ui, "2");
+        assert_eq!(
+            ui.form.monthly_day, 3,
+            "a day of the month past 31 was taken"
+        );
+        type_text(&mut ui, "1");
+        assert_eq!(ui.form.monthly_day, 31);
+        hit(&mut ui, Key::Home, Modifiers::NONE);
+        type_text(&mut ui, "x");
+        assert_eq!(ui.form.monthly_day, 31, "a letter was taken");
+        // `+31` parses as 31, and `+` is no digit: refused, which leaves the
+        // caret at the start for the Delete below. Taken, it would stand in
+        // the editor in front of a 31 the box does not show.
+        type_text(&mut ui, "+");
+        hit(&mut ui, Key::Delete, Modifiers::NONE);
+        assert_eq!(
+            ui.form.monthly_day, 1,
+            "Delete at the caret, or a + was taken"
+        );
+        hit(&mut ui, Key::Backspace, Modifiers::NONE);
+        assert_eq!(ui.form.monthly_day, 1, "Backspace at the start deleted");
+        hit(&mut ui, Key::Delete, Modifiers::NONE);
+        assert_eq!(ui.form.monthly_day, 0);
+        let param = probe::rect_of(&ui, Target::Field(FormField::Param)).expect("the day box");
+        assert!(
+            !commands(&ui).iter().any(|c| matches!(c,
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. }
+                    if text == "0")),
+            "the emptied box shows a 0 nobody typed"
+        );
+        assert_eq!(carets_in(&ui, param), 1);
+    }
+
+    /// **A box the keyboard moves to types after what it holds**, wherever
+    /// the caret stood in the box it came from -- even when the two hold the
+    /// same text, which is when an editor left as it was would type at the
+    /// old box's caret.
+    #[test]
+    fn a_box_the_keyboard_moves_to_types_after_what_it_holds() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        type_text(&mut ui, "ab");
+        ui.form.command = String::from("ab");
+        hit(&mut ui, Key::Home, Modifiers::NONE);
+        hit(&mut ui, Key::Tab, Modifiers::NONE);
+        assert_eq!(ui.focus, Some(FormField::Command));
+        type_text(&mut ui, "c");
+        assert_eq!(
+            ui.form.command, "abc",
+            "Tab left the caret where the last box had it"
         );
     }
 }

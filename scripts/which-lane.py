@@ -218,6 +218,14 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     # held lane C to it -- and 15 of its 25 users are under apps/, which is
     # the half of lane C that became lane E.
     ("randrange/", "E"),
+    # The archive codecs lane E ported out of the kernel binary so that
+    # apps/archivemanager can open .tar.bz2, .tar.xz and .7z (lane A's answer
+    # to requests/e-a-bzip2-xz-and-7z-are-trapped-in-the-kernel-binary.md:
+    # lane E does the crates, lane A the kernel shim).  Root leaf crates, like
+    # `deflate`, whose first users are the archive manager and the kernel.
+    ("bzip2/", "E"),
+    ("xz/", "E"),
+    ("sevenz/", "E"),
     # --- F: graphics stack ------------------------------------------------
     ("gui/compositor/", "F"),
     ("gui/window/", "F"),
@@ -615,6 +623,9 @@ def _self_test() -> int:
         ("toolchain/x86_64-slateos.json", "A"),
         ("apps/chess/src/main.rs", "E"),
         ("randrange/src/lib.rs", "E"),
+        ("bzip2/src/lib.rs", "E"),
+        ("xz/src/lib.rs", "E"),
+        ("sevenz/src/lib.rs", "E"),
         ("gui/compositor/src/lib.rs", "F"),
         ("gui/compositor", "F"),
         ("gui/window/src/lib.rs", "F"),

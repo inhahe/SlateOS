@@ -60,6 +60,8 @@
 //!     height  : u32
 //!     title   : u32 length + UTF-8 bytes
 //!     app_id  : u32 length + UTF-8 bytes
+//!     has_proc: u8                     1 if the kernel named the process, else 0
+//!     process : u32                    present only when has_proc is 1
 //! ```
 //!
 //! Scalars are little-endian, matching every other codec in this crate.
@@ -104,7 +106,14 @@ pub const WINDOW_LIST_MAGIC: [u8; 4] = *b"WLST";
 ///   to skip a record it does not care about. It is still a version bump, for
 ///   the reason `3` gives — a v3 decoder stops one record early and reports the
 ///   frame as truncated, which is the loud failure this numbering exists for.
-pub const WINDOW_LIST_VERSION: u8 = 4;
+/// - `5` — a fifth state bit, [`demands_attention`](WindowInfo::demands_attention).
+///   No byte moved, and a v4 decoder refuses the bit rather than ignoring it
+///   (`STATE_KNOWN`), so it is a version bump on the input protocol's terms: a
+///   vocabulary change is a version change.
+/// - `6` — each window's [`process`](WindowInfo::process): the process that
+///   opened it, as the kernel names it, appended to the record for `4`'s
+///   reason.
+pub const WINDOW_LIST_VERSION: u8 = 6;
 
 /// Window-list header: magic + version + flags + showing desktop + window count.
 const WINDOW_LIST_HEADER_LEN: usize = 4 + 1 + 1 + 4 + 4;
@@ -123,12 +132,14 @@ const STATE_VISIBLE: u8 = 1 << 0;
 const STATE_MINIMIZED: u8 = 1 << 1;
 const STATE_MAXIMIZED: u8 = 1 << 2;
 const STATE_FOCUSED: u8 = 1 << 3;
+const STATE_ATTENTION: u8 = 1 << 4;
 
 /// Bits with a meaning. A set bit outside this mask is rejected rather than
 /// ignored, for the reason `input::MOD_KNOWN` gives: when a later version adds
 /// a state, an older shell should say so loudly rather than quietly draw a
 /// window as though it did not have it.
-const STATE_KNOWN: u8 = STATE_VISIBLE | STATE_MINIMIZED | STATE_MAXIMIZED | STATE_FOCUSED;
+const STATE_KNOWN: u8 =
+    STATE_VISIBLE | STATE_MINIMIZED | STATE_MAXIMIZED | STATE_FOCUSED | STATE_ATTENTION;
 
 /// One window, as the rest of the desktop sees it.
 ///
@@ -140,8 +151,20 @@ const STATE_KNOWN: u8 = STATE_VISIBLE | STATE_MINIMIZED | STATE_MAXIMIZED | STAT
 pub struct WindowInfo {
     /// The compositor's id for the window, as used by every other request.
     pub id: u64,
-    /// The process that owns it, so a shell can group a program's windows.
+    /// The connection that opened it: the compositor's per-connection
+    /// number. Not a process id -- one process may hold two connections, and
+    /// a program connected over TCP has none the compositor could know --
+    /// but every window opened over one connection shares it, and no other
+    /// window does. For the process itself, see [`process`](Self::process).
     pub pid: u64,
+    /// The process that opened it, as the kernel names it: `None` for a
+    /// window whose program reached the compositor over TCP, which cannot
+    /// say. A real process id, so the windows of one program running as one
+    /// process share it, whichever connections they were opened over.
+    ///
+    /// Unlike [`app_id`](Self::app_id), nothing the program says can change
+    /// it.
+    pub process: Option<u32>,
     /// Which stacking band it lives in.
     ///
     /// The field that makes the list usable: a taskbar must not list itself,
@@ -163,8 +186,9 @@ pub struct WindowInfo {
     /// matching nothing rather than as matching everything: an unnamed program
     /// is not every program.
     ///
-    /// **Client-supplied and therefore unverified.** [`pid`](Self::pid) comes
-    /// from the connection and cannot be forged; this cannot be checked at all.
+    /// **Client-supplied and therefore unverified.** [`pid`](Self::pid) and
+    /// [`process`](Self::process) come from the connection and cannot be
+    /// forged; this cannot be checked at all.
     /// It is fine for the cosmetic uses above and must never gate a permission.
     pub app_id: String,
     /// Whether the window is mapped at all. A hidden window keeps its id and
@@ -176,6 +200,16 @@ pub struct WindowInfo {
     pub maximized: bool,
     /// Whether it currently holds keyboard focus. At most one entry has this.
     pub focused: bool,
+    /// Whether the window has asked for the user's attention -- a chat with a
+    /// new message, a finished download, a dialog behind other windows -- and
+    /// has not been focused since.
+    ///
+    /// Windows' flashing taskbar button, X11's urgency hint. The window asks
+    /// with [`RequestBody::RequestAttention`](crate::control::RequestBody::RequestAttention);
+    /// the compositor clears it when the window is next focused, and a focused
+    /// window's request changes nothing, because it already has the user. So a
+    /// focused entry never has this set.
+    pub demands_attention: bool,
     /// Which virtual desktop the window is filed on.
     ///
     /// Compare against [`WindowList::current_workspace`] to know whether the
@@ -217,6 +251,7 @@ impl WindowInfo {
         Self {
             id,
             pid,
+            process: None,
             layer: Layer::Normal,
             title: title.into(),
             app_id: String::new(),
@@ -224,6 +259,7 @@ impl WindowInfo {
             minimized: false,
             maximized: false,
             focused: false,
+            demands_attention: false,
             workspace: 0,
             x: 0,
             y: 0,
@@ -257,6 +293,13 @@ impl WindowInfo {
         self
     }
 
+    /// The same window, opened by the process the kernel names `process`.
+    #[must_use]
+    pub const fn opened_by(mut self, process: u32) -> Self {
+        self.process = Some(process);
+        self
+    }
+
     fn state_byte(&self) -> u8 {
         let mut bits = 0u8;
         if self.visible {
@@ -270,6 +313,9 @@ impl WindowInfo {
         }
         if self.focused {
             bits |= STATE_FOCUSED;
+        }
+        if self.demands_attention {
+            bits |= STATE_ATTENTION;
         }
         bits
     }
@@ -352,6 +398,13 @@ pub fn encode_window_list_into(out: &mut Vec<u8>, list: &WindowList) {
         write_u32(out, win.height);
         write_string(out, &win.title);
         write_string(out, &win.app_id);
+        match win.process {
+            Some(process) => {
+                out.push(1);
+                write_u32(out, process);
+            }
+            None => out.push(0),
+        }
     }
 }
 
@@ -439,9 +492,15 @@ fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
     let height = r.read_u32()?;
     let title = r.read_string()?;
     let app_id = r.read_string()?;
+    let process = match r.read_u8()? {
+        0 => None,
+        1 => Some(r.read_u32()?),
+        other => return Err(DecodeError::BadTag(other)),
+    };
     Ok(WindowInfo {
         id,
         pid,
+        process,
         layer,
         title,
         app_id,
@@ -449,6 +508,7 @@ fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
         minimized: state & STATE_MINIMIZED != 0,
         maximized: state & STATE_MAXIMIZED != 0,
         focused: state & STATE_FOCUSED != 0,
+        demands_attention: state & STATE_ATTENTION != 0,
         workspace,
         x,
         y,
@@ -476,6 +536,8 @@ mod tests {
                 WindowInfo {
                     id: 1,
                     pid: 100,
+                    // Opened over TCP: the kernel named nobody.
+                    process: None,
                     layer: Layer::Background,
                     title: "Wallpaper".to_string(),
                     // Titled but unnamed. Paired with window 3 below, which is
@@ -489,6 +551,7 @@ mod tests {
                     minimized: false,
                     maximized: false,
                     focused: false,
+                    demands_attention: false,
                     // Furniture: recorded, ignored, and deliberately not equal
                     // to the showing desktop, so a codec that confused the two
                     // numbers cannot pass.
@@ -504,6 +567,7 @@ mod tests {
                 WindowInfo {
                     id: 2,
                     pid: 200,
+                    process: Some(4100),
                     layer: Layer::Normal,
                     title: "Editor — notes.txt".to_string(),
                     // Shared with window 3, which shares its pid: one program
@@ -514,6 +578,7 @@ mod tests {
                     minimized: false,
                     maximized: true,
                     focused: true,
+                    demands_attention: false,
                     workspace: 2,
                     // A monitor arranged to the left of the primary one.
                     x: -1920,
@@ -524,6 +589,7 @@ mod tests {
                 WindowInfo {
                     id: 3,
                     pid: 200,
+                    process: Some(4100),
                     layer: Layer::Normal,
                     title: String::new(),
                     // Named but untitled — the mirror of window 1. Also the
@@ -533,6 +599,9 @@ mod tests {
                     minimized: true,
                     maximized: false,
                     focused: false,
+                    // Asking for attention while minimised: the case a
+                    // taskbar tile exists to show.
+                    demands_attention: true,
                     workspace: 7,
                     x: 37,
                     y: -12,
@@ -542,6 +611,8 @@ mod tests {
                 WindowInfo {
                     id: 4,
                     pid: 300,
+                    // The widest pid, so a codec that narrowed it fails.
+                    process: Some(u32::MAX),
                     layer: Layer::Overlay,
                     title: "Taskbar".to_string(),
                     app_id: "slateos-shell".to_string(),
@@ -549,6 +620,7 @@ mod tests {
                     minimized: false,
                     maximized: false,
                     focused: false,
+                    demands_attention: false,
                     workspace: 1,
                     x: 12,
                     y: 1040,
@@ -634,6 +706,32 @@ mod tests {
             },
             plain
         );
+    }
+
+    #[test]
+    fn a_process_the_kernel_named_survives_and_an_unnamed_one_stays_unnamed() {
+        let list = WindowList::new(
+            0,
+            vec![
+                WindowInfo::new(1, 10, "named").opened_by(4321),
+                WindowInfo::new(2, 11, "over tcp"),
+                // Process 0 is a value, not an absence: a codec writing
+                // `None` as zero would turn it into one, and back.
+                WindowInfo::new(3, 12, "zero").opened_by(0),
+            ],
+        );
+        let (decoded, _) = decode_window_list(&encode_window_list(&list)).unwrap();
+        let processes: Vec<Option<u32>> = decoded.windows.iter().map(|w| w.process).collect();
+        assert_eq!(processes, vec![Some(4321), None, Some(0)]);
+    }
+
+    #[test]
+    fn a_process_presence_byte_other_than_zero_or_one_is_refused() {
+        let list = WindowList::new(0, vec![WindowInfo::new(1, 10, "w")]);
+        let mut bytes = encode_window_list(&list);
+        // One window with no process: the presence byte is the frame's last.
+        *bytes.last_mut().unwrap() = 2;
+        assert_eq!(decode_window_list(&bytes), Err(DecodeError::BadTag(2)));
     }
 
     #[test]
@@ -779,8 +877,8 @@ mod tests {
 
     #[test]
     fn a_state_bit_with_no_meaning_is_refused_rather_than_ignored() {
-        // The point of STATE_KNOWN. A newer compositor that grows a fifth state
-        // must not have an older shell silently drop it.
+        // The point of STATE_KNOWN. A newer compositor that grows a state this
+        // build has no name for must not have an older shell silently drop it.
         let list = WindowList::new(0, vec![WindowInfo::new(1, 1, "W")]);
         let mut bytes = encode_window_list(&list);
         // header + id (8) + pid (8) + layer (1) = the state byte.

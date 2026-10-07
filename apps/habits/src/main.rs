@@ -27,8 +27,10 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
+use guitk::textedit;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -424,7 +426,7 @@ impl Frequency {
 
 // ── Habit ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Habit {
     /// What the habit is kept under. It was taken out when nothing was kept
     /// ("there is no identity to preserve across a restart"); there is now.
@@ -688,6 +690,13 @@ struct HabitTrackerApp {
     category_filter: Option<Category>,
     show_create_form: bool,
     create_name: String,
+    /// Whether Enter was pressed on the form with no name, so the name's box
+    /// says what is wrong -- until the name changes.
+    create_name_missing: bool,
+    /// How wide the mark is round the name's box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    focus_ring_width: f32,
     create_category_idx: usize,
     create_frequency_daily: bool,
     create_weekly_count: u32,
@@ -749,6 +758,8 @@ impl HabitTrackerApp {
             category_filter: None,
             show_create_form: false,
             create_name: String::new(),
+            create_name_missing: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             create_category_idx: 0,
             create_frequency_daily: true,
             create_weekly_count: 3,
@@ -939,6 +950,55 @@ impl HabitTrackerApp {
         }
     }
 
+    /// Read the habits again after the desktop said `habits.yaml` changed --
+    /// a check-in in another window, or a hand edit (§1418, §1434).
+    ///
+    /// The lists are rebuilt, so the three places that point into them follow
+    /// their habit by id rather than by place: the selection (into the list
+    /// the screen shows), the heat map's habit, and a delete waiting on its
+    /// `Y`. One whose habit has gone is let go -- the delete above all, which
+    /// must not fall on whichever habit took its place. A tracker that keeps
+    /// nothing, as a test's does not, reads nothing. Whether anything changed.
+    fn reread_habits(&mut self) -> bool {
+        if !self.persist {
+            return false;
+        }
+        let shown = |app: &Self| {
+            if app.screen == Screen::Archive {
+                app.archived_habits()
+            } else {
+                app.active_habits()
+            }
+        };
+        let id_in = |app: &Self, list: &[usize], i: usize| {
+            list.get(i).and_then(|&h| app.habits.get(h)).map(|h| h.id)
+        };
+        let selected = id_in(self, &shown(self), self.selected_habit);
+        let heatmap = id_in(self, &self.active_habits(), self.heatmap_habit_idx);
+        let deleting = self
+            .pending_delete
+            .and_then(|i| self.habits.get(i))
+            .map(|h| h.id);
+        let before = std::mem::take(&mut self.habits);
+
+        self.load_habits(&settingsfile::load(CONFIG_NAME));
+
+        let place = |app: &Self, list: &[usize], id: Option<u64>| {
+            id.and_then(|id| {
+                list.iter()
+                    .position(|&h| app.habits.get(h).is_some_and(|x| x.id == id))
+            })
+        };
+        let now_shown = shown(self);
+        self.selected_habit = place(self, &now_shown, selected)
+            .unwrap_or_else(|| self.selected_habit.min(now_shown.len().saturating_sub(1)));
+        let active = self.active_habits();
+        self.heatmap_habit_idx = place(self, &active, heatmap)
+            .unwrap_or_else(|| self.heatmap_habit_idx.min(active.len().saturating_sub(1)));
+        self.pending_delete = deleting.and_then(|id| self.habits.iter().position(|h| h.id == id));
+        before != self.habits
+    }
+
     /// The tracker the window opens: the user's habits, and every change kept.
     fn from_settings() -> Self {
         let mut app = Self::new();
@@ -1008,6 +1068,7 @@ impl HabitTrackerApp {
         // dropped by `load_habits` the next time the window opened.
         if self.create_name.trim().is_empty() {
             self.status_msg = String::from("Name cannot be empty");
+            self.create_name_missing = true;
             return;
         }
         let category = Category::ALL
@@ -1142,6 +1203,7 @@ impl HabitTrackerApp {
             }
             "n" | "N" if !ctrl => {
                 self.show_create_form = true;
+                self.create_name_missing = false;
                 self.status_msg = String::from("New habit -- fill in details");
             }
             "Up" if self.selected_habit > 0 => {
@@ -1288,7 +1350,7 @@ impl HabitTrackerApp {
         true
     }
 
-    fn handle_create_form_key(&mut self, key: &str, _ctrl: bool) {
+    fn handle_create_form_key(&mut self, key: &str, ctrl: bool) {
         match key {
             "Escape" => {
                 self.show_create_form = false;
@@ -1317,8 +1379,14 @@ impl HabitTrackerApp {
                 self.create_weekly_count = self.create_weekly_count.saturating_sub(1).max(1);
             }
             "Backspace" => {
-                self.create_name.pop();
+                if self.create_name.pop().is_some() {
+                    self.create_name_missing = false;
+                }
             }
+            // A Ctrl chord carries its letter, and is not typing: Ctrl+K typed
+            // a `k` into the name. (Alt's and the Windows key's chords never
+            // reach here: `handle_event` keeps them out of the window.)
+            _ if ctrl => {}
             // `key_name` names the space bar rather than passing its text, so
             // the arm below never saw one: "Read 20 pages" could not be typed.
             "Space" => self.type_into_name(" "),
@@ -1332,6 +1400,7 @@ impl HabitTrackerApp {
         // short at a third of its length in some scripts.
         if key.chars().count() == 1 && self.create_name.chars().count() < 40 {
             self.create_name.push_str(key);
+            self.create_name_missing = false;
         }
     }
 
@@ -1481,10 +1550,23 @@ impl HabitTrackerApp {
                 true
             }
             Event::Key(key) if key.pressed => {
+                // A chord with Alt or the Windows key is the window's or the
+                // desktop's, and arrives carrying its key: Alt+1 changed the
+                // screen and Alt+X typed an `x` into a new habit's name. None
+                // is this window's.
+                if textline::is_alt_or_windows_chord(key.modifiers) {
+                    return false;
+                }
                 let Some(name) = Self::key_name(key) else {
                     return false;
                 };
-                self.handle_key(&name, key.modifiers.ctrl, key.modifiers.shift);
+                // Ctrl alone: Ctrl+Alt is AltGr, which types -- German `@` is
+                // AltGr+Q -- and is no Ctrl chord.
+                self.handle_key(
+                    &name,
+                    textline::is_ctrl_chord(key.modifiers),
+                    key.modifiers.shift,
+                );
                 true
             }
             // Midnight, or near enough to check.
@@ -1499,6 +1581,12 @@ impl HabitTrackerApp {
                 true
             }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            // The habits on disk changed and the desktop says so: another
+            // window's check-in reaches this one. Read at startup only, two
+            // windows each kept their own and the last to write won.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                self.reread_habits()
+            }
             _ => false,
         }
     }
@@ -2846,6 +2934,11 @@ impl HabitTrackerApp {
         }
     }
 
+    /// The new habit's name box, in a form whose corner is `(fx, fy)`.
+    fn create_name_rect(fx: f32, fy: f32) -> Rect {
+        Rect::new(fx + 80.0, fy + 48.0, 290.0, 28.0)
+    }
+
     fn render_create_form(&self, cmds: &mut Frame<Target>) {
         // Modal overlay, which takes every press that misses the form.
         cmds.push(RenderCommand::FillRect {
@@ -2894,28 +2987,59 @@ impl HabitTrackerApp {
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
         });
-        self.palette
-            .push_surface(cmds, fx + 80.0, fy + 48.0, 290.0, 28.0, 4.0, Surface::Card);
-        let display_name = if self.create_name.is_empty() {
-            String::from("Type a name...")
-        } else {
-            self.create_name.clone()
+        // The toolkit's field: it has the keyboard -- every key that types
+        // goes into the name -- unless the shortcut card is over the form,
+        // and is red once Enter has found it empty, until the name changes.
+        // Never lit under the pointer: it has no press of its own to offer.
+        let name_box = Self::create_name_rect(fx, fy);
+        let state = field::State {
+            hovered: false,
+            focused: !self.show_help,
+            disabled: false,
+            invalid: self.create_name_missing,
         };
-        let name_color = if self.create_name.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        cmds.push(RenderCommand::Text {
-            x: fx + 88.0,
-            y: fy + 54.0,
-            text: display_name,
-            font_size: 12.0,
-            color: name_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(270.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        field::draw(cmds, &self.palette, name_box, state, self.focus_ring_width);
+        let line = guitk::text::line_height(12.0, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            name_box.x + 8.0,
+            name_box.y + (name_box.h - line) / 2.0,
+            name_box.w - 16.0,
+        );
+        if self.create_name.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: String::from("Type a name..."),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &self.create_name,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: guitk::text::TextCursor::from(self.create_name.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: 12.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
 
         // Category
         let cat = Category::ALL
@@ -3144,6 +3268,10 @@ fn rate_color(rate: f32, pal: &Palette) -> Color {
 impl App for HabitTrackerApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5939,6 +6067,90 @@ mod tests {
         }
     }
 
+    /// **A change in another window reaches this one**, when the desktop says
+    /// `habits.yaml` changed (§1434) -- two windows each kept their own, and
+    /// the last to write won. The selection and a delete waiting on its `Y`
+    /// follow their habit by id when the list shifts under them, and a delete
+    /// whose habit has gone is let go rather than falling on the next one.
+    #[test]
+    fn a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit() {
+        settingsfile::testing::with_scratch_config("habits-reread", |_| {
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            let mut first = HabitTrackerApp::from_settings();
+            first.today = FIXTURE_DAY;
+            for name in ["Read", "Stretch", "Walk"] {
+                first.create_name = String::from(name);
+                first.create_habit();
+            }
+            let mut second = HabitTrackerApp::from_settings();
+            second.today = FIXTURE_DAY;
+            assert_eq!(second.habits.len(), 3);
+            // "Stretch" selected, and a delete of "Walk" waiting on its Y: when
+            // "Read" goes, each moves up one place, and staying where it was
+            // would land on the wrong habit or on nothing.
+            second.selected_habit = 1;
+            second.ask_to_delete(2);
+
+            // The first window deletes "Read", and checks in on "Walk".
+            first.ask_to_delete(0);
+            first.handle_key("y", false, false);
+            first.selected_habit = 1;
+            first.selected_day_col = 0;
+            first.toggle_check_in_selected();
+
+            assert!(!second.handle_event(&announce(b"notes")));
+            assert_eq!(second.habits.len(), 3, "another program's file was read");
+            assert!(second.handle_event(&announce(b"habits")));
+            assert_eq!(second.habits.len(), 2, "the delete did not reach it");
+            let selected = second.active_habits()[second.selected_habit];
+            assert_eq!(
+                second.habits[selected].name, "Stretch",
+                "the selection lost its habit"
+            );
+            assert_eq!(
+                second
+                    .pending_delete
+                    .map(|i| second.habits[i].name.as_str()),
+                Some("Walk"),
+                "the waiting delete lost its habit"
+            );
+            let walk = second
+                .habits
+                .iter()
+                .find(|h| h.name == "Walk")
+                .expect("Walk is still there");
+            assert_eq!(
+                walk.check_ins,
+                vec![FIXTURE_DAY],
+                "the check-in did not reach it"
+            );
+
+            // "Walk" goes in the first window: the delete is let go.
+            first.ask_to_delete(1);
+            first.handle_key("y", false, false);
+            second.handle_event(&announce(b"habits"));
+            assert_eq!(
+                second.pending_delete, None,
+                "a delete fell on another habit"
+            );
+
+            assert!(
+                !first.handle_event(&announce(b"habits")),
+                "a window's own save, announced back, changed what it shows"
+            );
+            let mut quiet = HabitTrackerApp::new();
+            assert!(!quiet.handle_event(&announce(b"habits")));
+            assert!(
+                quiet.habits.is_empty(),
+                "a tracker that keeps nothing read the file"
+            );
+        });
+    }
+
     /// Habits, their check-ins, and archiving survive the window closing.
     /// Nothing did: every mark went when the window closed.
     #[test]
@@ -6089,5 +6301,191 @@ mod tests {
                 app.status_msg
             );
         });
+    }
+    // -- The new habit's name box (lane C, c-e-a-theme-can-shape-the-controls)
+    //    and the chords kept out of it
+
+    /// A key held with `modifiers` that typed `text`.
+    fn chord_event(key: Key, text: &str, modifiers: guitk::event::Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        })
+    }
+
+    /// The name box of the form as `app` draws it.
+    fn name_box(app: &HabitTrackerApp) -> Rect {
+        HabitTrackerApp::create_name_rect((app.width - 400.0) / 2.0, (app.height - 300.0) / 2.0)
+    }
+
+    /// Whether `app` draws exactly the toolkit's field for the name box in
+    /// `state` -- and, unless `state` has the keyboard, not the focused one
+    /// as well.
+    fn draws_name_box(app: &HabitTrackerApp, p: &Palette, state: field::State) -> bool {
+        let rect = name_box(app);
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, app.focus_ring_width);
+            v
+        };
+        let cmds = app.render_commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// **The new habit's name box is the toolkit's field**: it has the
+    /// keyboard while the form is up, marked as the theme marks a field in
+    /// the user's width; Enter on an empty name turns it red until the name
+    /// changes; and under the shortcut card it gives up its mark. It was a
+    /// card with no caret.
+    #[test]
+    fn the_name_box_is_the_toolkits_field() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.handle_key("n", false, false);
+        assert!(app.show_create_form);
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_name_box(&app, &p, focused),
+            "the name box does not have the keyboard"
+        );
+
+        app.handle_key("Return", false, false);
+        assert!(app.show_create_form, "an empty name made a habit");
+        assert!(
+            draws_name_box(
+                &app,
+                &p,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "Enter on an empty name does not turn the box red"
+        );
+        app.handle_key("R", false, false);
+        assert!(
+            draws_name_box(&app, &p, focused),
+            "the box stays red once there is a name"
+        );
+        app.handle_key("Backspace", false, false);
+        app.handle_key("Return", false, false);
+        app.handle_key("Escape", false, false);
+        app.handle_key("n", false, false);
+        assert!(
+            draws_name_box(&app, &p, focused),
+            "a form opened again is red from the last one"
+        );
+
+        app.handle_key("F1", false, false);
+        assert!(
+            draws_name_box(&app, &p, field::State::default()),
+            "the name box keeps the keyboard's mark under the card"
+        );
+    }
+
+    /// **A chord's letter is not typed into the name, and AltGr's is.** The
+    /// form ignored Ctrl, so Ctrl+K typed a `k`; Alt+X typed an `x` and
+    /// Windows+E an `e`; and on the habits themselves Alt+2 changed the
+    /// screen. AltGr -- Ctrl+Alt -- types: German `@` is AltGr+Q.
+    #[test]
+    fn a_chord_is_not_typed_into_the_name_and_altgr_is() {
+        use guitk::event::Modifiers;
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let screen = app.screen;
+        app.handle_event(&chord_event(
+            Key::Num2,
+            "2",
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(app.screen, screen, "Alt+2 changed the screen");
+
+        app.handle_key("n", false, false);
+        for (k, t, m) in [
+            (Key::K, "k", Modifiers::ctrl()),
+            (
+                Key::X,
+                "x",
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
+            (
+                Key::E,
+                "e",
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        ] {
+            app.handle_event(&chord_event(k, t, m));
+        }
+        assert_eq!(
+            app.create_name, "",
+            "a chord's letter was typed into the name"
+        );
+        app.handle_event(&chord_event(
+            Key::Q,
+            "@",
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(app.create_name, "@", "AltGr+Q did not type its @");
+    }
+
+    /// **The caret is after the name, inside its box.**
+    #[test]
+    fn the_caret_follows_the_name() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        app.handle_key("n", false, false);
+        for c in ["R", "u", "n"] {
+            app.handle_key(c, false, false);
+        }
+        let cmds = app.render_commands();
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "Run"))
+            .expect("the name is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the name: {other:?}"),
+        };
+        let rect = name_box(&app);
+        let end = rect.x + 8.0 + guitk::text::measure("Run", 12.0, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the name at {end}"
+        );
     }
 }

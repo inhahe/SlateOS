@@ -27,10 +27,14 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -60,6 +64,11 @@ const LIST_ROW_H: f32 = 56.0;
 const LIST_HEADER_H: f32 = 28.0;
 const PICKER_ITEM_H: f32 = 44.0;
 const PICKER_HEAD_H: f32 = 84.0;
+/// The size the picker's search is drawn at.
+const PICKER_SEARCH_SIZE: f32 = 13.0;
+/// The most characters the picker's search holds: far more than any city's
+/// name, and a stop for a paste of something that is not one.
+const PICKER_SEARCH_CAPACITY: usize = 128;
 
 /// The three glyph buttons in a card's or a row's top-right corner.
 const GLYPH_W: f32 = 20.0;
@@ -472,6 +481,16 @@ pub struct WorldClockApp {
     /// Timezone picker
     show_picker: bool,
     picker_search: String,
+    /// The picker's search box's caret and selection, laid over
+    /// `picker_search`, which stays the truth: reloaded whenever the search
+    /// has changed under it (opening the picker empties it).
+    picker_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
+    picker_clipboard: String,
+    /// How wide the mark is round the search box while it has the keyboard:
+    /// the user's focus width (`App::appearance_changed`), the toolkit's
+    /// until it is known.
+    focus_ring_width: f32,
     picker_scroll: usize,
     /// Settings
     use_24h: bool,
@@ -540,6 +559,9 @@ impl WorldClockApp {
             clock_style: ClockStyle::Digital,
             show_picker: false,
             picker_search: String::new(),
+            picker_editor: TextInput::new(),
+            picker_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             picker_scroll: 0,
             use_24h: false,
             show_seconds: true,
@@ -787,7 +809,8 @@ impl WorldClockApp {
     }
 
     fn filtered_timezones(&self) -> Vec<usize> {
-        let query = self.picker_search.to_ascii_lowercase();
+        // Folded as Unicode, not ASCII: "SÃO" finds São Paulo.
+        let query = self.picker_search.to_lowercase();
         TIMEZONES
             .iter()
             .enumerate()
@@ -800,10 +823,10 @@ impl WorldClockApp {
                 // find Sydney.
                 let abbrev = tz
                     .rule()
-                    .map(|r| self.abbrev(&r).to_ascii_lowercase())
+                    .map(|r| self.abbrev(&r).to_lowercase())
                     .unwrap_or_default();
-                tz.city.to_ascii_lowercase().contains(&query)
-                    || tz.country.to_ascii_lowercase().contains(&query)
+                tz.city.to_lowercase().contains(&query)
+                    || tz.country.to_lowercase().contains(&query)
                     || abbrev.contains(&query)
             })
             .map(|(i, _)| i)
@@ -817,10 +840,58 @@ impl WorldClockApp {
         self.picker_scroll = 0;
     }
 
-    fn handle_picker_text(&mut self, text: &str) {
-        if self.show_picker {
-            self.picker_search.push_str(text);
+    /// Apply an editing key to the picker's search box: the caret keys,
+    /// Backspace and Delete, Ctrl+A, C, X and V, and typing, which knows a
+    /// command from AltGr (`textline::apply_key`). A changed search starts
+    /// the list from its top. The box had no caret: Backspace from the end
+    /// was its only edit.
+    fn edit_picker_search(&mut self, key: &KeyEvent) -> EventResult {
+        if self.picker_editor.text() != self.picker_search {
+            self.picker_editor.set_text(&self.picker_search);
+        }
+        let before = (
+            self.picker_editor.cursor(),
+            self.picker_editor.selection_anchor(),
+        );
+        let edit = textline::apply_key(
+            &mut self.picker_editor,
+            key,
+            PICKER_SEARCH_CAPACITY,
+            &self.picker_clipboard,
+            PICKER_SEARCH_SIZE,
+        );
+        if let Some(copied) = edit.copied {
+            self.picker_clipboard = copied;
+        }
+        if !edit.handled {
+            return EventResult::Ignored;
+        }
+        if self.picker_editor.text() != self.picker_search {
+            self.picker_search = self.picker_editor.text().to_owned();
             self.picker_scroll = 0;
+            return EventResult::Consumed;
+        }
+        if (
+            self.picker_editor.cursor(),
+            self.picker_editor.selection_anchor(),
+        ) == before
+        {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// How the picker's search box is drawn: with the keyboard while the
+    /// picker is up -- every key that types goes to it -- unless the list of
+    /// keys is over it, and red while the search finds no city. Never lit
+    /// under the pointer: it has no press of its own.
+    fn picker_search_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.show_picker && !self.show_help,
+            disabled: false,
+            invalid: !self.picker_search.is_empty() && self.filtered_timezones().is_empty(),
         }
     }
 
@@ -1610,23 +1681,64 @@ impl WorldClockApp {
         );
         frame.hit(Target::PickerClose, close);
 
+        // The search box: the toolkit's field, holding the search with the
+        // editor's caret and selection, scrolled to keep the caret in view
+        // -- or a grey hint while it is empty. It was a grey bar with the
+        // search and an `|` typed onto it.
         let search = Rect::new(panel.x + 12.0, panel.y + 44.0, panel.w - 24.0, 32.0);
-        fill(frame, search, self.palette.surface0, 6.0);
-        let (search_text, search_color) = if self.picker_search.is_empty() {
-            (String::from("Search cities..."), self.palette.overlay0)
-        } else {
-            (format!("{}|", self.picker_search), self.palette.text)
-        };
-        label(
-            frame,
+        let state = self.picker_search_state();
+        field::draw(frame, &self.palette, search, state, self.focus_ring_width);
+        let line = text::line_height(PICKER_SEARCH_SIZE, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
             search.x + 8.0,
-            search.y + 8.0,
-            search_text,
-            13.0,
-            search_color,
-            FontWeightHint::Regular,
-            Some(search.w - 16.0),
+            search.y + (search.h - line) / 2.0,
+            (search.w - 16.0).max(0.0),
         );
+        if self.picker_search.is_empty() && !state.focused {
+            label(
+                frame,
+                tx,
+                ty,
+                String::from("Search cities..."),
+                PICKER_SEARCH_SIZE,
+                self.palette.subtext0,
+                FontWeightHint::Regular,
+                Some(tw),
+            );
+        } else {
+            let editing = self.picker_editor.text() == self.picker_search;
+            let mut typed = RenderTree::new();
+            textedit::draw(
+                &mut typed,
+                &textedit::SingleLine {
+                    text: &self.picker_search,
+                    cursor: if editing {
+                        self.picker_editor.cursor()
+                    } else {
+                        text::TextCursor::from(self.picker_search.len())
+                    },
+                    selection_anchor: if editing {
+                        self.picker_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused: state.focused,
+                    x: tx,
+                    y: ty,
+                    width: tw,
+                    line_height: line,
+                    font_size: PICKER_SEARCH_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            for command in typed.commands {
+                frame.push(command);
+            }
+        }
 
         let list = Rect::new(
             panel.x,
@@ -1815,16 +1927,21 @@ pub fn handle_event(state: &mut WorldClockApp, event: &Event) -> EventResult {
 }
 
 fn handle_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
+    // A key on its own is taken plain, nothing held but Shift: a chord with
+    // Ctrl, Alt or the Windows key is the window's or the desktop's and
+    // arrives carrying its key -- Alt+X removed the chosen clock and Alt+Space
+    // moved every clock on an hour.
+    let plain = textline::is_plain(key.modifiers);
     // Above the picker, so the card can be raised and dismissed from either
     // screen, and `Escape` closes the card before the picker acts on it.
-    if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+    if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
         state.show_help = !state.show_help;
         return EventResult::Consumed;
     }
     if state.show_help {
         // The card is modal: it takes every key, and a few dismiss it. Letting
         // the rest through would mean changing a clock you cannot see.
-        if matches!(key.key, Key::Escape | Key::Enter | Key::Space) {
+        if plain && matches!(key.key, Key::Escape | Key::Enter | Key::Space) {
             state.show_help = false;
         }
         return EventResult::Consumed;
@@ -1832,6 +1949,9 @@ fn handle_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
 
     if state.show_picker {
         return handle_picker_key(state, key);
+    }
+    if !plain {
+        return EventResult::Ignored;
     }
     match key.key {
         Key::Left | Key::H if state.selected_clock > 0 => {
@@ -1874,35 +1994,45 @@ fn handle_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
     EventResult::Consumed
 }
 
+/// Keys while the time-zone picker is up: its own keys plain -- Escape,
+/// Enter, and Up, Down and the page keys for the list -- and every other key
+/// its search box's editor's (`WorldClockApp::edit_picker_search`), which
+/// types AltGr's letters and not the letter a command carries (Alt+X
+/// searched for `x`).
 fn handle_picker_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
+    let plain = textline::is_plain(key.modifiers);
     match key.key {
-        Key::Escape => state.show_picker = false,
-        Key::Backspace => {
-            state.picker_search.pop();
-            state.picker_scroll = 0;
-        }
-        Key::Enter => {
+        Key::Escape if plain => state.show_picker = false,
+        Key::Enter if plain => {
             if let Some(&tz_idx) = state.filtered_timezones().first() {
                 state.add_clock(tz_idx);
                 state.show_picker = false;
             }
         }
-        Key::Up => state.scroll_picker(-1),
-        Key::Down => state.scroll_picker(1),
-        Key::PageUp => state.scroll_picker(-4),
-        Key::PageDown => state.scroll_picker(4),
-        _ => {
-            let typed: String = key.typed().collect();
-            if typed.is_empty() {
-                return EventResult::Ignored;
-            }
-            state.handle_picker_text(&typed);
-        }
+        Key::Up if plain => state.scroll_picker(-1),
+        Key::Down if plain => state.scroll_picker(1),
+        Key::PageUp if plain => state.scroll_picker(-4),
+        Key::PageDown if plain => state.scroll_picker(4),
+        _ => return state.edit_picker_search(key),
     }
     EventResult::Consumed
 }
 
 fn handle_mouse(state: &mut WorldClockApp, mouse: &MouseEvent) -> EventResult {
+    // The list of keys is modal for the pointer as it is for the keys, and
+    // drawn over everything, the city picker included: a press with any button
+    // puts it away and does nothing else -- it used to press the button under
+    // it, removing a clock the reader could not see among them -- and the
+    // wheel scrolls nothing it covers.
+    if state.show_help {
+        return match mouse.kind {
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                state.show_help = false;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        };
+    }
     match mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => {
             let Some(target) = state.target_at(mouse.x, mouse.y) else {
@@ -1967,6 +2097,10 @@ fn handle_mouse(state: &mut WorldClockApp, mouse: &MouseEvent) -> EventResult {
 impl App for WorldClockApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -2079,6 +2213,94 @@ mod tests {
     /// Send a key the way the window does.
     fn press(app: &mut WorldClockApp, k: Key) -> EventResult {
         probe::key(app, &probe::press(k))
+    }
+
+    /// **A chord is neither a clock key nor typing**: a chord with Ctrl, Alt
+    /// or the Windows key carries its key -- Alt+X removed the chosen clock,
+    /// Alt+Space moved every clock on an hour, Alt+T changed the clock to
+    /// twelve hours -- and in the city search Alt+X searched for `x`, while
+    /// a letter typed with AltGr belongs in it.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round.
+    #[test]
+    fn a_chord_is_neither_a_clock_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = sample_app();
+        app.selected_clock = 2;
+        let state = |app: &WorldClockApp| {
+            (
+                (app.clocks.len(), app.selected_clock, app.offset_secs),
+                (
+                    app.view_mode,
+                    app.clock_style,
+                    app.use_24h,
+                    app.show_seconds,
+                ),
+                (app.show_picker, app.show_help, app.home_tz_idx),
+                app.clocks.iter().map(|c| c.pinned).collect::<Vec<_>>(),
+            )
+        };
+        let before = state(&app);
+        for m in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [
+                Key::X,
+                Key::Delete,
+                Key::Space,
+                Key::T,
+                Key::S,
+                Key::A,
+                Key::G,
+                Key::P,
+                Key::N,
+                Key::Home,
+                Key::Left,
+                Key::F1,
+            ] {
+                assert_eq!(
+                    probe::key(&mut app, &chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the clocks");
+            }
+        }
+
+        // The city search types what was typed.
+        press(&mut app, Key::N);
+        assert!(app.show_picker, "control: N opens the picker");
+        probe::key(&mut app, &chord(Key::X, "x", Modifiers::alt()));
+        probe::key(&mut app, &chord(Key::X, "x", Modifiers::super_key()));
+        probe::key(&mut app, &chord(Key::S, "\u{15b}", altgr));
+        probe::key(&mut app, &chord(Key::Backspace, "", Modifiers::alt()));
+        probe::key(&mut app, &chord(Key::Escape, "", Modifiers::alt()));
+        probe::key(&mut app, &chord(Key::Enter, "", Modifiers::super_key()));
+        assert!(app.show_picker, "a chorded Escape or Enter closed it");
+        assert_eq!(
+            app.picker_search, "\u{15b}",
+            "a command's letter, or AltGr lost"
+        );
+
+        // The list of keys answers plain keys.
+        press(&mut app, Key::Escape);
+        press(&mut app, Key::F1);
+        assert!(app.show_help, "control: F1 raises it");
+        probe::key(&mut app, &chord(Key::Space, " ", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Space put it away");
     }
 
     /// States chosen so that between them every advertised key has work.
@@ -2955,6 +3177,66 @@ mod tests {
         );
     }
 
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press on a clock's
+    /// remove button under the list removed a clock the reader could not see.
+    /// The controls are the same turn and press with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        let mut app = sample_app();
+        let before = app.clocks.len();
+
+        handle_event(&mut app, &f1);
+        assert!(app.show_help);
+        assert_eq!(
+            probe::click(&mut app, Target::Remove(2)),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_eq!(
+            app.clocks.len(),
+            before,
+            "the press removed a clock under the list"
+        );
+        handle_event(&mut app, &f1);
+        probe::click_with(&mut app, Target::Remove(2), MouseButton::Right);
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The wheel, in a window too short for the clocks.
+        app.view_mode = ViewMode::List;
+        app.resize(900.0, 400.0);
+        handle_event(&mut app, &f1);
+        handle_event(&mut app, &scroll_at(450.0, 200.0, -3.0));
+        assert_eq!(
+            app.scroll_offset, 0.0,
+            "the wheel scrolled the clocks under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        handle_event(&mut app, &f1);
+
+        // The controls.
+        handle_event(&mut app, &scroll_at(450.0, 200.0, -3.0));
+        assert!(
+            app.scroll_offset > 0.0,
+            "control: the wheel scrolls nothing at all"
+        );
+        app.resize(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+        app.view_mode = ViewMode::Grid;
+        app.scroll_offset = 0.0;
+        probe::click(&mut app, Target::Remove(2));
+        assert_eq!(
+            app.clocks.len(),
+            before - 1,
+            "control: the press removes nothing even with the list down"
+        );
+    }
+
     /// A glyph button sits on top of the card, and is recorded after it, so it
     /// wins the reverse-order hit test rather than the card swallowing it.
     #[test]
@@ -3111,6 +3393,134 @@ mod tests {
         probe::click(&mut app, Target::PickerCity(idx));
         assert_eq!(app.clocks.len(), before + 1);
         assert_eq!(app.clocks.last().map(|c| c.tz_idx), Some(idx));
+    }
+
+    /// Type `text` into whatever has the keyboard, a character at a time.
+    fn type_text(app: &mut WorldClockApp, text: &str) {
+        for c in text.chars() {
+            probe::key(app, &probe::typing(&c.to_string()));
+        }
+    }
+
+    /// **The city search is the toolkit's field**: with the keyboard in the
+    /// theme's mark at the user's width while the picker is up -- not under
+    /// the list of keys -- red while it finds no city, and the search drawn
+    /// with a caret after it. It was a grey bar with an `|` typed onto the
+    /// search.
+    #[test]
+    fn the_city_search_is_the_toolkits_field() {
+        let mut app = sample_app();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        app.theme_changed(&p);
+        app.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.open_picker();
+        let panel = app.layout().picker().expect("a panel at the default size");
+        let rect = Rect::new(panel.x + 12.0, panel.y + 44.0, panel.w - 24.0, 32.0);
+        let draws = |app: &WorldClockApp, s: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = render(app);
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws(&app, focused),
+            "the open picker's search has no keyboard mark"
+        );
+
+        type_text(&mut app, "lon");
+        let cmds = render(&app);
+        let at = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "lon"))
+            .expect("the search is not drawn in its box");
+        let caret = match cmds.get(at + 1) {
+            Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+            other => panic!("no caret after the search: {other:?}"),
+        };
+        let end = rect.x + 8.0 + text::measure("lon", PICKER_SEARCH_SIZE, FontWeightHint::Regular);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the search at {end}"
+        );
+
+        type_text(&mut app, "zzq");
+        assert!(app.filtered_timezones().is_empty());
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(draws(&app, red), "a search that finds nothing is not red");
+        app.show_help = true;
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    focused: false,
+                    ..red
+                }
+            ),
+            "the search keeps its mark under the list of keys"
+        );
+    }
+
+    /// **The city search edits like a field**: the caret keys and Delete,
+    /// Ctrl+A and typing over the selection -- while Up and Down still move
+    /// through the list. Backspace from the end was its only edit.
+    #[test]
+    fn the_city_search_edits_like_a_field() {
+        let mut app = sample_app();
+        app.open_picker();
+        type_text(&mut app, "tokyo");
+        press(&mut app, Key::Home);
+        press(&mut app, Key::Delete);
+        assert_eq!(
+            app.picker_search, "okyo",
+            "Home and Delete did not edit the start"
+        );
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        type_text(&mut app, "s");
+        assert_eq!(
+            app.picker_search, "s",
+            "typing did not replace the selection"
+        );
+        let scroll = app.picker_scroll;
+        press(&mut app, Key::Down);
+        assert_ne!(
+            app.picker_scroll, scroll,
+            "Down no longer moves through the list"
+        );
+        assert_eq!(app.picker_search, "s");
+    }
+
+    /// **A search in capitals finds a city with an accent**: the search was
+    /// folded as ASCII, so "SÃO" kept its `Ã` and found no São Paulo.
+    #[test]
+    fn a_search_in_capitals_finds_a_city_with_an_accent() {
+        let mut app = sample_app();
+        app.open_picker();
+        app.picker_search = String::from("S\u{c3}O");
+        let found: Vec<&str> = app
+            .filtered_timezones()
+            .into_iter()
+            .filter_map(|i| TIMEZONES.get(i).map(|tz| tz.city))
+            .collect();
+        assert!(found.contains(&"S\u{e3}o Paulo"), "{found:?}");
     }
 
     /// The backdrop covers the whole window, so it is recorded *before* the

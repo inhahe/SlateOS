@@ -123,6 +123,8 @@ UNDECLARED_OK: dict[str, str] = {
     "verror": "gnulib's -- its verror.h declares it -- and the va_list form error's trampoline "
               "delegates to; glibc has no such function to declare it as",
     "verror_at_line": "as verror",
+    "rexecoptions": "glibc exports it beside rexec and declares it in no header; nothing "
+                    "reads it, glibc's code or this",
     "setkeylayout": "SlateOS's own call, made from Rust (localectl): a C declaration of "
                     "SlateOS's own calls waits on a header set for them",
     "slateos_spawn_caps": "as setkeylayout: posix_spawn with a capability list",

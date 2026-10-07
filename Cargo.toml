@@ -6,8 +6,28 @@ members = [
     "gui/*",
     # Lane F's video codecs, each its own crate under `gui/video/`, which
     # `gui/*` cannot reach and which is itself excluded below. The first is
-    # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`).
+    # rav1d, the AV1 decoder, vendored (`gui/video/rav1d/VENDORED.md`); the
+    # second, vp9, libvpx's VP9 decoder ported (design-decisions.md §1339),
+    # and vp8 its VP8 decoder, ported the same way; matroska, the Matroska
+    # and WebM demuxer their packets come from, mp4 the MP4 one and ogg the
+    # Ogg one; yuv,
+    # libyuv's and libavif's conversions and scaling their pictures are
+    # drawn with; codec (videocodec), the one a program calls for a file's
+    # frames; and opus, libopus's decoder for their sound, ported as vp9 was
+    # (§1350), and vorbis, Tremor's, ported the same way (§1352), and flac,
+    # libFLAC's.
+    "gui/video/codec",
+    "gui/video/flac",
+    "gui/video/matroska",
+    "gui/video/mp3",
+    "gui/video/mp4",
+    "gui/video/ogg",
+    "gui/video/opus",
     "gui/video/rav1d",
+    "gui/video/vorbis",
+    "gui/video/vp8",
+    "gui/video/vp9",
+    "gui/video/yuv",
     "init/*",
     "net/*",
     "userspace/*",
@@ -206,6 +226,24 @@ members = [
     # untrusted input, each its own attack surface, and a bug fixed in one is
     # not fixed in the other.
     "deflate",
+    # bzip2, ported from libbzip2 1.0.8 rather than promoted out of
+    # `kernel/src/fs/bzip2.rs` (`requests/e-a-bzip2-xz-and-7z-are-trapped-in-
+    # the-kernel-binary.md`): the kernel's copy, written rather than ported,
+    # compressed some inputs into streams no decoder accepts and read only the
+    # first of several concatenated streams. Its compressor writes libbzip2's
+    # exact bytes, which its fixtures check. no_std + alloc, no dependencies.
+    "bzip2",
+    # The .xz and .lzma formats and raw LZMA/LZMA2, ported from liblzma 5.2.5
+    # out of kernel/src/fs/xz.rs's place for the same request as `bzip2`: the
+    # kernel's copy read no filters, no SHA-256 and no .lzma. Its decoder
+    # accepts what `xz -d` accepts, held to liblzma's own test files and its
+    # verdicts. no_std + alloc.
+    "xz",
+    # 7z archives, read as 7-Zip reads them: a port of 7-Zip's own 7z reader
+    # from the public-domain LZMA SDK, decoding through `xz`, `bzip2` and
+    # `deflate`. Out of kernel/src/fs/sevenz.rs's place, for the request
+    # `bzip2` and `xz` came from. no_std + alloc.
+    "sevenz",
     # ZIP (APPNOTE 6.3.x) with Zip64, promoted out of `kernel/src/fs/zip.rs`
     # at lane C's request (`requests/c-a-zip-is-trapped-in-the-kernel-binary.md`)
     # -- the third time this same pattern has come up.
@@ -254,6 +292,15 @@ members = [
     # a member, as `rustcrypto/seal` is. Out of `default-members` for
     # procinfo's reason.
     "services/backupd",
+    # The dynamic-DNS service and what each provider is (lane E's
+    # requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md):
+    # `std` crates named inside the excluded `services`, as `backupd` is, and
+    # out of `default-members` for the same reason. The provider crate is
+    # shared with Settings' Dynamic DNS page; the router crate is the
+    # service's NAT-PMP and UPnP, for the router's address and port forwards.
+    "services/dyndns",
+    "services/dyndns/providers",
+    "services/dyndns/router",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project
@@ -273,9 +320,20 @@ members = [
 # target/ directory and so `cargo build -p <crate>` continues to work
 # from anywhere; building them explicitly (or from inside a zone)
 # still picks up the zone's x86_64-slateos target.
+#
+# `posix` was one of these until 2026-10-06, from when the libc was built
+# for x86_64-unknown-none. Since design-decisions §1106 it is built for its
+# own hard-float target, `posix/x86_64-slateos-libc.json`, by
+# `toolchain/build-sysroot.ps1` (which the pipeline runs), and its memory and
+# string functions are SSE2 (§1181): the stock soft-float target cannot
+# generate code for them at all ("rustc-LLVM ERROR: Do not know how to soften
+# the result of this operator!"). Nothing linked the build this produced --
+# the kernel does not depend on posix -- so every kernel build compiled a
+# libc for nothing, and stopped the boot the day it could not. Pre-push gate
+# 40 still type-checks posix for the stock target (`cargo check`, in
+# `posix/`), which is what that configuration is good for.
 default-members = [
     "kernel",
-    "posix",
     "toolchain/stubs",
 ]
 exclude = [
@@ -344,7 +402,17 @@ exclude = [
 # that feature. Declaring the name here keeps ordinary `cargo build` free of
 # `unexpected_cfgs` warnings. It lives at workspace scope because a crate that
 # sets `lints.workspace = true` may not also define its own `[lints.rust]`.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kasan_instrumented)'] }
+#
+# `target_vendor = "slateos"` is the vendor of SlateOS's own target
+# (`toolchain/x86_64-slateos.json`), which the compiler's list of known
+# vendors does not have: every `#[cfg(target_vendor = "slateos")]` in the tree
+# -- the channel transport in `gui/remote`, the file chooser in
+# `gui/filechooser` -- was an `unexpected_cfgs` warning, and an error under
+# `RUSTDOCFLAGS=-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(kasan_instrumented)',
+    'cfg(target_vendor, values("slateos"))',
+] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -675,6 +743,27 @@ strip = "none"
 opt-level = 3
 codegen-units = 1
 
+# The hashes behind the libc's `crypt` (`posix/pwhash`: SHA-2, MD5, yescrypt,
+# scrypt). Every login, `su`, `doas`, screen unlock and SSH password check is
+# one deliberately expensive hash, and at the libc's `-Os` ours took up to 3.7x
+# libxcrypt's time for the same one (yescrypt at 1 MiB: 5.7 ms against 1.5;
+# Ubuntu's `$y$j9T$`: 51 ms against 37; SHA-512 crypt: 9.8 ms against 4.8). At
+# `-O3` the same code matches libxcrypt's SSE2 build (1.6, 23 and 5.2 ms). The
+# hashes are a crate of their own so that only they pay `-O3`'s size; the rest
+# of the libc, in every program, stays `-Os`. Measured by
+# `cargo bench -p posix --bench crypt` against `posix/benches/libxcrypt-
+# reference.c`; performance-targets.md, "Password hashing". Lane D, 2026-10-06.
+#
+# And in the dev profile too: the hashes are run thousands of times by
+# posix's tests (libxcrypt's 1926 answers), which at opt-level 0 took three
+# minutes of the suite's four. Only the optimisation changes; the dev
+# profile's overflow checks and debug assertions stay on.
+[profile.release.package.pwhash]
+opt-level = 3
+
+[profile.dev.package.pwhash]
+opt-level = 3
+
 # Decoding pictures is arithmetic over every pixel, and `opt-level = "s"`
 # forgoes the loop unrolling and vectorisation that arithmetic runs on. rav1d
 # (the AV1 decoder, `gui/video/rav1d`) is pure Rust, without dav1d's assembly,
@@ -694,10 +783,95 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
+# yuv (`gui/video/yuv`) is where those conversions to pixels went when video
+# frames came to share them (2026-10-04): libyuv's rows and libavif's paths,
+# a loop over every pixel of every frame, which `-Os` would not unroll or
+# vectorise. It keeps the optimisation it had inside imagecodec.
+[profile.release.package.yuv]
+opt-level = 3
+codegen-units = 1
+
+# vp9 (the VP9 decoder, `gui/video/vp9`) is written for the compiler to
+# vectorise -- its filters' widths are constants so that loops unroll into
+# SSE2 -- which `-Os` undoes. Counted with callgrind (exact instruction
+# counts, so other lanes' load does not disturb them) over the first 30
+# frames of libvpx's 1080p test vector: 21.98 G instructions at `-Os` with
+# 16 codegen units, 6.57 G at `-O3` with one. libvpx's own C decoder takes
+# 13.8 G. `gui/video/vp9/tests/bench.rs` is the committed benchmark. Lane F,
+# 2026-10-03.
+[profile.release.package.vp9]
+opt-level = 3
+codegen-units = 1
+
+# vp8 (the VP8 decoder, `gui/video/vp8`), for the same reason: its motion
+# compensation and loop filter are written in lanes for the compiler to
+# vectorise. Counted with callgrind over the first 20 frames of 1080p film
+# (`gui/video/vp8/tests/bench.rs`'s stream): 11.09 G instructions at `-Os`
+# with 16 codegen units, 1.99 G at `-O3` with one; libvpx's C decoder takes
+# 6.46 G, its SIMD 0.86 G. Lane F, 2026-10-04.
+[profile.release.package.vp8]
+opt-level = 3
+codegen-units = 1
+
+# opus (the Opus decoder, `gui/video/opus`): filters, transforms and
+# resamplers over every sample, in libopus's fixed-point arithmetic. Counted
+# with callgrind over every stream in its `tests/data` at 48 kHz (151 s of
+# sound; `tests/bench.rs`, one pass): 5.32 G instructions at `-Os` with 16
+# codegen units, 4.46 G at `-O3` with one; libopus 1.5.2's own fixed-point
+# C (`-O2`, no intrinsics; `tools/bench.c`) takes 4.03 G. Lane F, 2026-10-04.
+[profile.release.package.opus]
+opt-level = 3
+codegen-units = 1
+
+# vorbis (the Vorbis decoder, `gui/video/vorbis`): the same kind of work, in
+# Tremor's fixed point -- an MDCT, floors, residues and the window over every
+# sample. Counted with callgrind over the encoded streams in its `tests/data`
+# (27.6 s of sound in 1 to 8 channels; `tests/bench.rs`, one pass): 771 M
+# instructions at `-Os` with 16 codegen units, 675 M at `-O3` with one; Tremor
+# itself (`-O2`; `tools/bench.c`) takes 627 M. Lane F, 2026-10-04.
+[profile.release.package.vorbis]
+opt-level = 3
+codegen-units = 1
+
 # And in debug builds rav1d alone is optimised, keeping its debug assertions
 # (its `DisjointMut` overlap checks among them): unoptimised it takes 11 ms to
 # decode a 37x19 picture, which makes `imagecodec`'s tests that decode
 # thousands of damaged files take minutes.
 [profile.dev.package.rav1d]
+opt-level = 3
+
+# The same for vp9 and yuv, for the same reason: `videocodec`'s test plays
+# thousands of damaged copies of its fixtures, decoding (vp9) and converting
+# (yuv) every frame, and unoptimised it took minutes (over 400 s, 2026-10-04).
+# Debug assertions stay on.
+[profile.dev.package.vp9]
+opt-level = 3
+
+[profile.dev.package.yuv]
+opt-level = 3
+
+# And vp8 (`gui/video/vp8`): its own tests decode 446 damaged streams and
+# hundreds more at random, 70 s unoptimised (2026-10-04).
+[profile.dev.package.vp8]
+opt-level = 3
+
+# And opus (`gui/video/opus`): its tests decode every test stream about
+# thirty ways, a thousand decodes, and its damage test thousands of packets
+# more, through every decoder: 453 s unoptimised, 30 s so (2026-10-04).
+# Overflow checks and debug assertions stay on, as everywhere in dev.
+[profile.dev.package.opus]
+opt-level = 3
+
+# And vorbis (`gui/video/vorbis`): its tests decode 44 streams some 35 ways
+# each, damaged headers and packets among them: 36 s unoptimised, 4 s so
+# (2026-10-04).
+[profile.dev.package.vorbis]
+opt-level = 3
+
+# The same for `xz`, whose tests hold its encoder to XZ Utils' output byte
+# for byte at every preset: unoptimised, the normal-mode parser codes about
+# 0.3 MB a second, and the corpus is tens of megabytes. Overflow checks and
+# debug assertions stay, as for rav1d. Lane E, 2026-10-03.
+[profile.dev.package.xz]
 opt-level = 3
 

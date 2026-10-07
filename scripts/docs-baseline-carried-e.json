@@ -1,0 +1,14 @@
+{
+ "issue_without_status": [
+  "td-c-ten-files-switch-off-the-dead-code-warning-for-themselves"
+ ],
+ "lowercase_marker": [],
+ "decision_files": [
+  "design-decisions/1227-the-games-words-are-read-under-themes-that-leave-no-room-not-only-the-stock-pale.md",
+  "design-decisions/1228-a-file-a-copy-cannot-carry-out-is-asked-about-unless-told-once-to-skip-such-file.md"
+ ],
+ "deferred_without_trigger": [],
+ "todo_done_paragraphs": [
+  "e779bee046cadb98"
+ ]
+}

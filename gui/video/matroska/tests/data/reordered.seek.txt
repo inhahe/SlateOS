@@ -1,0 +1,14 @@
+# reordered.mkv: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 0 K__
+packet 1 0 K__
+packet 0 40 ___
+packet 1 1020 ___
+packet 1 990 ___
+packet 0 1040 ___
+seek 1500
+packet 1 1020 ___
+packet 1 990 ___
+packet 0 1000 K__
+packet 1 1060 ___
+packet 0 1080 ___

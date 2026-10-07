@@ -10,6 +10,8 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# `is_plain` and `is_ctrl_chord`: a key held with Alt or the Windows key is not the window's, and AltGr is not Ctrl.
+textline = { path = "../textline" }
 # What it converts: WAV through `wavpcm`, pictures decoded by `imagecodec`
 # (lane F's, which owns decoding pictures). Sources are read through a cap and
 # outputs written atomically through `safeio`, so a crash mid-write leaves no

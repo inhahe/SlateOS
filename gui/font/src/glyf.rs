@@ -51,6 +51,11 @@
 //!   FreeType's rounding, kept apart on purpose (design-decisions §1325).
 //!
 //! [`crate::sfnt`]: crate::sfnt
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/OT/glyf/Glyph.hh` and
+//! `src/OT/glyf/glyf.hh`, which carry no copyright line of their own and are
+//! the HarfBuzz authors' (`harfbuzz-COPYING` lists them). Used under HarfBuzz's
+//! licence: see `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 

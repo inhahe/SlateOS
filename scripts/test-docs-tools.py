@@ -310,6 +310,20 @@ def migrate_then_search() -> None:
         s = run(root, sys.executable, script("docsearch.py"), "zebra", "--json", "--no-semantic")
         check("...and sees a file added since the index was built", json.loads(s.stdout)[0]["path"],
               "known-issues/TD-A-NEW.md")
+        # Printed, not as JSON, through a pipe in the platform's own encoding --
+        # `run` sets PYTHONIOENCODING, so this one does not: a title with a `→`
+        # raised UnicodeEncodeError under Windows' cp1252 and the search stopped
+        # after its first hit or two.
+        write(root, "known-issues/TD-A-ARROW.md",
+              "## TD-A-ARROW (lane A) left → right — OPEN\n**Status:** OPEN\nleft → right\n")
+        bare = {k: v for k, v in os.environ.items()
+                if not k.startswith("GIT_") and k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+        r = subprocess.run([sys.executable, script("docsearch.py"), "TD-A-ARROW", "--no-semantic"],
+                           cwd=root, capture_output=True, env=bare)
+        # (The label is ASCII: this file prints its own labels through the
+        # same kind of pipe.)
+        check("...and prints an arrow whatever the console's code page",
+              (r.returncode, b"Traceback" in r.stderr), (0, False))
 
 
 @contextlib.contextmanager

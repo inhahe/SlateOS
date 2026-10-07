@@ -1,0 +1,5 @@
+# delayed.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 opus 1/1000
+packet 0 -960 N/A 2 231 K__ 5640486daa6880d667b76c958820361a -
+packet 0 40 N/A 2 275 K__ 8a8bb7cd343aa2ad99b7d762030857a2 -
+packet 0 1040 N/A 2 319 K__ 693a9fdd4c2fd0700968fba0d07ff3c0 -

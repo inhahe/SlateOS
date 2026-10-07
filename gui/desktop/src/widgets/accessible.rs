@@ -9,6 +9,7 @@
 //! | photo frame | the picture up on it, named by its file, or what it says in a picture's place |
 //! | battery | its charge, or "No battery", described by what its icon shows and the time left |
 //! | calendar | the month today is in, a grid named by the month and year, each day named by its date and said to be today, to have events, or to be another month's |
+//! | upcoming events | a list of the events it shows, each named by its title and described by its day and time, the list said to have nothing coming or how many more there are |
 //! | the rest | the name they show where their content will be |
 //!
 //! A widget not drawn is not here: one hidden, and every one while the layer
@@ -23,6 +24,7 @@ use guitk::render::FontWeightHint;
 use guitk::widget::automation::{Node, Role, Value};
 
 use super::monitor::{Graph, Graphs, Panel};
+use super::upcoming;
 use super::{
     BATTERY_CHARGE, CLOCK_TIME, DesktopWidgetManager, LiveReadings, METER_HEIGHT, Meter,
     NOT_MEASURED, PLACEHOLDER_SIZE, PROBLEM_SIZE, WidgetInstance, WidgetInstanceId, WidgetKind,
@@ -30,7 +32,7 @@ use super::{
     placeholder_line, problem_line,
 };
 use crate::Rect;
-use crate::calendar::MonthGlance;
+use crate::calendar::{MonthGlance, Upcoming};
 use crate::power::{BatteryInfo, BatteryState};
 
 /// A part of the widget layer, as tools name it.
@@ -58,6 +60,10 @@ pub enum WidgetPart {
     Month(WidgetInstanceId),
     /// A day of a calendar's month, by its place in the six weeks.
     Day(WidgetInstanceId, usize),
+    /// An upcoming-events widget's list.
+    Upcoming(WidgetInstanceId),
+    /// One of the events it lists, by its place among them.
+    UpcomingEvent(WidgetInstanceId, usize),
     /// The name a widget with no content of its own yet shows in its place.
     Placeholder(WidgetInstanceId),
 }
@@ -103,6 +109,55 @@ fn month_node(
         grid.children.push(node);
     }
     Some(grid)
+}
+
+/// An upcoming-events widget's list in its content `(x, y, width, height)`:
+/// each event it shows, named by its title and described by its day and
+/// time -- "Today, 09:00" -- boxed where it is drawn ([`upcoming::lines`]);
+/// the list said to have nothing coming, or how many more it does not show.
+fn upcoming_node(
+    id: WidgetInstanceId,
+    upcoming: &Upcoming,
+    (x, y, width, height): (f32, f32, f32, f32),
+) -> Node<WidgetPart> {
+    let content = Rect::new(x, y, width, height);
+    let mut list = Node::new(
+        WidgetPart::Upcoming(id),
+        Role::List,
+        WidgetKind::Reminders.label(),
+        content,
+    );
+    if upcoming.days.is_empty() {
+        list.description = Some(upcoming::NOTHING_COMING.to_owned());
+        return list;
+    }
+    let laid = upcoming::lines(upcoming, content);
+    for line in &laid.lines {
+        if let upcoming::Line::Event {
+            day,
+            event,
+            index,
+            bounds,
+        } = *line
+            && let Some((day, event)) = upcoming
+                .days
+                .get(day)
+                .and_then(|d| d.events.get(event).map(|e| (d, e)))
+        {
+            let mut row = Node::new(
+                WidgetPart::UpcomingEvent(id, index),
+                Role::ListItem,
+                event.title.clone(),
+                bounds,
+            );
+            row.description = Some(format!("{}, {}", day.label, event.time));
+            list.children.push(row);
+        }
+    }
+    if let Some((more, _)) = laid.more {
+        list.description = Some(format!("{} not shown", upcoming::more_text(more)));
+    }
+    list
 }
 
 /// A system monitor's `meter`, its heading's line at `(x, top)`, `width`
@@ -246,6 +301,7 @@ impl DesktopWidgetManager {
             WidgetKind::Calendar => month_node(id, &live.month, (cx, cy, cw, ch))
                 .into_iter()
                 .collect(),
+            WidgetKind::Reminders => vec![upcoming_node(id, &live.upcoming, (cx, cy, cw, ch))],
             WidgetKind::BatteryStatus => {
                 let mut charge = Node::new(
                     WidgetPart::Charge(id),

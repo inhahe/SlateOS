@@ -1996,6 +1996,39 @@ fn a_calendar_widget_shows_this_month() {
     assert_eq!(today, 1, "today marked once");
 }
 
+/// **The desktop's menu adds an upcoming-events widget, which lists the
+/// calendar's week** -- gathered only while one is out.
+#[test]
+fn an_upcoming_events_widget_lists_the_calendars_week() {
+    let mut s = shell();
+    let now = DesktopShell::unix_now();
+    let zone = s.local_zone();
+    s.agenda = crate::calendar::Agenda::of(vec![crate::reminder_shell_tests::event_ahead(
+        "Dentist", now, 60, 15, &zone,
+    )]);
+    assert!(
+        s.live_readings().upcoming.days.is_empty(),
+        "a week gathered with no list out"
+    );
+    s.open_desktop_menu(900.0, 500.0);
+    assert!(
+        s.activate_desktop_menu_item(DesktopShell::MENU_ADD_UPCOMING)
+            .changed()
+    );
+    s.dismiss_popups();
+    let id = s
+        .widgets
+        .all_widgets()
+        .iter()
+        .find(|w| w.kind == WidgetKind::Reminders)
+        .map(|w| w.id)
+        .expect("added");
+    let list = node(&s, ShellPart::Widget(WidgetPart::Upcoming(id)));
+    assert_eq!(list.name, "Upcoming events");
+    let names: Vec<&str> = list.children.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, ["Dentist"]);
+}
+
 /// **A note's text is set as the user would set it**: the note opened with
 /// a click on it, which gives it the keyboard, and the text pasted over all
 /// of it -- its layout to be saved, as after typing -- and what is typed next

@@ -23,6 +23,7 @@ use yamldoc::Document;
 
 mod accessible;
 pub mod monitor;
+pub mod upcoming;
 
 pub use accessible::WidgetPart;
 
@@ -372,7 +373,7 @@ impl WidgetKind {
             Self::MusicPlayer => "Music Player",
             Self::PhotoFrame => "Photo Frame",
             Self::WorldClock => "World Clock",
-            Self::Reminders => "Reminders",
+            Self::Reminders => "Upcoming events",
             Self::DiskUsage => "Disk Usage",
             Self::NetworkMonitor => "Network",
             Self::BatteryStatus => "Battery",
@@ -416,7 +417,7 @@ impl WidgetKind {
             Self::MusicPlayer => WidgetSize::WIDE,
             Self::PhotoFrame => WidgetSize::LARGE,
             Self::WorldClock => WidgetSize::WIDE,
-            Self::Reminders => WidgetSize::TALL,
+            Self::Reminders => WidgetSize::LARGE,
             Self::DiskUsage => WidgetSize::SMALL,
             Self::NetworkMonitor => WidgetSize::SMALL,
             Self::BatteryStatus => WidgetSize::SMALL,
@@ -433,13 +434,21 @@ impl WidgetKind {
     /// one cell's height would be drawn smaller than text is read at. A
     /// clock and the battery are a line or three, which a wider box only
     /// pads. A system monitor is its three meters, or -- given two rows --
-    /// its graphs of the last minute (`monitor`).
+    /// its graphs of the last minute (`monitor`). The upcoming events are a
+    /// list, a few lines high at the least and a cell and more across: in
+    /// one cell its titles would be cut to nothing.
     #[must_use]
     pub const fn sizes(&self) -> &'static [WidgetSize] {
         match self {
             Self::Clock | Self::BatteryStatus => &[WidgetSize::SMALL, WidgetSize::WIDE],
             Self::SystemMonitor => &[WidgetSize::SMALL, WidgetSize::WIDE, WidgetSize::LARGE],
             Self::Calendar => &[WidgetSize::LARGE, WidgetSize::EXTRA_LARGE],
+            Self::Reminders => &[
+                WidgetSize::WIDE,
+                WidgetSize::TALL,
+                WidgetSize::LARGE,
+                WidgetSize::EXTRA_LARGE,
+            ],
             Self::Notes | Self::PhotoFrame => &WidgetSize::ALL,
             _ => &[],
         }
@@ -488,7 +497,9 @@ impl WidgetInstance {
             WidgetKind::PhotoFrame => FRAME_INTERVAL_MS,
             // Once a minute, for midnight: a calendar that drew only when
             // something else did would mark yesterday as today until then.
-            WidgetKind::Calendar => 60_000,
+            // And the upcoming events for an event's end as well: one over
+            // drops away.
+            WidgetKind::Calendar | WidgetKind::Reminders => 60_000,
             _ => 0,
         };
         Self {
@@ -953,6 +964,10 @@ pub struct LiveReadings {
     /// The last minute of what a system monitor graphs, as the shell sampled
     /// it (`monitor::Sampler`); empty while no monitor is drawn.
     pub graphs: monitor::Graphs,
+    /// The events coming up over the next week, as the upcoming-events
+    /// widget lists them -- gathered by the shell from the user's calendar
+    /// (`Agenda::upcoming`) in the clock's zone; empty while none is drawn.
+    pub upcoming: crate::calendar::Upcoming,
 }
 
 /// Manages all desktop widgets.
@@ -2253,6 +2268,13 @@ impl DesktopWidgetManager {
             WidgetKind::Calendar => {
                 Self::render_calendar(&live.month, p, (x, y, width, height), alpha, commands);
             }
+            WidgetKind::Reminders => upcoming::render(
+                &live.upcoming,
+                crate::Rect::new(x, y, width, height),
+                p,
+                alpha,
+                commands,
+            ),
             WidgetKind::BatteryStatus => {
                 let b = &live.battery;
                 // The battery as it is: missing, charging, nearly flat, or
@@ -2570,16 +2592,32 @@ mod tests {
                     up: 2_000,
                 }),
             },
+            // The same calendar's week from the morning of the 6th, so an
+            // upcoming-events widget the fixture shows lists the coloured
+            // event and the day it is on.
+            upcoming: october_agenda().upcoming(OCTOBER_NOON - 3 * 3600, &tzrules::Tz::UTC),
         }
     }
+
+    /// 12:00 UTC on 6 October 2026: the October fixture's now.
+    const OCTOBER_NOON: u64 = 1_791_288_000;
 
     /// October 2026 at a glance, today the 6th, with an event on the 6th
     /// the user coloured and a personal one on the 20th they did not.
     fn october_glance() -> crate::calendar::MonthGlance {
-        use crate::calendar::{Agenda, CalendarConfig, CalendarView, testing::event};
-        // 12:00 UTC on 6 October 2026.
-        let noon = 1_791_288_000;
-        let agenda = Agenda::of(vec![
+        use crate::calendar::{CalendarConfig, CalendarView};
+        CalendarView::new(CalendarConfig::default()).month_glance(
+            OCTOBER_NOON,
+            &tzrules::Tz::UTC,
+            &october_agenda(),
+        )
+    }
+
+    /// The October fixture's calendar: a meeting at noon on the 6th, in a
+    /// colour the user gave it, and one on the 20th in its category's.
+    fn october_agenda() -> crate::calendar::Agenda {
+        use crate::calendar::{Agenda, testing::event};
+        Agenda::of(vec![
             event(
                 "Meeting",
                 (2026, 10, 6),
@@ -2594,8 +2632,7 @@ mod tests {
                 calendarstore::RecurrenceRule::None,
                 None,
             ),
-        ]);
-        CalendarView::new(CalendarConfig::default()).month_glance(noon, &tzrules::Tz::UTC, &agenda)
+        ])
     }
 
     /// The colour the user gave the October fixture's first event.
@@ -4158,6 +4195,7 @@ mod tests {
             battery: crate::power::BatteryInfo::default(),
             month: crate::calendar::MonthGlance::default(),
             graphs: monitor::Graphs::default(),
+            upcoming: crate::calendar::Upcoming::default(),
         };
         let cmds = full_mgr().render(&p, &blank);
         let bars = meter_rects(&cmds);
@@ -4219,6 +4257,7 @@ mod tests {
             battery: crate::power::BatteryInfo::default(),
             month: crate::calendar::MonthGlance::default(),
             graphs: monitor::Graphs::default(),
+            upcoming: crate::calendar::Upcoming::default(),
         };
         let cmds = full_mgr().render(&p, &mixed);
         let texts: Vec<String> = cmds

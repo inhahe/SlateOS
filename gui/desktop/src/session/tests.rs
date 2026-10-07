@@ -1750,6 +1750,17 @@ fn a_desktop_icon_clicked_is_drawn_selected() {
 
 #[test]
 fn a_widget_dragged_is_drawn_where_it_went() {
+    // On a clock that does not move: the widget is a clock, and the frame
+    // is compared at the end with one drawn afresh. On the wall clock a run
+    // slow enough to cross a minute -- the whole suite under a boot test's
+    // load took 57 minutes -- drew the next minute in the fresh one and
+    // called the sent frame stale.
+    datetimesettings::clock::with_time(1_790_424_000, || {
+        a_widget_dragged_is_drawn_where_it_went_at_a_fixed_time();
+    });
+}
+
+fn a_widget_dragged_is_drawn_where_it_went_at_a_fixed_time() {
     settingsfile::testing::with_scratch_config("session-widget-drawn", |_root| {
         let (mut session, desktop, _turn) = session();
         let background = session.background().window();

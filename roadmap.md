@@ -2303,6 +2303,15 @@ live.
   **Next:** opening the calendar at the event pressed, or at a reminder's,
   asked of lane E (`requests/c-e-open-the-calendar-at-an-event-or-a-day.md`).
 
+- `[x]` `[C]` **An upcoming-events widget** (`design-decisions.md` §1499) --
+  done 2026-10-07. "Add widget > Upcoming events": the calendar's events from
+  now over the next week, a day at a time -- Today, Tomorrow, then the date
+  -- each with its time and the bar of its colour; what does not fit is
+  counted, and with nothing coming it says so. Today's events drop away as
+  they end. Tools see it as a list, each event described by its day and
+  time. **Next:** whether a click on a widget opens what it shows is the
+  operator's to say (`open-questions/C-Q36.md`).
+
 - `[x]` `[C]` **The desktop raises the calendar's reminders**
   (`design-decisions.md` §1498) -- done 2026-10-07. When an event's reminder
   is due, a notification from Calendar -- the event, when and where -- stays

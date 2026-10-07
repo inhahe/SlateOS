@@ -41,6 +41,7 @@ fn readings() -> LiveReadings {
             memory: vec![0.73],
             ..Graphs::default()
         },
+        upcoming: crate::calendar::Upcoming::default(),
     }
 }
 
@@ -470,4 +471,80 @@ fn a_widget_with_nothing_to_show_says_what_it_is() {
     let shown = node_of(&layer, &live, WidgetPart::Placeholder(id)).expect("seen");
     assert_eq!((shown.role, shown.name.as_str()), (Role::Label, "Weather"));
     assert!(within(shown.bounds, widget.bounds));
+}
+
+/// **The upcoming events show tools a list of what is coming**: each event
+/// named by its title and described by its day and time, where it is drawn
+/// inside the widget -- and, with nothing coming, a list said to have
+/// nothing in it.
+#[test]
+fn the_upcoming_events_are_a_list_of_whats_coming() {
+    use crate::calendar::{Agenda, testing::event};
+    let (layer, id) = one(WidgetKind::Reminders);
+    let empty = node_of(&layer, &readings(), WidgetPart::Upcoming(id)).expect("seen");
+    assert_eq!(
+        (
+            empty.role,
+            empty.name.as_str(),
+            empty.description.as_deref()
+        ),
+        (
+            Role::List,
+            "Upcoming events",
+            Some(super::upcoming::NOTHING_COMING)
+        )
+    );
+    assert!(empty.children.is_empty());
+
+    // 08:00 UTC on Thursday 8 October 2026.
+    let now = 1_791_446_400;
+    let agenda = Agenda::of(vec![
+        event(
+            "Dentist",
+            (2026, 10, 8),
+            9,
+            calendarstore::RecurrenceRule::None,
+            None,
+        ),
+        event(
+            "Review",
+            (2026, 10, 9),
+            14,
+            calendarstore::RecurrenceRule::None,
+            None,
+        ),
+    ]);
+    let live = LiveReadings {
+        upcoming: agenda.upcoming(now, &tzrules::Tz::UTC),
+        ..readings()
+    };
+    let list = node_of(&layer, &live, WidgetPart::Upcoming(id)).expect("seen");
+    let rows: Vec<(WidgetPart, Role, &str, Option<&str>)> = list
+        .children
+        .iter()
+        .map(|n| (n.id, n.role, n.name.as_str(), n.description.as_deref()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                WidgetPart::UpcomingEvent(id, 0),
+                Role::ListItem,
+                "Dentist",
+                Some("Today, 09:00")
+            ),
+            (
+                WidgetPart::UpcomingEvent(id, 1),
+                Role::ListItem,
+                "Review",
+                Some("Tomorrow, 14:00")
+            ),
+        ]
+    );
+    assert_eq!(list.description, None, "everything fits a large widget");
+    let (x, y, w, h) = layer.content_rect(id).expect("placed");
+    let content = Rect::new(x, y, w, h);
+    for row in &list.children {
+        assert_eq!(content.union(row.bounds), content, "{} outside", row.name);
+    }
 }

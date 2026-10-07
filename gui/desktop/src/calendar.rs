@@ -515,6 +515,110 @@ impl Agenda {
     }
 }
 
+/// How many days ahead, today among them, the upcoming-events widget lists
+/// ([`Agenda::upcoming`]): a week, the span a glance at "what is coming" is
+/// asked about.
+pub const UPCOMING_DAYS: u32 = 7;
+
+/// The events coming up, a day at a time, as the upcoming-events widget
+/// lists them ([`Agenda::upcoming`]): from now, over [`UPCOMING_DAYS`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Upcoming {
+    /// The days with events still to come, soonest first; empty when there
+    /// are none.
+    pub days: Vec<UpcomingDay>,
+}
+
+impl Upcoming {
+    /// Every event listed, soonest first, with the day it is on.
+    pub fn events(&self) -> impl Iterator<Item = (&UpcomingDay, &UpcomingEvent)> {
+        self.days
+            .iter()
+            .flat_map(|day| day.events.iter().map(move |event| (day, event)))
+    }
+}
+
+/// A day of [`Upcoming`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpcomingDay {
+    /// The day as the list heads it: "Today", "Tomorrow", "Friday 9
+    /// October".
+    pub label: String,
+    /// Its events still to come, all-day ones first and then by time.
+    pub events: Vec<UpcomingEvent>,
+}
+
+/// An event of an [`UpcomingDay`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpcomingEvent {
+    /// Its title.
+    pub title: String,
+    /// When on its day: "All day", or the time it starts, "09:00".
+    pub time: String,
+    /// Its mark: the bar beside it, as on the popup's card.
+    pub mark: EventMark,
+}
+
+impl Agenda {
+    /// The events from `utc_now` over [`UPCOMING_DAYS`] in the zone `tz`, a
+    /// day at a time, as the calendar program finds them on each day
+    /// ([`on`](Self::on)) -- today's less those already over. A day with
+    /// nothing still to come is left out.
+    #[must_use]
+    pub fn upcoming(&self, utc_now: u64, tz: &Tz) -> Upcoming {
+        let (year, month, day, hour, minute, _) = timestamp_to_date(local_secs(utc_now, tz));
+        let today = Date::from_ymd(year, month, day);
+        let now_minute = hour.saturating_mul(60).saturating_add(minute);
+        let days = (0..UPCOMING_DAYS)
+            .filter_map(|ahead| {
+                let date = today.add_days(i32::try_from(ahead).unwrap_or(i32::MAX));
+                let (y, m, d) = date.ymd();
+                let events: Vec<UpcomingEvent> = self
+                    .on(y, m, d)
+                    .into_iter()
+                    // Today's that are over are not coming up. An event
+                    // lasts from its start for its length, as the calendar
+                    // program measures it -- an all-day one the whole day,
+                    // and one running past midnight beyond today's end.
+                    .filter(|event| {
+                        ahead > 0 || {
+                            let ends = event
+                                .start
+                                .time
+                                .to_minutes()
+                                .saturating_add(event.duration_minutes().max(1));
+                            ends > now_minute
+                        }
+                    })
+                    .map(|event| UpcomingEvent {
+                        title: event.title.clone(),
+                        time: event_time_label(event),
+                        mark: EventMark::of(event),
+                    })
+                    .collect();
+                (!events.is_empty()).then(|| UpcomingDay {
+                    label: upcoming_label(ahead, date),
+                    events,
+                })
+            })
+            .collect();
+        Upcoming { days }
+    }
+}
+
+/// How the upcoming-events widget heads the day `ahead` days from today,
+/// `date`: "Today", "Tomorrow", then the weekday and date.
+fn upcoming_label(ahead: u32, date: Date) -> String {
+    match ahead {
+        0 => "Today".to_owned(),
+        1 => "Tomorrow".to_owned(),
+        _ => {
+            let (_, month, day) = date.ymd();
+            format!("{} {day} {}", date.weekday().name(), month_name(month))
+        }
+    }
+}
+
 /// What marks an event on the calendar: the colour the user gave it, if they
 /// gave it one, and its category, in whose colour it is marked otherwise --
 /// kept as such rather than as a colour, so it is drawn in the palette of
@@ -3341,6 +3445,93 @@ mod tests {
         assert!(agenda.refresh_at(&path, written));
         assert_eq!(agenda.problem(), None, "the problem outlived its file");
         assert!(!agenda.refresh_at(&path, written));
+    }
+
+    /// **The upcoming events are the week's still to come**: today's --
+    /// all-day ones, and timed ones not yet over, one ending this minute
+    /// among the over -- then each day's in turn, a week ahead with today
+    /// the first of it, days with nothing left out.
+    #[test]
+    fn the_upcoming_events_are_the_weeks_still_to_come() {
+        // 12:30 UTC on Thursday 8 October 2026.
+        let now = date_to_timestamp(2026, 10, 8, 12, 30, 0).expect("valid");
+        let at = |title: &str, day: u32, (h, m): (u32, u32), (eh, em): (u32, u32)| {
+            let mut event = testing::event(
+                title,
+                (2026, 10, day),
+                h,
+                calendarstore::RecurrenceRule::None,
+                None,
+            );
+            event.start.time = calendarstore::Time { hour: h, minute: m };
+            event.end.time = calendarstore::Time {
+                hour: eh,
+                minute: em,
+            };
+            event
+        };
+        let mut holiday = at("Holiday", 8, (0, 0), (23, 59));
+        holiday.all_day = true;
+        let agenda = Agenda::of(vec![
+            at("Breakfast", 8, (8, 0), (9, 0)),
+            at("Standup", 8, (12, 0), (12, 30)),
+            at("Lunch", 8, (12, 0), (13, 0)),
+            holiday,
+            at("Dentist", 9, (10, 0), (11, 0)),
+            at("Review", 14, (9, 0), (10, 0)),
+            at("Too far", 15, (9, 0), (10, 0)),
+        ]);
+        let upcoming = agenda.upcoming(now, &Tz::UTC);
+        let listed: Vec<(&str, Vec<(&str, &str)>)> = upcoming
+            .days
+            .iter()
+            .map(|day| {
+                (
+                    day.label.as_str(),
+                    day.events
+                        .iter()
+                        .map(|e| (e.title.as_str(), e.time.as_str()))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("Today", vec![("Holiday", "All day"), ("Lunch", "12:00")]),
+                ("Tomorrow", vec![("Dentist", "10:00")]),
+                ("Wednesday 14 October", vec![("Review", "09:00")]),
+            ]
+        );
+        assert_eq!(upcoming.events().count(), 4);
+        // Nothing at all: no days.
+        assert_eq!(
+            Agenda::default().upcoming(now, &Tz::UTC),
+            Upcoming::default()
+        );
+    }
+
+    /// **The week is the zone's**: half past eleven at night in UTC on the
+    /// 8th is the 9th in Tokyo, whose "Today" is the 9th's events.
+    #[test]
+    fn the_upcoming_weeks_today_is_the_zones() {
+        let now = date_to_timestamp(2026, 10, 8, 23, 30, 0).expect("valid");
+        let agenda = Agenda::of(vec![testing::event(
+            "Dentist",
+            (2026, 10, 9),
+            10,
+            calendarstore::RecurrenceRule::None,
+            None,
+        )]);
+        let label = |tz: &Tz| {
+            agenda
+                .upcoming(now, tz)
+                .days
+                .first()
+                .map(|day| day.label.clone())
+        };
+        assert_eq!(label(&Tz::UTC).as_deref(), Some("Tomorrow"));
+        assert_eq!(label(&tz("JST-9")).as_deref(), Some("Today"));
     }
 
     /// **A glance's today is the zone's**: half past eleven at night on the

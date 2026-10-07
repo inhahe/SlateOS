@@ -4423,13 +4423,18 @@ impl<T: Transport> ShellSession<T> {
             // became due, so the interval is the widget's own and not a second
             // timer free to disagree with it.
             self.shell.sample_system(self.clock_ms);
-            // A calendar widget turning its minute reads the calendar again
-            // if the calendar program has saved since: it says nothing when
-            // it does. Asked of the file's length and time alone, unchanged.
+            // A calendar or upcoming-events widget turning its minute reads
+            // the calendar again if it has changed -- for a desktop whose
+            // settings watch, which says so as it happens, is down. Asked of
+            // the file's length and time alone, unchanged.
             if self
                 .shell
                 .widgets
                 .draws(&crate::widgets::WidgetKind::Calendar)
+                || self
+                    .shell
+                    .widgets
+                    .draws(&crate::widgets::WidgetKind::Reminders)
             {
                 let _ = self.shell.refresh_agenda();
             }

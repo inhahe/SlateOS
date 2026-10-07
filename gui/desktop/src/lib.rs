@@ -219,7 +219,7 @@ use tzrules::Tz;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 // ============================================================================
 // Geometry
@@ -9222,10 +9222,7 @@ impl DesktopShell {
         if self.clock_has_two_lines() {
             // The reference's two lines, each centred in the slot: the time,
             // bold, and under it the weekday and date, smaller and dimmer.
-            let secs = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let secs = Self::unix_now();
             let (time, date) = self.clock_lines_at(secs);
             let (time_size, date_size) = (
                 self.font_size(TextRole::Body),
@@ -11047,10 +11044,7 @@ impl DesktopShell {
     /// something the tree already did properly, with the user able to see only
     /// the lesser one.
     fn current_clock_string(&self) -> String {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let secs = Self::unix_now();
         self.clock_string_at(secs)
     }
 
@@ -13073,10 +13067,7 @@ impl DesktopShell {
         self.volume_flyout.set_visible(false);
         self.shortcut_card_open = false;
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = Self::unix_now();
         let zone = self.local_zone();
         // Today comes from the zone's *rules*, so the popup cannot open on a
         // different day than the reading that opened it.
@@ -14112,6 +14103,7 @@ impl DesktopShell {
     const MENU_ADD_PHOTO_FRAME: u64 = 10;
     const MENU_FRAME_FOLDER: u64 = 11;
     const MENU_MOVE_WALLPAPER: u64 = 12;
+    const MENU_ADD_UPCOMING: u64 = 13;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
     // A widget's "Size", and its rows: the base plus the size's place in
@@ -14243,6 +14235,7 @@ impl DesktopShell {
                 children: vec![
                     item(Self::MENU_ADD_CLOCK, "Clock", None),
                     item(Self::MENU_ADD_CALENDAR, "Calendar", None),
+                    item(Self::MENU_ADD_UPCOMING, "Upcoming events", None),
                     item(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor", None),
                     item(Self::MENU_ADD_NOTE, "Note", None),
                     item(Self::MENU_ADD_PHOTO_FRAME, "Photo frame", None),
@@ -14824,10 +14817,7 @@ impl DesktopShell {
     /// being *told* as distinct from what it draws.
     #[must_use]
     pub fn live_readings(&self) -> crate::widgets::LiveReadings {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let secs = Self::unix_now();
         let zone = self.local_zone();
         let clock = self.clock();
         crate::widgets::LiveReadings {
@@ -14866,6 +14856,13 @@ impl DesktopShell {
                 self.monitor.graphs()
             } else {
                 crate::widgets::monitor::Graphs::default()
+            },
+            // The week's events from now, in the clock's zone, gathered only
+            // while an upcoming-events widget is drawn.
+            upcoming: if self.widgets.draws(&WidgetKind::Reminders) {
+                self.agenda.upcoming(secs, &zone)
+            } else {
+                calendar::Upcoming::default()
             },
         }
     }
@@ -15329,6 +15326,7 @@ impl DesktopShell {
         let kind = match id {
             Self::MENU_ADD_CLOCK => Some(WidgetKind::Clock),
             Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),
+            Self::MENU_ADD_UPCOMING => Some(WidgetKind::Reminders),
             Self::MENU_ADD_SYSTEM_MONITOR => Some(WidgetKind::SystemMonitor),
             Self::MENU_ADD_NOTE => Some(WidgetKind::Notes),
             Self::MENU_ADD_PHOTO_FRAME => Some(WidgetKind::PhotoFrame),
@@ -15818,10 +15816,7 @@ impl DesktopShell {
             return None;
         }
         let (x, y) = self.calendar_origin();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = Self::unix_now();
         let mut tree = RenderTree::new();
         tree.commands.extend(self.calendar.render(
             &Palette::from_settings(&self.appearance),

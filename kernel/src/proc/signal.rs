@@ -17,11 +17,14 @@
 //!    entirely in userspace.
 //! 2. `kill()`/`raise()` post a signal into a target process's **pending
 //!    set** (`set_pending`, via the `SYS_SIGNAL_SEND` syscall).
-//! 3. When the target process next returns to userspace from a syscall,
-//!    the syscall-return path checks for a deliverable signal
-//!    (`take_deliverable`) and, if the trampoline is registered, builds a
-//!    [`SignalContext`] on the user stack and redirects execution to the
-//!    trampoline (see `handlers::deliver_pending_signal`).
+//! 3. When a thread of the target process next returns to userspace -- from
+//!    a syscall, or from an interrupt that found it running in ring 3 -- the
+//!    return path checks for a deliverable signal (`take_deliverable`) and,
+//!    if the trampoline is registered, builds a [`SignalContext`] on the user
+//!    stack (with the registers and FPU state the context has no room for
+//!    above it, [`SignalFrameExt`]) and redirects execution to the trampoline
+//!    (see `handlers::deliver_pending_signal` and
+//!    `handlers::deliver_pending_signal_on_interrupt_exit`).
 //! 4. The trampoline invokes the userspace handler then calls
 //!    `SYS_SIGNAL_RETURN` to restore the interrupted context.
 //!
@@ -284,6 +287,37 @@ const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_pid) == 4);
 const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_uid) == 8);
 const _: () = assert!(core::mem::offset_of!(SignalInfoTail, pad) == 12);
 const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_value) == 16);
+
+/// What the kernel keeps above a native signal frame -- after the context, and
+/// after the siginfo tail when the trampoline takes one -- for
+/// `SYS_SIGNAL_RETURN` to put back: the two registers the context has no room
+/// for, and the thread's FPU state ([`crate::sched::fpu::capture_signal_image`],
+/// `fpu_len` bytes, right after this header).
+///
+/// Not part of what the C library reads: the context and the tail keep their
+/// offsets, and the handler's stack lies below the context, so nothing it does
+/// reaches these bytes. Added 2026-10-07, when signals began to be delivered
+/// from interrupts -- the interrupted code may be anywhere, with live values in
+/// `rcx`, `r11` and every FPU register.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalFrameExt {
+    /// [`SIGNAL_FRAME_EXT_MAGIC`]: present, and laid out as here.
+    pub magic: u64,
+    /// The interrupted `rcx`.
+    pub rcx: u64,
+    /// The interrupted `r11`.
+    pub r11: u64,
+    /// Bytes of FPU image that follow.
+    pub fpu_len: u64,
+}
+
+/// [`SignalFrameExt::magic`] ("SIGFRAMX").
+pub const SIGNAL_FRAME_EXT_MAGIC: u64 = 0x5849_4D41_5246_4749;
+
+/// Size of [`SignalFrameExt`]'s header.
+pub const SIGNAL_FRAME_EXT_SIZE: usize = core::mem::size_of::<SignalFrameExt>();
+const _: () = assert!(SIGNAL_FRAME_EXT_SIZE == 32);
 
 /// Where a native signal frame of `frame_size` bytes goes on a stack whose top
 /// is `base`: the context's address -- 16-byte aligned, the frame below

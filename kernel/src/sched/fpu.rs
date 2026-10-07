@@ -707,6 +707,237 @@ pub unsafe fn restore(state: *const FpuState) {
 }
 
 // ---------------------------------------------------------------------------
+// The user FPU image a signal frame carries
+// ---------------------------------------------------------------------------
+//
+// A signal handler may use any register, SSE and AVX included, and the code it
+// interrupted may have had live values in all of them -- an interrupt can land
+// on any instruction. So delivering a signal saves the thread's FPU state into
+// the frame, starts the handler from the initial state, and the signal return
+// loads the saved state back: Linux's `copy_fpstate_to_sigframe`,
+// `fpu__clear_user_states` and `__fpu_restore_sig`. The kernel is built
+// soft-float, so while a thread is in the kernel the CPU's FPU registers hold
+// that thread's user state, which is what these work on.
+//
+// The image is Linux's x86-64 layout, so a Linux program's `uc_mcontext.fpstate`
+// reads as on Linux: with XSAVE, the standard-format XSAVE area whose
+// software-reserved bytes (464..512 of the legacy region) hold an
+// `_fpx_sw_bytes` record, then `FP_XSTATE_MAGIC2`; without, the 512-byte
+// FXSAVE area. Native frames carry the same image.
+
+/// `FP_XSTATE_MAGIC1`: the first word of `_fpx_sw_bytes`, saying the image is
+/// an XSAVE area with the record.
+pub const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
+/// `FP_XSTATE_MAGIC2`: the word right after an XSAVE image.
+pub const FP_XSTATE_MAGIC2: u32 = 0x4650_5845;
+/// Bytes of `FP_XSTATE_MAGIC2`.
+const FP_XSTATE_MAGIC2_SIZE: usize = 4;
+/// Offset of `_fpx_sw_bytes` in the legacy region (the bytes FXRSTOR and
+/// XRSTOR leave alone for software).
+const SW_BYTES_OFFSET: usize = 464;
+/// The legacy (FXSAVE) region.
+const LEGACY_SIZE: usize = 512;
+/// The XSAVE header: `XSTATE_BV` at 512, `XCOMP_BV` at 520, then 48 reserved
+/// bytes, all of which XRSTOR requires to be zero in a standard-format image.
+const XSAVE_HEADER_OFFSET: usize = 512;
+/// Size of the XSAVE header.
+const XSAVE_HEADER_SIZE: usize = 64;
+/// Offset of `MXCSR_MASK` in the legacy region.
+const MXCSR_MASK_OFFSET: usize = 28;
+/// `MXCSR_MASK` when FXSAVE reports 0 (a CPU without DAZ).
+const DEFAULT_MXCSR_MASK: u32 = 0xFFBF;
+
+/// The CPU's `MXCSR_MASK`, read once: the MXCSR bits it implements. A
+/// restored MXCSR with any other bit set would fault FXRSTOR/XRSTOR.
+static MXCSR_MASK: AtomicU32 = AtomicU32::new(0);
+
+/// The CPU's `MXCSR_MASK` (see [`MXCSR_MASK`]).
+fn mxcsr_mask() -> u32 {
+    let cached = MXCSR_MASK.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let mut area = FpuState::new_default_boxed();
+    // SAFETY: `area` is a live, 64-byte-aligned buffer of 4096 bytes, more
+    // than FXSAVE's 512; FXSAVE only writes it.
+    unsafe {
+        asm!("fxsave64 [{}]", in(reg) area.as_mut_ptr(), options(nostack));
+    }
+    let mask = area
+        .data
+        .get(MXCSR_MASK_OFFSET..MXCSR_MASK_OFFSET + 4)
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u32::from_le_bytes);
+    let mask = if mask == 0 { DEFAULT_MXCSR_MASK } else { mask };
+    MXCSR_MASK.store(mask, Ordering::Relaxed);
+    mask
+}
+
+/// Bytes of the FPU image a signal frame carries: the XSAVE area and its
+/// trailer, or the FXSAVE area.
+#[must_use]
+pub fn signal_image_size() -> usize {
+    if xsave_active() {
+        (xsave_area_size() as usize).saturating_add(FP_XSTATE_MAGIC2_SIZE)
+    } else {
+        LEGACY_SIZE
+    }
+}
+
+/// Write `value` at `offset` of `buf`, little-endian; out of range writes
+/// nothing (every caller's offsets are inside the area).
+fn put_le(buf: &mut [u8], offset: usize, value: &[u8]) {
+    if let Some(dst) = buf.get_mut(offset..offset.saturating_add(value.len())) {
+        dst.copy_from_slice(value);
+    }
+}
+
+/// Read a little-endian `u32` at `offset` of `buf` (0 out of range).
+fn get_u32(buf: &[u8], offset: usize) -> u32 {
+    buf.get(offset..offset.saturating_add(4))
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u32::from_le_bytes)
+}
+
+/// Read a little-endian `u64` at `offset` of `buf` (0 out of range).
+fn get_u64(buf: &[u8], offset: usize) -> u64 {
+    buf.get(offset..offset.saturating_add(8))
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
+/// The current CPU's FPU state -- the running thread's user state -- as a
+/// signal-frame image ([`signal_image_size`] bytes, Linux's layout).
+///
+/// Saved with plain XSAVE (or FXSAVE), never XSAVEOPT: XSAVEOPT may skip a
+/// component it believes this buffer already holds, which a fresh buffer at a
+/// recycled address would not.
+#[must_use]
+pub fn capture_signal_image() -> alloc::vec::Vec<u8> {
+    let mut area = FpuState::new_default_boxed();
+    let xsave = xsave_active();
+    // SAFETY: `area` is a live, 64-byte-aligned buffer of MAX_XSAVE_AREA
+    // bytes, at least `xsave_area_size()`; XSAVE64/FXSAVE64 only write it.
+    unsafe {
+        if xsave {
+            let xcr0 = ACTIVE_XCR0.load(Ordering::Relaxed);
+            asm!(
+                "xsave64 [{}]",
+                in(reg) area.as_mut_ptr(),
+                in("eax") xcr0 as u32,
+                in("edx") (xcr0 >> 32) as u32,
+                options(nostack),
+            );
+        } else {
+            asm!("fxsave64 [{}]", in(reg) area.as_mut_ptr(), options(nostack));
+        }
+    }
+    let size = if xsave {
+        xsave_area_size() as usize
+    } else {
+        LEGACY_SIZE
+    };
+    let mut image = alloc::vec::Vec::with_capacity(signal_image_size());
+    image.extend_from_slice(area.data.get(..size).unwrap_or(&[]));
+    if xsave {
+        // `_fpx_sw_bytes`: magic1, extended_size, xfeatures, xstate_size, then
+        // seven words of padding. XSAVE does not write these software bytes,
+        // so they are cleared here rather than trusted to be zero.
+        if let Some(sw) = image.get_mut(SW_BYTES_OFFSET..LEGACY_SIZE) {
+            sw.fill(0);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let size32 = size as u32;
+        put_le(&mut image, SW_BYTES_OFFSET, &FP_XSTATE_MAGIC1.to_le_bytes());
+        put_le(
+            &mut image,
+            SW_BYTES_OFFSET + 4,
+            &size32
+                .saturating_add(FP_XSTATE_MAGIC2_SIZE as u32)
+                .to_le_bytes(),
+        );
+        put_le(
+            &mut image,
+            SW_BYTES_OFFSET + 8,
+            &ACTIVE_XCR0.load(Ordering::Relaxed).to_le_bytes(),
+        );
+        put_le(&mut image, SW_BYTES_OFFSET + 16, &size32.to_le_bytes());
+        image.extend_from_slice(&FP_XSTATE_MAGIC2.to_le_bytes());
+    }
+    image
+}
+
+/// Load a signal-frame image back into the current CPU's FPU state -- the
+/// running thread's -- as a signal return does (Linux's `__fpu_restore_sig`);
+/// `None`, a frame with no image (a NULL `fpstate`), loads the initial state.
+///
+/// Whatever the handler left in the image is made safe first, as Linux does,
+/// rather than refused: MXCSR keeps only the bits the CPU implements, and an
+/// XSAVE header keeps only enabled components, standard format, reserved bytes
+/// zero -- anything else would make XRSTOR or FXRSTOR fault in the kernel. An
+/// image without a valid `_fpx_sw_bytes` record (or the trailer) is read as a
+/// plain FXSAVE area: x87 and SSE restored, everything else initial.
+pub fn restore_signal_image(image: Option<&[u8]>) {
+    let mut area = FpuState::new_default_boxed();
+    let xsave = xsave_active();
+    let xcr0 = ACTIVE_XCR0.load(Ordering::Relaxed);
+    if let Some(img) = image {
+        let ours = xsave_area_size() as usize;
+        let magic1 = get_u32(img, SW_BYTES_OFFSET);
+        let extended = get_u32(img, SW_BYTES_OFFSET + 4) as usize;
+        let features = get_u64(img, SW_BYTES_OFFSET + 8);
+        let xstate_size = get_u32(img, SW_BYTES_OFFSET + 16) as usize;
+        let xsave_image = xsave
+            && magic1 == FP_XSTATE_MAGIC1
+            && (LEGACY_SIZE + XSAVE_HEADER_SIZE..=ours).contains(&xstate_size)
+            && extended == xstate_size.saturating_add(FP_XSTATE_MAGIC2_SIZE)
+            && img.len() >= extended
+            && get_u32(img, xstate_size) == FP_XSTATE_MAGIC2;
+        let copy = if xsave_image {
+            xstate_size
+        } else {
+            LEGACY_SIZE.min(img.len())
+        };
+        if let (Some(dst), Some(src)) = (area.data.get_mut(..copy), img.get(..copy)) {
+            dst.copy_from_slice(src);
+        }
+        if xsave {
+            // The header XRSTOR checks: only enabled components (and, for an
+            // FXSAVE-shaped image, only the two it holds), standard format,
+            // reserved bytes zero.
+            let mut bv = if xsave_image {
+                get_u64(&area.data, XSAVE_HEADER_OFFSET) & features
+            } else {
+                XCR0_X87 | XCR0_SSE
+            };
+            bv &= xcr0;
+            if let Some(header) = area
+                .data
+                .get_mut(XSAVE_HEADER_OFFSET..XSAVE_HEADER_OFFSET + XSAVE_HEADER_SIZE)
+            {
+                header.fill(0);
+            }
+            put_le(&mut area.data, XSAVE_HEADER_OFFSET, &bv.to_le_bytes());
+        }
+        let mxcsr = get_u32(&area.data, MXCSR_OFFSET) & mxcsr_mask();
+        put_le(&mut area.data, MXCSR_OFFSET, &mxcsr.to_le_bytes());
+    }
+    // SAFETY: `area` is a live, 64-byte-aligned save area holding either the
+    // default state or an image made safe above: a standard-format header with
+    // only enabled components and zero reserved bytes, and an MXCSR with only
+    // implemented bits -- every condition under which XRSTOR/FXRSTOR fault.
+    unsafe {
+        restore(&raw const *area);
+    }
+}
+
+/// Put the current CPU's FPU state in its initial state, which a signal
+/// handler starts with (Linux's `fpu__clear_user_states`).
+pub fn reset_to_initial() {
+    restore_signal_image(None);
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -771,7 +1002,104 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         test_ymm_round_trip();
     }
 
+    // Test 5: the signal-frame image -- what a signal or an exception saves
+    // and its return loads back.
+    test_signal_image()?;
+
     serial_println!("[fpu] FPU/SSE self-test PASSED");
+    Ok(())
+}
+
+/// The signal-frame FPU image: its layout (the `_fpx_sw_bytes` record and the
+/// trailer with XSAVE), a round trip of XMM0 and MXCSR through it, the reset a
+/// handler starts from, and that a hostile image -- reserved MXCSR bits, a
+/// non-standard XSAVE header, components the CPU has not enabled -- loads
+/// without faulting instead of taking the kernel down.
+fn test_signal_image() -> crate::error::KernelResult<()> {
+    let fail = |what: &str| {
+        serial_println!("[fpu]   FAIL: signal image: {}", what);
+        Err(crate::error::KernelError::InternalError)
+    };
+    let pattern: u128 = 0x0123_4567_89AB_CDEF_FEDC_BA98_7654_3210;
+    let toward_zero: u32 = 0x7F80;
+    let mut readback: u128 = 0;
+    let mut mxcsr: u32 = 0;
+    // SAFETY: SSE is enabled (CR4.OSFXSR); these load XMM0 and MXCSR from
+    // valid locals.
+    unsafe {
+        asm!("movdqu xmm0, [{}]", in(reg) &pattern, options(nostack));
+        asm!("ldmxcsr [{}]", in(reg) &toward_zero, options(nostack));
+    }
+    let image = capture_signal_image();
+    if image.len() != signal_image_size() {
+        return fail("size");
+    }
+    if xsave_active() {
+        let size = xsave_area_size() as usize;
+        if get_u32(&image, SW_BYTES_OFFSET) != FP_XSTATE_MAGIC1
+            || get_u32(&image, SW_BYTES_OFFSET + 16) as usize != size
+            || get_u32(&image, size) != FP_XSTATE_MAGIC2
+        {
+            return fail("the _fpx_sw_bytes record or the trailer");
+        }
+    }
+    // A handler's start: the initial state.
+    reset_to_initial();
+    // SAFETY: as above; these store XMM0 and MXCSR to valid locals.
+    unsafe {
+        asm!("movdqu [{}], xmm0", in(reg) &mut readback, options(nostack));
+        asm!("stmxcsr [{}]", in(reg) &mut mxcsr, options(nostack));
+    }
+    if readback != 0 || mxcsr != DEFAULT_MXCSR {
+        return fail("the reset did not give the initial state");
+    }
+    // The return: what was saved comes back.
+    restore_signal_image(Some(&image));
+    // SAFETY: as above.
+    unsafe {
+        asm!("movdqu [{}], xmm0", in(reg) &mut readback, options(nostack));
+        asm!("stmxcsr [{}]", in(reg) &mut mxcsr, options(nostack));
+    }
+    if readback != pattern || mxcsr & 0xFFFF != toward_zero {
+        return fail("XMM0 or MXCSR did not survive the round trip");
+    }
+    // A hostile image: every reserved MXCSR bit, a compacted-format header
+    // with reserved bytes, and every component bit -- each of which faults
+    // XRSTOR/FXRSTOR unless made safe first.
+    let mut hostile = image.clone();
+    put_le(&mut hostile, MXCSR_OFFSET, &(!0u32).to_le_bytes());
+    if xsave_active() {
+        put_le(&mut hostile, XSAVE_HEADER_OFFSET, &(!0u64).to_le_bytes());
+        put_le(
+            &mut hostile,
+            XSAVE_HEADER_OFFSET + 8,
+            &(1u64 << 63).to_le_bytes(),
+        );
+        put_le(
+            &mut hostile,
+            XSAVE_HEADER_OFFSET + 16,
+            &(!0u64).to_le_bytes(),
+        );
+    }
+    restore_signal_image(Some(&hostile));
+    // SAFETY: as above.
+    unsafe {
+        asm!("stmxcsr [{}]", in(reg) &mut mxcsr, options(nostack));
+    }
+    if mxcsr & !mxcsr_mask() != 0 {
+        return fail("a reserved MXCSR bit got through");
+    }
+    // A short, record-less image: read as FXSAVE, the rest initial.
+    restore_signal_image(Some(image.get(..LEGACY_SIZE).unwrap_or(&image)));
+    // SAFETY: as above.
+    unsafe {
+        asm!("movdqu [{}], xmm0", in(reg) &mut readback, options(nostack));
+    }
+    if readback != pattern {
+        return fail("a legacy image did not restore XMM0");
+    }
+    reset_to_initial();
+    serial_println!("[fpu]   signal-frame image (layout, round trip, reset, hostile image): OK");
     Ok(())
 }
 

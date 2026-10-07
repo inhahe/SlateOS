@@ -144,6 +144,12 @@ global_asm!(
     "push r9",     // arg5
     "push rax",    // syscall number
     "push gs:[8]", // user RSP (from per-CPU scratch)
+    // RCX and R11 to restore, and the flag asking for it: zero, so the exit
+    // below is SYSRETQ unless a signal return sets the flag (see
+    // `SyscallFrame::exit_full`).
+    "push 0", // r11
+    "push 0", // rcx
+    "push 0", // exit_full
     // Swap GS back to user's GS base (so kernel code sees normal GS).
     "swapgs",
     // --- Phase 3: Call Rust handler ---
@@ -160,14 +166,19 @@ global_asm!(
     // Disable interrupts for the SYSRET sequence (we'll manipulate
     // the stack and per-CPU data).
     "cli",
+    // A signal return that restored a context with live RCX and R11 asked
+    // for IRETQ, which can put them back; SYSRETQ overwrites both.
+    "cmp qword ptr [rsp], 0",
+    "jne 2f",
     // Swap to kernel GS for per-CPU data access.
     "swapgs",
     // Save user RSP from the frame into per-CPU scratch.
-    // [rsp + 0] = user RSP.
-    "mov rdi, [rsp]",
+    // [rsp + 24] = user RSP (after exit_full, rcx, r11).
+    "mov rdi, [rsp + 24]",
     "mov gs:[8], rdi",
-    // Skip user_rsp and syscall_nr (rax already has the return value).
-    "add rsp, 16",
+    // Skip exit_full, rcx, r11, user_rsp and syscall_nr (rax already has
+    // the return value).
+    "add rsp, 40",
     // Restore all registers in reverse order.
     "pop r9",
     "pop r8",
@@ -192,6 +203,39 @@ global_asm!(
     //          CS = STAR[63:48]+16 (0x20 | 3 = user CS),
     //          SS = STAR[63:48]+8  (0x18 | 3 = user DS).
     "sysretq",
+    // --- Phase 4, full restore: every register from the frame ---
+    //
+    // An IRETQ frame (RIP, CS, RFLAGS, RSP, SS) is built below the
+    // SyscallFrame, every general register is loaded from it -- RCX and R11
+    // from their own slots -- and IRETQ returns to ring 3. GS is still the
+    // user's (Phase 3 swapped it back), and the CPU loads no new RSP for the
+    // kernel: the next entry takes it from per-CPU data, as ever. Offsets are
+    // SyscallFrame's: exit_full 0, rcx 8, r11 16, user_rsp 24, syscall_nr 32,
+    // r9 40 ... rbp 128, user_rflags 136, user_rip 144; each push moves the
+    // frame 8 bytes further from RSP.
+    "2:",
+    "push {user_ss}",
+    "push qword ptr [rsp + 8 + 24]",
+    "push qword ptr [rsp + 16 + 136]",
+    "push {user_cs}",
+    "push qword ptr [rsp + 32 + 144]",
+    "mov rcx, [rsp + 40 + 8]",
+    "mov r11, [rsp + 40 + 16]",
+    "mov r9, [rsp + 40 + 40]",
+    "mov r8, [rsp + 40 + 48]",
+    "mov r10, [rsp + 40 + 56]",
+    "mov rdx, [rsp + 40 + 64]",
+    "mov rsi, [rsp + 40 + 72]",
+    "mov rdi, [rsp + 40 + 80]",
+    "mov r15, [rsp + 40 + 88]",
+    "mov r14, [rsp + 40 + 96]",
+    "mov r13, [rsp + 40 + 104]",
+    "mov r12, [rsp + 40 + 112]",
+    "mov rbx, [rsp + 40 + 120]",
+    "mov rbp, [rsp + 40 + 128]",
+    "iretq",
+    user_cs = const crate::gdt::USER_CS as u64,
+    user_ss = const crate::gdt::USER_DS as u64,
 );
 
 // Import the assembly symbol.
@@ -205,9 +249,22 @@ unsafe extern "C" {
 
 /// The register frame pushed by `syscall_entry`.
 ///
-/// Matches the push order in the assembly above.
+/// Matches the push order in the assembly above. The exit path reads it at
+/// fixed offsets (the full-restore path names them), so the field order is
+/// part of that assembly's contract.
 #[repr(C)]
 pub struct SyscallFrame {
+    /// Nonzero: leave through IRETQ, loading every general register from this
+    /// frame -- `rcx` and `r11` from the two fields below -- rather than
+    /// through SYSRETQ, which overwrites RCX with the return RIP and R11 with
+    /// RFLAGS. Zero at every entry; a signal return sets it, because the
+    /// context it restores may have been interrupted anywhere -- an interrupt
+    /// delivered the signal, not a system call -- with live values in both.
+    pub exit_full: u64,
+    /// RCX to restore when `exit_full` is set.
+    pub rcx: u64,
+    /// R11 to restore when `exit_full` is set.
+    pub r11: u64,
     /// User stack pointer.
     pub user_rsp: u64,
     /// Syscall number (from rax).

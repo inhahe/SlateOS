@@ -3490,6 +3490,15 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_posix_timers(),
     );
 
+    // Ring-3 test of a signal delivered from the timer interrupt to a loop
+    // that makes no system calls, with every register, the FPU state and the
+    // red zone checked after the handler.
+    selftest::dispatch_debug(
+        "Linux signal from interrupt (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_signal_from_interrupt(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

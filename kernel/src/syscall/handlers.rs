@@ -7697,6 +7697,41 @@ pub fn sys_exception_return_with_frame(frame: &mut super::entry::SyscallFrame) -
         return KernelError::InvalidAddress.code() as i64;
     }
 
+    // The kernel's extension above the context and its null return slot: the
+    // FPU image the fault interrupted, which every exception frame since
+    // 2026-10-07 carries. Read before anything changes.
+    let ext_addr = frame
+        .arg0
+        .wrapping_add(crate::proc::exception::EXCEPTION_CONTEXT_SIZE as u64)
+        .wrapping_add(8);
+    let fpu_image =
+        match crate::mm::user::read_user_value::<crate::proc::signal::SignalFrameExt>(ext_addr) {
+            Ok(e) if e.magic == crate::proc::signal::SIGNAL_FRAME_EXT_MAGIC && e.fpu_len != 0 => {
+                let max = crate::sched::fpu::signal_image_size();
+                let len = usize::try_from(e.fpu_len).unwrap_or(usize::MAX);
+                if len > max {
+                    return KernelError::InvalidArgument.code() as i64;
+                }
+                let at = ext_addr.wrapping_add(crate::proc::signal::SIGNAL_FRAME_EXT_SIZE as u64);
+                match crate::mm::user::read_user_vec(at, len, max) {
+                    Ok(v) => Some(v),
+                    Err(e) => return e.code() as i64,
+                }
+            }
+            Ok(_) => None,
+            Err(e) => return e.code() as i64,
+        };
+    if let Some(image) = fpu_image.as_deref() {
+        crate::sched::fpu::restore_signal_image(Some(image));
+    }
+
+    // Every register comes back from the context, RCX and R11 included --
+    // the fault interrupted the code anywhere -- so the exit is IRETQ, which
+    // can load them; SYSRETQ would overwrite both.
+    frame.rcx = ctx.rcx;
+    frame.r11 = ctx.r11;
+    frame.exit_full = 1;
+
     // Restore the SYSRET frame from the exception context.
     frame.user_rip = ctx.rip;
     frame.user_rsp = ctx.rsp;
@@ -9647,6 +9682,48 @@ pub fn sys_signal_return_with_frame(frame: &mut super::entry::SyscallFrame) -> i
         return KernelError::InvalidAddress.code() as i64;
     }
 
+    // The kernel's extension above the context (and the siginfo tail, for a
+    // trampoline that takes one): RCX, R11 and the FPU image every frame
+    // since 2026-10-07 carries. Read in full before anything changes, so a
+    // bad one leaves the frame as it was. A context without one -- the magic
+    // missing -- is restored as before, from the context alone.
+    let caller = crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0);
+    let ext_offset = if crate::proc::signal::extended_frame(caller) {
+        crate::proc::signal::SIGNAL_FRAME_EXTENDED_SIZE
+    } else {
+        crate::proc::signal::SIGNAL_CONTEXT_SIZE
+    };
+    let ext_addr = frame.arg0.wrapping_add(ext_offset as u64);
+    let ext =
+        match crate::mm::user::read_user_value::<crate::proc::signal::SignalFrameExt>(ext_addr) {
+            Ok(v) if v.magic == crate::proc::signal::SIGNAL_FRAME_EXT_MAGIC => Some(v),
+            Ok(_) => None,
+            Err(e) => return e.code() as i64,
+        };
+    let fpu_image = match ext {
+        Some(e) if e.fpu_len != 0 => {
+            let max = crate::sched::fpu::signal_image_size();
+            let len = usize::try_from(e.fpu_len).unwrap_or(usize::MAX);
+            if len > max {
+                return KernelError::InvalidArgument.code() as i64;
+            }
+            let at = ext_addr.wrapping_add(crate::proc::signal::SIGNAL_FRAME_EXT_SIZE as u64);
+            match crate::mm::user::read_user_vec(at, len, max) {
+                Ok(v) => Some(v),
+                Err(e) => return e.code() as i64,
+            }
+        }
+        _ => None,
+    };
+    if let Some(e) = ext {
+        // The FPU state the handler interrupted, and RCX/R11 through the
+        // IRETQ exit: the context may have been interrupted anywhere.
+        crate::sched::fpu::restore_signal_image(fpu_image.as_deref());
+        frame.rcx = e.rcx;
+        frame.r11 = e.r11;
+        frame.exit_full = 1;
+    }
+
     // Restore the interrupted SYSRET frame.
     frame.user_rip = ctx.rip;
     frame.user_rsp = ctx.rsp;
@@ -9989,60 +10066,257 @@ pub fn kill_orphaned_pgrp(pgid: crate::proc::pcb::ProcessId) {
     }
 }
 
+/// Where an interrupted thread was when a signal is delivered to it: on its
+/// way out of system call `nr`, about to return `ret` (possibly a restart
+/// sentinel). A signal delivered on an interrupt's return to user mode has no
+/// such call -- the thread was anywhere -- and passes `None`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SyscallExit {
+    /// The system call's number.
+    pub nr: u64,
+    /// What it is about to return.
+    pub ret: i64,
+}
+
+/// The whole user register state at a system call's exit: the frame's saved
+/// registers, `rax` the value being returned, and `rcx`/`r11` what the
+/// `syscall` instruction left there -- the return address and RFLAGS --
+/// unless a signal return restored real ones into the frame (`exit_full`).
+fn regs_from_syscall_frame(
+    frame: &super::entry::SyscallFrame,
+    ret_val: i64,
+) -> super::linux::LinuxTrapRegs {
+    let (rcx, r11) = if frame.exit_full != 0 {
+        (frame.rcx, frame.r11)
+    } else {
+        (frame.user_rip, frame.user_rflags)
+    };
+    // The value travels as the register's bits.
+    #[allow(clippy::cast_sign_loss)]
+    let rax = ret_val as u64;
+    super::linux::LinuxTrapRegs {
+        rax,
+        rbx: frame.rbx,
+        rcx,
+        rdx: frame.arg2,
+        rsi: frame.arg1,
+        rdi: frame.arg0,
+        rbp: frame.rbp,
+        r8: frame.arg4,
+        r9: frame.arg5,
+        r10: frame.arg3,
+        r11,
+        r12: frame.r12,
+        r13: frame.r13,
+        r14: frame.r14,
+        r15: frame.r15,
+        rip: frame.user_rip,
+        rsp: frame.user_rsp,
+        rflags: frame.user_rflags,
+    }
+}
+
+/// Make `regs` -- a signal handler's entry state -- what the system call
+/// returns to. (`rax` is the call's return value, which the caller sets.)
+fn regs_into_syscall_frame(
+    frame: &mut super::entry::SyscallFrame,
+    regs: &super::linux::LinuxTrapRegs,
+) {
+    frame.user_rip = regs.rip;
+    frame.user_rsp = regs.rsp;
+    frame.user_rflags = regs.rflags;
+    frame.arg0 = regs.rdi;
+    frame.arg1 = regs.rsi;
+    frame.arg2 = regs.rdx;
+    frame.arg3 = regs.r10;
+    frame.arg4 = regs.r8;
+    frame.arg5 = regs.r9;
+    frame.rbx = regs.rbx;
+    frame.rbp = regs.rbp;
+    frame.r12 = regs.r12;
+    frame.r13 = regs.r13;
+    frame.r14 = regs.r14;
+    frame.r15 = regs.r15;
+    frame.rcx = regs.rcx;
+    frame.r11 = regs.r11;
+}
+
 /// Deliver a pending signal to the current process on the way back to
-/// userspace, if one is deliverable.
+/// userspace from a system call, if one is deliverable.
 ///
-/// If the process has a handler trampoline registered, this mirrors the
-/// SEH-style exception delivery (`idt::try_dispatch_user_exception`): build a
-/// [`SignalContext`](crate::proc::signal::SignalContext) on the user stack
-/// capturing the interrupted state (including the syscall's return value in
-/// RAX), then rewrite the syscall frame so the SYSRET path jumps to the
-/// trampoline with `rdi = signum` and `rsi = &ctx`. A trampoline registered
-/// with `SIGNAL_FRAME_SIGINFO` also gets the signal's record -- code, sender,
-/// value -- right after the context
-/// ([`SignalInfoTail`](crate::proc::signal::SignalInfoTail)).
-///
-/// If the process has **no** trampoline, the kernel default action applies
-/// instead: a terminating signal kills the process (exit `128 + sig`, via
+/// If the process has a handler, a signal frame goes on the user stack
+/// recording the interrupted state -- every register, the syscall's return
+/// value in RAX, and the FPU state -- and the frame is rewritten so the return
+/// enters the handler (see [`deliver_signal_to_regs`]). If the process has
+/// **no** handler, the kernel default action applies instead: a terminating
+/// signal kills the process (exit `128 + sig`, via
 /// [`terminate_current_process_for_signal`] — this call does not return),
-/// while ignore/stop/continue defaults are consumed and dropped.
+/// while ignore/stop/continue defaults are consumed.
 ///
-/// `ret_val` is the value the interrupted syscall was about to return in
-/// RAX; it is saved into the context and restored on `SYS_SIGNAL_RETURN`.
+/// `ret_val` is the value the interrupted syscall was about to return in RAX;
+/// it is saved into the frame and restored by the signal return.
 ///
 /// Returns `true` if a signal was delivered to a handler (the frame was
 /// rewritten), `false` otherwise (the normal return value should be used).
 /// Note that a fatal no-handler signal does not return at all.
 ///
-/// If the user stack cannot hold the context (e.g. it would cross into an
-/// unmapped guard page), delivery is skipped and the signal stays pending
-/// — it will be retried on the next return to userspace. This avoids
-/// corrupting memory; a proper alternate signal stack (`sigaltstack`) is
-/// a documented future enhancement.
+/// If the user stack cannot hold the frame (e.g. it would cross into an
+/// unmapped guard page), delivery is skipped and the signal stays pending —
+/// it will be retried on the next return to userspace. This avoids
+/// corrupting memory.
 pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i64) -> bool {
-    use crate::proc::signal::{
-        self, SIGNAL_CONTEXT_SIZE, SIGNAL_FRAME_EXTENDED_SIZE, SignalContext, SignalInfoTail,
-    };
-
     // Fast path: nothing pending anywhere.
-    if !signal::any_pending() {
+    if !crate::proc::signal::any_pending() {
         return false;
     }
-
     let task_id = sched::current_task_id();
     let pid = match crate::proc::thread::owner_process(task_id) {
         Some(pid) if pid != 0 => pid,
         _ => return false,
     };
-
-    // Linux-ABI processes get a byte-exact Linux `rt_sigframe` so an
-    // unmodified glibc/WINE handler sees correct siginfo/ucontext and
-    // returns via its own `sa_restorer` → `rt_sigreturn`. The native
-    // SEH-style `SignalContext` trampoline path below is for native
-    // POSIX-shim processes only.
-    if crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux) {
-        return deliver_linux_signal(frame, ret_val, pid, task_id);
+    let mut regs = regs_from_syscall_frame(frame, ret_val);
+    let exit = SyscallExit {
+        nr: frame.syscall_nr,
+        ret: ret_val,
+    };
+    if deliver_signal_to_regs(pid, task_id, &mut regs, Some(exit)) {
+        regs_into_syscall_frame(frame, &regs);
+        true
+    } else {
+        false
     }
+}
+
+/// Deliver a pending signal to the current thread on an interrupt's return to
+/// user mode -- the other half of Linux's "check on every return to user
+/// mode", without which a thread that makes no system calls (a computation in
+/// a loop) never runs its handler for `^C` or a timer. Called from the
+/// interrupt exit ([`crate::idt::SavedGprs`]) with the interrupted registers,
+/// which it rewrites to enter the handler.
+///
+/// Like Linux's exit-to-user work it runs with interrupts enabled: writing the
+/// frame may fault in the user stack, and a default action may stop or end the
+/// thread. That is safe here because the interrupted code is in ring 3, so it
+/// holds no kernel lock, and this runs on the thread's own kernel stack after
+/// the interrupt has been handled. Interrupts are off again on return, for the
+/// stub's register restore and `iretq`.
+pub fn deliver_pending_signal_on_interrupt_exit(
+    gprs: &mut crate::idt::SavedGprs,
+    iret: &mut crate::idt::InterruptStackFrame,
+) {
+    use crate::proc::signal;
+    let task_id = sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return,
+    };
+    // Cheap enough to ask before enabling interrupts: anything this thread
+    // could take now?
+    if !signal::has_pending_in_mask(pid, !signal::blocked(pid)) {
+        return;
+    }
+    let mut regs = super::linux::LinuxTrapRegs {
+        rax: gprs.rax,
+        rbx: gprs.rbx,
+        rcx: gprs.rcx,
+        rdx: gprs.rdx,
+        rsi: gprs.rsi,
+        rdi: gprs.rdi,
+        rbp: gprs.rbp,
+        r8: gprs.r8,
+        r9: gprs.r9,
+        r10: gprs.r10,
+        r11: gprs.r11,
+        r12: gprs.r12,
+        r13: gprs.r13,
+        r14: gprs.r14,
+        r15: gprs.r15,
+        rip: iret.rip,
+        rsp: iret.rsp,
+        rflags: iret.rflags,
+    };
+    crate::cpu::irqoff_tracker::record_enable();
+    // SAFETY: the interrupt has been handled and acknowledged, and this is the
+    // outermost one, on the interrupted thread's kernel stack (the caller's
+    // contract); the interrupted code was in ring 3, so no kernel lock is held
+    // by it. A nested interrupt here pushes its frame below ours and returns.
+    unsafe {
+        crate::cpu::sti();
+    }
+    let delivered = deliver_signal_to_regs(pid, task_id, &mut regs, None);
+    // SAFETY: disabling interrupts is always sound; the stub restores the
+    // registers and `iretq`s with the interrupted RFLAGS.
+    unsafe {
+        crate::cpu::cli();
+    }
+    crate::cpu::irqoff_tracker::record_disable();
+    if delivered {
+        gprs.rax = regs.rax;
+        gprs.rbx = regs.rbx;
+        gprs.rcx = regs.rcx;
+        gprs.rdx = regs.rdx;
+        gprs.rsi = regs.rsi;
+        gprs.rdi = regs.rdi;
+        gprs.rbp = regs.rbp;
+        gprs.r8 = regs.r8;
+        gprs.r9 = regs.r9;
+        gprs.r10 = regs.r10;
+        gprs.r11 = regs.r11;
+        gprs.r12 = regs.r12;
+        gprs.r13 = regs.r13;
+        gprs.r14 = regs.r14;
+        gprs.r15 = regs.r15;
+        iret.rip = regs.rip;
+        iret.rsp = regs.rsp;
+        iret.rflags = regs.rflags;
+    }
+}
+
+/// Deliver at most one pending signal to the current thread of `pid`, whose
+/// interrupted user state is `regs`, and on a handler's entry make `regs` the
+/// handler's entry state and answer `true`. `exit` says whether the thread is
+/// at a system call's exit (whose restart sentinel a handler resolves) or was
+/// interrupted anywhere.
+///
+/// Linux-ABI processes get a byte-exact Linux `rt_sigframe`
+/// ([`deliver_linux_signal`]); native ones the native frame
+/// ([`deliver_native_signal`]).
+fn deliver_signal_to_regs(
+    pid: crate::proc::pcb::ProcessId,
+    task_id: crate::sched::task::TaskId,
+    regs: &mut super::linux::LinuxTrapRegs,
+    exit: Option<SyscallExit>,
+) -> bool {
+    if crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux) {
+        return deliver_linux_signal(regs, exit, pid, task_id);
+    }
+    deliver_native_signal(regs, exit, pid, task_id)
+}
+
+/// The native half of [`deliver_signal_to_regs`].
+///
+/// If the process has a handler trampoline registered, this mirrors the
+/// SEH-style exception delivery (`idt::try_dispatch_user_exception`): build a
+/// [`SignalContext`](crate::proc::signal::SignalContext) on the user stack
+/// capturing the interrupted state (including RAX), then point the registers
+/// at the trampoline with `rdi = signum` and `rsi = &ctx`. A trampoline
+/// registered with `SIGNAL_FRAME_SIGINFO` also gets the signal's record --
+/// code, sender, value -- right after the context
+/// ([`SignalInfoTail`](crate::proc::signal::SignalInfoTail)). Above both goes
+/// what the context has no room for: `rcx`, `r11` and the FPU state
+/// ([`SignalFrameExt`](crate::proc::signal::SignalFrameExt)), which
+/// `SYS_SIGNAL_RETURN` puts back. The handler starts from the initial FPU
+/// state.
+fn deliver_native_signal(
+    regs: &mut super::linux::LinuxTrapRegs,
+    exit: Option<SyscallExit>,
+    pid: crate::proc::pcb::ProcessId,
+    task_id: crate::sched::task::TaskId,
+) -> bool {
+    use crate::proc::signal::{
+        self, SIGNAL_CONTEXT_SIZE, SIGNAL_FRAME_EXT_MAGIC, SIGNAL_FRAME_EXT_SIZE,
+        SIGNAL_FRAME_EXTENDED_SIZE, SignalContext, SignalFrameExt, SignalInfoTail,
+    };
 
     // The trampoline and the frame it reads, together (see `trampoline_frame`).
     let (trampoline, extended) = match signal::trampoline_frame(pid) {
@@ -10105,51 +10379,46 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
         }
     };
 
+    // The thread's FPU state, for the frame.
+    let fpu_image = crate::sched::fpu::capture_signal_image();
+
     // Compute the placement of the frame on the user stack.
     //
-    //   sp = user_rsp
-    //   sp -= frame_size; sp &= !0xF;  (16-byte aligned context)
+    //   sp = base; sp -= frame_size; sp &= !0xF;  (16-byte aligned context)
     //   ctx_addr = sp
     //   sp -= 8;                       (fake return slot — null)
     //   new_rsp = sp                   (RSP%16 == 8 at handler entry,
     //                                   matching the SysV call convention)
     //
     // The frame is the SignalContext, then -- for a trampoline registered
-    // with SIGNAL_FRAME_SIGINFO -- the signal's siginfo tail at ctx + 136.
-    // The tail sits above the context, so the context and the return slot
-    // keep their places relative to each other in either form.
-    let frame_size = if extended {
+    // with SIGNAL_FRAME_SIGINFO -- the signal's siginfo tail at ctx + 136,
+    // then the kernel's extension (rcx, r11, the FPU image). Each part sits
+    // above the one before, so the context and the return slot keep their
+    // places relative to each other in every form.
+    let ext_offset = if extended {
         SIGNAL_FRAME_EXTENDED_SIZE
     } else {
         SIGNAL_CONTEXT_SIZE
     };
-    let ctx_size = frame_size as u64;
+    let frame_size = ext_offset
+        .saturating_add(SIGNAL_FRAME_EXT_SIZE)
+        .saturating_add(fpu_image.len());
     // Where the frame grows down from. Normally the interrupted stack -- but if
     // this signal's handler asked for SA_ONSTACK, the top of the alternate stack
     // instead, because the case that feature exists to serve is the interrupted
-    // stack having just overflowed. Writing the context there is the store that
-    // faults, inside the kernel, before the trampoline exists to run and long
-    // before any libc code could switch away: that is the whole gap lane B
-    // reported in
-    // requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md.
-    //
-    // Everything after this line is unchanged, including the alignment contract
-    // and the validate_user_write below, which now checks the alternate stack
-    // when that is where the frame is going.
+    // stack having just overflowed (lane B's
+    // requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md).
     //
     // On the interrupted stack the frame goes below the 128-byte red zone,
     // which the interrupted code may be using (Linux's `get_sigframe`); the
     // alternate stack's top has nothing live above it.
-    let frame_base = signal::altstack_top_for(pid, sig, frame.user_rsp).unwrap_or(
-        frame
-            .user_rsp
-            .wrapping_sub(crate::proc::linux_sigframe::RED_ZONE),
-    );
-    let (ctx_addr, new_rsp) = signal::frame_placement(frame_base, ctx_size);
+    let frame_base = signal::altstack_top_for(pid, sig, regs.rsp)
+        .unwrap_or(regs.rsp.wrapping_sub(crate::proc::linux_sigframe::RED_ZONE));
+    let (ctx_addr, new_rsp) = signal::frame_placement(frame_base, frame_size as u64);
 
-    // Validate the whole region [new_rsp, ctx_addr + ctx_size) is a
+    // Validate the whole region [new_rsp, ctx_addr + frame_size) is a
     // writable user mapping before touching it.
-    let region_len = (ctx_addr.wrapping_add(ctx_size)).wrapping_sub(new_rsp);
+    let region_len = (ctx_addr.wrapping_add(frame_size as u64)).wrapping_sub(new_rsp);
     if crate::mm::user::validate_user_write(new_rsp, region_len as usize).is_err() {
         // Cannot place the frame; re-arm the signal and skip delivery.
         signal::set_pending_info(pid, sig, info);
@@ -10174,31 +10443,45 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     // `KernelError` code, where -4 is `WouldBlock`/`EAGAIN`. Using it here
     // would report "try again" for "interrupted by a signal" — the two
     // errnos a program most needs to tell apart around a blocking read.
-    let ret_val = if crate::syscall::linux::restart::is_sentinel(ret_val) {
-        i64::from(KernelError::Interrupted.code())
-    } else {
-        ret_val
+    //
+    // Only at a system call's exit: after an interrupt RAX is a register like
+    // any other, whatever its value.
+    let rax = match exit {
+        Some(e) if crate::syscall::linux::restart::is_sentinel(e.ret) => {
+            #[allow(clippy::cast_sign_loss)]
+            let code = i64::from(KernelError::Interrupted.code()) as u64;
+            code
+        }
+        _ => regs.rax,
     };
 
     let ctx = SignalContext {
         signum: u64::from(sig),
-        rax: ret_val as u64,
-        rdi: frame.arg0,
-        rsi: frame.arg1,
-        rdx: frame.arg2,
-        r10: frame.arg3,
-        r8: frame.arg4,
-        r9: frame.arg5,
-        rbx: frame.rbx,
-        rbp: frame.rbp,
-        r12: frame.r12,
-        r13: frame.r13,
-        r14: frame.r14,
-        r15: frame.r15,
-        rip: frame.user_rip,
-        rsp: frame.user_rsp,
-        rflags: frame.user_rflags,
+        rax,
+        rdi: regs.rdi,
+        rsi: regs.rsi,
+        rdx: regs.rdx,
+        r10: regs.r10,
+        r8: regs.r8,
+        r9: regs.r9,
+        rbx: regs.rbx,
+        rbp: regs.rbp,
+        r12: regs.r12,
+        r13: regs.r13,
+        r14: regs.r14,
+        r15: regs.r15,
+        rip: regs.rip,
+        rsp: regs.rsp,
+        rflags: regs.rflags,
     };
+    let ext = SignalFrameExt {
+        magic: SIGNAL_FRAME_EXT_MAGIC,
+        rcx: regs.rcx,
+        r11: regs.r11,
+        fpu_len: fpu_image.len() as u64,
+    };
+    let ext_addr = ctx_addr.wrapping_add(ext_offset as u64);
+    let fpu_addr = ext_addr.wrapping_add(SIGNAL_FRAME_EXT_SIZE as u64);
 
     // Stored through the bounce rather than by a typed write to the user
     // stack: the store has to be bracketed by STAC/CLAC once SMAP is on, and
@@ -10215,7 +10498,14 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
             SignalInfoTail::from_info(&info),
         )
         .is_ok();
+    // SAFETY: `fpu_image` is a live kernel buffer of the length passed;
+    // `copy_to_user` validates the destination itself.
+    let fpu_written =
+        unsafe { crate::mm::user::copy_to_user(fpu_image.as_ptr(), fpu_addr, fpu_image.len()) }
+            .is_ok();
     if !tail_written
+        || !fpu_written
+        || crate::mm::user::write_user_value::<SignalFrameExt>(ext_addr, ext).is_err()
         || crate::mm::user::write_user_value::<SignalContext>(ctx_addr, ctx).is_err()
         || crate::mm::user::write_user_value::<u64>(new_rsp, 0u64).is_err()
     {
@@ -10223,22 +10513,25 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
         return false;
     }
 
-    // Rewrite the frame so SYSRET jumps to the trampoline.
-    frame.user_rip = trampoline;
-    frame.user_rsp = new_rsp;
-    frame.arg0 = u64::from(sig); // rdi = signum
-    frame.arg1 = ctx_addr; // rsi = &SignalContext
-    // Clear other argument registers for cleanliness.
-    frame.arg2 = 0;
-    frame.arg3 = 0;
-    frame.arg4 = 0;
-    frame.arg5 = 0;
+    // The handler starts from the initial FPU state (Linux's
+    // `fpu__clear_user_states`); the signal return loads the saved one.
+    crate::sched::fpu::reset_to_initial();
 
+    // Enter the trampoline: rdi = signum, rsi = &SignalContext; the other
+    // argument registers cleared for cleanliness.
+    regs.rip = trampoline;
+    regs.rsp = new_rsp;
+    regs.rdi = u64::from(sig);
+    regs.rsi = ctx_addr;
+    regs.rdx = 0;
+    regs.r10 = 0;
+    regs.r8 = 0;
+    regs.r9 = 0;
     true
 }
 
-/// Deliver pending signals to a **Linux-ABI** process at the
-/// syscall-return checkpoint.
+/// Deliver pending signals to a **Linux-ABI** process whose interrupted
+/// registers are `regs`.
 ///
 /// Unlike the native path (one trampoline pointer per process), a Linux
 /// process has a per-signal `struct sigaction` disposition. This loop
@@ -10257,11 +10550,11 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
 ///     as the native no-handler path. A terminating default never
 ///     returns.
 ///
-/// Returns `true` if a handler frame was built (frame rewritten),
+/// Returns `true` if a handler frame was built (`regs` rewritten),
 /// `false` if nothing was delivered to a handler.
 fn deliver_linux_signal(
-    frame: &mut super::entry::SyscallFrame,
-    ret_val: i64,
+    regs: &mut super::linux::LinuxTrapRegs,
+    exit: Option<SyscallExit>,
     pid: crate::proc::pcb::ProcessId,
     task_id: crate::sched::task::TaskId,
 ) -> bool {
@@ -10291,7 +10584,7 @@ fn deliver_linux_signal(
                 // recorded source metadata so the siginfo_t is sender-faithful.
                 // On a stack-placement failure the signal is re-armed (with its
                 // info) inside build_linux_rt_frame and we fall through to false.
-                return linux::build_linux_rt_frame(frame, ret_val, pid, sig, &act, info);
+                return linux::build_linux_rt_frame(regs, exit, pid, sig, &act, info);
             }
             LinuxDisposition::Ignore => {
                 // Explicit SIG_IGN: drop and check the next signal.

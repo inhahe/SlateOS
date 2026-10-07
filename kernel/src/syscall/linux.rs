@@ -2074,6 +2074,31 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
 /// `SYS_SIGNAL_RETURN` and `SYS_EXCEPTION_RETURN` have the same problem).
 const SIGRETURN_RFLAGS_FORCED: u64 = crate::syscall::entry::USER_RFLAGS_FORCED;
 
+/// Read the FPU image a Linux signal frame's `fpstate` points at: the 512-byte
+/// FXSAVE area, and the rest of the XSAVE image only when its `_fpx_sw_bytes`
+/// record says there is one (and no larger than this kernel's), as Linux's
+/// `__fpu_restore_sig` reads it -- so a legacy image at the end of a mapping
+/// is not refused for bytes it never had.
+fn read_user_fpu_image(addr: u64) -> Result<alloc::vec::Vec<u8>, KernelError> {
+    const LEGACY: usize = 512;
+    const SW_BYTES: usize = 464;
+    let max = crate::sched::fpu::signal_image_size();
+    let legacy = crate::mm::user::read_user_vec(addr, LEGACY.min(max), LEGACY)?;
+    let word = |o: usize| {
+        legacy
+            .get(o..o.saturating_add(4))
+            .and_then(|b| b.try_into().ok())
+            .map_or(0, u32::from_le_bytes)
+    };
+    let extended = word(SW_BYTES + 4) as usize;
+    if word(SW_BYTES) == crate::sched::fpu::FP_XSTATE_MAGIC1 && extended > LEGACY && extended <= max
+    {
+        crate::mm::user::read_user_vec(addr, extended, max)
+    } else {
+        Ok(legacy)
+    }
+}
+
 /// Linux `rt_sigreturn(2)` translation — restores from a **Linux-shape**
 /// `ucontext` built by [`build_linux_rt_frame`].
 ///
@@ -2139,6 +2164,26 @@ fn linux_rt_sigreturn(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     if !crate::syscall::entry::user_return_state_ok(mc.rip, mc.rsp) {
         return -i64::from(errno::EFAULT);
     }
+
+    // The FPU image (`uc_mcontext.fpstate`), read in before anything is
+    // changed, so an unreadable one leaves the frame as it was. A NULL
+    // pointer means the initial state, as on Linux.
+    let fpu_image = if mc.fpstate == 0 {
+        None
+    } else {
+        match read_user_fpu_image(mc.fpstate) {
+            Ok(v) => Some(v),
+            Err(_) => return -i64::from(errno::EFAULT),
+        }
+    };
+    crate::sched::fpu::restore_signal_image(fpu_image.as_deref());
+
+    // Every register comes back, RCX and R11 too: the context may have been
+    // interrupted anywhere (a signal delivered from an interrupt), so the
+    // exit is IRETQ, which can load them, not SYSRETQ, which overwrites them.
+    frame.rcx = mc.rcx;
+    frame.r11 = mc.r11;
+    frame.exit_full = 1;
 
     // Restore the interrupted GPRs from uc_mcontext.
     frame.arg0 = mc.rdi;
@@ -2269,12 +2314,19 @@ pub fn emit_linux_rt_frame(
     };
     use crate::proc::signal;
 
-    // Where does the frame land on the user stack?  Underflow ⇒ fail.
-    let layout: FrameLayout = linux_sigframe::compute_layout(regs.rsp)?;
+    // The thread's FPU state, which the handler may clobber and the
+    // interrupted code may need: saved into the frame (`uc_mcontext.fpstate`)
+    // and loaded back by `rt_sigreturn`.
+    let fpu_image = crate::sched::fpu::capture_signal_image();
 
-    // Validate the whole frame region [frame_addr, frame_addr + size) is
-    // writable user memory before touching it.
-    if crate::mm::user::validate_user_write(layout.frame_addr, RT_SIGFRAME_SIZE).is_err() {
+    // Where does the frame land on the user stack?  Underflow ⇒ fail.
+    let layout: FrameLayout = linux_sigframe::compute_layout(regs.rsp, fpu_image.len() as u64)?;
+
+    // Validate the whole frame region [frame_addr, frame_addr + size) and the
+    // FPU image's are writable user memory before touching them.
+    if crate::mm::user::validate_user_write(layout.frame_addr, RT_SIGFRAME_SIZE).is_err()
+        || crate::mm::user::validate_user_write(layout.fp_addr, fpu_image.len()).is_err()
+    {
         return None;
     }
 
@@ -2309,8 +2361,6 @@ pub fn emit_linux_rt_frame(
     }
 
     // ---- build the saved machine context (uc_mcontext) ----
-    // fpstate stays 0 (NULL) via Default: no FP context is saved, so
-    // rt_sigreturn skips the FP restore.
     let sc = LinuxSigcontext {
         rdi: regs.rdi,
         rsi: regs.rsi,
@@ -2335,11 +2385,20 @@ pub fn emit_linux_rt_frame(
         // oldmask is the deprecated low-32 signal mask; glibc reads
         // uc_sigmask instead, but fill it for completeness.
         oldmask: restore_blocked,
+        fpstate: layout.fp_addr,
         ..LinuxSigcontext::default()
     };
 
+    // Linux's `frame_uc_flags`: the image is XSAVE-shaped (with the
+    // `_fpx_sw_bytes` record) when larger than the 512-byte FXSAVE area; the
+    // saved SS is meaningful and restored strictly.
+    let xstate = if fpu_image.len() > 512 {
+        linux_sigframe::UC_FP_XSTATE
+    } else {
+        0
+    };
     let uc = LinuxUcontext {
-        uc_flags: 0,
+        uc_flags: xstate | linux_sigframe::UC_SIGCONTEXT_SS | linux_sigframe::UC_STRICT_RESTORE_SS,
         uc_link: 0,
         uc_stack: LinuxStackT {
             ss_sp: 0,
@@ -2399,8 +2458,18 @@ pub fn emit_linux_rt_frame(
     // SAFETY: `frame_buf` is a live kernel array of exactly
     // `RT_SIGFRAME_SIZE` bytes, so the source range is readable for the
     // length passed.  `copy_to_user` validates the destination itself.
+    // SAFETY (the second copy): `fpu_image` is a live kernel buffer of the
+    // length passed; `copy_to_user` validates the destination itself.
     let stored = unsafe {
-        crate::mm::user::copy_to_user(frame_buf.as_ptr(), layout.frame_addr, RT_SIGFRAME_SIZE)
+        crate::mm::user::copy_to_user(fpu_image.as_ptr(), layout.fp_addr, fpu_image.len()).and_then(
+            |()| {
+                crate::mm::user::copy_to_user(
+                    frame_buf.as_ptr(),
+                    layout.frame_addr,
+                    RT_SIGFRAME_SIZE,
+                )
+            },
+        )
     };
     if stored.is_err() {
         // Undo the one side effect taken above so `None` means "nothing
@@ -2419,6 +2488,11 @@ pub fn emit_linux_rt_frame(
         linux_sigaction_reset_handler(pid, sig);
     }
 
+    // ---- the handler starts from the initial FPU state ----
+    // Saved above; Linux's `fpu__clear_user_states`, so a handler never
+    // inherits the interrupted code's rounding mode or exception masks.
+    crate::sched::fpu::reset_to_initial();
+
     Some(RtFrameEntry {
         rip: act.sa_handler,
         rsp: layout.frame_addr,
@@ -2431,8 +2505,9 @@ pub fn emit_linux_rt_frame(
     })
 }
 
-/// Build a byte-exact Linux `struct rt_sigframe` on the user stack and
-/// rewrite the syscall frame so the SYSRET path enters the handler.
+/// Build a byte-exact Linux `struct rt_sigframe` on the user stack and turn
+/// `regs` -- the interrupted thread's registers, at a system call's exit or an
+/// interrupt's -- into the handler's entry state.
 ///
 /// This is the Linux-ABI counterpart of the native trampoline path in
 /// [`crate::syscall::handlers::deliver_pending_signal`].  An unmodified
@@ -2444,8 +2519,11 @@ pub fn emit_linux_rt_frame(
 ///   * a fully-populated `siginfo` and `ucontext` at the advertised
 ///     addresses.
 ///
-/// `ret_val` is the value the interrupted syscall was about to return; it
-/// is stashed in `uc_mcontext.rax` and restored by [`linux_rt_sigreturn`].
+/// `regs.rax` is what the interrupted code resumes with -- at a system
+/// call's exit, the value it was about to return (`exit` says which call, so
+/// a restart sentinel can be resolved); it is stashed in `uc_mcontext.rax`
+/// and restored by [`linux_rt_sigreturn`], with every other register, the FPU
+/// state among them.
 ///
 /// Returns `true` on successful delivery (frame rewritten, one signal
 /// consumed).  Returns `false` if the user stack cannot hold the frame —
@@ -2454,8 +2532,8 @@ pub fn emit_linux_rt_frame(
 /// value.
 #[must_use]
 pub fn build_linux_rt_frame(
-    frame: &mut crate::syscall::entry::SyscallFrame,
-    ret_val: i64,
+    regs: &mut LinuxTrapRegs,
+    exit: Option<crate::syscall::handlers::SyscallExit>,
     pid: pcb::ProcessId,
     sig: u32,
     act: &LinuxSigaction,
@@ -2468,15 +2546,18 @@ pub fn build_linux_rt_frame(
     // re-executes after the handler returns (RAX = original nr, RIP = the
     // `syscall` instruction), or we convert the sentinel to the user-visible
     // -EINTR.  A non-sentinel return value is passed through unchanged.  See
-    // [`restart::restart_action`].
-    let (saved_rax, saved_rip) = match restart::sentinel_magnitude(ret_val) {
-        Some(sentinel) => {
+    // [`restart::restart_action`].  An interrupt's exit (`exit` None) has no
+    // call to restart: RAX is just a register there.
+    if let Some(exit) = exit {
+        if let Some(sentinel) = restart::sentinel_magnitude(exit.ret) {
             let sa_restart = (act.sa_flags & sa_flags::SA_RESTART) != 0;
             match restart::restart_action(sentinel, true, sa_restart) {
-                restart::RestartAction::Restart => (
-                    frame.syscall_nr,
-                    frame.user_rip.wrapping_sub(restart::SYSCALL_INSN_LEN),
-                ),
+                restart::RestartAction::Restart => {
+                    regs.rax = exit.nr;
+                    regs.rip = regs.rip.wrapping_sub(restart::SYSCALL_INSN_LEN);
+                    // What the `syscall` instruction will leave in RCX.
+                    regs.rcx = regs.rip;
+                }
                 // With a handler running, RestartBlock collapses to EINTR
                 // (restart_action returns Eintr for it when has_handler=true);
                 // both arms therefore yield the user-visible -EINTR at the
@@ -2487,38 +2568,11 @@ pub fn build_linux_rt_frame(
                 // so a later stray restart_syscall can't replay a stale sleep.
                 restart::RestartAction::RestartBlock | restart::RestartAction::Eintr => {
                     restart_block::clear(crate::sched::current_task_id());
-                    ((-i64::from(errno::EINTR)) as u64, frame.user_rip)
+                    regs.rax = (-i64::from(errno::EINTR)) as u64;
                 }
             }
         }
-        #[allow(clippy::cast_sign_loss)]
-        None => (ret_val as u64, frame.user_rip),
-    };
-
-    // Snapshot the interrupted syscall context.  rcx/r11 are clobbered by the
-    // `syscall` instruction; their architectural values are the return RIP and
-    // saved RFLAGS, so reproduce that.  RAX resumes with the syscall's pending
-    // return value (or, on restart, the original syscall number).
-    let regs = LinuxTrapRegs {
-        rax: saved_rax,
-        rbx: frame.rbx,
-        rcx: saved_rip,
-        rdx: frame.arg2,
-        rsi: frame.arg1,
-        rdi: frame.arg0,
-        rbp: frame.rbp,
-        r8: frame.arg4,
-        r9: frame.arg5,
-        r10: frame.arg3,
-        r11: frame.user_rflags,
-        r12: frame.r12,
-        r13: frame.r13,
-        r14: frame.r14,
-        r15: frame.r15,
-        rip: saved_rip,
-        rsp: frame.user_rsp,
-        rflags: frame.user_rflags,
-    };
+    }
 
     // Async (process-directed) signal: fill siginfo from the recorded source
     // metadata -- si_code, then the pid, uid and value slots, which carry a
@@ -2530,17 +2584,17 @@ pub fn build_linux_rt_frame(
     let signo_i = sig as i32;
     let siginfo = crate::proc::linux_sigframe::LinuxSiginfo::from_record(signo_i, &info);
 
-    match emit_linux_rt_frame(pid, sig, act, &regs, siginfo) {
+    match emit_linux_rt_frame(pid, sig, act, regs, siginfo) {
         Some(entry) => {
-            frame.user_rip = entry.rip;
-            frame.user_rsp = entry.rsp;
-            frame.arg0 = entry.rdi; // rdi = signo
-            frame.arg1 = entry.rsi; // rsi = &siginfo
-            frame.arg2 = entry.rdx; // rdx = &ucontext
-            frame.arg3 = 0; // r10
-            frame.arg4 = 0; // r8
-            frame.arg5 = 0; // r9
-            frame.user_rflags = entry.rflags;
+            regs.rip = entry.rip;
+            regs.rsp = entry.rsp;
+            regs.rdi = entry.rdi; // signo
+            regs.rsi = entry.rsi; // &siginfo
+            regs.rdx = entry.rdx; // &ucontext
+            regs.r10 = 0;
+            regs.r8 = 0;
+            regs.r9 = 0;
+            regs.rflags = entry.rflags;
             true
         }
         None => {
@@ -58814,6 +58868,9 @@ fn self_test_dispatch_with_frame_routing() -> crate::error::KernelResult<()> {
     use crate::serial_println;
     use crate::syscall::entry::SyscallFrame;
     let mut f = SyscallFrame {
+        exit_full: 0,
+        rcx: 0,
+        r11: 0,
         syscall_nr: nr::READ,
         arg0: 0,
         arg1: 0,
@@ -59077,6 +59134,9 @@ fn self_test_clone_vfork_parent() -> crate::error::KernelResult<()> {
     use crate::serial_println;
     use crate::syscall::entry::SyscallFrame;
     let mut f = SyscallFrame {
+        exit_full: 0,
+        rcx: 0,
+        r11: 0,
         syscall_nr: nr::CLONE,
         arg0: clone_flags::SIGCHLD | clone_flags::CLONE_VFORK,
         arg1: 0,
@@ -59411,6 +59471,9 @@ fn self_test_rt_sigreturn() -> crate::error::KernelResult<()> {
     use crate::serial_println;
     use crate::syscall::entry::SyscallFrame;
     let mut f = SyscallFrame {
+        exit_full: 0,
+        rcx: 0,
+        r11: 0,
         syscall_nr: nr::RT_SIGRETURN,
         arg0: 0,
         arg1: 0,

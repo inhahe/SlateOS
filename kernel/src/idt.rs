@@ -437,6 +437,66 @@ pub struct InterruptStackFrame {
     pub ss: u64,
 }
 
+/// The general registers every interrupt and exception stub saves, in the
+/// order they sit on the stack: right below the [`InterruptStackFrame`], the
+/// error code (the CPU's, or the stub's dummy 0), and below it the fifteen
+/// pushed registers, `rax` first pushed and so highest. The stubs restore them
+/// from here on the way out, so a handler that changes them changes what the
+/// interrupted code resumes with -- which is how a signal handler is entered
+/// from an interrupt ([`deliver_signal_on_user_return`]).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SavedGprs {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rbp: u64,
+    pub rbx: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rax: u64,
+    /// The error code, or the stub's dummy 0.
+    pub error_code: u64,
+}
+
+/// Bytes between the saved registers and the frame: 15 registers and the
+/// error code. Every stub's `lea rdi, [rsp + 128]` is this.
+const SAVED_GPRS_SIZE: usize = 128;
+const _: () = assert!(core::mem::size_of::<SavedGprs>() == SAVED_GPRS_SIZE);
+
+/// On an interrupt's way back to ring 3, deliver a pending signal to the
+/// interrupted thread, as Linux does on every return to user mode -- not only
+/// on a system call's, which until 2026-10-07 was the only place this kernel
+/// looked, so a program computing in a loop never saw `^C` or a timer's signal
+/// reach its handler.
+///
+/// Called by [`irq_common_dispatch`] once the interrupt has been handled and
+/// any preemption done, on the interrupted thread's own kernel stack. A
+/// no-op unless the frame says ring 3 and some signal may be pending.
+fn deliver_signal_on_user_return(frame: *mut InterruptStackFrame) {
+    // SAFETY: `frame` is the stub's saved frame on this kernel stack.
+    let cs = unsafe { (*frame).cs };
+    if cs & 3 != 3 || !crate::proc::signal::any_pending() {
+        return;
+    }
+    // SAFETY: every stub pushes the error code and the fifteen registers
+    // directly below the frame (see `SavedGprs`), on this same stack, and
+    // nothing else refers to them until the stub pops them.
+    // `SavedGprs` is exactly the SAVED_GPRS_SIZE bytes below the frame, so one
+    // element back from the frame, cast to it, is their start.
+    let gprs = unsafe { &mut *frame.cast::<SavedGprs>().sub(1) };
+    // SAFETY: as above; the frame is ours until the stub's `iretq`.
+    let iret = unsafe { &mut *frame };
+    crate::syscall::handlers::deliver_pending_signal_on_interrupt_exit(gprs, iret);
+}
+
 // ---------------------------------------------------------------------------
 // Per-CPU hardware-IRQ stacks (B-DF1 / open-questions Q7, option A)
 //
@@ -763,6 +823,7 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
         // (pre-existing behaviour: safe, but without overflow isolation).
         dispatch_vector(frame, vector);
         crate::sched::do_deferred_preempt();
+        deliver_signal_on_user_return(frame);
         return;
     }
 
@@ -789,6 +850,7 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
         run_on_irq_stack(top, frame, vector);
     }
     crate::sched::do_deferred_preempt();
+    deliver_signal_on_user_return(frame);
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,10 +1299,24 @@ fn try_dispatch_user_exception(
     // "return address" that the handler's RET will pop.  We use 0
     // (which will fault if the handler tries to return without calling
     // SYS_EXIT or SYS_EXCEPTION_RETURN — this is intentional).
-    #[allow(clippy::arithmetic_side_effects)]
+    // The thread's FPU state, kept above the context for the return to put
+    // back: the handler may use any register, and the faulting code had live
+    // values in all of them. The handler still sees the live state (an SSE
+    // fault's handler may want MXCSR's flags), unlike a signal handler.
+    let fpu_image = crate::sched::fpu::capture_signal_image();
+
     let ctx_size = EXCEPTION_CONTEXT_SIZE as u64;
-    #[allow(clippy::arithmetic_side_effects)]
-    let new_rsp = (rsp - ctx_size - 8) & !0xF; // 16-byte align
+    // Context, the null return slot above it, then the kernel's extension
+    // (`SignalFrameExt`) and the FPU image -- below the faulting function's
+    // 128-byte red zone, which it may be using (Linux's `get_sigframe`).
+    let frame_size = ctx_size
+        .saturating_add(8)
+        .saturating_add(crate::proc::signal::SIGNAL_FRAME_EXT_SIZE as u64)
+        .saturating_add(fpu_image.len() as u64);
+    let new_rsp = rsp
+        .wrapping_sub(crate::proc::linux_sigframe::RED_ZONE)
+        .wrapping_sub(frame_size)
+        & !0xF; // 16-byte align
 
     let ctx_addr = new_rsp;
 
@@ -1300,6 +1376,24 @@ fn try_dispatch_user_exception(
         return false;
     }
     if crate::mm::user::write_user_value::<u64>(ctx_addr.wrapping_add(ctx_size), 0u64).is_err() {
+        return false;
+    }
+    let ext_addr = ctx_addr.wrapping_add(ctx_size).wrapping_add(8);
+    let ext = crate::proc::signal::SignalFrameExt {
+        magic: crate::proc::signal::SIGNAL_FRAME_EXT_MAGIC,
+        rcx,
+        r11,
+        fpu_len: fpu_image.len() as u64,
+    };
+    let fpu_addr = ext_addr.wrapping_add(crate::proc::signal::SIGNAL_FRAME_EXT_SIZE as u64);
+    // SAFETY: `fpu_image` is a live kernel buffer of the length passed;
+    // `copy_to_user` validates the destination itself.
+    let fpu_written =
+        unsafe { crate::mm::user::copy_to_user(fpu_image.as_ptr(), fpu_addr, fpu_image.len()) };
+    if fpu_written.is_err()
+        || crate::mm::user::write_user_value::<crate::proc::signal::SignalFrameExt>(ext_addr, ext)
+            .is_err()
+    {
         return false;
     }
 

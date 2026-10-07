@@ -21,7 +21,9 @@
 //!                                                 glibc __restore_rt → rt_sigreturn
 //!            uc          (struct ucontext, 304 bytes)
 //!            info        (struct siginfo, 128 bytes)
-//!            [ fpstate ] (optional; we set uc_mcontext.fpstate = 0 / no FP save)
+//!            [ gap ]
+//!            fpstate     (the FPU image, 64-byte aligned; uc_mcontext.fpstate)
+//!            [ red zone, 128 bytes, left alone ]
 //! ```
 //!
 //! This mirrors the native [`crate::proc::signal::SignalContext`] trampoline
@@ -80,9 +82,10 @@ pub struct LinuxSigcontext {
     pub trapno: u64,
     pub oldmask: u64,
     pub cr2: u64,
-    /// Pointer to the saved `struct _fpstate`, or 0 when no FP context is
-    /// saved (Linux permits a NULL fpstate; `rt_sigreturn` then skips the FP
-    /// restore).  We currently always write 0 — see module docs / TD note.
+    /// Pointer to the saved `struct _fpstate`: the FPU image above the frame
+    /// (`crate::sched::fpu::capture_signal_image`), which `rt_sigreturn`
+    /// loads back. A handler may set it to 0, as on Linux, for the initial
+    /// state.
     pub fpstate: u64,
     pub reserved1: [u64; 8],
 }
@@ -300,18 +303,23 @@ pub struct FrameLayout {
     /// Address of the embedded `siginfo` (= `uc_addr + sizeof(ucontext)`).
     /// Goes in `%rsi`.
     pub info_addr: u64,
+    /// Address of the FPU image (`uc_mcontext.fpstate`): above the frame,
+    /// 64-byte aligned, below the red zone.
+    pub fp_addr: u64,
 }
 
 /// The System V x86-64 red zone: the 128 bytes below `%rsp` a leaf function
 /// may keep data in without moving `%rsp`, which nothing else may write.
 pub const RED_ZONE: u64 = 128;
 
-/// Compute where on the user stack to place an `rt_sigframe`, given the
-/// pre-signal `%rsp`.
+/// Compute where on the user stack to place an `rt_sigframe` and an FPU image
+/// of `fp_size` bytes, given the pre-signal `%rsp`.
 ///
 /// Linux's `get_sigframe` (x86_64) first steps over the 128-byte red zone --
 /// the interrupted code may hold live data there, a leaf function around its
-/// `syscall` instruction above all -- and then `align_sigframe` does
+/// `syscall` instruction above all -- then puts the FPU image at
+/// `round_down(sp - fp_size, 64)` (`fpu__alloc_mathframe`; XSAVE wants 64-byte
+/// alignment), and below it `align_sigframe` does
 /// `sp = round_down(sp - size, 16) - 8`, so the frame begins at an address
 /// `≡ 8 (mod 16)`.  Because `pretcode` occupies that first word and acts as
 /// the handler's return address, the handler sees `%rsp ≡ 8 (mod 16)` at its
@@ -322,10 +330,11 @@ pub const RED_ZONE: u64 = 128;
 /// Returns `None` if the subtraction would underflow the address space
 /// (a degenerate `%rsp` near 0), so callers map that to a delivery failure.
 #[must_use]
-pub fn compute_layout(user_rsp: u64) -> Option<FrameLayout> {
+pub fn compute_layout(user_rsp: u64, fp_size: u64) -> Option<FrameLayout> {
     let size = RT_SIGFRAME_SIZE as u64;
-    // round_down(sp - 128 - size, 16) - 8
-    let lowered = user_rsp.checked_sub(RED_ZONE)?.checked_sub(size)?;
+    // fp = round_down(sp - 128 - fp_size, 64); frame = round_down(fp - size, 16) - 8
+    let fp_addr = user_rsp.checked_sub(RED_ZONE)?.checked_sub(fp_size)? & !0x3Fu64;
+    let lowered = fp_addr.checked_sub(size)?;
     let frame_addr = (lowered & !0xFu64).checked_sub(8)?;
     let uc_addr = frame_addr.checked_add(8)?;
     let info_addr = uc_addr.checked_add(core::mem::size_of::<LinuxUcontext>() as u64)?;
@@ -333,8 +342,16 @@ pub fn compute_layout(user_rsp: u64) -> Option<FrameLayout> {
         frame_addr,
         uc_addr,
         info_addr,
+        fp_addr,
     })
 }
+
+/// `uc_flags`: `uc_mcontext.fpstate` is an XSAVE image with `_fpx_sw_bytes`.
+pub const UC_FP_XSTATE: u64 = 0x1;
+/// `uc_flags`: the saved `ss` is meaningful.
+pub const UC_SIGCONTEXT_SS: u64 = 0x2;
+/// `uc_flags`: `rt_sigreturn` restores `ss` strictly from the context.
+pub const UC_STRICT_RESTORE_SS: u64 = 0x4;
 
 /// `si_code` constants.
 ///
@@ -516,7 +533,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // ---- frame layout / alignment ----
     // For any 16-aligned input rsp, the frame must end up ≡ 8 (mod 16) and
     // strictly below rsp - RT_SIGFRAME_SIZE region.
-    let layout = match compute_layout(0x0000_7fff_ffff_0000) {
+    let layout = match compute_layout(0x0000_7fff_ffff_0000, 836) {
         Some(l) => l,
         None => {
             serial_println!("[sigframe]   FAIL: compute_layout returned None for a valid rsp");
@@ -552,7 +569,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
     // Underflow guard: a tiny rsp yields None rather than wrapping.
-    if compute_layout(8).is_some() {
+    // The FPU image sits between the frame and the red zone, 64-byte aligned.
+    if layout.fp_addr % 64 != 0
+        || layout.frame_addr.saturating_add(RT_SIGFRAME_SIZE as u64) > layout.fp_addr
+        || layout.fp_addr.saturating_add(836) > rsp.saturating_sub(RED_ZONE)
+    {
+        serial_println!(
+            "[sigframe]   FAIL: FPU image at {:#x} not 64-aligned between the frame and the red zone",
+            layout.fp_addr
+        );
+        return Err(KernelError::InvalidArgument);
+    }
+    if compute_layout(8, 0).is_some() {
         serial_println!("[sigframe]   FAIL: compute_layout(8) should underflow to None");
         return Err(KernelError::InvalidArgument);
     }

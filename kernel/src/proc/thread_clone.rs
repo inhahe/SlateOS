@@ -661,6 +661,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // (1) build_register_image: verify slot mapping.
     let frame = SyscallFrame {
+        exit_full: 0,
+        rcx: 0,
+        r11: 0,
         syscall_nr: 0,
         arg0: 0x1111,
         arg1: 0x2222,
@@ -709,6 +712,9 @@ pub fn self_test() -> KernelResult<()> {
     }
     // RFLAGS substitution: zero -> 0x202.
     let frame_zero_rflags = SyscallFrame {
+        exit_full: 0,
+        rcx: 0,
+        r11: 0,
         user_rflags: 0,
         ..frame
     };

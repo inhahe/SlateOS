@@ -22865,6 +22865,88 @@ pub fn self_test_linux_dev_stdin() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of signal delivery from an interrupt, with every register and
+/// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
+/// spins in a loop that makes no system calls, holding known values in every
+/// general register, the XMM registers, MXCSR and its red zone, until a
+/// `SIGALRM` handler has run; the signal can only reach it from the timer
+/// interrupt. Exits `0x2A` when the loop finds everything intact and the
+/// handler started from the initial FPU state.
+pub fn self_test_linux_signal_from_interrupt() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux signal-from-interrupt (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_signal_from_interrupt_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-signal-from-interrupt"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-signal-from-interrupt",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: signal-from-interrupt spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: signal from interrupt (ring 3) — the program did not finish in 60 s              (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x32) => "setting up the mailbox, the handler or the timer failed",
+            Some(0x33) => "the handler did not run exactly once",
+            Some(0x34) => "the signal arrived before the loop, three times running",
+            Some(0x35) => "the handler's context did not show the loop as interrupted",
+            Some(0x36) => "the handler did not start from the initial MXCSR",
+            Some(0x37) => "rcx or r11 changed across the handler",
+            Some(0x38 | 0x39) => "a general register changed across the handler",
+            Some(0x3A) => "the signal frame overwrote the red zone",
+            Some(0x3B) => "MXCSR changed across the handler",
+            Some(0x3C) => "an XMM register changed across the handler",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: signal from interrupt (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux signal from interrupt (ring 3: a loop without system calls got its          SIGALRM handler, and every register, rcx/r11, the XMM registers, MXCSR and the red          zone came back; the handler started from the initial FPU state): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of POSIX timers through the Linux ABI:
 /// [`elf::build_linux_posix_timers_test_elf`] creates timers on several
 /// clocks and sigevents, takes their signals with `rt_sigtimedwait`, a

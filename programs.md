@@ -118,7 +118,7 @@ two disagree.
 | `htop` | Interactive Process Viewer | yes |  |  |
 | `hwclock` | Hardware clock and time management utility for SlateOS. | yes |  |  |
 | `hwinfo` | Hardware information utility: `hwinfo`, a comprehensive hardware inventory. | yes |  |  |
-| `iconv` | Character encoding conversion utility. | yes |  |  |
+| `iconv` | Convert text from one character encoding to another. | yes |  |  |
 | `id` | Print user and group information for each specified USER, or (when USER is omitted) for the current process. | yes | `coreutils` |  |
 | `ifconfig` | Classic network interface configuration utility. | yes |  |  |
 | `indexer` | Background File Indexer | yes |  |  |

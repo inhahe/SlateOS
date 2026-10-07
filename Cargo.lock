@@ -1715,6 +1715,9 @@ dependencies = [
 name = "iconv"
 version = "0.1.0"
 dependencies = [
+ "coreutils",
+ "errmsg",
+ "getoptlong",
  "quoting",
 ]
 

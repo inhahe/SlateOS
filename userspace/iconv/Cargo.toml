@@ -2,10 +2,19 @@
 name = "iconv"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS iconv - character encoding conversion"
+description = "SlateOS iconv - glibc 2.39's iconv program over the C library's iconv(3)"
+
 [dependencies]
-# Character-set names and file names come from argv.
+# Character-set names, file names and the program's own name come from argv,
+# and are bytes.
 quoting = { path = "../quoting" }
+# The standard-descriptor guard, glibc's stdio buffer for the output, and raw
+# writes to descriptor 2 -- the pieces every port in coreutils is built from.
+coreutils = { path = "../coreutils" }
+# glibc's `getopt_long`, sentences included; argp hands it the option table.
+getoptlong = { path = "../getoptlong" }
+# `strerror`'s words.
+errmsg = { path = "../errmsg" }
 
 [lints]
 workspace = true

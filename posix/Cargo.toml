@@ -42,3 +42,10 @@ workspace = true
 [[bench]]
 name = "mem"
 harness = false
+
+# `crypt`'s time a hash for the settings an /etc/shadow holds, beside
+# libxcrypt's (benches/libxcrypt-reference.c): `cargo bench -p posix
+# --target x86_64-pc-windows-gnu --bench crypt`.
+[[bench]]
+name = "crypt"
+harness = false

@@ -558,3 +558,6 @@ mod wctype_tables;
 pub mod wordexp;
 pub mod x87;
 pub mod xattr;
+// yescrypt and scrypt, `crypt`'s `$y$` and `$7$` methods: a port of
+// libxcrypt's, reached only through `crypt.rs`.
+mod yescrypt;

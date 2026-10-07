@@ -117,6 +117,11 @@ const SHA256_K: [u32; 64] = [
 ];
 
 /// SHA-256 streaming hasher.
+///
+/// `Clone` so that a keyed state can be reused: HMAC-SHA256 (in
+/// [`crate::yescrypt`]) hashes its padded key once and clones the result for
+/// every message, as PBKDF2 needs one per block.
+#[derive(Clone)]
 pub struct Sha256 {
     state: [u32; 8],
     /// Total bytes fed so far (used for the padding length field).

@@ -1,12 +1,14 @@
 //! POSIX `<unistd.h>` / `<crypt.h>` password hashing.
 //!
 //! Implements the SHA-256 (`$5$`) and SHA-512 (`$6$`) crypt methods —
-//! the modern shadow-suite defaults — following Ulrich Drepper's
-//! specification ("Unix crypt using SHA-256 and SHA-512"), plus legacy
-//! MD5 crypt (`$1$`, Poul-Henning Kamp's algorithm).  The hash cores
-//! live in [`crate::sha2`] and [`crate::md5`]; this module implements the
-//! salt/rounds parsing, the key-derivation rounds, and the crypt base-64
-//! encoding.
+//! the shadow suite's — following Ulrich Drepper's specification ("Unix
+//! crypt using SHA-256 and SHA-512"); legacy MD5 crypt (`$1$`, Poul-Henning
+//! Kamp's algorithm); and yescrypt (`$y$`) and scrypt (`$7$`), which Ubuntu,
+//! Debian and Fedora hash new passwords with, ported from libxcrypt in
+//! `yescrypt.rs`.  The SHA and MD5 cores live in [`crate::sha2`] and
+//! [`crate::md5`]; this module implements their salt/rounds parsing, their
+//! key-derivation rounds and the crypt base-64 encoding, and the dispatch
+//! of a setting to its method.
 //!
 //! Previously `crypt()` returned `"$0$<key>"` — i.e. the password in
 //! cleartext with a marker prefix.  Any program that hashed a password
@@ -15,10 +17,12 @@
 //!
 //! ## Method strength
 //!
-//! `$6$` (SHA-512) is the recommended default.  `$1$` (MD5) is
-//! cryptographically broken and is supported only so the OS can verify
-//! existing `$1$` entries in legacy `/etc/shadow` files — never use it
-//! for new passwords.
+//! `$6$` (SHA-512) is this system's default for new passwords.  `$y$`
+//! (yescrypt) is the stronger -- a guess costs 16 MiB of memory as well as
+//! time -- and is here first so that an `/etc/shadow` brought from Ubuntu
+//! verifies.  `$1$` (MD5) is cryptographically broken and is supported only
+//! so the OS can verify existing `$1$` entries in legacy `/etc/shadow`
+//! files — never use it for new passwords.
 //!
 //! ## Failure: the failure token, as libxcrypt answers
 //!
@@ -37,16 +41,32 @@
 //! | the passphrase is 512 bytes or longer | `ERANGE` |
 //! | the setting has a space, a control or non-ASCII byte, or one of `! * : ; \` | `EINVAL` |
 //! | the setting names no method this module implements | `EINVAL` |
+//! | a `$y$` or `$7$` setting is 212 bytes or longer (see below) | `ERANGE` |
+//! | a `$y$` or `$7$` setting the method refuses, or no memory for its hash | `EINVAL` |
 //!
 //! Until 2026-09-26 a NULL argument was `EFAULT` and every failure returned
 //! NULL, which a program ported from Linux does not expect.
 //!
+//! ## The output's room: 256 bytes, where libxcrypt has 384
+//!
+//! `crypt_r` writes into its caller's `struct crypt_data`, and C here is
+//! compiled against musl's `<crypt.h>`, whose `crypt_data` is 260 bytes
+//! (libxcrypt's is 32 KiB, its `output` 384).  So a result has 256 bytes,
+//! NUL included.  Every hash fits: the longest `$y$` one -- every parameter
+//! in six characters, a 64-byte salt -- is 182 bytes.  What differs is
+//! yescrypt's own test before hashing, which wants room for *all* of the
+//! setting given, plus `$`, 43 characters and a NUL: here it passes for a
+//! setting of up to 211 bytes, in libxcrypt for up to 339.  Every `$y$`
+//! hash, used as the setting that verifies it, is within both; only a `$7$`
+//! setting with a salt of over 150 characters, which nothing generates, is
+//! refused here (`ERANGE`) and taken there.
+//!
 //! ## Unsupported methods
 //!
-//! Legacy DES (two-character salt), BSDi DES, bcrypt, scrypt, yescrypt and
+//! Legacy DES (two-character salt), BSDi DES, bcrypt, gost-yescrypt and
 //! libxcrypt's other methods are **not** implemented: their settings fail
 //! with the token and `EINVAL`, never with a fabricated hash.  (See
-//! `todo.txt` for the DES follow-up.)
+//! `todo.txt` for the follow-ups.)
 //!
 //! `encrypt`/`setkey` (raw DES block cipher) remain unimplemented and
 //! answer `ENOSYS`.
@@ -58,12 +78,14 @@ use crate::errno;
 use crate::md5::Md5;
 use crate::sha2::{Digest, Sha256, Sha512};
 
-/// Maximum length of a crypt result string (including the NUL terminator).
+/// The room for a crypt result, NUL included: what `crypt_r` may write into
+/// a C caller's `struct crypt_data`, whose size musl's `<crypt.h>` sets at
+/// 260 (see "The output's room" above).
 ///
-/// The longest output we generate is a SHA-512 hash with an explicit
-/// rounds field: `"$6$rounds=999999999$"` (20) + 16-byte salt + `"$"` (1)
-/// + 86-character hash + NUL = 124 bytes, comfortably within this bound.
-const CRYPT_OUTPUT_LEN: usize = 128;
+/// The longest SHA result is 124 bytes (`"$6$rounds=999999999$"`, a 16-byte
+/// salt, `"$"`, 86 characters, NUL), the longest `$y$` one 183.  It was 128
+/// until yescrypt, whose test before hashing measures the whole setting.
+const CRYPT_OUTPUT_LEN: usize = 256;
 
 /// Static buffer for `crypt()` results (non-reentrant, per POSIX).
 static mut CRYPT_BUF: [u8; CRYPT_OUTPUT_LEN] = [0u8; CRYPT_OUTPUT_LEN];
@@ -86,6 +108,10 @@ const ROUNDS_MAX: u32 = 999_999_999;
 const SALT_MAX: usize = 16;
 /// Maximum salt length in bytes for MD5 crypt (`$1$`).
 const MD5_SALT_MAX: usize = 8;
+/// The longest salt a new yescrypt (`$y$`) or scrypt (`$7$`) setting may
+/// carry: libxcrypt's `crypt_gensalt` takes at most 64 bytes of randomness,
+/// which are 86 base-64 characters.
+const YESCRYPT_SALT_MAX: usize = 86;
 
 // ---------------------------------------------------------------------------
 // Fixed-capacity output builder
@@ -458,10 +484,29 @@ fn md5_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
     true
 }
 
-/// Dispatch a crypt `setting` to the matching method, writing the result
-/// into `out`.  Returns `false` if no supported method recognises it.
-fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
-    md5_crypt(key, setting, out) || sha_crypt(key, setting, out)
+/// Dispatch a crypt `setting` to the method it names, writing the result,
+/// NUL-terminated, into `out`.  [`Refusal::Invalid`] if no method this
+/// module implements takes it; yescrypt's and scrypt's own refusals as
+/// they make them.
+fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Refusal> {
+    if crate::yescrypt::names_method(setting) {
+        let len =
+            crate::yescrypt::crypt(key, setting, &mut out.buf).map_err(
+                |refused| match refused {
+                    crate::yescrypt::Refused::Range => Refusal::Range,
+                    crate::yescrypt::Refused::Invalid => Refusal::Invalid,
+                },
+            )?;
+        // `crypt` leaves room for the NUL.
+        out.len = len;
+        out.push(0);
+        return Ok(());
+    }
+    if md5_crypt(key, setting, out) || sha_crypt(key, setting, out) {
+        Ok(())
+    } else {
+        Err(Refusal::Invalid)
+    }
 }
 
 /// libxcrypt's `check_badsalt_chars`: a setting may hold only printable ASCII
@@ -490,9 +535,11 @@ fn failure_token(setting: Option<&[u8]>) -> [u8; 3] {
 /// `errno`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
-    /// `ERANGE`: a passphrase too long, or a hash that did not fit.
+    /// `ERANGE`: a passphrase too long, a hash that did not fit, or a `$y$`
+    /// or `$7$` setting longer than the output's room allows.
     Range,
-    /// `EINVAL`: a setting with a character no method allows, or no method.
+    /// `EINVAL`: a setting with a character no method allows, no method, or
+    /// one its method refuses.
     Invalid,
 }
 
@@ -505,9 +552,7 @@ fn do_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Refusal>
     if has_bad_setting_chars(setting) {
         return Err(Refusal::Invalid);
     }
-    if !compute_crypt(key, setting, out) {
-        return Err(Refusal::Invalid);
-    }
+    compute_crypt(key, setting, out)?;
     if out.overflow {
         return Err(Refusal::Range);
     }
@@ -532,8 +577,11 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 
 /// `crypt` — one-way password hashing.
 ///
-/// Supports `$1$` (MD5), `$5$` (SHA-256), and `$6$` (SHA-512) settings;
-/// the SHA methods accept an optional `rounds=N$`.  Returns a pointer to a
+/// Supports `$1$` (MD5), `$5$` (SHA-256), `$6$` (SHA-512), `$y$` (yescrypt)
+/// and `$7$` (scrypt) settings; the SHA methods accept an optional
+/// `rounds=N$`, and yescrypt's and scrypt's carry their own parameters.  A
+/// yescrypt hash takes as much memory as its setting asks for -- 16 MiB for
+/// Ubuntu's `$y$j9T$` -- and fails if it cannot have it.  Returns a pointer to a
 /// static buffer, overwritten by each call: the hash, or on failure
 /// libxcrypt's failure token (`"*0"`, or `"*1"`) with `errno` set -- see the
 /// module docs for when.  `crypt_r` into that buffer, as libxcrypt's is.
@@ -665,6 +713,14 @@ pub enum Method {
     Sha256,
     /// `$6$` — SHA-512 crypt.  The shadow-suite default, and ours.
     Sha512,
+    /// `$y$` — yescrypt, the default of Ubuntu, Debian and Fedora: a guess
+    /// costs memory as well as time.  A new setting asks for libxcrypt's
+    /// default cost, `$y$j9T$`: 16 MiB a hash.
+    Yescrypt,
+    /// `$7$` — scrypt, yescrypt's ancestor, as libxcrypt writes it.  A new
+    /// setting asks for libxcrypt's default cost: N = 2^14, r = 32, 64 MiB a
+    /// hash.
+    Scrypt,
 }
 
 impl Method {
@@ -675,34 +731,64 @@ impl Method {
             Self::Md5 => "$1$",
             Self::Sha256 => "$5$",
             Self::Sha512 => "$6$",
+            Self::Yescrypt => "$y$",
+            Self::Scrypt => "$7$",
+        }
+    }
+
+    /// What a new setting for this method holds before its salt: the
+    /// identifier and, for yescrypt and scrypt, their parameters --
+    /// libxcrypt's defaults (`crypt_gensalt` with a count of 0).
+    fn setting_head(self) -> &'static str {
+        match self {
+            Self::Yescrypt => "$y$j9T$",
+            // N = 2^14 ('C'), then r = 32 and p = 1 in five characters each.
+            Self::Scrypt => "$7$CU..../....",
+            Self::Md5 | Self::Sha256 | Self::Sha512 => self.prefix(),
         }
     }
 
     /// How many crypt-base-64 characters this method's hash field holds.
     ///
     /// A fixed number, because the digest is a fixed size: 16 bytes for MD5
-    /// (22 characters), 32 for SHA-256 (43), 64 for SHA-512 (86).  This is
-    /// what [`stored_method`] checks, and it is how an entry this tree wrote
-    /// before the safe API existed — 64 *hex* digits under a `$5$` label —
-    /// is told apart from a genuine one, with no ambiguity in either
-    /// direction.
+    /// (22 characters), 32 for SHA-256, yescrypt and scrypt (43), 64 for
+    /// SHA-512 (86).  This is what [`stored_method`] checks, and it is how
+    /// an entry this tree wrote before the safe API existed — 64 *hex*
+    /// digits under a `$5$` label — is told apart from a genuine one, with
+    /// no ambiguity in either direction.
     #[must_use]
     pub fn hash_len(self) -> usize {
         match self {
             Self::Md5 => 22,
-            Self::Sha256 => 43,
+            Self::Sha256 | Self::Yescrypt | Self::Scrypt => 43,
             Self::Sha512 => 86,
         }
     }
 
-    /// The longest salt this method uses.  A longer one is truncated when
-    /// hashing, so an entry carrying one can never be reproduced.
+    /// The longest salt a new setting for this method may carry.
+    ///
+    /// For MD5 and the SHA methods it is the longest they use: a longer one
+    /// is truncated when hashing, so an entry carrying one can never be
+    /// reproduced.  For yescrypt and scrypt it is libxcrypt's: 64 bytes of
+    /// randomness, in 86 characters.
     #[must_use]
     pub fn salt_max(self) -> usize {
         match self {
             Self::Md5 => MD5_SALT_MAX,
             Self::Sha256 | Self::Sha512 => SALT_MAX,
+            Self::Yescrypt | Self::Scrypt => YESCRYPT_SALT_MAX,
         }
+    }
+
+    /// Whether `salt` may follow this method's setting head: crypt base-64,
+    /// non-empty, no longer than [`Method::salt_max`] -- and, for yescrypt,
+    /// whose salt is the bytes the characters decode to, characters that
+    /// decode.
+    fn takes_salt(self, salt: &[u8]) -> bool {
+        !salt.is_empty()
+            && salt.len() <= self.salt_max()
+            && salt.iter().copied().all(is_b64)
+            && (self != Self::Yescrypt || crate::yescrypt::is_yescrypt_salt(salt))
     }
 
     /// The method named by a `$N$` prefix, if it is one we implement.
@@ -711,6 +797,8 @@ impl Method {
             b"$1$" => Some(Self::Md5),
             b"$5$" => Some(Self::Sha256),
             b"$6$" => Some(Self::Sha512),
+            b"$y$" => Some(Self::Yescrypt),
+            b"$7$" => Some(Self::Scrypt),
             _ => None,
         }
     }
@@ -740,12 +828,15 @@ fn compute_into(key: &[u8], setting: &[u8], out: &mut HashBuf) -> Option<usize> 
 /// Hash `key` under `setting`, writing the crypt string into `out`.
 ///
 /// The safe equivalent of [`crypt`]: the same settings (`$1$`, `$5$`, `$6$`,
-/// with an optional `rounds=N$`) and the same output, but reentrant — the
-/// result lands in the caller's buffer, so a call on another thread cannot
-/// replace it between it being computed and being read.
+/// with an optional `rounds=N$`, and `$y$` and `$7$`) and the same output,
+/// but reentrant — the result lands in the caller's buffer, so a call on
+/// another thread cannot replace it between it being computed and being
+/// read.
 ///
 /// `setting` may be a bare `"$6$<salt>$"` (see [`setting_into`]) or a whole
-/// stored hash, since the salt is read up to the first `$` either way.
+/// stored hash, since the salt is read up to the first `$` either way --
+/// for yescrypt and scrypt, up to the last, which in a stored hash is the
+/// one before the hash.
 ///
 /// Returns `None` if `crypt` would fail -- `setting` selects no method we
 /// implement or holds a character `crypt` refuses, or `key` is 512 bytes or
@@ -758,17 +849,22 @@ pub fn hash_into<'o>(key: &[u8], setting: &[u8], out: &'o mut HashBuf) -> Option
     core::str::from_utf8(out.get(..n)?).ok()
 }
 
-/// Assemble a setting for a *new* password: `"$N$<salt>$"`.
+/// Assemble a setting for a *new* password: `"$N$<salt>$"` -- for yescrypt
+/// `"$y$j9T$<salt>$"` and for scrypt `"$7$CU..../....<salt>$"`, libxcrypt's
+/// default costs (see [`Method`]).
 ///
-/// Rejects a salt that is empty, longer than the method uses (a truncated
-/// salt means the entry written is not the entry that was asked for), or
-/// that holds anything outside the crypt base-64 alphabet — `$` above all,
-/// which would silently end the salt early.
+/// Rejects a salt that is empty, longer than [`Method::salt_max`] (for MD5
+/// and SHA, a truncated salt means the entry written is not the entry that
+/// was asked for), or that holds anything outside the crypt base-64
+/// alphabet — `$` above all, which would silently end the salt early.  A
+/// yescrypt salt is the bytes its characters decode to, so it must also
+/// decode: a whole number of bytes, the spare bits of its last character
+/// zero, as `crypt_gensalt` writes them.
 pub fn setting_into<'o>(method: Method, salt: &[u8], out: &'o mut HashBuf) -> Option<&'o str> {
-    if salt.is_empty() || salt.len() > method.salt_max() || !salt.iter().copied().all(is_b64) {
+    if !method.takes_salt(salt) {
         return None;
     }
-    let prefix = method.prefix().as_bytes();
+    let prefix = method.setting_head().as_bytes();
     let salt_end = prefix.len().checked_add(salt.len())?;
     let len = salt_end.checked_add(1)?;
     out.get_mut(..prefix.len())?.copy_from_slice(prefix);
@@ -796,17 +892,16 @@ pub fn setting_into<'o>(method: Method, salt: &[u8], out: &'o mut HashBuf) -> Op
 ///
 /// Returns `None` for [`Method::Md5`]: MD5 crypt has no rounds field, and
 /// `$1$rounds=N$` would be read as a SALT beginning with `rounds=`, quietly
-/// hashing a different password-salt pair than the caller asked for.
+/// hashing a different password-salt pair than the caller asked for.  And
+/// for [`Method::Yescrypt`] and [`Method::Scrypt`], whose cost is in their
+/// parameters, not a rounds field.
 pub fn setting_rounds_into<'o>(
     method: Method,
     rounds: u32,
     salt: &[u8],
     out: &'o mut HashBuf,
 ) -> Option<&'o str> {
-    if matches!(method, Method::Md5) {
-        return None;
-    }
-    if salt.is_empty() || salt.len() > method.salt_max() || !salt.iter().copied().all(is_b64) {
+    if !matches!(method, Method::Sha256 | Method::Sha512) || !method.takes_salt(salt) {
         return None;
     }
 
@@ -889,7 +984,10 @@ pub fn verify(key: &[u8], stored: &[u8]) -> bool {
 ///
 /// A *shape* check, not a verification: it reads the `$N$` prefix, skips an
 /// optional `rounds=N$`, skips the salt, and requires what remains to be
-/// exactly [`Method::hash_len`] characters of crypt base-64.
+/// exactly [`Method::hash_len`] characters of crypt base-64.  A yescrypt or
+/// scrypt entry carries its parameters, so for those it reads them as
+/// `crypt` would and requires ones it accepts -- whether the memory they
+/// ask for will be there is the one thing it cannot tell.
 ///
 /// It exists to tell a genuine entry from one this tree wrote before the
 /// safe API existed.  `chpasswd` labelled its output `$5$` while computing
@@ -900,6 +998,9 @@ pub fn verify(key: &[u8], stored: &[u8]) -> bool {
 #[must_use]
 pub fn stored_method(stored: &[u8]) -> Option<Method> {
     let method = Method::from_prefix(stored)?;
+    if matches!(method, Method::Yescrypt | Method::Scrypt) {
+        return crate::yescrypt::is_stored_hash(stored, CRYPT_OUTPUT_LEN).then_some(method);
+    }
     let mut rest = stored.get(3..)?;
 
     // An explicit rounds field, which only the SHA methods accept.  A
@@ -1005,6 +1106,188 @@ mod tests {
             r,
             "$5$rounds=10000$saltstringsaltst$3xv.VbSHBb41AL9AvLeujZkZRBAwqFMz2.opqey6IcA"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // libxcrypt as the oracle
+    // -----------------------------------------------------------------------
+
+    /// `name`'s errno value, as the oracle spells it.
+    fn errno_named(name: &str) -> i32 {
+        match name {
+            "0" => 0,
+            "EINVAL" => crate::errno::EINVAL,
+            "ERANGE" => crate::errno::ERANGE,
+            other => panic!("an errno the oracle should not give: {other}"),
+        }
+    }
+
+    /// libxcrypt's own answers (`posix/tools/oracle/crypt_harness.py`): its
+    /// table of known answers for every method this module implements, and
+    /// yescrypt's and scrypt's parameters, salts and refusals.  Each through
+    /// `crypt` -- the result, and `errno` when it fails -- and each hash's
+    /// stored form through `stored_method`, which names the method it
+    /// begins with, and for yescrypt and scrypt through `verify`.
+    #[test]
+    fn libxcrypt_answers() {
+        const ORACLE: &str = include_str!("crypt_oracle.txt");
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut lines = 0;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            lines += 1;
+            let (call, answer) = line.split_once(" = ").expect("`call = answer`");
+            let (hex, setting) = call.split_once(' ').expect("`password setting`");
+            let (result, errno) = answer.rsplit_once(' ').expect("`result errno`");
+            let mut key: std::vec::Vec<u8> = if hex == "-" {
+                std::vec::Vec::new()
+            } else {
+                (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
+                    .collect()
+            };
+            let password = key.clone();
+            key.push(0);
+            let c_setting = std::format!("{setting}\0");
+            let (got, got_errno) = crypt_raw(key.as_ptr(), c_setting.as_ptr());
+            assert_eq!(got, result, "{line}");
+            // errno says something only of a failure (C11 7.5): libxcrypt
+            // leaves ENOMEM behind a hash of 32 MiB or more that it got by
+            // asking for huge pages first, and being refused.
+            if result.starts_with('*') {
+                assert_eq!(got_errno, errno_named(errno), "{line}");
+                continue;
+            }
+            let named = Method::from_prefix(result.as_bytes());
+            assert!(named.is_some(), "{line}");
+            assert_eq!(stored_method(result.as_bytes()), named, "{line}");
+            // A stored yescrypt or scrypt hash is its own setting, its salt
+            // read to the last `$`: new here, so each is verified too.  (A
+            // second hash each; the SHA and MD5 entries' verification has
+            // tests of its own, and would double this test's time.)
+            if matches!(named, Some(Method::Yescrypt | Method::Scrypt)) {
+                assert!(verify(&password, result.as_bytes()), "{line}");
+            }
+        }
+        assert_eq!(lines, 1926, "the oracle's every line");
+    }
+
+    // -----------------------------------------------------------------------
+    // yescrypt and scrypt
+    // -----------------------------------------------------------------------
+
+    /// yescrypt's test before hashing wants room for all of the setting,
+    /// `$`, 43 characters and a NUL: 256 bytes here, so a setting of 211
+    /// bytes is hashed and one of 212 is `ERANGE` (libxcrypt's 384 bytes
+    /// take settings to 339: "The output's room" in the module docs).
+    #[test]
+    fn a_setting_too_long_for_the_room_is_erange() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `$7$`, N = 16, r = 1, p = 1, and a salt of raw characters.
+        let head = "$7$2/..../....";
+        let fits = std::format!("{head}{}\0", "s".repeat(211 - head.len()));
+        let (got, e) = crypt_raw(b"pw\0".as_ptr(), fits.as_ptr());
+        assert_eq!(e, 0);
+        assert_eq!(got.len(), 211 + 1 + 43);
+        let over = std::format!("{head}{}\0", "s".repeat(212 - head.len()));
+        let got = crypt_raw(b"pw\0".as_ptr(), over.as_ptr());
+        assert_eq!(got, ("*0".into(), crate::errno::ERANGE));
+    }
+
+    /// A hash whose memory cannot be had fails, with `EINVAL`, and at once:
+    /// N = 2^31 blocks of r = 2^20, 256 PiB, which no allocator gives.  Its
+    /// parameters are ones the KDF takes, so the entry's shape is sound.
+    #[test]
+    fn a_hash_without_its_memory_is_einval() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Flavour 'j', N_log2 31 ('S'), and r 2^20 in the variable-length
+        // code (`crypt_harness.py`'s `y(RW, 31, 1 << 20)`).
+        let setting = "$y$jSy/vrD$LdJMENpBABJJ3hIHjB1Bi.";
+        let c_setting = std::format!("{setting}\0");
+        let got = crypt_raw(b"pw\0".as_ptr(), c_setting.as_ptr());
+        assert_eq!(got, ("*0".into(), crate::errno::EINVAL));
+        let stored = std::format!("{setting}${}", "A".repeat(43));
+        assert_eq!(stored_method(stored.as_bytes()), Some(Method::Yescrypt));
+    }
+
+    /// A new setting asks for libxcrypt's default cost, and hashes as
+    /// libxcrypt does: Ubuntu's `$y$j9T$`, checked against the oracle's
+    /// answer for the same salt.
+    #[test]
+    fn a_new_yescrypt_setting_is_ubuntus() {
+        let mut sb = buf();
+        let setting = setting_into(Method::Yescrypt, b"PKXc3hCOSyMqdaEQArI62/", &mut sb).unwrap();
+        assert_eq!(setting, "$y$j9T$PKXc3hCOSyMqdaEQArI62/$");
+        let setting = std::string::String::from(setting);
+        let mut hb = buf();
+        assert_eq!(
+            hash_into(b"pleaseletmein", setting.as_bytes(), &mut hb),
+            Some("$y$j9T$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7")
+        );
+        let mut sb = buf();
+        assert_eq!(
+            setting_into(Method::Scrypt, b"SodiumChloride", &mut sb),
+            Some("$7$CU..../....SodiumChloride$")
+        );
+    }
+
+    /// A yescrypt salt is the bytes its characters decode to, so a new
+    /// setting's must decode; scrypt's is its characters.  Neither has a
+    /// rounds field.
+    #[test]
+    fn yescrypt_salts_must_decode() {
+        let mut sb = buf();
+        // One character is not a whole byte; "zz" leaves bits set past one.
+        for salt in [&b"z"[..], b"zz", b"ab-c", b"$abc"] {
+            assert_eq!(
+                setting_into(Method::Yescrypt, salt, &mut sb),
+                None,
+                "{salt:?}"
+            );
+        }
+        assert!(setting_into(Method::Yescrypt, b"z.", &mut sb).is_some());
+        assert!(setting_into(Method::Yescrypt, &[b'.'; 86], &mut sb).is_some());
+        assert_eq!(setting_into(Method::Yescrypt, &[b'.'; 87], &mut sb), None);
+        assert!(setting_into(Method::Scrypt, b"z", &mut sb).is_some());
+        assert_eq!(setting_into(Method::Scrypt, b"", &mut sb), None);
+        assert_eq!(
+            setting_rounds_into(Method::Yescrypt, 5000, b"z.", &mut sb),
+            None
+        );
+        assert_eq!(
+            setting_rounds_into(Method::Scrypt, 5000, b"z", &mut sb),
+            None
+        );
+    }
+
+    /// What `stored_method` takes as a yescrypt or scrypt entry: one `crypt`
+    /// would reproduce, parameters and salt included.
+    #[test]
+    fn stored_yescrypt_entries() {
+        let hash = "$y$j9T$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7";
+        assert_eq!(stored_method(hash.as_bytes()), Some(Method::Yescrypt));
+        let scrypt = "$7$66..../....SodiumChloride$SpJsFY2pIFcsdECgiLhE7VnInSJAT3kTfdlS6S6xFq9";
+        assert_eq!(stored_method(scrypt.as_bytes()), Some(Method::Scrypt));
+        for bad in [
+            // A hash a character short, and one long.
+            "$y$j9T$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg",
+            "$y$j9T$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg77",
+            // No salt's `$`: the hash is read as the salt.
+            "$y$j9T$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7",
+            // A salt that does not decode.
+            "$y$j9T$zz$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7",
+            // A flavour libxcrypt does not implement; N = 2; an upgrade (g).
+            "$y$k.9T$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7",
+            "$y$j.T$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7",
+            "$y$j9T1.$PKXc3hCOSyMqdaEQArI62/$6ks28kkbpf7JiBlPEqR8s9sTF8ybIkPXN7OLBaSqEg7",
+            // A hex hash, as this tree once wrote.
+            "$y$j9T$PKXc3hCOSyMqdaEQArI62/$0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            // scrypt: r = 0, and a salt character `crypt` refuses.
+            "$7$6...../....SodiumChloride$SpJsFY2pIFcsdECgiLhE7VnInSJAT3kTfdlS6S6xFq9",
+            "$7$66..../....Sodium-Chloride$SpJsFY2pIFcsdECgiLhE7VnInSJAT3kTfdlS6S6xFq9",
+        ] {
+            assert_eq!(stored_method(bad.as_bytes()), None, "{bad}");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1374,9 +1657,12 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    /// 256: the most `crypt_r` may write into a `struct crypt_data` as
+    /// musl's `<crypt.h>` declares it (an `int` and 256 bytes), and enough
+    /// for the longest `$y$` hash.
     #[test]
     fn output_len_constant() {
-        assert_eq!(CRYPT_OUTPUT_LEN, 128);
+        assert_eq!(CRYPT_OUTPUT_LEN, 256);
     }
 
     // -----------------------------------------------------------------------

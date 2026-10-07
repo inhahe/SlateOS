@@ -1317,19 +1317,40 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
     // is taken: a VFS call must not be made under it (`advance_offset`). They
     // used the size this handle had last seen until 2026-10-01, so
     // `SEEK_END` missed another writer's growth.
+    let held = |handle: u64| -> KernelResult<(Option<Arc<crate::fs::vfs::FileHold>>, PathBuf)> {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        Ok((file.object.clone(), file.path.clone()))
+    };
     let size = match from {
-        SeekFrom::End(_) | SeekFrom::Data(_) | SeekFrom::Hole(_) => {
-            let (object, path) = {
-                let table = OPEN_FILES.lock();
-                let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
-                if file.is_directory {
-                    return Err(KernelError::IsADirectory);
-                }
-                (file.object.clone(), file.path.clone())
-            };
+        SeekFrom::End(_) => {
+            let (object, path) = held(handle)?;
             current_size(object.as_deref(), &path)?
         }
-        SeekFrom::Start(_) | SeekFrom::Current(_) => 0,
+        _ => 0,
+    };
+    // SEEK_DATA / SEEK_HOLE ask the filesystem where its holes are -- also
+    // before the table lock. Until 2026-10-07 every file was taken to have
+    // none, so `cp --sparse`, `tar -S` and `rsync -S` read every zero of a
+    // sparse file, and the C library could not find a file's holes to
+    // allocate them (lane D's report). A handle held by path, on a
+    // filesystem that cannot hold a file by inode, keeps that answer.
+    let found = match from {
+        SeekFrom::Data(pos) | SeekFrom::Hole(pos) => {
+            let want_data = matches!(from, SeekFrom::Data(_));
+            let (object, path) = held(handle)?;
+            match object.as_deref() {
+                Some(obj) => crate::fs::Vfs::object_seek_data_hole(obj, pos, want_data)?,
+                None => {
+                    let size = current_size(None, &path)?;
+                    (pos < size).then_some(if want_data { pos } else { size })
+                }
+            }
+        }
+        _ => None,
     };
 
     let mut table = OPEN_FILES.lock();
@@ -1367,23 +1388,10 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
                 size.checked_sub(d).ok_or(KernelError::InvalidArgument)?
             }
         }
-        SeekFrom::Data(pos) => {
-            // For non-sparse filesystems, any offset within the file is "data".
-            // Return the requested offset if it's within the file.
-            if pos >= size {
-                return Err(KernelError::InvalidArgument);
-            }
-            pos
-        }
-        SeekFrom::Hole(pos) => {
-            // For non-sparse filesystems, the first "hole" is at EOF.
-            // If pos is already past EOF, that's an error.
-            if pos > size {
-                return Err(KernelError::InvalidArgument);
-            }
-            // Return EOF as the first hole.
-            size
-        }
+        // No data at or after the offset, or the offset at or past the end:
+        // Linux's ENXIO (it was EINVAL, and SEEK_HOLE at exactly the end
+        // succeeded).
+        SeekFrom::Data(_) | SeekFrom::Hole(_) => found.ok_or(KernelError::NoSuchDeviceOrAddress)?,
     };
 
     file.offset = new_offset;

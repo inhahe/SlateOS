@@ -30,6 +30,7 @@
 
 pub mod balloc;
 pub mod driver;
+pub mod extent_map;
 pub mod fsck;
 pub mod htree;
 pub mod io;
@@ -76,7 +77,8 @@ pub fn probe(device: &str) -> bool {
 /// diskless / non-FAT Path-Z boot where [`self_test`] is skipped. Guards the
 /// sparse-file extent-placement regression (BUG-EXT4-SPARSE-READ).
 pub fn self_test_pure() -> KernelResult<()> {
-    driver::self_test_pure()
+    driver::self_test_pure()?;
+    extent_map::self_test()
 }
 
 pub fn self_test() -> KernelResult<()> {
@@ -949,6 +951,10 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     fallocate test file cleaned up OK");
     }
 
+    // --- Holes, length changes and unwritten blocks ---
+    serial_println!("[ext4]   Testing holes, length changes and unwritten blocks...");
+    sparse_file_test(&root)?;
+
     // --- Write-at tests ---
     serial_println!("[ext4]   Testing write_at paths...");
     {
@@ -1064,5 +1070,124 @@ pub fn self_test() -> KernelResult<()> {
     htree::self_test()?;
 
     serial_println!("[ext4] Self-test passed.");
+    Ok(())
+}
+
+/// Holes, length changes and unwritten blocks, on the mounted ext4 volume.
+///
+/// Lane D's report (requests/d-a-truncating-an-ext4-file-...): growing a file
+/// built it whole in kernel memory, so `truncate -s 64G` was a failed kernel
+/// allocation -- a halt; a write into a hole was `EIO`; a write into a
+/// preallocated block read back as zeros; `SEEK_DATA` / `SEEK_HOLE` saw no
+/// holes. Each step checks one of those. Block counts are the file's own
+/// (`st_blocks`) rather than the volume's free count, which another task
+/// writing to the volume during boot would move.
+#[allow(clippy::too_many_lines)]
+fn sparse_file_test(root: &crate::fs::path::Path) -> KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::fs::Vfs;
+    use crate::fs::handle::{self, OpenFlags, SeekFrom};
+
+    const MIB: u64 = 1 << 20;
+    let p = root.join("_ext4_sparse_test");
+    let fail = |what: &str| -> KernelResult<()> {
+        serial_println!("[ext4]   FAIL: sparse file: {}", what);
+        // Best effort: the file is this test's own scratch.
+        let _ = Vfs::remove(&p);
+        Err(KernelError::InternalError)
+    };
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = Vfs::remove(&p);
+    Vfs::write_file(&p, b"head")?;
+    let bs = Vfs::statvfs(&p)?.block_size;
+    if bs == 0 || bs % 512 != 0 {
+        return fail("the volume reports no block size");
+    }
+    let spb = bs / 512;
+    let blocks = |p: &crate::fs::path::PathBuf| Vfs::metadata(p).map(|m| m.blocks);
+    let blocks0 = blocks(&p)?;
+
+    // 1. Growing to 64 GiB records the length and allocates nothing.
+    Vfs::truncate(&p, 1 << 36)?;
+    if Vfs::stat(&p)?.size != 1 << 36 || blocks(&p)? != blocks0 {
+        return fail("growing to 64 GiB allocated blocks or did not set the length");
+    }
+    if Vfs::read_at(&p, 1 << 35, 16)? != [0u8; 16] {
+        return fail("the hole does not read as zeros");
+    }
+
+    // 2. A write into the hole lands, alone: one block, the bytes around it
+    //    zero.
+    Vfs::write_at(&p, 10 * MIB + 7, b"middle")?;
+    let mut want = [0u8; 16];
+    want[7..13].copy_from_slice(b"middle");
+    if Vfs::read_at(&p, 10 * MIB, 16)? != want {
+        return fail("a write into a hole did not read back");
+    }
+    if blocks(&p)? != blocks0 + spb {
+        return fail("a write into a hole took other than one block");
+    }
+
+    // 3. SEEK_DATA / SEEK_HOLE find the holes.
+    let h = handle::open(&p, OpenFlags::READ)?;
+    let seeks = [
+        handle::seek(h, SeekFrom::Data(0)),
+        handle::seek(h, SeekFrom::Hole(0)),
+        handle::seek(h, SeekFrom::Data(bs)),
+        handle::seek(h, SeekFrom::Hole(10 * MIB)),
+        handle::seek(h, SeekFrom::Data(10 * MIB + bs)),
+    ];
+    // Best effort: a read handle, closed whatever the seeks said.
+    let _ = handle::close(h);
+    let want_seeks = [
+        Ok(0),
+        Ok(bs),
+        Ok(10 * MIB),
+        Ok(10 * MIB + bs),
+        Err(KernelError::NoSuchDeviceOrAddress),
+    ];
+    if seeks != want_seeks {
+        serial_println!("[ext4]     seeks {:?}, want {:?}", seeks, want_seeks);
+        return fail("SEEK_DATA / SEEK_HOLE did not find the holes");
+    }
+
+    // 4. Shrinking past the written block frees it.
+    Vfs::truncate(&p, 5 * MIB)?;
+    if Vfs::stat(&p)?.size != 5 * MIB || blocks(&p)? != blocks0 {
+        return fail("shrinking did not free the block past the new end");
+    }
+
+    // 5. Bytes a shrink cut off read as zeros when the file grows back.
+    Vfs::write_at(&p, 0, b"ABCDEFGH")?;
+    Vfs::truncate(&p, 3)?;
+    Vfs::truncate(&p, 100)?;
+    if Vfs::read_at(&p, 0, 8)? != b"ABC\0\0\0\0\0" {
+        return fail("bytes cut off by a shrink came back after growing");
+    }
+
+    // 6. Preallocated blocks: reserved, reading as zeros, and a write into one
+    //    reads back -- the rest of its block zero, nothing more allocated.
+    let before = blocks(&p)?;
+    Vfs::fallocate(&p, 16 * bs)?;
+    if blocks(&p)? != before + 15 * spb {
+        return fail("fallocate did not reserve the 15 missing blocks");
+    }
+    Vfs::write_at(&p, 4 * bs + 10, b"xyz")?;
+    let mut want = [0u8; 16];
+    want[10..13].copy_from_slice(b"xyz");
+    if Vfs::read_at(&p, 4 * bs, 16)? != want {
+        return fail("a write into a preallocated block did not read back");
+    }
+    if blocks(&p)? != before + 15 * spb {
+        return fail("a write into a preallocated block allocated another");
+    }
+    if Vfs::read_at(&p, 2 * bs, 8)? != [0u8; 8] {
+        return fail("a preallocated block reads other than zeros");
+    }
+
+    Vfs::remove(&p)?;
+    serial_println!(
+        "[ext4]     holes, length changes, SEEK_DATA/SEEK_HOLE and unwritten blocks: OK"
+    );
     Ok(())
 }

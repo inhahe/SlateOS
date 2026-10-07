@@ -812,6 +812,27 @@ pub trait FileSystem: Send {
         Ok(())
     }
 
+    /// `SEEK_DATA` (`want_data`) or `SEEK_HOLE` on a held inode: the first
+    /// offset at or after `offset` that is in data, or in a hole. `Ok(None)`
+    /// is Linux's `ENXIO`: no data at or after `offset`, or `offset` at or past
+    /// the end.
+    ///
+    /// The default knows no holes -- data runs to the end, and the end is the
+    /// only hole -- which is the right answer for a filesystem that stores no
+    /// sparse files, and the answer Linux gives for one that cannot say.
+    fn seek_data_hole_ino(
+        &mut self,
+        ino: u64,
+        offset: u64,
+        want_data: bool,
+    ) -> KernelResult<Option<u64>> {
+        let size = self.metadata_ino(ino)?.size;
+        if offset >= size {
+            return Ok(None);
+        }
+        Ok(Some(if want_data { offset } else { size }))
+    }
+
     /// Make a regular file with no name in directory `dir`, held once as
     /// [`pin_ino`](Self::pin_ino) holds one, and return its inode: Linux's
     /// `->tmpfile`, behind `O_TMPFILE`. It goes at the matching
@@ -4659,6 +4680,20 @@ impl Vfs {
         let mut meta = obj.fs.lock().metadata_ino(obj.ino)?;
         meta.dev = dev_of(obj.fs_id);
         Ok(meta)
+    }
+
+    /// `SEEK_DATA` / `SEEK_HOLE` through an object: the filesystem's own
+    /// answer ([`FileSystem::seek_data_hole_ino`]). `Ok(None)` is `ENXIO`.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own.
+    pub fn object_seek_data_hole(
+        obj: &FileObject,
+        offset: u64,
+        want_data: bool,
+    ) -> KernelResult<Option<u64>> {
+        obj.fs.lock().seek_data_hole_ino(obj.ino, offset, want_data)
     }
 
     /// Read through an object: through the page cache, as

@@ -413,7 +413,8 @@ impl FileSystem for Ext4Fs {
         // Entry for ".." (parent) — rec_len extends to end of block.
         write_dotdot_entry(&mut dir_block, 12, parent_ino, block_size - 12);
 
-        self.driver.write_file_data(&mut dir_inode, &dir_block)?;
+        self.driver
+            .write_file_data(dir_ino, &mut dir_inode, &dir_block)?;
         self.driver.write_inode(dir_ino, &dir_inode)?;
 
         // Add entry in parent directory.
@@ -627,7 +628,7 @@ impl FileSystem for Ext4Fs {
                     let old_inode = dir_inode_copy;
                     self.driver.invalidate_extent_cache(src_ino);
                     self.driver
-                        .write_file_data(&mut dir_inode_copy, &dir_data)?;
+                        .write_file_data(src_ino, &mut dir_inode_copy, &dir_data)?;
                     self.driver.free_inode_data(src_ino, &old_inode)?;
                 }
                 Err(e) => return Err(e),
@@ -730,6 +731,19 @@ impl FileSystem for Ext4Fs {
 
     fn truncate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
         self.truncate_ino_u32(ext4_ino(ino)?, size)
+    }
+
+    /// The file's own holes, from its extent map (`Ext4Driver::seek_data_hole`):
+    /// unwritten extents count as holes, as Linux reports them.
+    fn seek_data_hole_ino(
+        &mut self,
+        ino: u64,
+        offset: u64,
+        want_data: bool,
+    ) -> KernelResult<Option<u64>> {
+        let ino = ext4_ino(ino)?;
+        let inode = self.driver.read_inode(ino)?;
+        self.driver.seek_data_hole(ino, &inode, offset, want_data)
     }
 
     fn metadata_ino(&mut self, ino: u64) -> KernelResult<FileMeta> {
@@ -1000,7 +1014,8 @@ impl FileSystem for Ext4Fs {
             sym_inode.i_flags &= !inode_flags::EXTENTS;
         } else {
             // Slow symlink: store target in data blocks.
-            self.driver.write_file_data(&mut sym_inode, target_bytes)?;
+            self.driver
+                .write_file_data(sym_ino, &mut sym_inode, target_bytes)?;
         }
 
         // Set the size to the target length.
@@ -1256,7 +1271,7 @@ impl Ext4Fs {
         // Invalidate cached extent mappings before rebuilding
         // the extent tree — old ranges become stale.
         self.driver.invalidate_extent_cache(ino);
-        self.driver.write_file_data(&mut new_inode, data)?;
+        self.driver.write_file_data(ino, &mut new_inode, data)?;
         // Update mtime/ctime so `stat`/`ls -l` reflect the write.
         stamp_inode_mtime(&mut new_inode);
         self.driver.write_inode(ino, &new_inode)?;
@@ -1286,8 +1301,18 @@ impl Ext4Fs {
     }
 
     /// [`FileSystem::write_at`] on inode `ino`, which must exist: never
-    /// creates a file. Its whole-file fallbacks rewrite the inode in place
-    /// (`replace_contents`), not a name.
+    /// creates a file.
+    ///
+    /// Two paths. A write inside the file over blocks that all hold written
+    /// data is done in place, block by block (the extent cache says where
+    /// each lives). Anything else -- into a hole or an unwritten extent,
+    /// growing the file, starting past its end -- is
+    /// `Ext4Driver::write_extents`, which allocates what is missing and
+    /// rebuilds the extent map. Nothing builds a file, or the gap before a
+    /// write, in kernel memory any more: a write starting past the end used
+    /// to zero-fill the whole gap in one kernel buffer, and a large gap made
+    /// that a failed kernel allocation, which halts the machine (lane D's
+    /// report, requests/d-a-truncating-an-ext4-file-...).
     fn write_ino_u32(&mut self, ino: u32, offset: u64, data: &[u8]) -> KernelResult<()> {
         let inode = self.driver.read_inode(ino)?;
 
@@ -1303,113 +1328,64 @@ impl Ext4Fs {
         // looked, so a write through a handle went into either; `write_file`
         // was the only path that checked.
         attr_policy::may_write_at(attrs_of(&inode), offset, file_size)?;
-        let end = offset.saturating_add(data.len() as u64);
+        if data.is_empty() {
+            return Ok(());
+        }
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or(KernelError::FileTooLarge)?;
 
-        if end <= file_size {
-            // Write is within existing file bounds — modify blocks in place.
-            // No block allocation needed, no extent tree changes.
+        if end <= file_size && self.all_written(ino, &inode, offset, end)? {
             self.driver.write_at_inplace(ino, &inode, offset, data)?;
             // Block data changed in place but the inode itself was untouched;
             // still bump mtime/ctime so the modification is observable.
-            if !data.is_empty() {
-                let mut new_inode = inode;
-                stamp_inode_mtime(&mut new_inode);
-                self.driver.write_inode(ino, &new_inode)?;
-            }
-            self.driver.flush()?;
-            Ok(())
-        } else if offset == file_size {
-            // Append at EOF — try the efficient extend path.
-            // This avoids reading/rewriting the entire file for the
-            // common case of growing a log file, database, etc.
             let mut new_inode = inode;
-            match self.driver.extend_file_data(ino, &mut new_inode, data) {
-                Ok(()) => {
-                    stamp_inode_mtime(&mut new_inode);
-                    self.driver.write_inode(ino, &new_inode)?;
-                    self.driver.invalidate_extent_cache(ino);
-                    self.driver.write_superblock()?;
-                    self.driver.write_group_descs()?;
-                    self.driver.flush()?;
-                    Ok(())
-                }
-                Err(KernelError::NotSupported) => {
-                    // Deep extent tree or extent entries full — fall back
-                    // to read-modify-write.
-                    let mut contents = self.driver.read_file_data(ino, &inode)?;
-                    contents.extend_from_slice(data);
-                    self.replace_contents(ino, &contents)
-                }
-                Err(e) => Err(e),
-            }
-        } else if offset < file_size {
-            // Write starts within the file but extends past EOF.
-            // Optimization: write the in-bounds portion in place, then
-            // append the remainder using extend_file_data.  This avoids
-            // reading the entire file for the common case of overwriting
-            // the tail + appending new data.
-            let in_bounds_len = file_size.saturating_sub(offset) as usize;
-            let in_bounds = data.get(..in_bounds_len).unwrap_or(data);
-            let past_eof = data.get(in_bounds_len..).unwrap_or(&[]);
-
-            // Step 1: write the in-bounds portion in place.
-            if !in_bounds.is_empty() {
-                self.driver
-                    .write_at_inplace(ino, &inode, offset, in_bounds)?;
-            }
-
-            // Step 2: append the past-EOF portion.
-            if !past_eof.is_empty() {
-                // Re-read inode (write_at_inplace doesn't change it, but
-                // extend_file_data needs the current state).
-                let mut new_inode = self.driver.read_inode(ino)?;
-                match self.driver.extend_file_data(ino, &mut new_inode, past_eof) {
-                    Ok(()) => {
-                        stamp_inode_mtime(&mut new_inode);
-                        self.driver.write_inode(ino, &new_inode)?;
-                        self.driver.invalidate_extent_cache(ino);
-                        self.driver.write_superblock()?;
-                        self.driver.write_group_descs()?;
-                    }
-                    Err(KernelError::NotSupported) => {
-                        // Fall back to full read-modify-write.
-                        let mut contents = self.driver.read_file_data(ino, &inode)?;
-                        let start = offset as usize;
-                        let end_usize = end as usize;
-                        if end_usize > contents.len() {
-                            contents.resize(end_usize, 0);
-                        }
-                        if let Some(dest) =
-                            contents.get_mut(start..start.saturating_add(data.len()))
-                        {
-                            dest.copy_from_slice(data);
-                        }
-                        return self.replace_contents(ino, &contents);
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            self.driver.flush()?;
-            Ok(())
-        } else {
-            // Write starts past EOF — zero-fill gap then write.
-            // This is an unusual case; fall back to read-modify-write.
-            let mut contents = self.driver.read_file_data(ino, &inode)?;
-            let start = offset as usize;
-            let end_usize = end as usize;
-
-            if end_usize > contents.len() {
-                contents.resize(end_usize, 0);
-            }
-            if let Some(dest) = contents.get_mut(start..start.saturating_add(data.len())) {
-                dest.copy_from_slice(data);
-            }
-            self.replace_contents(ino, &contents)
+            stamp_inode_mtime(&mut new_inode);
+            self.driver.write_inode(ino, &new_inode)?;
+            return self.driver.flush();
         }
+
+        let mut new_inode = inode;
+        stamp_inode_mtime(&mut new_inode);
+        self.driver
+            .write_extents(ino, &mut new_inode, offset, data)?;
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()
     }
 
-    /// [`FileSystem::truncate`] on inode `ino`.
+    /// Whether every block of `[offset, end)` holds written data -- the
+    /// condition for an in-place write. A hole or an unwritten block does not
+    /// (`lookup_physical_block` answers `None` for both).
+    fn all_written(
+        &self,
+        ino: u32,
+        inode: &super::ondisk::Ext4Inode,
+        offset: u64,
+        end: u64,
+    ) -> KernelResult<bool> {
+        let bs = u64::from(self.driver.superblock().block_size);
+        if bs == 0 {
+            return Err(KernelError::IoError);
+        }
+        let last = end.saturating_sub(1) / bs;
+        let mut block = offset / bs;
+        while block <= last {
+            if self
+                .driver
+                .lookup_physical_block(ino, inode, block)?
+                .is_none()
+            {
+                return Ok(false);
+            }
+            block = block.saturating_add(1);
+        }
+        Ok(true)
+    }
+
+    /// [`FileSystem::truncate`] on inode `ino`: `Ext4Driver::truncate_extents`
+    /// -- growing records the length and leaves a hole, shrinking frees the
+    /// blocks past the new end. Neither reads the file.
     fn truncate_ino_u32(&mut self, ino: u32, size: u64) -> KernelResult<()> {
         let inode = self.driver.read_inode(ino)?;
 
@@ -1425,92 +1401,31 @@ impl Ext4Fs {
         // call already read -- no second lookup, no TOCTOU window.
         attr_policy::may_rewrite(attrs_of(&inode))?;
 
-        let current_size = inode_file_size(&inode);
-
-        if size == current_size {
+        if size == inode_file_size(&inode) {
             return Ok(());
         }
-
-        if size == 0 {
-            // Truncate to zero: free all data blocks, reset inode.
-            let old_inode = inode;
-            let mut new_inode = inode;
-
-            // Clear size.
-            new_inode.i_size_lo = 0;
-            new_inode.i_size_high = 0;
-            set_inode_blocks_48(&mut new_inode, 0);
-
-            // Initialize an empty extent header.
-            self.driver.init_extent_header_pub(&mut new_inode, 0);
-
-            stamp_inode_mtime(&mut new_inode);
-            // Write the new inode first (crash-safe: inode points to
-            // nothing, so the old blocks are just leaked on crash).
-            self.driver.write_inode(ino, &new_inode)?;
-
-            // Now free the old blocks.
-            self.driver.free_inode_data(ino, &old_inode)?;
-
-            self.driver.write_superblock()?;
-            self.driver.write_group_descs()?;
-            self.driver.flush()?;
-            return Ok(());
+        // ext4 numbers a file's blocks in 32 bits: a length past the last
+        // one is too large, as Linux answers past `s_maxbytes` (EFBIG).
+        let bs = u64::from(self.driver.superblock().block_size);
+        if bs == 0 {
+            return Err(KernelError::IoError);
+        }
+        if size.div_ceil(bs) > u64::from(u32::MAX) {
+            return Err(KernelError::FileTooLarge);
         }
 
-        if size < current_size {
-            // Shrink: read existing data, truncate, rewrite.
-            // A fully optimized version would walk the extent tree and
-            // free trailing blocks, but that requires extent tree surgery
-            // (splitting the last extent).  The read-truncate-rewrite
-            // approach is correct and the data volume is bounded by the
-            // current file size (which we're shrinking).
-            //
-            // Crash-safe ordering: write new data first, free old blocks.
-            let old_inode = inode;
-            let mut data = self.driver.read_file_data(ino, &inode)?;
-            data.truncate(size as usize);
-
-            let mut new_inode = inode;
-            self.driver.invalidate_extent_cache(ino);
-            self.driver.write_file_data(&mut new_inode, &data)?;
-            stamp_inode_mtime(&mut new_inode);
-            self.driver.write_inode(ino, &new_inode)?;
-
-            // Free old blocks now that inode points to new data.
-            self.driver.free_inode_data(ino, &old_inode)?;
-
-            self.driver.write_superblock()?;
-            self.driver.write_group_descs()?;
-            self.driver.flush()?;
-            Ok(())
-        } else {
-            // Extend: read, resize with zeros, rewrite.
-            // Growing in place would require extending the extent tree,
-            // which uses the same write_file_data path anyway.
-            let mut data = self.driver.read_file_data(ino, &inode)?;
-            let old_inode = inode;
-
-            data.resize(size as usize, 0);
-
-            let mut new_inode = inode;
-            self.driver.invalidate_extent_cache(ino);
-            self.driver.write_file_data(&mut new_inode, &data)?;
-            stamp_inode_mtime(&mut new_inode);
-            self.driver.write_inode(ino, &new_inode)?;
-
-            self.driver.free_inode_data(ino, &old_inode)?;
-
-            self.driver.write_superblock()?;
-            self.driver.write_group_descs()?;
-            self.driver.flush()?;
-            Ok(())
-        }
+        let mut new_inode = inode;
+        stamp_inode_mtime(&mut new_inode);
+        self.driver.truncate_extents(ino, &mut new_inode, size)?;
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()
     }
 
     /// Reserve space for the first `size` bytes of inode `ino` without
     /// changing its size: `fallocate` by inode, for a path and a held file
-    /// alike.
+    /// alike (`Ext4Driver::preallocate_extents` -- unwritten blocks for
+    /// every hole, all or nothing).
     fn fallocate_ino_u32(&mut self, ino: u32, size: u64) -> KernelResult<()> {
         let inode = self.driver.read_inode(ino)?;
 
@@ -1518,118 +1433,19 @@ impl Ext4Fs {
         if mode != file_type::S_IFREG {
             return Err(KernelError::NotSupported);
         }
-
-        let current_size = inode_file_size(&inode);
-        let block_size = u64::from(self.driver.superblock().block_size);
-        if block_size == 0 {
-            return Err(KernelError::IoError);
-        }
-
-        // Calculate blocks currently allocated vs needed. `block_size` is not
-        // 0 (checked above), so neither division fails.
-        let current_blocks = current_size
-            .saturating_add(block_size.saturating_sub(1))
-            .checked_div(block_size)
-            .ok_or(KernelError::IoError)?;
-        let needed_blocks = size
-            .saturating_add(block_size.saturating_sub(1))
-            .checked_div(block_size)
-            .ok_or(KernelError::IoError)?;
-
-        if needed_blocks <= current_blocks {
-            // Already have enough allocated blocks.
+        // Not into an immutable file; an append-only one may reserve space
+        // (Linux's `vfs_fallocate`, `fs::attr_policy::may_allocate`).
+        attr_policy::may_allocate(attrs_of(&inode))?;
+        if size == 0 {
             return Ok(());
         }
 
-        // For non-empty files, append an UNWRITTEN extent covering the
-        // new blocks.  This requires a depth-0 extent tree with room for
-        // one more entry.  If that fails (depth>0 or full), silently
-        // succeed — blocks will be allocated on demand when data is written.
-        if current_size != 0 {
-            let extra_blocks = needed_blocks.saturating_sub(current_blocks);
-            if extra_blocks == 0 || extra_blocks > 0x7FFF_u64 {
-                return Ok(());
-            }
-
-            let mut new_inode = inode;
-
-            // Goal: allocate adjacent to last existing extent for contiguity.
-            // Parse the extent tree to find the last physical block.
-            let last_extent_end = self
-                .driver
-                .last_extent_end(&new_inode)
-                .unwrap_or(u64::from(self.driver.superblock().raw.s_first_data_block));
-
-            #[allow(clippy::cast_possible_truncation)]
-            let extra_u16 = extra_blocks as u16;
-            #[allow(clippy::cast_possible_truncation)]
-            let logical_start = current_blocks as u32;
-
-            match self.driver.append_unwritten_extent(
-                &mut new_inode,
-                logical_start,
-                extra_u16,
-                last_extent_end,
-            ) {
-                Ok(_first_block) => {
-                    // Update block count (not file size — that's the point
-                    // of fallocate).
-                    let total_sectors = needed_blocks
-                        .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
-                    set_inode_blocks_48(&mut new_inode, total_sectors);
-
-                    stamp_inode_mtime(&mut new_inode);
-                    self.driver.write_inode(ino, &new_inode)?;
-                    self.driver.invalidate_extent_cache(ino);
-                    self.driver.write_superblock()?;
-                    self.driver.write_group_descs()?;
-                    self.driver.flush()?;
-                }
-                Err(KernelError::NotSupported) => {
-                    // Can't add extent (tree too deep or full) — silently
-                    // succeed; blocks will be allocated on write.
-                }
-                Err(e) => return Err(e),
-            }
-
-            return Ok(());
-        }
-
-        // Allocate contiguous blocks via the driver (avoids split borrows).
-        let blocks_to_alloc = needed_blocks.min(0x7FFF_u64);
-
-        #[allow(clippy::cast_possible_truncation)]
-        let blocks_u32 = blocks_to_alloc as u32;
-        let goal = u64::from(self.driver.superblock().raw.s_first_data_block);
-
-        let first_block = self.driver.fallocate_blocks(goal, blocks_u32)?;
-
-        // Set up the extent tree with an UNWRITTEN extent.
-        // Unwritten extents have bit 15 set in ee_len, causing reads to
-        // return zeros instead of reading actual block data.
         let mut new_inode = inode;
-        self.driver.init_extent_header_pub(&mut new_inode, 1);
-
-        // Set extent with UNWRITTEN flag (0x8000 | block_count).
-        #[allow(clippy::cast_possible_truncation)]
-        let block_count_u16 = blocks_to_alloc as u16;
-        self.driver
-            .set_single_extent_unwritten(&mut new_inode, 0, first_block, block_count_u16);
-
-        // Update block count (in 512-byte sectors) but NOT file size.
-        // File size stays 0 — reads past logical EOF return zeros.
-        let sectors = u64::from(blocks_u32)
-            .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
-        set_inode_blocks_48(&mut new_inode, sectors);
-
         stamp_inode_mtime(&mut new_inode);
-        self.driver.write_inode(ino, &new_inode)?;
-        self.driver.invalidate_extent_cache(ino);
-
+        self.driver.preallocate_extents(ino, &mut new_inode, size)?;
         self.driver.write_superblock()?;
         self.driver.write_group_descs()?;
-        self.driver.flush()?;
-        Ok(())
+        self.driver.flush()
     }
 
     /// Inode `ino`'s last name has gone (its link count is now 0): free it,
@@ -2077,7 +1893,8 @@ impl Ext4Fs {
             .create_inode(file_type::S_IFREG | 0o644, preferred_group)?;
 
         // Write file data.
-        self.driver.write_file_data(&mut file_inode, data)?;
+        self.driver
+            .write_file_data(file_ino, &mut file_inode, data)?;
         self.driver.write_inode(file_ino, &file_inode)?;
 
         // Add directory entry in parent.
@@ -2168,8 +1985,11 @@ impl Ext4Fs {
                                 let old_inode = *dir_inode;
                                 let mut dir_inode_copy = *dir_inode;
                                 self.driver.invalidate_extent_cache(dir_ino);
-                                self.driver
-                                    .write_file_data(&mut dir_inode_copy, &dir_data)?;
+                                self.driver.write_file_data(
+                                    dir_ino,
+                                    &mut dir_inode_copy,
+                                    &dir_data,
+                                )?;
                                 self.driver.free_inode_data(dir_ino, &old_inode)?;
                             }
                             Err(e) => return Err(e),

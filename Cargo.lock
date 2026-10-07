@@ -1904,6 +1904,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "bitflags",
+ "bzip2",
  "crc32",
  "deflate",
  "ere",
@@ -1914,9 +1915,11 @@ dependencies = [
  "netring",
  "planecompose",
  "seal",
+ "sevenz",
  "sha2",
  "spin",
  "tzrules",
+ "xz",
  "ziparchive",
 ]
 

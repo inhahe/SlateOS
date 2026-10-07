@@ -73,6 +73,15 @@ deflate = { path = "../deflate" }
 # binary crate, so it could list an archive's entries but not extract one
 # (requests/c-a-zip-is-trapped-in-the-kernel-binary.md). no_std + alloc.
 ziparchive = { path = "../ziparchive" }
+# The bzip2, xz and 7z codecs. `kernel/src/fs/{bzip2,xz,sevenz}.rs` were
+# implementations written here, and are now shims over these ports (of
+# libbzip2 1.0.8, liblzma 5.2.5 and 7-Zip's reader), which lane E's
+# archive manager links too (requests/e-a-the-bzip2-crate-is-ready-for-the-
+# kernel-shim.md and its two sequels). The written ones lost data: their
+# compressors wrote streams no decoder reads. no_std + alloc.
+bzip2 = { path = "../bzip2" }
+xz = { path = "../xz" }
+sevenz = { path = "../sevenz" }
 # The shared POSIX regular-expression engine, used by userspace's grep, sed,
 # awk and expr. The kernel shell carries its own awk and sed, and they were
 # matching `/regex/` with `str::contains` -- so `awk '/^err/'` matched lines

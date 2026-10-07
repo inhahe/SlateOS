@@ -31239,6 +31239,7 @@ fn cmd_fcompress(args: &str) {
             shell_println!("  Files compressed:  {}", s.files_compressed);
             shell_println!("  Files decompressed:{}", s.files_decompressed);
             shell_println!("  Files skipped:     {}", s.files_skipped);
+            shell_println!("  Round trips failed:{}", s.round_trip_failures);
             if s.bytes_original > 0 {
                 let ratio = s.bytes_original as f64 / s.bytes_stored.max(1) as f64;
                 shell_println!("  Original bytes:    {}", s.bytes_original);

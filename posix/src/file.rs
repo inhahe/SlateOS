@@ -248,8 +248,13 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 
     // If another fd still references the same kernel handle (from
     // dup on handle types without kernel-level duplication), skip
-    // the kernel close — the handle is still in use.
+    // the kernel close — the handle is still in use. Closing a descriptor
+    // for a file still releases the process's record locks on it (POSIX),
+    // which the kernel does itself only at the handle's last close.
     if fdtable::is_handle_referenced(entry.kind, entry.handle) {
+        if entry.kind == HandleKind::File {
+            crate::fcntl_ops::release_record_locks(entry.handle);
+        }
         return 0;
     }
     // The file's last descriptor: it leaves every epoll interest list, as
@@ -2027,8 +2032,14 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
             }
             _ => None,
         };
-        // Only close the old kernel handle if no other fd still uses it.
-        if !fdtable::is_handle_referenced(old.kind, old.handle) {
+        // Only close the old kernel handle if no other fd still uses it --
+        // though closing it releases the process's record locks on its file
+        // either way, as `close()` says.
+        if fdtable::is_handle_referenced(old.kind, old.handle) {
+            if old.kind == HandleKind::File {
+                crate::fcntl_ops::release_record_locks(old.handle);
+            }
+        } else {
             // And only then does the evicted file leave epoll's interest
             // lists — see `close()`.
             crate::epoll::forget_file(old.kind, old.handle);
@@ -6292,38 +6303,62 @@ pub const F_ULOCK: i32 = 0;
 /// Lock command: test if a section is locked.
 pub const F_TEST: i32 = 3;
 
-/// Lock a section of a file (POSIX `lockf`).
+/// Lock a section of a file (POSIX `lockf`): `len` bytes from the file's
+/// offset (to the end and beyond when 0; before it when negative), as glibc
+/// builds it on `fcntl`'s record locks, which are the kernel's
+/// ([`crate::fcntl_ops::fcntl`]) -- so `lockf` and `fcntl` locks are one kind
+/// and contend, as POSIX allows and Linux has them:
 ///
-/// Validates `fd` and `cmd`, then succeeds as a no-op.
+/// - `F_LOCK`: a write lock, waiting for it (`F_SETLKW`);
+/// - `F_TLOCK`: a write lock, or `EAGAIN` at once (`F_SETLK`);
+/// - `F_ULOCK`: the section unlocked;
+/// - `F_TEST`: 0 when no other process holds a lock across the section,
+///   else -1 with `EACCES` -- tested as a read lock would be, as glibc
+///   tests it.
 ///
-/// Unlike [`flock`], `lockf` locks a *byte range* of the file.  The
-/// kernel advisory-lock table is whole-file only, so wiring `lockf` to
-/// it would lock the entire file for every range request — turning
-/// independent ranges (e.g. a database locking distinct records) into
-/// false contention and potential deadlock, which is strictly worse than
-/// the no-op.  `F_TEST` additionally has no non-destructive kernel query
-/// syscall.  A faithful `lockf` therefore needs byte-range lock support
-/// plus a lock-query syscall in the kernel; this is tracked in todo.txt.
-/// Until then the body is a validation-only no-op.
+/// Until 2026-10-07 it validated `fd` and `cmd` and then did nothing: the
+/// kernel's table was whole-file, and a byte range had nowhere to go.
 ///
-/// Errors:
-///   * `EBADF` — `fd` is negative or not open.
-///   * `EINVAL` — `cmd` is not one of F_LOCK, F_TLOCK, F_ULOCK, F_TEST.
+/// Errors: `EBADF` for a descriptor that is not open, or not open for
+/// writing (`F_LOCK`, `F_TLOCK`); `EINVAL` for another `cmd`; and those of
+/// `fcntl`'s record locks.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lockf(fd: Fd, cmd: i32, _len: OffT) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
+pub extern "C" fn lockf(fd: Fd, cmd: i32, len: OffT) -> i32 {
+    use crate::fcntl_ops::{F_GETLK, F_RDLCK, F_SETLK, F_SETLKW, F_UNLCK, F_WRLCK, Flock};
+    let mut fl = Flock {
+        l_type: F_WRLCK,
+        l_whence: 1, // SEEK_CUR
+        l_start: 0,
+        l_len: len,
+        l_pid: 0,
+    };
+    // `fcntl`'s argument is the `struct flock`'s address as an integer, taken
+    // at each call -- after the fields are set -- so the call is seen to read
+    // them.
+    match cmd {
+        F_TEST => {
+            fl.l_type = F_RDLCK;
+            if crate::fcntl_ops::fcntl(fd, F_GETLK, (&raw mut fl) as i64) < 0 {
+                return -1;
+            }
+            if fl.l_type == F_UNLCK || fl.l_pid == crate::process::getpid() {
+                return 0;
+            }
+            errno::set_errno(errno::EACCES);
+            -1
+        }
+        F_ULOCK => {
+            fl.l_type = F_UNLCK;
+            crate::fcntl_ops::fcntl(fd, F_SETLK, (&raw mut fl) as i64)
+        }
+        F_LOCK => crate::fcntl_ops::fcntl(fd, F_SETLKW, (&raw mut fl) as i64),
+        F_TLOCK => crate::fcntl_ops::fcntl(fd, F_SETLK, (&raw mut fl) as i64),
+        _ => {
+            // As glibc: an fd that is not open is not looked at first.
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
     }
-    if fdtable::get_fd(fd).is_none() {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    if !matches!(cmd, F_LOCK | F_TLOCK | F_ULOCK | F_TEST) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -10861,9 +10896,12 @@ mod tests {
         assert_eq!(F_TEST, 3);
     }
 
+    /// Each command on a file open for reading and writing. The host has no
+    /// kernel lock table, so each is granted, as on a kernel without one.
     #[test]
-    fn test_lockf_stub_succeeds() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+    fn test_lockf_commands_on_a_read_write_file() {
+        let fd = fdtable::alloc_fd_with_flags(HandleKind::File, 0, crate::fcntl::O_RDWR)
+            .expect("alloc_fd File failed");
         assert_eq!(lockf(fd, F_LOCK, 0), 0);
         assert_eq!(lockf(fd, F_TLOCK, 0), 0);
         assert_eq!(lockf(fd, F_ULOCK, 0), 0);
@@ -16574,18 +16612,41 @@ mod tests {
         let _ = fdtable::close_fd(fd);
     }
 
+    /// glibc's `lockf` switches on `cmd` before anything looks at `fd`:
+    /// `lockf(-1, 99, 0)` is EINVAL (measured, glibc 2.39 on Linux 6.6).
+    /// This said EBADF while `lockf` was a stub that checked the fd first.
     #[test]
-    fn test_lockf_bad_fd_beats_bad_cmd() {
+    fn test_lockf_bad_cmd_beats_bad_fd_as_glibcs() {
         crate::errno::set_errno(0);
         assert_eq!(lockf(-1, 99, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// A lock is a write lock, which a descriptor not open for writing may
+    /// not take; a test asks only whether one would conflict, and an unlock
+    /// needs no mode (measured on Linux 6.6).
+    #[test]
+    fn test_lockf_write_lock_needs_a_descriptor_open_for_writing() {
+        let fd = fdtable::alloc_fd_with_flags(HandleKind::File, 0, crate::fcntl::O_RDONLY)
+            .expect("alloc_fd File failed");
+        for cmd in [F_LOCK, F_TLOCK] {
+            crate::errno::set_errno(0);
+            assert_eq!(lockf(fd, cmd, 0), -1, "cmd {cmd}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF, "cmd {cmd}");
+        }
+        assert_eq!(lockf(fd, F_TEST, 0), 0);
+        assert_eq!(lockf(fd, F_ULOCK, 0), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_lockf_negative_len_accepted() {
         // POSIX lockf accepts negative len (means "lock backwards from
-        // current offset").  Our stub passes a non-zero len through.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        // current offset"), and passes it through to the kernel, which
+        // refuses a range that would start before byte 0 (EINVAL at offset
+        // 0, as Linux's). The host has no kernel table: granted.
+        let fd = fdtable::alloc_fd_with_flags(HandleKind::File, 0, crate::fcntl::O_RDWR)
+            .expect("alloc_fd File failed");
         assert_eq!(lockf(fd, F_LOCK, -100), 0);
         let _ = fdtable::close_fd(fd);
     }

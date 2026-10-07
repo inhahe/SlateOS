@@ -9,8 +9,9 @@
 //!   `F_SETFL` can only change `O_APPEND`, `O_NONBLOCK`, `O_SYNC`;
 //!   access mode bits (`O_RDONLY`/`O_WRONLY`/`O_RDWR`) are immutable.
 //! - `F_DUPFD`/`F_DUPFD_CLOEXEC` — duplicate fd to lowest >= arg
-//! - `F_GETLK`/`F_SETLK`/`F_SETLKW` — advisory record locking
-//!   (stub: no kernel-level locking, always succeeds)
+//! - `F_GETLK`/`F_SETLK`/`F_SETLKW` — advisory record locking, in the
+//!   kernel's lock table (`SYS_FS_RECORD_LOCK`), which the Linux `fcntl`
+//!   shares; see [`record_lock`]
 
 use crate::errno;
 use crate::fdtable;
@@ -153,37 +154,7 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
             // Duplicate fd to lowest available >= arg, with FD_CLOEXEC.
             dup_fd_from(fd, arg as i32, true)
         }
-        F_GETLK => {
-            // Test if an advisory lock can be placed.
-            //
-            // Our kernel doesn't implement file locking, so we always
-            // report "no conflicting lock" by setting l_type = F_UNLCK.
-            // This tells the caller that their desired lock would succeed.
-            if arg == 0 {
-                errno::set_errno(errno::EFAULT);
-                return -1;
-            }
-            // SAFETY: arg is a pointer to a Flock struct (caller contract).
-            // We only write to the struct, never read uninit memory.
-            let flock_ptr = arg as *mut Flock;
-            unsafe {
-                (*flock_ptr).l_type = F_UNLCK;
-                (*flock_ptr).l_pid = 0;
-            }
-            0
-        }
-        F_SETLK | F_SETLKW => {
-            // Set or clear an advisory lock (non-blocking or blocking).
-            //
-            // Our kernel doesn't implement file locking, so we always
-            // succeed.  Programs that use fcntl locking (editors,
-            // databases, package managers) will proceed as if the lock
-            // was acquired.  Since all user processes run in separate
-            // address spaces and we're currently single-process, there
-            // are no real lock conflicts to worry about.
-            let _ = arg;
-            0
-        }
+        F_GETLK | F_SETLK | F_SETLKW => record_lock(&entry, cmd, arg as *mut Flock),
         _ => {
             errno::set_errno(errno::EINVAL);
             -1
@@ -195,6 +166,143 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fcntl64(fd: Fd, cmd: i32, arg: i64) -> i32 {
     fcntl(fd, cmd, arg)
+}
+
+// ---------------------------------------------------------------------------
+// Record locks
+// ---------------------------------------------------------------------------
+
+/// `SYS_FS_RECORD_LOCK`'s operations: test, set, and set waiting.
+const RECORD_LOCK_GET: u64 = 0;
+const RECORD_LOCK_SET: u64 = 1;
+const RECORD_LOCK_SET_WAIT: u64 = 2;
+
+/// `F_GETLK`, `F_SETLK` and `F_SETLKW` on the descriptor `entry`, with the
+/// caller's `struct flock` at `flock`.
+///
+/// The locks are the kernel's (`SYS_FS_RECORD_LOCK`, lane A's): the table
+/// the Linux `fcntl` uses, so a native and a Linux program exclude each
+/// other, held by the calling process and released when it exits, when it
+/// unlocks, or when it closes any descriptor for the file -- the kernel does
+/// that at a handle's last close, and [`release_record_locks`] when a
+/// descriptor closes whose handle another still holds. Until 2026-10-07 this
+/// granted every lock and found every range free, so two processes could both
+/// hold one exclusive range (`known-issues/D-POSIX-FCNTL-RECORD-LOCKS-NEVER-
+/// REACH-THE-KERNEL.md`) -- which is still what happens on a kernel without
+/// the call, and for a descriptor that is not a file.
+///
+/// What Linux refuses before it looks at a lock is refused here first, so a
+/// program is answered alike on every kernel: a `struct flock` that is not
+/// there (`EFAULT`), an `l_type` or `l_whence` that is none of the three
+/// (`EINVAL`), `F_UNLCK` to `F_GETLK` (`EINVAL`), and a read lock on a
+/// descriptor not open for reading or a write lock on one not open for
+/// writing (`EBADF`; `F_GETLK` asks nothing of the mode, as Linux's does not).
+/// `F_SETLKW` waits in the kernel; a signal handler ends the wait unless it
+/// was installed with `SA_RESTART`, as Linux restarts it (signal(7)).
+fn record_lock(entry: &fdtable::FdEntry, cmd: i32, flock: *mut Flock) -> i32 {
+    use crate::fcntl::{O_ACCMODE, O_RDONLY, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET};
+
+    if flock.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: non-null, and the caller's contract is that it points at a
+    // `struct flock`, which is all plain integers.
+    let (l_type, l_whence) = unsafe { ((*flock).l_type, (*flock).l_whence) };
+    let whence = i32::from(l_whence);
+    if !matches!(l_type, F_RDLCK | F_WRLCK | F_UNLCK)
+        || !matches!(whence, SEEK_SET | SEEK_CUR | SEEK_END)
+        || (cmd == F_GETLK && l_type == F_UNLCK)
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let mode = entry.status_flags & O_ACCMODE;
+    if cmd != F_GETLK
+        && ((l_type == F_RDLCK && mode == O_WRONLY) || (l_type == F_WRLCK && mode == O_RDONLY))
+    {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    let free = || {
+        if cmd == F_GETLK {
+            // SAFETY: as above.
+            unsafe { (*flock).l_type = F_UNLCK };
+        }
+        0
+    };
+    if entry.kind != fdtable::HandleKind::File {
+        // A pipe, a socket, the console: nothing in the kernel's table to
+        // lock. Linux locks such a file's inode, which only the processes
+        // sharing it could contend for; here every lock is granted.
+        return free();
+    }
+    let op = match cmd {
+        F_GETLK => RECORD_LOCK_GET,
+        F_SETLK => RECORD_LOCK_SET,
+        _ => RECORD_LOCK_SET_WAIT,
+    };
+    let call = || {
+        crate::syscall::syscall3(
+            crate::syscall::SYS_FS_RECORD_LOCK,
+            entry.handle,
+            op,
+            flock as u64,
+        )
+    };
+    let ret = if cmd == F_SETLKW {
+        crate::interrupt::restarting(crate::interrupt::Restart::IfAsked, call)
+    } else {
+        call()
+    };
+    if no_lock_table(ret) {
+        return free();
+    }
+    if ret < 0 {
+        errno::set_errno(match ret {
+            // A full table: POSIX's ENOLCK, where the shared mapping says
+            // ENOMEM.
+            errno::native::RESOURCE_EXHAUSTED => errno::ENOLCK,
+            _ => errno::errno_for(ret),
+        });
+        return -1;
+    }
+    0
+}
+
+/// Whether `ret` says there is no lock table to ask: a kernel without
+/// `SYS_FS_RECORD_LOCK` (every kernel before lane A's 1093), or, in the host
+/// build, no kernel at all.
+fn no_lock_table(ret: i64) -> bool {
+    ret == errno::native::NO_SUCH_SYSCALL
+        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+}
+
+/// Release every record lock this process holds on the file `handle` is
+/// open on: what closing a descriptor for it does, by POSIX, when the
+/// descriptor's kernel handle stays open because another descriptor -- a
+/// `dup` -- still holds it, so the kernel's own release at the handle's last
+/// close does not run. A whole-file `F_UNLCK`, as lane A's
+/// `SYS_FS_RECORD_LOCK` documents for exactly this.
+///
+/// Its answer is discarded on purpose: on a kernel without the call there
+/// are no locks to release, and a close must not fail over a release that
+/// finds nothing -- the descriptor is gone either way.
+pub(crate) fn release_record_locks(handle: u64) {
+    let mut whole_file = Flock {
+        l_type: F_UNLCK,
+        l_whence: 0, // SEEK_SET
+        l_start: 0,
+        l_len: 0,
+        l_pid: 0,
+    };
+    let _ = crate::syscall::syscall3(
+        crate::syscall::SYS_FS_RECORD_LOCK,
+        handle,
+        RECORD_LOCK_SET,
+        (&raw mut whole_file) as u64,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -366,11 +474,94 @@ mod tests {
 
     #[test]
     fn test_fcntl_setlk_no_lock_conflict() {
-        // F_SETLK and F_SETLKW succeed unconditionally (no real locking).
-        // We need an existing fd though.  If it doesn't exist, we get EBADF.
-        // Test with a non-existent fd to verify the fd-check path.
+        // A descriptor that is not open is EBADF before its `struct flock`
+        // is looked at.
         let ret = fcntl(200, F_SETLK, 0);
         assert_eq!(ret, -1); // EBADF because fd doesn't exist.
+    }
+
+    /// A `struct flock` on the stack, for the record-lock tests.
+    fn lock_of(l_type: i16, l_whence: i16) -> Flock {
+        Flock {
+            l_type,
+            l_whence,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        }
+    }
+
+    /// `fcntl`'s answer and errno for `cmd` with `fl` on `fd`.
+    fn lock_answer(fd: Fd, cmd: i32, fl: &mut Flock) -> (i32, i32) {
+        crate::errno::set_errno(0);
+        let r = fcntl(fd, cmd, (fl as *mut Flock) as i64);
+        (r, crate::errno::get_errno())
+    }
+
+    /// What Linux refuses before it looks at a lock, refused alike on every
+    /// kernel -- each answer measured on Linux 6.6 with glibc 2.39.
+    #[test]
+    fn record_locks_refuse_what_linux_refuses_first() {
+        use crate::fcntl::{O_RDONLY, O_WRONLY};
+        let rd = fdtable::alloc_fd_with_flags(fdtable::HandleKind::File, 0, O_RDONLY)
+            .expect("a free descriptor");
+        let wr = fdtable::alloc_fd_with_flags(fdtable::HandleKind::File, 0, O_WRONLY)
+            .expect("a free descriptor");
+        let einval = (-1, errno::EINVAL);
+        let ebadf = (-1, errno::EBADF);
+
+        // A lock the open mode does not allow: EBADF; an unlock needs none.
+        assert_eq!(lock_answer(wr, F_SETLK, &mut lock_of(F_RDLCK, 0)), ebadf);
+        assert_eq!(lock_answer(rd, F_SETLK, &mut lock_of(F_WRLCK, 0)), ebadf);
+        assert_eq!(lock_answer(rd, F_SETLKW, &mut lock_of(F_WRLCK, 0)), ebadf);
+        assert_eq!(lock_answer(rd, F_SETLK, &mut lock_of(F_UNLCK, 0)).0, 0);
+        // A test asks nothing of the mode, and finds the range free here.
+        let mut probe = lock_of(F_WRLCK, 0);
+        assert_eq!(lock_answer(rd, F_GETLK, &mut probe).0, 0);
+        assert_eq!(probe.l_type, F_UNLCK);
+
+        // An unknown type or whence, and F_UNLCK to F_GETLK: EINVAL.
+        assert_eq!(lock_answer(rd, F_SETLK, &mut lock_of(7, 0)), einval);
+        assert_eq!(lock_answer(rd, F_SETLK, &mut lock_of(F_RDLCK, 9)), einval);
+        assert_eq!(lock_answer(rd, F_GETLK, &mut lock_of(F_RDLCK, 9)), einval);
+        assert_eq!(lock_answer(rd, F_GETLK, &mut lock_of(7, 0)), einval);
+        assert_eq!(lock_answer(rd, F_GETLK, &mut lock_of(F_UNLCK, 0)), einval);
+
+        // No `struct flock`: EFAULT.
+        crate::errno::set_errno(0);
+        assert_eq!(fcntl(rd, F_SETLK, 0), -1);
+        assert_eq!(crate::errno::get_errno(), errno::EFAULT);
+
+        let _ = fdtable::close_fd(rd);
+        let _ = fdtable::close_fd(wr);
+    }
+
+    /// A pipe's ends are held to their modes as a file is -- a write lock on
+    /// the read end is EBADF -- and otherwise granted: there is no file in
+    /// the kernel's table to lock.
+    #[test]
+    fn record_locks_on_a_pipe_follow_its_ends_modes() {
+        use crate::fcntl::O_RDONLY;
+        let end = fdtable::alloc_fd_with_flags(fdtable::HandleKind::Pipe, 0, O_RDONLY)
+            .expect("a free descriptor");
+        assert_eq!(lock_answer(end, F_SETLK, &mut lock_of(F_RDLCK, 0)).0, 0);
+        assert_eq!(
+            lock_answer(end, F_SETLK, &mut lock_of(F_WRLCK, 0)),
+            (-1, errno::EBADF)
+        );
+        let _ = fdtable::close_fd(end);
+    }
+
+    /// A kernel without `SYS_FS_RECORD_LOCK`, and the host, have no table: a
+    /// lock is granted there and a test finds the range free, as every lock
+    /// was before the call existed. Any other answer is the kernel's.
+    #[test]
+    fn no_lock_table_is_only_a_missing_call() {
+        assert!(no_lock_table(errno::native::NO_SUCH_SYSCALL));
+        assert!(no_lock_table(crate::syscall::HOST_ENOSYS));
+        assert!(!no_lock_table(errno::native::WOULD_BLOCK));
+        assert!(!no_lock_table(errno::native::DEADLOCK));
+        assert!(!no_lock_table(0));
     }
 
     #[test]

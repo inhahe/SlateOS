@@ -1,4 +1,4 @@
-## D-POSIX-FCNTL-RECORD-LOCKS-NEVER-REACH-THE-KERNEL — a native program's `fcntl(F_SETLK)` still says yes to every lock (lane D, 2026-09-28) — **Status: OPEN (blocked on lane A: `requests/d-a-native-programs-cannot-reach-the-record-lock-table.md`)**
+## D-POSIX-FCNTL-RECORD-LOCKS-NEVER-REACH-THE-KERNEL — a native program's `fcntl(F_SETLK)` still says yes to every lock (lane D, 2026-09-28) — **Status: OPEN -- both halves are written: lane A's `SYS_FS_RECORD_LOCK` (1093, on `lane-a`) and lane D's `fcntl` and `lockf` on it (2026-10-07). It closes when lane A's kernel is on `main` and `services/ctest-record-locks` passes in a lane D boot.**
 
 **In short:** two SlateOS programs can both "hold" the same exclusive file
 lock. File locks are how SQLite keeps two writers from corrupting a
@@ -27,7 +27,22 @@ and the missing piece is a native system call, which is lane A's.
 `/etc/.pwd.lock` the same way -- written against `fcntl` so that it becomes
 real with nothing further to change.
 
-**Proper fix:** lane A's native call (the request proposes
+**Lane D's half, done 2026-10-07:** `posix/src/fcntl_ops.rs`, `record_lock`:
+`F_GETLK`, `F_SETLK` and `F_SETLKW` go to the kernel's table through lane A's
+`SYS_FS_RECORD_LOCK` (1093), whose wait is the kernel's -- so no yield loop
+-- and which a signal handler ends unless it has `SA_RESTART`, as Linux
+restarts it. What Linux refuses before it looks at a lock is refused first,
+measured on Linux 6.6 (`EFAULT`, `EINVAL` for a bad type or whence or
+`F_UNLCK` to `F_GETLK`, `EBADF` for a lock the open mode does not allow); a
+full table is `ENOLCK`. Closing a descriptor whose kernel handle a `dup`
+still holds sends the kernel a whole-file unlock, since by POSIX any close
+releases the process's locks on the file (`close`, `dup2`). `lockf` is
+glibc's, on `fcntl` -- it was a validate-only no-op, the old table being
+whole-file. On a kernel without the call every lock is granted, as before.
+`services/ctest-record-locks` checks the two halves together and passes on
+Linux. `F_OFD_*` stay `EINVAL`.
+
+**What was asked of lane A:** lane A's native call (the request proposes
 `SYS_FS_RECORD_LOCK(handle, op, flock *)` with `linux.rs`'s semantics), then
 `fcntl_ops.rs` wired through it: `F_SETLK` and `F_GETLK` as they are asked,
 `F_SETLKW` as `F_SETLK` retried with a yield until granted (the kernel does

@@ -203,6 +203,13 @@ pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
 /// handles open, so it is sent before each attempt. Lane A's (1090); a kernel
 /// without it answers `NoSuchSyscall` and closes nothing, as before.
 pub const SYS_PROCESS_SET_EXEC_CLOSE: u64 = 1090;
+/// A POSIX byte-range record lock -- `fcntl`'s `F_GETLK`, `F_SETLK` and
+/// `F_SETLKW` -- on an open file: `fs_record_lock(handle, op, flock_ptr)`,
+/// `op` 0 to test, 1 to set, 2 to set and wait; `flock_ptr` a Linux x86-64
+/// `struct flock`, rewritten by a test. The lock table the Linux `fcntl`
+/// uses, held by the calling process. Lane A's (1093); a kernel without it
+/// answers `NoSuchSyscall`.
+pub const SYS_FS_RECORD_LOCK: u64 = 1093;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

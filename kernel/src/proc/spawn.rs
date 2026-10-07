@@ -23062,6 +23062,103 @@ pub fn self_test_linux_sigaltstack() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 test of `SIGPIPE`: [`elf::build_linux_sigpipe_test_elf`] checks that
+/// a write into a pipe nobody reads raises `SIGPIPE` before `EPIPE` is seen --
+/// its default action ending a child, ignored giving `EPIPE` alone, a handler
+/// (`SI_USER`, from the process itself) having run, a blocked one pending for
+/// `sigtimedwait` -- through `write`, `writev`, `vmsplice`, `tee`, `splice` and
+/// `sendfile`; on a unix stream socket whose peer is gone or that was shut down
+/// for writing, and on a TCP socket never connected (when there is a network);
+/// and not with `MSG_NOSIGNAL`, nor on a datagram socket. Exits `0x2A` on
+/// success; the same program passes on Linux 6.6.
+pub fn self_test_linux_sigpipe() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux SIGPIPE (ring 3) integration test...");
+
+    let exe_elf = elf::build_linux_sigpipe_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-sigpipe"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-sigpipe",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: SIGPIPE spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+        && crate::hrtimer::now_ns() < deadline
+    {
+        crate::sched::sleep_ms(5);
+    }
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: SIGPIPE (ring 3) — the program did not finish in 60 s (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30 | 0x31 | 0x3F) => {
+                "setting up the mailbox, a pipe, a socket pair or the action failed"
+            }
+            Some(0x32 | 0x33) => {
+                "the child for the default action could not be forked or waited for"
+            }
+            Some(0x34) => "SIGPIPE's default action did not end the writer",
+            Some(0x40) => "an ignored SIGPIPE's write was not EPIPE",
+            Some(0x41) => "a write into a broken pipe did not run the handler before EPIPE",
+            Some(0x42) => "writev into a broken pipe did not raise SIGPIPE",
+            Some(0x43) => "vmsplice into a broken pipe did not raise SIGPIPE",
+            Some(0x44..=0x46) => "tee or splice into a broken pipe did not raise SIGPIPE",
+            Some(0x47 | 0x48) => "sendfile into a broken pipe did not raise SIGPIPE",
+            Some(0x50 | 0x51) => {
+                "a write or send on a unix stream with its peer gone did not raise SIGPIPE"
+            }
+            Some(0x52) => "MSG_NOSIGNAL did not keep SIGPIPE back",
+            Some(0x53 | 0x54) => "a write after shutdown(SHUT_WR) did not raise SIGPIPE",
+            Some(0x55 | 0x56) => "a datagram socket's EPIPE raised SIGPIPE, or was not EPIPE",
+            Some(0x58 | 0x59) => "a send on a TCP socket never connected was not EPIPE and SIGPIPE",
+            Some(0x60..=0x64) => {
+                "a blocked SIGPIPE was not left pending for sigtimedwait (SI_USER)"
+            }
+            None => "no exit code: the program died -- by a SIGPIPE it should have caught?",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: SIGPIPE (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux SIGPIPE (ring 3: default, ignored, handled and blocked; write, \
+         writev, vmsplice, tee, splice, sendfile; unix streams, SHUT_WR, TCP; not with \
+         MSG_NOSIGNAL or on a datagram socket): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of signal delivery from an interrupt, with every register and
 /// the FPU state preserved: [`elf::build_linux_signal_from_interrupt_test_elf`]
 /// spins in a loop that makes no system calls, holding known values in every

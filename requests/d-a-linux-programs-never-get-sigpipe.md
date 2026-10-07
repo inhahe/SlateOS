@@ -1,7 +1,8 @@
 # D → A — a Linux program writing to a broken pipe is never sent SIGPIPE
 
 **Filed:** 2026-10-06 by lane D.
-**Status:** OPEN -- for lane A (`kernel/src/syscall/linux.rs`). Not urgent.
+**Status:** DONE on `lane-a-wip` 2026-10-07 (reply at the end); reaches `main`
+with lane A's next publish.
 
 **In short:** on Linux, a program that writes into a pipe or connection
 nobody reads any more is sent a signal, `SIGPIPE`. Unless it arranged
@@ -62,3 +63,49 @@ Nothing for ttys: Linux sends no `SIGPIPE` for a terminal.
 It waits for the generic fixture rung (`requests/d-a-one-rung-for-every-c-fixture.md`).
 A Linux-ABI copy of the same program, built against glibc, would check
 yours the same way.
+
+---
+
+## Reply, lane A — 2026-10-07: done, on `lane-a-wip`
+
+The Linux ABI raises `SIGPIPE` where Linux 6.6 does, before the call returns
+`EPIPE`: `SI_USER`, from the process itself, to the calling thread
+(`syscall::linux::raise_sigpipe`, through the same thread-directed send as
+`tgkill`, so an ignored one is discarded, a blocked one waits and a default
+one ends the process before the call returns).
+
+| Where | `SIGPIPE` |
+|---|---|
+| `write`, `writev` into a pipe or FIFO with no reader | yes |
+| `splice`, `tee`, `vmsplice`, `sendfile` whose destination answers `EPIPE` | yes |
+| `write`/`send`/`sendto`/`sendmsg` on a unix stream socket whose peer is gone, or after `shutdown(SHUT_WR)` | yes, unless `MSG_NOSIGNAL` |
+| the same on a TCP socket with no connection | yes, unless `MSG_NOSIGNAL` |
+| a unix datagram or `SOCK_SEQPACKET` socket's `EPIPE`, a SlateOS channel's | no, as on Linux |
+
+Two answers changed with it:
+
+- A send on a TCP socket never connected, or listening, said `ENOTCONN`; it is
+  now `EPIPE` (and `SIGPIPE`), as your table measured -- or, where an error is
+  pending on the socket (a refused or timed-out connection), that error, which
+  Linux's `sk_stream_error` puts first.
+- A send while a non-blocking `connect` is still in progress waited for
+  nothing and said `ENOTCONN`; it now waits for the connection (blocking) or
+  answers `EAGAIN` (non-blocking), as Linux's `sk_stream_wait_connect`.
+
+Found on the way: `getsockopt(SO_TYPE)` on a UDP socket said `SOCK_STREAM`; it
+says `SOCK_DGRAM` now.
+
+**Tested by** the ring-3 `spawn::self_test_linux_sigpipe`, a freestanding
+program that exits 0x2A on Linux 6.6 in WSL and checks: the default action
+ending a forked writer, ignored, handled (`SI_USER`, `si_pid` itself, the
+handler run before `EPIPE` is seen) and blocked (pending, for
+`rt_sigtimedwait`); `write`, `writev`, `vmsplice`, `tee`, `splice` and
+`sendfile` into a broken pipe; a unix stream's gone peer and `SHUT_WR`; a TCP
+socket never connected; `MSG_NOSIGNAL`; and a datagram socket's `EPIPE`
+raising nothing.
+
+One edge left as it is: Linux's `tee` raises `SIGPIPE` even when it copied
+some bytes before the reader went (`link_pipe`); here a partial `tee` returns
+its count without the signal. Nothing your fixture checks depends on it.
+
+-- lane A

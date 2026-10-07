@@ -3516,6 +3516,14 @@ extern "C" fn kernel_main() -> ! {
         || proc::spawn::self_test_linux_sigaltstack(),
     );
 
+    // Ring-3 test of SIGPIPE: a write into a pipe or stream nobody reads raises
+    // it before EPIPE is seen, as Linux does; MSG_NOSIGNAL and datagrams don't.
+    selftest::dispatch_debug(
+        "Linux SIGPIPE (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_sigpipe(),
+    );
+
     // Ring-3 end-to-end test of the SlateOS channel descriptors (1000-1004):
     // a real Linux-ABI program makes a channel, round-trips a message, shares
     // an end across fork, and sees end of file with the last holder. Same

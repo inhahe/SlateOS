@@ -600,6 +600,17 @@ pub fn send(handle: SocketHandle, buf: &[u8], nonblock: bool) -> KernelResult<i3
     loop {
         let rest = buf.get(sent..).unwrap_or(&[]);
         let got = wait_until(handle, nonblock, || {
+            // A connect still in progress is waited for, as Linux's
+            // `sk_stream_wait_connect` waits: a blocking send until it is
+            // settled, a non-blocking one `EAGAIN`. `poll_ready` settles it,
+            // to Connected or Failed; until 2026-10-07 such a send said
+            // NotConnected at once.
+            if inner.lock().state == SockState::Connecting {
+                poll_ready(handle)?;
+                if inner.lock().state == SockState::Connecting {
+                    return Err(KernelError::WouldBlock);
+                }
+            }
             let mut guard = inner.lock();
             if guard.state != SockState::Connected {
                 return Err(KernelError::NotConnected);

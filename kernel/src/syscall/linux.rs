@@ -1096,7 +1096,7 @@ mod sol {
 mod so {
     /// `SO_REUSEADDR` — allow reuse of a local address (a `bool`/`int`).
     pub const SO_REUSEADDR: i32 = 2;
-    /// `SO_TYPE` — read-only: the socket's type (`SOCK_STREAM` for our sockets).
+    /// `SO_TYPE` — read-only: the socket's type (`SOCK_STREAM` or `SOCK_DGRAM`).
     pub const SO_TYPE: i32 = 3;
     /// `SO_ERROR` — read and clear the pending socket error (an `int`). Used by a
     /// non-blocking `connect()`er after `poll(POLLOUT)` to learn the outcome.
@@ -1152,10 +1152,9 @@ mod tcpopt {
 /// `MSG_*` per-call flags for `send(2)`/`sendto(2)`/`recv(2)`/`recvfrom(2)`
 /// (the `flags` argument, arg3).  Values mirror Linux `include/linux/socket.h`.
 ///
-/// `MSG_DONTWAIT`, `MSG_WAITALL`, and `MSG_PEEK` change behaviour; the rest are
-/// silently ignored, which is already correct for our daemon-backed streams —
-/// notably `MSG_NOSIGNAL` (0x4000) is a no-op because we never raise `SIGPIPE`
-/// (a broken pipe surfaces as the `EPIPE` return value instead).
+/// `MSG_DONTWAIT`, `MSG_WAITALL`, `MSG_PEEK` and `MSG_NOSIGNAL` change
+/// behaviour; the rest are silently ignored, which is already correct for our
+/// daemon-backed streams.
 mod msgflags {
     /// Peek at received data without consuming it: buffered bytes are copied to
     /// the caller but remain queued, so a subsequent receive returns the same
@@ -1182,6 +1181,9 @@ mod msgflags {
     /// On a receive: the descriptors an `SCM_RIGHTS` message brings are
     /// installed close-on-exec.
     pub const MSG_CMSG_CLOEXEC: u32 = 0x4000_0000;
+    /// On a send: a stream whose other end is gone answers `EPIPE` alone,
+    /// without raising `SIGPIPE` ([`super::raise_sigpipe`]).
+    pub const MSG_NOSIGNAL: u32 = 0x4000;
 }
 
 // ---------------------------------------------------------------------------
@@ -3557,10 +3559,13 @@ pub fn dispatch_linux(nr: u64, args: &SyscallArgs) -> SyscallResult {
         nr::INOTIFY_RM_WATCH => sys_inotify_rm_watch(args),
         nr::FANOTIFY_INIT => sys_fanotify_init(args),
         nr::FANOTIFY_MARK => sys_fanotify_mark(args),
-        nr::SENDFILE => sys_sendfile(args),
-        nr::SPLICE => sys_splice(args),
-        nr::TEE => sys_tee(args),
-        nr::VMSPLICE => sys_vmsplice(args),
+        // Their EPIPE is the destination's: a pipe nobody reads, or a stream
+        // with no connection -- SIGPIPE first, as Linux's pipe_write,
+        // link_pipe and splice_to_socket raise it.
+        nr::SENDFILE => sigpipe_on_epipe(sys_sendfile(args), false),
+        nr::SPLICE => sigpipe_on_epipe(sys_splice(args), false),
+        nr::TEE => sigpipe_on_epipe(sys_tee(args), false),
+        nr::VMSPLICE => sigpipe_on_epipe(sys_vmsplice(args), false),
         nr::COPY_FILE_RANGE => sys_copy_file_range(args),
         nr::IO_SETUP => sys_io_setup(args),
         nr::IO_DESTROY => sys_io_destroy(args),
@@ -4256,7 +4261,8 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
                 arg4: 0,
                 arg5: 0,
             };
-            linux_from_native(handlers::sys_fs_write(&a))
+            // A FIFO is a file here, and its `EPIPE` is a pipe's.
+            sigpipe_on_epipe(linux_from_native(handlers::sys_fs_write(&a)), false)
         }
         HandleKind::Pipe => {
             let a = SyscallArgs {
@@ -4270,12 +4276,17 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             // O_NONBLOCK is the open file's (pipe2's flag, or F_SETFL's): a
             // full pipe then answers EAGAIN rather than waiting, as Linux's
             // pipe_write does. Until 2026-10-02 this always waited.
+            // A pipe whose reader has gone raises SIGPIPE before the EPIPE is
+            // seen (Linux's pipe_write).
             if entry.status_flags & oflags::O_NONBLOCK != 0 {
-                return linux_from_native(handlers::sys_pipe_try_write(&a));
+                return sigpipe_on_epipe(
+                    linux_from_native(handlers::sys_pipe_try_write(&a)),
+                    false,
+                );
             }
             // A pipe is a slow object: an interrupted blocking write is
             // restartable (SA_RESTART) via the ERESTARTSYS sentinel.
-            linux_from_slow_io(handlers::sys_pipe_write(&a))
+            sigpipe_on_epipe(linux_from_slow_io(handlers::sys_pipe_write(&a)), false)
         }
         HandleKind::EventFd => dispatch_eventfd_write(entry, buf, len),
         // signalfd, timerfd and inotify are read-only: write(2) → EINVAL.
@@ -4297,7 +4308,7 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         HandleKind::AlsaPcm => dispatch_alsa_pcm_write(entry, buf, len),
         HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
         // AF_INET stream socket — `write(2)` is `send(2)` with no flags.
-        HandleKind::Socket => dispatch_socket_write(entry, buf, len, false),
+        HandleKind::Socket => dispatch_socket_write(entry, buf, len, false, false),
         // A channel end: one write, one message.
         HandleKind::Channel => dispatch_channel_write(entry, buf, len),
         // A listener has no data: `accept` is its only operation.
@@ -4305,6 +4316,83 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         // A Unix-domain socket: `send` with no flags.
         HandleKind::UnixSocket => dispatch_unix_write(entry, buf, len),
     }
+}
+
+/// Linux's `send_sig(SIGPIPE, current, 0)`: tell the calling thread that it
+/// wrote into a pipe or stream nobody reads any more, before the call that
+/// found out returns `EPIPE` -- `SI_USER`, from its own process, to the thread
+/// itself (requests/d-a-linux-programs-never-get-sigpipe.md).
+///
+/// Unless the thread handles, ignores or blocks it, `SIGPIPE`'s default action
+/// ends the process before the call returns: that is how `yes | head -1`
+/// stops `yes`, and how a shell loop writing into a closed pipe ends. A
+/// handler runs before the caller sees `EPIPE`; an ignored one is discarded;
+/// a blocked one waits, pending. Until 2026-10-07 nothing in the Linux ABI
+/// raised it, and such a loop never ended.
+///
+/// Raised where Linux raises it: a write, `writev`, `splice`, `tee`,
+/// `vmsplice` or `sendfile` into a pipe or FIFO with no reader; a write or
+/// send on a unix stream socket whose peer is gone or that was shut down for
+/// writing, or on a TCP socket with no connection -- unless the send said
+/// `MSG_NOSIGNAL`. Not for a datagram or `SOCK_SEQPACKET` socket, a SlateOS
+/// channel, or a terminal: their `EPIPE`, where they have one, is the answer
+/// alone, as on Linux.
+fn raise_sigpipe() {
+    /// `SIGPIPE`.
+    const SIGPIPE: u64 = 13;
+    let Some(pid) = caller_pid() else {
+        return;
+    };
+    let args = SyscallArgs {
+        arg0: pid,
+        arg1: SIGPIPE,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    // A process signalling itself passes every check the send makes (it is
+    // alive, and may signal itself), so the answer can only be success; what
+    // becomes of the signal -- delivered, discarded as ignored, pending while
+    // blocked, the process ended -- is the post's, as for any other signal.
+    let _ = handlers::sys_signal_send_to_thread(
+        &args,
+        crate::proc::signal::si_code::SI_USER,
+        0,
+        crate::sched::current_task_id(),
+    );
+}
+
+/// `r`, having first raised `SIGPIPE` ([`raise_sigpipe`]) if `r` is `EPIPE` and
+/// `nosignal` (`MSG_NOSIGNAL`) is not set -- the answer of a write into a pipe
+/// or stream.
+fn sigpipe_on_epipe(r: SyscallResult, nosignal: bool) -> SyscallResult {
+    if r.value == i64::from(errno::EPIPE).wrapping_neg() && !nosignal {
+        raise_sigpipe();
+    }
+    r
+}
+
+/// What a send on the stream socket `h` answers, as Linux's `tcp_sendmsg`
+/// does: the bytes sent; or, for a socket with no connection -- never
+/// connected, listening, or gone -- the error pending on it if there is one,
+/// else `EPIPE` (Linux's `sk_stream_error`: `sock_error(sk) ?: -EPIPE`), which
+/// raises `SIGPIPE` unless `nosignal` (`MSG_NOSIGNAL`). Until 2026-10-07 a send
+/// on a socket never connected, or a listener, said `ENOTCONN`.
+fn stream_send_answer(
+    h: crate::net::socket::SocketHandle,
+    sent: Result<i32, KernelError>,
+    nosignal: bool,
+) -> SyscallResult {
+    let r = match sent {
+        Ok(n) => return SyscallResult::ok(i64::from(n)),
+        Err(KernelError::NotConnected) => match crate::net::socket::take_so_error(h) {
+            Ok(pending) if pending > 0 => linux_err(pending),
+            _ => linux_err(errno::EPIPE),
+        },
+        Err(e) => linux_err(linux_errno_for(e)),
+    };
+    sigpipe_on_epipe(r, nosignal)
 }
 
 /// Socket write — copy up to `len` bytes from the user buffer and hand them to
@@ -4317,12 +4405,14 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
 ///
 /// Honours the fd's `O_NONBLOCK` status flag: when set, a send that would block on
 /// a full send window returns `-EAGAIN` (before any bytes are accepted) instead of
-/// waiting on the daemon.
+/// waiting on the daemon. A stream with no connection is `EPIPE`, with `SIGPIPE`
+/// unless `nosignal` ([`stream_send_answer`]).
 fn dispatch_socket_write(
     entry: FdEntry,
     buf: u64,
     len: u64,
     force_nonblock: bool,
+    nosignal: bool,
 ) -> SyscallResult {
     // A datagram socket has no stream: `write(2)` sends one datagram to the
     // connected default peer (`EDESTADDRREQ` if unconnected). Route it before the
@@ -4352,10 +4442,7 @@ fn dispatch_socket_write(
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
     // Non-blocking if the fd is O_NONBLOCK *or* the caller passed MSG_DONTWAIT.
     let nonblock = force_nonblock || (entry.status_flags & oflags::O_NONBLOCK) != 0;
-    match crate::net::socket::send(h, &kbuf, nonblock) {
-        Ok(n) => SyscallResult::ok(i64::from(n)),
-        Err(e) => linux_err(linux_errno_for(e)),
-    }
+    stream_send_answer(h, crate::net::socket::send(h, &kbuf, nonblock), nosignal)
 }
 
 /// Back off once while a daemon-backed socket read waits for data.
@@ -40377,8 +40464,24 @@ fn unix_send(
     };
     match sent {
         Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
-        Err(e) => unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Send),
+        Err(e) => unix_send_failed(e, h, flags),
     }
+}
+
+/// The answer to a send on `AF_UNIX` socket `h` that failed with `e`: its
+/// errno -- and, for a stream socket's `EPIPE` (the peer gone, or our own
+/// `shutdown(SHUT_WR)`), `SIGPIPE` first unless `flags` has `MSG_NOSIGNAL`
+/// (Linux's `unix_stream_sendmsg`). A datagram or `SOCK_SEQPACKET` socket's
+/// `EPIPE` raises nothing, as on Linux.
+fn unix_send_failed(
+    e: crate::error::KernelError,
+    h: crate::ipc::unix_socket::UnixHandle,
+    flags: u32,
+) -> SyscallResult {
+    use crate::ipc::unix_socket::{self, Kind};
+    let r = unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Send);
+    let stream = unix_socket::kind(h) == Some(Kind::Stream);
+    sigpipe_on_epipe(r, !stream || flags & msgflags::MSG_NOSIGNAL != 0)
 }
 
 /// `recv`/`recvfrom`/`read` on an `AF_UNIX` descriptor: into `buf` (room
@@ -40669,7 +40772,7 @@ fn unix_sendmsg(entry: &FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     };
     match sent {
         Ok(n) => SyscallResult::ok(i64::try_from(n).unwrap_or(i64::MAX)),
-        Err(e) => unix_errno_timed(e, h, crate::ipc::unix_socket::Direction::Send),
+        Err(e) => unix_send_failed(e, h, flags),
     }
 }
 
@@ -42252,8 +42355,8 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
     // forwards the payload to the daemon.  A destination address on a connected
     // stream socket is ignored (Linux ignores it too, or returns EISCONN — we
     // take the permissive path and just send).  MSG_DONTWAIT (args.arg3) forces a
-    // per-call non-blocking send; MSG_NOSIGNAL is a harmless no-op (we never raise
-    // SIGPIPE — a broken pipe surfaces as EPIPE).  Other MSG_* flags are ignored.
+    // per-call non-blocking send; MSG_NOSIGNAL keeps a broken connection's EPIPE
+    // from raising SIGPIPE.  Other MSG_* flags are ignored.
     if crate::net::netstack_client::userspace_enabled()
         && let Ok(entry) = lookup_caller_fd(fd)
         && entry.kind == HandleKind::Socket
@@ -42272,7 +42375,8 @@ fn sys_sendto(args: &SyscallArgs) -> SyscallResult {
         #[allow(clippy::cast_possible_truncation)]
         let msg_flags = args.arg3 as u32;
         let force_nonblock = (msg_flags & msgflags::MSG_DONTWAIT) != 0;
-        return dispatch_socket_write(entry, buf, args.arg2, force_nonblock);
+        let nosignal = (msg_flags & msgflags::MSG_NOSIGNAL) != 0;
+        return dispatch_socket_write(entry, buf, args.arg2, force_nonblock, nosignal);
     }
     linux_err(errno::EBADF)
 }
@@ -42696,10 +42800,8 @@ fn socket_sendmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
     let nonblock =
         (flags & msgflags::MSG_DONTWAIT) != 0 || (entry.status_flags & oflags::O_NONBLOCK) != 0;
-    match crate::net::socket::send(h, &staged, nonblock) {
-        Ok(n) => SyscallResult::ok(i64::from(n)),
-        Err(e) => linux_err(linux_errno_for(e)),
-    }
+    let nosignal = (flags & msgflags::MSG_NOSIGNAL) != 0;
+    stream_send_answer(h, crate::net::socket::send(h, &staged, nonblock), nosignal)
 }
 
 /// `recvmsg(2)` on a connected daemon-backed stream socket: performs a single
@@ -43505,7 +43607,16 @@ fn sys_getsockopt(args: &SyscallArgs) -> SyscallResult {
         }
         let value: i32 = match level {
             l if l == sol::SOL_SOCKET => match optname {
-                so::SO_TYPE => so::SOCK_STREAM,
+                // TCP or UDP, as `socket` made it. Until 2026-10-07 every
+                // daemon-backed socket said SOCK_STREAM, a UDP one too.
+                so::SO_TYPE => {
+                    let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
+                    if crate::net::socket::is_dgram(h).unwrap_or(false) {
+                        so::SOCK_DGRAM
+                    } else {
+                        so::SOCK_STREAM
+                    }
+                }
                 so::SO_RCVBUF | so::SO_SNDBUF => BUF_HINT,
                 so::SO_KEEPALIVE | so::SO_REUSEADDR | so::SO_REUSEPORT | so::SO_BROADCAST => 0,
                 _ => return linux_err(errno::ENOPROTOOPT),

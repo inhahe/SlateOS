@@ -51,6 +51,19 @@ pressure. The journal shows the web services stopped the same way at 14:19,
 `ratemyidea` together) and 16:03:49. No systemd timer or crontab entry
 matches those times.
 
+**17:06:56, and it comes in bursts.** Again `ratemyidea`'s gunicorn and lane
+D's native GCC build (`make all-gcc`, inside MPFR's `configure`) -- and this
+time the build's immediate retry, started within the second, and the next
+two `make`s after it (`all-target-libgcc`, `all-target-libstdc++-v3`), each
+with its own immediate retry, were all killed too: six runs ended in the same
+second. The sender keeps killing for at least a second or two, so a retry has
+to wait it out. The interval since the last is about an hour (15:21:50,
+16:03:49, 17:06:56), which suggests something scheduled outside WSL, where
+`systemctl list-timers` and the crontabs cannot see it. `scripts/pgrep-diff.sh`
+was checked again and is not it: each of its `pkill` cases runs with a
+synthetic `/proc` bound over the real one, in its own PID and user namespaces,
+so neither what it sees nor what it signals is outside.
+
 **What would close it:** finding the sender -- most likely a session or
 script that cleans up "its" WSL processes with `pkill -f <pattern>` or
 similar, which the operator's rules forbid ("kill only the exact process you
@@ -61,9 +74,10 @@ always,exit -F arch=b64 -S kill,tkill,tgkill -F a1=15 -k sigterm`; after the
 next occurrence, `sudo ausearch -k sigterm -i` gives the sending process,
 its parent and its command line.
 
-**Meanwhile, every long WSL step survives one kill:** lane D's pipeline
-script (`build/pipeline.sh`, local and not in the tree) runs the CMake step
-a second time when the first dies, and since 2026-10-07 the GCC spike runs
-each `make` through `slate_resume_once_if_killed` (`scripts/lib/worktree.sh`),
-which runs it again once after an outside SIGTERM -- make deletes a target a
-fatal signal interrupted, so the second run redoes only what was lost.
+**Meanwhile, long WSL steps survive it:** lane D's pipeline script
+(`build/pipeline.sh`, local and not in the tree) runs the CMake step a
+second time when the first dies, and since 2026-10-07 the GCC spike runs
+each `make` through `slate_resume_if_killed` (`scripts/lib/worktree.sh`):
+after an outside SIGTERM it waits 30 seconds for the burst to pass and runs
+the step again, three times at most. make deletes a target a fatal signal
+interrupted, so each run redoes only what was lost.

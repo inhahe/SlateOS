@@ -1029,26 +1029,32 @@ BODY
 }
 
 # Run "$@" -- a make, or anything else that picks up where it stopped when run
-# again -- with its output in the file $1, and run it once more if something
-# outside SIGTERMed it: exit 143 (128 + 15), or a failure whose log ends a line
-# with make's "Terminated". Something on this machine SIGTERMs WSL builds by a
-# pattern several times a day (known-issues/D-SOMETHING-KILLS-WSL-PROCESSES-BY-
-# PATTERN.md), so an hour-long build is more likely hit than not; make deletes
-# a target whose recipe a fatal signal ended, so the second run redoes only what
-# was lost. Returns the last run's status. The second run's output is appended,
+# again -- with its output in the file $1, and run it again if something
+# outside SIGTERMed it: exit 143 (128 + 15), or a failure whose last lines end
+# one with make's "Terminated". Something on this machine SIGTERMs WSL
+# processes by a pattern several times a day, in bursts that also take a run
+# started a second later (known-issues/D-SOMETHING-KILLS-WSL-PROCESSES-BY-
+# PATTERN.md), so an hour-long build is more likely hit than not: each retry
+# waits 30 seconds for the burst to pass, and there are three at most. make
+# deletes a target whose recipe a fatal signal ended, so a run redoes only what
+# was lost. Returns the last run's status. Each retry's output is appended,
 # after a line saying why.
 #
-#   slate_resume_once_if_killed make.log make -j"$JOBS" all-gcc
-slate_resume_once_if_killed() {
+#   slate_resume_if_killed make.log make -j"$JOBS" all-gcc
+slate_resume_if_killed() {
     local log="$1"
     shift
     "$@" >"$log" 2>&1
     local rc=$?
-    if [ "$rc" -eq 143 ] || { [ "$rc" -ne 0 ] && grep -q 'Terminated$' "$log"; }; then
-        echo "=== SIGTERMed from outside (exit $rc) -- running it again: $*" >>"$log"
-        echo "slate_resume_once_if_killed: $1 was SIGTERMed from outside (exit $rc); running it again" >&2
+    local retries=0
+    while [ "$retries" -lt 3 ] \
+        && { [ "$rc" -eq 143 ] || { [ "$rc" -ne 0 ] && tail -n 20 "$log" | grep -q 'Terminated$'; }; }; do
+        retries=$((retries + 1))
+        echo "=== SIGTERMed from outside (exit $rc) -- retry $retries of 3 in 30 s: $*" >>"$log"
+        echo "slate_resume_if_killed: $1 was SIGTERMed from outside (exit $rc); retry $retries of 3 in 30 s" >&2
+        sleep 30
         "$@" >>"$log" 2>&1
         rc=$?
-    fi
+    done
     return "$rc"
 }

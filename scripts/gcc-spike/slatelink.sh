@@ -71,12 +71,12 @@ cd "$BUILD" || exit 1
 for p in xgcc xg++ cpp cc1 cc1plus collect2 gcov gcov-dump gcov-tool; do
     rm -f "gcc/$p"
 done
-slate_resume_once_if_killed "$WORK/relink.log" make -j"$JOBS" all-gcc
+slate_resume_if_killed "$WORK/relink.log" make -j"$JOBS" all-gcc
 echo "RELINK_EXIT=$?"
 grep -E ' error: |Error [0-9]|undefined reference|multiple definition' "$WORK/relink.log" | head -20
 
 rm -rf "${DEST:?}"
-slate_resume_once_if_killed "$WORK/install.log" \
+slate_resume_if_killed "$WORK/install.log" \
     make DESTDIR="$DEST" install-gcc install-target-libgcc install-target-libstdc++-v3
 echo "INSTALL_EXIT=$?"
 grep -E ' error: |Error [0-9]' "$WORK/install.log" | head -10

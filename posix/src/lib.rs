@@ -82,9 +82,10 @@
 //!   `semget`/`semop`/`semtimedop`/`semctl`,
 //!   `shmget`/`shmat`/`shmdt`/`shmctl`
 //! - **Password Hashing**: `crypt`, `crypt_r`, `crypt_rn`, `crypt_ra`
-//!   (yescrypt, scrypt, bcrypt, SHA-512, SHA-256, MD5 and the DES methods,
-//!   answering as libxcrypt does; the hashes themselves in the `pwhash`
-//!   crate), `crypt_gensalt` and its `_rn` and `_ra` forms,
+//!   (every method libxcrypt has -- yescrypt, gost-yescrypt, scrypt,
+//!   bcrypt, SHA-512, SHA-256, sha1crypt, SunMD5, MD5, NT and the DES
+//!   methods -- answering as libxcrypt does; the hashes themselves in the
+//!   `pwhash` crate), `crypt_gensalt` and its `_rn` and `_ra` forms,
 //!   `crypt_checksalt`, `crypt_preferred_method`; `encrypt`, `setkey` (DES)
 //! - **Language Information**: `nl_langinfo`, `nl_langinfo_l`
 //!   (C locale date/time formats, day/month names, codeset, etc.)
@@ -378,8 +379,14 @@ pub(crate) mod decfloat;
 // `pwhash::des`, reached through `crypt.rs` and `gensalt.rs`; and POSIX's
 // `encrypt` and `setkey`.
 pub mod des;
+// libxcrypt's last three crypt methods, each over its hash in `pwhash`:
+// NetBSD's sha1crypt, Solaris's SunMD5 and FreeBSD's NT; reached only
+// through `crypt.rs` and `gensalt.rs`.
 pub mod dirent;
 pub mod dlfcn;
+mod nthash;
+mod sha1crypt;
+mod sunmd5;
 // Ed25519 lives here, next to `crypt` and `sha2`, because this crate is
 // already where lane B's cryptographic primitives are written once and shared:
 // `sshd`, `ssh` and `ftpd` each had their own fake of it. See the module doc.

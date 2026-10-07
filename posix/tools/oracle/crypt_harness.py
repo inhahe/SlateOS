@@ -20,8 +20,12 @@ The cases:
 
 - libxcrypt's own known-answer table's 92 passwords (test/ka-table.inc in
   its source) under that table's settings for the methods posix implements
-  -- MD5, SHA-256, SHA-512, scrypt, yescrypt, gost-yescrypt, bcrypt's four
-  variants, traditional DES, bigcrypt and BSDi's DES;
+  -- every one libxcrypt has: MD5, SHA-256, SHA-512, scrypt, yescrypt,
+  gost-yescrypt, bcrypt's four variants, sha1crypt, SunMD5, NT, traditional
+  DES, bigcrypt and BSDi's DES;
+- sha1crypt's counts, salts and long keys, SunMD5's rounds (to the count
+  that wraps them to none), salts and quirks, NT's Latin-1, and what each
+  refuses;
 - gost-yescrypt over yescrypt's modes, salts, passwords and refusals, and
   the room its one more byte takes;
 - the DES methods over salts at each end of the alphabet, passwords around
@@ -37,10 +41,11 @@ The cases:
   cannot; passwords of every length to the 511-byte limit, and past it;
 - settings each check refuses, in libxcrypt's order.
 
-Left out: a `$7$` setting long enough for libxcrypt's 384 bytes of output and
-not posix's 256 (`crypt.rs`, "The output's room"), and any setting asking
-for more memory than a test machine has -- posix's tests take those on
-separately.
+Left out: a `$7$`, `$gy$`, `$sha1` or `$md5` setting long enough for
+libxcrypt's 384 bytes of output and not posix's 256 (`crypt.rs`, "The
+output's room"); any setting asking for more memory than a test machine
+has -- posix's tests take those on separately -- or more time: a sha1crypt
+count past a few thousand, a SunMD5 one near 2^32.
 """
 
 import sys
@@ -198,6 +203,28 @@ KA_SETTINGS = [
     "_B...abcd",
     "CC",
     "ab",
+    "$3$",
+    "$3$__not_used__0123456789abcdef",
+    "$sha1$12$GGXpNqoJvglVTkGU",
+    "$sha1$12$xSZGpk6Bp4SA3.cR",
+    "$sha1$456$GGXpNqoJvglVTkGU",
+    "$sha1$456$xSZGpk6Bp4SA3.cR",
+    "$md5$1xMeE.at",
+    "$md5$1xMeE.at$",
+    "$md5$1xMeE.at$$",
+    "$md5$1xMeE.at$x",
+    "$md5$9ZLwtuTO",
+    "$md5$9ZLwtuTO$",
+    "$md5$9ZLwtuTO$$",
+    "$md5$9ZLwtuTO$x",
+    "$md5,rounds=12$1xMeE.at",
+    "$md5,rounds=12$1xMeE.at$",
+    "$md5,rounds=12$1xMeE.at$$",
+    "$md5,rounds=12$1xMeE.at$x",
+    "$md5,rounds=12$9ZLwtuTO",
+    "$md5,rounds=12$9ZLwtuTO$",
+    "$md5,rounds=12$9ZLwtuTO$$",
+    "$md5,rounds=12$9ZLwtuTO$x",
 ]
 
 # bcrypt's own base-64 alphabet: crypt's characters, in another order.
@@ -438,6 +465,44 @@ def generated():
     for total in [210, 211]:
         cases.append((pw, head + "." * (total - len(head))))
 
+    # sha1crypt: counts as strtoul reads them (a sign, leading zeros, none
+    # at all), salts to 100 characters and what may follow them, keys
+    # longer than HMAC-SHA1's block, which it hashes first, and refusals.
+    for s in ["$sha1$1$salt", "$sha1$2$salt", "$sha1$0$salt", "$sha1$$salt", "$sha1$+5$salt",
+              "$sha1$007$salt", "$sha1$5$s", "$sha1$5$" + "x" * 64, "$sha1$5$" + "y" * 100,
+              "$sha1$5$salt$", "$sha1$5$salt$junk", "$sha1$12$GGXpNqoJvglVTkGU$ignored"]:
+        cases.append((pw, s))
+    for n in [0, 1, 63, 64, 65, 100, 511]:
+        word = bytes((i * 17) % 255 + 1 for i in range(n))
+        cases.append((word, "$sha1$3$salt"))
+    for s in ["$sha1", "$sha1$", "$sha1$5", "$sha1$5$", "$sha1$5$$", "$sha1x5$salt", "$sha1$+$salt",
+              "$sha1$-$salt", "$sha1$5$sa-lt", "$sha1$5x$salt", "$sha"]:
+        cases.append((pw, s))
+    # SunMD5: `rounds=` after `,` or `$`, and the count that wraps the
+    # rounds to none (4096 + 4294963200 is 2^32); salts from none to 150
+    # characters, and the `$` the original keeps; refusals.
+    for s in ["$md5,rounds=1$salt", "$md5$rounds=7$salt", "$md5,rounds=4294963200$salt",
+              "$md5,rounds=4294963201$salt", "$md5$", "$md5,", "$md5$s", "$md5$" + "z" * 64,
+              "$md5$" + "q" * 150, "$md5$salt$-", "$md5$salt$$$", "$md5,rounds=3$salt$$x"]:
+        cases.append((pw, s))
+    for n in [0, 1, 55, 56, 64, 200, 511]:
+        word = bytes((i * 19) % 255 + 1 for i in range(n))
+        cases.append((word, "$md5,rounds=1$salt"))
+    for s in ["$md5", "$md5x", "$md5x$salt", "$md5,rounds=0$salt", "$md5,rounds=05$salt",
+              "$md5,rounds=$salt", "$md5,rounds=4294967296$salt", "$md5,rounds=5salt",
+              "$md5$sa-lt", "$md5,rounds=99999999999999999999$salt"]:
+        cases.append((pw, s))
+    # NT: no salt, the rest of the setting unread; Latin-1 high bytes, which
+    # become U+0080 to U+00FF.
+    for s in ["$3$", "$3$$", "$3$anything", "$3$$8846f7eaee8fb117ad06bdd830b7586c"]:
+        cases.append((b"password", s))
+    for n in [0, 1, 31, 32, 33, 255, 511]:
+        word = bytes((i * 23) % 255 + 1 for i in range(n))
+        cases.append((word, "$3$"))
+    cases.append((bytes(range(128, 256)), "$3$"))
+    for s in ["$3", "$3x"]:
+        cases.append((pw, s))
+
     # What the three refuse: no salt character, too short, a character
     # outside the alphabet where one is read.
     for s in ["", "a", "a{", "{a", "a$", ".", "_", "_J9..abc", "_J9.-abcd", "_J9..abc-",
@@ -601,7 +666,8 @@ def gensalt_cases():
 
     lines = []
     # Every method's prefix: BSDi's DES's `_`, and traditional DES's none.
-    prefixes = ["$y$", "$gy$", "$7$", "$2b$", "$2y$", "$2a$", "$2x$", "$6$", "$5$", "$1$", "_", "-"]
+    prefixes = ["$y$", "$gy$", "$7$", "$2b$", "$2y$", "$2a$", "$2x$", "$6$", "$5$", "$sha1", "$md5",
+                "$1$", "$3$", "_", "-"]
     counts = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 31, 32, 999, 1000, 4999, 5000,
               5001, 999999999, 1000000000, 4294967296, 18446744073709551615]
     # Every method at every cost, with the bytes it takes by default.

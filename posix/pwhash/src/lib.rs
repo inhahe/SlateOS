@@ -1,8 +1,9 @@
 //! The hashing behind `posix`'s `crypt`: SHA-256 and SHA-512 ([`sha2`]),
 //! MD5 ([`md5`]), the SHA-crypt and md5crypt rounds ([`shacrypt`],
 //! [`md5crypt`]), yescrypt's and scrypt's KDF ([`yescrypt`]), bcrypt's
-//! Eksblowfish ([`bcrypt`]), DES with crypt's salt ([`des`]), and GOST R
-//! 34.11-2012, Streebog, and its HMAC ([`streebog`]).
+//! Eksblowfish ([`bcrypt`]), DES with crypt's salt ([`des`]), GOST R
+//! 34.11-2012, Streebog, and its HMAC ([`streebog`]), SHA-1 and HMAC-SHA1
+//! ([`sha1`]), MD4 ([`md4`]) and SunMD5's rounds ([`sunmd5`]).
 //!
 //! ## Why a crate and not modules of `posix`
 //!
@@ -52,10 +53,13 @@ extern crate std;
 
 pub mod bcrypt;
 pub mod des;
+pub mod md4;
 pub mod md5;
 pub mod md5crypt;
+pub mod sha1;
 pub mod sha2;
 pub mod shacrypt;
 pub mod streebog;
 mod streebog_tables;
+pub mod sunmd5;
 pub mod yescrypt;

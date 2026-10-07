@@ -59,6 +59,8 @@
 //! | a `$y$`, `$gy$` or `$7$` setting the method refuses, or no memory for its hash | `EINVAL` |
 //! | a bcrypt setting the method refuses (a cost below 04), or its self-test failing | `EINVAL` |
 //! | a DES setting with a character outside the salt alphabet where it reads one, or a `_` setting shorter than nine | `EINVAL` |
+//! | a `$sha1`, `$md5` or `$3$` setting the method refuses | `EINVAL` |
+//! | a `$sha1` or `$md5` setting whose hash would not fit the room (see below) | `ERANGE` |
 //!
 //! Until 2026-09-26 a NULL argument was `EFAULT` and every failure returned
 //! NULL, which a program ported from Linux does not expect.
@@ -77,14 +79,16 @@
 //! setting of up to 211 bytes, in libxcrypt for up to 339.  Every `$y$`
 //! hash, used as the setting that verifies it, is within both; only a `$7$`
 //! setting with a salt of over 150 characters, which nothing generates, is
-//! refused here (`ERANGE`) and taken there.
+//! refused here (`ERANGE`) and taken there; and so, likewise, are `$sha1`
+//! and `$md5` settings whose salts run to some two hundred characters.
 //!
-//! ## Unsupported methods
+//! ## Every method libxcrypt has
 //!
-//! sha1crypt (`$sha1`), SunMD5 (`$md5`) and NT (`$3$`), libxcrypt's
-//! remaining methods, are **not** implemented: their
-//! settings fail with the token and `EINVAL`, never with a fabricated hash.
-//! (See `todo.txt` for the follow-ups.)
+//! Since 2026-10-07 every method libxcrypt 4.4.36 hashes is here, the
+//! last three -- sha1crypt (`$sha1`, NetBSD's), SunMD5 (`$md5`, Solaris's)
+//! and NT (`$3$`, FreeBSD's) -- in `sha1crypt.rs`, `sunmd5.rs` and
+//! `nthash.rs`.  A setting that names none fails with the token and
+//! `EINVAL`, never with a fabricated hash.
 //!
 //! `encrypt` and `setkey`, POSIX's DES block cipher, are `des.rs`'s.
 
@@ -384,6 +388,30 @@ fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> Result<(), Ref
         return Ok(());
     }
     if md5_crypt(key, setting, out) || sha_crypt(key, setting, out) {
+        return Ok(());
+    }
+    if crate::sha1crypt::names_method(setting) {
+        let len = crate::sha1crypt::crypt(key, setting, &mut out.buf).map_err(|r| match r {
+            crate::sha1crypt::Refusal::Range => Refusal::Range,
+            crate::sha1crypt::Refusal::Invalid => Refusal::Invalid,
+        })?;
+        out.len = len;
+        out.push(0);
+        return Ok(());
+    }
+    if crate::sunmd5::names_method(setting) {
+        let len = crate::sunmd5::crypt(key, setting, &mut out.buf)
+            .ok_or(Refusal::Invalid)?
+            .map_err(|()| Refusal::Range)?;
+        out.len = len;
+        out.push(0);
+        return Ok(());
+    }
+    if crate::nthash::names_method(setting) {
+        // 36 characters: within the room, with the NUL.
+        let len = crate::nthash::crypt(key, setting, &mut out.buf).ok_or(Refusal::Invalid)?;
+        out.len = len;
+        out.push(0);
         return Ok(());
     }
     // Last, as libxcrypt matches them: traditional DES and bigcrypt have no
@@ -715,6 +743,17 @@ pub enum Method {
     /// `_` — BSDi's extended DES: a count of encryptions, a 24-bit salt and
     /// the whole password.  For verifying, as [`Method::Des`].
     BsdiDes,
+    /// `$sha1$` — sha1crypt, NetBSD's: PBKDF1 over HMAC-SHA1
+    /// (`sha1crypt.rs`).  For verifying, as [`Method::Des`]: libxcrypt
+    /// counts it a legacy method.
+    Sha1crypt,
+    /// `$md5` — SunMD5, Solaris's (`sunmd5.rs`).  For verifying, as
+    /// [`Method::Des`].
+    SunMd5,
+    /// `$3$` — the NT hash, MD4 of the password, as FreeBSD writes it
+    /// (`nthash.rs`): no salt and no cost.  For verifying, as
+    /// [`Method::Des`].
+    Nt,
 }
 
 impl Method {
@@ -732,6 +771,9 @@ impl Method {
             Self::Bcrypt => "$2b$",
             Self::Des => "",
             Self::BsdiDes => "_",
+            Self::Sha1crypt => "$sha1$",
+            Self::SunMd5 => "$md5",
+            Self::Nt => "$3$",
         }
     }
 
@@ -747,7 +789,14 @@ impl Method {
             Self::Scrypt => "$7$CU..../....",
             // Cost 5, in two digits.
             Self::Bcrypt => "$2b$05$",
-            Self::Md5 | Self::Sha256 | Self::Sha512 | Self::Des | Self::BsdiDes => self.prefix(),
+            Self::Md5
+            | Self::Sha256
+            | Self::Sha512
+            | Self::Des
+            | Self::BsdiDes
+            | Self::Sha1crypt
+            | Self::SunMd5
+            | Self::Nt => self.prefix(),
         }
     }
 
@@ -769,6 +818,9 @@ impl Method {
             Self::Bcrypt => 31,
             Self::Sha512 => 86,
             Self::Des | Self::BsdiDes => 11,
+            Self::Sha1crypt => 28,
+            Self::SunMd5 => 22,
+            Self::Nt => 32,
         }
     }
 
@@ -790,6 +842,9 @@ impl Method {
             Self::Bcrypt => BCRYPT_SALT_LEN,
             Self::Des => 2,
             Self::BsdiDes => 8,
+            Self::Sha1crypt => 64,
+            Self::SunMd5 => 8,
+            Self::Nt => 0,
         }
     }
 
@@ -800,8 +855,10 @@ impl Method {
     /// it (it holds two bits, so `crypt` would rewrite any other).  None,
     /// for the DES methods: no new password should be hashed with them.
     fn takes_salt(self, salt: &[u8]) -> bool {
-        !matches!(self, Self::Des | Self::BsdiDes)
-            && !salt.is_empty()
+        !matches!(
+            self,
+            Self::Des | Self::BsdiDes | Self::Sha1crypt | Self::SunMd5 | Self::Nt
+        ) && !salt.is_empty()
             && salt.len() <= self.salt_max()
             && salt.iter().copied().all(is_b64)
             && (!matches!(self, Self::Yescrypt | Self::GostYescrypt)
@@ -822,6 +879,15 @@ impl Method {
         }
         if setting.starts_with(b"$gy$") {
             return Some(Self::GostYescrypt);
+        }
+        if crate::sha1crypt::names_method(setting) {
+            return Some(Self::Sha1crypt);
+        }
+        if crate::sunmd5::names_method(setting) {
+            return Some(Self::SunMd5);
+        }
+        if crate::nthash::names_method(setting) {
+            return Some(Self::Nt);
         }
         match setting.get(..3)? {
             b"$1$" => Some(Self::Md5),
@@ -1036,6 +1102,15 @@ pub fn stored_method(stored: &[u8]) -> Option<Method> {
     if matches!(method, Method::Des | Method::BsdiDes) {
         return crate::des::stored_kind(stored).is_some().then_some(method);
     }
+    if method == Method::Sha1crypt {
+        return crate::sha1crypt::is_stored_hash(stored, CRYPT_OUTPUT_LEN).then_some(method);
+    }
+    if method == Method::SunMd5 {
+        return crate::sunmd5::is_stored_hash(stored, CRYPT_OUTPUT_LEN).then_some(method);
+    }
+    if method == Method::Nt {
+        return crate::nthash::is_stored_hash(stored).then_some(method);
+    }
     if matches!(
         method,
         Method::Yescrypt | Method::GostYescrypt | Method::Scrypt
@@ -1222,12 +1297,15 @@ mod tests {
                         | Method::Bcrypt
                         | Method::Des
                         | Method::BsdiDes
+                        | Method::Sha1crypt
+                        | Method::SunMd5
+                        | Method::Nt
                 )
             ) {
                 assert!(verify(&password, result.as_bytes()), "{line}");
             }
         }
-        assert_eq!(lines, 4812, "the oracle's every line");
+        assert_eq!(lines, 6909, "the oracle's every line");
     }
 
     // -----------------------------------------------------------------------
@@ -1409,17 +1487,19 @@ mod tests {
 
     #[test]
     fn unsupported_method_is_the_token_and_einval() {
-        // libxcrypt's methods this module lacks -- gost-yescrypt, NT,
-        // SunMD5, sha1crypt -- and unknown markers are rejected, never
-        // silently turned into a fake hash; and so is what begins with a salt
-        // character and then another character, which is no DES setting.
+        // Settings that name no method -- here or in libxcrypt -- are
+        // rejected, never silently turned into a fake hash: unknown markers,
+        // a method's prefix in another case or cut short, and what begins
+        // with a salt character and then another character, which is no DES
+        // setting.
         let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for setting in [
-            &b"$gy$j9T$abc\0"[..],
-            b"$3$$\0",
-            b"$md5$x\0",
-            b"$sha1$1$x\0",
-            b"$9$x\0",
+            &b"$9$x\0"[..],
+            b"$Y$j9T$abc\0",
+            b"$2c$05$abcdefghijklmnopqrstuu\0",
+            b"$gy\0",
+            b"$sha\0",
+            b"$3\0",
             b"a{\0",
         ] {
             let got = crypt_raw(b"password\0".as_ptr(), setting.as_ptr());

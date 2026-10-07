@@ -67,9 +67,20 @@ touch -d '2020-01-02 03:04:05 UTC' stamped.txt
 printf '@0\n@1000000000\n2021-03-04 05:06:07\n' > dates.txt
 printf '' > empty.txt
 
+# A redirection applied to `date` itself on both sides -- `>&-`, `>/dev/full`,
+# `<&-`, `< .`, `2>&-` -- for the cases about standard descriptors. Such a case
+# runs without `diff_run`, whose `4>&2` needs descriptor 2 open: the
+# redirection goes on `timeout`, and `date` inherits it through `timeout` and
+# `env`. `eval` only for the redirection; the arguments stay in "$@".
+REDIR=
+
 run_side() {
   local side=$1; shift
-  diff_run timeout -k 2 15 env TZ=UTC LC_ALL=C.UTF-8 PATH="$bindir/$side" date "$@"
+  if [ -n "$REDIR" ]; then
+    eval "timeout -k 2 15 env TZ=UTC LC_ALL=C.UTF-8 PATH=\"\$bindir/\$side\" date \"\$@\" $REDIR"
+  else
+    diff_run timeout -k 2 15 env TZ=UTC LC_ALL=C.UTF-8 PATH="$bindir/$side" date "$@"
+  fi
 }
 
 compare() {
@@ -104,7 +115,7 @@ report() {
   return 0
 }
 
-run_case() { compare "$@"; report "date $*"; }
+run_case() { compare "$@"; report "date $*${REDIR:+ $REDIR}"; }
 
 # `known_bug_case KEY -- ARGS...` — a difference nobody wants, written up in
 # `known-issues.md` under KEY and not yet fixed.
@@ -374,6 +385,34 @@ run_case --ref=stamped.txt
 run_case --iso -d @1000000000
 run_case --rfc
 run_case --u -d @1000000000
+
+# --- standard descriptors that cannot be used -----------------------------------
+# `date` writes through stdio's buffer, and `close_stdout` reports a failure at
+# exit: `write error: REASON`. `-f -` reads standard input with `getline` and
+# names it with `quotef`, so `'standard input'`, quoted for its space; a read
+# error ends the run, after the dates of the lines read before it. A
+# diagnostic -- `--debug`'s included -- that cannot be written is the run's
+# failure.
+for redir in '>&-' '>/dev/full'; do
+  REDIR=$redir
+  run_case -d @0
+  run_case -f dates.txt
+  run_case -d bogus
+  run_case --help
+  run_case --version
+  run_case -f /nosuch
+  REDIR=
+done
+REDIR='<&-';          run_case -f -
+REDIR='< .';          run_case -f -
+REDIR='< dates.txt';  run_case -f -
+REDIR='<&-';          run_case -d @0
+REDIR='<&- >&-';      run_case -f -
+REDIR='2>&-';         run_case -d bogus
+REDIR='2>&-';         run_case --debug -d @0
+REDIR='2>/dev/full';  run_case --debug -d @0
+REDIR='2>/dev/full';  run_case -f dates.txt
+REDIR=
 
 # --- the two whose text is ours -----------------------------------------------------------------------
 xfail_case "our help text, not the GNU project's" --help

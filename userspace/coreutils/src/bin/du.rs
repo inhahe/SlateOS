@@ -73,6 +73,12 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+// Before `main`, so that `stdfd::restore` still sees the descriptors `du` was
+// given: a closed standard output is `write error`, and a closed standard
+// input a read error of the `--files0-from` list, as they are upstream -- not
+// the `/dev/null` Rust's runtime would put on each.
+coreutils::guard_std_fds!();
+
 const DU: Program = Program::new("du", 1);
 
 /// GNU's own short-option string, in GNU's own order.
@@ -508,6 +514,11 @@ impl Walk<'_> {
         if self.out.write_all(&line).is_err() {
             self.failed = true;
         }
+        // `print_size` ends with `fflush (stdout)`, unchecked: a failure is the
+        // stream's, and `close_stdout` reports it at the end -- with no reason
+        // after a full disk, whose final close succeeds with nothing left to
+        // write.
+        let _ = self.out.flush();
     }
 
     /// `lstat` or `stat` the entry, wording the failure as `du` words it.
@@ -635,11 +646,17 @@ impl Walk<'_> {
         Some((full, meta.is_dir))
     }
 
-    /// Walk every operand and, under `-c`, print the grand total.
-    ///
-    /// The total is exempt from `-t`: measured, `du -t 1000000 -c` prints a
-    /// total line even when the threshold suppressed every row that made it up.
+    /// Walk every operand and, under `-c`, print the grand total: the whole of
+    /// a run, for the tests. `main` takes the two halves separately, because
+    /// the `--files0-from` list's close is judged between them.
+    #[cfg(test)]
     fn run(&mut self, roots: &[Vec<u8>]) {
+        self.run_names(roots);
+        self.print_total();
+    }
+
+    /// Walk every operand, without the total.
+    fn run_names(&mut self, roots: &[Vec<u8>]) {
         for (index, root) in roots.iter().enumerate() {
             // An empty name is never looked up — it is refused, and the
             // sentence says where it came from. Measured on 9.4:
@@ -666,6 +683,13 @@ impl Walk<'_> {
                 self.grand = self.grand.saturating_add(size);
             }
         }
+    }
+
+    /// Under `-c`, the grand total.
+    ///
+    /// The total is exempt from `-t`: measured, `du -t 1000000 -c` prints a
+    /// total line even when the threshold suppressed every row that made it up.
+    fn print_total(&mut self) {
         if self.cfg.total {
             let grand = self.grand;
             self.emit(grand, b"total");
@@ -1099,12 +1123,16 @@ fn meta_of(meta: &std::fs::Metadata) -> Meta {
 /// measured, `du -X '' t` is `du: '': No such file or directory` and
 /// `du --files0-from=` is `du: cannot open '' for reading: No such file or
 /// directory`, while both accept `-` and read stdin.
+///
+/// Standard input is descriptor 0 read directly: `io::stdin()` answers a read
+/// of a closed descriptor with end of file, where upstream's `getc` fails, and
+/// `du -X - t <&-` is `du: -: Bad file descriptor`.
 #[cfg(unix)]
 fn slurp(name: &[u8]) -> io::Result<Vec<u8>> {
     use std::io::Read;
     if name == b"-" {
         let mut text = Vec::new();
-        io::stdin().read_to_end(&mut text)?;
+        stdfd::RawStdin.read_to_end(&mut text)?;
         return Ok(text);
     }
     std::fs::read(os_from_bytes(name))
@@ -1116,6 +1144,7 @@ fn slurp(name: &[u8]) -> io::Result<Vec<u8>> {
 /// [`stdfd::close_stderr`].
 #[cfg(unix)]
 fn main() -> ExitCode {
+    stdfd::restore();
     stdfd::close_stderr(run_main(), 1)
 }
 
@@ -1139,31 +1168,38 @@ fn run_main() -> ExitCode {
         }
     };
 
+    // Standard output as stdio's: written through a buffer, its failures kept
+    // for `close_stdout` to report at the end, as upstream's `atexit` does.
+    let mut out = Stream::stdout();
     let (cfg, source) = match request {
         Request::Help => {
-            print!("{}", help_text());
-            return ExitCode::SUCCESS;
+            let _ = out.write_all(help_text().as_bytes());
+            return stdfd::close_stdout("du", out, ExitCode::SUCCESS);
         }
         Request::Version => {
-            println!("du (SlateOS coreutils) 0.1.0");
-            return ExitCode::SUCCESS;
+            let _ = out.write_all(b"du (SlateOS coreutils) 0.1.0\n");
+            return stdfd::close_stdout("du", out, ExitCode::SUCCESS);
         }
         Request::Run(cfg, source) => (cfg, source),
     };
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
     // diagnostic that never arrived has to reach `close_stderr`'s flag.
     let mut err = Stream::stderr();
 
+    let mut list_unread = false;
+    let mut list_close: Option<io::Result<()>> = None;
     let (roots, list) = match source {
         Source::Operands(names) => (names, None),
         Source::Files0From(from) => match read_operand_list(&from, &mut err) {
             // The label the diagnostics carry is the spelling as given, `-`
             // included: `du --files0-from=-` reports `du: -:2: …`.
-            Ok(names) => (names, Some(from)),
-            Err(status) => return ExitCode::from(status),
+            Ok(read) => {
+                list_unread = read.failed;
+                list_close = Some(read.closed);
+                (read.names, Some(from))
+            }
+            Err(status) => return stdfd::close_stdout("du", out, ExitCode::from(status)),
         },
     };
 
@@ -1175,19 +1211,24 @@ fn run_main() -> ExitCode {
         err: &mut err,
         seen: HashSet::new(),
         grand: 0,
-        failed: false,
-        list,
+        failed: list_unread,
+        list: list.clone(),
     };
-    walk.run(&roots);
-    let failed = walk.failed;
-    if out.flush().is_err() {
-        return ExitCode::from(1);
+    walk.run_names(&roots);
+    // "if (files_from && (ferror (stdin) || fclose (stdin) != 0) && ok)": the
+    // list's close, judged only when nothing else failed, and fatal -- before
+    // the total, with no reason, as `error (EXIT_FAILURE, 0, ...)` prints it.
+    let unclosed = !walk.failed && matches!(list_close, Some(Err(_)));
+    match (&list, unclosed) {
+        (Some(label), true) => walk.diagnose(&format!("du: error reading {}", quoteaf(label))),
+        _ => walk.print_total(),
     }
-    if failed {
+    let earned = if walk.failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
-    }
+    };
+    stdfd::close_stdout("du", out, earned)
 }
 
 /// Read `--files0-from`'s list into the operand vector, empty names included.
@@ -1196,9 +1237,12 @@ fn run_main() -> ExitCode {
 /// where it stands, because that is where GNU reports it. See the `list` field
 /// of [`Walk`].
 ///
-/// Failing to *read* the list is fatal and is worded differently from failing
-/// to *open* it, which is not a distinction one would invent — it exists
-/// because the two are separate calls in gnulib and a directory passes the
+/// Failing to *open* the list is fatal. Failing to *read* it is not: upstream
+/// streams the names with `argv_iter`, so a read error (`AI_ERR_READ`) is
+/// reported after the rows of the names read before it, and the run goes on --
+/// `du -c --files0-from=- <&-` still prints `0 total`, with status 1. The two
+/// are worded differently, which is not a distinction one would invent -- it
+/// exists because they are separate calls in gnulib and a directory passes the
 /// first and fails the second. Measured, on 9.4:
 ///
 /// ```text
@@ -1213,35 +1257,27 @@ fn run_main() -> ExitCode {
 /// only where the name needs it). An empty spelling is a file named `""` and
 /// not a second way to write `-`; see [`slurp`].
 #[cfg(unix)]
-fn read_operand_list(name: &[u8], err: &mut dyn Write) -> Result<Vec<Vec<u8>>, u8> {
+fn read_operand_list(name: &[u8], err: &mut dyn Write) -> Result<ListRead, u8> {
     use std::io::Read;
 
-    let text = if name == b"-" {
-        let mut text = Vec::new();
-        match io::stdin().read_to_end(&mut text) {
-            Ok(_) => text,
-            Err(error) => {
-                let line = format!("du: {}: read error: {}", quotef(name), strerror(&error));
-                let _ = writeln!(err, "{line}");
-                return Err(1);
-            }
-        }
+    let mut text = Vec::new();
+    // `read_to_end` keeps what it read before a failure, which is what the
+    // names upstream has already walked when `getdelim` fails are made of --
+    // a partial last name included, as `getdelim` returns one.
+    let (read, closed) = if name == b"-" {
+        // Descriptor 0 itself: `io::stdin()` would answer a closed one with
+        // end of file, where upstream's read fails.
+        let read = stdfd::RawStdin.read_to_end(&mut text);
+        (read, stdfd::close_stdin())
     } else {
         match std::fs::File::open(os_from_bytes(name)) {
             Ok(mut file) => {
-                let mut text = Vec::new();
-                match file.read_to_end(&mut text) {
-                    Ok(_) => text,
-                    Err(error) => {
-                        let line =
-                            format!("du: {}: read error: {}", quotef(name), strerror(&error));
-                        let _ = writeln!(err, "{line}");
-                        return Err(1);
-                    }
-                }
+                let read = file.read_to_end(&mut text);
+                (read, stdfd::close(file))
             }
             Err(error) => {
-                // `error (EXIT_FAILURE, …)`, so no referral follows.
+                // `error (EXIT_FAILURE, …)`, so no referral follows. Unchecked:
+                // a diagnostic that is lost is `close_stderr`'s to report.
                 let _ = writeln!(
                     err,
                     "du: cannot open {} for reading: {}",
@@ -1252,8 +1288,35 @@ fn read_operand_list(name: &[u8], err: &mut dyn Write) -> Result<Vec<Vec<u8>>, u
             }
         }
     };
+    let failed = match read {
+        Ok(_) => false,
+        Err(error) => {
+            // Unchecked, as above.
+            let _ = writeln!(
+                err,
+                "du: {}: read error: {}",
+                quotef(name),
+                strerror(&error)
+            );
+            true
+        }
+    };
+    Ok(ListRead {
+        names: split_nul(&text),
+        failed,
+        closed,
+    })
+}
 
-    Ok(split_nul(&text))
+/// What reading `--files0-from`'s list came to.
+#[cfg(unix)]
+struct ListRead {
+    /// The names, empty ones included, as far as the list could be read.
+    names: Vec<Vec<u8>>,
+    /// A read failed part-way, and has been reported.
+    failed: bool,
+    /// The list's close: upstream's `fclose (stdin)`, judged at the end.
+    closed: io::Result<()>,
 }
 
 // ------------------------------------------------------------------ tests ---

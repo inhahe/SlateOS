@@ -43,9 +43,9 @@ DIFF_PROG='read-error'
 DIFF_GNU_SOURCE=9.4
 DIFF_NO_REF=1
 DIFF_NEED="timeout"
-DIFF_BINS="b2sum base32 base64 cat cksum comm cut dircolors expand factor fold
-           head join md5sum nl numfmt od paste sha1sum sha256sum sha512sum sort
-           sum tail tee tr tsort unexpand uniq wc"
+DIFF_BINS="b2sum base32 base64 cat cksum comm csplit cut date dircolors du expand
+           factor fold head join md5sum nl numfmt od paste sha1sum sha256sum
+           sha512sum sort sum tail tee tr tsort unexpand uniq wc"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -55,7 +55,7 @@ have() { [ -e "$bindir/ours/$1" ]; }
 
 # --- fixtures -----------------------------------------------------------------
 fix=$DIFF_TMP/fix
-mkdir -p "$fix/adir"
+mkdir -p "$fix/adir" "$fix/cs"
 printf 'alpha\nbravo\ncharlie\n' > "$fix/f"
 printf 'a\tb\tc\n\tindented\n'   > "$fix/tabs"
 
@@ -188,6 +188,19 @@ sweep tail      -c +2
 sweep tail      -n 1 -
 sweep tail      f -
 sweep tail      - f
+# `du --files0-from=-` streams its list: a read error is reported, the run
+# goes on, and `-c` still prints its total. `-X -` fails as a refusal.
+sweep du        --files0-from=-
+sweep du        -c --files0-from=-
+sweep du        -X - f
+# `date -f -` names standard input `'standard input'`, quoted for its space,
+# and its read error ends the run.
+sweep date      -f -
+# `csplit -` reads as the split needs lines, so the read fails after the
+# first piece's file is made: its size is printed, then every file removed.
+# The pieces go to `cs/`, so that the fixture directory stays as it was.
+sweep csplit    -f cs/xx - 1
+sweep csplit    -f cs/xx - %x%
 # A read error that ends the run: no close is reached.
 sweep join      - f
 sweep join      f -
@@ -236,6 +249,9 @@ sweep sum       f
 sweep cat       f
 sweep head      f
 sweep tail      f
+sweep du        f
+sweep date      -f f
+sweep csplit    -f cs/xx f 1
 sweep od        f
 sweep uniq      f
 sweep sort      f

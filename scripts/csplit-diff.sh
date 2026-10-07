@@ -102,9 +102,19 @@ printf 'x\ny\nz' > nonl.txt
 # of the stderr the caller captures; `diff-wsl.sh` says why. The subshell does
 # not make it unnecessary — the subshell is the shell that waits on the child,
 # and it inherited the caller's redirected stderr along with everything else.
+#
+# `REDIR` is a redirection applied to `csplit` itself on both sides -- `<&-`,
+# `< .`, `>&-` -- for the cases about standard descriptors. Such a case runs
+# without `diff_run`, whose `4>&2` would need descriptor 2 open; `eval` only
+# for the redirection, the arguments staying in "$@".
+REDIR=
 run_side() {
   local side=$1 dir=$2; shift 2
-  ( cd "$dir" && diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" csplit "$@" )
+  if [ -n "$REDIR" ]; then
+    ( cd "$dir" && eval "env \${ENVV[@]+\"\${ENVV[@]}\"} PATH=\"\$bindir/\$side\" csplit \"\$@\" $REDIR" )
+  else
+    ( cd "$dir" && diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" csplit "$@" )
+  fi
 }
 
 # A manifest of everything the run left behind: each output file, in name
@@ -190,7 +200,7 @@ report() {
 run_case() {
   local fixture=$1; shift
   compare_argv "$fixture" in.txt "$@"
-  report "${ENVV[*]:+${ENVV[*]} }csplit $fixture $*"
+  report "${ENVV[*]:+${ENVV[*]} }csplit $fixture $*${REDIR:+ $REDIR}"
 }
 
 # The uncommon shape: the whole argv, for the cases that need something before
@@ -198,7 +208,7 @@ run_case() {
 raw_case() {
   local fixture=$1; shift
   compare_argv "$fixture" "$@"
-  report "csplit $*"
+  report "csplit $*${REDIR:+ $REDIR}"
 }
 
 # A case we expect to differ, with the reason. Counted separately so that a
@@ -454,6 +464,26 @@ run_case nonl.txt 3
 run_case nonl.txt '/z/'
 run_case empty.txt '/x/'
 run_case empty.txt '%x%'
+
+# --- standard descriptors that cannot be used -----------------------------------
+# A standard input that is closed, or a directory: upstream reads as the split
+# needs lines, so the read fails where the split first needs one -- after the
+# first piece's file is made, whose size, 0, the cleanup prints before every
+# file is removed. A skip pattern makes no file first, so nothing is counted;
+# `-s` counts nothing; `-k` keeps the empty file.
+REDIR='<&-'
+raw_case - - 1
+raw_case - - '/x/'
+raw_case - - '%x%'
+raw_case - -k - 1
+raw_case - -s - 1
+REDIR='< .'
+raw_case - - 1
+raw_case - - '/x/' '{*}'
+REDIR='>&-'
+run_case seq20.txt 4
+run_case seq20.txt 21
+REDIR=
 
 # --- not implemented ----------------------------------------------------------
 

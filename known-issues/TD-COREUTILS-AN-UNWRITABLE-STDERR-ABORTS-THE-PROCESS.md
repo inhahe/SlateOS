@@ -216,8 +216,8 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Eighteen programs still lack it: `awk bc chmod csplit date df dir du ed
-find hostname install kill ls more patch stat vdir`. That list is now
+all. Fifteen programs still lack it: `awk bc chmod df dir ed find hostname
+install kill ls more patch stat vdir`. That list is now
 pinned by `userspace/coreutils/tests/std_fds_guarded.rs`, which fails when
 a program is added without the guard, when one is converted without being
 taken off the list, and when a program has only one half of it. Two had
@@ -228,7 +228,12 @@ silent successes with their standard output closed. Both are fixed, and
 Since 2026-10-07 the guard also puts `SIGPIPE` back (design-decisions §1060),
 so each of these is also still the old exception there: a reader leaving
 ends it quietly with status 0 or the status it had earned, where GNU's dies
-of the signal with 141. (`tail` was converted on 2026-10-07, its output
+of the signal with 141. (`du`, `date` and `csplit` were converted on
+2026-10-07, each with its closed-standard-input fix: `du` flushes after every
+row, as upstream's `print_size` does, so a full disk's `write error` comes
+with no reason; `date` keeps one stdio buffer for the run, so the same failure
+comes with one.
+`tail` was converted on 2026-10-07, its output
 moved onto `stdio::StdioFile` with upstream's two ways of writing it -- file
 data through `xwrite_stdout`, which ends the run at its first failure, and
 the banners through `printf`, whose failure waits for `close_stdout` -- and

@@ -1938,36 +1938,63 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn glibc_measured() {
-        // (what is written, how many times, line-buffered,
-        //  glibc's pending bytes at the close, ferror then, close has a reason)
-        let rows: &[(&[u8], usize, bool, usize, bool, bool)] = &[
-            (&[b'x'; 5000], 1, false, 0, true, false),
-            (&[b'x'; 4096], 1, false, 0, true, false),
-            (&[b'x'; 100], 50, false, 900, true, true),
-            (&[b'x'; 1024], 4, false, 4096, false, true),
-            (&[b'x'; 1024], 5, false, 0, true, false),
-            (b"x\nxxx", 1, true, 0, true, false),
-            (b"x\nxxx", 2, true, 0, true, false),
-            (&[b'x'; 5000], 1, true, 0, true, false),
+        /// One measured case: what is written, how many times, whether
+        /// line-buffered -- and glibc's bytes still held at the close,
+        /// whether `ferror` was set by then, and whether the close's verdict
+        /// carried a reason.
+        struct Row {
+            piece: &'static [u8],
+            times: usize,
+            line: bool,
+            pending: usize,
+            ferror: bool,
+            reason: bool,
+        }
+        const fn row(
+            piece: &'static [u8],
+            times: usize,
+            line: bool,
+            pending: usize,
+            ferror: bool,
+            reason: bool,
+        ) -> Row {
+            Row {
+                piece,
+                times,
+                line,
+                pending,
+                ferror,
+                reason,
+            }
+        }
+        let rows = [
+            row(&[b'x'; 5000], 1, false, 0, true, false),
+            row(&[b'x'; 4096], 1, false, 0, true, false),
+            row(&[b'x'; 100], 50, false, 900, true, true),
+            row(&[b'x'; 1024], 4, false, 4096, false, true),
+            row(&[b'x'; 1024], 5, false, 0, true, false),
+            row(b"x\nxxx", 1, true, 0, true, false),
+            row(b"x\nxxx", 2, true, 0, true, false),
+            row(&[b'x'; 5000], 1, true, 0, true, false),
         ];
-        for &(piece, times, line, pending, ferror, reason) in rows {
-            let mode = if line {
+        for r in &rows {
+            let mode = if r.line {
                 Buffering::Line
             } else {
                 Buffering::Block
             };
             let (mut s, _keep) = full(mode);
-            for _ in 0..times {
-                let _ = s.write(piece);
+            for _ in 0..r.times {
+                let _ = s.write(r.piece);
             }
-            let row = format!("{} x {times}, line {line}", piece.len());
-            assert_eq!(inner(&s).buf.len(), pending, "pending: {row}");
-            assert_eq!(s.errored(), ferror, "ferror: {row}");
+            let what = format!("{} x {}, line {}", r.piece.len(), r.times, r.line);
+            assert_eq!(inner(&s).buf.len(), r.pending, "pending: {what}");
+            assert_eq!(s.errored(), r.ferror, "ferror: {what}");
             let e = s.finish().unwrap_err();
             assert_eq!(
                 !super::is_earlier_failure(&e),
-                reason,
-                "reason: {row}, got {e}"
+                r.reason,
+                "reason: {what}, got {e}"
             );
         }
     }

@@ -1120,11 +1120,54 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
 // pread / pwrite
 // ---------------------------------------------------------------------------
 
+/// Whether this process has found the kernel without `SYS_FS_PREAD` and
+/// `SYS_FS_PWRITE`, so that the positional calls go straight to the
+/// seek-transfer-seek emulation ([`at_position`]) rather than asking each
+/// time. Set by the first `NoSuchSyscall`; the kernel does not change.
+static NO_POSITIONAL_IO: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The kernel's positional read or write of `len` bytes at `buf`, at byte
+/// `offset` of the file `handle` is open on: one call, the handle's position
+/// neither read nor moved, so threads sharing a description can each read
+/// or write at their own offsets (`SYS_FS_PREAD`/`SYS_FS_PWRITE`, lane A's).
+/// Before them this library could only seek, transfer and seek back -- three
+/// calls, any of which another thread's use of the position could come
+/// between. Its answer, or `None` on a kernel without them, which is
+/// remembered ([`NO_POSITIONAL_IO`]).
+///
+/// On a handle opened for appending, a positional write lands at `offset`,
+/// as POSIX has it and lane A's kernel does (design-decisions §969); Linux,
+/// and this library's emulation, append it.
+fn positional_io(
+    handle: u64,
+    is_write: bool,
+    buf: *mut u8,
+    len: usize,
+    offset: u64,
+) -> Option<i64> {
+    use core::sync::atomic::Ordering;
+    if NO_POSITIONAL_IO.load(Ordering::Relaxed) {
+        return None;
+    }
+    let nr = if is_write {
+        SYS_FS_PWRITE
+    } else {
+        SYS_FS_PREAD
+    };
+    let ret = syscall4(nr, handle, buf as u64, len as u64, offset);
+    if ret == errno::native::NO_SUCH_SYSCALL {
+        NO_POSITIONAL_IO.store(true, Ordering::Relaxed);
+        return None;
+    }
+    Some(ret)
+}
+
 /// Read from a file at a given offset without changing the file position.
 ///
-/// This is implemented as seek→read→seek-back.  This is not atomic
-/// with respect to other threads, but sufficient for single-threaded
-/// programs.  Pipes and consoles return `ESPIPE`.
+/// One call to the kernel's positional read ([`positional_io`]); on a kernel
+/// without it, seek→read→seek-back, which another thread's use of the
+/// position can come between. Pipes and consoles return `ESPIPE`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT {
     // `ksys_pread64` (fs/read_write.c:652) fixes the whole order: `pos < 0`
@@ -1164,7 +1207,16 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
         return 0;
     }
 
-    // Save current position.
+    // `offset` is not negative (above), so it is the same number as a u64.
+    if let Some(ret) = positional_io(entry.handle, false, buf, count, offset as u64) {
+        return if ret < 0 {
+            errno::translate(ret) as SsizeT
+        } else {
+            ret as SsizeT
+        };
+    }
+
+    // A kernel without the positional call: save the current position.
     let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
     if saved < 0 {
         return errno::translate(saved) as SsizeT;
@@ -1201,7 +1253,10 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
 
 /// Write to a file at a given offset without changing the file position.
 ///
-/// Same seek→write→seek-back strategy as `pread`.
+/// One call to the kernel's positional write ([`positional_io`]), which on a
+/// descriptor opened with `O_APPEND` writes at `offset`, as POSIX has it
+/// (lane A's design-decisions §969) where Linux appends; on a kernel without
+/// it, seek→write→seek-back, as `pread`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> SsizeT {
     // Same order as `pread`, from `ksys_pwrite64` (fs/read_write.c:686):
@@ -1237,7 +1292,16 @@ pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> 
         return 0;
     }
 
-    // Save current position.
+    // `offset` is not negative (above), so it is the same number as a u64.
+    if let Some(ret) = positional_io(entry.handle, true, buf.cast_mut(), count, offset as u64) {
+        return if ret < 0 {
+            errno::translate(ret) as SsizeT
+        } else {
+            ret as SsizeT
+        };
+    }
+
+    // A kernel without the positional call: save the current position.
     let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
     if saved < 0 {
         return errno::translate(saved) as SsizeT;
@@ -1512,7 +1576,38 @@ fn vectored(
             }
             run()
         }
-        (VecPos::At(p), false) => at_position(&entry, SeekTo::Offset(p), run),
+        (VecPos::At(p), false) => {
+            // Each segment through the kernel's positional call
+            // (`positional_io`), at the offset the ones before it reached:
+            // the position is never touched, so no other thread's use of it
+            // can come between the segments. A kernel without the call
+            // says so on the first segment, before anything has moved, and
+            // the vector goes through `at_position` instead.
+            let absent = core::cell::Cell::new(false);
+            // `p` is not negative (checked first).
+            let mut at = p as u64;
+            // SAFETY: `import_vector` accepted `iov` for `iovcnt` segments.
+            let moved = unsafe {
+                transfer_segments(iov, iovcnt, total, |buf, len| {
+                    match positional_io(entry.handle, is_write, buf, len, at) {
+                        None => {
+                            absent.set(true);
+                            -1
+                        }
+                        Some(r) if r < 0 => errno::translate(r) as SsizeT,
+                        Some(r) => {
+                            at = at.saturating_add(r as u64);
+                            r as SsizeT
+                        }
+                    }
+                })
+            };
+            if absent.get() && moved <= 0 {
+                at_position(&entry, SeekTo::Offset(p), run)
+            } else {
+                moved
+            }
+        }
         (VecPos::At(_), true) => at_position(&entry, SeekTo::End, run),
     };
     if moved < 0 || !is_write {

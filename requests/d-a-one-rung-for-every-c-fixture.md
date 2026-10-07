@@ -113,18 +113,19 @@ will close them myself as each one goes on.
 | `ctest-cloexec-exec` | -- (filed with libc's half of `b-ad-close-on-exec-does-not-close-on-a-native-exec.md`, 2026-10-07); a close-on-exec pipe end is closed at a native exec, not when the new program exits; a failed exec keeps it; a handle a kept descriptor shares stays open. It execs itself from `/mnt/tests/`, sleeping two seconds three times at most; needs your `SYS_PROCESS_SET_EXEC_CLOSE` | file | 30 |
 | `ctest-record-locks` | -- (filed with `fcntl`'s record locks reaching your table, 2026-10-07; `d-a-native-programs-cannot-reach-the-record-lock-table.md`); a parent and forked children contend for byte ranges of a file in `/tmp`: a conflict refused and named by `F_GETLK`, an `F_SETLKW` wait, `EDEADLK`, a dup's close and an exit releasing, `lockf`, and `flock` as the open description's lock (a second open refused, a dup and a fork sharing, a blocking wait); needs your `SYS_FS_RECORD_LOCK` and `SYS_FS_FLOCK_HANDLE` | file | 30 |
 | `ctest-fsetfl-append` | -- (filed with `F_SETFL`'s `O_APPEND` reaching your description, 2026-10-07; `known-issues/D-POSIX-APPEND-SET-BY-FCNTL-IS-A-SEEK-THEN-A-WRITE.md`); a write landing at the end after `F_SETFL O_APPEND`, the flag cleared again, a dup sharing it, and two processes appending 2000 lines each through it without losing one; needs your `SYS_FS_SET_STATUS_FLAGS` | file | 60 |
+| `ctest-positional-io` | -- (filed with `pread`/`pwrite` on your positional calls, 2026-10-07); the position left alone by `pread`, `pwrite`, `preadv` and `pwritev`, and 20000 `pread`s undisturbed by another thread's seeks; needs your `SYS_FS_PREAD` and `SYS_FS_PWRITE` | file | 60 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
 
 The nine rows from `ctest-sigpipe` to `ctest-string` were added on
 2026-10-06, which made twenty-one fixtures waiting where the summary above
-says eleven; the nine after them came on 2026-10-07 -- GDB, Mono, binutils
+says eleven; the ten after them came on 2026-10-07 -- GDB, Mono, binutils
 and GCC on the image, each run by the fixture named for it, and Unix
 sockets with names, shared anonymous memory, close-on-exec at a native exec,
-record locks and appends, which your `SYS_UNIX_*`, native `MAP_SHARED`,
-`SYS_PROCESS_SET_EXEC_CLOSE`, `SYS_FS_RECORD_LOCK` and
-`SYS_FS_SET_STATUS_FLAGS` made possible.
+record locks, appends and positional I/O, which your `SYS_UNIX_*`, native
+`MAP_SHARED`, `SYS_PROCESS_SET_EXEC_CLOSE`, `SYS_FS_RECORD_LOCK`,
+`SYS_FS_SET_STATUS_FLAGS` and `SYS_FS_PREAD`/`PWRITE` made possible.
 `ctest-string` is
 the one whose subject every program runs: the C library's `memcpy`,
 `strlen`, `strcmp` and the rest became SSE2 that day, reading whole aligned

@@ -224,6 +224,16 @@ pub const SYS_FS_FLOCK_HANDLE: u64 = 1094;
 /// directory answers `IsADirectory`. Lane A's (1095); a kernel without it
 /// answers `NoSuchSyscall`.
 pub const SYS_FS_SET_STATUS_FLAGS: u64 = 1095;
+/// Read from a file handle at an explicit offset without reading or moving
+/// its position (POSIX `pread`): `fs_pread(handle, buf, len, offset)`, the
+/// bytes read. Lane A's (1080); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_FS_PREAD: u64 = 1080;
+/// Write to a file handle at an explicit offset without reading or moving
+/// its position (POSIX `pwrite`): `fs_pwrite(handle, buf, len, offset)`, the
+/// bytes written. On a handle opened for appending the offset still wins, as
+/// POSIX has it (lane A's design-decisions §969; Linux appends). Lane A's
+/// (1081); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_FS_PWRITE: u64 = 1081;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

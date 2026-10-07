@@ -59094,20 +59094,18 @@ is already waiting, not whether the setter exists.
   `get_properties_by_udev`.
 ## Lane D — POSIX, libc & toolchain
 
-- **crypt: libxcrypt's last four methods** (posix/src/crypt.rs).  $1$,
-  $5$, $6$ and, since 2026-10-06, yescrypt ($y$), scrypt ($7$), bcrypt
-  ($2a$, $2b$, $2x$, $2y$), traditional DES, bigcrypt and BSDi's DES ("_")
-  hash (posix/src/yescrypt.rs, bcrypt.rs, des.rs and posix/pwhash, ported
-  from libxcrypt 4.4.36 and held to it by
-  posix/tools/oracle/crypt_harness.py's 4399 answers), and encrypt/setkey
+- **crypt: libxcrypt's last three methods** (posix/src/crypt.rs).  $1$,
+  $5$, $6$ and, since 2026-10-06/07, yescrypt ($y$), gost-yescrypt ($gy$),
+  scrypt ($7$), bcrypt ($2a$, $2b$, $2x$, $2y$), traditional DES, bigcrypt
+  and BSDi's DES ("_") hash (posix/src/yescrypt.rs, bcrypt.rs, des.rs and
+  posix/pwhash, ported from libxcrypt 4.4.36 and held to it by
+  posix/tools/oracle/crypt_harness.py's 4812 answers), and encrypt/setkey
   are real DES (its 156); every other setting gets the failure token "*0"
   with EINVAL, as libxcrypt answers for a method it lacks.  Ubuntu 24.04's
-  libxcrypt also has, probed 2026-09-26: gost-yescrypt ($gy$, ALT Linux's
-  default; yescrypt with GOST R 34.11-2012 Streebog around it), sha1crypt
-  ($sha1$, NetBSD's), SunMD5 ($md5, Solaris's) and NT ($3$, FreeBSD's
-  MD4 of the UTF-16 password).  Next: gost-yescrypt, which reuses the
-  yescrypt port and needs Streebog in posix/pwhash; then sha1crypt, SunMD5
-  and NT.  Port from D:\refsrc\libxcrypt-4.4.36, per design-decisions.md
+  libxcrypt also has, probed 2026-09-26: sha1crypt ($sha1, NetBSD's:
+  HMAC-SHA1 iterated), SunMD5 ($md5, Solaris's) and NT ($3$, FreeBSD's MD4
+  of the UTF-16 password).  Next: those three, each a hash posix/pwhash has
+  not yet (SHA-1, MD4) or has (MD5).  Port from D:\refsrc\libxcrypt-4.4.36, per design-decisions.md
   §539: primitives ported, not written -- the hashing into posix/pwhash,
   compiled for speed (§1183), the setting's parsing into posix; extend
   crypt_harness.py's KA_SETTINGS with the method's rows of ka-table.inc.

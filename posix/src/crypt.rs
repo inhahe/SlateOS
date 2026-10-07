@@ -4,12 +4,13 @@
 //! the shadow suite's — following Ulrich Drepper's specification ("Unix
 //! crypt using SHA-256 and SHA-512"); legacy MD5 crypt (`$1$`, Poul-Henning
 //! Kamp's algorithm); yescrypt (`$y$`) and scrypt (`$7$`), which Ubuntu,
-//! Debian and Fedora hash new passwords with; bcrypt (`$2a$`, `$2b$`,
+//! Debian and Fedora hash new passwords with, and gost-yescrypt (`$gy$`),
+//! ALT Linux's; bcrypt (`$2a$`, `$2b$`,
 //! `$2x$`, `$2y$`), OpenBSD's; and the DES methods -- traditional DES (no
 //! prefix), bigcrypt and BSDi's extended DES (`_`) -- the last three
 //! families ported from libxcrypt (`yescrypt.rs`, `bcrypt.rs` and `des.rs`
 //! read their settings).  The hashing itself -- SHA-2, MD5, the SHA-crypt
-//! and md5crypt rounds, yescrypt's KDF, Eksblowfish, DES -- is the `pwhash`
+//! and md5crypt rounds, yescrypt's KDF, Streebog, Eksblowfish, DES -- is the `pwhash`
 //! crate's, compiled for speed where this one is compiled for size (its
 //! crate docs); this module implements the settings' parsing, the crypt
 //! base-64 encoding, the C ABI, and the dispatch of a setting to its method.
@@ -54,8 +55,8 @@
 //! | the passphrase is 512 bytes or longer | `ERANGE` |
 //! | the setting has a space, a control or non-ASCII byte, or one of `! * : ; \` | `EINVAL` |
 //! | the setting names no method this module implements | `EINVAL` |
-//! | a `$y$` or `$7$` setting is 212 bytes or longer (see below) | `ERANGE` |
-//! | a `$y$` or `$7$` setting the method refuses, or no memory for its hash | `EINVAL` |
+//! | a `$y$`, `$gy$` or `$7$` setting is 212 bytes or longer (see below) | `ERANGE` |
+//! | a `$y$`, `$gy$` or `$7$` setting the method refuses, or no memory for its hash | `EINVAL` |
 //! | a bcrypt setting the method refuses (a cost below 04), or its self-test failing | `EINVAL` |
 //! | a DES setting with a character outside the salt alphabet where it reads one, or a `_` setting shorter than nine | `EINVAL` |
 //!
@@ -80,8 +81,8 @@
 //!
 //! ## Unsupported methods
 //!
-//! gost-yescrypt (`$gy$`), sha1crypt (`$sha1$`), SunMD5 (`$md5`) and NT
-//! (`$3$`), libxcrypt's remaining methods, are **not** implemented: their
+//! sha1crypt (`$sha1`), SunMD5 (`$md5`) and NT (`$3$`), libxcrypt's
+//! remaining methods, are **not** implemented: their
 //! settings fail with the token and `EINVAL`, never with a fabricated hash.
 //! (See `todo.txt` for the follow-ups.)
 //!
@@ -493,7 +494,8 @@ pub(crate) unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 /// `crypt` — one-way password hashing.
 ///
 /// Supports `$1$` (MD5), `$5$` (SHA-256), `$6$` (SHA-512), `$y$` (yescrypt),
-/// `$7$` (scrypt), `$2a$`/`$2b$`/`$2x$`/`$2y$` (bcrypt), `_` (BSDi's DES)
+/// `$gy$` (gost-yescrypt), `$7$` (scrypt), `$2a$`/`$2b$`/`$2x$`/`$2y$`
+/// (bcrypt), `_` (BSDi's DES)
 /// and two salt characters (traditional DES and bigcrypt) settings; the
 /// SHA methods accept an optional `rounds=N$`, and the others carry their
 /// own parameters.  `crypt_gensalt` (`gensalt.rs`) makes new ones.  A
@@ -694,6 +696,10 @@ pub enum Method {
     /// setting asks for libxcrypt's default cost: N = 2^14, r = 32, 64 MiB a
     /// hash.
     Scrypt,
+    /// `$gy$` — gost-yescrypt, ALT Linux's default: yescrypt's hash through
+    /// two HMACs of GOST R 34.11-2012 (`yescrypt.rs`).  A new setting asks
+    /// for yescrypt's default cost, `$gy$j9T$`.
+    GostYescrypt,
     /// `$2b$` — bcrypt, OpenBSD's default, which `htpasswd -B` writes.  A
     /// new setting asks for libxcrypt's default cost, `$2b$05$`: 2^5 rounds
     /// of Eksblowfish's key setup.  Stored `$2a$`, `$2x$` and `$2y$` entries
@@ -721,6 +727,7 @@ impl Method {
             Self::Sha256 => "$5$",
             Self::Sha512 => "$6$",
             Self::Yescrypt => "$y$",
+            Self::GostYescrypt => "$gy$",
             Self::Scrypt => "$7$",
             Self::Bcrypt => "$2b$",
             Self::Des => "",
@@ -735,6 +742,7 @@ impl Method {
     fn setting_head(self) -> &'static str {
         match self {
             Self::Yescrypt => "$y$j9T$",
+            Self::GostYescrypt => "$gy$j9T$",
             // N = 2^14 ('C'), then r = 32 and p = 1 in five characters each.
             Self::Scrypt => "$7$CU..../....",
             // Cost 5, in two digits.
@@ -757,7 +765,7 @@ impl Method {
     pub fn hash_len(self) -> usize {
         match self {
             Self::Md5 => 22,
-            Self::Sha256 | Self::Yescrypt | Self::Scrypt => 43,
+            Self::Sha256 | Self::Yescrypt | Self::GostYescrypt | Self::Scrypt => 43,
             Self::Bcrypt => 31,
             Self::Sha512 => 86,
             Self::Des | Self::BsdiDes => 11,
@@ -778,7 +786,7 @@ impl Method {
         match self {
             Self::Md5 => MD5_SALT_MAX,
             Self::Sha256 | Self::Sha512 => SALT_MAX,
-            Self::Yescrypt | Self::Scrypt => YESCRYPT_SALT_MAX,
+            Self::Yescrypt | Self::GostYescrypt | Self::Scrypt => YESCRYPT_SALT_MAX,
             Self::Bcrypt => BCRYPT_SALT_LEN,
             Self::Des => 2,
             Self::BsdiDes => 8,
@@ -796,7 +804,8 @@ impl Method {
             && !salt.is_empty()
             && salt.len() <= self.salt_max()
             && salt.iter().copied().all(is_b64)
-            && (self != Self::Yescrypt || crate::yescrypt::is_yescrypt_salt(salt))
+            && (!matches!(self, Self::Yescrypt | Self::GostYescrypt)
+                || crate::yescrypt::is_yescrypt_salt(salt))
             && (self != Self::Bcrypt || crate::bcrypt::is_salt(salt))
     }
 
@@ -810,6 +819,9 @@ impl Method {
             } else {
                 Self::Des
             });
+        }
+        if setting.starts_with(b"$gy$") {
+            return Some(Self::GostYescrypt);
         }
         match setting.get(..3)? {
             b"$1$" => Some(Self::Md5),
@@ -1024,7 +1036,10 @@ pub fn stored_method(stored: &[u8]) -> Option<Method> {
     if matches!(method, Method::Des | Method::BsdiDes) {
         return crate::des::stored_kind(stored).is_some().then_some(method);
     }
-    if matches!(method, Method::Yescrypt | Method::Scrypt) {
+    if matches!(
+        method,
+        Method::Yescrypt | Method::GostYescrypt | Method::Scrypt
+    ) {
         return crate::yescrypt::is_stored_hash(stored, CRYPT_OUTPUT_LEN).then_some(method);
     }
     if method == Method::Bcrypt {
@@ -1191,17 +1206,18 @@ mod tests {
             let named = Method::from_prefix(result.as_bytes());
             assert!(named.is_some(), "{line}");
             assert_eq!(stored_method(result.as_bytes()), named, "{line}");
-            // A stored yescrypt, scrypt, bcrypt or DES hash is its own
-            // setting -- yescrypt's salt read to the last `$`, bcrypt's 22
-            // characters and nothing after, DES's two characters (and its
-            // length, which tells a bigcrypt hash's blocks from one), BSDi's
-            // nine: new here, so each is verified too.  (A second hash each;
-            // the SHA and MD5 entries' verification has tests of its own,
-            // and would double this test's time.)
+            // A stored yescrypt, gost-yescrypt, scrypt, bcrypt or DES hash
+            // is its own setting -- yescrypt's salt read to the last `$`,
+            // bcrypt's 22 characters and nothing after, DES's two characters
+            // (and its length, which tells a bigcrypt hash's blocks from
+            // one), BSDi's nine: new here, so each is verified too.  (A
+            // second hash each; the SHA and MD5 entries' verification has
+            // tests of its own, and would double this test's time.)
             if matches!(
                 named,
                 Some(
                     Method::Yescrypt
+                        | Method::GostYescrypt
                         | Method::Scrypt
                         | Method::Bcrypt
                         | Method::Des
@@ -1211,7 +1227,7 @@ mod tests {
                 assert!(verify(&password, result.as_bytes()), "{line}");
             }
         }
-        assert_eq!(lines, 4399, "the oracle's every line");
+        assert_eq!(lines, 4812, "the oracle's every line");
     }
 
     // -----------------------------------------------------------------------
@@ -2104,6 +2120,7 @@ mod tests {
             Method::Sha256,
             Method::Sha512,
             Method::Yescrypt,
+            Method::GostYescrypt,
             Method::Scrypt,
             Method::Bcrypt,
         ] {

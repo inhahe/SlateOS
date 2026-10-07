@@ -20,8 +20,10 @@ The cases:
 
 - libxcrypt's own known-answer table's 92 passwords (test/ka-table.inc in
   its source) under that table's settings for the methods posix implements
-  -- MD5, SHA-256, SHA-512, scrypt, yescrypt, bcrypt's four variants,
-  traditional DES, bigcrypt and BSDi's DES;
+  -- MD5, SHA-256, SHA-512, scrypt, yescrypt, gost-yescrypt, bcrypt's four
+  variants, traditional DES, bigcrypt and BSDi's DES;
+- gost-yescrypt over yescrypt's modes, salts, passwords and refusals, and
+  the room its one more byte takes;
 - the DES methods over salts at each end of the alphabet, passwords around
   the eight characters each block reads, to bigcrypt's sixteen blocks and
   past them, under traditional and bigcrypt settings, BSDi's counts, salts
@@ -168,6 +170,10 @@ KA_SETTINGS = [
     "$y$j75$LdJMENpBABJJ3hIHjB1Bi.",
     "$y$j85$.......",
     "$y$j85$LdJMENpBABJJ3hIHjB1Bi.",
+    "$gy$j75$.......",
+    "$gy$j75$LdJMENpBABJJ3hIHjB1Bi.",
+    "$gy$j85$.......",
+    "$gy$j85$LdJMENpBABJJ3hIHjB1Bi.",
     "$2a$04$CCCCCCCCCCCCCCCCCCCCC.",
     "$2a$04$abcdefghijklmnopqrstuu",
     "$2a$05$CCCCCCCCCCCCCCCCCCCCC.",
@@ -403,6 +409,35 @@ def generated():
         cases.append((word, "_J9..abcd"))
     for word in [b"\x80", b"\xff" * 9, b"\xc3\xa9t\xc3\xa9"]:
         cases.append((word, "_J9..abcd"))
+    # gost-yescrypt: yescrypt's settings under `$gy$` -- each mode, the
+    # prehash, salts of each length and the ones that do not decode, a whole
+    # hash as the setting, passwords to the limit -- and what it refuses.
+    def gy(s):
+        return "$gy$" + s[3:]
+    for n_log2, r, p, t in [(2, 1, 1, 0), (4, 1, 1, 0), (4, 1, 1, 2), (8, 8, 1, 0), (6, 2, 3, 1)]:
+        cases.append((pw, gy(y(RW, n_log2, r, p, t))))
+    cases.append((pw, gy(y(WORM, 8, 8, 1, 1))))
+    cases.append((pw, gy(y(CLASSIC, 8, 8))))
+    cases.append((pw, gy(y(RW, 12, 32, salt="PKXc3hCOSyMqdaEQArI62/"))))
+    for n in [0, 1, 2, 15, 16, 17, 63, 64]:
+        salt = enc64(bytes((i * 37 + 11) & 0xFF for i in range(n)))
+        cases.append((pw, gy(y(RW, 4, 1, salt=salt))))
+    for salt in ["z", "ab$cd", "ab$", "$", "." * 86 + "/", "x" * 86]:
+        cases.append((pw, gy(y(RW, 4, 1, salt=salt))))
+    cases.append((pw, "$gy$j75$LdJMENpBABJJ3hIHjB1Bi.$tUlUF19mIl6XpRTpX7LBp5ABKS8KSmDfP1gXFrZ6Sy8"))
+    for n in [0, 1, 31, 32, 33, 64, 65, 200, 511]:
+        word = bytes((i * 7 + 1) % 255 + 1 for i in range(n))
+        cases.append((word, gy(y(RW, 5, 2))))
+    for s in ["$gy$", "$gy$j", "$gy$j75", "$gy$j75$", "$gy$$", "$gy$-75$abcd", gy(y(RW, 1, 1)),
+              gy(y(RW, 4, 1, g=1)), "$gy", "$g$j75$abcd", "$GY$j75$abcd"]:
+        cases.append((pw, s))
+    # Room: a `$gy$` setting is a byte longer than its `$y$` one, and 211
+    # bytes are the most posix's 256 take. (At 212 posix's answer is ERANGE
+    # and libxcrypt's, with 384, the salt's EINVAL: left out, as above.)
+    head = "$gy$j75$"
+    for total in [210, 211]:
+        cases.append((pw, head + "." * (total - len(head))))
+
     # What the three refuse: no salt character, too short, a character
     # outside the alphabet where one is read.
     for s in ["", "a", "a{", "{a", "a$", ".", "_", "_J9..abc", "_J9.-abcd", "_J9..abc-",
@@ -566,7 +601,7 @@ def gensalt_cases():
 
     lines = []
     # Every method's prefix: BSDi's DES's `_`, and traditional DES's none.
-    prefixes = ["$y$", "$7$", "$2b$", "$2y$", "$2a$", "$2x$", "$6$", "$5$", "$1$", "_", "-"]
+    prefixes = ["$y$", "$gy$", "$7$", "$2b$", "$2y$", "$2a$", "$2x$", "$6$", "$5$", "$1$", "_", "-"]
     counts = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 31, 32, 999, 1000, 4999, 5000,
               5001, 999999999, 1000000000, 4294967296, 18446744073709551615]
     # Every method at every cost, with the bytes it takes by default.

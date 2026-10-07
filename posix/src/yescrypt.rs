@@ -1,9 +1,13 @@
-//! yescrypt and classic scrypt: the `$y$` and `$7$` methods of `crypt`.
+//! yescrypt, classic scrypt and gost-yescrypt: the `$y$`, `$7$` and `$gy$`
+//! methods of `crypt`.
 //!
 //! Ubuntu, Debian and Fedora hash new passwords with yescrypt -- `$y$j9T$`
 //! is N = 4096, r = 32, 16 MiB of memory a hash -- so an `/etc/shadow`
 //! brought from any of them names it, and until 2026-10-06 such an entry
-//! could not be verified here.
+//! could not be verified here.  ALT Linux hashes with gost-yescrypt:
+//! yescrypt's hash, put through two HMACs of GOST R 34.11-2012, the Russian
+//! standard hash (`pwhash::streebog`), so that its strength rests on that
+//! standard's too.
 //!
 //! This module is the settings and the C-facing checks; the KDF itself is
 //! `pwhash::yescrypt`, a crate of its own so that it compiles for speed
@@ -15,6 +19,8 @@
 //!   and `yescrypt_r`;
 //! - from `crypt-yescrypt.c` and `crypt-scrypt.c`, the checks `crypt` makes
 //!   before hashing: the output's room, and a `$7$` salt's characters;
+//! - `crypt-gost-yescrypt.c`: the `$gy$` method around `yescrypt_r`, and
+//!   its `crypt_gensalt`;
 //! - the memory, which `pwhash` cannot allocate: libxcrypt's
 //!   `yescrypt_local_t`, from this libc's `calloc`.  A hash that cannot get
 //!   its memory fails.
@@ -30,6 +36,9 @@
 //!   Copyright (C) 2018 Björn Esser <besser82@fedoraproject.org>
 //! crypt-yescrypt.c:
 //!   Copyright (C) 2018 vt@altlinux.org
+//! crypt-gost-yescrypt.c:
+//!   Copyright (C) 2018 vt@altlinux.org
+//!   Copyright (C) 2018 Björn Esser besser82@fedoraproject.org
 //!
 //! Redistribution and use in source and binary forms, with or without
 //! modification, are permitted.
@@ -318,27 +327,78 @@ pub(crate) enum Refused {
     Invalid,
 }
 
-/// Whether `setting` names yescrypt (`$y$`) or scrypt (`$7$`), the methods
-/// [`crypt`] computes.
+/// Whether `setting` names yescrypt (`$y$`), scrypt (`$7$`) or
+/// gost-yescrypt (`$gy$`), the methods [`crypt`] computes.
 pub(crate) fn names_method(setting: &[u8]) -> bool {
-    setting.starts_with(b"$y$") || setting.starts_with(b"$7$")
+    setting.starts_with(b"$y$") || setting.starts_with(b"$7$") || setting.starts_with(b"$gy$")
 }
 
-/// `crypt` for a `$y$` or `$7$` setting -- `crypt_yescrypt_rn` and
-/// `crypt_scrypt_rn` -- into `out`, whose length is the output's room
-/// (libxcrypt's `CRYPT_OUTPUT_SIZE`): the setting through its salt, `$`,
-/// and the hash in 43 characters.  The bytes written, without a NUL, which
-/// there is room for.
+/// `crypt` for a `$y$`, `$7$` or `$gy$` setting -- `crypt_yescrypt_rn`,
+/// `crypt_scrypt_rn` and `crypt_gost_yescrypt_rn` -- into `out`, whose
+/// length is the output's room (libxcrypt's `CRYPT_OUTPUT_SIZE`): the
+/// setting through its salt, `$`, and the hash in 43 characters.  The bytes
+/// written, without a NUL, which there is room for.
 pub(crate) fn crypt(passwd: &[u8], setting: &[u8], out: &mut [u8]) -> Result<usize, Refused> {
     // Room for all of the setting -- though only its head is repeated --
     // `$`, the hash and a NUL.
     if out.len() < setting.len() + AFTER_SETTING {
         return Err(Refused::Range);
     }
+    if setting.starts_with(b"$gy$") {
+        return gost(passwd, setting, out).ok_or(Refused::Invalid);
+    }
     if setting.starts_with(b"$7$") && !scrypt_salt_ok(setting) {
         return Err(Refused::Invalid);
     }
     hash(passwd, setting, out).ok_or(Refused::Invalid)
+}
+
+/// `crypt_gost_yescrypt_rn`, past its room check: yescrypt's hash of the
+/// `$y$` setting the `$gy$` one is -- `$y$` and what follows `$gy$` --
+/// then, in its place, `HMAC(HMAC(Streebog(K), S), Y)`: K the password, Y
+/// yescrypt's 32 bytes, S the setting through its salt (as libxcrypt
+/// measures it, the length of the `$y$` output's head, which is the `$gy$`
+/// setting's without its last `$`), each HMAC R 50.1.113-2016's over
+/// GOST R 34.11-2012 at 256 bits.
+fn gost(passwd: &[u8], setting: &[u8], out: &mut [u8]) -> Option<usize> {
+    let rest = setting.strip_prefix(b"$gy$")?;
+    // The `$y$` setting, one byte shorter: the room check before this
+    // found room for the `$gy$` one.
+    let mut ysetting = [0u8; 256];
+    let ylen = 3 + rest.len();
+    let head = ysetting.get_mut(..ylen)?;
+    head[..3].copy_from_slice(b"$y$");
+    head[3..].copy_from_slice(rest);
+    let hashed = hash(passwd, &ysetting[..ylen], &mut out[1..]);
+    wipe(&mut ysetting);
+    let total = 1 + hashed?;
+    // `$y$...` became `$gy$...`, the `$` before it the first byte.
+    out[0] = b'$';
+    out[1] = b'g';
+    // The hash follows the `$` after the parameters and the one after the
+    // salt; a salt that decoded has no `$` of its own.
+    let after_params = 4 + out[4..total].iter().position(|&c| c == b'$')?;
+    let hash_at = after_params
+        + 2
+        + out[after_params + 1..total]
+            .iter()
+            .position(|&c| c == b'$')?;
+    let mut y = [0u8; 32];
+    if decode64(&mut y, &out[hash_at..total]) != Some(y.len()) {
+        wipe(&mut y);
+        return None;
+    }
+    let mut hk = pwhash::streebog::hash256(&[passwd]);
+    let interm = pwhash::streebog::hmac256(&hk, setting.get(..hash_at - 1)?);
+    wipe(&mut hk);
+    let mut interm = interm?;
+    let gy = pwhash::streebog::hmac256(&interm, &y);
+    wipe(&mut interm);
+    wipe(&mut y);
+    let mut gy = gy?;
+    let written = encode64(&mut out[hash_at..], &gy);
+    wipe(&mut gy);
+    Some(hash_at + written?)
 }
 
 /// `yescrypt_r(NULL, local, passwd, setting, NULL, out)`.
@@ -379,6 +439,17 @@ fn hash(passwd: &[u8], setting: &[u8], out: &mut [u8]) -> Option<usize> {
 /// What it cannot know is whether the memory will be there: a hash asking
 /// for more than the machine has passes here and fails when computed.
 pub(crate) fn is_stored_hash(stored: &[u8], room: usize) -> bool {
+    if let Some(rest) = stored.strip_prefix(b"$gy$") {
+        // gost-yescrypt's is yescrypt's shape with `$gy$` for `$y$`: a byte
+        // longer, so the room it needs is a byte more.
+        let mut y = [0u8; 256];
+        let Some(head) = y.get_mut(..3 + rest.len()) else {
+            return false;
+        };
+        head[..3].copy_from_slice(b"$y$");
+        head[3..].copy_from_slice(rest);
+        return is_stored_hash(&y[..3 + rest.len()], room.saturating_sub(1));
+    }
     let Some(parsed) = parse(stored) else {
         return false;
     };
@@ -482,6 +553,25 @@ pub(crate) fn gensalt(
         return Err(Refused::Range);
     }
     Ok(n)
+}
+
+/// `gensalt_gost_yescrypt_rn`: [`gensalt`]'s setting with `$gy$` for `$y$`.
+/// Its own room check is a byte weaker than the one `gensalt` makes in a
+/// byte less, which therefore decides; both are libxcrypt's.
+pub(crate) fn gensalt_gost(
+    count: u64,
+    rbytes: &[u8],
+    out: &mut [u8],
+) -> Result<usize, crate::gensalt::Refused> {
+    use crate::gensalt::Refused;
+    if out.len() < 4 + 8 * 6 + base64_len(rbytes.len().min(64)) + 1 {
+        return Err(Refused::Range);
+    }
+    let n = gensalt(count, rbytes, &mut out[1..])?;
+    // `$y$...` one byte on: `$gy$...`.
+    out[0] = b'$';
+    out[1] = b'g';
+    Ok(n + 1)
 }
 
 /// `gensalt_scrypt_rn`: a new `$7$` setting at cost `count` -- 6 to 11, N =

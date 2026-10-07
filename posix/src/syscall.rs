@@ -217,6 +217,13 @@ pub const SYS_FS_RECORD_LOCK: u64 = 1093;
 /// a kernel without it answers `NoSuchSyscall`, and [`SYS_FS_FLOCK`]'s
 /// path-keyed, per-process table is what is left.
 pub const SYS_FS_FLOCK_HANDLE: u64 = 1094;
+/// Set an open description's status flags, as `fcntl(F_SETFL)` does:
+/// `fs_set_status_flags(handle, native_flags)`. Only the native `APPEND`
+/// (0x10) is taken: with it, each write lands at the file's end as it is
+/// when the write lands, for every descriptor sharing the handle. A
+/// directory answers `IsADirectory`. Lane A's (1095); a kernel without it
+/// answers `NoSuchSyscall`.
+pub const SYS_FS_SET_STATUS_FLAGS: u64 = 1095;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

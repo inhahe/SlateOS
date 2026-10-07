@@ -552,6 +552,13 @@ const SETFL_MASK: i32 = 0o2000 | 0o4000 | 0o4_010_000;
 /// mode bits from the original `open()` are preserved, and only the
 /// changeable bits are updated.
 ///
+/// The flags are the open file description's, not the descriptor's
+/// (POSIX), so every descriptor sharing this one's kernel handle -- a `dup`,
+/// a `dup2`, a copy inherited across `fork` -- takes the change too, as on
+/// Linux, where `F_SETFL` on one end of a `dup` is seen by `F_GETFL` on the
+/// other. Until 2026-10-07 only `fd` changed. A socket not yet created or
+/// bound has no handle (0), and shares nothing with another such socket.
+///
 /// Returns `true` on success, `false` if the fd is not open.
 #[must_use]
 pub fn set_status_flags(fd: i32, new_flags: i32) -> bool {
@@ -563,13 +570,24 @@ pub fn set_status_flags(fd: i32, new_flags: i32) -> bool {
     // this reference is unique.
     unsafe {
         let table = &mut *table_ptr();
-        if let Some(Some(entry)) = table.get_mut(fd as usize) {
-            // Preserve access mode, replace changeable bits.
-            entry.status_flags = (entry.status_flags & !SETFL_MASK) | (new_flags & SETFL_MASK);
-            true
-        } else {
-            false
+        let Some(Some(target)) = table.get(fd as usize) else {
+            return false;
+        };
+        let (kind, handle) = (target.kind, target.handle);
+        let shares = handle != 0
+            || !matches!(
+                kind,
+                HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
+            );
+        for (i, slot) in table.iter_mut().enumerate() {
+            if let Some(entry) = slot
+                && (i == fd as usize || (shares && entry.kind == kind && entry.handle == handle))
+            {
+                // Preserve access mode, replace changeable bits.
+                entry.status_flags = (entry.status_flags & !SETFL_MASK) | (new_flags & SETFL_MASK);
+            }
         }
+        true
     }
 }
 
@@ -1063,6 +1081,44 @@ mod tests {
         assert_ne!(flags & 0o2000, 0, "O_APPEND should be set");
 
         let _ = close_fd(fd);
+    }
+
+    /// The flags are the open description's: a descriptor sharing the
+    /// handle takes the change; one with another handle does not, nor does
+    /// one unconnected socket (handle 0) take another's.
+    #[test]
+    fn status_flags_are_the_open_descriptions() {
+        let a = alloc_fd_with_flags(HandleKind::File, 4242, 2).unwrap();
+        let b = alloc_fd_with_flags(HandleKind::File, 4242, 2).unwrap(); // a's dup
+        let c = alloc_fd_with_flags(HandleKind::File, 4343, 1).unwrap(); // another open
+        assert!(set_status_flags(a, 0o2000 | 2)); // O_APPEND
+        assert_ne!(
+            get_status_flags(b).unwrap() & 0o2000,
+            0,
+            "the dup sees O_APPEND"
+        );
+        assert_eq!(
+            get_status_flags(b).unwrap() & 3,
+            2,
+            "and keeps its access mode"
+        );
+        assert_eq!(
+            get_status_flags(c).unwrap() & 0o2000,
+            0,
+            "another open does not"
+        );
+        let s1 = alloc_fd_with_flags(HandleKind::TcpStream, 0, 2).unwrap();
+        let s2 = alloc_fd_with_flags(HandleKind::TcpStream, 0, 2).unwrap();
+        assert!(set_status_flags(s1, 0o4000 | 2)); // O_NONBLOCK
+        assert_ne!(get_status_flags(s1).unwrap() & 0o4000, 0);
+        assert_eq!(
+            get_status_flags(s2).unwrap() & 0o4000,
+            0,
+            "two unconnected sockets share nothing"
+        );
+        for fd in [a, b, c, s1, s2] {
+            let _ = close_fd(fd);
+        }
     }
 
     #[test]

@@ -13,6 +13,8 @@
 //!   kernel's lock table (`SYS_FS_RECORD_LOCK`), which the Linux `fcntl`
 //!   shares; see [`record_lock`]
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::errno;
 use crate::fdtable;
 use crate::types::*;
@@ -139,7 +141,11 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
             // Change mutable file status flags (O_APPEND, O_NONBLOCK, O_SYNC).
             // Access mode bits (O_ACCMODE) are preserved by set_status_flags().
             #[allow(clippy::cast_possible_truncation)]
-            if fdtable::set_status_flags(fd, arg as i32) {
+            let flags = arg as i32;
+            if entry.kind == fdtable::HandleKind::File {
+                give_kernel_append(entry.handle, flags & crate::fcntl::O_APPEND != 0);
+            }
+            if fdtable::set_status_flags(fd, flags) {
                 0
             } else {
                 errno::set_errno(errno::EBADF);
@@ -166,6 +172,54 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fcntl64(fd: Fd, cmd: i32, arg: i64) -> i32 {
     fcntl(fd, cmd, arg)
+}
+
+// ---------------------------------------------------------------------------
+// O_APPEND
+// ---------------------------------------------------------------------------
+
+/// The native open flag `APPEND` (`file.rs`'s `translate_open_flags`).
+const NATIVE_APPEND: u64 = 0x10;
+
+/// Whether the kernel has taken an append flag from this process through
+/// `SYS_FS_SET_STATUS_FLAGS`. Once it has, every `O_APPEND` in this
+/// process's descriptor table is the kernel's too -- given at `open`, which
+/// the kernel has always appended for, or by `F_SETFL` through that call,
+/// the only other way a file descriptor gets the flag -- and `write` need not
+/// seek to the end first ([`kernel_keeps_append`]). Per process: a `fork`
+/// copies it, on the same kernel, and an `exec` starts again from `false`,
+/// where `write` seeks as before until an `F_SETFL` shows the call is there.
+static KERNEL_KEEPS_APPEND: AtomicBool = AtomicBool::new(false);
+
+/// Whether `write` can leave `O_APPEND` to the kernel: see
+/// [`KERNEL_KEEPS_APPEND`].
+pub(crate) fn kernel_keeps_append() -> bool {
+    KERNEL_KEEPS_APPEND.load(Ordering::Relaxed)
+}
+
+/// Give the kernel the open description's append flag, as `F_SETFL` changes
+/// it (`SYS_FS_SET_STATUS_FLAGS`, lane A's): with it set, each write on the
+/// description lands at the file's end as it is when the write lands --
+/// atomically, as `O_APPEND` must. Before it, `write` emulated an `F_SETFL`
+/// append with a seek to the end before each write, two calls another
+/// appender could come between
+/// (`known-issues/D-POSIX-APPEND-SET-BY-FCNTL-IS-A-SEEK-THEN-A-WRITE.md`);
+/// it still does, on a kernel without the call.
+///
+/// Only success is acted on. A kernel without the call keeps no such flag
+/// (the seek does the work); a directory answers `IsADirectory`, where Linux
+/// records `O_APPEND` and answers 0 (measured on 6.6), and nothing is
+/// written to a directory; and the descriptor table's flags, which `F_GETFL`
+/// reports, are this library's whatever the kernel says.
+fn give_kernel_append(handle: u64, append: bool) {
+    let ret = crate::syscall::syscall2(
+        crate::syscall::SYS_FS_SET_STATUS_FLAGS,
+        handle,
+        if append { NATIVE_APPEND } else { 0 },
+    );
+    if ret >= 0 {
+        KERNEL_KEEPS_APPEND.store(true, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------

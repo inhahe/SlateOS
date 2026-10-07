@@ -1,4 +1,4 @@
-## D-POSIX-APPEND-SET-BY-FCNTL-IS-A-SEEK-THEN-A-WRITE — `O_APPEND` turned on after `open` is two calls, which another process's append can come between (lane D, 2026-10-01) — **Status: OPEN (lane A adds `SYS_FS_SET_STATUS_FLAGS`, 1095, after its 2026-10-01 publish; then lane D's `F_SETFL` hands it the flags)**
+## D-POSIX-APPEND-SET-BY-FCNTL-IS-A-SEEK-THEN-A-WRITE — `O_APPEND` turned on after `open` is two calls, which another process's append can come between (lane D, 2026-10-01) — **Status: OPEN -- both halves are written: lane A's `SYS_FS_SET_STATUS_FLAGS` (1095, on `lane-a`) and lane D's `F_SETFL` on it (2026-10-07). It closes when lane A's kernel is on `main` and `services/ctest-fsetfl-append` passes in a lane D boot.**
 
 **In short:** a file opened for appending (`O_APPEND`) gets each write added
 at the very end, even when other programs append to it too -- that is what
@@ -24,6 +24,18 @@ overwritten. With `O_APPEND` at `open`, none are.
 this tree, `fdopen(fd, "a")` on a descriptor opened without it and
 `freopen(NULL, "a", f)` (`posix/src/stdio.rs`, both as musl's do), and
 `dd oflag=append` with no `of=` (`userspace/coreutils/src/bin/dd.rs`).
+
+**Lane D's half, done 2026-10-07:** `F_SETFL` on a file gives the kernel its
+open description's append flag (`posix/src/fcntl_ops.rs`,
+`give_kernel_append`), and once the call has worked in a process, `write`
+leaves `O_APPEND` to the kernel and no longer seeks first (`file.rs`,
+`fcntl_ops::kernel_keeps_append`); on a kernel without the call the seek
+emulates it, as before. The status flags are the description's now in the
+library's table too: `F_SETFL` on one descriptor changes every descriptor
+sharing its handle, so `F_GETFL` on a `dup` agrees, as Linux's does
+(`fdtable::set_status_flags`). `services/ctest-fsetfl-append` checks the
+two halves together -- two processes appending through `F_SETFL` lose no
+line -- and passes on Linux.
 
 **The proper fix, agreed with lane A on 2026-10-01:**
 `SYS_FS_SET_STATUS_FLAGS(handle, flags)`, 1095, flags in the native

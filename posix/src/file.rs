@@ -824,16 +824,18 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
 
     let ret = match entry.kind {
         HandleKind::File => {
-            // O_APPEND: seek to EOF before each write so the data is
-            // appended atomically (w.r.t. single-process).  This handles
-            // the case where O_APPEND was added via fcntl(F_SETFL) after
-            // open() — the kernel handle doesn't know about the flag
-            // change, so we must seek explicitly.  When O_APPEND was in
-            // the original open() flags the kernel already appends, but
-            // the redundant seek is harmless (it targets the same offset
-            // the kernel would use).
+            // O_APPEND: the kernel appends itself -- atomically, at the end
+            // as it is when the write lands -- for a file opened with
+            // O_APPEND, and for one fcntl(F_SETFL) gave O_APPEND through
+            // SYS_FS_SET_STATUS_FLAGS (`fcntl_ops::give_kernel_append`).
+            // Until this process has seen that call work, an O_APPEND here
+            // may be one F_SETFL could not give the kernel, so the write is
+            // preceded by a seek to the end: the append itself on a kernel
+            // without the call -- two calls, which another process's append
+            // can come between (known-issues/D-POSIX-APPEND-SET-BY-FCNTL-IS-
+            // A-SEEK-THEN-A-WRITE.md) -- and redundant on one with it.
             let status = fdtable::get_status_flags(fd).unwrap_or(0);
-            if status & crate::fcntl::O_APPEND != 0 {
+            if status & crate::fcntl::O_APPEND != 0 && !crate::fcntl_ops::kernel_keeps_append() {
                 // SEEK_END(2), offset 0 → position at EOF.
                 let _ = syscall3(SYS_FS_SEEK, entry.handle, 0, 2);
             }

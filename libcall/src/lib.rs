@@ -65,6 +65,7 @@ use core::ffi::CStr;
 
 pub mod clock;
 pub mod conf;
+pub mod crypt;
 pub mod epoll;
 pub mod inotify;
 pub mod lock;
@@ -96,6 +97,9 @@ pub const ENOENT: i32 = 2;
 pub const EFAULT: i32 = 14;
 /// Invalid argument.
 pub const EINVAL: i32 = 22;
+/// Result too large -- also what `crypt_gensalt_rn` answers when a setting
+/// has no room in the buffer it was given.
+pub const ERANGE: i32 = 34;
 /// File name too long -- from `gethostname` when the buffer is too small.
 pub const ENAMETOOLONG: i32 = 36;
 /// Function not implemented.
@@ -817,6 +821,7 @@ mod tests {
         assert_eq!(ENOENT, posix::errno::ENOENT);
         assert_eq!(EFAULT, posix::errno::EFAULT);
         assert_eq!(EINVAL, posix::errno::EINVAL);
+        assert_eq!(ERANGE, posix::errno::ERANGE);
         assert_eq!(ENOSYS, posix::errno::ENOSYS);
         assert_eq!(EINTR, posix::errno::EINTR);
         assert_eq!(EAGAIN, posix::errno::EAGAIN);

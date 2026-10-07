@@ -284,8 +284,33 @@ fn rounds_and_cost_are_clamped_and_zero_means_the_default() {
     assert_eq!(&yescrypt_cost_text(11), b"jFT$");
 }
 
+/// A setting where the linked library can make one -- the real [`gensalt`],
+/// which on the Linux these tests also run on is libxcrypt's -- and elsewhere
+/// one of the same shape, so that what a run does with a hash is still tested
+/// on a host with no `crypt_gensalt` to ask: the prefix, then as many salt
+/// characters as libxcrypt writes for the method, each from crypt's alphabet
+/// and a random byte. (A DES setting is its salt alone.)
+fn setting_for_tests(request: &SettingRequest, random: &[u8]) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if cfg!(target_os = "linux") {
+        return gensalt(request, random);
+    }
+    let (prefix, chars): (&[u8], usize) = match request.prefix.get(..2) {
+        Some(b"$1") => (&request.prefix, 8),
+        Some(b"$5" | b"$6") => (&request.prefix, 16),
+        Some(b"$y") => (&request.prefix, 22),
+        _ => (b"", 2),
+    };
+    let mut setting = prefix.to_vec();
+    setting.extend((0..chars).map(|i| ALPHABET[usize::from(random[i % random.len()]) % 64]));
+    Some(setting)
+}
+
 /// Given its bytes, a setting is a pure function of them: as long as
-/// libxcrypt's own, method by method.
+/// libxcrypt's own, method by method. Where there is a library to ask -- on
+/// SlateOS `libc.a`, on a Linux host libxcrypt itself, which is what this
+/// asks when these tests run there.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_setting_is_as_long_as_libxcrypts() {
     let made = |parts: &[&str]| {
@@ -319,12 +344,12 @@ fn a_new_hash_verifies_and_a_source_that_fails_ends_the_run() {
         }
         true
     };
-    let hash = hash_new(b"s3cret", &request, &mut random).unwrap();
+    let hash = hash_new(b"s3cret", &request, &mut random, &setting_for_tests).unwrap();
     assert!(posix::crypt::verify(b"s3cret", &hash));
     assert!(!posix::crypt::verify(b"S3cret", &hash));
     let mut broken = |_: &mut [u8]| false;
     assert_eq!(
-        hash_new(b"s3cret", &request, &mut broken),
+        hash_new(b"s3cret", &request, &mut broken, &setting_for_tests),
         Err(
             "Unable to generate a salt from setting \"$1$\", check your settings in \
              ENCRYPT_METHOD and the corresponding configuration for your selected hash method."
@@ -425,6 +450,7 @@ fn run_over(path: &Path, parts: &[&str], input: &str, epoch: Option<&str>) -> (i
         now: 20_000 * 86_400 + 5,
         source_date_epoch: epoch.map(|e| e.as_bytes().to_vec()),
         random: &mut random,
+        make_setting: &setting_for_tests,
     };
     let status = run(&cfg, b"chpasswd", input.as_bytes(), &mut err, &mut world);
     (status, String::from_utf8(err).unwrap())
@@ -525,6 +551,7 @@ fn an_encrypted_line_is_stored_as_it_came_unless_the_files_cannot_hold_it() {
         now: 0,
         source_date_epoch: None,
         random: &mut random,
+        make_setting: &setting_for_tests,
     };
     let status = run(
         &cfg,

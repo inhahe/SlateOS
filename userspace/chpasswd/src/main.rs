@@ -43,8 +43,9 @@
 //!    starts and gives it to every password in the run. So two accounts given
 //!    the same password in one run get the same hash, and one precomputed
 //!    table covers the whole batch. Each setting here is otherwise exactly
-//!    upstream's: libxcrypt's `crypt_gensalt`, as `posix` answers it, given
-//!    the prefix and the cost shadow-utils gives it.
+//!    upstream's: libxcrypt's `crypt_gensalt`, as the C library the program
+//!    links answers it (`libcall::crypt`), given the prefix and the cost
+//!    shadow-utils gives it.
 //! 5. **A locked account stays locked.** Upstream's lock is a `!` in front of
 //!    the password field, so writing a new password over the field unlocks
 //!    the account as a side effect. The database here keeps the lock apart
@@ -77,7 +78,7 @@
 
 #![cfg_attr(not(test), no_main)]
 
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
@@ -637,31 +638,24 @@ fn yescrypt_cost_text(cost: i64) -> [u8; 4] {
     [b'j', middle, if offset >= 3 { b'T' } else { b'5' }, b'$']
 }
 
-/// libxcrypt's `crypt_gensalt_rn`, as `posix` answers it: the setting
-/// `request` names, salted with `random`. `None` if it is refused.
+/// libxcrypt's `crypt_gensalt_rn`, as the C library the program links answers
+/// it: the setting `request` names, salted with `random`. `None` if it is
+/// refused -- and always on a host with no such library.
+///
+/// Through `libcall::crypt` and not `posix::gensalt`: named as a Rust path,
+/// `posix`'s function is the rlib's copy of the library, which
+/// design-decisions §768 keeps out of every program (`scripts/
+/// check-one-libc-per-process.py` refuses it). On SlateOS the answer is
+/// `libc.a`'s, which is that same code; on a Linux host it is libxcrypt's,
+/// the one shadow-utils calls.
 fn gensalt(request: &SettingRequest, random: &[u8]) -> Option<Vec<u8>> {
-    let mut prefix = request.prefix.clone();
-    prefix.push(0);
-    let mut out = [0u8; posix::gensalt::CRYPT_GENSALT_OUTPUT_SIZE];
-    let nrbytes = i32::try_from(random.len()).ok()?;
-    let room = i32::try_from(out.len()).ok()?;
-    // SAFETY: `prefix` is NUL-terminated; `random` is readable for its
-    // `nrbytes` bytes; `out` is writable for its `room` bytes, and nothing
-    // else refers to any of the three while this runs.
-    let made = unsafe {
-        posix::gensalt::crypt_gensalt_rn(
-            prefix.as_ptr(),
-            request.count,
-            random.as_ptr(),
-            nrbytes,
-            out.as_mut_ptr(),
-            room,
-        )
-    };
-    if made.is_null() {
-        return None;
-    }
-    let len = out.iter().position(|&b| b == 0)?;
+    // The prefix is built from method names and digits, so it holds no NUL
+    // and always converts; `None` is the refusal it would be if it did not.
+    let prefix = CString::new(request.prefix.clone()).ok()?;
+    let mut out = [0u8; libcall::crypt::GENSALT_OUTPUT_SIZE];
+    // The refusal's `errno` is not wanted: upstream's message for a setting
+    // that could not be made names the setting and nothing else.
+    let len = libcall::crypt::gensalt(&prefix, request.count, random, &mut out).ok()?;
     out.get(..len).map(<[u8]>::to_vec)
 }
 
@@ -698,19 +692,24 @@ fn random_bytes(_out: &mut [u8]) -> bool {
     false
 }
 
+/// What makes a setting from a request and its random bytes: [`gensalt`], or
+/// a test's stand-in where the library it asks is not there.
+type MakeSetting = dyn Fn(&SettingRequest, &[u8]) -> Option<Vec<u8>>;
+
 /// Hash `password` under a fresh setting for `request`, as upstream's
 /// `pw_encrypt` does, or say why not.
 fn hash_new(
     password: &[u8],
     request: &SettingRequest,
     random: &mut dyn FnMut(&mut [u8]) -> bool,
+    make_setting: &MakeSetting,
 ) -> Result<Vec<u8>, String> {
     // Ubuntu's shadow-utils leaves the random bytes to libxcrypt's
     // `crypt_gensalt`, so a source that fails is that call failing, and is
     // reported as one: no program name, and the run ends.
     let mut rbytes = vec![0u8; request.nrbytes];
     let made = if random(&mut rbytes) {
-        gensalt(request, &rbytes)
+        make_setting(request, &rbytes)
     } else {
         None
     };
@@ -928,6 +927,8 @@ struct World<'a> {
     source_date_epoch: Option<Vec<u8>>,
     /// The random source settings are salted from.
     random: &'a mut dyn FnMut(&mut [u8]) -> bool,
+    /// What makes each setting from its random bytes: [`gensalt`].
+    make_setting: &'a MakeSetting,
 }
 
 /// Upstream's `main`, from `open_files` to the end: read the lines, change
@@ -1002,7 +1003,7 @@ fn run(
         // The hash comes before the lookup, as upstream's does: a name that
         // does not exist costs what one that does costs.
         let stored = match &request {
-            Some(request) => match hash_new(newpwd, request, world.random) {
+            Some(request) => match hash_new(newpwd, request, world.random, world.make_setting) {
                 Ok(hash) => hash,
                 Err(message) => {
                     let _ = writeln!(err, "{message}");
@@ -1148,6 +1149,7 @@ fn chpasswd(argv: &[OsString], input: impl Read, out: &mut dyn Write, err: &mut 
         now: now_secs(),
         source_date_epoch: std::env::var_os("SOURCE_DATE_EPOCH").map(|v| os_bytes(&v).into_owned()),
         random: &mut random,
+        make_setting: &gensalt,
     };
     run(&cfg, &prog, input, err, &mut world)
 }

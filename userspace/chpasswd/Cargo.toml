@@ -8,12 +8,16 @@ description = "SlateOS chpasswd - set many passwords at once, shadow-utils 4.13'
 # Account names arrive on stdin, one per line, from whatever produced that
 # stream, and are quoted for the terminal when a diagnostic names one.
 quoting = { path = "../quoting" }
-# The libc's `crypt(3)` and libxcrypt's `crypt_gensalt`. `chpasswd`, `passwd`
-# and `login` read and write the same password entries, and while each
-# implemented the hash format itself they disagreed. The format now has one
-# implementation, and this dependency is what makes that true rather than
-# aspirational. See `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
+# The libc's `crypt(3)`, through its pure Rust API. `chpasswd`, `passwd` and
+# `login` read and write the same password entries, and while each implemented
+# the hash format itself they disagreed. The format now has one implementation,
+# and this dependency is what makes that true rather than aspirational. See
+# `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 posix = { path = "../../posix" }
+# libxcrypt's `crypt_gensalt`, through the C library the program links rather
+# than `posix`'s copy of it, which reports through an `errno` the program cannot
+# read (design-decisions §768).
+libcall = { path = "../../libcall" }
 # The account database. `design-decisions.md` §353 makes `/etc/users.yaml` the
 # truth and `/etc/passwd` and `/etc/shadow` copies generated from it, so this
 # program writes the database and lets the save write the copies. It wrote

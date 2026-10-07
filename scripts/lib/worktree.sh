@@ -292,6 +292,21 @@ SLATE_MPFR_SHA256="b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6c
 # shellcheck disable=SC2034
 SLATE_MPFR_TARBALL="$SLATE_ZIG_CACHE/mpfr-$SLATE_MPFR_VERSION.tar.xz"
 
+# Mono, for scripts/mono-spike/: the .NET runtime the operator asked for
+# (design-decisions.md 1050, "I want Mono (dotnet support for Linux) ported
+# too"). Upstream moved from Microsoft to WineHQ in 2024; 6.14.1 is its current
+# release. The tarball is 303,688,164 bytes. Three packagers attest it, each
+# recomputed here and compared in full, 2026-10-07:
+#
+#   Alpine    community/mono/APKBUILD, pkgver=6.14.1, sha512sums
+#             c16a2ecb...2e9f1b9 -- a *different function*.
+#   Fedora    rpms/mono `sources`, SHA512 (mono-6.14.1.tar.xz) = c16a2ecb...2e9f1b9.
+#   Homebrew  Formula/m/mono.rb, sha256 the hex below.
+SLATE_MONO_VERSION="6.14.1"
+SLATE_MONO_SHA256="3024c97c0bc8cbcd611c401d5f994528704108ceb31f31b28dea4783004d0820"
+# shellcheck disable=SC2034
+SLATE_MONO_TARBALL="$SLATE_ZIG_CACHE/mono-$SLATE_MONO_VERSION.tar.xz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -649,6 +664,17 @@ slate_ensure_mpfr_src() {
         "$SLATE_MPFR_SHA256" \
         "https://ftp.gnu.org/gnu/mpfr/mpfr-$SLATE_MPFR_VERSION.tar.xz" \
         "$SLATE_WORK/gdb-spike")" || return 1
+}
+
+# The Mono counterpart, for scripts/mono-spike/.
+slate_ensure_mono_src() {
+    # SLATE_MONO_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/mono-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_MONO_TARBALL="$(slate_ensure_src mono "$SLATE_MONO_VERSION" \
+        "$SLATE_MONO_SHA256" \
+        "https://dl.winehq.org/mono/sources/mono/mono-$SLATE_MONO_VERSION.tar.xz" \
+        "$SLATE_WORK/mono-spike")" || return 1
 }
 
 slate_make_zig_wrappers() {

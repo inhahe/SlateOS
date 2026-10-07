@@ -34,6 +34,7 @@ Whether coreutils should now restore `SIGPIPE` to its default before
 pipeline exit statuses: GNU's `seq | head -1` reports 141 under `set -o
 pipefail`; ours reports 0.
 `known-issues/TD-COREUTILS-BROKEN-PIPE-IS-HAND-ROLLED-IN-FOURTEEN-PLACES.md`
+(since resolved, now under `known-issues-resolved/`)
 says "SlateOS has no signals to die of", which is no longer true whichever
 you choose.
 

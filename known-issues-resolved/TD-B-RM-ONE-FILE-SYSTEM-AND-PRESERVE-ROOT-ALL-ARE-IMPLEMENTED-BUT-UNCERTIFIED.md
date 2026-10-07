@@ -1,6 +1,6 @@
 ## TD-B-RM-ONE-FILE-SYSTEM-AND-PRESERVE-ROOT-ALL-ARE-IMPLEMENTED-BUT-UNCERTIFIED (lane B, 2026-08-30)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending -- certified,
+**Status:** RESOLVED -- fixed 2026-10-03 (lane B), boot-confirmed on `main` 2026-10-07: the fix is in `8a7cdaf26`, whose boot passed and which was published to `main` as `73d857e1b` -- certified,
 and nothing needed changing. `scripts/rm-diff.sh` section 16b does what this
 entry proposed: each side runs in its own `unshare -mUr` namespace with
 `tree/sub` a tmpfs mount, and the program's output, its status and what is

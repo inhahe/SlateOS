@@ -1,7 +1,6 @@
 ## TD-COREUTILS-BROKEN-PIPE-IS-HAND-ROLLED-IN-FOURTEEN-PLACES (lane B, 2026-08-24)
 
-**Status:** FIXED 2026-10-07 by lane B, pending a boot test on `main` before
-the move to `known-issues-resolved/`. Every site that should ask the shared
+**Status:** RESOLVED -- fixed 2026-10-07 by lane B, boot-confirmed on `main` 2026-10-07: the fix is in `8a7cdaf26`, whose boot passed and which was published to `main` as `73d857e1b`. Every site that should ask the shared
 predicate now does, and the predicate itself changed meaning with
 design-decisions §1060.
 

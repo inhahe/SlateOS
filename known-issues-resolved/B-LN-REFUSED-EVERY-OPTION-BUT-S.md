@@ -1,6 +1,6 @@
 ## B-LN-REFUSED-EVERY-OPTION-BUT-S (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending.
+**Status:** RESOLVED -- fixed 2026-10-03 (lane B), boot-confirmed on `main` 2026-10-07: the fix is in `8a7cdaf26`, whose boot passed and which was published to `main` as `73d857e1b`.
 
 **In short:** `ln` made links, but only plain hard links and `-s` symbolic
 ones. Every other option GNU's `ln` has was refused by name: `-f` (replace),

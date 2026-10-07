@@ -55,7 +55,6 @@ userspace/hostnamectl/src/main.rs:argv-as-string
 userspace/htop/src/main.rs:argv-as-string
 userspace/hwclock/src/main.rs:argv-as-string
 userspace/hwinfo/src/main.rs:argv-as-string
-userspace/iconv/src/main.rs:argv-as-string
 userspace/ifconfig/src/main.rs:argv-as-string
 userspace/indexer/src/main.rs:argv-as-string
 userspace/inetd/src/main.rs:argv-as-string

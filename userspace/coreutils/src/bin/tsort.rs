@@ -299,8 +299,10 @@ fn say(mut out: Stream, bytes: &[u8]) -> ExitCode {
 fn read_input(file: &OsStr) -> Result<Vec<u8>, Trouble> {
     let mut data = Vec::new();
     if file == "-" {
-        io::stdin()
-            .lock()
+        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty,
+        // where upstream's `tsort <&-` is `tsort: -: read error: Bad file
+        // descriptor`.
+        stdfd::RawStdin
             .read_to_end(&mut data)
             .map_err(|e| Trouble::Read(file.to_os_string(), e))?;
     } else {

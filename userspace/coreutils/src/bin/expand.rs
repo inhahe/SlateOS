@@ -228,7 +228,17 @@ fn run_main() -> ExitCode {
     // flush that fails here is a truncated conversion reported as a complete
     // one. Upstream gets this from `atexit (close_stdout)`, which is also why
     // the failure surfaces here and not at the byte it happened on.
-    let earned = if input.failed {
+    let mut failed = input.failed;
+    // Upstream's `cleanup_file_list_stdin`: `if (have_read_stdin && fclose
+    // (stdin) != 0) error (EXIT_FAILURE, errno, "-")`. Measured, `expand <&-`
+    // says `expand: -: Bad file descriptor` twice: the read, then this.
+    if input.have_read_stdin
+        && let Err(e) = stdfd::close_stdin()
+    {
+        diag!("expand: -: {}", strerror(&e));
+        failed = true;
+    }
+    let earned = if failed {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
@@ -362,6 +372,9 @@ struct Input {
     /// Set by an operand that could not be opened or read; the run continues
     /// and the status is 1 at the end.
     failed: bool,
+    /// Upstream's `have_read_stdin`: a `-` was opened, so standard input is
+    /// closed -- and a failure to close it reported -- at the end.
+    have_read_stdin: bool,
 }
 
 struct Open {
@@ -384,6 +397,7 @@ impl Input {
             names: names.into_iter(),
             open: None,
             failed: false,
+            have_read_stdin: false,
         }
     }
 
@@ -391,7 +405,10 @@ impl Input {
     fn advance(&mut self) -> bool {
         for name in self.names.by_ref() {
             let opened: io::Result<Box<dyn BufRead>> = if name == "-" {
-                Ok(Box::new(BufReader::new(io::stdin())))
+                self.have_read_stdin = true;
+                // Descriptor 0 itself: `io::stdin()` reads a closed one as
+                // empty.
+                Ok(Box::new(BufReader::new(stdfd::RawStdin)))
             } else {
                 File::open(&name).map(|f| Box::new(BufReader::new(f)) as Box<dyn BufRead>)
             };

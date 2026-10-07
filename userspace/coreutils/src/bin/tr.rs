@@ -114,6 +114,9 @@ use coreutils::stdfd;
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
+
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
 use std::process::ExitCode;
 
 const TR: Program = Program::new("tr", 1);
@@ -339,6 +342,7 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let request = match parse_args(&args) {
         Ok(request) => request,
@@ -346,32 +350,53 @@ fn run_main() -> ExitCode {
     };
 
     let job = match request {
-        Request::Help => {
-            print!("{}", help_text());
-            return ExitCode::SUCCESS;
-        }
-        Request::Version => {
-            println!("tr (SlateOS coreutils) 0.1.0");
-            return ExitCode::SUCCESS;
-        }
+        // Writes like any other, through the funnel: `print!` panicked on a
+        // full disk and said nothing of a closed standard output, where
+        // upstream's `close_stdout` reports `write error` and exits 1.
+        Request::Help => return say(help_text().as_bytes()),
+        Request::Version => return say(b"tr (SlateOS coreutils) 0.1.0\n"),
         Request::Run(job) => job,
     };
 
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
-    let stdout = io::stdout();
-    let mut out = io::BufWriter::new(stdout.lock());
+    // Descriptor 0 itself: `io::stdin()` reads a closed one as empty, where
+    // upstream's `tr a b <&-` is `tr: read error: Bad file descriptor`.
+    let mut input = stdfd::RawStdin;
+    // Descriptor 1 itself: `io::stdout()` answers a closed one's `EBADF` with
+    // success, where upstream's `tr a b >&-` is a write error.
+    let mut out = io::BufWriter::new(stdfd::RawStdout);
 
     match stream(&job, &mut input, &mut out) {
         Ok(()) => {}
+        // Upstream dies of `SIGPIPE` when the reader goes away, printing
+        // nothing; Rust masks that signal, so it arrives as `EPIPE`, and the
+        // run so far had succeeded (design-decisions 377).
+        Err(Trouble::Write(e)) if stdfd::reader_gone(&e) => return ExitCode::SUCCESS,
         Err(trouble) => return trouble.report(),
+    }
+    // Upstream's `if (close (STDIN_FILENO) != 0) error (EXIT_FAILURE, errno,
+    // _("standard input"))`, before the `atexit (close_stdout)` that the
+    // flush below stands for.
+    if let Err(e) = stdfd::close_stdin() {
+        diag!("tr: standard input: {}", strerror(&e));
+        return ExitCode::FAILURE;
     }
     // Buffered output has to reach the OS before success can be claimed; a
     // flush that fails here is a truncated file reported as a complete one.
     if let Err(e) = out.flush() {
+        if stdfd::reader_gone(&e) {
+            return ExitCode::SUCCESS;
+        }
         return Trouble::Write(e).report();
     }
     ExitCode::SUCCESS
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = stdfd::Stream::stdout();
+    // The stream records a failure for the funnel; it never returns one.
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("tr", out, ExitCode::SUCCESS)
 }
 
 /// GNU's `--help`, byte for byte, minus the trailing block of URLs that names

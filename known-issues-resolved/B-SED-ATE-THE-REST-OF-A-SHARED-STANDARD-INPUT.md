@@ -1,6 +1,6 @@
 ## B-SED-ATE-THE-REST-OF-A-SHARED-STANDARD-INPUT (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending.
+**Status:** FIXED 2026-10-03 (lane B); boot-tested on main (394c97655, published as 109a26eec).
 
 **In short:** `{ sed 1q; cat; } < file` is how a script takes the first line
 of a file and hands the rest to the next command. With GNU sed, `cat` prints

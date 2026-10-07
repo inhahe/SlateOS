@@ -306,7 +306,9 @@ fn run_main() -> ExitCode {
             ExitCode::SUCCESS
         }
     };
-    stdfd::close_stdout("rm", out, earned)
+    // Upstream's `atexit (close_stdin)`: the answers' read-ahead goes back to
+    // a seekable standard input, and a read that failed is reported.
+    stdfd::close_stdin_and_stdout("rm", answers.into_stream(), out, earned)
 }
 
 /// Say one thing and stop — `--help` and `--version`.

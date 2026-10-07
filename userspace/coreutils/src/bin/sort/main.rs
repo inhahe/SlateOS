@@ -82,9 +82,13 @@ use std::process::ExitCode;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::posixver;
-use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
+use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef, quotef_os};
+use coreutils::stdio::StdioFile;
 use keydef::{Blanks, KeySpec, Kind, parse_key, parse_obsolete_end, parse_obsolete_start};
 use order::Ignore;
+
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
 
 const USAGE: &str = "\
 usage: sort [OPTION]... [FILE]...
@@ -193,36 +197,17 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let raw: Vec<OsString> = std::env::args_os().skip(1).collect();
     let cfg = match parse_args(&raw, getopt::posixly_correct(), posixver::posix2_version()) {
-        Ok(Some(c)) => c,
-        Ok(None) => return ExitCode::SUCCESS,
+        Ok(c) => c,
         Err(e) => die_with(&e.message(), e.status),
     };
 
     // Every input is read before anything is written, which is what lets
     // `sort -o f f` work: by the time the output file is truncated its old
     // contents are already in memory.
-    let mut contents: Vec<Vec<u8>> = Vec::with_capacity(cfg.files.len());
-    for path in &cfg.files {
-        match read_file(path) {
-            Ok(bytes) => contents.push(bytes),
-            // GNU words a failed open one way when checking and another when
-            // sorting, and a failed *read* a third way in both. The wording is
-            // the only thing that tells a user whether the name was wrong or
-            // the thing behind it was, so it is worth reproducing.
-            Err(failure) => die(&format!(
-                "{}: {}: {}",
-                match failure {
-                    ReadFailure::Open(_) if cfg.check.is_some() => "open failed",
-                    ReadFailure::Open(_) => "cannot read",
-                    ReadFailure::Read(_) => "read failed",
-                },
-                quotef_os(path),
-                strerror(failure.cause())
-            )),
-        }
-    }
+    let contents = read_inputs(&cfg);
     let per_file: Vec<Vec<&[u8]>> = contents.iter().map(|c| split_lines(c, cfg.delim)).collect();
 
     if let Some(mode) = cfg.check {
@@ -243,16 +228,154 @@ fn run_main() -> ExitCode {
         lines
     };
 
-    if let Err(e) = write_out(&cfg, &ordered) {
-        // A closed pipe is how `sort | head` ends. It is not a failure worth a
-        // diagnostic, but it is not success either.
-        if e.kind() == io::ErrorKind::BrokenPipe {
-            return ExitCode::from(2);
-        }
-        die(&format!("write failed: {}", strerror(&e)));
+    // Reported in `write_out`, which knows which of upstream's calls failed;
+    // what comes back is the status to end with.
+    if let Err(status) = write_out(&cfg, &ordered) {
+        return status;
+    }
+
+    // Upstream's `if (have_read_stdin && fclose (stdin) == EOF) sort_die
+    // (_("close failed"), "-")`.
+    if cfg.files.iter().any(|f| f == "-")
+        && let Err(e) = stdfd::close_stdin()
+    {
+        die(&format!("close failed: -: {}", strerror(&e)));
     }
 
     ExitCode::SUCCESS
+}
+
+// ── reading the inputs ──────────────────────────────────────────────────────
+
+/// One input as upstream holds it: standard input, or a file it opened.
+enum Opened {
+    Stdin,
+    File(File),
+}
+
+/// Every input's bytes, in order, read in the order upstream opens, checks
+/// and reads them. Nobody can see that order until standard input is closed,
+/// and then it is exactly what decides the answer -- each row measured
+/// against GNU sort 9.4:
+///
+/// * `check_inputs` first asks every *named* file `euidaccess (R_OK)`, before
+///   anything is opened: `sort - nosuch <&-` is `cannot read: nosuch`.
+/// * Sorting opens the first input and then `fstat`s every `-` once, sizing
+///   its buffer (`sort_buffer_size`): `sort <&-` and `sort - f <&-` are
+///   `stat failed: -: Bad file descriptor`, status 2.
+/// * But a file opened while descriptor 0 is closed *becomes* descriptor 0,
+///   and `xfclose` never closes descriptor 0 -- "allow reading stdin from tty
+///   more than once". So in `sort f - <&-` the `-` is `f` again, at its end:
+///   the output is `f` sorted, status 0. Merging opens every input before
+///   reading any, so `sort -m - f <&-` reads `f` through the `-`.
+/// * `-c` reads its one input and asks nothing first: `read failed: -`.
+fn read_inputs(cfg: &Config) -> Vec<Vec<u8>> {
+    let files = &cfg.files;
+    if cfg.check.is_some() {
+        return files
+            .iter()
+            .map(|path| read_opened(open_input(path), path))
+            .collect();
+    }
+    // `check_inputs`.
+    for path in files.iter().filter(|p| *p != "-") {
+        if let Err(e) = stdfd::readable(&arg_bytes(path)) {
+            die(&format!(
+                "cannot read: {}: {}",
+                quotef_os(path),
+                strerror(&e)
+            ));
+        }
+    }
+    if cfg.merge {
+        let opened: Vec<Opened> = files.iter().map(open_input).collect();
+        return opened
+            .into_iter()
+            .zip(files)
+            .map(|(input, path)| read_opened(input, path))
+            .collect();
+    }
+    let mut contents = Vec::with_capacity(files.len());
+    for (n, path) in files.iter().enumerate() {
+        let input = open_input(path);
+        if n == 0 {
+            // `sort_buffer_size`, asked once, with only the first input open.
+            for dash in files.iter().filter(|p| *p == "-") {
+                if let Err(e) = stdfd::probe(0) {
+                    die(&format!(
+                        "stat failed: {}: {}",
+                        quotef_os(dash),
+                        strerror(&e)
+                    ));
+                }
+            }
+        }
+        contents.push(read_opened(input, path));
+    }
+    contents
+}
+
+/// Upstream's `xfopen` for reading.
+fn open_input(path: &OsString) -> Opened {
+    if path == "-" {
+        return Opened::Stdin;
+    }
+    match File::open(path) {
+        Ok(file) => Opened::File(file),
+        Err(e) => die(&format!(
+            "open failed: {}: {}",
+            quotef_os(path),
+            strerror(&e)
+        )),
+    }
+}
+
+/// Read one opened input to its end, then `xfclose` it.
+fn read_opened(input: Opened, path: &OsString) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let read = match &input {
+        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+        Opened::Stdin => stdfd::RawStdin.read_to_end(&mut bytes),
+        Opened::File(file) => {
+            let mut handle: &File = file;
+            handle.read_to_end(&mut bytes)
+        }
+    };
+    if let Err(e) = read {
+        die(&format!(
+            "read failed: {}: {}",
+            quotef_os(path),
+            strerror(&e)
+        ));
+    }
+    if let Opened::File(file) = input {
+        if on_descriptor_zero(&file) {
+            // `xfclose` leaves a stream on descriptor 0 open, and a later `-`
+            // reads it: kept open, deliberately, for the rest of the process.
+            std::mem::forget(file);
+        } else if let Err(e) = stdfd::close(file) {
+            die(&format!(
+                "close failed: {}: {}",
+                quotef_os(path),
+                strerror(&e)
+            ));
+        }
+    }
+    bytes
+}
+
+/// Whether `file` was opened onto descriptor 0 -- which happens only when
+/// standard input was closed.
+#[cfg(unix)]
+fn on_descriptor_zero(file: &File) -> bool {
+    use std::os::fd::AsRawFd;
+    file.as_raw_fd() == 0
+}
+
+/// No descriptor numbers off unix.
+#[cfg(not(unix))]
+fn on_descriptor_zero(_file: &File) -> bool {
+    false
 }
 
 // ── comparison ──────────────────────────────────────────────────────────────
@@ -360,36 +483,27 @@ fn check(cfg: &Config, lines: &[&[u8]], mode: Check) -> u8 {
 
 // ── input and output ────────────────────────────────────────────────────────
 
-/// Which stage of reading a file failed.
-///
-/// The distinction is not bookkeeping: "no such file" and "is a directory" are
-/// both `cannot read` if you collapse them, and the user then cannot tell a
-/// misspelled name from a name that is right but not a file.
+/// Which stage of reading a `--files0-from` list failed: upstream says
+/// `open failed: F: reason` for the one and `cannot read file names from 'F'`,
+/// with no reason, for the other. (The inputs themselves are read by
+/// [`read_inputs`], in upstream's order.)
 enum ReadFailure {
     Open(io::Error),
-    Read(io::Error),
-}
-
-impl ReadFailure {
-    fn cause(&self) -> &io::Error {
-        match self {
-            ReadFailure::Open(e) | ReadFailure::Read(e) => e,
-        }
-    }
+    Read,
 }
 
 fn read_file(path: &OsString) -> Result<Vec<u8>, ReadFailure> {
     let mut bytes = Vec::new();
     if path == "-" {
-        io::stdin()
-            .lock()
+        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+        stdfd::RawStdin
             .read_to_end(&mut bytes)
-            .map_err(ReadFailure::Read)?;
+            .map_err(|_| ReadFailure::Read)?;
     } else {
         File::open(path)
             .map_err(ReadFailure::Open)?
             .read_to_end(&mut bytes)
-            .map_err(ReadFailure::Read)?;
+            .map_err(|_| ReadFailure::Read)?;
     }
     Ok(bytes)
 }
@@ -406,7 +520,7 @@ fn read_files0(list: &OsString) -> Result<Vec<OsString>, String> {
         ReadFailure::Open(e) => {
             format!("open failed: {}: {}", quotef_os(list), strerror(&e))
         }
-        ReadFailure::Read(_) => {
+        ReadFailure::Read => {
             format!("cannot read file names from {}", quoteaf_os(list))
         }
     })?;
@@ -451,17 +565,44 @@ fn split_lines(data: &[u8], delim: u8) -> Vec<&[u8]> {
     lines
 }
 
-fn write_out(cfg: &Config, lines: &[&[u8]]) -> io::Result<()> {
-    let mut sink: Box<dyn Write> = match &cfg.output {
-        Some(path) => Box::new(io::BufWriter::new(File::create(path).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("open failed: {}: {}", quotef_os(path), strerror(&e)),
-            )
-        })?)),
-        None => Box::new(io::BufWriter::new(io::stdout().lock())),
+/// Write the result as upstream does: each line with `write_line`'s one
+/// `fwrite`, then `xfclose`'s `fflush`, and the process's status in `Err`
+/// when it must end with another.
+///
+/// Through [`StdioFile`], which reproduces glibc's buffer, because *which*
+/// call fails is part of the output: a failure while the lines are going out
+/// is `write failed`, one at the final `fflush` is `fflush failed`, each
+/// naming the output -- `'standard output'`, or `-o`'s file, which upstream
+/// has moved onto descriptor 1. Either way upstream then dies, and the
+/// `close_stdout` in its `exit_cleanup` adds a `write error` with no reason:
+/// measured, `sort f >&-` and `sort f >/dev/full` both print the pair and exit
+/// 2. A reader that went away is the exception: upstream died of `SIGPIPE`,
+/// saying nothing, and the run keeps its status (design-decisions 377). Before
+/// this, every failure was one `write failed: REASON` and a broken pipe was 2.
+fn write_out(cfg: &Config, lines: &[&[u8]]) -> Result<(), ExitCode> {
+    let (mut out, name) = match &cfg.output {
+        None => (StdioFile::stdout(), quotef(b"standard output")),
+        Some(path) => match File::create(path) {
+            Ok(file) => (StdioFile::from_file(file), quotef_os(path)),
+            Err(e) => die(&format!(
+                "open failed: {}: {}",
+                quotef_os(path),
+                strerror(&e)
+            )),
+        },
+    };
+    let failed = |what: &str, e: &io::Error| -> ExitCode {
+        if stdfd::reader_gone(e) {
+            return ExitCode::SUCCESS;
+        }
+        diag!("sort: {what}: {name}: {}", strerror(e));
+        diag!("sort: write error");
+        ExitCode::from(2)
     };
     let mut previous: Option<&[u8]> = None;
+    // One record per `fwrite`, its delimiter included, as upstream writes it:
+    // the sizes of the writes are what decide where glibc's buffer flushes.
+    let mut record: Vec<u8> = Vec::new();
     for line in lines {
         if cfg.unique
             && let Some(prev) = previous
@@ -469,11 +610,26 @@ fn write_out(cfg: &Config, lines: &[&[u8]]) -> io::Result<()> {
         {
             continue;
         }
-        sink.write_all(line)?;
-        sink.write_all(&[cfg.delim])?;
+        record.clear();
+        record.extend_from_slice(line);
+        record.push(cfg.delim);
+        if let Err(e) = out.write(&record) {
+            return Err(failed("write failed", &e));
+        }
         previous = Some(line);
     }
-    sink.flush()
+    if let Err(e) = out.flush() {
+        return Err(failed("fflush failed", &e));
+    }
+    // `-o`'s file is upstream's standard output, closed by `close_stdout`; a
+    // failure there is its `write error`, with the reason.
+    if cfg.output.is_some()
+        && let Err(e) = out.close()
+    {
+        diag!("sort: write error: {}", strerror(&e));
+        return Err(ExitCode::from(2));
+    }
+    Ok(())
 }
 
 // ── command line ────────────────────────────────────────────────────────────
@@ -501,7 +657,8 @@ fn fatal(message: String) -> Fatal {
     SORT.usage(message)
 }
 
-/// Parse argv. `Ok(None)` means `--help` or `--version` has already answered.
+/// Parse argv. `--help` and `--version` do not return: upstream answers them
+/// from inside its option loop and exits, and so does [`say_now`].
 ///
 /// `posixly_correct` and `posix2_version` are the environment's
 /// ([`getopt::posixly_correct`], [`posixver::posix2_version`]), passed in so
@@ -513,7 +670,7 @@ fn parse_args(
     raw: &[OsString],
     posixly_correct: bool,
     posix2_version: i32,
-) -> Result<Option<Config>, Fatal> {
+) -> Result<Config, Fatal> {
     let mut cfg = Config::default();
     // The options that are not attached to a `-k` collect here, and are then
     // either handed to the keys that named no ordering of their own or, if
@@ -557,10 +714,7 @@ fn parse_args(
             continue;
         }
         if bytes.starts_with(b"--") {
-            match long_option(&bytes, raw, &mut i, &mut cfg, &mut global)? {
-                Answered::Yes => return Ok(None),
-                Answered::No => {}
-            }
+            long_option(&bytes, raw, &mut i, &mut cfg, &mut global)?;
             continue;
         }
         // `+POS [-POS]`: the obsolete key syntax. An argument that starts with
@@ -676,13 +830,7 @@ fn parse_args(
     if cfg.files.is_empty() {
         cfg.files.push(OsString::from("-"));
     }
-    Ok(Some(cfg))
-}
-
-/// Whether a long option has already printed the answer.
-enum Answered {
-    Yes,
-    No,
+    Ok(cfg)
 }
 
 /// The name every diagnostic below is stamped with, and the status a bad
@@ -755,7 +903,7 @@ fn long_option(
     i: &mut usize,
     cfg: &mut Config,
     global: &mut KeySpec,
-) -> Result<Answered, Fatal> {
+) -> Result<(), Fatal> {
     let body = bytes.get(2..).unwrap_or_default();
     let (typed, inline) = match body.iter().position(|&c| c == b'=') {
         Some(at) => (
@@ -790,14 +938,8 @@ fn long_option(
     let need = || value.clone().unwrap_or_default();
 
     match name {
-        "help" => {
-            println!("{USAGE}");
-            return Ok(Answered::Yes);
-        }
-        "version" => {
-            println!("sort (SlateOS coreutils)");
-            return Ok(Answered::Yes);
-        }
+        "help" => say_now(format!("{USAGE}\n").as_bytes()),
+        "version" => say_now(b"sort (SlateOS coreutils)\n"),
         "ignore-leading-blanks" => {
             keydef::set_ordering(b"b", global, Blanks::Both);
         }
@@ -830,7 +972,7 @@ fn long_option(
         // Accepted and ignored, as for their short forms.
         _ => {}
     }
-    Ok(Answered::No)
+    Ok(())
 }
 
 /// `--check`'s words. `quiet` and `silent` are two spellings of one answer,
@@ -908,6 +1050,26 @@ fn os_from_bytes(b: &[u8]) -> OsString {
     OsString::from(String::from_utf8_lossy(b).into_owned())
 }
 
+/// `--help` and `--version`, which upstream answers from inside its option
+/// loop -- `usage (EXIT_SUCCESS)`, `version_etc` and `exit` -- so the process
+/// ends here, with the funnel's verdict: status 2 when the text could not be
+/// written (`sort --help >/dev/full`), `close_stdout` giving `sort`'s
+/// `exit_failure`. `println!` panicked on a full disk.
+fn say_now(text: &[u8]) -> ! {
+    let mut out = Stream::stdout();
+    // The stream records a failure for the verdict below; it never returns one.
+    let _ = out.write_all(text);
+    let status = match out.finish() {
+        Ok(()) => 0,
+        Err(e) if stdfd::reader_gone(&e) => 0,
+        Err(e) => {
+            stdfd::write_error("sort", &e);
+            2
+        }
+    };
+    stdfd::exit_now(status, 2)
+}
+
 fn die(msg: &str) -> ! {
     die_with(msg, 2)
 }
@@ -936,7 +1098,7 @@ mod tests {
     /// `parse_args` with `POSIXLY_CORRECT` unset and `_POSIX2_VERSION` at its
     /// default, so no test depends on the environment `cargo test` inherited.
     /// The tests of those two variables call `super::parse_args`.
-    fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
+    fn parse_args(raw: &[OsString]) -> Result<Config, Fatal> {
         super::parse_args(raw, false, posixver::DEFAULT)
     }
 
@@ -949,7 +1111,7 @@ mod tests {
     fn posixly_correct_makes_every_word_after_a_file_a_file() {
         let files = |words: &[&str], posix: bool, version: i32| -> Vec<OsString> {
             match super::parse_args(&os_args(words), posix, version) {
-                Ok(Some(cfg)) => cfg.files,
+                Ok(cfg) => cfg.files,
                 _ => panic!("{words:?} should parse"),
             }
         };
@@ -973,17 +1135,17 @@ mod tests {
             |words: &[&str], version: i32| super::parse_args(&os_args(words), true, version);
         let d = posixver::DEFAULT;
         // `-o FILE` and `-oFILE` after a file are the output, not files.
-        let Ok(Some(cfg)) = parsed(&["f", "-o", "out"], d) else {
+        let Ok(cfg) = parsed(&["f", "-o", "out"], d) else {
             panic!("expected a configuration");
         };
         assert_eq!(cfg.files, os_args(&["f"]));
         assert_eq!(cfg.output, Some(OsString::from("out")));
-        let Ok(Some(cfg)) = parsed(&["f", "-oout"], d) else {
+        let Ok(cfg) = parsed(&["f", "-oout"], d) else {
             panic!("expected a configuration");
         };
         assert_eq!(cfg.output, Some(OsString::from("out")));
         // A final `-o` with nothing after it is a file.
-        let Ok(Some(cfg)) = parsed(&["f", "-o"], d) else {
+        let Ok(cfg) = parsed(&["f", "-o"], d) else {
             panic!("expected a configuration");
         };
         assert_eq!(cfg.files, os_args(&["f", "-o"]));
@@ -998,7 +1160,7 @@ mod tests {
             e.sentence
         );
         // And not under the 2001 edition.
-        let Ok(Some(cfg)) = parsed(&["f", "-o", "out"], 200_112) else {
+        let Ok(cfg) = parsed(&["f", "-o", "out"], 200_112) else {
             panic!("expected a configuration");
         };
         assert_eq!(cfg.files, os_args(&["f", "-o", "out"]));
@@ -1011,7 +1173,7 @@ mod tests {
             posix,
             200_112,
         ) {
-            Ok(Some(cfg)) => (cfg.keys.len(), cfg.files),
+            Ok(cfg) => (cfg.keys.len(), cfg.files),
             _ => panic!("{words:?} should parse"),
         };
         assert_eq!(parsed(&["+1", "f"], false), (0, os_args(&["+1", "f"])));
@@ -1026,7 +1188,7 @@ mod tests {
 
     fn cfg_of(args: &[&str]) -> Config {
         let raw: Vec<OsString> = args.iter().map(OsString::from).collect();
-        parse_args(&raw).unwrap().unwrap()
+        parse_args(&raw).unwrap()
     }
 
     fn run(args: &[&str], input: &str) -> String {

@@ -259,6 +259,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
 | `scripts/llvm-spike/run.sh` | Cross-compile LLVM 20's `opt`, `llc` and `ld.lld` for SlateOS, linked against |
 | `scripts/llvm-spike/slatelink.sh` | Link LLVM's opt, llc and ld.lld for SlateOS from the objects |
+| `scripts/ln-diff.sh` | ln-diff.sh -- compare our `ln` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/lockfile-diff.sh` | Differential test: our `lockfile` against procmail 3.24's, as Ubuntu builds it. |
 | `scripts/logger-diff.sh` | Differential test: our `logger` against util-linux 2.39.3's. |
 | `scripts/logname-diff.sh` | logname-diff.sh — compare our `logname` against the real GNU one, inside WSL. |
@@ -358,6 +359,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/quote-probe.py` | Measure GNU coreutils' two quoting styles, byte for byte. |
 | `scripts/quote-sweep.py` | One-shot: route every file name in a coreutils diagnostic through `quote`. |
 | `scripts/raced-globals.py` | Find mutable process-globals that two or more `#[test]`s drive unserialised. |
+| `scripts/read-error-diff.sh` | read-error-diff.sh — one question, asked of every utility that answers it: |
 | `scripts/reclaim-space.py` | Free space on the shared build volume, without guessing what is in use. |
 | `scripts/reintro-benchmark.py` | Reintroduction check for the benchmark scroll fixes. |
 | `scripts/reintro-credmanager.py` | Reintroduction check for the credmanager scroll fixes. |
@@ -518,4 +520,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_508 scripts._
+_510 scripts._

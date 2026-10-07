@@ -816,13 +816,13 @@ fn help_text(program: Program) -> String {
 }
 
 /// The input, with stdio's two sticky flags.
-struct Input {
-    src: Box<dyn Read>,
+struct Input<'a> {
+    src: Box<dyn Read + 'a>,
     eof: bool,
     error: Option<io::Error>,
 }
 
-impl Input {
+impl Input<'_> {
     /// `fread (buf, 1, want, in)`: read until `want` bytes arrived or the input
     /// ended or failed, setting the matching flag. A read that gets what it
     /// asked for does not look further, so a file that ends exactly on a block
@@ -878,7 +878,7 @@ fn wrap_write(text: &[u8], wrap: usize, column: &mut usize, out: &mut Stream) {
 }
 
 /// `do_encode`. `Err` is the message that ends the run with status 1.
-fn encode(settings: &Settings, input: &mut Input, out: &mut Stream) -> Result<(), String> {
+fn encode(settings: &Settings, input: &mut Input<'_>, out: &mut Stream) -> Result<(), String> {
     let mut column = 0usize;
     loop {
         let mut block: Vec<u8> = Vec::with_capacity(ENC_BLOCKSIZE);
@@ -913,7 +913,7 @@ fn encode(settings: &Settings, input: &mut Input, out: &mut Stream) -> Result<()
 fn decode(
     program: Program,
     settings: &Settings,
-    input: &mut Input,
+    input: &mut Input<'_>,
     out: &mut Stream,
 ) -> Result<(), String> {
     let cap = program.dec_blocksize();
@@ -986,16 +986,23 @@ fn run(program: Program) -> ExitCode {
     };
 
     let file = os_bytes(&settings.file).into_owned();
-    let src: Box<dyn Read> = if file == b"-" {
-        Box::new(io::stdin())
+    let opened = if file == b"-" {
+        None
     } else {
         match File::open(os_from_bytes(&file)) {
-            Ok(f) => Box::new(f),
+            Ok(f) => Some(f),
             Err(e) => {
                 diag!("{name}: {}: {}", quotef(&file), strerror(&e));
                 return ExitCode::from(1);
             }
         }
+    };
+    // Descriptor 0 itself for `-`: `io::stdin()` reads a closed one as empty,
+    // where upstream's `base64 <&-` is `base64: read error: Bad file
+    // descriptor`.
+    let src: Box<dyn Read + '_> = match &opened {
+        Some(f) => Box::new(f),
+        None => Box::new(stdfd::RawStdin),
     };
     let mut input = Input {
         src,
@@ -1008,8 +1015,29 @@ fn run(program: Program) -> ExitCode {
     } else {
         encode(&settings, &mut input, &mut out)
     };
+    drop(input);
     match outcome {
-        Ok(()) => stdfd::close_stdout(name, out, ExitCode::SUCCESS),
+        Ok(()) => {
+            // Upstream's `finish_and_exit`: `if (fclose (in) != 0)`, worded
+            // `closing standard input` for `-` and as the file's name
+            // otherwise. A read error never gets here: it is fatal.
+            let closed = match opened {
+                Some(f) => stdfd::close(f),
+                None => stdfd::close_stdin(),
+            };
+            let earned = match closed {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    if file == b"-" {
+                        diag!("{name}: closing standard input: {}", strerror(&e));
+                    } else {
+                        diag!("{name}: {}: {}", quotef(&file), strerror(&e));
+                    }
+                    ExitCode::from(1)
+                }
+            };
+            stdfd::close_stdout(name, out, earned)
+        }
         Err(message) => {
             diag!("{name}: {message}");
             stdfd::close_stdout(name, out, ExitCode::from(1))

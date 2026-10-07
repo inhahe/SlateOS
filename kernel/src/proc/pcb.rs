@@ -9482,12 +9482,14 @@ fn test_subpage_fault_spares_a_shared_frame() -> KernelResult<()> {
         let Some(old_frame) = PhysFrame::from_addr(old) else {
             return fail("the first fault mapped no frame");
         };
-        // Mark sub-page 1's slice of the frame.
-        let slice1 = (old + hw).wrapping_add(hhdm) as *mut u8;
-        // SAFETY: `old` is a live 16 KiB frame mapped into the test process,
-        // read and written here through its HHDM alias; no thread of the test
-        // process runs.
-        unsafe { core::ptr::write_bytes(slice1, MARK, 16) };
+        // Mark sub-page 1, through the primitive every write into a
+        // process's pages uses (the frame is this process's alone so far).
+        if crate::mm::user::copy_to_user_as(pml4, base + hw, &[MARK; 16]).is_err() {
+            return fail("could not mark sub-page 1");
+        }
+        // Where to look for the marker later, after sub-page 1 is unmapped:
+        // the frame's own slice, through its HHDM alias.
+        let slice1 = (old + hw).wrapping_add(hhdm) as *const u8;
         if shared {
             // SAFETY: `old_frame` is live (mapped above); dropped below.
             if unsafe { frame::ref_inc(old_frame) }.is_err() {
@@ -9583,9 +9585,9 @@ fn test_partly_present_frame_refills() -> KernelResult<()> {
         return fail("the first fault mapped nothing");
     };
     // Mark sub-pages 0 and 1, then drop sub-page 1 alone.
-    // SAFETY: `frame` is the live 16 KiB frame mapped above, reached through
-    // its HHDM alias; no thread of the test process runs.
-    unsafe { core::ptr::write_bytes(frame.wrapping_add(hhdm) as *mut u8, MARK, 2 * HW_PAGE_SIZE) };
+    if crate::mm::user::copy_to_user_as(pml4, base, &alloc::vec![MARK; 2 * HW_PAGE_SIZE]).is_err() {
+        return fail("could not mark the test frame");
+    }
     crate::mm::user::unmap_user_range(pml4, base + hw, base + 2 * hw);
     if page_table::translate(pml4, VirtAddr::new(base + hw)).is_some() {
         return fail("the dropped sub-page is still mapped");

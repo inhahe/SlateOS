@@ -7864,18 +7864,23 @@ fn madvise_reclaim(vmas: &[crate::mm::vma::Vma], pml4: u64, start: u64, end: u64
 /// `MADV_REMOVE`: the range reads as zeros afterwards for every process
 /// sharing it -- Linux's hole punched in the shared memory behind it.
 ///
-/// Shared memory only, as on Linux, checked before anything changes: a
-/// private file mapping is `EACCES` (Linux: not a shared writable mapping),
-/// private anonymous or any other region `EINVAL` (no file behind it). A
-/// part of the range no VMA covers is `ENOMEM`, after the covered parts are
-/// cleared, as Linux does.
+/// Shared, writable memory only, as on Linux (`vma_is_shared_maywrite`),
+/// checked before anything changes: a private file mapping or a read-only
+/// shared one is `EACCES`, private anonymous or any other region `EINVAL`
+/// (no file behind it). A part of the range no VMA covers is `ENOMEM`, after
+/// the covered parts are cleared, as Linux does.
 ///
-/// The bytes are zeroed in place: the shared frames are this memory, and
-/// every mapper sees the zeros at once. (Linux frees the pages too; here
-/// shared memory is committed for its lifetime, so the memory stays.)
+/// The bytes are zeroed in place, through `mm::user::copy_to_user_as` -- the
+/// primitive that checks the page is writable before writing, as every write
+/// into a process's pages must. The shared frames are this memory, so every
+/// mapper sees the zeros at once. (Linux frees the pages too; here shared
+/// memory is committed for its lifetime, so the memory stays.)
 fn madvise_remove(vmas: &[crate::mm::vma::Vma], pml4: u64, start: u64, end: u64) -> SyscallResult {
-    use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
+    use crate::mm::page_table::{HW_PAGE_SIZE, PageFlags};
     use crate::mm::vma::VmaKind;
+
+    /// One page of zeros to write with.
+    static ZEROS: [u8; HW_PAGE_SIZE] = [0; HW_PAGE_SIZE];
 
     let in_range: alloc::vec::Vec<&crate::mm::vma::Vma> = vmas
         .iter()
@@ -7889,10 +7894,10 @@ fn madvise_remove(vmas: &[crate::mm::vma::Vma], pml4: u64, start: u64, end: u64)
                 errno::EINVAL
             });
         }
+        if !v.flags.contains(PageFlags::WRITABLE) {
+            return linux_err(errno::EACCES);
+        }
     }
-    let Some(hhdm) = page_table::hhdm() else {
-        return linux_err(errno::ENOMEM);
-    };
     let page = HW_PAGE_SIZE as u64;
     let mut cursor = start;
     let mut gap = false;
@@ -7904,15 +7909,12 @@ fn madvise_remove(vmas: &[crate::mm::vma::Vma], pml4: u64, start: u64, end: u64)
         let hi = v.end.min(end);
         let mut va = lo;
         while va < hi {
-            if let Some(phys) = page_table::translate(pml4, VirtAddr::new(va)) {
-                // SAFETY: `phys` is the 4 KiB page backing `va` in the
-                // caller's own address space, part of shared memory it maps
-                // writable or not; its HHDM alias is valid for one page.
-                // Zeroing it is the operation itself: every mapper of the
-                // shared frame is meant to see it.
-                unsafe {
-                    core::ptr::write_bytes(phys.wrapping_add(hhdm) as *mut u8, 0, HW_PAGE_SIZE);
-                }
+            let len = usize::try_from(hi.saturating_sub(va).min(page)).unwrap_or(HW_PAGE_SIZE);
+            let zeros = ZEROS.get(..len).unwrap_or(&ZEROS);
+            if crate::mm::user::copy_to_user_as(pml4, va, zeros).is_err() {
+                // Checked writable above; a page that will not take the
+                // write now changed under the call.
+                return linux_err(errno::EFAULT);
             }
             va = va.saturating_add(page);
         }

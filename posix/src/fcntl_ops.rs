@@ -260,15 +260,21 @@ fn record_lock(entry: &fdtable::FdEntry, cmd: i32, flock: *mut Flock) -> i32 {
         return free();
     }
     if ret < 0 {
-        errno::set_errno(match ret {
-            // A full table: POSIX's ENOLCK, where the shared mapping says
-            // ENOMEM.
-            errno::native::RESOURCE_EXHAUSTED => errno::ENOLCK,
-            _ => errno::errno_for(ret),
-        });
+        errno::set_errno(lock_errno(ret));
         return -1;
     }
     0
+}
+
+/// The errno for a lock call's negative answer `ret` -- `SYS_FS_RECORD_LOCK`'s
+/// or `SYS_FS_FLOCK_HANDLE`'s: the shared mapping's, except that a full lock
+/// table is POSIX's `ENOLCK`, where the mapping says `ENOMEM` for the code.
+pub(crate) fn lock_errno(ret: i64) -> i32 {
+    if ret == errno::native::RESOURCE_EXHAUSTED {
+        errno::ENOLCK
+    } else {
+        errno::errno_for(ret)
+    }
 }
 
 /// Whether `ret` says there is no lock table to ask: a kernel without
@@ -555,6 +561,14 @@ mod tests {
     /// A kernel without `SYS_FS_RECORD_LOCK`, and the host, have no table: a
     /// lock is granted there and a test finds the range free, as every lock
     /// was before the call existed. Any other answer is the kernel's.
+    #[test]
+    fn a_full_lock_table_is_enolck_and_the_rest_the_shared_mapping() {
+        assert_eq!(lock_errno(errno::native::RESOURCE_EXHAUSTED), errno::ENOLCK);
+        assert_eq!(lock_errno(errno::native::WOULD_BLOCK), errno::EAGAIN);
+        assert_eq!(lock_errno(errno::native::DEADLOCK), errno::EDEADLK);
+        assert_eq!(lock_errno(errno::native::INTERRUPTED), errno::EINTR);
+    }
+
     #[test]
     fn no_lock_table_is_only_a_missing_call() {
         assert!(no_lock_table(errno::native::NO_SUCH_SYSCALL));

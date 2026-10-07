@@ -25,6 +25,11 @@
  *    5x  a lock ends with its process: the child's, when it exits
  *    6x  lockf: F_TLOCK on a section another process holds is EAGAIN (or
  *        EACCES, which POSIX also allows), and F_TEST reports it held
+ *    7x  flock, whose lock is the open file description's (lane A's
+ *        SYS_FS_FLOCK_HANDLE): a second open of the file in this process
+ *        is another owner (EWOULDBLOCK), a dup and a forked child share
+ *        the description's lock, and a child's own blocking flock waits
+ *        until the parent unlocks (70 is that unlock failing)
  *
  * Exit codes: 42 is every check passed.
  *    2  open, pipe, fork or waitpid failed     3  a child failed (its step
@@ -38,6 +43,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -351,6 +357,68 @@ int main(void)
         return fail(66, "lockf F_TEST finds it free once the child is gone");
     }
     ok("lockf locks a section from the offset, and F_TEST sees another's");
+
+    /* 7: flock -- the open description's lock, not the process's. */
+    int d1 = open(PATH, O_RDWR);
+    int d2 = open(PATH, O_RDWR);
+    if (d1 < 0 || d2 < 0) {
+        return fail(2, "open " PATH " twice");
+    }
+    if (flock(d1, LOCK_EX) != 0) {
+        return fail(71, "flock LOCK_EX");
+    }
+    errno = 0;
+    if (flock(d2, LOCK_EX | LOCK_NB) != -1 || errno != EWOULDBLOCK) {
+        return fail(72, "a second open of the file is another owner, even in this process");
+    }
+    int d3 = dup(d1);
+    if (d3 < 0 || flock(d3, LOCK_EX | LOCK_NB) != 0) {
+        return fail(73, "a dup shares the description, and its lock");
+    }
+    close(d3);
+    child = fork();
+    if (child < 0) {
+        return fail(2, "fork");
+    }
+    if (child == 0) {
+        /* d1 is the parent's description, shared by the fork. */
+        if (flock(d1, LOCK_EX | LOCK_NB) != 0) {
+            _exit(74);
+        }
+        int own = open(PATH, O_RDWR);
+        if (own < 0) {
+            _exit(75);
+        }
+        errno = 0;
+        if (flock(own, LOCK_EX | LOCK_NB) != -1 || errno != EWOULDBLOCK) {
+            _exit(76);
+        }
+        if (signal_go(back[1]) != 0) {
+            _exit(77);
+        }
+        long start = now_ms();
+        if (flock(own, LOCK_EX) != 0) {
+            _exit(78);
+        }
+        if (now_ms() - start < 100) {
+            _exit(79);  /* granted while the parent's description held it */
+        }
+        _exit(0);
+    }
+    if (wait_go(back[0]) != 0) {
+        return fail(77, "the child's word");
+    }
+    sleep_ms(200);
+    if (flock(d1, LOCK_UN) != 0) {
+        return fail(70, "flock LOCK_UN");
+    }
+    code = reap(child);
+    if (code != 0) {
+        return code;
+    }
+    close(d1);
+    close(d2);
+    ok("flock's lock is the open description's: shared by a dup and a fork, not by a second open");
 
     close(fd);
     unlink(PATH);

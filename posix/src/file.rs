@@ -6178,21 +6178,24 @@ const FLOCK_OP_MASK: i32 = LOCK_SH | LOCK_EX | LOCK_UN | LOCK_NB;
 
 /// Apply or remove an advisory lock on an open file.
 ///
-/// Wired to the kernel advisory-lock table (`SYS_FS_FLOCK` /
-/// `SYS_FS_FUNLOCK`).  The lock is whole-file and owned by the calling
-/// process: the kernel keys locks by resolved path + owner ID (our PID),
-/// so every thread and descriptor in a process shares one lock per path.
-///
-/// Without `LOCK_NB`, a contended request blocks until the lock can be
-/// acquired; the kernel primitive is non-blocking, so we poll with a
-/// yield between attempts (see the limitation note on `do_flock`).  With
-/// `LOCK_NB`, contention returns `EWOULDBLOCK` immediately.
+/// A whole-file lock that belongs to the **open file description**, as
+/// Linux's does: descriptors sharing it (a `dup`, a `fork`) share the lock,
+/// and two `open`s of one file are two owners even in one process. It is
+/// the kernel's (`SYS_FS_FLOCK_HANDLE`), in the table the Linux `flock`
+/// uses, so native and Linux programs exclude each other. Without
+/// `LOCK_NB`, a contended request waits in the kernel until the lock is
+/// free, and a signal handler installed without `SA_RESTART` ends the wait
+/// (`EINTR`); with `LOCK_NB`, contention is `EWOULDBLOCK` at once. On a
+/// kernel without that call the lock falls back to the older path-keyed
+/// table, owned by the process, as `do_flock` says.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
 ///   * `EINVAL` — `operation` has unknown bits, lacks one of
 ///     LOCK_SH/LOCK_EX/LOCK_UN, or names more than one of them.
 ///   * `EWOULDBLOCK` — `LOCK_NB` set and the lock is held by another owner.
+///   * `EINTR` — a handler interrupted the wait.
+///   * `ENOLCK` — the kernel's lock table is full.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn flock(fd: Fd, operation: i32) -> i32 {
     if fd < 0 {
@@ -6229,19 +6232,40 @@ pub extern "C" fn flock(fd: Fd, operation: i32) -> i32 {
     }
 }
 
-/// Bare-metal worker for [`flock`]: resolve the fd to its path and drive
-/// the kernel advisory-lock syscalls.
+/// Bare-metal worker for [`flock`].
 ///
-/// A path-less descriptor (pipe, socket, anonymous fd) has no entry in
-/// the kernel's path-keyed lock table, so the request is accepted as a
-/// no-op.  Linux would lock the open file description's inode, which our
-/// path-based lock table cannot represent — documented in todo.txt.
+/// A file's lock is asked of the kernel through its handle
+/// (`SYS_FS_FLOCK_HANDLE`, lane A's): the lock is the open file
+/// description's, as Linux's is -- a `dup` or a `fork` shares it, a second
+/// `open` does not -- in the table the Linux `flock` uses, and a blocking
+/// request waits in the kernel, ended by a handler installed without
+/// `SA_RESTART`, as Linux restarts `flock` (signal(7)).
 ///
-/// LIMITATION: blocking acquisition (without `LOCK_NB`) polls with a
-/// yield because `SYS_FS_FLOCK` is non-blocking.  A true blocking wait
-/// needs a kernel wait queue; deferred (see todo.txt).
+/// A kernel without that call leaves the older path-keyed table
+/// (`SYS_FS_FLOCK`), below: there the lock is the process's, and a blocking
+/// request polls in naps, since that call never waits. A path-less
+/// descriptor (pipe, socket, anonymous fd) has no entry in either table, so
+/// its request is accepted as a no-op; Linux would lock its inode.
 #[cfg(target_os = "none")]
 fn do_flock(fd: Fd, operation: i32) -> i32 {
+    if let Some(entry) = fdtable::get_fd(fd)
+        && entry.kind == HandleKind::File
+    {
+        let wait = operation & LOCK_NB == 0 && operation & LOCK_UN == 0;
+        let call = || syscall2(SYS_FS_FLOCK_HANDLE, entry.handle, operation as u64);
+        let ret = if wait {
+            crate::interrupt::restarting(Restart::IfAsked, call)
+        } else {
+            call()
+        };
+        if ret != errno::native::NO_SUCH_SYSCALL {
+            if ret < 0 {
+                errno::set_errno(crate::fcntl_ops::lock_errno(ret));
+                return -1;
+            }
+            return 0;
+        }
+    }
     let mut buf = [0u8; crate::unistd::PATH_MAX];
     let path_len = fdtable::get_fd_path(fd, &mut buf);
     if path_len == 0 {

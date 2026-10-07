@@ -210,6 +210,13 @@ pub const SYS_PROCESS_SET_EXEC_CLOSE: u64 = 1090;
 /// uses, held by the calling process. Lane A's (1093); a kernel without it
 /// answers `NoSuchSyscall`.
 pub const SYS_FS_RECORD_LOCK: u64 = 1093;
+/// BSD `flock(2)` on an open file: `fs_flock_handle(handle, op)`, `op`
+/// Linux's `LOCK_SH`/`LOCK_EX`/`LOCK_UN`, optionally with `LOCK_NB`. The lock
+/// belongs to the open file description, as Linux's does, in the table the
+/// Linux `flock` uses; without `LOCK_NB` the kernel waits. Lane A's (1094);
+/// a kernel without it answers `NoSuchSyscall`, and [`SYS_FS_FLOCK`]'s
+/// path-keyed, per-process table is what is left.
+pub const SYS_FS_FLOCK_HANDLE: u64 = 1094;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

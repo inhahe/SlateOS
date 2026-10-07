@@ -1,0 +1,13 @@
+# meta_seek_head.mkv: the metadata ffprobe shows (generate_fixtures.py).
+start 0
+format
+tag FIRST=1
+tag SECOND=2
+tag THIRD=3
+stream 0 track
+tag language=eng
+stream 1 attachment bin_data 4 f2c67381db28fa11c59fe7a6df0f2587
+tag filename=a.bin
+tag mimetype=binary
+chapter 1 0 1000000000
+tag title=Linear

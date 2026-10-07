@@ -352,7 +352,9 @@ Phase 5 progresses:
   non-blocking transfer (→ `EAGAIN` on a full send window / empty receive)
   regardless of the fd's `O_NONBLOCK`, via a `force_nonblock` arg threaded into
   `dispatch_socket_write`/`dispatch_socket_read`. `MSG_NOSIGNAL` is a no-op (we
-  never raise `SIGPIPE`; a broken pipe returns `EPIPE`). Remaining gaps: other
+  never raise `SIGPIPE`; a broken pipe returns `EPIPE`) -- in the Linux ABI. The
+  native C library raises it since 2026-10-06 (design-decisions §1176); the
+  Linux ABI's half is `requests/d-a-linux-programs-never-get-sigpipe.md`. Remaining gaps: other
   `MSG_*` flags (`MSG_OOB`, `MSG_TRUNC`) are still ignored. (For a **datagram**
   socket, `recvfrom` now reports the *real* per-datagram source address — see the
   `SOCK_DGRAM` bullet above — via `dispatch_dgram_recvfrom`; the connected-stream

@@ -53,12 +53,13 @@ const GRID: f32 = 32.0;
 
 /// The smallest and largest pointer, in pixels, that will be rasterized.
 ///
-/// The user's setting is 16 to 48 and a display scale multiplies it; the bounds
-/// are there so a nonsense scale cannot ask for a zero-pixel pointer or a
-/// ten-thousand-pixel one.
+/// The user's setting is 16 to 96 (`appearance::CursorSize`) and a display
+/// scale multiplies it -- the largest at 4x is 384; the bounds are there so a
+/// nonsense scale cannot ask for a zero-pixel pointer or a ten-thousand-pixel
+/// one.
 const MIN_SIZE_PX: u32 = 8;
 /// See [`MIN_SIZE_PX`].
-const MAX_SIZE_PX: u32 = 256;
+const MAX_SIZE_PX: u32 = 512;
 
 /// How the pointer should look: its size and its two colours.
 ///
@@ -355,7 +356,7 @@ pub fn render(shape: CursorShape, style: &CursorStyle) -> Option<CursorImage> {
     let size = style.size_px.clamp(MIN_SIZE_PX, MAX_SIZE_PX);
     #[allow(
         clippy::cast_precision_loss,
-        reason = "size is clamped to 8..=256, exact in f32"
+        reason = "size is clamped to 8..=512, exact in f32"
     )]
     let scale = size as f32 / GRID;
 

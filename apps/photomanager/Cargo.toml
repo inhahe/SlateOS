@@ -11,6 +11,9 @@ pathtext = { path = "../pathtext" }
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# A one-line field's keys -- the caret, the selection, the clipboard -- and
+# which keystrokes are commands rather than typing.
+textline = { path = "../textline" }
 
 # Decoding a photograph, which is the one thing a photo manager has to do with
 # one. Until this arrived the library could import a file, read its EXIF and

@@ -56,6 +56,9 @@ associations = { path = "../associations" }
 # rather than a typed crate like `appearance`. See src/idle_lock.rs.
 settingsfile = { path = "../settingsfile" }
 guitk = { path = "../toolkit" }
+# The shell's sounds -- a notification's chime, a screenshot's shutter --
+# decoded, converted and played (`event_sounds`).
+sound = { path = "../sound" }
 # `/proc` is read through the one parser, not a second copy. The same
 # crate serves apps/sysinfo, apps/procexplorer and apps/sysmonitor; two
 # /proc parsers in one repository is the arrangement where a kernel
@@ -104,12 +107,21 @@ yamldoc = { path = "../../yamldoc" }
 # two processes cannot disagree about what the user chose. The shell paints
 # from it (DesktopTheme::from_settings) and hosts the panel that edits it.
 appearance = { path = "../appearance" }
+# The window rules: the model, the engine that applies them when a window
+# arrives, and `window-rules.yaml`, which the shell loads at start and
+# reloads when Settings changes it. Shared with Settings so the two
+# processes cannot disagree about what a rule file says.
+windowrules = { path = "../windowrules" }
 # The installed programs' desktop entries: what the start menu lists, under
 # which folder, with which picture, and how each starts.
 desktopentry = { path = "../desktopentry" }
 # SlateOS's own programs, as desktop entries: the one list of programs
 # (design-decisions 1425), which replaced the table the shell kept itself.
 programs = { path = "../programs" }
+# What programs add to a file's right-click menu: KDE's service-menu files,
+# how KDE runs their commands, and the user's choices of them
+# (design-decisions 1448).
+servicemenus = { path = "../servicemenus" }
 
 # The input settings model, on the same terms as `appearance` above: the
 # compositor applies these values, the Settings application edits them, and the

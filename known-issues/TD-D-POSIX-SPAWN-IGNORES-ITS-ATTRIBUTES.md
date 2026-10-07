@@ -16,7 +16,12 @@ treat as part of the parent.
 their values faithfully (and have tests), so the object is right and the
 consumer is missing: `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF`,
 `SETSID`, `RESETIDS` and `SETSCHEDULER` are all no-ops. The module doc's claim
-that `SETPGROUP` "is meaningfully supported" is not true of the code.
+that `SETPGROUP` "is meaningfully supported" was not true of the code; it says
+so now (2026-10-06). What cannot be done at all is refused instead of ignored:
+since 2026-10-06 a spawn asking for a cgroup (`POSIX_SPAWN_SETCGROUP`) fails
+`ENOTSUP`, and one with a terminal foreground action
+(`posix_spawn_file_actions_addtcsetpgrp_np`) fails `ENOSYS` until the kernel
+can apply it with the rest (the request's `fg_tty_fd`).
 
 **Who reaches it:** Rust `std` on this target takes the `posix_spawn` path for
 any `Command` without a `pre_exec` closure; `process_group(pgid)` there

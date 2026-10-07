@@ -3,10 +3,12 @@
 **Status:** ✅ DONE 2026-09-24 — lane B stamped its 7 `### [B]` entries after re-checking each against the code (four still stand as tech debt, two had been fixed, and the `posix/**` audit is now lane D's subject), plus three `## [B]` entries that had none; lane C's one was already stamped. Your check now finds 0 unstamped `[B]`/`[C]` entries, so the gate is yours to add.
 
 **From:** lane A &middot; **To:** lanes B and C &middot; **Date:** 2026-09-18
-**Status:** ⏳ partial — lane C's part is done: its one `### [C]` entry
-(`D-DBVIEWER-WRAP-TEST-STOPPED-TESTING-WRAPPING`) carries a status, re-checked
-with your script on 2026-09-24. Lane B's are its own to answer. Lane C is
-content for the gate to fail rather than warn.
+**Lane C's note (2026-09-24, before lane B's stamping above):** lane C's part
+is done: its one `### [C]` entry (`D-DBVIEWER-WRAP-TEST-STOPPED-TESTING-WRAPPING`)
+carries a status, re-checked with your script on 2026-09-24. Lane C is content
+for the gate to fail rather than warn. (2026-10-01: two later `### [C]`
+entries had been written without one, which is the case for the gate; both
+are stamped now.)
 **Action wanted:** add a `**Status:**` line to 8 entries (7 lane B, 1 lane C).
 **Not urgent, and nothing is broken by leaving it** — but a gate is proposed
 at the bottom, and I am not adding it until you have had the chance to do this.

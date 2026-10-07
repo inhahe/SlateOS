@@ -94,8 +94,12 @@ fi
 # In /tmp/oils-spec, the path the run on SlateOS uses: cases run in
 # directories under it and some see it (run_all.py, --out). /tmp is shared by
 # every lane's WSL, hence the lock.
+#
+# PYTHONDONTWRITEBYTECODE: the driver imports sh_spec.py from the tree, and
+# Python would otherwise leave __pycache__/sh_spec.cpython-312.pyc in it --
+# compiled by this host's Python, shipped to the image with everything else.
 if [ -x "$NATIVE" ]; then
-    flock /tmp/oils-spec.lock \
+    PYTHONDONTWRITEBYTECODE=1 flock /tmp/oils-spec.lock \
         python3 "$DEST/run_all.py" --record --oils-for-unix "$NATIVE" --out /tmp/oils-spec \
         >"$SLATE_WORK/oils-spec-record.log" 2>&1
     echo "RECORD_EXIT=$?"

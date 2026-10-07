@@ -1,0 +1,12 @@
+# Third-party code in this crate, for the image's notices (design-decisions 1433).
+#
+# src/ is a port of libbzip2 1.0.8 -- decompress.c, compress.c, blocksort.c,
+# huffman.c, randtable.c, crctable.c, and the stream handling of bzlib.c and
+# bzip2.c -- function by function. It is an altered version, which the
+# licence's third condition requires saying; src/lib.rs says what was altered.
+# tests/data/sample1.bz2 and sample3.bz2 are the distribution's own test files.
+libbzip2:
+  version: 1.0.8
+  licence: bzip2-1.0.6
+  texts:
+    - libbzip2-LICENSE

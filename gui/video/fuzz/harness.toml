@@ -1,0 +1,83 @@
+# The cargo-fuzz harness's manifest. `setup.py` installs it as
+# ~/fuzz/tree/fuzz/Cargo.toml, and the `path`s below are relative to that place,
+# not to this file: kept under another name here so that nothing in the real
+# workspace mistakes this directory for a package. See README.md.
+[package]
+name = "lanef-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+imagecodec = { path = "../gui/imagecodec" }
+videocodec = { path = "../gui/video/codec" }
+matroska = { path = "../gui/video/matroska" }
+mp4 = { path = "../gui/video/mp4" }
+vp8 = { path = "../gui/video/vp8" }
+vp9 = { path = "../gui/video/vp9" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "image"
+path = "fuzz_targets/image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "video"
+path = "fuzz_targets/video.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sound"
+path = "fuzz_targets/sound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subtitles"
+path = "fuzz_targets/subtitles.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "matroska"
+path = "fuzz_targets/matroska.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mp4"
+path = "fuzz_targets/mp4.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vp8"
+path = "fuzz_targets/vp8.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vp9"
+path = "fuzz_targets/vp9.rs"
+test = false
+doc = false
+bench = false

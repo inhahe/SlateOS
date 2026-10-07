@@ -463,6 +463,12 @@ MUTATIONS = [
         "Surface::Card",
         ["the_size_in_play_looks_chosen_and_the_card_is_grounded"],
     ),
+    (
+        "a key held with a modifier is the game's",
+        '            Event::Key(ke) if ke.pressed && !textline::is_plain(ke.modifiers) => {',
+        '            Event::Key(ke) if ke.pressed && false => {',
+        ['a_key_held_with_a_modifier_is_not_the_games'],
+    ),
 ]
 
 if __name__ == "__main__":

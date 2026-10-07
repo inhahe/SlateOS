@@ -11,7 +11,10 @@ used to draw an empty pane, and the one-value categories named
 `/sys/hardware/...` paths nothing reads any more.  And a value nothing
 reports -- a cache, the memory's speed and slots, the adapter's memory, a
 refresh rate with no primary output -- is drawn as not reported, where it was
-"0 KiB", "0 MHz", "0 / 0", "0 MiB" and "0 Hz".
+"0 KiB", "0 MHz", "0 / 0", "0 MiB" and "0 Hz".  The last rows, added
+2026-10-04, cover the list of keys' hold on the pointer: a press with it up
+puts it away and reaches nothing under it, and the wheel scrolls nothing it
+covers.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -120,6 +123,116 @@ MUTATIONS = [
         '|hz| format!("{hz} Hz")',
         '|hz| format!("{hz}")',
         [ZERO],
+    ),
+]
+
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
+
+MUTATIONS += [
+    # The list of keys takes the pointer (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
+    ),
+]
+
+# The keys are plain and a Ctrl chord is not AltGr; the search box is the
+# toolkit's field, edited by textline's editor (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+CHORDS = "a_chord_is_no_key_here_and_types_nothing"
+FIELD = "the_search_box_is_the_toolkits_field"
+
+MUTATIONS += [
+    (
+        "a chord raises the list of keys",
+        "        if key.key == Key::F1 && plain {\n",
+        "        if key.key == Key::F1 {\n",
+        [CHORDS],
+    ),
+    (
+        "AltGr+E opens the export dialog",
+        "            Key::E if ctrl => {\n",
+        "            Key::E if key.modifiers.ctrl => {\n",
+        [CHORDS],
+    ),
+    (
+        "a chord works the window's keys",
+        "            _ if !plain => return EventResult::Ignored,\n",
+        "",
+        [CHORDS],
+    ),
+    (
+        "a chorded Escape leaves the search",
+        "            Key::Escape if plain => {\n                self.search_focused = false;\n",
+        "            Key::Escape => {\n                self.search_focused = false;\n",
+        [CHORDS],
+    ),
+    (
+        "the search box is never lit",
+        "            hovered: self.search_hovered && !covered,\n",
+        "            hovered: false,\n",
+        [FIELD],
+    ),
+    (
+        "the pointer over the search box is not noted",
+        "                self.search_hovered = Self::toolbar_layout().search.contains(mouse.x, mouse.y);\n",
+        "",
+        [FIELD],
+    ),
+    (
+        "the search box never has the keyboard's mark",
+        "            focused: self.search_focused && !covered,\n",
+        "            focused: false,\n",
+        [FIELD],
+    ),
+    (
+        "the search box keeps its mark under the list of keys",
+        "            focused: self.search_focused && !covered,\n",
+        "            focused: self.search_focused,\n",
+        [FIELD],
+    ),
+    (
+        "a search that finds nothing is not red",
+        "            invalid: !self.search_text.is_empty() && self.search_all(&self.search_text).is_empty(),\n",
+        "            invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "a press leaves the caret where it was",
+        "        self.search_editor.set_cursor(cursor);\n",
+        "        let _ = cursor;\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
     ),
 ]
 

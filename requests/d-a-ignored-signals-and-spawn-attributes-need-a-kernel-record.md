@@ -71,8 +71,9 @@ the table from `SYS_SIGNAL_GET_IGNORED`; `exec` needs nothing more.
 | `sigmask` | the child's blocked set, low 64 signals | ″ |
 | `sigdefault` | signals removed from the child's inherited ignored set (part 1) | `POSIX_SPAWN_SETSIGDEF` |
 | `setsid` | 1 = the child starts a new session | `POSIX_SPAWN_SETSID` |
+| `fg_tty_fd` | -1 = none (today); else the child's descriptor of a terminal whose foreground process group becomes the child's group, after `pgid` is applied (added 2026-10-06) | `posix_spawn_file_actions_addtcsetpgrp_np` |
 
-All four must be in force before the child's first instruction, which is why
+All of them must be in force before the child's first instruction, which is why
 the parent cannot do them itself after the syscall: a `setpgid(child, pgid)`
 from the parent races the child, which is the race shells tolerate for `fork`
 but not what `posix_spawn` promises. `POSIX_SPAWN_RESETIDS` maps onto the
@@ -90,6 +91,11 @@ tests), and refuse a flag the running kernel reports it cannot honour —
   and every shell's background jobs.
 - Rust's `Command::process_group` and anything else using
   `POSIX_SPAWN_SETPGROUP`.
+- `posix_spawn_file_actions_addtcsetpgrp_np` (glibc 2.35; added here
+  2026-10-06): a job-control shell's way to hand the terminal to the job it
+  spawns. Lane D records the action, and until `fg_tty_fd` exists a spawn
+  with it fails `ENOSYS` -- a refusal the caller can see, rather than a
+  foreground set after the child has already run.
 - Zombie-free `SIGCHLD = SIG_IGN` servers.
 
 Nothing breaks while it waits; the gaps are all silent, which is why they are

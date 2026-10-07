@@ -554,3 +554,15 @@ it sits.
   for ever, while a notification persists in a history they can come back to.
   It still needs a caller of its own, for the transient messages an OSD is
   actually right for.
+
+- **2026-10-05 -- the window rules have a home on both sides of the split.**
+  Under C-Q6's answer (§815) the rules editor is a screen you open, so it
+  belongs to Settings -- and `apps/settings` had no counterpart, which is why
+  this entry listed window rules among the shell's panels with nowhere else to
+  go. The model, the engine and a file for them (`window-rules.yaml`) moved to
+  their own crate, `gui/windowrules`, which Settings can depend on without
+  linking the shell; the shell reads the file at start and on every change
+  (§1465). The page is requested of lane E
+  (`requests/c-e-a-window-rules-page-in-settings.md`); when it lands, the
+  shell's `RulesSettingsUI` -- still drawn by nothing -- is deleted rather
+  than wired.

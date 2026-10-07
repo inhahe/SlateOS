@@ -363,7 +363,7 @@ fn load_host_conf(c: &mut HostConf) {
     let env = |name: &[u8]| -> Option<&'static [u8]> {
         // SAFETY: `name` is NUL-terminated; the value lives as long as the
         // environment.
-        let v = unsafe { crate::environ::getenv(name.as_ptr()) };
+        let v = unsafe { crate::environ::lookup(name.as_ptr()) };
         // SAFETY: a non-null value is a NUL-terminated string.
         (!v.is_null()).then(|| unsafe { nss_files::c_bytes(v) })
     };

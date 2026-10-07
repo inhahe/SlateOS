@@ -28,6 +28,9 @@ libcall = { path = "../../libcall" }
 # The link to the shell -- this file's `child.rs` until `apps/tmux` needed one
 # for every pane.
 termchild = { path = "../termchild" }
+# Whether a keystroke typed something: AltGr, which arrives as Ctrl+Alt, types
+# (`textline::types_into_field`), where a Ctrl or Alt chord is a command.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 termchild = { path = "../termchild", features = ["testing"] }

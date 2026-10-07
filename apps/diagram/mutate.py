@@ -11,6 +11,12 @@ did not exist -- and nothing it wrote could be opened again.  Nothing recorded
 unsaved changes, and the window closed over them.  The table covers the file
 it has now and the question; the rest of the suite predates them.
 
+The undo history is a tree now (C-Q24): an edit after an undo keeps the undone
+diagram as a branch, reached with Alt+Z.  Its rows cover the keys -- and
+AltGr, which arrives as Ctrl+Alt, not being taken for either -- the toolbar's
+word on it, the cap, and an opened diagram's history starting with it; the
+tree itself is `statehistory`'s and the toolkit's to test.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -29,6 +35,14 @@ REFUSED = "a_file_that_is_not_a_diagram_is_refused"
 PARTIAL = "what_is_not_understood_is_left_out_and_the_rest_read"
 KEYS = "ctrl_s_saves_over_the_diagrams_own_file_once_it_has_one"
 CLOSE = "closing_or_opening_over_unsaved_changes_asks"
+TREE = "an_edit_after_an_undo_keeps_the_undone_diagram_reachable_with_alt_z"
+CTRL_SHIFT_Z = "ctrl_shift_z_redoes"
+ALTGR = "altgr_z_does_not_undo"
+SUPER = "alt_z_with_the_windows_key_goes_nowhere"
+GUARD = "a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut"
+INDICATOR = "the_toolbar_says_whether_undo_and_redo_can_go"
+CAP = "the_history_keeps_the_last_hundred_edits"
+OPENED = "an_opened_diagram_cannot_be_undone_into_the_one_before"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -115,8 +129,8 @@ MUTATIONS = [
     ),
     (
         "a change does not mark the diagram",
-        "        self.undo.save(snap);\n        self.dirty = true;\n",
-        "        self.undo.save(snap);\n",
+        "        self.undo.begin(snap);\n        self.dirty = true;\n",
+        "        self.undo.begin(snap);\n",
         [KEYS, CLOSE],
     ),
     (
@@ -176,6 +190,215 @@ MUTATIONS = [
         "                        if !self.selection.has_node(id) {\n                            self.selection.select_single_node(id);\n                        }",
         "                        self.selection.select_single_node(id);",
         ["dragging_across_empty_canvas_selects_the_shapes_the_box_touches"],
+    ),
+    # -- the history: a tree, walked with Alt+Z (C-Q24) -----------------------
+    (
+        "a diagram the history puts back is not marked",
+        "        self.restore_snapshot(snapshot);\n"
+        "        // Undoing past a save leaves a diagram the file does not hold.\n"
+        "        self.dirty = true;\n",
+        "        self.restore_snapshot(snapshot);\n",
+        [TREE],
+    ),
+    (
+        "Alt+Z goes nowhere",
+        "                } else {\n                    self.earlier()\n                })",
+        "                } else {\n                    false\n                })",
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "                    self.later()\n                } else {",
+        "                    self.earlier()\n                } else {",
+        [TREE],
+    ),
+    (
+        "Alt+Z only undoes",
+        "        let earlier = self.undo.earlier(current);",
+        "        let earlier = self.undo.undo(current);",
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z only redoes",
+        "        let later = self.undo.later(current);",
+        "        let later = self.undo.redo(current);",
+        [TREE],
+    ),
+    (
+        "AltGr+Z goes back",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key =>",
+        "Key::Z if key.modifiers.alt && !key.modifiers.super_key =>",
+        [ALTGR],
+    ),
+    (
+        "Super+Alt+Z goes back",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key =>",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl =>",
+        [SUPER],
+    ),
+    (
+        "a key held with Alt is a shortcut",
+        "            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,",
+        "            _ if key.modifiers.super_key => EventResult::Ignored,",
+        [ALTGR, GUARD],
+    ),
+    (
+        "a key held with the Windows key is a shortcut",
+        "            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,",
+        "            _ if key.modifiers.alt => EventResult::Ignored,",
+        [GUARD],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "            Key::Z if ctrl && key.modifiers.shift => moved(self.redo()),\n",
+        "",
+        [CTRL_SHIFT_Z],
+    ),
+    (
+        "redo undoes",
+        "        let next = self.undo.redo(current);",
+        "        let next = self.undo.undo(current);",
+        [CTRL_SHIFT_Z, "test_redo_add_node"],
+    ),
+    (
+        "the toolbar says undo never can",
+        'if self.undo.can_undo() { "yes" } else { "no" },',
+        'if false { "yes" } else { "no" },',
+        [INDICATOR],
+    ),
+    (
+        "the toolbar says whether undo can for redo",
+        'if self.undo.can_redo() { "yes" } else { "no" }',
+        'if self.undo.can_undo() { "yes" } else { "no" }',
+        [INDICATOR],
+    ),
+    (
+        "the history keeps more than a hundred edits",
+        "            undo: StateHistory::new(UNDO_LIMIT),",
+        "            undo: StateHistory::new(UNDO_LIMIT.saturating_add(20)),",
+        [CAP],
+    ),
+    (
+        "an opened diagram keeps the history of the one before",
+        "                self.undo.clear();\n",
+        "",
+        [OPENED],
+    ),
+    (
+        "a label refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["a_label_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a label types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if !key.types_text() {",
+        ["a_label_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    # -- the shortcut card is modal, for the keys and the pointer
+    (
+        "the card is modal for nothing",
+        "        if self.show_help {\n            match event {\n",
+        "        if false && self.show_help {\n            match event {\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        "                    if closes {\n"
+        "                        self.show_help = false;\n"
+        "                    }\n"
+        "                    return EventResult::Consumed;\n",
+        "                    if closes {\n"
+        "                        self.show_help = false;\n"
+        "                        return EventResult::Consumed;\n"
+        "                    }\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "? does not put the card away",
+        "                        Key::Slash => key.modifiers.shift,\n",
+        "                        Key::Slash => false,\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "Escape does not put the card away",
+        "                        Key::F1 | Key::Escape => true,\n",
+        "                        Key::F1 => true,\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "a press goes through the card",
+        "                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                        self.show_help = false;\n"
+        "                        return EventResult::Consumed;\n"
+        "                    }\n",
+        "",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "only the left button puts the card away",
+        "                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                    MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+    (
+        "the wheel zooms what the card covers",
+        "                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        ["the_shortcut_card_takes_every_key_and_press_while_it_is_up"],
+    ),
+]
+
+FIELD = "a_label_is_typed_into_the_toolkits_field"
+FIRST = "a_thing_with_no_label_shows_its_first_label_as_it_is_typed"
+CARET = "the_caret_follows_the_typing_and_stays_in_the_box"
+
+MUTATIONS += [
+    # A label is typed into the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls). There was no box and no caret, and
+    # a thing with no label showed none of its first one until Enter.
+    (
+        "a box's first label is not drawn as it is typed",
+        "            Some((LabelTarget::Node(id), buf)) if *id == node.id => {",
+        "            Some((LabelTarget::Node(id), buf)) if *id == node.id && !node.label.is_empty() => {",
+        [FIRST, FIELD],
+    ),
+    (
+        "a line's first label is not drawn as it is typed",
+        "            Some((LabelTarget::Edge(id), buf)) if *id == edge.id => {",
+        "            Some((LabelTarget::Edge(id), buf)) if *id == edge.id && !edge.label.is_empty() => {",
+        [FIRST, FIELD],
+    ),
+    (
+        "a label is typed into no box",
+        "        field::draw(\n"
+        "            cmds,\n"
+        "            &self.palette,\n"
+        "            strip.field(),\n",
+        "        let _ = (\n"
+        "            cmds.len(),\n"
+        "            &self.palette,\n"
+        "            strip.field(),\n",
+        [FIELD],
+    ),
+    (
+        "the label's box does not have the keyboard",
+        "                focused: true,\n                ..field::State::default()",
+        "                focused: false,\n                ..field::State::default()",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the caret is at the start of the typing",
+        "                cursor: guitk::text::TextCursor::from(buf.len()),",
+        "                cursor: guitk::text::TextCursor::from(0),",
+        [CARET],
     ),
 ]
 

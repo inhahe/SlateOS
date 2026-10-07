@@ -58,6 +58,16 @@ pub mod icons;
 // resolve the module's own links from this scope, where its items are not.
 pub mod themes;
 
+pub mod decorations;
+
+pub mod cursors;
+
+pub mod sounds;
+
+pub mod panel;
+
+pub mod themecheck;
+
 /// Where settings files live and how they are replaced.
 ///
 /// This was `appearance::config` before it was a crate of its own, and it is
@@ -72,6 +82,7 @@ use core::time::Duration;
 use datetimesettings::Tz;
 pub use daywindow::{DailyWindow, TimeOfDay};
 use guitk::color::Color;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
@@ -249,6 +260,10 @@ impl PaletteSource for AppearanceSettings {
         self.animation_theme
             .motion()
             .at_speed(self.animation_speed.multiplier())
+    }
+
+    fn accent_titlebars(&self) -> bool {
+        self.accent_titlebars
     }
 }
 
@@ -1108,6 +1123,72 @@ impl AnimationSpeed {
 }
 
 // ============================================================================
+// Sound settings
+// ============================================================================
+
+/// The volume system sounds play at until the user chooses: a little under
+/// full, so a chime does not startle at a volume set for music.
+pub const DEFAULT_SOUND_VOLUME: f32 = 0.8;
+
+/// The user's sounds: on or off, how loud, and their own sound for an event
+/// -- the `sounds` section of `appearance.yaml`. Which theme the rest come
+/// from is [`AppearanceSettings::sound_theme`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundSettings {
+    /// Whether events make sounds at all.
+    pub enabled: bool,
+    /// How loud they are, 0 to 1.
+    pub volume: f32,
+    /// The user's own choice for an event, by its sound naming
+    /// specification name, over the theme's: `sounds.events.<name>` in the
+    /// file, an absolute path or `off`.
+    pub events: BTreeMap<String, EventSound>,
+}
+
+impl Default for SoundSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            volume: DEFAULT_SOUND_VOLUME,
+            events: BTreeMap::new(),
+        }
+    }
+}
+
+/// The user's own choice for one event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventSound {
+    /// This file, an absolute path.
+    File(PathBuf),
+    /// No sound.
+    Off,
+}
+
+impl EventSound {
+    /// The choice `value` -- `sounds.events.<name>` in the file -- spells:
+    /// `off`, or an absolute path. `None` for anything else, a relative path
+    /// above all: relative to what would be a guess.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value == "off" {
+            return Some(Self::Off);
+        }
+        let path = pathcodec::decode_path(value);
+        path.is_absolute().then_some(Self::File(path))
+    }
+
+    /// How the file spells it.
+    #[must_use]
+    pub fn yaml_value(&self) -> String {
+        match self {
+            Self::Off => "off".to_string(),
+            Self::File(path) => pathcodec::encode_path(path),
+        }
+    }
+}
+
+// ============================================================================
 // Font settings
 // ============================================================================
 
@@ -1200,7 +1281,8 @@ impl FontSettings {
         }
     }
 
-    /// Draw in these families from now on, in *this* process.
+    /// Draw in these families from now on, in *this* process -- and at
+    /// `ui_size`, which the toolkit's controls follow, on this thread.
     ///
     /// `guitk`'s font selection is per-process global state, and its own
     /// documentation is explicit about the consequence: "callers must apply
@@ -1229,6 +1311,13 @@ impl FontSettings {
         // compositor's was hinted. The colour-emoji palette is the theme's,
         // which this section does not know, so the one in force is kept.
         guitk::text::set_rendering(self.rendering(guitk::text::rendering().palette));
+        // And the size: the toolkit's controls draw their text at it, and lay
+        // their rows and boxes out round it (`guitk::text::scaled`). Until
+        // this they drew at 13 pixels whatever the user chose, so a larger
+        // size reached the desktop's own text and the window titles and left
+        // every menu, tooltip, button and field behind. On this thread: the
+        // one that lays the program's windows out.
+        let _changed = guitk::text::set_base_size(self.ui_size);
         // Asking first, because installing is not free: `set_font_family`
         // reloads the faces and drops every rasterized glyph, so calling it
         // for the family already in use would throw the cache away to arrive
@@ -1503,6 +1592,26 @@ pub struct AppearanceSettings {
     /// "mix-and-match"). Nothing is read until an icon is drawn; see
     /// [`icons::IconTheme`].
     pub icon_theme: icons::IconTheme,
+    /// The theme the pointer's pictures come from: the built-in one -- the
+    /// compositor's own pointer -- unless the user chose another. `theme.cursors`
+    /// in the file, by the folder name of the theme, which may be another
+    /// desktop's cursor theme (Adwaita, Breeze) as well as a SlateOS one.
+    /// Nothing is read until a cursor is drawn; see [`cursors::CursorTheme`].
+    /// How large the pointer is and its colours for the built-in pictures stay
+    /// [`cursor_size`](Self::cursor_size) and
+    /// [`cursor_scheme`](Self::cursor_scheme).
+    pub cursor_theme: cursors::CursorTheme,
+    /// The theme an event's sound comes from -- a message arriving, an
+    /// error, the recycle bin emptied: the built-in one, the sounds
+    /// `gui/sound` synthesizes, unless the user chose another. `theme.sounds`
+    /// in the file, by the folder name of the theme, which may be another
+    /// desktop's sound theme (freedesktop's, Yaru) as well as a SlateOS one.
+    /// Nothing is read until a sound is asked for; see
+    /// [`sounds::SoundTheme`] and [`sound_for`](Self::sound_for).
+    pub sound_theme: sounds::SoundTheme,
+    /// Whether events make sounds, how loud, and the user's own sound for an
+    /// event -- the `sounds` section.
+    pub sounds: SoundSettings,
     /// The theme the shapes of the controls come from -- a button's corners,
     /// a field's focus mark, a scrollbar's width: the built-in one unless the
     /// user chose another. `theme.widget_style` in the file, by the theme's
@@ -1518,6 +1627,37 @@ pub struct AppearanceSettings {
     /// reach everything that animates together, as `Palette::motion`. See
     /// [`themes::AnimationTheme`] and `design-decisions.md` §1446.
     pub animation_theme: themes::AnimationTheme,
+    /// The theme every window's frame is shaped by -- its title bar, the
+    /// buttons on it, its border and its shadow: the built-in one unless the
+    /// user chose another. `theme.decorations` in the file, by the theme's
+    /// folder name, which may name yet another theme. The compositor draws
+    /// and hit-tests frames from [`decorations`](Self::decorations); see
+    /// [`themes::DecorationTheme`] and `design-decisions.md` §1456.
+    pub decoration_theme: themes::DecorationTheme,
+    /// The theme the taskbar's finish and spacing come from -- how much of
+    /// the Aero reference's glass it wears, and the gaps between its tiles:
+    /// the built-in one unless the user chose another. `theme.taskbar_panel`
+    /// in the file, by the theme's folder name. The desktop draws and lays
+    /// out its taskbar from [`panel`](Self::panel); whether the bar is
+    /// see-through stays [`taskbar_style`](Self::taskbar_style). See
+    /// [`themes::PanelTheme`] and `design-decisions.md` §1460.
+    pub panel_theme: themes::PanelTheme,
+    /// The theme whose recommended wallpaper the desktop shows -- its picture
+    /// for the mode the desktop is drawn in -- or the built-in one, which
+    /// recommends none, so that the user's own
+    /// [`wallpaper`](Self::wallpaper) is shown. `theme.wallpaper` in the
+    /// file, by the theme's folder name. Below a time-of-day schedule and a
+    /// rotation folder, each of which *is* the wallpaper when set; above the
+    /// fixed picture, which it stands in for. See [`themes::WallpaperTheme`]
+    /// and `design-decisions.md` §1471.
+    pub wallpaper_theme: themes::WallpaperTheme,
+    /// The theme whose recommended fonts are drawn -- for each role the
+    /// first of its families this machine has, in place of the user's own
+    /// [`fonts`](Self::fonts) -- or the built-in one, which recommends none.
+    /// `theme.fonts` in the file, by the theme's folder name. What every
+    /// process draws in is [`fonts_in_use`](Self::fonts_in_use). See
+    /// [`themes::FontTheme`] and `design-decisions.md` §1472.
+    pub font_theme: themes::FontTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1598,6 +1738,16 @@ pub struct AppearanceSettings {
     /// expects. The same argument `night_light`/`night_light_strength` makes
     /// one field along.
     pub wallpaper_fit: ImageFit,
+    /// Which part of the picture shows where it overflows the screen -- and
+    /// where it sits where it is smaller than the screen: fractions across
+    /// and down, `(0.0, 0.0)` its top-left corner at the screen's, the
+    /// default `(0.5, 0.5)` its middle at the screen's middle, `(1.0, 1.0)`
+    /// its bottom-right at the screen's. `design.txt`: "let the user scroll
+    /// the image up/down or right/left to center it on the desktop how they
+    /// want". `wallpaper.position_x` and `position_y` in the file, held to
+    /// 0..=1. The login screen, showing the same picture, shows the same part
+    /// of it.
+    pub wallpaper_position: (f32, f32),
 
     /// A folder to rotate wallpapers from, instead of one fixed picture.
     ///
@@ -1760,6 +1910,7 @@ impl Default for AppearanceSettings {
             // different shape usually wants, and it is what the shell did
             // unconditionally before this was settable.
             wallpaper_fit: ImageFit::Fill,
+            wallpaper_position: (0.5, 0.5),
             wallpaper_folder: None,
             // Ten minutes. Long enough that a picture is a background rather
             // than a distraction, short enough that a user who turns rotation
@@ -1772,8 +1923,15 @@ impl Default for AppearanceSettings {
             theme_mode: ThemeMode::Dark,
             color_theme: themes::ColorTheme::built_in(),
             icon_theme: icons::IconTheme::built_in(),
+            cursor_theme: cursors::CursorTheme::built_in(),
+            sound_theme: sounds::SoundTheme::built_in(),
+            sounds: SoundSettings::default(),
             widget_theme: themes::WidgetTheme::built_in(),
             animation_theme: themes::AnimationTheme::built_in(),
+            decoration_theme: themes::DecorationTheme::built_in(),
+            panel_theme: themes::PanelTheme::built_in(),
+            wallpaper_theme: themes::WallpaperTheme::built_in(),
+            font_theme: themes::FontTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -1904,6 +2062,46 @@ impl AppearanceSettings {
             .map_or(asked, |theme| theme.variant(asked).0)
     }
 
+    /// The picture the chosen wallpaper theme recommends for the mode the
+    /// desktop is drawn in ([`is_light`](Self::is_light)) -- so a theme's day
+    /// and night pictures follow the automatic mode as its colours do --
+    /// or `None` when it recommends none, the built-in theme among them.
+    #[must_use]
+    pub fn theme_wallpaper(&self) -> Option<&std::path::Path> {
+        self.wallpaper_theme.picture(self.is_light())
+    }
+
+    /// The fonts every process draws in: the user's own
+    /// [`fonts`](Self::fonts) -- families, sizes and rasterizing -- and, once
+    /// every process applies through this, a chosen font theme's
+    /// recommendations in place of the families where this machine has them
+    /// ([`fonts_with_theme`](Self::fonts_with_theme)).
+    ///
+    /// **The theme's are not applied yet.** A label is measured by the
+    /// program that lays it out and drawn by the compositor, so the two must
+    /// agree on the face or every centred label sits off centre. The shell
+    /// applies through this; the applications' event loop and the
+    /// compositor read [`fonts`](Self::fonts) still
+    /// (`requests/c-f-apply-the-fonts-in-use.md`), and until both apply
+    /// through this it answers as they read: the user's own. Turning the
+    /// theme on is then this function's body alone --
+    /// `self.fonts_with_theme(guitk::text::family_installed)` -- which every
+    /// process takes up together (`design-decisions.md` §1472).
+    #[must_use]
+    pub fn fonts_in_use(&self) -> FontSettings {
+        self.fonts.clone()
+    }
+
+    /// The user's [`fonts`](Self::fonts) with the chosen font theme's
+    /// recommendations in place of the families, where `installed` says this
+    /// machine has one ([`themes::FontTheme::families_in_use`]): what
+    /// [`fonts_in_use`](Self::fonts_in_use) will answer, and what a font page
+    /// can show meanwhile.
+    #[must_use]
+    pub fn fonts_with_theme(&self, installed: impl Fn(&str) -> bool) -> FontSettings {
+        self.font_theme.families_in_use(&self.fonts, installed)
+    }
+
     /// How long until the automatic mode next turns light or dark, reading
     /// the time of day at `utc_secs` in `zone`; `None` unless the mode is
     /// automatic, or when its hours start and end at the same time and so
@@ -2030,12 +2228,72 @@ impl AppearanceSettings {
         self.window_corners.radius()
     }
 
+    /// The shape of every window's frame: the chosen window-decorations
+    /// theme's, or the built-in one where that could not be used
+    /// ([`themes::DecorationTheme::problem`] says why). Where a frame's
+    /// buttons and title go is
+    /// [`DecorationStyle::title_bar`](decorations::DecorationStyle::title_bar).
+    #[must_use]
+    pub fn decorations(&self) -> decorations::DecorationStyle {
+        self.decoration_theme.style()
+    }
+
+    /// The taskbar's finish and spacing: the chosen taskbar-panel theme's, or
+    /// the built-in one where that could not be used
+    /// ([`themes::PanelTheme::problem`] says why).
+    #[must_use]
+    pub fn panel(&self) -> panel::PanelStyle {
+        self.panel_theme.style()
+    }
+
+    /// What to play for the event `name` -- a sound naming specification
+    /// name (`message-new-instant`, `dialog-error`, `trash-empty`): nothing
+    /// with sounds off; else the user's own choice for it, or for its name
+    /// cut at a hyphen, so a sound chosen for `dialog-error` is heard for
+    /// `dialog-error-serious` too; else the sound theme's
+    /// ([`sounds::SoundTheme::sound`]), which ends at the built-in sound.
+    /// Play it at [`SoundSettings::volume`].
+    #[must_use]
+    pub fn sound_for(&self, name: &str) -> sounds::SoundChoice {
+        let name = name.trim();
+        if !self.sounds.enabled || !sounds::is_valid_name(name) {
+            return sounds::SoundChoice::Silent;
+        }
+        for candidate in sounds::cuts(name) {
+            match self.sounds.events.get(candidate) {
+                Some(EventSound::File(path)) => return sounds::SoundChoice::File(path.clone()),
+                Some(EventSound::Off) => return sounds::SoundChoice::Silent,
+                None => {}
+            }
+        }
+        self.sound_theme.sound(name)
+    }
+
     /// Validate and clamp settings to sane ranges.
     pub fn validate(&mut self) {
+        // A volume is a fraction; a NaN set in code is the default rather
+        // than a panic or a silence nobody chose.
+        self.sounds.volume = if self.sounds.volume.is_nan() {
+            DEFAULT_SOUND_VOLUME
+        } else {
+            self.sounds.volume.clamp(0.0, 1.0)
+        };
+        // A name that is no event's would be looked up as nothing anyway;
+        // dropped, so a save does not keep writing it back.
+        self.sounds
+            .events
+            .retain(|name, _| sounds::is_valid_name(name));
         // Clamp font sizes. `get_f64` never yields a NaN or an infinity, so
         // `clamp` cannot be handed one from a config file; a NaN written by a
         // future code path would panic here rather than propagate silently.
         self.fonts.ui_size = self.fonts.ui_size.clamp(8.0, 32.0);
+        // Fractions of the room a picture leaves; a NaN set in code is the
+        // middle rather than a panic or a picture nowhere.
+        let place = |v: f32| if v.is_nan() { 0.5 } else { v.clamp(0.0, 1.0) };
+        self.wallpaper_position = (
+            place(self.wallpaper_position.0),
+            place(self.wallpaper_position.1),
+        );
         self.fonts.mono_size = self.fonts.mono_size.clamp(6.0, 32.0);
         self.scaling_percent = self.scaling_percent.clamp(100, 300);
         // Up to four times, not the a11y module's five: the caret is drawn
@@ -2152,8 +2410,14 @@ impl DecorationColors {
     #[must_use]
     pub fn from_palette(p: &Palette) -> Self {
         Self {
-            title_focused_bg: p.surface0,
-            title_focused_fg: p.text,
+            // The palette's answer, the accent where the user asked for
+            // accented title bars: the same one a ribbon's strip, joined to
+            // the bar, is drawn from. The *unfocused* bar deliberately keeps
+            // the base palette -- an accent that marks every window marks none
+            // of them, and telling the focused window apart is the title bar's
+            // first job.
+            title_focused_bg: p.title_bar(),
+            title_focused_fg: p.title_text(),
             title_unfocused_bg: p.base,
             title_unfocused_fg: p.subtext0,
             border_focused: p.surface2,
@@ -2194,20 +2458,16 @@ impl DecorationColors {
     /// counter was put on `Palette::from_settings`: `Compositor::set_appearance`
     /// resolved one for its own cache and this resolved a second, identical,
     /// one line later.
+    ///
+    /// The settings themselves are no longer read: since 2026-09-30 the
+    /// palette carries the one thing a frame took from them beyond it --
+    /// whether the title bar is in the accent ([`Palette::title_bar`]) -- so
+    /// that a ribbon's strip, joined to the bar, is drawn from the same
+    /// answer. The parameter stays so that the window manager's call is
+    /// unchanged.
     #[must_use]
-    pub fn from_settings_with(settings: &AppearanceSettings, palette: &Palette) -> Self {
-        let mut colors = Self::from_palette(palette);
-
-        if settings.accent_titlebars {
-            let accent = settings.effective_accent();
-            colors.title_focused_bg = accent;
-            colors.title_focused_fg = readable_on(accent);
-            // The *unfocused* bar deliberately keeps the base palette: an
-            // accent that marks every window marks none of them, and telling
-            // the focused window apart is the title bar's first job.
-        }
-
-        colors
+    pub fn from_settings_with(_settings: &AppearanceSettings, palette: &Palette) -> Self {
+        Self::from_palette(palette)
     }
 
     /// Every colour a frame is drawn with, paired with its field name.
@@ -2379,6 +2639,16 @@ impl AppearanceSettings {
             doc.get_str(&["wallpaper", "fit"])
                 .and_then(|v| ImageFit::from_yaml_name(v.trim()))
         );
+        read_into!(
+            s.wallpaper_position.0,
+            doc.get_f64(&["wallpaper", "position_x"])
+                .map(|v| (v as f32).clamp(0.0, 1.0))
+        );
+        read_into!(
+            s.wallpaper_position.1,
+            doc.get_f64(&["wallpaper", "position_y"])
+                .map(|v| (v as f32).clamp(0.0, 1.0))
+        );
 
         if let Some(path) = doc.get_str(&["wallpaper", "image"]) {
             let trimmed = path.trim();
@@ -2455,6 +2725,46 @@ impl AppearanceSettings {
         {
             s.icon_theme = icons::IconTheme::load(&pathcodec::decode_path(&name).into_os_string());
         }
+        // The cursor theme, spelled as the icon theme is, and for its reason
+        // read no further: a cursor is looked up when the pointer is drawn.
+        if let Some(name) = doc
+            .get_str(&["theme", "cursors"])
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            s.cursor_theme =
+                cursors::CursorTheme::load(&pathcodec::decode_path(&name).into_os_string());
+        }
+        // The sound theme, spelled as the cursor theme is, and for its
+        // reason read no further: a sound is looked up when it is played.
+        if let Some(name) = doc
+            .get_str(&["theme", "sounds"])
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            s.sound_theme =
+                sounds::SoundTheme::load(&pathcodec::decode_path(&name).into_os_string());
+        }
+        if let Some(on) = doc.get_bool(&["sounds", "enabled"]) {
+            s.sounds.enabled = on;
+        }
+        if let Some(volume) = doc.get_f64(&["sounds", "volume"]) {
+            // Clamped by `validate`; the narrowing is of a fraction.
+            #[allow(clippy::cast_possible_truncation, reason = "a volume, 0 to 1")]
+            let volume = volume as f32;
+            s.sounds.volume = volume;
+        }
+        // The user's own sounds: an event's name and `off` or a path. One
+        // that is neither, or is no event's, is passed over rather than
+        // costing the rest.
+        for name in doc.keys(&["sounds", "events"]) {
+            let choice = doc
+                .get_str(&["sounds", "events", &name])
+                .and_then(|value| EventSound::parse(&value));
+            if let Some(choice) = choice.filter(|_| sounds::is_valid_name(&name)) {
+                s.sounds.events.insert(name, choice);
+            }
+        }
         // The widget style, spelled and loaded as the colour theme is -- file
         // and all, since the palette carries it and a palette is resolved per
         // frame.
@@ -2464,6 +2774,25 @@ impl AppearanceSettings {
         // The motion, for the same reason: the palette carries it.
         if let Some(name) = animation_theme_name(doc) {
             s.animation_theme = themes::AnimationTheme::load(&name);
+        }
+        // The window frames, the same way.
+        if let Some(name) = decoration_theme_name(doc) {
+            s.decoration_theme = themes::DecorationTheme::load(&name);
+        }
+        // The taskbar's panel, the same way.
+        if let Some(name) = panel_theme_name(doc) {
+            s.panel_theme = themes::PanelTheme::load(&name);
+        }
+        // And the wallpaper a theme recommends, the same way: the pictures
+        // are found when the settings are read, never when one is drawn.
+        if let Some(name) = wallpaper_theme_name(doc) {
+            s.wallpaper_theme = themes::WallpaperTheme::load(&name);
+        }
+        // And the fonts a theme recommends, as it names them. Which of them
+        // this machine has is asked where they are drawn (`fonts_in_use`):
+        // a fact about the machine, not about the file.
+        if let Some(name) = font_theme_name(doc) {
+            s.font_theme = themes::FontTheme::load(&name);
         }
         read_into!(
             s.theme_mode,
@@ -2724,6 +3053,14 @@ impl AppearanceSettings {
         let schedule: Vec<&str> = schedule.iter().map(String::as_str).collect();
         doc.set_seq(&["wallpaper", "schedule"], &schedule);
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
+        doc.set_f64(
+            &["wallpaper", "position_x"],
+            f64::from(self.wallpaper_position.0),
+        );
+        doc.set_f64(
+            &["wallpaper", "position_y"],
+            f64::from(self.wallpaper_position.1),
+        );
         doc.set_str(&["login", "background"], self.login_background.yaml_name());
         match &self.login_background {
             LoginBackground::SolidColor(color) => {
@@ -2761,12 +3098,48 @@ impl AppearanceSettings {
             &pathcodec::encode_path(std::path::Path::new(self.icon_theme.id())),
         );
         doc.set_str(
+            &["theme", "cursors"],
+            &pathcodec::encode_path(std::path::Path::new(self.cursor_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "sounds"],
+            &pathcodec::encode_path(std::path::Path::new(self.sound_theme.id())),
+        );
+        doc.set_bool(&["sounds", "enabled"], self.sounds.enabled);
+        doc.set_f64(&["sounds", "volume"], f64::from(self.sounds.volume));
+        // An event no longer given a sound of its own is taken out, so the
+        // theme's is heard again; the rest are written as they are.
+        for stale in doc.keys(&["sounds", "events"]) {
+            if !self.sounds.events.contains_key(&stale) {
+                let _removed = doc.remove(&["sounds", "events", &stale]);
+            }
+        }
+        for (name, choice) in &self.sounds.events {
+            doc.set_str(&["sounds", "events", name], &choice.yaml_value());
+        }
+        doc.set_str(
             &["theme", "widget_style"],
             &pathcodec::encode_path(std::path::Path::new(self.widget_theme.id())),
         );
         doc.set_str(
             &["theme", "animation"],
             &pathcodec::encode_path(std::path::Path::new(self.animation_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "decorations"],
+            &pathcodec::encode_path(std::path::Path::new(self.decoration_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "taskbar_panel"],
+            &pathcodec::encode_path(std::path::Path::new(self.panel_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "wallpaper"],
+            &pathcodec::encode_path(std::path::Path::new(self.wallpaper_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "fonts"],
+            &pathcodec::encode_path(std::path::Path::new(self.font_theme.id())),
         );
         doc.set_str(
             &["theme", "surface_style"],
@@ -3013,6 +3386,34 @@ pub(crate) fn widget_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
 /// [`color_theme_name`] is.
 pub(crate) fn animation_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
     theme_name_at(doc, "animation")
+}
+
+/// The window-decorations theme a settings document names, decoded; `None`
+/// for the built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn decoration_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "decorations")
+}
+
+/// The taskbar-panel theme a settings document names, decoded; `None` for
+/// the built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn panel_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "taskbar_panel")
+}
+
+/// The wallpaper theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn wallpaper_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "wallpaper")
+}
+
+/// The font theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn font_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "fonts")
 }
 
 /// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
@@ -3447,6 +3848,22 @@ mod tests {
         assert_eq!(r.subpixel, guitk::text::Subpixel::Rgb);
     }
 
+    /// **Applying the fonts sets the toolkit's text size**, on the thread
+    /// that applies them -- the one that lays the program's windows out -- so
+    /// the toolkit's controls follow the user's size. The families stay the
+    /// defaults here, as every caller of `apply` in this binary leaves them.
+    #[test]
+    fn applying_the_fonts_sets_the_toolkits_text_size() {
+        let fonts = FontSettings {
+            ui_size: 20.0,
+            ..FontSettings::default()
+        };
+        let _ = fonts.apply();
+        assert!((guitk::text::base_size() - 20.0).abs() < f32::EPSILON);
+        let _ = FontSettings::default().apply();
+        assert!((guitk::text::base_size() - guitk::text::DEFAULT_SIZE).abs() < f32::EPSILON);
+    }
+
     /// One mapping from the settings to a rasterizer's terms, field by field.
     #[test]
     fn the_rendering_is_the_settings_field_for_field() {
@@ -3517,6 +3934,21 @@ mod tests {
     /// The round trip's animation theme: a fourth, for the same reason.
     const ROUND_TRIP_ANIMATION: &str = "ressort ü";
     const ROUND_TRIP_ANIMATION_FILE: &str = "animation:\n  duration-ms: 320\n  easing: spring\n";
+    /// The round trip's window-frames theme: a fifth.
+    const ROUND_TRIP_DECORATIONS: &str = "cadres é";
+    const ROUND_TRIP_DECORATIONS_FILE: &str =
+        "window-decorations:\n  title-bar:\n    height: 36\n  buttons:\n    side: left\n";
+    /// The round trip's taskbar-panel theme: a sixth.
+    const ROUND_TRIP_PANEL: &str = "barre ö";
+    const ROUND_TRIP_PANEL_FILE: &str = "taskbar-panel:\n  gloss: 0.25\n  spacing:\n    tiles: 4\n";
+    /// The round trip's wallpaper theme: a seventh, recommending one picture
+    /// for dark mode, which the round trip puts in its folder.
+    const ROUND_TRIP_WALLPAPERS: &str = "fonds ï";
+    const ROUND_TRIP_WALLPAPERS_FILE: &str = "wallpapers:\n  dark: wallpapers/night.png\n";
+    /// The round trip's font theme: an eighth, recommending two families for
+    /// the interface's text and one for code.
+    const ROUND_TRIP_FONTS: &str = "polices ë";
+    const ROUND_TRIP_FONTS_FILE: &str = "fonts:\n  ui: [Inter, Cantarell]\n  mono: Fira Code\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3542,6 +3974,28 @@ mod tests {
             // A theme of its own, not the colour theme's, so a round trip that
             // wrote one axis into the other would be caught.
             icon_theme: icons::IconTheme::load(std::ffi::OsStr::new("line-icons")),
+            // Another again, and another desktop's: a cursor theme need not
+            // be a SlateOS theme at all.
+            cursor_theme: cursors::CursorTheme::load(std::ffi::OsStr::new("Adwaita")),
+            // Another desktop's sound theme, and none of the others': the
+            // sound axis is its own.
+            sound_theme: sounds::SoundTheme::load(std::ffi::OsStr::new("Yaru")),
+            // Off, an uncommon volume, and an event of each kind: a file
+            // whose name holds a space, a non-ASCII letter and a `%`, and a
+            // silence.
+            sounds: SoundSettings {
+                enabled: false,
+                volume: 0.35,
+                events: BTreeMap::from([
+                    ("dialog-error".to_string(), EventSound::Off),
+                    (
+                        "message-new-instant".to_string(),
+                        EventSound::File(PathBuf::from(host_absolute(
+                            "home/u/Sounds/d\u{ed}ng 100%.oga",
+                        ))),
+                    ),
+                ]),
+            },
             // A third, read back from the file the round trip installs.
             widget_theme: themes::WidgetTheme::from_style(
                 ROUND_TRIP_WIDGETS,
@@ -3555,6 +4009,34 @@ mod tests {
                 themes::parse(ROUND_TRIP_ANIMATION_FILE)
                     .motion
                     .expect("the fixture sets a motion"),
+            ),
+            // A fifth, for the window frames.
+            decoration_theme: themes::DecorationTheme::from_style(
+                ROUND_TRIP_DECORATIONS,
+                themes::parse(ROUND_TRIP_DECORATIONS_FILE)
+                    .decorations
+                    .expect("the fixture sets window frames"),
+            ),
+            // A sixth, for the taskbar's panel.
+            panel_theme: themes::PanelTheme::from_style(
+                ROUND_TRIP_PANEL,
+                themes::parse(ROUND_TRIP_PANEL_FILE)
+                    .panel
+                    .expect("the fixture sets a taskbar panel"),
+            ),
+            // A seventh, for the wallpaper: only its name is written; what it
+            // reads back as is a path in the scratch folder, which the round
+            // trip compares inside it.
+            wallpaper_theme: themes::WallpaperTheme::from_pictures(
+                ROUND_TRIP_WALLPAPERS,
+                None,
+                None,
+            ),
+            // An eighth, for the fonts: read back as its file names them.
+            font_theme: themes::FontTheme::from_families(
+                ROUND_TRIP_FONTS,
+                vec!["Inter".to_string(), "Cantarell".to_string()],
+                vec!["Fira Code".to_string()],
             ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
@@ -3586,6 +4068,7 @@ mod tests {
             // filesystem the user named, and a tidy ASCII fixture would pass
             // through a codec that mangled either.
             wallpaper_fit: ImageFit::Tile,
+            wallpaper_position: (0.25, 0.75),
             wallpaper: Some(PathBuf::from("/home/u/Pictures/maíz del alba.png")),
             theme_mode: ThemeMode::Light,
             // Not 07:00-19:00. Read back whatever the mode, since the hours are
@@ -3651,12 +4134,30 @@ mod tests {
         settings.write_into(&mut doc);
         // The colour theme is read from its own file, so that file has to be
         // where the reader looks: a scratch user's data directory.
-        let reread = config::testing::with_scratch_config("round-trip", |root| {
+        let (reread, wallpapers) = config::testing::with_scratch_config("round-trip", |root| {
             install_theme(root, ROUND_TRIP_THEME, ROUND_TRIP_THEME_FILE);
             install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
             install_theme(root, ROUND_TRIP_ANIMATION, ROUND_TRIP_ANIMATION_FILE);
-            AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
+            install_theme(root, ROUND_TRIP_DECORATIONS, ROUND_TRIP_DECORATIONS_FILE);
+            install_theme(root, ROUND_TRIP_PANEL, ROUND_TRIP_PANEL_FILE);
+            install_theme(root, ROUND_TRIP_WALLPAPERS, ROUND_TRIP_WALLPAPERS_FILE);
+            install_theme(root, ROUND_TRIP_FONTS, ROUND_TRIP_FONTS_FILE);
+            let folder = config::testing::scratch_data_dir(root)
+                .join("slateos")
+                .join("themes")
+                .join(ROUND_TRIP_WALLPAPERS);
+            let night = folder.join(themes::WALLPAPERS_DIR).join("night.png");
+            std::fs::create_dir_all(night.parent().unwrap()).unwrap();
+            std::fs::write(&night, b"a picture").unwrap();
+            let wallpapers =
+                themes::WallpaperTheme::from_pictures(ROUND_TRIP_WALLPAPERS, Some(night), None);
+            (
+                AppearanceSettings::read_from(&Document::parse(&doc.to_text())),
+                wallpapers,
+            )
         });
+        let mut settings = settings;
+        settings.wallpaper_theme = wallpapers;
         assert_eq!(reread, settings);
     }
 
@@ -3766,6 +4267,204 @@ mod tests {
             let back = AppearanceSettings::read_from(&written);
             assert_eq!(back.icon_theme.id(), odd.as_os_str());
         });
+    }
+
+    /// The cursor theme is its own setting too: `theme.cursors`, apart from
+    /// the icon theme even where an icon theme and a cursor theme share a
+    /// folder (as Adwaita's do), the built-in one -- the compositor's own
+    /// pointer -- when the file names none or a blank, and a folder name that
+    /// is not text kept byte for byte.
+    #[test]
+    fn the_cursor_theme_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("cursor-theme", |_| {
+            let s = AppearanceSettings::read_from(&Document::parse(""));
+            assert!(s.cursor_theme.is_built_in());
+
+            let doc = Document::parse("theme:\n  icons: papirus\n  cursors: Adwaita\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.cursor_theme.id(), "Adwaita");
+            assert_eq!(s.icon_theme.id(), "papirus");
+            let mut saved = Document::parse("");
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "cursors"]).as_deref(),
+                Some("Adwaita")
+            );
+            assert_eq!(
+                saved.get_str(&["theme", "icons"]).as_deref(),
+                Some("papirus")
+            );
+
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  cursors: \" \"\n"));
+            assert!(blank.cursor_theme.is_built_in());
+
+            let odd = std::path::Path::new(&pathcodec::decode_path("caf%E9"))
+                .as_os_str()
+                .to_os_string();
+            let mut settings = AppearanceSettings::default();
+            settings.cursor_theme = cursors::CursorTheme::load(&odd);
+            let mut written = Document::parse("");
+            settings.write_into(&mut written);
+            let back = AppearanceSettings::read_from(&written);
+            assert_eq!(back.cursor_theme.id(), odd.as_os_str());
+        });
+    }
+
+    /// `tail` made absolute on the host the tests run on. A SlateOS path is
+    /// absolute from `/`, but `Path::is_absolute` on a Windows host also
+    /// wants a drive -- and with one, the path is still spelled with `/`
+    /// alone, so it reads the same in a file as anywhere else.
+    fn host_absolute(tail: &str) -> String {
+        if cfg!(windows) {
+            format!("C:/{tail}")
+        } else {
+            format!("/{tail}")
+        }
+    }
+
+    /// Settings whose sound theme is `id` under a scratch directory's roots,
+    /// with one file there: `t/stereo/bell.oga`.
+    fn with_sound_theme(scratch: &scratchdir::ScratchDir) -> (AppearanceSettings, PathBuf) {
+        let share = scratch.dir().join("share");
+        let bell = share.join("t").join("stereo").join("bell.oga");
+        std::fs::create_dir_all(bell.parent().unwrap()).unwrap();
+        std::fs::write(&bell, b"a sound").unwrap();
+        let mut s = AppearanceSettings::default();
+        s.sound_theme = sounds::SoundTheme::named(
+            std::ffi::OsStr::new("t"),
+            themes::ThemeDirs {
+                user: None,
+                system: scratch.dir().join("system"),
+            },
+            vec![share],
+        );
+        (s, bell)
+    }
+
+    /// **An event's sound is the user's own, then the theme's, then the
+    /// built-in one** -- the user's for an event's shorter name too, so a
+    /// sound chosen for `dialog-error` is heard for `dialog-error-serious`.
+    #[test]
+    fn an_events_sound_is_the_users_then_the_themes_then_the_built_in() {
+        let scratch = scratchdir::ScratchDir::new("appearance-sound-for");
+        let (mut s, bell) = with_sound_theme(&scratch);
+        assert_eq!(s.sound_for("bell"), sounds::SoundChoice::File(bell.clone()));
+        assert_eq!(
+            s.sound_for("trash-empty"),
+            sounds::SoundChoice::BuiltIn("trash-empty".to_string())
+        );
+        let mine = PathBuf::from("/home/u/my bell.wav");
+        s.sounds
+            .events
+            .insert("bell".to_string(), EventSound::File(mine.clone()));
+        s.sounds
+            .events
+            .insert("dialog-error".to_string(), EventSound::Off);
+        assert_eq!(s.sound_for("bell"), sounds::SoundChoice::File(mine));
+        assert_eq!(
+            s.sound_for("dialog-error-serious"),
+            sounds::SoundChoice::Silent
+        );
+        assert_eq!(s.sound_for(" bell "), s.sound_for("bell"), "trimmed");
+        assert_eq!(s.sound_for("Not An Event"), sounds::SoundChoice::Silent);
+    }
+
+    /// **With sounds off, no event makes one** -- not the user's own, not the
+    /// theme's, not the built-in.
+    #[test]
+    fn with_sounds_off_nothing_sounds() {
+        let scratch = scratchdir::ScratchDir::new("appearance-sounds-off");
+        let (mut s, _) = with_sound_theme(&scratch);
+        s.sounds.enabled = false;
+        s.sounds.events.insert(
+            "complete".to_string(),
+            EventSound::File(PathBuf::from("/x.oga")),
+        );
+        for event in ["bell", "complete", "trash-empty"] {
+            assert_eq!(s.sound_for(event), sounds::SoundChoice::Silent, "{event}");
+        }
+    }
+
+    /// **The file spells a choice `off` or an absolute path**; a relative
+    /// path, a blank and a name that is no event's are passed over, and the
+    /// rest are kept.
+    #[test]
+    fn the_file_spells_a_choice_off_or_an_absolute_path() {
+        let done = host_absolute("home/u/done.oga");
+        let doc = Document::parse(&format!(
+            "theme:\n  sounds: Yaru\nsounds:\n  enabled: false\n  volume: 0.25\n  events:\n    bell: relative/x.oga\n    Bad: \"off\"\n    trash-empty: \"off\"\n    complete: {done}\n    message: \" \"\n",
+        ));
+        let s = AppearanceSettings::read_from(&doc);
+        assert_eq!(s.sound_theme.id(), "Yaru");
+        assert!(!s.sounds.enabled);
+        assert!((s.sounds.volume - 0.25).abs() < 1e-6);
+        assert_eq!(
+            s.sounds.events,
+            BTreeMap::from([
+                ("trash-empty".to_string(), EventSound::Off),
+                (
+                    "complete".to_string(),
+                    EventSound::File(PathBuf::from(&done))
+                ),
+            ])
+        );
+        assert_eq!(EventSound::parse("off"), Some(EventSound::Off));
+        assert_eq!(EventSound::parse(" off "), Some(EventSound::Off));
+        assert_eq!(EventSound::parse("relative.oga"), None);
+        assert_eq!(EventSound::parse(""), None);
+        // Spelled as the file spells any path: a `%` is `%25`.
+        assert_eq!(
+            EventSound::parse(&host_absolute("100%25.oga")),
+            Some(EventSound::File(PathBuf::from(host_absolute("100%.oga"))))
+        );
+    }
+
+    /// **An event given back to the theme leaves the file**, and the
+    /// defaults -- sounds on, the built-in theme -- are written as such.
+    #[test]
+    fn an_event_given_back_to_the_theme_leaves_the_file() {
+        let mut s = AppearanceSettings::default();
+        let mut doc = Document::parse("");
+        s.write_into(&mut doc);
+        assert_eq!(doc.get_bool(&["sounds", "enabled"]), Some(true));
+        assert_eq!(
+            doc.get_str(&["theme", "sounds"]).as_deref(),
+            Some(themes::BUILT_IN)
+        );
+        s.sounds.events.insert("bell".to_string(), EventSound::Off);
+        s.sounds.events.insert(
+            "complete".to_string(),
+            EventSound::File(PathBuf::from(host_absolute("a.oga"))),
+        );
+        s.write_into(&mut doc);
+        assert_eq!(doc.keys(&["sounds", "events"]), ["bell", "complete"]);
+        s.sounds.events.remove("bell");
+        s.write_into(&mut doc);
+        assert_eq!(doc.keys(&["sounds", "events"]), ["complete"]);
+        assert_eq!(AppearanceSettings::read_from(&doc).sounds, s.sounds);
+    }
+
+    /// **A volume is held to 0 to 1, a NaN is the default, and a name that is
+    /// no event's is dropped.**
+    #[test]
+    fn the_sound_settings_are_validated() {
+        let mut s = AppearanceSettings::default();
+        s.sounds.volume = 3.0;
+        s.validate();
+        assert_eq!(s.sounds.volume, 1.0);
+        s.sounds.volume = -1.0;
+        s.validate();
+        assert_eq!(s.sounds.volume, 0.0);
+        s.sounds.volume = f32::NAN;
+        s.validate();
+        assert_eq!(s.sounds.volume, DEFAULT_SOUND_VOLUME);
+        s.sounds
+            .events
+            .insert("../escape".to_string(), EventSound::Off);
+        s.sounds.events.insert("bell".to_string(), EventSound::Off);
+        s.validate();
+        assert_eq!(s.sounds.events.keys().collect::<Vec<_>>(), ["bell"]);
     }
 
     /// A blank name is the built-in theme, as a blanked wallpaper is none.
@@ -4087,6 +4786,147 @@ mod tests {
         });
     }
 
+    /// **The wallpaper's position is read, held to 0..=1 and written back**;
+    /// absent, it is the middle, and a NaN set in code is the middle too.
+    #[test]
+    fn the_wallpaper_position_is_read_held_and_written() {
+        let none = AppearanceSettings::read_from(&Document::parse(""));
+        assert_eq!(none.wallpaper_position, (0.5, 0.5));
+
+        let s = AppearanceSettings::read_from(&Document::parse(
+            "wallpaper:\n  position_x: 0.25\n  position_y: 0.9\n",
+        ));
+        assert_eq!(s.wallpaper_position, (0.25, 0.9));
+
+        let held = AppearanceSettings::read_from(&Document::parse(
+            "wallpaper:\n  position_x: 1.7\n  position_y: -0.5\n",
+        ));
+        assert_eq!(held.wallpaper_position, (1.0, 0.0));
+
+        let mut written = Document::new();
+        s.write_into(&mut written);
+        assert_eq!(written.get_f64(&["wallpaper", "position_x"]), Some(0.25));
+        let back = AppearanceSettings::read_from(&written);
+        assert_eq!(back.wallpaper_position, (0.25, 0.9));
+
+        let mut nan = AppearanceSettings {
+            wallpaper_position: (f32::NAN, 2.0),
+            ..AppearanceSettings::default()
+        };
+        nan.validate();
+        assert_eq!(nan.wallpaper_position, (0.5, 1.0));
+    }
+
+    /// **The window frames are their own setting**, `theme.decorations`:
+    /// read, carried to `decorations()`, written back -- the built-in frame
+    /// where nothing or a blank is chosen, and where the chosen theme cannot
+    /// give one (which keeps its name and says why).
+    #[test]
+    fn the_window_frames_are_their_own_setting_and_survive_a_save() {
+        config::testing::with_scratch_config("decorations-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.decoration_theme, themes::DecorationTheme::built_in());
+            assert_eq!(none.decorations(), decorations::DecorationStyle::AERO);
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  decorations: \" \"\n"));
+            assert_eq!(blank.decoration_theme, themes::DecorationTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "decorations"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            install_theme(
+                root,
+                "roomy",
+                "window-decorations:\n  title-bar:\n    height: 40\n  buttons:\n    side: left\n",
+            );
+            let doc = Document::parse("theme:\n  decorations: roomy\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.decoration_theme.problem(), None);
+            assert_eq!(s.decorations().title_height, 40);
+            assert_eq!(s.decorations().button_side, decorations::ButtonSide::Left);
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "decorations"]).as_deref(),
+                Some("roomy")
+            );
+
+            // A colours-only theme cannot give the frames.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let s =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  decorations: nord\n"));
+            assert_eq!(s.decoration_theme.id(), "nord");
+            assert_eq!(s.decorations(), decorations::DecorationStyle::AERO);
+            assert!(
+                s.decoration_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no window frames")),
+                "{:?}",
+                s.decoration_theme.problem()
+            );
+        });
+    }
+
+    /// **The taskbar panel is its own setting**, `theme.taskbar_panel`:
+    /// read, carried to `panel()`, written back -- the built-in panel where
+    /// nothing or a blank is chosen, and where the chosen theme cannot give
+    /// one (which keeps its name and says why).
+    #[test]
+    fn the_taskbar_panel_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("panel-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.panel_theme, themes::PanelTheme::built_in());
+            assert_eq!(none.panel(), panel::PanelStyle::AERO);
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  taskbar_panel: \" \"\n"));
+            assert_eq!(blank.panel_theme, themes::PanelTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "taskbar_panel"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            install_theme(
+                root,
+                "flat",
+                "taskbar-panel:\n  gloss: 0\n  spacing:\n    tiles: 5\n",
+            );
+            let doc = Document::parse("theme:\n  taskbar_panel: flat\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.panel_theme.problem(), None);
+            assert_eq!(s.panel().gloss, 0);
+            assert_eq!(s.panel().tile_gap, 5);
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "taskbar_panel"]).as_deref(),
+                Some("flat")
+            );
+
+            // A colours-only theme cannot give the panel.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let s =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  taskbar_panel: nord\n"));
+            assert_eq!(s.panel_theme.id(), "nord");
+            assert_eq!(s.panel(), panel::PanelStyle::AERO);
+            assert!(
+                s.panel_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no taskbar panel")),
+                "{:?}",
+                s.panel_theme.problem()
+            );
+        });
+    }
+
     /// **High contrast keeps the motion, whole**: it is about telling things
     /// apart, and how fast they move does not change that.
     #[test]
@@ -4152,6 +4992,97 @@ mod tests {
             assert_ne!(themes::fingerprint(&other), themes::fingerprint(&colours));
             let alone = Document::parse("theme:\n  animation: calm\n");
             assert!(!themes::fingerprint(&alone).is_empty());
+        });
+    }
+
+    /// The wallpaper theme is a dependency as the other axes' are, and so are
+    /// the pictures it recommends: `watcher()` sees one arrive after the
+    /// theme's file -- a theme being copied in -- and the desktop is told the
+    /// picture it can now show. They count even when the theme's file was
+    /// counted for another axis.
+    #[test]
+    fn a_wallpaper_theme_and_its_pictures_are_a_dependency() {
+        config::testing::with_scratch_config("wallpaper-axis", |root| {
+            let text = "colors:\n  base: \"#2e3440\"\nwallpapers:\n  dark: night.png\n";
+            install_theme(root, "aurora", text);
+            let dir = config::testing::scratch_data_dir(root)
+                .join("slateos")
+                .join("themes")
+                .join("aurora");
+            let mut file = AppearanceFile::load();
+            file.settings.wallpaper_theme =
+                themes::WallpaperTheme::load(std::ffi::OsStr::new("aurora"));
+            assert!(file.settings.theme_wallpaper().is_none(), "no picture yet");
+            file.save().unwrap();
+
+            let mut w = watcher();
+            assert!(w.poll().is_some(), "the first look");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            std::fs::write(dir.join("night.png"), b"a picture").unwrap();
+            let doc = w
+                .poll()
+                .expect("the picture arrived, so the wallpaper changed");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.theme_wallpaper(), Some(dir.join("night.png").as_path()));
+            assert!(w.poll().is_none(), "reported once");
+
+            // An edit that leaves the same pictures found: the file itself
+            // is a dependency, not only what it recommends.
+            install_theme(root, "aurora", &text.replace("#2e3440", "#3b4252"));
+            assert!(w.poll().is_some(), "the theme's file edited");
+
+            let both = Document::parse("theme:\n  colors: aurora\n  wallpaper: aurora\n");
+            let with_picture = themes::fingerprint(&both);
+            std::fs::remove_file(dir.join("night.png")).unwrap();
+            assert_ne!(
+                themes::fingerprint(&both),
+                with_picture,
+                "the pictures count when the file was counted for the colours"
+            );
+        });
+    }
+
+    /// A font theme is chosen by name, as the other axes are, written back
+    /// by name, and its file is a dependency. What it gives is its first
+    /// installed family for each role, the user's own where it has none
+    /// installed ([`AppearanceSettings::fonts_with_theme`]) -- and until every
+    /// process applies through [`AppearanceSettings::fonts_in_use`], that
+    /// answers with the user's own, so no two processes draw in different
+    /// faces.
+    #[test]
+    fn a_font_theme_is_chosen_and_its_families_resolved() {
+        config::testing::with_scratch_config("font-axis", |root| {
+            install_theme(
+                root,
+                "nord",
+                "fonts:\n  ui: [Inter, Noto Sans]\n  mono: Fira Code\n",
+            );
+            let doc = Document::parse("theme:\n  fonts: nord\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.font_theme.id(), "nord");
+            assert_eq!(s.font_theme.problem(), None);
+
+            let fonts = s.fonts_with_theme(|family| family == "Noto Sans");
+            assert_eq!(fonts.ui_font, "Noto Sans", "the first of its installed");
+            assert_eq!(
+                fonts.mono_font, s.fonts.mono_font,
+                "none of its installed: the user's own"
+            );
+            assert_eq!(
+                s.fonts_in_use(),
+                s.fonts,
+                "not drawn until every process applies through fonts_in_use"
+            );
+
+            let mut out = Document::new();
+            s.write_into(&mut out);
+            assert_eq!(out.get_str(&["theme", "fonts"]).as_deref(), Some("nord"));
+
+            let before = themes::fingerprint(&doc);
+            assert!(!before.is_empty(), "the font theme's file is a dependency");
+            install_theme(root, "nord", "fonts:\n  ui: Cantarell\n");
+            assert_ne!(themes::fingerprint(&doc), before);
         });
     }
 
@@ -4706,6 +5637,31 @@ mod tests {
         );
     }
 
+    /// **The window's title bar and a ribbon's strip joined to it are one
+    /// colour, with one ink,** for every accent, mode and setting: both are
+    /// the palette's answer (`Palette::title_bar`), so they cannot part.
+    #[test]
+    fn the_title_bar_and_a_ribbons_strip_are_one_colour() {
+        for &accent in AccentColor::presets() {
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                for accent_titlebars in [false, true] {
+                    let settings = AppearanceSettings {
+                        theme_mode: mode,
+                        accent_color: accent,
+                        accent_titlebars,
+                        ..AppearanceSettings::default()
+                    };
+                    let palette = Palette::from_settings(&settings);
+                    let frame = DecorationColors::from_settings(&settings);
+                    let what = format!("{mode:?} {accent:?} accented={accent_titlebars}");
+                    assert_eq!(frame.title_focused_bg, palette.title_bar(), "{what}");
+                    assert_eq!(frame.title_focused_fg, palette.title_text(), "{what}");
+                    assert_eq!(palette.accent_titlebars, accent_titlebars, "{what}");
+                }
+            }
+        }
+    }
+
     /// The WCAG contrast ratio between two opaque colours.
     ///
     /// 4.5 is the AA threshold for body text and 3.0 the one for large text;
@@ -4800,13 +5756,17 @@ mod tests {
         // Not pure black and white: an accented title bar with `#000` text
         // beside a taskbar with `#11111B` text is two different blacks a few
         // pixels apart, which reads as a rendering fault rather than a style.
+        // The answers are the palettes' own extremes one step further out --
+        // Mocha's crust and Latte's base, each channel moved by one -- the
+        // same colours to the eye, and values no role has, so a palette
+        // check can tell them from a leftover page colour.
         assert_eq!(
             readable_on(Color::from_hex(0xF9E2AF)),
-            Color::from_hex(0x11111B)
+            Color::from_hex(0x10101A)
         );
         assert_eq!(
             readable_on(Color::from_hex(0x1E1E2E)),
-            Color::from_hex(0xEFF1F5)
+            Color::from_hex(0xF0F2F6)
         );
         // A saturated blue is dark to the eye however bright its one channel
         // is: near-white on `#0000FF` is 7.60:1 and near-black only 2.18:1.
@@ -4814,8 +5774,16 @@ mod tests {
         // unweighted, would call this one light and put black text on it.
         assert_eq!(
             readable_on(Color::from_hex(0x0000FF)),
-            Color::from_hex(0xEFF1F5)
+            Color::from_hex(0xF0F2F6)
         );
+        // No role of either built-in palette is either answer.
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            for (name, role) in p.roles() {
+                assert_ne!(role, DARK_EXTREME, "{name} (light {light})");
+                assert_ne!(role, LIGHT_EXTREME, "{name} (light {light})");
+            }
+        }
     }
 
     /// [`contrast_ratio`] is the WCAG ratio and not merely something shaped

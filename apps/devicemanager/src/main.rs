@@ -869,6 +869,11 @@ pub struct DeviceManagerState {
     pub show_resource_view: bool,
     /// Hovered properties tab index.
     pub hovered_tab_index: Option<usize>,
+    /// Whether the pointer is over the search box, so it is drawn lit (lane
+    /// C, c-e-a-theme-can-shape-the-controls).
+    pub hovered_search: bool,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    pub focus_ring_width: f32,
 }
 
 impl DeviceManagerState {
@@ -919,6 +924,8 @@ impl DeviceManagerState {
             hovered_toolbar_action: None,
             show_resource_view: false,
             hovered_tab_index: None,
+            hovered_search: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
         }
     }
 
@@ -1995,6 +2002,31 @@ fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
 }
 
 /// Render the search bar below the toolbar.
+/// The search box, inside its band at the top of the sidebar: one rectangle
+/// for the drawing and the pointer's light.
+fn search_box() -> guitk::frame::Rect {
+    let band = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+    guitk::frame::Rect::new(
+        8.0,
+        band + 4.0,
+        SIDEBAR_WIDTH - 16.0,
+        SEARCH_BAR_HEIGHT - 8.0,
+    )
+}
+
+/// How the search box is drawn now: lit under the pointer and marked while
+/// the keys type into it -- neither while the list of keys or the file
+/// dialog takes them first.
+fn search_box_state(state: &DeviceManagerState) -> guitk::field::State {
+    let open = !state.show_help && !state.picker.is_open();
+    guitk::field::State {
+        hovered: open && state.hovered_search,
+        focused: open && state.search_focused,
+        disabled: false,
+        invalid: false,
+    }
+}
+
 fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
     let y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
 
@@ -2007,35 +2039,17 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         corner_radii: CornerRadii::ZERO,
     });
 
-    // Search input background
-    let input_x = 8.0;
-    let input_y = y + 4.0;
-    let input_w = SIDEBAR_WIDTH - 16.0;
-    let input_h = SEARCH_BAR_HEIGHT - 8.0;
-
-    let border_color = if state.search_focused {
-        state.palette.blue
-    } else {
-        state.palette.surface1
-    };
-
-    cmds.push(RenderCommand::FillRect {
-        x: input_x,
-        y: input_y,
-        width: input_w,
-        height: input_h,
-        color: state.palette.base,
-        corner_radii: CornerRadii::all(3.0),
-    });
-    cmds.push(RenderCommand::StrokeRect {
-        x: input_x,
-        y: input_y,
-        width: input_w,
-        height: input_h,
-        color: border_color,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    // The search box: the toolkit's field (lane C,
+    // c-e-a-theme-can-shape-the-controls).
+    let input = search_box();
+    let (input_x, input_y, input_w) = (input.x, input.y, input.w);
+    guitk::field::draw(
+        cmds,
+        &state.palette,
+        input,
+        search_box_state(state),
+        state.focus_ring_width,
+    );
 
     let display_text = if state.search_query.is_empty() {
         "Search devices...".to_string()
@@ -3314,25 +3328,37 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
         return EventResult::Ignored;
     }
 
+    // Every key but a Ctrl chord and what the search types is taken plain: a
+    // chord with Alt or the Windows key is the window's or the desktop's and
+    // arrives carrying its key -- Alt+Delete asked to uninstall the device.
+    let plain = textline::is_plain(key.modifiers);
+
     // Above the search box's branch, which takes the keyboard and returns.
     // Placed after it, the card could be raised from the tree and then not
     // dismissed while the search had focus.
-    if key.key == Key::F1 {
+    if key.key == Key::F1 && plain {
         state.show_help = !state.show_help;
         return EventResult::Consumed;
     }
     if state.show_help {
         // Modal. Delete uninstalls the selected device, and doing that from
         // behind a list somebody is reading is the reason nothing passes.
-        if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+        if plain && matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
             state.show_help = false;
         }
         return EventResult::Consumed;
     }
 
-    // Search bar text input
+    // Search bar text input: what a key typed, AltGr's among it, and not a
+    // command's letter, which a chord carries -- Alt+X typed an `x`.
     if state.search_focused {
+        if textline::types_into_field(key) {
+            state.search_query.extend(key.typed());
+            state.apply_search_filter();
+            return EventResult::Consumed;
+        }
         match key.key {
+            _ if !plain => {}
             Key::Escape => {
                 state.search_focused = false;
                 return EventResult::Consumed;
@@ -3346,19 +3372,14 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
                 state.search_focused = false;
                 return EventResult::Consumed;
             }
-            _ => {
-                if key.types_text() {
-                    state.search_query.extend(key.typed());
-                    state.apply_search_filter();
-                    return EventResult::Consumed;
-                }
-            }
+            _ => {}
         }
         return EventResult::Consumed;
     }
 
-    // Global shortcuts
-    if key.modifiers.ctrl {
+    // Global shortcuts, as Ctrl chords: AltGr arrives as Ctrl+Alt and types,
+    // and AltGr+E -- a Polish `ę` -- exported the report.
+    if textline::is_ctrl_chord(key.modifiers) {
         match key.key {
             Key::F => {
                 state.search_focused = true;
@@ -3374,6 +3395,9 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
             }
             _ => {}
         }
+    }
+    if !plain {
+        return EventResult::Ignored;
     }
 
     match key.key {
@@ -3494,6 +3518,21 @@ fn handle_mouse_event(
     let mx = mouse.x;
     let my = mouse.y;
 
+    if state.show_help {
+        // The card is modal for the pointer as it is for the keys: a press,
+        // with any button, puts it away rather than reaching the control
+        // drawn under it, and the wheel scrolls nothing it covers. A move
+        // still updates the light below, so it is right when the card goes.
+        match mouse.kind {
+            MouseEventKind::Press(_) => {
+                state.show_help = false;
+                return EventResult::Consumed;
+            }
+            MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+            _ => {}
+        }
+    }
+
     match &mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => {
             // Check toolbar buttons
@@ -3562,6 +3601,7 @@ fn handle_mouse_event(
             state.hovered_tree_index = None;
             state.hovered_toolbar_action = None;
             state.hovered_tab_index = None;
+            state.hovered_search = search_box().contains(mx, my);
 
             // Toolbar hover
             let toolbar_y = TITLE_BAR_HEIGHT;
@@ -3599,6 +3639,14 @@ fn handle_mouse_event(
                 }
             }
 
+            EventResult::Consumed
+        }
+        // Nothing is under a pointer that has left the window.
+        MouseEventKind::Leave => {
+            state.hovered_tree_index = None;
+            state.hovered_toolbar_action = None;
+            state.hovered_tab_index = None;
+            state.hovered_search = false;
             EventResult::Consumed
         }
         MouseEventKind::Scroll { dy, .. } => {
@@ -3674,6 +3722,18 @@ fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
 // ============================================================================
 
 impl oswindow::app::App for DeviceManagerState {
+    /// The user's colours. The window drew in the defaults whatever the
+    /// theme: the hand-copied constants were mapped onto the palette, and the
+    /// palette was never told when the theme changed.
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         String::from("Device Manager")
     }
@@ -3749,6 +3809,99 @@ mod tests {
 
     use super::*;
 
+    /// **The search box is the toolkit's field, in the user's colours**
+    /// (lane C, c-e-a-theme-can-shape-the-controls): lit under the pointer
+    /// and out when it goes, marked at the user's focus width while the keys
+    /// type into it -- neither while the list of keys covers the window. The
+    /// box is drawn from the palette the theme handed over: the window never
+    /// took one, and drew in the defaults whatever the theme.
+    #[test]
+    fn the_search_box_is_the_toolkits_field() {
+        use guitk::field::State;
+        use oswindow::app::App;
+        let mut state = DeviceManagerState::new();
+        let palette = Palette::for_mode(true);
+        let width = {
+            let settings = appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            };
+            App::appearance_changed(&mut state, &settings);
+            settings.focus_ring_width()
+        };
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        let seq = |palette: &Palette, s: State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, palette, search_box(), s, width);
+            want
+        };
+        assert_ne!(
+            seq(&palette, State::default()),
+            seq(&state.palette, State::default()),
+            "the test's palette has to differ from the one the window starts with"
+        );
+        App::theme_changed(&mut state, &palette);
+        let draws = |state: &DeviceManagerState, s: State| {
+            let cmds = render(state);
+            let has = |w: &[RenderCommand]| !w.is_empty() && cmds.windows(w.len()).any(|c| c == w);
+            has(&seq(&palette, s))
+                && (s.focused || !has(&seq(&palette, State { focused: true, ..s })))
+        };
+        let pointer = |state: &mut DeviceManagerState, kind: MouseEventKind| {
+            let (x, y) = search_box().centre();
+            handle_event(
+                state,
+                &Event::Mouse(guitk::event::MouseEvent { x, y, kind }),
+            );
+        };
+        let lit = State {
+            hovered: true,
+            ..State::default()
+        };
+        let both = State {
+            focused: true,
+            ..lit
+        };
+
+        assert!(
+            draws(&state, State::default()),
+            "the box is not drawn in the theme's colours"
+        );
+        pointer(&mut state, MouseEventKind::Move);
+        assert!(
+            draws(&state, lit),
+            "the box does not light under the pointer"
+        );
+        // Out when the pointer leaves -- checked before the box has the keys,
+        // whose mark can hide the light.
+        pointer(&mut state, MouseEventKind::Leave);
+        assert!(
+            draws(&state, State::default()),
+            "the light stayed when the pointer left"
+        );
+        pointer(&mut state, MouseEventKind::Move);
+        pointer(&mut state, MouseEventKind::Press(MouseButton::Left));
+        assert!(state.search_focused);
+        assert!(draws(&state, both), "the box is not marked with the keys");
+        state.show_help = true;
+        assert!(
+            draws(&state, State::default()),
+            "the box shows through the list of keys"
+        );
+        state.show_help = false;
+        pointer(&mut state, MouseEventKind::Leave);
+        assert!(
+            draws(
+                &state,
+                State {
+                    focused: true,
+                    ..State::default()
+                }
+            ),
+            "the light stayed when the pointer left"
+        );
+    }
+
     /// **Every key the card advertises is answered by this window.**
     ///
     /// Two states, because `Esc` and `Enter` mean one thing in the search box
@@ -3770,6 +3923,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A chord is neither a key of the window nor typing, and AltGr types**:
+    /// Alt+Delete asked to uninstall the selected device, Alt+Tab-like
+    /// chords changed the tab, AltGr+E -- a Polish `ę` -- exported the
+    /// report, and Alt+X typed an `x` into the search.
+    #[test]
+    fn a_chord_is_neither_a_key_of_the_window_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut state = DeviceManagerState::new();
+        if !state.tree_nodes.is_empty() {
+            state.select_tree_node(0);
+        }
+        let (tab, selected) = (state.active_tab, state.selected_tree_index);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Delete, Key::Tab, Key::Down, Key::E, Key::F1] {
+                handle_event(&mut state, &key(k, "", m));
+            }
+        }
+        assert!(
+            state.notice.is_none(),
+            "a chord asked to uninstall: {:?}",
+            state.notice
+        );
+        assert_eq!(state.active_tab, tab, "a chord changed the tab");
+        assert_eq!(
+            state.selected_tree_index, selected,
+            "a chord moved the selection"
+        );
+        assert!(!state.picker.is_open(), "AltGr+E exported the report");
+        assert!(!state.show_help, "a chord raised the keys");
+
+        // The search types what a key typed; its own keys are plain.
+        handle_event(&mut state, &key(Key::F, "f", Modifiers::ctrl()));
+        assert!(state.search_focused, "control: Ctrl+F searches");
+        handle_event(&mut state, &key(Key::X, "x", Modifiers::alt()));
+        handle_event(&mut state, &key(Key::X, "x", Modifiers::super_key()));
+        handle_event(&mut state, &key(Key::Escape, "", Modifiers::alt()));
+        handle_event(&mut state, &key(Key::E, "ę", altgr));
+        assert!(state.search_focused, "Alt+Escape left the search");
+        assert_eq!(
+            state.search_query, "ę",
+            "the search typed a command or lost AltGr's ę"
+        );
     }
 
     /// **The card reaches the window, and nothing acts behind it.**
@@ -3827,6 +4035,83 @@ mod tests {
         assert!(
             state.search_focused,
             "control: Ctrl+F does nothing even with the card down"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let mut state = app_with_scrollable_tree();
+        let mouse = |state: &mut DeviceManagerState, x: f32, y: f32, kind: MouseEventKind| {
+            handle_event(
+                state,
+                &Event::Mouse(guitk::event::MouseEvent { x, y, kind }),
+            )
+        };
+        // The search bar, where the drawing puts it.
+        let (sx, sy) = (
+            SIDEBAR_WIDTH / 2.0,
+            TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT / 2.0,
+        );
+        // The device tree, which overflows this window.
+        let (px, py) = tree_point(&state);
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+
+        handle_event(&mut state, &f1);
+        assert!(state.show_help);
+        mouse(
+            &mut state,
+            px,
+            py,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert_eq!(
+            state.tree_scroll, 0,
+            "the wheel scrolled the tree under the card"
+        );
+        assert_eq!(
+            mouse(&mut state, sx, sy, MouseEventKind::Press(MouseButton::Left)),
+            EventResult::Consumed
+        );
+        assert!(!state.show_help, "the press did not put the card away");
+        assert!(
+            !state.search_focused,
+            "the press went through the card to the search bar"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        handle_event(&mut state, &f1);
+        mouse(
+            &mut state,
+            sx,
+            sy,
+            MouseEventKind::Press(MouseButton::Right),
+        );
+        assert!(!state.show_help, "a right-button press left the card up");
+
+        mouse(
+            &mut state,
+            px,
+            py,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            state.tree_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut state, sx, sy, MouseEventKind::Press(MouseButton::Left));
+        assert!(
+            state.search_focused,
+            "control: the press does nothing even with the card down"
         );
     }
 

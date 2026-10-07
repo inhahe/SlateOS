@@ -18,7 +18,8 @@ for gcc/coreutils/bash/CPython` item. It is deliberately shaped like
 GNU coreutils **9.5**, unmodified, `./configure --host=x86_64-linux-musl
 --disable-shared --disable-nls`, compiled with `zig cc` against zig's musl
 headers, then each binary relinked `-nostdlib` against
-`toolchain/sysroot/lib/libc.a`.
+`toolchain/sysroot/lib/libc.a`. (Since 2026-10-01 the relink is zig's `ld.lld`
+with exactly its inputs instead; see the end of the next section but one.)
 
 configure and the build both succeeded on the first attempt, producing 286
 gnulib objects and 107 link lines.
@@ -153,6 +154,24 @@ spike would have reported a cleaner result than the truth.
 Checked: the make and pkgconf spikes are not affected. Both construct their link
 command from an object list with no `-l` flags at all, so zig's musl was never
 reachable. Their green results stand.
+
+**That check was wrong, and the fix only half right** (2026-10-01).
+`-lpthread` put musl *ahead* of ours, where it collided and showed; but musl
+was on every link anyway, *behind* ours: zig's driver appends its own musl
+`libc.a` to every link for this target, whatever it is told — `-nostdlib`,
+`-nodefaultlibs`, `-nostdlib++` — after every input it was given (measured with
+`zig cc -v`). Behind ours it collides with nothing and fills, silently, whatever
+ours lacks; so every port's links had it, and `LINKS_THAT_PULLED_ZIG_MUSL`,
+which counted the logs naming zig's cache, could only ever see musl where it
+collided. The relink is now zig's
+`ld.lld` with exactly its inputs (`slate_make_link_wrappers` in
+`scripts/lib/worktree.sh`), which also drops the `-l` flags for what our `libc.a`
+holds; the musl count is gone, and in its place every binary is checked for the
+SlateOS ABI note (`BINARIES_WITHOUT_SLATEOS_NOTE`). known-issues
+`D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC` has the measurement. make's and
+pkgconf's results did stand: relinked with no musl, neither has anything
+undefined. This port's tree is not on the machine where that was measured, so
+its counts above have not been taken again.
 
 ## Status
 

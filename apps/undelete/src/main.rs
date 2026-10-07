@@ -73,6 +73,7 @@ use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -80,6 +81,9 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
+use guitk::text::TextCursor;
+use guitk::textedit;
+use guitk::widget::CheckState;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -139,12 +143,26 @@ const DETECTION_METHOD_ROW_HEIGHT: f32 = 24.0;
 const META_VALUE_FRACTION: f32 = 0.6;
 const SMALL_RADIUS: f32 = 4.0;
 const FONT_SIZE: f32 = 13.0;
+/// The results' search box's width.
+const SEARCH_WIDTH: f32 = 260.0;
+/// The results' search box's height.
+const SEARCH_HEIGHT: f32 = 28.0;
+/// How far the search box's text sits in from its left and right edges.
+const SEARCH_TEXT_INSET: f32 = 8.0;
 const FONT_SIZE_SMALL: f32 = 11.0;
 const FONT_SIZE_HEADING: f32 = 16.0;
 const FONT_SIZE_TITLE: f32 = 20.0;
 const BUTTON_WIDTH: f32 = 120.0;
 const BUTTON_HEIGHT: f32 = 32.0;
-const CHECKBOX_SIZE: f32 = 16.0;
+/// Where a file row's check box is drawn: the toolkit's size, at the row's
+/// left, centred down it.
+fn row_check_box(x: f32, y: f32) -> Rect {
+    let side = guitk::checkbox::SIZE;
+    Rect::new(x + 8.0, y + (ITEM_HEIGHT - side) / 2.0, side, side)
+}
+
+/// How tall a scan mode's row is, drawn and pressed alike.
+const MODE_ROW_HEIGHT: f32 = 24.0;
 const PROGRESS_HEIGHT: f32 = 8.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 
@@ -2036,8 +2054,11 @@ impl ScanFilter {
         self
     }
 
+    /// Search file names for `term`, in letters of either case. Kept as it
+    /// was typed: it is drawn in the search box, and lowercasing it there
+    /// would show the user a word they did not type.
     pub fn with_search(mut self, term: &str) -> Self {
-        self.filename_search = term.to_lowercase();
+        self.filename_search = term.to_owned();
         self
     }
 
@@ -2074,7 +2095,10 @@ impl ScanFilter {
             return false;
         }
         if !self.filename_search.is_empty()
-            && !file.filename.to_lowercase().contains(&self.filename_search)
+            && !file
+                .filename
+                .to_lowercase()
+                .contains(&self.filename_search.to_lowercase())
         {
             return false;
         }
@@ -2224,6 +2248,10 @@ pub struct UndeleteApp {
     pub sort_direction: SortDirection,
     pub selected_file_idx: Option<usize>,
     pub scroll_offset: usize,
+    /// The wheel's unspent fraction of a result row. `scroll_offset` is a
+    /// whole row, so a touchpad's small turns are added up here rather than
+    /// each truncated to nothing.
+    results_wheel: guitk::wheel::Accumulator,
     pub recovery_target: String,
     pub recovery_results: Vec<RecoveryResult>,
     pub show_filter_panel: bool,
@@ -2234,12 +2262,19 @@ pub struct UndeleteApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The control under the pointer, which is drawn lit.
+    hover: Option<Control>,
+    /// The user's focus width (`App::appearance_changed`), for the
+    /// toolkit's controls' keyboard rings.
+    focus_ring_width: f32,
 }
 
 impl UndeleteApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             width,
             height,
             show_help: false,
@@ -2255,6 +2290,7 @@ impl UndeleteApp {
             sort_direction: SortDirection::Ascending,
             selected_file_idx: None,
             scroll_offset: 0,
+            results_wheel: guitk::wheel::Accumulator::default(),
             recovery_target: String::from("/home/user/recovered"),
             recovery_results: Vec::new(),
             show_filter_panel: false,
@@ -2277,7 +2313,7 @@ impl UndeleteApp {
         self.engine.begin_scan(&partition, self.scan_mode);
         self.screen = UiScreen::Scanning;
         self.selected_file_idx = None;
-        self.scroll_offset = 0;
+        self.restart_results();
         self.clear_filters();
     }
 
@@ -2329,24 +2365,31 @@ impl UndeleteApp {
         if !self.engine.scan_step(&partition) {
             self.screen = UiScreen::Results;
             self.selected_file_idx = None;
-            self.scroll_offset = 0;
+            self.restart_results();
         }
         EventResult::Consumed
     }
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
-        if key.key == Key::F1 {
+        // A key on its own is taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Enter started a recovery, and
+        // Alt+Escape left the results for the setup screen.
+        let plain = textline::is_plain(key.modifiers);
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+A
+        // -- a Polish `ą`, typed into the search -- selected every file.
+        if textline::is_ctrl_chord(key.modifiers) {
             return match key.key {
                 Key::A => {
                     self.engine.select_all(&self.filter);
@@ -2364,6 +2407,9 @@ impl UndeleteApp {
         }
 
         match self.screen {
+            // The results take typing, into their search.
+            UiScreen::Results => self.handle_results_key(key),
+            _ if !plain => EventResult::Ignored,
             UiScreen::ScanSetup => self.handle_setup_key(key),
             UiScreen::Scanning => {
                 if key.key == Key::Escape {
@@ -2373,7 +2419,6 @@ impl UndeleteApp {
                     EventResult::Ignored
                 }
             }
-            UiScreen::Results => self.handle_results_key(key),
             UiScreen::Recovering => {
                 if matches!(key.key, Key::Escape | Key::Enter) {
                     self.screen = UiScreen::Results;
@@ -2412,9 +2457,22 @@ impl UndeleteApp {
         }
     }
 
-    /// Keys on the results screen.
+    /// Keys on the results screen: the list's keys plain, and typing into
+    /// the search -- what was typed, AltGr's letters among it, not the letter
+    /// a command carries (Alt+X searched for `x`). Backspace edits the search,
+    /// so it is refused only to Alt and the Windows key.
     fn handle_results_key(&mut self, key: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
+            Key::Backspace if !textline::is_alt_or_windows_chord(key.modifiers) => {
+                let mut search = self.filter.filename_search.clone();
+                if search.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.set_search(&search);
+                EventResult::Consumed
+            }
+            _ if !plain => self.type_into_search(key),
             Key::Up => {
                 self.select_prev();
                 EventResult::Consumed
@@ -2478,40 +2536,80 @@ impl UndeleteApp {
                     EventResult::Consumed
                 }
             }
-            Key::Backspace => {
-                let mut search = self.filter.filename_search.clone();
-                if search.pop().is_none() {
-                    return EventResult::Ignored;
-                }
-                self.set_search(&search);
-                EventResult::Consumed
-            }
-            _ => {
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return EventResult::Ignored;
-                }
-                let mut search = self.filter.filename_search.clone();
-                search.push_str(&typed);
-                self.set_search(&search);
-                EventResult::Consumed
-            }
+            _ => self.type_into_search(key),
         }
+    }
+
+    /// What `key` typed, onto the end of the search.
+    fn type_into_search(&mut self, key: &KeyEvent) -> EventResult {
+        if !textline::types_into_field(key) {
+            return EventResult::Ignored;
+        }
+        let typed: String = key.typed().collect();
+        if typed.is_empty() {
+            return EventResult::Ignored;
+        }
+        let mut search = self.filter.filename_search.clone();
+        search.push_str(&typed);
+        self.set_search(&search);
+        EventResult::Consumed
     }
 
     /// Handle a mouse event.
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The list of keys is modal for the pointer as it is for the keys, and
+        // drawn over everything: a press with any button puts it away and does
+        // nothing else -- it used to press the button under it, starting a
+        // scan or a recovery the reader could not see -- and the wheel scrolls
+        // nothing it covers. A move or the pointer leaving is not a press, and
+        // passes.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                _ => {}
+            }
+        }
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(mouse.x, mouse.y),
+            // What is under the pointer is drawn lit; only a change in it is
+            // worth a redraw.
+            MouseEventKind::Move => {
+                let over = self.control_at(mouse.x, mouse.y);
+                if over == self.hover {
+                    EventResult::Ignored
+                } else {
+                    self.hover = over;
+                    EventResult::Consumed
+                }
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             MouseEventKind::Scroll { dy, .. } => {
                 if self.screen != UiScreen::Results {
                     return EventResult::Ignored;
                 }
-                let rows = guitk::wheel::rows_f(dy);
-                let delta = rows as isize;
-                self.scroll_offset = self.scroll_offset.saturating_add_signed(delta);
+                // Through an accumulator, not `rows_f(dy) as isize`: that
+                // truncated a touchpad's fifth of a notch -- 0.6 of a row --
+                // to nothing, every time, so the results could not be
+                // scrolled from a touchpad at all.
+                let rows = self.results_wheel.rows(dy);
+                let before = self.scroll_offset;
+                self.scroll_offset = self.scroll_offset.saturating_add_signed(rows);
                 self.clamp_scroll();
-                EventResult::Consumed
+                if self.scroll_offset == before {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
             }
             _ => EventResult::Ignored,
         }
@@ -2519,16 +2617,19 @@ impl UndeleteApp {
 
     /// Handle a left click.
     fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
-        if let Some(control) = self
-            .controls()
-            .into_iter()
-            .find(|(rect, _)| rect.contains(x, y))
-            .map(|(_, control)| control)
-        {
+        if let Some(control) = self.control_at(x, y) {
             self.apply_control(control);
             return EventResult::Consumed;
         }
         EventResult::Ignored
+    }
+
+    /// The control at `(x, y)` on the current screen, if any.
+    fn control_at(&self, x: f32, y: f32) -> Option<Control> {
+        self.controls()
+            .into_iter()
+            .find(|(rect, _)| rect.contains(x, y))
+            .map(|(_, control)| control)
     }
 
     /// Do what a control says.
@@ -2603,11 +2704,11 @@ impl UndeleteApp {
         let mode_y = list_y + self.partitions.len() as f32 * PARTITION_CARD_HEIGHT + PADDING;
         let quick_y = mode_y + 28.0;
         out.push((
-            Rect::new(PADDING, quick_y, card_w, 24.0),
+            Rect::new(PADDING, quick_y, card_w, MODE_ROW_HEIGHT),
             Control::Mode(ScanMode::Quick),
         ));
         out.push((
-            Rect::new(PADDING, quick_y + 32.0, card_w, 24.0),
+            Rect::new(PADDING, quick_y + 32.0, card_w, MODE_ROW_HEIGHT),
             Control::Mode(ScanMode::Deep),
         ));
 
@@ -2712,6 +2813,95 @@ impl UndeleteApp {
         out
     }
 
+    /// Where the results' search box is drawn: at the right of the header,
+    /// while the results are showing.
+    pub fn search_box_rect(&self) -> Option<Rect> {
+        (self.screen == UiScreen::Results).then(|| {
+            Rect::new(
+                self.width - SEARCH_WIDTH - PADDING,
+                (HEADER_HEIGHT - SEARCH_HEIGHT) / 2.0,
+                SEARCH_WIDTH,
+                SEARCH_HEIGHT,
+            )
+        })
+    }
+
+    /// How the search box is drawn: with the keyboard whenever the results
+    /// show -- what is typed goes to it -- unless the list of keys is over
+    /// it, and red while what is in it matches no file. Never lit under the
+    /// pointer: a press on it does nothing, the keys being its already.
+    fn search_box_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.screen == UiScreen::Results && !self.show_help,
+            disabled: false,
+            invalid: !self.filter.filename_search.is_empty() && self.visible_files().is_empty(),
+        }
+    }
+
+    /// Draw the search box: the toolkit's field, holding the search -- or
+    /// what it is for, faint, while it is empty -- with the caret after it,
+    /// where what is typed goes. The search was typed blind: no box showed
+    /// it anywhere, and the list only got shorter.
+    fn render_search_box(&self, cmds: &mut Vec<RenderCommand>) {
+        let Some(rect) = self.search_box_rect() else {
+            return;
+        };
+        let state = self.search_box_state();
+        field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
+        let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
+        let (x, y, width) = (
+            rect.x + SEARCH_TEXT_INSET,
+            rect.y + (rect.h - line) / 2.0,
+            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
+        );
+        let query = &self.filter.filename_search;
+        let mut tree = RenderTree::new();
+        if query.is_empty() {
+            tree.push(RenderCommand::Text {
+                x,
+                y,
+                text: "Search file names...".to_owned(),
+                color: self.palette.subtext0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
+            });
+            if state.focused {
+                textedit::push_caret(
+                    &mut tree,
+                    x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+            }
+        } else {
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: query,
+                    cursor: TextCursor::from(query.len()),
+                    selection_anchor: None,
+                    focused: state.focused,
+                    x,
+                    y,
+                    width,
+                    line_height: line,
+                    font_size: FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        cmds.extend(tree.commands);
+    }
+
     /// Set the filename search, and keep the selection on something visible.
     ///
     /// Through `ScanFilter::with_search`, which is the builder this file
@@ -2796,7 +2986,15 @@ impl UndeleteApp {
         self.active_category_filter = idx;
         self.filter.category = idx.and_then(|i| FileCategory::ALL.get(i).copied());
         self.selected_file_idx = None;
+        self.restart_results();
+    }
+
+    /// Back to the top of a results list that has just been replaced -- by a
+    /// scan, or another category -- forgetting with the old position any
+    /// fraction of a notch the wheel had banked over the old list.
+    fn restart_results(&mut self) {
         self.scroll_offset = 0;
+        self.results_wheel.reset();
     }
 
     /// Navigate to a file in the results.
@@ -2975,7 +3173,7 @@ impl UndeleteApp {
             PADDING,
             quick_y,
             "Quick Scan - Recycle bin + inode tables (faster)",
-            self.scan_mode == ScanMode::Quick,
+            ScanMode::Quick,
         );
 
         // Deep scan option
@@ -2985,7 +3183,7 @@ impl UndeleteApp {
             PADDING,
             deep_y,
             "Deep Scan - Sector-by-sector signature detection (thorough)",
-            self.scan_mode == ScanMode::Deep,
+            ScanMode::Deep,
         );
 
         // Start button
@@ -3099,59 +3297,31 @@ impl UndeleteApp {
         }
     }
 
+    /// One scan mode: the toolkit's radio button (lane C,
+    /// c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs),
+    /// on a row as tall as the row a press chooses it in, lit while the
+    /// pointer is on that row.
     fn render_radio_option(
         &self,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
         label: &str,
-        selected: bool,
+        mode: ScanMode,
     ) {
-        let radio_size: f32 = 16.0;
-        let cx = x + radio_size / 2.0;
-        let cy = y + radio_size / 2.0;
-
-        // Outer circle (approximated with small rounded rect)
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: radio_size,
-            height: radio_size,
-            color: if selected {
-                self.palette.blue
-            } else {
-                self.palette.overlay0
+        guitk::radio::draw(
+            cmds,
+            &self.palette,
+            (x, y, MODE_ROW_HEIGHT),
+            label,
+            self.scan_mode == mode,
+            guitk::radio::State {
+                hovered: self.hover == Some(Control::Mode(mode)),
+                focused: false,
+                disabled: false,
             },
-            line_width: 1.5,
-            corner_radii: CornerRadii::all(radio_size / 2.0),
-        });
-
-        if selected {
-            // Inner filled circle
-            cmds.push(RenderCommand::FillRect {
-                x: cx - 4.0,
-                y: cy - 4.0,
-                width: 8.0,
-                height: 8.0,
-                color: self.palette.blue,
-                corner_radii: CornerRadii::all(4.0),
-            });
-        }
-
-        cmds.push(RenderCommand::Text {
-            x: x + radio_size + 8.0,
-            y: y + 1.0,
-            text: label.to_string(),
-            color: if selected {
-                self.palette.text
-            } else {
-                self.palette.subtext0
-            },
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(self.width - x - radio_size - PADDING - 8.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            self.focus_ring_width,
+        );
     }
 
     // -- Scanning progress screen -------------------------------------------
@@ -3247,6 +3417,7 @@ impl UndeleteApp {
 
     fn render_results(&self, cmds: &mut Vec<RenderCommand>) {
         self.render_header(cmds, "Recovery Results");
+        self.render_search_box(cmds);
 
         let content_y = HEADER_HEIGHT;
         let content_h = self.height - HEADER_HEIGHT - FOOTER_HEIGHT - STATUS_BAR_HEIGHT;
@@ -3511,16 +3682,18 @@ impl UndeleteApp {
             let row_y = list_y + (i as f32) * ITEM_HEIGHT;
             let global_idx = i.saturating_add(self.scroll_offset);
             let is_selected = self.selected_file_idx == Some(global_idx);
-            self.render_file_row(cmds, file, x, row_y, width, is_selected);
+            self.render_file_row(cmds, file, global_idx, x, row_y, width, is_selected);
         }
 
         cmds.push(RenderCommand::PopClip);
     }
 
+    #[allow(clippy::too_many_arguments)] // one row's whole description
     fn render_file_row(
         &self,
         cmds: &mut Vec<RenderCommand>,
         file: &RecoverableFile,
+        index: usize,
         x: f32,
         y: f32,
         width: f32,
@@ -3541,28 +3714,27 @@ impl UndeleteApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Checkbox
-        let cb_x = x + 8.0;
-        let cb_y = y + (ITEM_HEIGHT - CHECKBOX_SIZE) / 2.0;
-        cmds.push(RenderCommand::StrokeRect {
-            x: cb_x,
-            y: cb_y,
-            width: CHECKBOX_SIZE,
-            height: CHECKBOX_SIZE,
-            color: self.palette.overlay0,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        if file.selected {
-            cmds.push(RenderCommand::FillRect {
-                x: cb_x + 3.0,
-                y: cb_y + 3.0,
-                width: CHECKBOX_SIZE - 6.0,
-                height: CHECKBOX_SIZE - 6.0,
-                color: self.palette.blue,
-                corner_radii: CornerRadii::all(2.0),
-            });
-        }
+        // Whether it is to be recovered: the toolkit's check box (lane C,
+        // c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs),
+        // lit while the pointer is on its row, which is what a press ticks.
+        let state = guitk::checkbox::State {
+            hovered: self.hover == Some(Control::File(index)),
+            focused: false,
+            disabled: false,
+        };
+        guitk::checkbox::draw_box(
+            cmds,
+            &self.palette,
+            row_check_box(x, y),
+            if file.selected {
+                CheckState::Checked
+            } else {
+                CheckState::Unchecked
+            },
+            state,
+            self.focus_ring_width,
+            guitk::checkbox::paint(&self.palette, state).mark,
+        );
 
         let columns = file_list_columns(width);
         let table = file_list_table(&columns, x);
@@ -4496,6 +4668,10 @@ impl App for UndeleteApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         // What the window is doing, because these four screens are four
         // different jobs and a taskbar entry saying only "Undelete" cannot tell
@@ -4748,6 +4924,97 @@ mod tests {
         app
     }
 
+    /// **A chord is neither an undelete key nor typing, and AltGr types**: a
+    /// chord with Alt or the Windows key carries its key -- Alt+Space chose a
+    /// file, Alt+Escape left the results, Alt+Tab re-sorted them and Alt+X
+    /// searched for `x`; and AltGr+A, a Polish `ą`, chose every file as
+    /// Ctrl+A does instead of typing into the search.
+    ///
+    /// Each key is asserted as it is pressed: the choice and the sort go
+    /// round.
+    #[test]
+    fn a_chord_is_neither_an_undelete_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = scanned();
+        assert_eq!(app.screen, UiScreen::Results, "control: a scan ran");
+        app.handle_event(&chord(Key::Down, "", Modifiers::NONE));
+        let state = |app: &UndeleteApp| {
+            (
+                (
+                    app.screen,
+                    app.selected_file_idx,
+                    app.engine.selected_count(),
+                ),
+                (app.sort_field, app.sort_direction, app.show_help),
+                app.filter.filename_search.clone(),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Space,
+                Key::Down,
+                Key::End,
+                Key::Tab,
+                Key::Enter,
+                Key::Escape,
+                Key::F1,
+                Key::A,
+                Key::D,
+            ] {
+                assert_eq!(
+                    app.handle_event(&chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the results");
+            }
+        }
+
+        // The search types what was typed, AltGr's letters among it.
+        app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
+        app.handle_event(&chord(Key::A, "\u{105}", altgr));
+        assert_eq!(app.filter.filename_search, "\u{105}", "AltGr's ą was lost");
+        app.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        assert_eq!(
+            app.filter.filename_search, "\u{105}",
+            "Alt+Backspace deleted"
+        );
+        app.handle_event(&chord(Key::Backspace, "", Modifiers::NONE));
+        assert!(app.filter.filename_search.is_empty(), "control: Backspace");
+
+        // The list of keys goes on a plain Escape only.
+        app.handle_event(&chord(Key::F1, "", Modifiers::NONE));
+        assert!(app.show_help, "control: F1 raises it");
+        app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+        assert!(app.show_help, "Alt+Escape put it away");
+        app.handle_event(&chord(Key::Escape, "", Modifiers::NONE));
+
+        // And the setup screen's keys are plain.
+        app.handle_event(&chord(Key::Escape, "", Modifiers::NONE));
+        assert_eq!(app.screen, UiScreen::ScanSetup, "control: Escape leaves");
+        let mode = app.scan_mode;
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            app.handle_event(&chord(Key::Tab, "", m));
+            assert_eq!(app.scan_mode, mode, "{m:?} Tab changed the scan");
+            app.handle_event(&chord(Key::Enter, "", m));
+            assert_eq!(app.screen, UiScreen::ScanSetup, "{m:?} Enter scanned");
+        }
+    }
+
     // -- the scan is something you can watch --
 
     /// `UiScreen::Scanning` was never set by anything, so the whole progress
@@ -4956,6 +5223,123 @@ mod tests {
         assert_eq!(app.scan_mode, ScanMode::Quick);
     }
 
+    /// **A press with the list of keys up puts it away and does nothing
+    /// else, and the wheel scrolls nothing under it.** A press on Start under
+    /// the list began a scan the reader could not see. The controls are the
+    /// same press and turn with the list down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        // A press, on Start.
+        let mut app = app_with_disks();
+        let start = app
+            .controls()
+            .into_iter()
+            .find(|(_, c)| *c == Control::StartScan)
+            .expect("Start is drawn")
+            .0;
+        let (x, y) = (start.x + start.w / 2.0, start.y + start.h / 2.0);
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        assert_eq!(app.handle_event(&click(x, y)), EventResult::Consumed);
+        assert!(!app.show_help, "the press did not put the list away");
+        assert_ne!(
+            app.screen,
+            UiScreen::Scanning,
+            "the press started a scan under the list"
+        );
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!app.show_help, "a right-button press left the list up");
+        app.handle_event(&click(x, y));
+        assert_eq!(
+            app.screen,
+            UiScreen::Scanning,
+            "control: the press starts nothing even with the list down"
+        );
+
+        // The wheel, over the results in a window short enough to scroll.
+        let mut app = scanned();
+        app.handle_event(&Event::Resize {
+            width: 900,
+            height: 200,
+        });
+        let wheel = Event::Mouse(MouseEvent {
+            x: 300.0,
+            y: 100.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+        });
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&wheel);
+        assert_eq!(
+            app.scroll_offset, 0,
+            "the wheel scrolled the results under the list"
+        );
+        assert!(app.show_help, "the wheel put the list away");
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&wheel);
+        assert!(
+            app.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+    }
+
+    /// The results in a window short enough to scroll, and a turn of the
+    /// wheel over them.
+    fn short_results() -> (UndeleteApp, impl Fn(f32) -> Event) {
+        let mut app = scanned();
+        app.handle_event(&Event::Resize {
+            width: 900,
+            height: 200,
+        });
+        let turn = |dy| {
+            Event::Mouse(MouseEvent {
+                x: 300.0,
+                y: 100.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        (app, turn)
+    }
+
+    /// **A touchpad's small turns add up to rows of the results.** Each was
+    /// truncated to a whole row on its own -- a quarter notch is three
+    /// quarters of a row, and `0.75 as isize` is nothing -- so the results
+    /// could not be scrolled from a touchpad at all.
+    #[test]
+    fn a_touchpads_small_turns_add_up_to_rows() {
+        let (mut app, turn) = short_results();
+        assert_eq!(
+            app.handle_event(&turn(-0.25)),
+            EventResult::Ignored,
+            "three quarters of a row moved a whole one"
+        );
+        assert_eq!(app.scroll_offset, 0);
+        app.handle_event(&turn(-0.25));
+        assert_eq!(
+            app.scroll_offset, 1,
+            "two quarter notches are a row and a half"
+        );
+    }
+
+    /// **A fraction of a notch belongs to the list it was turned over.** A
+    /// quarter notch, another category -- which replaces the list -- and a
+    /// quarter notch again: the second is not added to the first.
+    #[test]
+    fn a_fraction_of_a_notch_does_not_outlive_the_list() {
+        let (mut app, turn) = short_results();
+        app.handle_event(&turn(-0.25));
+        app.set_category_filter(None);
+        app.handle_event(&turn(-0.25));
+        assert_eq!(
+            app.scroll_offset, 0,
+            "a fraction turned over the old list moved the new one"
+        );
+    }
+
     #[test]
     fn the_start_button_starts_the_scan() {
         let mut app = app_with_disks();
@@ -4998,6 +5382,153 @@ mod tests {
         assert_eq!(app.engine.selected_count(), 1, "space should tick the row");
         app.handle_event(&press(Key::Space));
         assert_eq!(app.engine.selected_count(), 0, "and untick it");
+    }
+
+    /// **The search is drawn, in the toolkit's field**: on the results, with
+    /// the keyboard's mark at the user's width -- not under the list of keys
+    /// -- what is typed in the case it was typed, the caret after it, and red
+    /// while it matches no file; letters of either case match. It was typed
+    /// blind -- no box showed it -- and stored in lower case.
+    #[test]
+    fn the_search_is_drawn_in_the_toolkits_field() {
+        let mut app = scanned();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = app
+            .search_box_rect()
+            .expect("the results show no search box");
+        let draws = |app: &UndeleteApp, state: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = app.render_commands();
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let texts_in = |app: &UndeleteApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. }
+                    | RenderCommand::RichText { text, x, y, .. }
+                        if rect.contains(*x, *y) =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let carets = |app: &UndeleteApp| -> Vec<f32> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Line { x1, y1, x2, y2, .. }
+                        if (x1 - x2).abs() < f32::EPSILON
+                            && rect.contains(*x1, *y1)
+                            && rect.contains(*x2, *y2) =>
+                    {
+                        Some(*x1)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        let start = rect.x + SEARCH_TEXT_INSET;
+        assert!(draws(&app, focused), "the search box has no keyboard mark");
+        assert_eq!(texts_in(&app), vec![String::from("Search file names...")]);
+        assert_eq!(
+            carets(&app),
+            vec![start],
+            "the empty box has no caret at its start"
+        );
+
+        // A file's name in capitals finds it, and is shown as typed.
+        let name = app
+            .visible_files()
+            .first()
+            .map(|f| f.filename.clone())
+            .expect("the scan found something");
+        let needle: String = name.chars().take(3).collect::<String>().to_uppercase();
+        for c in needle.chars() {
+            app.handle_event(&types(c));
+        }
+        assert_eq!(
+            app.filter.filename_search, needle,
+            "the search lost its case"
+        );
+        assert!(
+            app.visible_files().iter().any(|f| f.filename == name),
+            "a name in other letters' case is not found"
+        );
+        assert!(
+            texts_in(&app).contains(&needle),
+            "what is typed is not drawn in the box: {:?}",
+            texts_in(&app)
+        );
+        let end = start + text::measure(&needle, FONT_SIZE, FontWeightHint::Regular);
+        assert!(
+            matches!(carets(&app).as_slice(), [at] if (at - end).abs() < 0.5),
+            "the caret is not after what was typed: {:?}, not {end}",
+            carets(&app)
+        );
+
+        for c in "zzq".chars() {
+            app.handle_event(&types(c));
+        }
+        assert!(
+            app.visible_files().is_empty(),
+            "control: the search matches nothing"
+        );
+        let red = field::State {
+            invalid: true,
+            ..focused
+        };
+        assert!(draws(&app, red), "a search that matches nothing is not red");
+
+        app.handle_event(&press(Key::F1));
+        assert!(
+            draws(
+                &app,
+                field::State {
+                    invalid: true,
+                    ..idle
+                }
+            ),
+            "the search box keeps its mark under the list of keys"
+        );
+        app.handle_event(&press(Key::F1));
+
+        app.screen = UiScreen::ScanSetup;
+        assert_eq!(
+            app.search_box_rect(),
+            None,
+            "a search box away from the results"
+        );
     }
 
     /// Typing filters by filename, through `ScanFilter::with_search` -- one of
@@ -5111,6 +5642,123 @@ mod tests {
         assert_eq!(app.sort_field, SortField::Filename);
         let reversed = app.visible_files().first().map(|f| f.filename.clone());
         assert_ne!(first, reversed, "a second click should reverse the order");
+    }
+
+    /// Whether `cmds` hold `want`, command for command.
+    fn holds(cmds: &[RenderCommand], want: &[RenderCommand]) -> bool {
+        !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+    }
+
+    /// The scan modes are the toolkit's radio buttons (lane C,
+    /// c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs):
+    /// the chosen one dotted, the one under the pointer lit.
+    #[test]
+    fn the_scan_modes_are_the_toolkits_radio_buttons() {
+        let mut app = UndeleteApp::new(1000.0, 700.0);
+        let deep = app
+            .controls()
+            .into_iter()
+            .find(|(_, c)| *c == Control::Mode(ScanMode::Deep))
+            .expect("the deep scan row")
+            .0;
+        let radio = |app: &UndeleteApp, chosen: bool, hovered: bool| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::radio::draw(
+                &mut want,
+                &app.palette,
+                (deep.x, deep.y, deep.h),
+                "Deep Scan - Sector-by-sector signature detection (thorough)",
+                chosen,
+                guitk::radio::State {
+                    hovered,
+                    focused: false,
+                    disabled: false,
+                },
+                app.focus_ring_width,
+            );
+            want
+        };
+        assert!(holds(&app.render_commands(), &radio(&app, false, false)));
+        let (x, y) = (deep.x + 4.0, deep.y + deep.h / 2.0);
+        assert_eq!(
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            })),
+            EventResult::Consumed
+        );
+        assert!(
+            holds(&app.render_commands(), &radio(&app, false, true)),
+            "the mode under the pointer is not lit"
+        );
+        app.handle_event(&click(x, y));
+        assert_eq!(app.scan_mode, ScanMode::Deep);
+        assert!(
+            holds(&app.render_commands(), &radio(&app, true, true)),
+            "the chosen mode is not dotted"
+        );
+    }
+
+    /// A row's box is the toolkit's check box: ticked when the file is to be
+    /// recovered, lit while the pointer is on the row.
+    #[test]
+    fn a_rows_box_is_the_toolkits_check_box() {
+        let mut app = scanned();
+        let row = app
+            .controls()
+            .into_iter()
+            .find(|(_, c)| *c == Control::File(1))
+            .expect("row 1")
+            .0;
+        let check = |app: &UndeleteApp, ticked: bool, hovered: bool| {
+            let state = guitk::checkbox::State {
+                hovered,
+                focused: false,
+                disabled: false,
+            };
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::checkbox::draw_box(
+                &mut want,
+                &app.palette,
+                row_check_box(row.x, row.y),
+                if ticked {
+                    CheckState::Checked
+                } else {
+                    CheckState::Unchecked
+                },
+                state,
+                app.focus_ring_width,
+                guitk::checkbox::paint(&app.palette, state).mark,
+            );
+            want
+        };
+        assert!(holds(&app.render_commands(), &check(&app, false, false)));
+        let (x, y) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            holds(&app.render_commands(), &check(&app, false, true)),
+            "the row under the pointer does not light its box"
+        );
+        app.handle_event(&click(x, y));
+        app.handle_event(&click(x, y));
+        assert!(
+            holds(&app.render_commands(), &check(&app, true, true)),
+            "a ticked row's box is not ticked"
+        );
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: -1.0,
+            y: -1.0,
+            kind: MouseEventKind::Leave,
+        }));
+        assert!(
+            holds(&app.render_commands(), &check(&app, true, false)),
+            "the box stayed lit after the pointer left"
+        );
     }
 
     #[test]

@@ -31,7 +31,10 @@
 //!
 //! - **Mutexes**: glibc's three-state low-level lock.  Normal, recursive
 //!   and error-checking types; the owner is the calling thread's task id,
-//!   cached in its per-thread block so locking makes no syscall.
+//!   cached in its per-thread block so locking makes no syscall.  A
+//!   `PTHREAD_PRIO_INHERIT` mutex is the kernel's priority-inheritance
+//!   futex instead, which lends a waiter's priority to the owner (see
+//!   "Priority-inheritance mutexes" below the mutex functions).
 //! - **Condition variables**: a sequence counter the waiters sleep on, with
 //!   a count of waiters so that a signal nobody is waiting for costs no
 //!   syscall.  The clock the attribute named is kept and used
@@ -132,9 +135,11 @@
 //!   kernel keys a futex by address space, so a waiter in one process could
 //!   never be woken from another (`known-issues.md` →
 //!   `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE`).
-//! - Priority-inheritance, priority-protect and robust mutexes are not
-//!   supported: their attributes can be set and read back, but
-//!   `pthread_mutex_init` refuses them with `ENOTSUP`.
+//! - Priority-protect and robust mutexes are not supported: their
+//!   attributes can be set and read back, but `pthread_mutex_init` refuses
+//!   them with `ENOTSUP` -- this library has no priority ceilings, and the
+//!   kernel keeps no robust list for its own ABI.  (Priority-inheritance
+//!   mutexes were refused the same way until 2026-10-06.)
 
 use crate::errno;
 use crate::sched::CpuSetT;
@@ -1473,6 +1478,35 @@ pub extern "C" fn pthread_kill(thread: PthreadT, sig: i32) -> i32 {
     0
 }
 
+/// glibc's internal signals -- `SIGCANCEL` (32) and `SIGSETXID` (33) -- which
+/// its `pthread_kill` and `pthread_sigqueue` refuse to send.
+fn is_internal_signal(sig: i32) -> bool {
+    sig == 32 || sig == 33
+}
+
+/// Send `sig` with `value` to `thread`, a thread of this process (glibc 2.11's
+/// `pthread_sigqueue`): `ESRCH` for a thread that is not live, `EINVAL` for a
+/// signal glibc keeps for itself or one past the range, 0 for signal 0 --
+/// the existence probe, answered here -- and otherwise `ENOSYS`. The kernel
+/// queues no value with a signal (`sigqueue` answers `ENOSYS` the same way),
+/// and a send without it would hand the handler a `si_value` the caller did
+/// not give; when the kernel can carry one, this sends it.
+///
+/// glibc's order: the thread first, then the signal.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_sigqueue(thread: PthreadT, sig: i32, _value: usize) -> i32 {
+    if !thread_is_live(thread) {
+        return errno::ESRCH;
+    }
+    if is_internal_signal(sig) || !(0..crate::signal::NSIG).contains(&sig) {
+        return errno::EINVAL;
+    }
+    if sig == 0 {
+        return 0;
+    }
+    errno::ENOSYS
+}
+
 /// Obtain a clock id that measures a thread's CPU time.
 ///
 /// Returns 0 on success or a positive errno; like the rest of this family it
@@ -1673,29 +1707,36 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
 /// Initialize a mutex.
 ///
 /// Reads the mutex type from `attr` (if non-null) to determine whether
-/// the mutex is normal, recursive, or error-checking.
+/// the mutex is normal, recursive, or error-checking, and its protocol to
+/// determine whether it lends its waiters' priority to its owner
+/// (`PTHREAD_PRIO_INHERIT`; see "Priority-inheritance mutexes").
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_init(
     mutex: *mut PthreadMutexT,
     attr: *const PthreadMutexattrT,
 ) -> i32 {
     // glibc's order (nptl/pthread_mutex_init.c): the attribute's sanity
-    // checks, then the mutex.  A protocol other than none, and robustness,
-    // are ENOTSUP here -- no priority-inheriting futexes, no priority
-    // ceilings, no robust list -- as glibc answers where it lacks them.
+    // checks, then the mutex.  Priority protection and robustness are
+    // ENOTSUP here -- no priority ceilings, no robust list -- as glibc
+    // answers where it lacks them.  Priority inheritance is the kernel's PI
+    // futex; it was ENOTSUP too until 2026-10-06.
     let word: u32 = if attr.is_null() {
         0
     } else {
         // SAFETY: attr verified non-null; `[u8; 4]`, so read unaligned.
         unsafe { core::ptr::read_unaligned(attr.cast::<u32>()) }
     };
-    if word & (MUTEXATTR_PROTOCOL_MASK | MUTEXATTR_FLAG_ROBUST) != 0 {
+    let protocol = word & MUTEXATTR_PROTOCOL_MASK;
+    if (protocol != 0 && protocol != MUTEXATTR_PRIO_INHERIT) || word & MUTEXATTR_FLAG_ROBUST != 0 {
         return errno::ENOTSUP;
     }
     if mutex.is_null() {
         return errno::EFAULT;
     }
-    let kind = (word & !MUTEXATTR_FLAG_BITS) as i32;
+    let mut kind = (word & !MUTEXATTR_FLAG_BITS) as i32;
+    if protocol == MUTEXATTR_PRIO_INHERIT {
+        kind |= MUTEX_KIND_PI;
+    }
     // SAFETY: caller guarantees mutex is valid.
     unsafe {
         (*mutex).locked.store(0, Ordering::Release);
@@ -1766,6 +1807,9 @@ fn held_by(m: &PthreadMutexT, self_id: i32) -> bool {
 ///   recursion count and returns 0 (`EAGAIN` at the count's limit).
 /// - **Error-checking**: if already held by calling thread, returns
 ///   EDEADLK without blocking.
+///
+/// A priority-inheritance mutex sleeps in the kernel instead, lending its
+/// owner the caller's priority meanwhile ([`pi_lock`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
@@ -1775,6 +1819,9 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
     let self_id = current_tid();
+    if kind & MUTEX_KIND_PI != 0 {
+        return pi_lock(m, kind & MUTEX_KIND_TYPE, self_id);
+    }
     if kind != PTHREAD_MUTEX_NORMAL && held_by(m, self_id) {
         if kind == PTHREAD_MUTEX_RECURSIVE {
             return recursive_relock(m);
@@ -1791,7 +1838,8 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
 ///
 /// Returns 0 on success, `EBUSY` if the mutex is already locked (by
 /// another thread, or -- for an error-checking mutex -- by this one).  A
-/// recursive mutex the calling thread holds gains a level.
+/// recursive mutex the calling thread holds gains a level.  The same for a
+/// priority-inheritance mutex ([`pi_trylock`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
@@ -1801,6 +1849,9 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
     let self_id = current_tid();
+    if kind & MUTEX_KIND_PI != 0 {
+        return pi_trylock(m, kind & MUTEX_KIND_TYPE, self_id);
+    }
     if kind == PTHREAD_MUTEX_RECURSIVE && held_by(m, self_id) {
         return recursive_relock(m);
     }
@@ -1818,7 +1869,9 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32
 /// For recursive mutexes, decrements the recursion count; the mutex
 /// is only released when the count reaches zero.  For error-checking
 /// mutexes, returns EPERM if the calling thread does not own the lock.
-/// Releasing a contended lock wakes one waiter.
+/// Releasing a contended lock wakes one waiter.  A priority-inheritance
+/// mutex is `EPERM` unless the caller holds it, whatever its type, and is
+/// handed to its highest-priority waiter ([`pi_unlock`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
@@ -1827,6 +1880,9 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 
     // SAFETY: caller guarantees mutex is valid.
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
+    if kind & MUTEX_KIND_PI != 0 {
+        return pi_unlock(m, kind & MUTEX_KIND_TYPE);
+    }
 
     if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
         if !held_by(m, current_tid()) {
@@ -1861,6 +1917,192 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut PthreadMutexT) -> i32
         (*mutex).locked.store(0, Ordering::Release);
     }
     0
+}
+
+// ---------------------------------------------------------------------------
+// Priority-inheritance mutexes
+// ---------------------------------------------------------------------------
+//
+// A `PTHREAD_PRIO_INHERIT` mutex's `locked` word is a kernel PI futex word
+// (`lowlevellock`'s "Priority-inheritance futexes"): 0 when free, else the
+// owner's task id and the kernel's two flags.  A thread that finds it held
+// sleeps in the kernel, which lends the owner the sleeper's priority until
+// the owner unlocks -- so a low-priority owner is not kept off the CPU by
+// medium-priority work while a high-priority thread waits for it: the
+// priority inversion design.txt asks the system to prevent.  Until
+// 2026-10-06 `pthread_mutex_init` refused the protocol with `ENOTSUP`.
+//
+// glibc's algorithm and answers -- nptl's `__pthread_mutex_lock_full`,
+// `__pthread_mutex_trylock`, `__pthread_mutex_clocklock_common` and
+// `__pthread_mutex_unlock_full`, their PI cases -- with two differences:
+//
+// - The word is taken and given back through the kernel every time, where
+//   glibc tries a compare-and-swap first: this kernel records an owner only
+//   when it saw the word taken, and keeps a holder it has no record of at
+//   priority lent to it after the lender stopped waiting (see
+//   `lowlevellock`).  So a lock and an unlock cost a syscall each, until the
+//   kernel records the owner it finds in a word.
+// - `pthread_mutex_trylock` on an error-checking PI mutex its caller holds is
+//   `EBUSY`, as POSIX and musl have it and as this library answers for every
+//   other mutex; glibc's PI path alone says `EDEADLK`.
+//
+// The priority lent is the kernel scheduler's (`SYS_THREAD_SET_PRIORITY`, 0
+// highest to 31), which `pthread_getschedparam` does not report -- every
+// thread reads as `SCHED_OTHER` at 0 there.  Between threads of one priority
+// there is nothing to lend, and a PI mutex is a plain one.
+//
+// If an owner dies holding one (the mutex is not robust), the kernel hands
+// it to its highest-priority waiter, or leaves it free with
+// `FUTEX_OWNER_DIED` set, and the next locker takes it and goes on: what
+// Linux does for a waiter; a later locker Linux answers `ESRCH`, on which
+// glibc sleeps forever.  POSIX leaves it open -- a stalled mutex "can lead
+// to deadlocks" -- and the flag is gone from the word after the next unlock.
+
+/// `kind`'s flag for a priority-inheritance mutex: glibc's
+/// `PTHREAD_MUTEX_PRIO_INHERIT_NP`.  Any other mutex has its type alone in
+/// `kind`.
+const MUTEX_KIND_PI: i32 = 0x20;
+/// `kind`'s type bits: glibc's `PTHREAD_MUTEX_KIND_MASK_NP`.
+const MUTEX_KIND_TYPE: i32 = 0x3;
+
+/// Whether `tid` -- a thread id as [`crate::lowlevellock::pi_owner`] makes
+/// it -- holds the PI mutex `m`.  No thread's id is 0, so a free word is held
+/// by nobody.
+fn pi_held_by(m: &PthreadMutexT, tid: u32) -> bool {
+    crate::lowlevellock::pi_bits(m.locked.load(Ordering::Relaxed))
+        & crate::lowlevellock::FUTEX_TID_MASK
+        == tid
+}
+
+/// A PI mutex just taken by `self_id`: the record every mutex keeps.
+fn pi_took(m: &PthreadMutexT, self_id: i32) -> i32 {
+    m.owner.store(self_id, Ordering::Relaxed);
+    m.count.store(1, Ordering::Relaxed);
+    0
+}
+
+/// The deadlock POSIX promises the owner of a normal mutex that locks it
+/// again, which glibc gives on a PI mutex too, where the kernel would answer
+/// `EDEADLK` rather than sleep: sleep, never to return.
+fn deadlock_forever() -> ! {
+    let never = AtomicI32::new(0);
+    loop {
+        crate::lowlevellock::futex_wait(&never, 0);
+    }
+}
+
+/// [`deadlock_forever`] for a lock with a deadline: sleep until the deadline
+/// on `clock` has passed, then `ETIMEDOUT`, as glibc answers.
+fn deadlock_until(clock: i32, deadline: &crate::stat::Timespec) -> i32 {
+    let never = AtomicI32::new(0);
+    while let Some(ns) =
+        crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(clock), deadline)
+    {
+        crate::lowlevellock::futex_wait_timeout(&never, 0, ns);
+    }
+    errno::ETIMEDOUT
+}
+
+/// [`pthread_mutex_lock`] on a PI mutex of type `ty`.
+fn pi_lock(m: &PthreadMutexT, ty: i32, self_id: i32) -> i32 {
+    if pi_held_by(m, crate::lowlevellock::pi_owner(self_id)) {
+        match ty {
+            PTHREAD_MUTEX_RECURSIVE => return recursive_relock(m),
+            PTHREAD_MUTEX_ERRORCHECK => return errno::EDEADLK,
+            _ => deadlock_forever(),
+        }
+    }
+    match crate::lowlevellock::futex_lock_pi_until(&m.locked, None) {
+        0 => pi_took(m, self_id),
+        e => errno::errno_for(e),
+    }
+}
+
+/// [`pthread_mutex_trylock`] on a PI mutex of type `ty`: one try, through the
+/// kernel, which also takes a word a dead owner left.
+fn pi_trylock(m: &PthreadMutexT, ty: i32, self_id: i32) -> i32 {
+    if pi_held_by(m, crate::lowlevellock::pi_owner(self_id)) {
+        return if ty == PTHREAD_MUTEX_RECURSIVE {
+            recursive_relock(m)
+        } else {
+            errno::EBUSY
+        };
+    }
+    loop {
+        match crate::lowlevellock::futex_lock_pi(&m.locked, Some(0)) {
+            0 => return pi_took(m, self_id),
+            errno::native::TIMED_OUT => return errno::EBUSY,
+            // A try that never sleeps is not interrupted; were it, it would
+            // be tried again rather than be `EINTR`, which this never is.
+            errno::native::INTERRUPTED => {}
+            e => return errno::errno_for(e),
+        }
+    }
+}
+
+/// [`mutex_lock_until`] on a PI mutex of type `ty`, the deadline at `abstime`
+/// on `clock`.  It is read only once the mutex could not be taken at once, as
+/// for every mutex (see [`mutex_lock_until`]).
+fn pi_lock_until(
+    m: &PthreadMutexT,
+    ty: i32,
+    self_id: i32,
+    clock: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    let held = pi_held_by(m, crate::lowlevellock::pi_owner(self_id));
+    if held {
+        match ty {
+            PTHREAD_MUTEX_RECURSIVE => return recursive_relock(m),
+            PTHREAD_MUTEX_ERRORCHECK => return errno::EDEADLK,
+            _ => {}
+        }
+    } else {
+        match crate::lowlevellock::futex_lock_pi(&m.locked, Some(0)) {
+            0 => return pi_took(m, self_id),
+            errno::native::TIMED_OUT | errno::native::INTERRUPTED => {}
+            e => return errno::errno_for(e),
+        }
+    }
+    if abstime.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: abstime verified non-null; a caller's may be unaligned.
+    let deadline = unsafe { core::ptr::read_unaligned(abstime) };
+    if !crate::time::valid_nanoseconds(deadline.tv_nsec) {
+        return errno::EINVAL;
+    }
+    if held {
+        // A normal mutex its owner locks again.
+        return deadlock_until(clock, &deadline);
+    }
+    match crate::lowlevellock::futex_lock_pi_until(&m.locked, Some((clock, &deadline))) {
+        0 => pi_took(m, self_id),
+        e => errno::errno_for(e),
+    }
+}
+
+/// [`pthread_mutex_unlock`] on a PI mutex of type `ty`: `EPERM` unless the
+/// caller holds it, whatever the type, as glibc answers.
+fn pi_unlock(m: &PthreadMutexT, ty: i32) -> i32 {
+    if !pi_held_by(m, crate::lowlevellock::pi_owner(current_tid())) {
+        return errno::EPERM;
+    }
+    if ty == PTHREAD_MUTEX_RECURSIVE {
+        let c = m.count.load(Ordering::Relaxed);
+        if c > 1 {
+            m.count.store(c.wrapping_sub(1), Ordering::Relaxed);
+            return 0;
+        }
+    }
+    m.owner.store(0, Ordering::Relaxed);
+    m.count.store(0, Ordering::Relaxed);
+    match crate::lowlevellock::futex_unlock_pi(&m.locked) {
+        0 => 0,
+        // The kernel's "not the owner", which the check above rules out.
+        errno::native::INVALID_ARGUMENT => errno::EPERM,
+        e => errno::errno_for(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4053,6 +4295,8 @@ pub const PTHREAD_MUTEX_ROBUST: i32 = 1;
 
 const MUTEXATTR_PROTOCOL_SHIFT: u32 = 28;
 const MUTEXATTR_PROTOCOL_MASK: u32 = 0x3000_0000;
+/// The protocol bits of a `PTHREAD_PRIO_INHERIT` attribute.
+const MUTEXATTR_PRIO_INHERIT: u32 = PTHREAD_PRIO_INHERIT.unsigned_abs() << MUTEXATTR_PROTOCOL_SHIFT;
 const MUTEXATTR_PRIO_CEILING_SHIFT: u32 = 12;
 const MUTEXATTR_PRIO_CEILING_MASK: u32 = 0x00ff_f000;
 const MUTEXATTR_FLAG_ROBUST: u32 = 0x4000_0000;
@@ -4161,8 +4405,9 @@ pub extern "C" fn pthread_mutexattr_getprotocol(
 }
 
 /// `pthread_mutexattr_setprotocol`: any of the three protocols is stored,
-/// as glibc stores it; the two this libc cannot provide are refused by
-/// [`pthread_mutex_init`], as glibc refuses what it cannot provide.
+/// as glibc stores it; `PTHREAD_PRIO_PROTECT`, which this libc cannot
+/// provide, is refused by [`pthread_mutex_init`], as glibc refuses what it
+/// cannot provide.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_mutexattr_setprotocol(
     attr: *mut PthreadMutexattrT,
@@ -4370,6 +4615,9 @@ fn mutex_lock_until(
     let m = unsafe { &*mutex };
     let kind = m.kind.load(Ordering::Relaxed);
     let self_id = current_tid();
+    if kind & MUTEX_KIND_PI != 0 {
+        return pi_lock_until(m, kind & MUTEX_KIND_TYPE, self_id, clock, abstime);
+    }
 
     // Recursive / error-checking: check if we already own the lock.
     if kind != PTHREAD_MUTEX_NORMAL && held_by(m, self_id) {
@@ -5107,32 +5355,42 @@ pub extern "C" fn pthread_getschedparam(
     0
 }
 
-/// Set a thread's scheduling policy and parameters.
+/// Set a thread's scheduling policy and parameters, answering as glibc does:
+/// with whatever `sched_setscheduler` answers for the thread
+/// ([`crate::sched::sched_setscheduler`]).
 ///
-/// Accepts `SCHED_OTHER` at priority 0 and **refuses everything else with
-/// `EINVAL`**, rather than accepting a request it cannot carry out.
+/// - `EINVAL` for a policy it does not know, a priority outside the policy's
+///   range, `SCHED_DEADLINE`, or a NULL `param`.
+/// - `EPERM` for a well-formed `SCHED_FIFO` or `SCHED_RR` request, because the
+///   scheduler has no real-time class to grant (that function's step 8).
+/// - 0 for the ordinary policies at priority 0, which every thread already
+///   runs as.
 ///
-/// That choice is the point of this function. A silent success would tell a
-/// caller its real-time thread is running at the priority it asked for, when
-/// nothing in the scheduler distinguishes that thread from any other — and a
-/// program that believes it has a priority it does not have makes worse
-/// decisions than one that knows it cannot have one. `EINVAL` is a documented
-/// answer to `pthread_setschedparam`; a false yes is not.
+/// A false yes is what this avoids. A program told its real-time thread runs
+/// real-time makes worse decisions than one told it cannot.
+///
+/// Until 2026-10-06, every request but `SCHED_OTHER` at 0 was `EINVAL`. That
+/// is Linux's answer for a malformed request; for a well-formed one it will
+/// not grant, Linux answers `EPERM`, which is what audio servers check for
+/// before running without real-time. A NULL `param` was `EFAULT`, where Linux
+/// answers `EINVAL`.
+///
+/// The answer is the return value. `errno` is left as the caller had it, as
+/// musl leaves it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setschedparam(
     _thread: PthreadT,
     policy: i32,
     param: *const crate::sched::SchedParam,
 ) -> i32 {
-    if param.is_null() {
-        return errno::EFAULT;
-    }
-    // SAFETY: verified non-null above; `SchedParam` is repr(C).
-    let requested = unsafe { (*param).sched_priority };
-    if policy != crate::sched::SCHED_OTHER || requested != 0 {
-        return errno::EINVAL;
-    }
-    0
+    let caller_errno = errno::get_errno();
+    let answer = if crate::sched::sched_setscheduler(0, policy, param) == 0 {
+        0
+    } else {
+        errno::get_errno()
+    };
+    errno::set_errno(caller_errno);
+    answer
 }
 
 /// Set a thread's priority within its policy: 0, the one priority
@@ -5789,37 +6047,86 @@ mod tests {
 
     #[test]
     fn setschedparam_refuses_a_priority_it_cannot_deliver() {
+        use crate::sched::{SCHED_DEADLINE, SCHED_FIFO, SCHED_OTHER, SCHED_RR, SchedParam};
+        let at = |sched_priority| SchedParam {
+            sched_priority,
+            ..SchedParam::default()
+        };
         // The important one. Accepting this would tell a caller its real-time
         // thread runs at priority 50 when nothing in the scheduler
         // distinguishes it from any other thread -- and a program that
         // believes it has a priority it does not have makes worse decisions
-        // than one that knows it cannot have one.
-        let rt = crate::sched::SchedParam {
-            sched_priority: 50,
-            ..crate::sched::SchedParam::default()
-        };
+        // than one that knows it cannot have one. Well-formed, it is EPERM,
+        // as sched_setscheduler answers it: what an audio server looks for.
+        for policy in [SCHED_FIFO, SCHED_RR] {
+            for prio in [1, 50, 99] {
+                let param = at(prio);
+                assert_eq!(
+                    pthread_setschedparam(0, policy, &raw const param),
+                    errno::EPERM,
+                    "{policy} at {prio}"
+                );
+            }
+        }
+        // Malformed is EINVAL: a priority SCHED_OTHER does not have, one
+        // outside the real-time range at either end, a policy nobody knows,
+        // and SCHED_DEADLINE, whose parameters only sched_setattr can give.
+        for (policy, prio) in [
+            (SCHED_OTHER, 50),
+            (SCHED_FIFO, 0),
+            (SCHED_RR, 100),
+            (4, 0),
+            (-1, 0),
+            (SCHED_DEADLINE, 0),
+        ] {
+            let param = at(prio);
+            assert_eq!(
+                pthread_setschedparam(0, policy, &raw const param),
+                errno::EINVAL,
+                "{policy} at {prio}"
+            );
+        }
+    }
+
+    #[test]
+    fn setschedparam_accepts_what_every_thread_already_is() {
+        use crate::sched::{SCHED_BATCH, SCHED_IDLE, SCHED_OTHER, SCHED_RESET_ON_FORK, SchedParam};
+        let plain = SchedParam::default();
+        for policy in [
+            SCHED_OTHER,
+            SCHED_BATCH,
+            SCHED_IDLE,
+            SCHED_OTHER | SCHED_RESET_ON_FORK,
+        ] {
+            assert_eq!(
+                pthread_setschedparam(0, policy, &raw const plain),
+                0,
+                "{policy:#x}"
+            );
+        }
+        // NULL is EINVAL, as Linux's do_sched_setscheduler answers it.
         assert_eq!(
-            pthread_setschedparam(0, crate::sched::SCHED_FIFO, &raw const rt),
-            errno::EINVAL
-        );
-        // Same policy, priority it cannot give either.
-        assert_eq!(
-            pthread_setschedparam(0, crate::sched::SCHED_OTHER, &raw const rt),
+            pthread_setschedparam(0, SCHED_OTHER, core::ptr::null()),
             errno::EINVAL
         );
     }
 
     #[test]
-    fn setschedparam_accepts_the_one_request_it_can_satisfy() {
-        let plain = crate::sched::SchedParam::default();
+    fn setschedparam_answers_without_touching_errno() {
+        use crate::sched::{SCHED_FIFO, SCHED_OTHER, SchedParam};
+        let rt = SchedParam {
+            sched_priority: 50,
+            ..SchedParam::default()
+        };
+        errno::set_errno(errno::ENOENT);
         assert_eq!(
-            pthread_setschedparam(0, crate::sched::SCHED_OTHER, &raw const plain),
-            0
+            pthread_setschedparam(0, SCHED_FIFO, &raw const rt),
+            errno::EPERM
         );
-        assert_eq!(
-            pthread_setschedparam(0, crate::sched::SCHED_OTHER, core::ptr::null()),
-            errno::EFAULT
-        );
+        assert_eq!(errno::get_errno(), errno::ENOENT, "a refusal");
+        let plain = SchedParam::default();
+        assert_eq!(pthread_setschedparam(0, SCHED_OTHER, &raw const plain), 0);
+        assert_eq!(errno::get_errno(), errno::ENOENT, "a success");
     }
     use core::sync::atomic::{AtomicI32, Ordering};
 
@@ -5842,6 +6149,30 @@ mod tests {
         assert_eq!(pthread_kill(stale, crate::signal::NSIG), errno::EINVAL);
         // Same bad thread, valid signal -> the thread verdict surfaces.
         assert_eq!(pthread_kill(stale, crate::signal::SIGTERM), errno::ESRCH);
+    }
+
+    /// `pthread_sigqueue`, in glibc's order: the thread, then the signal --
+    /// its own two (32 and 33) and those past the range refused -- then the
+    /// probe answered, and a real send `ENOSYS`, the kernel carrying no
+    /// value with a signal.
+    #[test]
+    fn pthread_sigqueue_checks_as_glibcs_and_cannot_send() {
+        let stale: PthreadT = u64::MAX - 1;
+        let me = pthread_self();
+        assert_eq!(pthread_sigqueue(stale, -1, 0), errno::ESRCH);
+        assert_eq!(
+            pthread_sigqueue(SLOT_EMPTY, crate::signal::SIGUSR1, 0),
+            errno::ESRCH
+        );
+        for sig in [-1, 32, 33, crate::signal::NSIG] {
+            assert_eq!(pthread_sigqueue(me, sig, 7), errno::EINVAL, "{sig}");
+        }
+        assert_eq!(pthread_sigqueue(me, 0, 7), 0);
+        assert_eq!(
+            pthread_sigqueue(me, crate::signal::SIGUSR1, 7),
+            errno::ENOSYS
+        );
+        assert_eq!(pthread_sigqueue(me, 34, 7), errno::ENOSYS);
     }
 
     /// Signal 0 is the existence probe: no signal is sent, and the
@@ -9226,6 +9557,337 @@ mod tests {
         .unwrap();
         assert_eq!(r, errno::ETIMEDOUT);
         assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    // -- priority-inheritance mutexes --
+
+    /// A mutex of type `ty` with protocol `protocol`, as `pthread_mutex_init`
+    /// makes it.
+    fn mutex_with(ty: i32, protocol: i32) -> PthreadMutexT {
+        let mut attr: PthreadMutexattrT = [0; 4];
+        assert_eq!(pthread_mutexattr_init(&mut attr), 0);
+        assert_eq!(pthread_mutexattr_settype(&mut attr, ty), 0);
+        assert_eq!(pthread_mutexattr_setprotocol(&mut attr, protocol), 0);
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(unsafe { pthread_mutex_init(&raw mut m, &attr) }, 0);
+        m
+    }
+
+    /// The calling thread's id as a PI futex word holds it.
+    fn my_pi_word() -> i32 {
+        crate::lowlevellock::pi_word(crate::lowlevellock::pi_owner(current_tid()))
+    }
+
+    /// A PI futex word naming a thread that is not this one.
+    fn someone_elses_word() -> i32 {
+        let other = crate::lowlevellock::pi_owner(current_tid()) ^ 0x100;
+        assert_ne!(other, 0);
+        crate::lowlevellock::pi_word(other)
+    }
+
+    /// Which protocols `pthread_mutex_init` takes: none and inheritance;
+    /// protection and robustness are still `ENOTSUP`, judged before the
+    /// mutex pointer, as glibc judges them.
+    #[test]
+    fn pi_mutex_init_takes_inheritance_and_refuses_the_rest() {
+        let m = mutex_with(PTHREAD_MUTEX_NORMAL, PTHREAD_PRIO_INHERIT);
+        assert_eq!(
+            m.kind.load(Ordering::Relaxed),
+            MUTEX_KIND_PI | PTHREAD_MUTEX_NORMAL
+        );
+        let m = mutex_with(PTHREAD_MUTEX_RECURSIVE, PTHREAD_PRIO_INHERIT);
+        assert_eq!(
+            m.kind.load(Ordering::Relaxed),
+            MUTEX_KIND_PI | PTHREAD_MUTEX_RECURSIVE
+        );
+        let m = mutex_with(PTHREAD_MUTEX_ERRORCHECK, PTHREAD_PRIO_NONE);
+        assert_eq!(m.kind.load(Ordering::Relaxed), PTHREAD_MUTEX_ERRORCHECK);
+
+        let mut attr: PthreadMutexattrT = [0; 4];
+        assert_eq!(pthread_mutexattr_init(&mut attr), 0);
+        assert_eq!(
+            pthread_mutexattr_setprotocol(&mut attr, PTHREAD_PRIO_PROTECT),
+            0
+        );
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(
+            unsafe { pthread_mutex_init(&raw mut m, &attr) },
+            errno::ENOTSUP
+        );
+        assert_eq!(
+            unsafe { pthread_mutex_init(core::ptr::null_mut(), &attr) },
+            errno::ENOTSUP,
+            "the attribute first"
+        );
+        assert_eq!(
+            pthread_mutexattr_setprotocol(&mut attr, PTHREAD_PRIO_INHERIT),
+            0
+        );
+        assert_eq!(
+            pthread_mutexattr_setrobust(&mut attr, PTHREAD_MUTEX_ROBUST),
+            0
+        );
+        assert_eq!(
+            unsafe { pthread_mutex_init(&raw mut m, &attr) },
+            errno::ENOTSUP
+        );
+        assert_eq!(
+            unsafe { pthread_mutex_init(core::ptr::null_mut(), core::ptr::null()) },
+            errno::EFAULT
+        );
+    }
+
+    /// The word holds the owner's id while it is held and 0 after; the owner
+    /// relocking is each type's answer, and anyone else unlocking is `EPERM`.
+    #[test]
+    fn pi_mutex_word_names_its_owner() {
+        for ty in [PTHREAD_MUTEX_NORMAL, PTHREAD_MUTEX_ERRORCHECK] {
+            let mut m = mutex_with(ty, PTHREAD_PRIO_INHERIT);
+            assert_eq!(
+                unsafe { pthread_mutex_unlock(&raw mut m) },
+                errno::EPERM,
+                "not held"
+            );
+            assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, 0);
+            assert_eq!(m.locked.load(Ordering::Relaxed), my_pi_word());
+            assert_eq!(m.owner.load(Ordering::Relaxed), current_tid());
+            if ty == PTHREAD_MUTEX_ERRORCHECK {
+                assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, errno::EDEADLK);
+            }
+            assert_eq!(
+                unsafe { pthread_mutex_trylock(&raw mut m) },
+                errno::EBUSY,
+                "held by this thread: POSIX's EBUSY, for every type but recursive"
+            );
+            let mp = Shared(&raw mut m);
+            let from_another =
+                std::thread::spawn(move || unsafe { pthread_mutex_unlock(mp.get()) })
+                    .join()
+                    .unwrap();
+            assert_eq!(from_another, errno::EPERM, "{ty}: whatever the type");
+            assert_eq!(m.locked.load(Ordering::Relaxed), my_pi_word(), "still held");
+            assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+            assert_eq!(m.locked.load(Ordering::Relaxed), 0);
+            assert_eq!(m.owner.load(Ordering::Relaxed), 0);
+            assert_eq!(unsafe { pthread_mutex_trylock(&raw mut m) }, 0);
+            assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+        }
+    }
+
+    /// A recursive PI mutex counts its owner's levels in `count`; the word is
+    /// given back with the last.
+    #[test]
+    fn pi_mutex_recursive_levels() {
+        let mut m = mutex_with(PTHREAD_MUTEX_RECURSIVE, PTHREAD_PRIO_INHERIT);
+        assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, 0);
+        assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, 0);
+        assert_eq!(unsafe { pthread_mutex_trylock(&raw mut m) }, 0);
+        let soon = in_ms(crate::time::CLOCK_MONOTONIC, 10);
+        assert_eq!(
+            pthread_mutex_clocklock(&raw mut m, crate::time::CLOCK_MONOTONIC, &raw const soon),
+            0
+        );
+        assert_eq!(m.count.load(Ordering::Relaxed), 4);
+        for left in [3, 2, 1] {
+            assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+            assert_eq!(m.count.load(Ordering::Relaxed), left);
+            assert_eq!(m.locked.load(Ordering::Relaxed), my_pi_word());
+        }
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+        assert_eq!(m.locked.load(Ordering::Relaxed), 0);
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, errno::EPERM);
+        m.count.store(i32::MAX, Ordering::Relaxed);
+        m.locked.store(my_pi_word(), Ordering::Relaxed);
+        assert_eq!(
+            unsafe { pthread_mutex_lock(&raw mut m) },
+            errno::EAGAIN,
+            "the count's limit"
+        );
+    }
+
+    /// Held by another thread: `trylock` is `EBUSY`, and a timed lock reads
+    /// its deadline only then -- `EFAULT` for NULL, `EINVAL` for a malformed
+    /// one, `ETIMEDOUT` once it passes; free, it never reads it.
+    #[test]
+    fn pi_mutex_timed_and_try_when_held_elsewhere() {
+        let mut m = mutex_with(PTHREAD_MUTEX_ERRORCHECK, PTHREAD_PRIO_INHERIT);
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, core::ptr::null()),
+            0,
+            "free"
+        );
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, core::ptr::null()),
+            errno::EDEADLK,
+            "its own, before the deadline is read"
+        );
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+
+        m.locked.store(someone_elses_word(), Ordering::Relaxed);
+        assert_eq!(unsafe { pthread_mutex_trylock(&raw mut m) }, errno::EBUSY);
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, core::ptr::null()),
+            errno::EFAULT
+        );
+        let bad = ts(0, 1_000_000_000);
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, &raw const bad),
+            errno::EINVAL
+        );
+        let past = ts(0, 1);
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, &raw const past),
+            errno::ETIMEDOUT
+        );
+        let start = std::time::Instant::now();
+        let soon = in_ms(crate::time::CLOCK_MONOTONIC, 30);
+        assert_eq!(
+            pthread_mutex_clocklock(&raw mut m, crate::time::CLOCK_MONOTONIC, &raw const soon),
+            errno::ETIMEDOUT
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(25),
+            "it waited"
+        );
+        assert_eq!(
+            m.locked.load(Ordering::Relaxed),
+            someone_elses_word(),
+            "untouched"
+        );
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, errno::EPERM);
+    }
+
+    /// A normal PI mutex its owner locks again with a deadline: glibc's
+    /// deadlock, slept out until the deadline, then `ETIMEDOUT`.
+    #[test]
+    fn pi_mutex_normal_relock_with_a_deadline_sleeps_it_out() {
+        let mut m = mutex_with(PTHREAD_MUTEX_NORMAL, PTHREAD_PRIO_INHERIT);
+        assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, 0);
+        let bad = ts(0, -1);
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, &raw const bad),
+            errno::EINVAL
+        );
+        let start = std::time::Instant::now();
+        let soon = in_ms(crate::time::CLOCK_MONOTONIC, 30);
+        assert_eq!(
+            pthread_mutex_clocklock(&raw mut m, crate::time::CLOCK_MONOTONIC, &raw const soon),
+            errno::ETIMEDOUT
+        );
+        assert!(start.elapsed() >= std::time::Duration::from_millis(25));
+        assert_eq!(
+            m.locked.load(Ordering::Relaxed),
+            my_pi_word(),
+            "still its own"
+        );
+        assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    /// A word a dead owner left -- `FUTEX_OWNER_DIED` and nobody -- is free:
+    /// every way of locking takes it, the flag kept until the unlock.
+    #[test]
+    fn pi_mutex_takes_a_dead_owners_word() {
+        use crate::lowlevellock::{FUTEX_OWNER_DIED, pi_bits, pi_word};
+        let dead = pi_word(FUTEX_OWNER_DIED);
+        let mut m = mutex_with(PTHREAD_MUTEX_NORMAL, PTHREAD_PRIO_INHERIT);
+        let far = in_ms(crate::time::CLOCK_REALTIME, 10_000);
+        for how in 0..3 {
+            m.locked.store(dead, Ordering::Relaxed);
+            let r = match how {
+                0 => unsafe { pthread_mutex_lock(&raw mut m) },
+                1 => unsafe { pthread_mutex_trylock(&raw mut m) },
+                _ => pthread_mutex_timedlock(&raw mut m, &raw const far),
+            };
+            assert_eq!(r, 0, "way {how}");
+            assert_eq!(
+                pi_bits(m.locked.load(Ordering::Relaxed)),
+                pi_bits(my_pi_word()) | FUTEX_OWNER_DIED
+            );
+            assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+            assert_eq!(m.locked.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    /// Mutual exclusion among real threads, through the kernel's (here, its
+    /// stand-in's) sleep and hand-off.
+    #[test]
+    fn pi_mutex_excludes_under_contention() {
+        let mut m = mutex_with(PTHREAD_MUTEX_NORMAL, PTHREAD_PRIO_INHERIT);
+        let mp = Shared(&raw mut m);
+        let mut counter = 0u64;
+        let cp = Shared(&raw mut counter);
+        let threads: Vec<_> = (0..6)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let (mp, cp) = (mp.get(), cp.get());
+                    for j in 0..300 {
+                        let r = if (i + j) % 3 == 0 {
+                            let later = in_ms(crate::time::CLOCK_MONOTONIC, 60_000);
+                            pthread_mutex_clocklock(
+                                mp,
+                                crate::time::CLOCK_MONOTONIC,
+                                &raw const later,
+                            )
+                        } else {
+                            unsafe { pthread_mutex_lock(mp) }
+                        };
+                        assert_eq!(r, 0);
+                        // Read, yield, write: a lost update shows here.
+                        let seen = unsafe { *cp };
+                        std::thread::yield_now();
+                        unsafe { *cp = seen + 1 };
+                        assert_eq!(unsafe { pthread_mutex_unlock(mp) }, 0);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(counter, 1800);
+        assert_eq!(m.locked.load(Ordering::Relaxed), 0, "left free");
+    }
+
+    /// A condition variable waits on a PI mutex as on any other: released
+    /// for the wait, held again -- by the waiter -- after.
+    #[test]
+    fn pi_mutex_under_a_condition_variable() {
+        let mut m = mutex_with(PTHREAD_MUTEX_ERRORCHECK, PTHREAD_PRIO_INHERIT);
+        // SAFETY: all-zeros is a valid condition variable (generation 0, no
+        // waiters, `CLOCK_REALTIME`), as `PTHREAD_COND_INITIALIZER` is.
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        let mut ready = AtomicBool::new(false);
+        let (mp, cp, rp) = (
+            Shared(&raw mut m),
+            Shared(&raw mut c),
+            Shared(&raw mut ready),
+        );
+        let waiter = std::thread::spawn(move || {
+            let (mp, cp, rp) = (mp.get(), cp.get(), rp.get());
+            assert_eq!(unsafe { pthread_mutex_lock(mp) }, 0);
+            while !unsafe { &*rp }.load(Ordering::Relaxed) {
+                assert_eq!(pthread_cond_wait(cp, mp), 0);
+            }
+            // Held again, by this thread.
+            let mine = unsafe { &*mp }.locked.load(Ordering::Relaxed) == my_pi_word();
+            assert_eq!(unsafe { pthread_mutex_unlock(mp) }, 0);
+            mine
+        });
+        loop {
+            assert_eq!(unsafe { pthread_mutex_lock(&raw mut m) }, 0);
+            // The waiter waiting has given the mutex back: take it, mark
+            // ready, signal.
+            if c.waiters.load(Ordering::SeqCst) > 0 {
+                ready.store(true, Ordering::Relaxed);
+                assert_eq!(pthread_cond_signal(&raw mut c), 0);
+                assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+                break;
+            }
+            assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+            std::thread::yield_now();
+        }
+        assert!(waiter.join().unwrap(), "the waiter held it after its wait");
+        assert_eq!(m.locked.load(Ordering::Relaxed), 0);
     }
 
     // -- the rwlock's kinds: glibc's pthread_rwlockattr_setkind_np --

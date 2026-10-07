@@ -122,10 +122,25 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     // be wrong for the third", which is right: nothing about these two
     // paths needs to reach the filesystem, and putting them here keeps the
     // kernel's namespace free of nodes that are really syscalls.
-    if let Some(fd) = open_pty_device(resolved.get(..resolved_len).unwrap_or(&[]), flags) {
+    let resolved = resolved.get(..resolved_len).unwrap_or(&[]);
+    if let Some(fd) = open_pty_device(resolved, flags) {
         return fd;
     }
+    // `/dev/fd/N`, `/dev/stdin` and kin, and `/proc/self/fd`: this process's
+    // own descriptors, which only this library knows (`crate::fdname`).
+    if let Some(fd) = crate::fdname::open(resolved, flags, mode) {
+        return fd;
+    }
+    open_resolved(resolved, flags, mode)
+}
 
+/// The kernel's half of [`open`]: `resolved` -- absolute and normalised, as
+/// `resolve_or_err` makes it -- opened through `SYS_FS_OPEN_MODE` and entered
+/// in the descriptor table. What `open` does once no name this library
+/// answers itself has claimed the path; [`crate::fdname`] calls it for the
+/// kernel's own `/proc/<pid>/fd`, which `open` would hand straight back.
+pub(crate) fn open_resolved(resolved: &[u8], flags: i32, mode: ModeT) -> Fd {
+    let resolved_len = resolved.len();
     let native_flags = translate_open_flags(flags);
 
     // Compute the umask-masked create mode only when O_CREAT is present;
@@ -350,6 +365,50 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         return -1;
     }
 
+    // The kinds whose reading is this library's answer as their Linux files
+    // do, a zero count and a NULL buffer included -- measured on 6.6 call by
+    // call. On x86-64 `access_ok` admits NULL (design-decisions §1107), so
+    // Linux faults only where it copies: an eventfd, a timerfd, an inotify
+    // queue check the count and their own state first, and a socket with no
+    // connection never reaches a copy at all.
+    match entry.kind {
+        HandleKind::Eventfd => return read_eventfd(fd, entry.handle, buf, count),
+        HandleKind::Timerfd => return read_timerfd(fd, entry.handle, buf, count, mark),
+        HandleKind::Inotify => return read_inotify(fd, entry.handle, buf, count, mark),
+        HandleKind::Epoll => {
+            // An epoll file has no read: EINVAL whatever the count or buffer
+            // (`vfs_read`'s FMODE_CAN_READ, ahead of `access_ok`).
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        HandleKind::TcpListener => {
+            // A listener carries no data. `sock_read_iter` answers a zero
+            // count with 0 before anything else; otherwise `tcp_recvmsg`
+            // answers ENOTCONN for TCP_LISTEN before touching the buffer.
+            // (This was EINVAL, and EFAULT for a NULL buffer.)
+            if count == 0 {
+                return 0;
+            }
+            errno::set_errno(errno::ENOTCONN);
+            return -1;
+        }
+        HandleKind::TcpStream if entry.handle == 0 => {
+            // Never connected: as a listener -- `tcp_recvmsg` finds
+            // TCP_CLOSE and answers ENOTCONN, a zero count 0.
+            if count == 0 {
+                return 0;
+            }
+            errno::set_errno(errno::ENOTCONN);
+            return -1;
+        }
+        _ => {}
+    }
+
+    // The kernel's kinds. A NULL buffer is refused here, where `access_ok`
+    // would sit, not at the copy, which is not Linux's answer at the end of
+    // a file (0), on an empty non-blocking pipe (EAGAIN) or for a directory
+    // (EISDIR): the kernel refuses NULL before it looks
+    // (`requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md`).
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -413,10 +472,6 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             })
         }
         HandleKind::TcpStream => {
-            if entry.handle == 0 {
-                errno::set_errno(errno::ENOTCONN);
-                return -1;
-            }
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
 
@@ -449,107 +504,15 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // source address is simply discarded (use recvfrom() to get it).
             return unsafe { crate::socket::recv(fd, buf, count, 0) } as SsizeT;
         }
-        HandleKind::TcpListener => {
-            // Listeners are not readable via read(); use accept().
-            errno::set_errno(errno::EINVAL);
+        HandleKind::TcpListener
+        | HandleKind::Epoll
+        | HandleKind::Timerfd
+        | HandleKind::Eventfd
+        | HandleKind::Inotify => {
+            // Answered before the buffer was looked at, above; here only so
+            // that this match stays exhaustive.
+            errno::set_errno(errno::EBADF);
             return -1;
-        }
-        HandleKind::Epoll => {
-            // Linux: read/write on an epoll fd returns EINVAL.
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        HandleKind::Timerfd => {
-            // Linux timerfd read: writes 8 bytes containing the number
-            // of expirations since the last read (or settime), as a
-            // host-endian u64.  If no expirations have occurred:
-            //   - O_NONBLOCK (or TFD_NONBLOCK): return EAGAIN.
-            //   - Otherwise: sleep 10ms and retry.
-            if count < 8 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let is_nb = fd_nb || crate::epoll::timerfd_is_nonblock(entry.handle);
-            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
-            let dst = unsafe { core::slice::from_raw_parts_mut(buf, 8) };
-            loop {
-                match crate::epoll::timerfd_read(entry.handle, dst) {
-                    Ok(0) => {
-                        if is_nb {
-                            errno::set_errno(errno::EAGAIN);
-                            return -1;
-                        }
-                        // Block: sleep 10ms and retry.  Matches the rest
-                        // of our readiness polling.
-                        if mark.interrupted(Restart::IfAsked) {
-                            errno::set_errno(errno::EINTR);
-                            return -1;
-                        }
-                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
-                    }
-                    Ok(n) => return n as SsizeT,
-                    Err(e) => {
-                        errno::set_errno(e);
-                        return -1;
-                    }
-                }
-            }
-        }
-        HandleKind::Eventfd => {
-            // Linux semantics: read on an eventfd requires an 8-byte
-            // buffer.  On success, the kernel counter is written into
-            // the buffer (host endian) and read() returns 8.  Buffers
-            // smaller than 8 bytes fail with EINVAL.
-            if count < 8 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let r = crate::epoll::eventfd_kernel_read(entry.handle, is_nb);
-            if r < 0 {
-                return errno::translate(r) as SsizeT;
-            }
-            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
-            // We write 8 bytes representing the u64 counter value in host
-            // endianness, matching Linux eventfd semantics.
-            unsafe {
-                let val = r as u64;
-                core::ptr::write_unaligned(buf.cast::<u64>(), val);
-            }
-            return 8;
-        }
-        HandleKind::Inotify => {
-            // inotify read: drains queued events in Linux's packed
-            // `struct inotify_event` format.  If the buffer is too
-            // small for the next event, EINVAL.  If the queue is empty:
-            //   - O_NONBLOCK (or IN_NONBLOCK): EAGAIN.
-            //   - Otherwise: sleep 10ms and retry (matches poll/timerfd
-            //     pattern).
-            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let is_nb = fd_nb || crate::epoll::inotify_is_nonblock(entry.handle);
-            // SAFETY: `buf` is valid for `count` bytes (checked above).
-            let dst = unsafe { core::slice::from_raw_parts_mut(buf, count) };
-            loop {
-                match crate::epoll::inotify_read(entry.handle, dst) {
-                    Ok(0) => {
-                        if is_nb {
-                            errno::set_errno(errno::EAGAIN);
-                            return -1;
-                        }
-                        if mark.interrupted(Restart::IfAsked) {
-                            errno::set_errno(errno::EINTR);
-                            return -1;
-                        }
-                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
-                    }
-                    Ok(n) => return n as SsizeT,
-                    Err(e) => {
-                        errno::set_errno(e);
-                        return -1;
-                    }
-                }
-            }
         }
         HandleKind::PtyMaster => {
             // What the program on the slave end printed, already through
@@ -619,6 +582,162 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
     errno::translate(ret) as SsizeT
 }
 
+/// The longest record an inotify read gives: its 16-byte header and the
+/// longest name, with its NUL, rounded up to 16.
+const INOTIFY_MAX_RECORD: usize = 16 + crate::epoll::INOTIFY_NAME_MAX.next_multiple_of(16);
+
+/// Whether `fd`'s descriptor was opened, or since set, `O_NONBLOCK`.
+fn fd_nonblocking(fd: Fd) -> bool {
+    fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0
+}
+
+/// `read` of an eventfd, in Linux's order (`eventfd_read`): a count under 8
+/// is EINVAL, whatever the buffer; an empty counter is EAGAIN without
+/// blocking, else waited for; then the counter is taken, and only then
+/// copied -- so a NULL buffer is EFAULT with the count gone, as on Linux
+/// (measured on 6.6).
+fn read_eventfd(fd: Fd, handle: u64, buf: *mut u8, count: SizeT) -> SsizeT {
+    if count < 8 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let r = crate::epoll::eventfd_kernel_read(handle, fd_nonblocking(fd));
+    if r < 0 {
+        return errno::translate(r) as SsizeT;
+    }
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: `buf` is the caller's, valid for `count >= 8` bytes and not
+    // NULL (checked above); the counter is written as a host-endian u64.
+    unsafe { core::ptr::write_unaligned(buf.cast::<u64>(), r as u64) };
+    8
+}
+
+/// `read` of a timerfd, in Linux's order (`timerfd_read`): a count under 8
+/// is EINVAL; no expiry yet is EAGAIN without blocking, else waited for;
+/// the expiries are taken, then copied -- a NULL buffer faulting after
+/// them, as `put_user` does on Linux (measured on 6.6).
+fn read_timerfd(fd: Fd, handle: u64, buf: *mut u8, count: SizeT, mark: Mark) -> SsizeT {
+    if count < 8 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let is_nb = fd_nonblocking(fd) || crate::epoll::timerfd_is_nonblock(handle);
+    let mut ticks = [0u8; 8];
+    loop {
+        match crate::epoll::timerfd_read(handle, &mut ticks) {
+            Ok(0) => {
+                if is_nb {
+                    errno::set_errno(errno::EAGAIN);
+                    return -1;
+                }
+                // Block: sleep 10ms and retry.  Matches the rest of our
+                // readiness polling.
+                if mark.interrupted(Restart::IfAsked) {
+                    errno::set_errno(errno::EINTR);
+                    return -1;
+                }
+                crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
+            }
+            Ok(n) => {
+                if buf.is_null() {
+                    errno::set_errno(errno::EFAULT);
+                    return -1;
+                }
+                let n = n.min(ticks.len());
+                // SAFETY: `buf` is the caller's, valid for `count >= 8 >= n`
+                // bytes and not NULL; `ticks` is a distinct local.
+                unsafe { core::ptr::copy_nonoverlapping(ticks.as_ptr(), buf, n) };
+                return n as SsizeT;
+            }
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        }
+    }
+}
+
+/// `read` of an inotify queue, in Linux's order (`inotify_read`): an empty
+/// queue is EAGAIN without blocking, else waited for -- a zero count too;
+/// a next event too long for the count is EINVAL; events are copied while
+/// they fit. With a NULL buffer the next event is taken and its copy
+/// faults: EFAULT, that one event gone, as on Linux (measured on 6.6).
+fn read_inotify(fd: Fd, handle: u64, buf: *mut u8, count: SizeT, mark: Mark) -> SsizeT {
+    let is_nb = fd_nonblocking(fd) || crate::epoll::inotify_is_nonblock(handle);
+    loop {
+        let got = if buf.is_null() {
+            match crate::epoll::inotify_next_record_size(handle) {
+                Ok(None) => Ok(0),
+                Ok(Some(size)) if size > count => Err(errno::EINVAL),
+                Ok(Some(size)) => {
+                    let mut record = [0u8; INOTIFY_MAX_RECORD];
+                    let take = record
+                        .get_mut(..size.min(INOTIFY_MAX_RECORD))
+                        .unwrap_or(&mut []);
+                    match crate::epoll::inotify_read(handle, take) {
+                        // Drained between the look and the take.
+                        Ok(0) => Ok(0),
+                        Ok(_) => Err(errno::EFAULT),
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            // SAFETY: `buf` is the caller's, valid for `count` bytes, and
+            // not NULL (an empty slice at a zero count).
+            let dst = unsafe { core::slice::from_raw_parts_mut(buf, count) };
+            crate::epoll::inotify_read(handle, dst)
+        };
+        match got {
+            Ok(0) => {
+                if is_nb {
+                    errno::set_errno(errno::EAGAIN);
+                    return -1;
+                }
+                if mark.interrupted(Restart::IfAsked) {
+                    errno::set_errno(errno::EINTR);
+                    return -1;
+                }
+                crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
+            }
+            Ok(n) => return n as SsizeT,
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        }
+    }
+}
+
+/// `write` of an eventfd, in Linux's order (`eventfd_write`): a count under
+/// 8 is EINVAL whatever the buffer, a NULL buffer EFAULT, the value
+/// `u64::MAX` EINVAL; then the counter is added to (measured on 6.6).
+fn write_eventfd(handle: u64, buf: *const u8, count: SizeT) -> SsizeT {
+    if count < 8 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: `buf` is the caller's, valid for `count >= 8` bytes, not NULL.
+    let val = unsafe { core::ptr::read_unaligned(buf.cast::<u64>()) };
+    if val == u64::MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let r = crate::epoll::eventfd_kernel_write(handle, val);
+    if r < 0 {
+        return errno::translate(r) as SsizeT;
+    }
+    8
+}
+
 /// Write to a file descriptor.
 ///
 /// Dispatches to the correct kernel write syscall based on handle type:
@@ -641,6 +760,42 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         return -1;
     }
 
+    // The kinds whose writing is this library's answer as their Linux files
+    // do, a zero count and a NULL buffer included (measured on 6.6; see
+    // `read`).
+    match entry.kind {
+        HandleKind::Eventfd => return write_eventfd(entry.handle, buf, count),
+        HandleKind::Timerfd | HandleKind::Epoll => {
+            // No write: EINVAL whatever the count or buffer (`vfs_write`'s
+            // FMODE_CAN_WRITE, ahead of `access_ok`).
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        HandleKind::Inotify => {
+            // Opened read-only by `inotify_init`: EBADF whatever the count
+            // or buffer (`vfs_write`'s FMODE_WRITE comes first).
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+        HandleKind::TcpListener => {
+            // A listener is not connected: EPIPE with SIGPIPE, a zero count
+            // too -- `sock_write_iter` has no zero-length shortcut, and
+            // `tcp_sendmsg` answers from the socket's state (measured on
+            // 6.6). This was EINVAL, and 0 for a zero count.
+            return crate::signal::broken_pipe(false);
+        }
+        HandleKind::TcpStream if entry.handle == 0 => {
+            // Never connected: as a listener -- `tcp_sendmsg` waits for a
+            // connection only from SYN_SENT or SYN_RECV, and answers EPIPE,
+            // with SIGPIPE, from any other state (measured on 6.6). `read`
+            // of the same socket is ENOTCONN.
+            return crate::signal::broken_pipe(false);
+        }
+        _ => {}
+    }
+
+    // The kernel's kinds: a NULL buffer refused where `access_ok` would sit
+    // (see `read`).
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -681,9 +836,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 })
             };
             if ret == errno::native::CHANNEL_CLOSED {
-                // Reader has closed — POSIX mandates EPIPE (not ECONNRESET).
-                errno::set_errno(errno::EPIPE);
-                return -1;
+                // Reader has closed: `SIGPIPE`, then EPIPE (not ECONNRESET),
+                // as Linux's `pipe_write` answers.
+                return crate::signal::broken_pipe(false);
             }
             ret
         }
@@ -703,20 +858,15 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 })
             };
             if ret == errno::native::CHANNEL_CLOSED {
-                // Peer's read side is gone — POSIX mandates EPIPE.  The
-                // kernel does not raise SIGPIPE (we have no signals), so a
-                // write to a broken stream socket simply fails with EPIPE.
-                errno::set_errno(errno::EPIPE);
-                return -1;
+                // Peer's read side is gone: `SIGPIPE`, then EPIPE, as
+                // Linux's `unix_stream_sendmsg` answers a `write` (which
+                // never carries `MSG_NOSIGNAL`).
+                return crate::signal::broken_pipe(false);
             }
             ret
         }
         HandleKind::Console => syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64),
         HandleKind::TcpStream => {
-            if entry.handle == 0 {
-                errno::set_errno(errno::ENOTCONN);
-                return -1;
-            }
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             if !is_nb {
                 // Blocking socket: use tcp_send_wait for full-write
@@ -724,25 +874,23 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // bytes are accepted; programs depend on this (same
                 // behavior as send() on a blocking socket).
                 let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms, mark);
+                return crate::socket::tcp_send_wait(
+                    entry.handle,
+                    buf,
+                    count,
+                    timeout_ms,
+                    mark,
+                    false,
+                );
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
             if ret >= 0 {
                 return ret as SsizeT;
             }
-            // ChannelClosed (-300) needs EPIPE/ECONNRESET distinction:
-            // RST from peer → ECONNRESET; local shutdown/graceful close → EPIPE.
-            if ret == errno::native::CHANNEL_CLOSED {
-                let last = syscall1(crate::syscall::SYS_TCP_LAST_ERROR, entry.handle) as u8;
-                errno::set_errno(if last == 2 {
-                    errno::ECONNRESET
-                } else {
-                    errno::EPIPE
-                });
-                return -1;
-            }
-            return errno::translate(ret) as SsizeT;
+            // A reset is ECONNRESET; an orderly close EPIPE, with SIGPIPE: a
+            // `write` never carries MSG_NOSIGNAL.
+            return crate::socket::tcp_send_failed(entry.handle, ret, false);
         }
         HandleKind::UdpSocket => {
             // POSIX: write() on a connected UDP socket behaves like send().
@@ -754,50 +902,15 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             }
             return unsafe { crate::socket::send(fd, buf, count, 0) } as SsizeT;
         }
-        HandleKind::TcpListener => {
-            // Listeners are not writable via write(); use accept().
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        HandleKind::Epoll => {
-            // Linux: read/write on an epoll fd returns EINVAL.
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        HandleKind::Timerfd => {
-            // Linux: write on a timerfd returns EINVAL.
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-        HandleKind::Inotify => {
-            // Linux: write on an inotify fd returns EBADF (it's
-            // read-only by design).  We use EBADF to match Linux —
-            // EINVAL is the more common dispatch error but inotify is
-            // specifically EBADF per man inotify(7).
+        HandleKind::TcpListener
+        | HandleKind::Epoll
+        | HandleKind::Timerfd
+        | HandleKind::Inotify
+        | HandleKind::Eventfd => {
+            // Answered before the buffer was looked at, above; here only so
+            // that this match stays exhaustive.
             errno::set_errno(errno::EBADF);
             return -1;
-        }
-        HandleKind::Eventfd => {
-            // Linux semantics: write on an eventfd requires an 8-byte
-            // buffer.  The bytes are interpreted as a host-endian u64
-            // delta added to the counter.  Writing 0xFFFF_FFFF_FFFF_FFFF
-            // (u64::MAX) is invalid (Linux EINVAL); writing 0 is a no-op
-            // but still legal.
-            if count < 8 {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
-            let val = unsafe { core::ptr::read_unaligned(buf.cast::<u64>()) };
-            if val == u64::MAX {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            let r = crate::epoll::eventfd_kernel_write(entry.handle, val);
-            if r < 0 {
-                return errno::translate(r) as SsizeT;
-            }
-            return 8;
         }
         HandleKind::PtyMaster => {
             // Writing to the master delivers keystrokes into the slave's
@@ -851,6 +964,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // (`design-decisions.md` §259), and it is deliberate on both
                 // sides: bytes nobody can ever read are worth refusing
                 // early, bytes already printed are worth delivering late.
+                //
+                // No `SIGPIPE` with it: Linux sends none for a terminal --
+                // only pipes and stream sockets raise it.
                 errno::set_errno(errno::EPIPE);
                 return -1;
             }
@@ -1358,11 +1474,13 @@ fn vectored(
     }
     // The durability the caller asked for, once the bytes are written.  A
     // failed sync replaces the byte count: the caller asked for stable
-    // storage and did not get it.
+    // storage and did not get it.  Only a file has storage to make stable:
+    // Linux takes the flags on a pipe, a socket or a terminal and ignores
+    // them there, where `fsync` itself would answer EINVAL.
     let rc = match plan.sync {
-        PostWriteSync::None => 0,
-        PostWriteSync::Data => fdatasync(fd),
-        PostWriteSync::Full => fsync(fd),
+        PostWriteSync::Data if entry.kind == HandleKind::File => fdatasync(fd),
+        PostWriteSync::Full if entry.kind == HandleKind::File => fsync(fd),
+        PostWriteSync::None | PostWriteSync::Data | PostWriteSync::Full => 0,
     };
     if rc < 0 {
         return -1;
@@ -2049,6 +2167,45 @@ pub extern "C" fn closefrom(lowfd: i32) {
 /// `follow` selects `SYS_FS_STAT` (follow the final symlink) versus
 /// `SYS_FS_LSTAT` (do not follow).  Returns 0 on success, or -1 with
 /// `errno` set on failure.
+/// `crate::fdname`'s `stat` (`follow`) or `lstat` for `path`, if it names one
+/// of this process's own descriptors -- `/dev/fd/N`, `/dev/stdin`, the
+/// directory -- and `None` for any other path, or one that does not resolve,
+/// which the caller's own resolution then reports.
+fn fdname_stat(path: *const u8, buf: *mut Stat, follow: bool) -> Option<i32> {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_or_err(path, &mut resolved)?;
+    crate::fdname::stat(resolved.get(..len)?, buf, follow)
+}
+
+/// `statx`'s answer for one of `crate::fdname`'s names: `(result, whether
+/// raw holds a kernel record)`, or `None` for any other path. Through a
+/// descriptor's link (`follow`) it is that descriptor's own record, its birth
+/// time included, exactly as `statx(fd, "", AT_EMPTY_PATH, ...)` reads it; a
+/// link itself, or the directory, is what `crate::fdname::stat` makes.
+fn statx_fdname(
+    path: *const u8,
+    follow: bool,
+    st: &mut Stat,
+    raw: &mut [u8; crate::stat::KERNEL_STAT_LEN],
+) -> Option<(i32, bool)> {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_or_err(path, &mut resolved)?;
+    let named = resolved.get(..len)?;
+    if follow {
+        if let Some(n) = crate::fdname::descriptor_of(named) {
+            if fdtable::get_fd(n).is_none() {
+                errno::set_errno(errno::ENOENT);
+                return Some((-1, false));
+            }
+            return Some(match stat_fd_raw(n, raw) {
+                Some(ret) => (ret, true),
+                None => (fstat(n, &raw mut *st), false),
+            });
+        }
+    }
+    crate::fdname::stat(named, &raw mut *st, follow).map(|ret| (ret, false))
+}
+
 fn stat_path_raw(
     path: *const u8,
     follow: bool,
@@ -2113,6 +2270,9 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
+    }
+    if let Some(ret) = fdname_stat(path, buf, true) {
+        return ret;
     }
 
     let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
@@ -2208,6 +2368,9 @@ pub extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
+    }
+    if let Some(ret) = fdname_stat(path, buf, false) {
+        return ret;
     }
 
     let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
@@ -2388,6 +2551,16 @@ pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> Ssiz
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
     };
+    let named = resolved.get(..resolved_len).unwrap_or(&[]);
+    if crate::fdname::classify(named, crate::process::getpid()).is_some() {
+        // SAFETY: `buf` is non-null (checked above) and the caller asserts it
+        // holds `bufsiz` writable bytes, as readlink's contract says; the
+        // slice lives for this call only.
+        let out = unsafe { core::slice::from_raw_parts_mut(buf, bufsiz) };
+        if let Some(ret) = crate::fdname::readlink(named, out) {
+            return ret;
+        }
+    }
 
     let ret = syscall4(
         SYS_FS_READLINK,
@@ -2532,7 +2705,13 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
 
 /// Synchronize file data to storage.
 ///
-/// Only meaningful for File handles.  Returns 0 for pipes/console.
+/// A file: the kernel's sync, which is the whole file system's
+/// (`SYS_FS_SYNC`) -- more than was asked, which is never wrong for a sync.
+/// Anything else -- a pipe, a socket, a terminal, an eventfd -- has no
+/// storage to synchronize, and Linux answers `EINVAL` (`vfs_fsync_range`:
+/// no `fsync` operation); this answered 0 until 2026-10-06, so `dd
+/// conv=fsync` into a pipe reported nothing where Linux's reports the
+/// failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fsync(fd: Fd) -> i32 {
     let Some(entry) = lookup_fd(fd) else {
@@ -2559,7 +2738,10 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         | HandleKind::Inotify
         | HandleKind::UnixStream
         | HandleKind::PtyMaster
-        | HandleKind::PtySlave => 0,
+        | HandleKind::PtySlave => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
     }
 }
 
@@ -2890,6 +3072,9 @@ pub extern "C" fn access(path: *const u8, mode: i32) -> i32 {
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
     };
+    if let Some(ret) = crate::fdname::access(resolved.get(..resolved_len).unwrap_or(&[]), mode) {
+        return ret;
+    }
 
     // Use stat to check if the file exists.
     let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
@@ -3889,6 +4074,17 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
         // absolute path, and `AT_FDCWD` names no descriptor to pin. `open`
         // resolves both against this libc's own cwd, which is the answer.
         return open(path, flags, mode);
+    }
+    // The directory of descriptors is this library's, not the kernel's: a
+    // name in it is one of this process's descriptors (`crate::fdname`), so
+    // it is resolved by the directory's path, not by asking the kernel's
+    // `/proc/<pid>/fd`, which lists nothing for a native process.
+    if crate::fdname::is_descriptor_dir(dirfd) {
+        let mut full = [0u8; crate::unistd::PATH_MAX];
+        if resolve_dirfd_path(dirfd, path, &mut full) == 0 {
+            return -1;
+        }
+        return open(full.as_ptr(), flags, mode);
     }
     // A real descriptor and a relative name: the case the pin is for. Ask the
     // kernel to walk from the *handle* rather than gluing the caller's name
@@ -5026,47 +5222,35 @@ pub extern "C" fn posix_fadvise(fd: Fd, _offset: OffT, len: OffT, advice: i32) -
 }
 
 /// Ensure that disk space is allocated for the file region
-/// `[offset, offset+len)`.
+/// `[offset, offset+len)`, growing the file to `offset + len` if it is
+/// shorter.
 ///
 /// POSIX: on success, returns 0.  On error, returns an error number
 /// (NOT -1; unlike most POSIX functions, `posix_fallocate` returns
-/// the error directly).
+/// the error directly), and `errno` is left as it was, as glibc's leaves it.
 ///
-/// Our implementation uses `fstat` + `ftruncate` to extend the file
-/// if `offset + len` exceeds the current size.  This doesn't truly
-/// preallocate contiguous blocks (the filesystem may still allocate
-/// lazily), but it guarantees the file is at least as large as
-/// `offset + len` — sufficient for programs that use `posix_fallocate`
-/// to avoid `ENOSPC` on later writes.
+/// glibc's is `fallocate(fd, 0, offset, len)` with its errors, falling back
+/// to writing zeros where the file system cannot allocate; this is
+/// [`fallocate`]'s mode 0 the same way (see `fallocate_on` for what it
+/// does and why).  Where Linux would fall back -- a block device -- glibc's
+/// fallback takes only a regular file, so the answer is `ENODEV`.
+///
+/// Until 2026-10-06 this grew the file with `ftruncate`, which on this
+/// kernel's ext4 builds the whole file in kernel memory
+/// (`requests/d-a-truncating-an-ext4-file-builds-the-whole-file-in-kernel-memory-so-truncate-s-10g-halts-the-kernel.md`),
+/// and did not look at holes inside the file at all.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_fallocate(fd: Fd, offset: OffT, len: OffT) -> i32 {
-    // POSIX: EINVAL if offset < 0 or len <= 0.
-    if offset < 0 || len <= 0 {
-        return errno::EINVAL;
-    }
-
-    // Check that offset + len doesn't overflow.
-    let Some(target_size) = offset.checked_add(len) else {
-        return errno::EFBIG;
+    let saved = errno::get_errno();
+    let answer = match fallocate_entry(fd)
+        .and_then(|entry| fallocate_on(&entry, &DescriptorFile(fd), 0, offset, len))
+    {
+        Ok(()) => 0,
+        Err(e) if e == errno::EOPNOTSUPP => errno::ENODEV,
+        Err(e) => e,
     };
-
-    // Get the current file size.
-    let mut stat_buf = Stat::zeroed();
-    if fstat(fd, &raw mut stat_buf) < 0 {
-        return errno::get_errno();
-    }
-
-    // If the file is already large enough, nothing to do.
-    if stat_buf.st_size >= target_size {
-        return 0;
-    }
-
-    // Extend the file to the required size.
-    if ftruncate(fd, target_size) < 0 {
-        return errno::get_errno();
-    }
-
-    0
+    errno::set_errno(saved);
+    answer
 }
 
 // ---------------------------------------------------------------------------
@@ -5089,147 +5273,272 @@ pub const FALLOC_FL_INSERT_RANGE: i32 = 0x20;
 /// Unshare shared extents (copy-on-write breakage).
 pub const FALLOC_FL_UNSHARE_RANGE: i32 = 0x40;
 
-/// Mask of all defined fallocate mode bits — mirrors Linux's
-/// `FALLOC_FL_SUPPORTED_MASK` in `include/uapi/linux/falloc.h`.  Mode
-/// bits outside this mask are rejected with `EOPNOTSUPP` to match
-/// `fs/open.c::vfs_fallocate`.
+/// The mode bits `vfs_fallocate` knows -- Linux 6.6's
+/// `FALLOC_FL_SUPPORTED_MASK` (`include/linux/falloc.h`).  Any other bit is
+/// `EOPNOTSUPP` before anything else is looked at.  That includes
+/// `FALLOC_FL_NO_HIDE_STALE`, which Linux reserves and supports nowhere
+/// (measured 2026-10-06: `0x04` and `0x0c` are `EOPNOTSUPP` on any file);
+/// it was in this mask until then, so `NO_HIDE_STALE | COLLAPSE_RANGE` was
+/// `EINVAL` here.
 pub const FALLOC_FL_VALID_MASK: i32 = FALLOC_FL_KEEP_SIZE
     | FALLOC_FL_PUNCH_HOLE
-    | FALLOC_FL_NO_HIDE_STALE
     | FALLOC_FL_COLLAPSE_RANGE
     | FALLOC_FL_ZERO_RANGE
     | FALLOC_FL_INSERT_RANGE
     | FALLOC_FL_UNSHARE_RANGE;
 
-/// Manipulate file space.
+/// What `fallocate` asks of the file behind a descriptor: the descriptor's
+/// own file in [`fallocate`] and [`posix_fallocate`], a stand-in in the
+/// tests (the host has no kernel to `fstat` or write).
+trait AllocFile {
+    /// `fstat`'s type (`st_mode & S_IFMT`), size, 512-byte blocks and
+    /// preferred I/O size.
+    fn stat(&self) -> Result<(u32, OffT, i64, i64), i32>;
+    /// The byte at `offset`, or `None` past the end of the file.
+    fn byte_at(&self, offset: OffT) -> Result<Option<u8>, i32>;
+    /// Write `data` at `offset`; how much was written.
+    fn write_at(&self, data: &[u8], offset: OffT) -> Result<usize, i32>;
+}
+
+/// [`AllocFile`] through a descriptor's own calls.
+struct DescriptorFile(Fd);
+
+impl AllocFile for DescriptorFile {
+    fn stat(&self) -> Result<(u32, OffT, i64, i64), i32> {
+        let mut st = Stat::zeroed();
+        if fstat(self.0, &raw mut st) < 0 {
+            return Err(errno::get_errno());
+        }
+        Ok((
+            st.st_mode & fcntl::S_IFMT,
+            st.st_size,
+            st.st_blocks,
+            st.st_blksize,
+        ))
+    }
+
+    fn byte_at(&self, offset: OffT) -> Result<Option<u8>, i32> {
+        let mut byte = 0u8;
+        loop {
+            match pread(self.0, &raw mut byte, 1, offset) {
+                1 => return Ok(Some(byte)),
+                0 => return Ok(None),
+                _ if errno::get_errno() == errno::EINTR => {}
+                _ => return Err(errno::get_errno()),
+            }
+        }
+    }
+
+    fn write_at(&self, data: &[u8], offset: OffT) -> Result<usize, i32> {
+        loop {
+            let n = pwrite(self.0, data.as_ptr(), data.len(), offset);
+            match usize::try_from(n) {
+                Ok(n) => return Ok(n),
+                Err(_) if errno::get_errno() == errno::EINTR => {}
+                Err(_) => return Err(errno::get_errno()),
+            }
+        }
+    }
+}
+
+/// How many zeros an extension writes at a time: enough that a large
+/// extension is a few thousand writes, each going through the kernel's
+/// append path on its own.
+const ZERO_PIECE: usize = 64 * 1024;
+
+/// The zeros an extension writes.
+static ZEROS: [u8; ZERO_PIECE] = [0; ZERO_PIECE];
+
+/// The descriptor `fallocate` was handed: `EBADF` for one that is not open,
+/// or an `O_PATH` one (`ksys_fallocate`'s `fdget`, before anything else).
+fn fallocate_entry(fd: Fd) -> Result<fdtable::FdEntry, i32> {
+    match fdtable::get_fd(fd) {
+        Some(entry) if !is_path_fd_entry(&entry) => Ok(entry),
+        Some(_) | None => Err(errno::EBADF),
+    }
+}
+
+/// Linux 6.6's `vfs_fallocate`, past `ksys_fallocate`'s descriptor lookup,
+/// in its order -- every refusal below was measured against Linux on
+/// 2026-10-06, file by file and mode by mode:
 ///
-/// Linux-specific `fallocate(2)`.  Unlike `posix_fallocate`, this
-/// supports modes such as hole-punching, range collapsing, and
-/// zero-filling via the `mode` parameter.
+/// 1. `offset < 0` or `len <= 0`: `EINVAL`, on any descriptor.
+/// 2. A mode bit outside [`FALLOC_FL_VALID_MASK`]; `PUNCH_HOLE` with
+///    `ZERO_RANGE`; `PUNCH_HOLE` without `KEEP_SIZE`: `EOPNOTSUPP`.
+/// 3. `COLLAPSE_RANGE` or `INSERT_RANGE` with any other bit, and
+///    `UNSHARE_RANGE` with any but `KEEP_SIZE`: `EINVAL`.
+/// 4. A descriptor not open for writing: `EBADF`.
+/// 5. A pipe or FIFO: `ESPIPE`; a directory: `EISDIR`; anything but a
+///    regular file or a block device: `ENODEV`.
+/// 6. `offset + len` past the largest offset: `EFBIG`.
 ///
-/// With `mode == 0`, this is equivalent to `posix_fallocate` (but
-/// returns -1/errno instead of the error code directly).
+/// Then the work.  **Mode 0, on a regular file, is done** (`allocate`).
+/// Every other mode -- `KEEP_SIZE`, the hole and range modes -- and any
+/// mode on a block device is `EOPNOTSUPP`, which is Linux's answer where a
+/// file system cannot do it.  `KEEP_SIZE` asks for blocks past the end of
+/// the file without growing it, and nothing this library can call by
+/// descriptor reserves them (the kernel's `SYS_FS_FALLOCATE` takes a path
+/// and is silent where it cannot allocate).  Until 2026-10-06 `KEEP_SIZE`
+/// answered 0 having reserved nothing, so a program that reserved space
+/// for a log or a download met `ENOSPC` later, where it had been told it
+/// would not.
+fn fallocate_on(
+    entry: &fdtable::FdEntry,
+    file: &dyn AllocFile,
+    mode: i32,
+    offset: OffT,
+    len: OffT,
+) -> Result<(), i32> {
+    if offset < 0 || len <= 0 {
+        return Err(errno::EINVAL);
+    }
+    let punch_and_zero = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE;
+    if mode & !FALLOC_FL_VALID_MASK != 0
+        || mode & punch_and_zero == punch_and_zero
+        || (mode & FALLOC_FL_PUNCH_HOLE != 0 && mode & FALLOC_FL_KEEP_SIZE == 0)
+    {
+        return Err(errno::EOPNOTSUPP);
+    }
+    if (mode & FALLOC_FL_COLLAPSE_RANGE != 0 && mode != FALLOC_FL_COLLAPSE_RANGE)
+        || (mode & FALLOC_FL_INSERT_RANGE != 0 && mode != FALLOC_FL_INSERT_RANGE)
+        || (mode & FALLOC_FL_UNSHARE_RANGE != 0
+            && mode & !(FALLOC_FL_UNSHARE_RANGE | FALLOC_FL_KEEP_SIZE) != 0)
+    {
+        return Err(errno::EINVAL);
+    }
+    if entry.status_flags & fcntl::O_ACCMODE == fcntl::O_RDONLY {
+        return Err(errno::EBADF);
+    }
+    match entry.kind {
+        HandleKind::File => {}
+        HandleKind::Pipe => return Err(errno::ESPIPE),
+        HandleKind::Console
+        | HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::Eventfd
+        | HandleKind::Epoll
+        | HandleKind::Timerfd
+        | HandleKind::Inotify
+        | HandleKind::UnixStream
+        | HandleKind::PtyMaster
+        | HandleKind::PtySlave => return Err(errno::ENODEV),
+    }
+    let (kind, size, blocks, blksize) = file.stat()?;
+    match kind {
+        fcntl::S_IFREG | fcntl::S_IFBLK => {}
+        fcntl::S_IFIFO => return Err(errno::ESPIPE),
+        fcntl::S_IFDIR => return Err(errno::EISDIR),
+        _ => return Err(errno::ENODEV),
+    }
+    let end = offset.checked_add(len).ok_or(errno::EFBIG)?;
+    if mode != 0 || kind != fcntl::S_IFREG {
+        return Err(errno::EOPNOTSUPP);
+    }
+    allocate(file, entry.status_flags, offset, end, size, blocks, blksize)
+}
+
+/// Allocate `[offset, end)` of a regular file now `size` bytes long, with
+/// `blocks` 512-byte blocks allocated, growing it to `end` -- what Linux's
+/// `fallocate` mode 0 does in the file system, done with the calls a
+/// program has, as glibc's fallback does them:
 ///
-/// With `FALLOC_FL_KEEP_SIZE`, space is allocated but the file size
-/// is not changed.
+/// - **Inside the file**, a hole is a block with nothing allocated, and a
+///   write into it allocates it.  Where the block count says there may be
+///   holes -- fewer bytes allocated than the size, but some -- the first
+///   byte of each block in the range that reads zero is written zero again,
+///   which allocates a hole and changes nothing else.  Not on an `O_APPEND`
+///   descriptor, where the write would land at the end instead: `EBADF`, as
+///   glibc's fallback answers.  (On this kernel a write into a hole is
+///   itself `EIO`, which is then the answer; the request named in
+///   [`posix_fallocate`]'s docs has it as item 5.)  A count of no blocks at
+///   all, for a file with bytes in it, is a file system that does not count
+///   them -- memfs, behind `/tmp`, reports 0 for every file -- and is taken
+///   to have nothing unallocated; an ext4 file that is one hole from end to
+///   end, which only an image built elsewhere holds, is missed.
+/// - **Past the end**, zeros, written from the end of the file a piece at a
+///   time, so each write takes the kernel's append path and allocates its
+///   blocks for real.  The volume filling is the write's `ENOSPC`, with
+///   what was written left as it is, as Linux's ext4 leaves what it
+///   allocated.  (Free space is not asked first: memfs and several other
+///   file systems here report none whatever they hold.)
 ///
-/// Our implementation delegates to `posix_fallocate` for the basic
-/// allocation case and stubs the advanced modes with EOPNOTSUPP.
+/// Like glibc's fallback, this races with another process writing the same
+/// range: a byte written between the read and the zero written back is
+/// lost, and an append between the size read and the first piece is
+/// overwritten.  Linux's own fallocate has no such race; a call that
+/// allocates by descriptor would end it here too.
+fn allocate(
+    file: &dyn AllocFile,
+    status_flags: i32,
+    offset: OffT,
+    end: OffT,
+    size: OffT,
+    blocks: i64,
+    blksize: i64,
+) -> Result<(), i32> {
+    let inside_end = end.min(size);
+    let holes_possible = offset < inside_end && blocks > 0 && blocks.saturating_mul(512) < size;
+    if holes_possible && status_flags & fcntl::O_APPEND != 0 {
+        return Err(errno::EBADF);
+    }
+    if holes_possible {
+        // glibc's step: the volume's block size, kept between 512 and 4096.
+        let step = blksize.clamp(512, 4096);
+        let mut at = offset;
+        while at < inside_end {
+            if file.byte_at(at)? == Some(0) && file.write_at(&[0], at)? != 1 {
+                return Err(errno::EIO);
+            }
+            // The next block's first byte.
+            at = at
+                .checked_div(step)
+                .and_then(|b| b.checked_add(1))
+                .and_then(|b| b.checked_mul(step))
+                .ok_or(errno::EFBIG)?;
+        }
+    }
+    if end > size {
+        let mut at = size;
+        while at < end {
+            let want = usize::try_from(end.saturating_sub(at))
+                .unwrap_or(ZERO_PIECE)
+                .min(ZERO_PIECE);
+            let zeros = ZEROS.get(..want).unwrap_or(&ZEROS);
+            let wrote = file.write_at(zeros, at)?;
+            if wrote == 0 {
+                // A regular file's write that takes nothing and says
+                // nothing would loop here for ever.
+                return Err(errno::EIO);
+            }
+            at = at.saturating_add(OffT::try_from(wrote).map_err(|_| errno::EIO)?);
+        }
+    }
+    Ok(())
+}
+
+/// Manipulate file space: Linux's `fallocate(2)`.
 ///
-/// # Validation order (Linux parity, Phase 109)
-///
-/// Mirrors Linux's `fs/open.c::ksys_fallocate` + `vfs_fallocate`:
-///
-/// 1. `EBADF` — `fd` is not an open descriptor.  `ksys_fallocate`
-///    does `fdget()` before doing anything else, so an invalid fd
-///    wins over any other input error.
-/// 2. `EINVAL` — `offset < 0` or `len <= 0` (POSIX-defined values
-///    that cannot describe a valid byte range).
-/// 3. `EOPNOTSUPP` — unknown mode bits (`mode & !FALLOC_FL_VALID_MASK`).
-/// 4. `EOPNOTSUPP` — `FALLOC_FL_PUNCH_HOLE` set without
-///    `FALLOC_FL_KEEP_SIZE` (Linux requires the combination).
-/// 5. `EINVAL` — `FALLOC_FL_KEEP_SIZE` combined with
-///    `FALLOC_FL_COLLAPSE_RANGE` or `FALLOC_FL_INSERT_RANGE`
-///    (the range-shifting modes can never preserve file size).
-/// 6. `EINVAL` — `FALLOC_FL_COLLAPSE_RANGE` combined with any other
-///    bit (collapse must be the sole mode).
-/// 7. `EINVAL` — `FALLOC_FL_INSERT_RANGE` combined with any other
-///    bit (insert must be the sole mode).
-/// 8. `EINVAL` — `FALLOC_FL_UNSHARE_RANGE` combined with
-///    `FALLOC_FL_COLLAPSE_RANGE` or `FALLOC_FL_INSERT_RANGE`.
-///
-/// After these argument-domain checks pass, the operation is either
-/// performed (mode 0) or accepted but stubbed (`KEEP_SIZE` alone,
-/// silently a no-op) or reported as unimplemented (`EOPNOTSUPP` —
-/// the filesystem doesn't support that operation yet).
+/// `EBADF` for a descriptor that is not open, first, as `ksys_fallocate`'s
+/// `fdget` answers it; then `fallocate_on`'s checks and work, in Linux's
+/// order: mode 0 allocates `[offset, offset + len)` of a regular file,
+/// growing it as needed; every other mode is `EOPNOTSUPP`.  Returns 0, or
+/// -1 with `errno`; a success leaves `errno` as it was.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fallocate(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
-    // (1) Linux's ksys_fallocate looks up the fd before vfs_fallocate
-    // touches any of the other arguments — an invalid fd wins over
-    // bad offset/len or bad mode bits.
-    let Some(entry) = fdtable::get_fd(fd) else {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    };
-    if reject_path_fd_entry(&entry) {
-        return -1;
-    }
-
-    // (2) vfs_fallocate's first check: POSIX-required range validation.
-    if offset < 0 || len <= 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // (3) Unknown mode bits are EOPNOTSUPP, not EINVAL — Linux uses
-    // EOPNOTSUPP for "this kernel/filesystem doesn't know what you
-    // mean" and reserves EINVAL for "the combination of known bits
-    // is logically invalid".
-    if mode & !FALLOC_FL_VALID_MASK != 0 {
-        errno::set_errno(errno::EOPNOTSUPP);
-        return -1;
-    }
-
-    // (4) PUNCH_HOLE requires KEEP_SIZE: a hole-punch cannot extend
-    // the file, so omitting KEEP_SIZE has no coherent meaning.
-    if (mode & FALLOC_FL_PUNCH_HOLE) != 0 && (mode & FALLOC_FL_KEEP_SIZE) == 0 {
-        errno::set_errno(errno::EOPNOTSUPP);
-        return -1;
-    }
-
-    // (5) KEEP_SIZE is incompatible with the range-shifting modes,
-    // because COLLAPSE and INSERT *must* change the file size.
-    if (mode & FALLOC_FL_KEEP_SIZE) != 0
-        && (mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE)) != 0
+    let saved = errno::get_errno();
+    match fallocate_entry(fd)
+        .and_then(|entry| fallocate_on(&entry, &DescriptorFile(fd), mode, offset, len))
     {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // (6) COLLAPSE_RANGE must appear alone — no other mode bits.
-    if (mode & FALLOC_FL_COLLAPSE_RANGE) != 0 && (mode & !FALLOC_FL_COLLAPSE_RANGE) != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // (7) INSERT_RANGE must appear alone — no other mode bits.
-    if (mode & FALLOC_FL_INSERT_RANGE) != 0 && (mode & !FALLOC_FL_INSERT_RANGE) != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // (8) UNSHARE_RANGE conflicts with range-shifting modes — those
-    // would need to recopy the shifted data, which is incoherent.
-    if (mode & FALLOC_FL_UNSHARE_RANGE) != 0
-        && (mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE)) != 0
-    {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // Basic allocation (mode 0): delegate to posix_fallocate.
-    if mode == 0 {
-        let err = posix_fallocate(fd, offset, len);
-        if err != 0 {
-            errno::set_errno(err);
-            return -1;
+        Ok(()) => {
+            errno::set_errno(saved);
+            0
         }
-        return 0;
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
     }
-
-    // KEEP_SIZE alone: allocate but don't extend visible size.
-    // We treat this as a no-op success (the filesystem can allocate
-    // lazily — the space will be available when written).
-    if mode == FALLOC_FL_KEEP_SIZE {
-        return 0;
-    }
-
-    // All remaining mode combinations are valid per Linux semantics
-    // (punch-hole, zero-range, collapse-range, insert-range,
-    // unshare-range, plus accepted compound bits) but our filesystem
-    // doesn't implement them yet.
-    errno::set_errno(errno::EOPNOTSUPP);
-    -1
 }
 
 /// `posix_fallocate64` — LP64 alias for `posix_fallocate`.
@@ -5632,9 +5941,21 @@ fn tee_transfer_over<P: TeePipes>(pipes: &mut P, len: usize, nonblock: bool) -> 
             // `to_write <= chunk <= buf.len()`: `peek` returns at most what
             // it was given room for.
             let nw = pipes.write(buf.get(written..to_write).unwrap_or(&[]), nonblock);
+            if nw == errno::native::CHANNEL_CLOSED {
+                // The destination's readers are gone. Linux's `link_pipe`
+                // sends `SIGPIPE` whether or not anything was duplicated, and
+                // answers EPIPE only when nothing was -- a short transfer
+                // otherwise. (This was translated as a closed channel, which
+                // is not EPIPE, and sent no signal.)
+                if total > 0 || written > 0 {
+                    crate::signal::raise_sigpipe();
+                    return total.saturating_add(written) as isize;
+                }
+                return crate::signal::broken_pipe(false);
+            }
             if nw < 0 {
                 // Destination error.  If we've made progress, return it so the
-                // caller sees a short transfer (Linux behaviour on EAGAIN/EPIPE
+                // caller sees a short transfer (Linux behaviour on EAGAIN
                 // mid-tee).  Otherwise surface the error.
                 if total > 0 || written > 0 {
                     return total.saturating_add(written) as isize;
@@ -7070,7 +7391,7 @@ pub extern "C" fn __getcwd_chk(buf: *mut u8, size: SizeT, buflen: SizeT) -> *mut
     } else {
         size.min(buflen)
     };
-    crate::unistd::getcwd(buf, size)
+    crate::unistd::copy_cwd(buf, size)
 }
 
 /// `__realpath_chk` — fortified `realpath`.
@@ -7208,8 +7529,15 @@ pub extern "C" fn sync_file_range(fd: Fd, offset: i64, nbytes: i64, flags: u32) 
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    if fdtable::get_fd(fd).is_none() {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    // `sync_file_range` (fs/sync.c) takes a regular file, a block device, a
+    // directory or a link, and answers anything else -- a pipe, a socket --
+    // ESPIPE, before `fsync` would have said EINVAL.
+    if entry.kind != HandleKind::File {
+        errno::set_errno(errno::ESPIPE);
         return -1;
     }
     // Delegate to fsync — we don't have fine-grained range sync.
@@ -8085,15 +8413,22 @@ pub extern "C" fn statx(
             return ret;
         }
     } else {
-        let ret = if dirfd == AT_FDCWD || is_absolute_path(path) {
-            stat_path_raw(path, follow, &mut raw)
+        let mut full = [0u8; crate::unistd::PATH_MAX];
+        let named = if dirfd == AT_FDCWD || is_absolute_path(path) {
+            path
         } else {
-            let mut full = [0u8; crate::unistd::PATH_MAX];
             let len = resolve_dirfd_path(dirfd, path, &mut full);
             if len == 0 {
                 return -1;
             }
-            stat_path_raw(full.as_ptr(), follow, &mut raw)
+            full.as_ptr()
+        };
+        let ret = match statx_fdname(named, follow, &mut st, &mut raw) {
+            Some((ret, raw_ok)) => {
+                have_raw = raw_ok;
+                ret
+            }
+            None => stat_path_raw(named, follow, &mut raw),
         };
         if ret != 0 {
             return ret;
@@ -8169,14 +8504,24 @@ pub extern "C" fn statx(
     }
 
     sx.stx_blksize = st.st_blksize as u32;
-    // Device numbers: split st_dev/st_rdev into major/minor.
-    sx.stx_dev_major = (st.st_dev >> 8) as u32;
-    sx.stx_dev_minor = (st.st_dev & 0xFF) as u32;
-    sx.stx_rdev_major = (st.st_rdev >> 8) as u32;
-    sx.stx_rdev_minor = (st.st_rdev & 0xFF) as u32;
+    (sx.stx_dev_major, sx.stx_dev_minor) = split_dev(st.st_dev);
+    (sx.stx_rdev_major, sx.stx_rdev_minor) = split_dev(st.st_rdev);
 
     sx.stx_mask = filled;
     0
+}
+
+/// A `dev_t`'s major and minor numbers, as glibc's `major` and `minor` take
+/// them apart -- the numbers Linux's `statx` reports.
+///
+/// The split was `dev >> 8` and `dev & 0xff` until 2026-10-01: Linux's
+/// sixteen-bit form of the 1990s, which gets any minor past 255 wrong. It
+/// did no harm while `st_dev` was always 0.
+fn split_dev(dev: DevT) -> (u32, u32) {
+    (
+        crate::crt::gnu_dev_major(dev),
+        crate::crt::gnu_dev_minor(dev),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -8672,6 +9017,221 @@ mod tests {
         );
     }
 
+    /// A destination pipe whose readers are gone: Linux's `link_pipe` sends
+    /// `SIGPIPE` either way, and answers `EPIPE` when nothing was duplicated,
+    /// the count when something was. (It was a closed channel's errno, and
+    /// no signal.)
+    #[test]
+    fn tee_into_a_pipe_with_no_reader_raises_sigpipe() {
+        struct ReaderGone {
+            inner: FakePipes,
+            /// Writes accepted before the reader goes.
+            accepted: usize,
+        }
+        impl TeePipes for ReaderGone {
+            fn peek(&mut self, offset: u64, buf: &mut [u8]) -> i64 {
+                self.inner.peek(offset, buf)
+            }
+            fn write(&mut self, buf: &[u8], nb: bool) -> i64 {
+                if self.inner.writes >= self.accepted {
+                    self.inner.writes += 1;
+                    return errno::native::CHANNEL_CLOSED;
+                }
+                self.inner.write(buf, nb)
+            }
+            fn wait_readable(&mut self) -> i64 {
+                self.inner.wait_readable()
+            }
+        }
+        std::thread_local! {
+            static PIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+        }
+        // `replace`, not `set`: scripts/raced-globals.py matches a call by its
+        // name, and `set` here is also the umask model's writer.
+        extern "C" fn count_sigpipe(_sig: i32) {
+            PIPES.with(|p| p.replace(p.get() + 1));
+        }
+        use crate::signal::{SIGPIPE, SighandlerT, signal};
+        let old = signal(SIGPIPE, count_sigpipe as *const () as SighandlerT);
+
+        let mut p = ReaderGone {
+            inner: FakePipes::with_source(b"hello"),
+            accepted: 0,
+        };
+        errno::set_errno(0);
+        assert_eq!(tee_transfer_over(&mut p, 5, false), -1);
+        assert_eq!(errno::get_errno(), errno::EPIPE);
+        assert_eq!(PIPES.with(core::cell::Cell::get), 1);
+
+        // One chunk across, then the reader goes: the chunk is the answer,
+        // and the signal is sent all the same.
+        let src: Vec<u8> = (0..5_000u32).map(|i| (i % 251) as u8).collect();
+        let mut p = ReaderGone {
+            inner: FakePipes::with_source(&src),
+            accepted: 1,
+        };
+        errno::set_errno(0);
+        assert_eq!(tee_transfer_over(&mut p, src.len(), false), 4096);
+        assert_eq!(errno::get_errno(), 0);
+        assert_eq!(PIPES.with(core::cell::Cell::get), 2);
+
+        signal(SIGPIPE, old);
+    }
+
+    /// The kinds this library reads and writes itself answer a zero count
+    /// and a NULL buffer as Linux 6.6 does (measured): their own checks
+    /// first, the copy -- and so the fault -- last.
+    #[test]
+    fn eventfd_epoll_and_unconnected_sockets_answer_count_and_null_as_linux() {
+        std::thread_local! {
+            static PIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+        }
+        // `replace`, not `set`: scripts/raced-globals.py matches a call by its
+        // name, and `set` here is also the umask model's writer.
+        extern "C" fn count_sigpipe(_sig: i32) {
+            PIPES.with(|p| p.replace(p.get() + 1));
+        }
+        use crate::signal::{SIGPIPE, SighandlerT, signal};
+        let old = signal(SIGPIPE, count_sigpipe as *const () as SighandlerT);
+        let mut b = [0u8; 16];
+        let rd = |fd: Fd, buf: *mut u8, n: usize| {
+            errno::set_errno(0);
+            (read(fd, buf, n), errno::get_errno())
+        };
+        let wr = |fd: Fd, buf: *const u8, n: usize| {
+            errno::set_errno(0);
+            (write(fd, buf, n), errno::get_errno())
+        };
+        let null = core::ptr::null_mut::<u8>();
+
+        // eventfd: the count is checked first, then the buffer for a write.
+        let ev = fdtable::alloc_fd(HandleKind::Eventfd, 0x99).expect("fd table full");
+        assert_eq!(rd(ev, null, 4), (-1, errno::EINVAL));
+        assert_eq!(rd(ev, b.as_mut_ptr(), 0), (-1, errno::EINVAL));
+        assert_eq!(rd(ev, null, 0), (-1, errno::EINVAL));
+        assert_eq!(wr(ev, null, 4), (-1, errno::EINVAL));
+        assert_eq!(wr(ev, b.as_ptr(), 0), (-1, errno::EINVAL));
+        assert_eq!(wr(ev, null, 8), (-1, errno::EFAULT));
+        let _ = fdtable::close_fd(ev);
+
+        // epoll: no read and no write, whatever the count or buffer.
+        let ep = fdtable::alloc_fd(HandleKind::Epoll, 0x98).expect("fd table full");
+        for (r, w) in [
+            (rd(ep, null, 1), wr(ep, null, 1)),
+            (rd(ep, b.as_mut_ptr(), 0), wr(ep, b.as_ptr(), 0)),
+        ] {
+            assert_eq!((r, w), ((-1, errno::EINVAL), (-1, errno::EINVAL)));
+        }
+        let _ = fdtable::close_fd(ep);
+
+        // inotify: opened read-only, so any write is EBADF.
+        let ino = fdtable::alloc_fd(HandleKind::Inotify, 0x97).expect("fd table full");
+        assert_eq!(wr(ino, null, 1), (-1, errno::EBADF));
+        assert_eq!(wr(ino, b.as_ptr(), 0), (-1, errno::EBADF));
+        let _ = fdtable::close_fd(ino);
+
+        // A listener, and a TCP socket never connected: a zero-count read is
+        // 0, any other read ENOTCONN, and any write -- a zero count too --
+        // EPIPE with SIGPIPE.
+        let l = fdtable::alloc_fd(HandleKind::TcpListener, 0x77).expect("fd table full");
+        let t = fdtable::alloc_fd(HandleKind::TcpStream, 0).expect("fd table full");
+        for fd in [l, t] {
+            assert_eq!(rd(fd, b.as_mut_ptr(), 0), (0, 0), "{fd}");
+            assert_eq!(rd(fd, null, 1), (-1, errno::ENOTCONN), "{fd}");
+            PIPES.with(|p| p.replace(0));
+            assert_eq!(wr(fd, b.as_ptr(), 0), (-1, errno::EPIPE), "{fd}");
+            assert_eq!(wr(fd, null, 1), (-1, errno::EPIPE), "{fd}");
+            assert_eq!(PIPES.with(core::cell::Cell::get), 2, "{fd}");
+        }
+        let _ = fdtable::close_fd(l);
+        let _ = fdtable::close_fd(t);
+        signal(SIGPIPE, old);
+    }
+
+    /// A timerfd: a count under 8 is EINVAL; no expiry, non-blocking,
+    /// EAGAIN -- a NULL buffer too; an expiry is taken and then faults on a
+    /// NULL buffer, so the next read finds none (Linux 6.6, measured).
+    #[test]
+    fn a_timerfd_read_checks_the_count_then_faults_after_taking_the_ticks() {
+        use crate::epoll::{Itimerspec, TFD_NONBLOCK, timerfd_create, timerfd_settime};
+        let fd = timerfd_create(1, TFD_NONBLOCK);
+        assert!(fd >= 0);
+        let mut b = [0u8; 8];
+        let null = core::ptr::null_mut::<u8>();
+        let rd = |buf: *mut u8, n: usize| {
+            errno::set_errno(0);
+            (read(fd, buf, n), errno::get_errno())
+        };
+        assert_eq!(rd(null, 4), (-1, errno::EINVAL));
+        assert_eq!(rd(b.as_mut_ptr(), 0), (-1, errno::EINVAL));
+        assert_eq!(
+            rd(null, 8),
+            (-1, errno::EAGAIN),
+            "nothing to take, so nothing to fault on"
+        );
+        // Armed to expire at once: one tick.
+        let soon = Itimerspec {
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 1,
+            },
+        };
+        // SAFETY: a valid itimerspec; the old value is not wanted.
+        assert_eq!(
+            unsafe { timerfd_settime(fd, 0, &soon, core::ptr::null_mut()) },
+            0
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(rd(null, 8), (-1, errno::EFAULT));
+        assert_eq!(
+            rd(b.as_mut_ptr(), 8),
+            (-1, errno::EAGAIN),
+            "the tick was taken"
+        );
+        close(fd);
+    }
+
+    /// An inotify queue: empty and non-blocking is EAGAIN, a zero count
+    /// too; an event too long for the count is EINVAL; a NULL buffer takes
+    /// the one next event and faults (Linux 6.6, measured).
+    #[test]
+    fn an_inotify_read_answers_count_and_null_as_linux() {
+        use crate::epoll::{IN_CREATE, IN_NONBLOCK, inotify_init1, inotify_push_test_event};
+        let fd = inotify_init1(IN_NONBLOCK);
+        assert!(fd >= 0, "inotify_init1: {}", errno::get_errno());
+        let handle = fdtable::get_fd(fd).expect("the descriptor").handle;
+        let mut b = [0u8; 64];
+        let null = core::ptr::null_mut::<u8>();
+        let rd = |buf: *mut u8, n: usize| {
+            errno::set_errno(0);
+            (read(fd, buf, n), errno::get_errno())
+        };
+        assert_eq!(rd(null, 64), (-1, errno::EAGAIN));
+        assert_eq!(rd(b.as_mut_ptr(), 0), (-1, errno::EAGAIN));
+        inotify_push_test_event(handle, 1, IN_CREATE, b"a");
+        inotify_push_test_event(handle, 1, IN_CREATE, b"b");
+        assert_eq!(
+            rd(b.as_mut_ptr(), 0),
+            (-1, errno::EINVAL),
+            "an event is queued, and does not fit"
+        );
+        assert_eq!(
+            rd(null, 16),
+            (-1, errno::EINVAL),
+            "a 32-byte record does not fit 16"
+        );
+        assert_eq!(rd(null, 64), (-1, errno::EFAULT));
+        // One event was taken, the other is still there.
+        assert_eq!(rd(b.as_mut_ptr(), 64), (32, 0));
+        assert_eq!(b.get(16), Some(&b'b'));
+        assert_eq!(rd(b.as_mut_ptr(), 64), (-1, errno::EAGAIN));
+        close(fd);
+    }
+
     #[test]
     fn a_length_larger_than_the_internal_buffer_transfers_every_chunk() {
         // The buffer is 4 KiB; 10,000 bytes needs three passes, and the offset
@@ -9055,28 +9615,42 @@ mod tests {
         let _ = close(fd);
     }
 
+    // posix_fallocate's descriptor is looked up first, as Linux's
+    // `ksys_fallocate` does, so each test opens its own rather than
+    // trusting fd 0 to be open on this test thread.
+
     #[test]
     fn test_posix_fallocate_invalid_offset() {
-        // Negative offset → EINVAL (returned directly, not via errno).
-        assert_eq!(posix_fallocate(0, -1, 4096), crate::errno::EINVAL);
+        // Negative offset → EINVAL (returned directly, not via errno),
+        // ahead of the descriptor's being read-only.
+        let fd = fallocate_test_fd();
+        assert_eq!(posix_fallocate(fd, -1, 4096), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_posix_fallocate_invalid_len_zero() {
-        // len == 0 → EINVAL.
-        assert_eq!(posix_fallocate(0, 0, 0), crate::errno::EINVAL);
+        let fd = fallocate_test_fd();
+        assert_eq!(posix_fallocate(fd, 0, 0), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_posix_fallocate_invalid_len_negative() {
-        // len < 0 → EINVAL.
-        assert_eq!(posix_fallocate(0, 0, -1), crate::errno::EINVAL);
+        let fd = fallocate_test_fd();
+        assert_eq!(posix_fallocate(fd, 0, -1), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
-    fn test_posix_fallocate_overflow() {
-        // offset + len overflows i64 → EFBIG.
-        assert_eq!(posix_fallocate(0, i64::MAX, 1), crate::errno::EFBIG,);
+    fn test_posix_fallocate_overflow_on_a_read_only_descriptor() {
+        // An overflowing end is EFBIG only once the descriptor has been
+        // found open for writing and the file regular (Linux measured:
+        // a read-only one is EBADF first); `fallocate_on`'s own test has
+        // the EFBIG.
+        let fd = fallocate_test_fd();
+        assert_eq!(posix_fallocate(fd, i64::MAX, 1), crate::errno::EBADF);
+        let _ = fdtable::close_fd(fd);
     }
 
     // -- fallocate (Linux) --
@@ -9120,14 +9694,6 @@ mod tests {
     }
 
     #[test]
-    fn test_fallocate_keep_size_succeeds() {
-        // KEEP_SIZE mode is a no-op stub — should succeed.
-        let fd = fallocate_test_fd();
-        assert_eq!(fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 4096), 0);
-        let _ = fdtable::close_fd(fd);
-    }
-
-    #[test]
     fn test_fallocate_keep_size_negative_offset() {
         let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
@@ -9136,52 +9702,382 @@ mod tests {
         let _ = fdtable::close_fd(fd);
     }
 
+    // -- fallocate's checks and work, against a stand-in file --
+
+    /// A file for `fallocate_on`: its type, its bytes, how much of it is
+    /// allocated, and every write made to it.
+    struct FakeAllocFile {
+        kind: u32,
+        bytes: core::cell::RefCell<Vec<u8>>,
+        blocks: i64,
+        blksize: i64,
+        writes: core::cell::RefCell<Vec<(OffT, usize)>>,
+        /// The write, counted from 0, that fails, and with what.
+        fail_write: Option<(usize, i32)>,
+        /// Writes take nothing (a broken kernel's answer).
+        writes_take_nothing: bool,
+    }
+
+    impl FakeAllocFile {
+        /// A regular file of `size` bytes, every block allocated.
+        fn regular(size: usize) -> Self {
+            Self {
+                kind: fcntl::S_IFREG,
+                bytes: core::cell::RefCell::new(vec![7u8; size]),
+                blocks: i64::try_from(size.div_ceil(4096) * 8).unwrap(),
+                blksize: 4096,
+                writes: core::cell::RefCell::new(Vec::new()),
+                fail_write: None,
+                writes_take_nothing: false,
+            }
+        }
+
+        fn of_kind(kind: u32) -> Self {
+            Self {
+                kind,
+                ..Self::regular(0)
+            }
+        }
+
+        fn size(&self) -> usize {
+            self.bytes.borrow().len()
+        }
+    }
+
+    impl AllocFile for FakeAllocFile {
+        fn stat(&self) -> Result<(u32, OffT, i64, i64), i32> {
+            let size = OffT::try_from(self.size()).unwrap();
+            Ok((self.kind, size, self.blocks, self.blksize))
+        }
+
+        fn byte_at(&self, offset: OffT) -> Result<Option<u8>, i32> {
+            let at = usize::try_from(offset).unwrap();
+            Ok(self.bytes.borrow().get(at).copied())
+        }
+
+        fn write_at(&self, data: &[u8], offset: OffT) -> Result<usize, i32> {
+            let n = self.writes.borrow().len();
+            self.writes.borrow_mut().push((offset, data.len()));
+            if let Some((which, e)) = self.fail_write
+                && which == n
+            {
+                return Err(e);
+            }
+            if self.writes_take_nothing {
+                return Ok(0);
+            }
+            let at = usize::try_from(offset).unwrap();
+            let mut bytes = self.bytes.borrow_mut();
+            if bytes.len() < at + data.len() {
+                bytes.resize(at + data.len(), 0);
+            }
+            bytes[at..at + data.len()].copy_from_slice(data);
+            Ok(data.len())
+        }
+    }
+
+    /// An open descriptor's entry: `kind`, opened `flags`.
+    fn alloc_entry(kind: HandleKind, flags: i32) -> fdtable::FdEntry {
+        fdtable::FdEntry {
+            kind,
+            handle: 0xF00,
+            flags: 0,
+            status_flags: flags,
+        }
+    }
+
+    /// What Linux answered on 2026-10-06 (WSL2's kernel, ext4, a 4096-byte
+    /// `len` at offset 0), mode by mode, for each kind of descriptor: a
+    /// regular file open for writing, the same file read-only, `/dev/null`
+    /// read-write, a pipe's write end, a directory read-only.  `0` is
+    /// success.  (`EOPNOTSUPP` is 95 and `EINVAL` 22, `EBADF` 9, `ENODEV`
+    /// 19, `ESPIPE` 29 -- spelled with names below.)
+    const LINUX_FALLOCATE: &[(i32, [i32; 5])] = {
+        use crate::errno::{EBADF as B, EINVAL as I, ENODEV as N, EOPNOTSUPP as O, ESPIPE as S};
+        &[
+            (0x00, [0, B, N, S, B]),
+            (0x01, [0, B, N, S, B]),
+            (0x02, [O, O, O, O, O]),
+            (0x03, [0, B, N, S, B]),
+            (0x04, [O, O, O, O, O]),
+            (0x05, [O, O, O, O, O]),
+            (0x08, [I, B, N, S, B]),
+            (0x09, [I, I, I, I, I]),
+            (0x0c, [O, O, O, O, O]),
+            (0x10, [0, B, N, S, B]),
+            (0x11, [0, B, N, S, B]),
+            (0x12, [O, O, O, O, O]),
+            (0x13, [O, O, O, O, O]),
+            (0x20, [0, B, N, S, B]),
+            (0x21, [I, I, I, I, I]),
+            (0x40, [O, B, N, S, B]),
+            (0x41, [O, B, N, S, B]),
+            (0x42, [O, O, O, O, O]),
+            (0x43, [I, I, I, I, I]),
+            (0x50, [I, I, I, I, I]),
+            (0x48, [I, I, I, I, I]),
+            (0x60, [I, I, I, I, I]),
+            (0x80, [O, O, O, O, O]),
+            (0x1000, [O, O, O, O, O]),
+        ]
+    };
+
+    /// The modes whose answer, on a regular file open for writing, was
+    /// ext4's own: 0 for `KEEP_SIZE`, `PUNCH_HOLE | KEEP_SIZE`,
+    /// `ZERO_RANGE` (with and without `KEEP_SIZE`) and `INSERT_RANGE`, and
+    /// `EINVAL` for a `COLLAPSE_RANGE` past the end of the file.
+    const FS_WORK: &[i32] = &[0x01, 0x03, 0x08, 0x10, 0x11, 0x20];
+
+    /// Every answer is Linux's, but where Linux's file system does the
+    /// work and this library cannot: on a regular file open for writing,
+    /// those modes ([`FS_WORK`]) are `EOPNOTSUPP` -- Linux's own answer
+    /// where a file system cannot do them.
     #[test]
-    fn test_fallocate_punch_hole_eopnotsupp() {
-        let fd = fallocate_test_fd();
-        crate::errno::set_errno(0);
+    fn fallocate_answers_as_linux_does_mode_by_mode() {
+        let answer = |entry: &fdtable::FdEntry, file: &FakeAllocFile, mode| match fallocate_on(
+            entry, file, mode, 0, 4096,
+        ) {
+            Ok(()) => 0,
+            Err(e) => e,
+        };
+        for &(mode, linux) in LINUX_FALLOCATE {
+            let columns = [
+                (
+                    alloc_entry(HandleKind::File, fcntl::O_RDWR),
+                    FakeAllocFile::regular(0),
+                ),
+                (
+                    alloc_entry(HandleKind::File, fcntl::O_RDONLY),
+                    FakeAllocFile::regular(0),
+                ),
+                (
+                    alloc_entry(HandleKind::Console, fcntl::O_RDWR),
+                    FakeAllocFile::of_kind(fcntl::S_IFCHR),
+                ),
+                (
+                    alloc_entry(HandleKind::Pipe, fcntl::O_WRONLY),
+                    FakeAllocFile::of_kind(fcntl::S_IFIFO),
+                ),
+                (
+                    alloc_entry(HandleKind::File, fcntl::O_RDONLY),
+                    FakeAllocFile::of_kind(fcntl::S_IFDIR),
+                ),
+            ];
+            for (column, ((entry, file), &linux_answer)) in columns.iter().zip(&linux).enumerate() {
+                // Where Linux's answer came from ext4 doing (or judging) the
+                // work, which this library has no call for.
+                let want = if column == 0 && FS_WORK.contains(&mode) {
+                    errno::EOPNOTSUPP
+                } else {
+                    linux_answer
+                };
+                assert_eq!(
+                    answer(entry, file, mode),
+                    want,
+                    "mode {mode:#x}, column {column}"
+                );
+            }
+        }
+    }
+
+    /// The other refusals, which the table cannot show: a directory open
+    /// for writing (none can be, but a stand-in can), a FIFO behind a
+    /// file descriptor, a block device, and an end past the largest offset.
+    #[test]
+    fn fallocate_refuses_what_is_not_a_regular_file_and_what_overflows() {
+        let rw = alloc_entry(HandleKind::File, fcntl::O_RDWR);
+        let on = |kind| fallocate_on(&rw, &FakeAllocFile::of_kind(kind), 0, 0, 4096);
+        assert_eq!(on(fcntl::S_IFDIR), Err(errno::EISDIR));
+        assert_eq!(on(fcntl::S_IFIFO), Err(errno::ESPIPE));
+        assert_eq!(on(fcntl::S_IFCHR), Err(errno::ENODEV));
         assert_eq!(
-            fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096),
-            -1
+            on(fcntl::S_IFBLK),
+            Err(errno::EOPNOTSUPP),
+            "Linux's blkdev_fallocate"
         );
-        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
-        let _ = fdtable::close_fd(fd);
+        let file = FakeAllocFile::regular(0);
+        assert_eq!(fallocate_on(&rw, &file, 0, i64::MAX, 1), Err(errno::EFBIG));
+        assert_eq!(fallocate_on(&rw, &file, 0, 1, i64::MAX), Err(errno::EFBIG));
+        assert!(file.writes.borrow().is_empty());
+        for kind in [
+            HandleKind::Eventfd,
+            HandleKind::TcpStream,
+            HandleKind::UnixStream,
+            HandleKind::PtySlave,
+        ] {
+            assert_eq!(
+                fallocate_on(&alloc_entry(kind, fcntl::O_RDWR), &file, 0, 0, 4096),
+                Err(errno::ENODEV),
+                "{kind:?}"
+            );
+        }
     }
 
+    /// Past the end, zeros from the end of the file, a piece at a time, so
+    /// the kernel's append path allocates each piece -- never `ftruncate`,
+    /// which builds the whole file in kernel memory on this kernel.
     #[test]
-    fn test_fallocate_collapse_range_eopnotsupp() {
-        let fd = fallocate_test_fd();
-        crate::errno::set_errno(0);
-        assert_eq!(fallocate(fd, FALLOC_FL_COLLAPSE_RANGE, 0, 4096), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
-        let _ = fdtable::close_fd(fd);
+    fn mode_0_grows_the_file_with_zeros_written_from_its_end() {
+        let rw = alloc_entry(HandleKind::File, fcntl::O_RDWR);
+        let file = FakeAllocFile::regular(1000);
+        assert_eq!(fallocate_on(&rw, &file, 0, 0, 200_000), Ok(()));
+        let writes = file.writes.borrow().clone();
+        assert_eq!(writes.first(), Some(&(1000, ZERO_PIECE)));
+        assert_eq!(writes.len(), 4, "{writes:?}");
+        let mut at = 1000;
+        for &(offset, len) in &writes {
+            assert_eq!(offset, at);
+            assert!(len <= ZERO_PIECE);
+            at += OffT::try_from(len).unwrap();
+        }
+        assert_eq!(at, 200_000);
+        assert_eq!(file.size(), 200_000);
+        let bytes = file.bytes.borrow();
+        assert!(
+            bytes[..1000].iter().all(|&b| b == 7),
+            "the file's own bytes are kept"
+        );
+        assert!(bytes[1000..].iter().all(|&b| b == 0));
     }
 
+    /// A range inside a file whose blocks are all allocated needs nothing.
     #[test]
-    fn test_fallocate_zero_range_eopnotsupp() {
-        let fd = fallocate_test_fd();
-        crate::errno::set_errno(0);
-        assert_eq!(fallocate(fd, FALLOC_FL_ZERO_RANGE, 0, 4096), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
-        let _ = fdtable::close_fd(fd);
+    fn mode_0_inside_an_allocated_file_writes_nothing() {
+        let rw = alloc_entry(HandleKind::File, fcntl::O_RDWR);
+        let file = FakeAllocFile::regular(100_000);
+        assert_eq!(fallocate_on(&rw, &file, 0, 4096, 50_000), Ok(()));
+        assert!(file.writes.borrow().is_empty());
+        assert_eq!(file.size(), 100_000);
     }
 
+    /// Where the block count says there are holes, each block's first byte
+    /// in the range that reads zero is written zero again -- allocating a
+    /// hole, changing nothing -- and a block whose byte is not zero is
+    /// already allocated.
     #[test]
-    fn test_fallocate_insert_range_eopnotsupp() {
-        let fd = fallocate_test_fd();
-        crate::errno::set_errno(0);
-        assert_eq!(fallocate(fd, FALLOC_FL_INSERT_RANGE, 0, 4096), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
-        let _ = fdtable::close_fd(fd);
+    fn holes_inside_the_file_are_written_a_byte_at_a_time() {
+        let rw = alloc_entry(HandleKind::File, fcntl::O_RDWR);
+        let mut file = FakeAllocFile::regular(5 * 4096);
+        file.blocks = 8; // one block of five allocated
+        {
+            let mut bytes = file.bytes.borrow_mut();
+            bytes[4096] = 0; // block 1 reads zero
+            bytes[3 * 4096] = 0; // block 3 too
+        }
+        // From 100 into block 0 to the end of block 3.
+        assert_eq!(fallocate_on(&rw, &file, 0, 100, 4 * 4096 - 100), Ok(()));
+        assert_eq!(
+            file.writes.borrow().as_slice(),
+            &[(4096, 1), (3 * 4096, 1)],
+            "the probes at 100, 4096, 8192 and 12288 found zero at two"
+        );
+        let bytes = file.bytes.borrow();
+        assert_eq!((bytes[4096], bytes[3 * 4096]), (0, 0));
+        assert_eq!(bytes[100], 7);
     }
 
+    /// The probe starts at `offset` itself, mid-block, and steps by the
+    /// volume's block size, kept within glibc's 512 to 4096.
     #[test]
-    fn test_fallocate_unshare_range_eopnotsupp() {
-        let fd = fallocate_test_fd();
-        crate::errno::set_errno(0);
-        assert_eq!(fallocate(fd, FALLOC_FL_UNSHARE_RANGE, 0, 4096), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
-        let _ = fdtable::close_fd(fd);
+    fn the_hole_probe_steps_by_the_block_size() {
+        let rw = alloc_entry(HandleKind::File, fcntl::O_RDWR);
+        let mut file = FakeAllocFile::regular(4096);
+        file.blocks = 1; // 512 bytes of 4096 allocated
+        file.blksize = 1024;
+        file.bytes.borrow_mut().iter_mut().for_each(|b| *b = 0);
+        assert_eq!(fallocate_on(&rw, &file, 0, 10, 4086), Ok(()));
+        assert_eq!(
+            file.writes.borrow().as_slice(),
+            &[(10, 1), (1024, 1), (2048, 1), (3072, 1)]
+        );
+        file.writes.borrow_mut().clear();
+        file.blksize = 1 << 20; // a volume that claims a megabyte: 4096
+        assert_eq!(fallocate_on(&rw, &file, 0, 0, 4096), Ok(()));
+        assert_eq!(file.writes.borrow().as_slice(), &[(0, 1)]);
+    }
+
+    /// The probe's write would land at the end on an `O_APPEND` descriptor:
+    /// `EBADF`, as glibc's fallback answers -- but only where there are
+    /// holes to write; growing the file writes at its end anyway.
+    #[test]
+    fn an_o_append_descriptor_is_refused_only_where_holes_need_writing() {
+        let append = alloc_entry(HandleKind::File, fcntl::O_RDWR | fcntl::O_APPEND);
+        let mut holey = FakeAllocFile::regular(8192);
+        holey.blocks = 8; // one block of two
+        assert_eq!(fallocate_on(&append, &holey, 0, 0, 8192), Err(errno::EBADF));
+        assert!(holey.writes.borrow().is_empty());
+        let whole = FakeAllocFile::regular(8192);
+        assert_eq!(fallocate_on(&append, &whole, 0, 0, 10_000), Ok(()));
+        assert_eq!(whole.writes.borrow().as_slice(), &[(8192, 10_000 - 8192)]);
+    }
+
+    /// A file with bytes and no blocks counted is a file system that does
+    /// not count them -- memfs, behind `/tmp`, reports 0 for every file --
+    /// not a file that is all hole: nothing is probed, and an `O_APPEND`
+    /// descriptor is not refused for it.
+    #[test]
+    fn a_file_system_that_counts_no_blocks_has_no_holes_to_fill() {
+        let mut memfs = FakeAllocFile::regular(10_000);
+        memfs.blocks = 0;
+        memfs.bytes.borrow_mut().iter_mut().for_each(|b| *b = 0);
+        for flags in [fcntl::O_RDWR, fcntl::O_RDWR | fcntl::O_APPEND] {
+            let entry = alloc_entry(HandleKind::File, flags);
+            assert_eq!(
+                fallocate_on(&entry, &memfs, 0, 0, 10_000),
+                Ok(()),
+                "{flags:#o}"
+            );
+        }
+        assert!(memfs.writes.borrow().is_empty());
+    }
+
+    /// A write that fails is the answer, with what was written left as it
+    /// is; a write that takes nothing is EIO rather than a loop.
+    #[test]
+    fn a_failed_or_empty_write_is_the_answer() {
+        let rw = alloc_entry(HandleKind::File, fcntl::O_RDWR);
+        let mut file = FakeAllocFile::regular(0);
+        file.fail_write = Some((1, errno::ENOSPC));
+        assert_eq!(
+            fallocate_on(&rw, &file, 0, 0, 3 * ZERO_PIECE as OffT),
+            Err(errno::ENOSPC)
+        );
+        assert_eq!(file.size(), ZERO_PIECE, "the first piece stays");
+        let mut stuck = FakeAllocFile::regular(0);
+        stuck.writes_take_nothing = true;
+        assert_eq!(fallocate_on(&rw, &stuck, 0, 0, 10), Err(errno::EIO));
+        assert_eq!(stuck.writes.borrow().len(), 1);
+    }
+
+    /// `posix_fallocate` returns the error and leaves `errno` alone, and
+    /// what Linux would hand to glibc's fallback -- a block device -- is
+    /// ENODEV, the fallback's answer for anything but a regular file.
+    #[test]
+    fn posix_fallocate_returns_the_error_and_leaves_errno() {
+        let console = fdtable::alloc_fd_with_flags(HandleKind::Console, 0, fcntl::O_RDWR)
+            .expect("fd available");
+        let reader = fdtable::alloc_fd_with_flags(HandleKind::File, 0xA10, fcntl::O_RDONLY)
+            .expect("fd available");
+        let pipe_end = fdtable::alloc_fd_with_flags(HandleKind::Pipe, 0, fcntl::O_WRONLY)
+            .expect("fd available");
+        errno::set_errno(31);
+        assert_eq!(posix_fallocate(console, 0, 4096), errno::ENODEV);
+        assert_eq!(posix_fallocate(reader, 0, 4096), errno::EBADF);
+        assert_eq!(posix_fallocate(pipe_end, 0, 4096), errno::ESPIPE);
+        assert_eq!(posix_fallocate(console, -1, 4096), errno::EINVAL);
+        assert_eq!(
+            posix_fallocate(-1, -1, 4096),
+            errno::EBADF,
+            "the descriptor first"
+        );
+        assert_eq!(posix_fallocate(9999, 0, 0), errno::EBADF);
+        assert_eq!(errno::get_errno(), 31, "errno untouched");
+        for fd in [console, reader, pipe_end] {
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+        let rw = alloc_entry(HandleKind::File, fcntl::O_RDWR);
+        let blk = FakeAllocFile::of_kind(fcntl::S_IFBLK);
+        assert_eq!(fallocate_on(&rw, &blk, 0, 0, 4096), Err(errno::EOPNOTSUPP));
     }
 
     // -- Phase 109: Linux-parity validation order + mode-combination checks --
@@ -9342,10 +10238,10 @@ mod tests {
 
     #[test]
     fn test_fallocate_phase109_recovery_after_einval() {
-        // After an EINVAL-rejected call, a subsequent well-formed
-        // call must still succeed — the validation surface is purely
-        // stateless.  KEEP_SIZE alone with a valid fd is a no-op
-        // success.
+        // After an EINVAL-rejected call, a subsequent well-formed call is
+        // judged afresh -- the checks keep no state.  The descriptor is a
+        // read-only terminal, so a well-formed KEEP_SIZE is Linux's EBADF
+        // (not open for writing), exactly as on a fresh descriptor.
         let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
         assert_eq!(
@@ -9353,7 +10249,8 @@ mod tests {
             -1,
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-        assert_eq!(fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 4096), 0);
+        assert_eq!(fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
         let _ = fdtable::close_fd(fd);
     }
 
@@ -10741,6 +11638,37 @@ mod tests {
         let result = fsync(9999);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// What has no storage -- a pipe, a socket, a terminal, an eventfd -- has
+    /// nothing to sync: `fsync` and `fdatasync` answer EINVAL, as Linux's
+    /// `vfs_fsync_range` does with no `fsync` operation, and
+    /// `sync_file_range` answers ESPIPE first. All three answered 0 until
+    /// 2026-10-06 (`sync_file_range` by way of `fsync`).
+    #[test]
+    fn what_has_no_storage_has_nothing_to_sync() {
+        for kind in [
+            HandleKind::Pipe,
+            HandleKind::Console,
+            HandleKind::TcpStream,
+            HandleKind::UdpSocket,
+            HandleKind::Eventfd,
+            HandleKind::UnixStream,
+            HandleKind::PtySlave,
+        ] {
+            let fd = fdtable::alloc_fd_with_flags(kind, 0x5359, crate::fcntl::O_RDWR)
+                .expect("fd table full");
+            crate::errno::set_errno(0);
+            assert_eq!(fsync(fd), -1, "{kind:?}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "{kind:?}");
+            crate::errno::set_errno(0);
+            assert_eq!(fdatasync(fd), -1, "{kind:?}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL, "{kind:?}");
+            crate::errno::set_errno(0);
+            assert_eq!(sync_file_range(fd, 0, 0, 0), -1, "{kind:?}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE, "{kind:?}");
+            assert!(fdtable::close_fd(fd).is_some());
+        }
     }
 
     #[test]
@@ -13895,6 +14823,21 @@ mod tests {
     // -----------------------------------------------------------------------
     // statx
     // -----------------------------------------------------------------------
+
+    /// `statx`'s device numbers are glibc's `major` and `minor` of the
+    /// `dev_t`, past 255 too: the old split, `dev >> 8` and `dev & 0xff`,
+    /// made minor 300 under major 0 into major 4096, minor 44.
+    #[test]
+    fn statx_splits_a_device_as_major_and_minor_do() {
+        use crate::crt::gnu_dev_makedev;
+        for (major, minor) in [(0, 0), (0, 300), (0, 0x05_1234), (8, 1), (259, 65_536)] {
+            assert_eq!(
+                split_dev(gnu_dev_makedev(major, minor)),
+                (major, minor),
+                "{major}:{minor}"
+            );
+        }
+    }
 
     #[test]
     fn test_statx_null_buf() {

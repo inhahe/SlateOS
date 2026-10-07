@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The chrome every game draws round its board, in the user's theme: the roles,
+# the push button, and the legibility sweep the tests read the frame with.
+gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 # The window. Without it `main` built a `LifeApp`, dropped it and exited: no
 # board ever reached a screen and no key ever arrived — which is how both key
@@ -14,3 +17,8 @@ oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# For `palette_check`, which holds every colour the board draws to the user's
+# palette in both modes.
+appearance = { path = "../../gui/appearance", features = ["testing"] }

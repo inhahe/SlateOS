@@ -6,6 +6,20 @@
 `apps/procexplorer/src/features.rs`, `apps/settings/src/remote.rs`,
 `apps/match3`, `apps/pinball`, `apps/screenrecorder`, `apps/soundrecorder`.
 
+**Status (lane E, 2026-09-28):** one remains, `apps/settings/src/remote.rs`,
+and it waits on something other than a reading: it is the unreachable
+remote page C-Q17 says to wire up (§1423), whose dynamic-DNS half needs the
+userspace service in `requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`
+and whose remote-desktop half has no server to configure (`todo.txt`,
+"C-Q17: what is left"). The rest carry none: the explorer's `columns.rs` and
+`fileops.rs` (the last on this date:
+`TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS`),
+`procexplorer`'s `features.rs`, `match3`, `pinball`, and on this date the
+screen recorder (an unused layout constant) and the sound recorder (the
+noise gate's attack, documented and never read -- it opened and shut in one
+sample, a click at each edge; it ramps now). `thumbs.rs` is `gui/thumbs`
+now, and `imageviewer/src/video.rs` is gone.
+
 **In short:** ten files tell the compiler not to mention code nothing uses.
 Each suppression covers the whole file — thousands of lines in several cases —
 so anything inside that loses its last caller goes quiet permanently. Three of

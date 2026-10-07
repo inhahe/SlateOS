@@ -1,0 +1,27 @@
+# sound_edit_mid_frame.mp4: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 420 420 K__ 0
+packet 0 1380 1380 K__ 0
+packet 0 2340 2340 K__ 0
+packet 0 3300 3300 K__ 0
+packet 0 4260 4260 K__ 0
+packet 0 5220 5220 K__ 0
+seek 50
+packet 0 1380 1380 K__ 0
+packet 0 2340 2340 K__ 0
+packet 0 3300 3300 K__ 0
+packet 0 4260 4260 K__ 0
+packet 0 5220 5220 K__ 0
+packet 0 6180 6180 K__ 0
+seek 120
+packet 0 5220 5220 K__ 0
+packet 0 6180 6180 K__ 0
+packet 0 7140 7140 K__ 0
+packet 0 8100 8100 K__ 0
+packet 0 9060 9060 K__ 0
+packet 0 10020 10020 K__ 0
+seek 250
+packet 0 10980 10980 K__ 0
+packet 0 11940 11940 K__ 0
+packet 0 12900 12900 K__ 0
+packet 0 13860 13860 K__ 0

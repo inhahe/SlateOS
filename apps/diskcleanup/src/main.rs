@@ -81,7 +81,8 @@ const FONT_SIZE_HEADING: f32 = 16.0;
 const BUTTON_WIDTH: f32 = 100.0;
 const BUTTON_HEIGHT: f32 = 32.0;
 const CORNER_RADIUS: f32 = 6.0;
-const CHECKBOX_SIZE: f32 = 16.0;
+/// The category box's side: the toolkit's check box (`guitk::checkbox`).
+const CHECKBOX_SIZE: f32 = guitk::checkbox::SIZE;
 const PROGRESS_HEIGHT: f32 = 8.0;
 
 /// Where a scan starts when the user presses "Scan" rather than a test.
@@ -1334,6 +1335,9 @@ pub struct CleanupUI {
     /// is told about. Defaulted to the toolkit's own width so a program that
     /// is never told still draws a ring of the ordinary thickness.
     focus_ring_width: f32,
+    /// The category row under the pointer -- the target a press toggles --
+    /// whose box is drawn lit.
+    hovered_row: Option<usize>,
 }
 
 impl CleanupUI {
@@ -1348,6 +1352,7 @@ impl CleanupUI {
             screen: UiScreen::CategoryList,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            hovered_row: None,
             selected,
             category_sizes: BTreeMap::new(),
             scan_complete: false,
@@ -1619,6 +1624,37 @@ impl CleanupUI {
 
     /// Hit-test a mouse event against [`Layout`].
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // The row under the pointer is drawn lit; only a change in it is
+        // worth a redraw.
+        match mouse.kind {
+            MouseEventKind::Move => {
+                let over = self.row_at(&self.layout(), mouse.x, mouse.y);
+                return if over == self.hovered_row {
+                    EventResult::Ignored
+                } else {
+                    self.hovered_row = over;
+                    EventResult::Consumed
+                };
+            }
+            MouseEventKind::Leave => {
+                return if self.hovered_row.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                };
+            }
+            _ => {}
+        }
+        // The card is modal for the pointer as it is for the keys: a press,
+        // with any button, puts it away rather than reaching the control
+        // drawn under it -- the Clean button among them.
+        if self.show_help {
+            if matches!(mouse.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         // Press, not release: this app has no drag, and matching on press is
         // what makes a click feel immediate.
         if !matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {
@@ -1651,6 +1687,29 @@ impl CleanupUI {
             // than no Cancel button.
             UiScreen::Progress => EventResult::Ignored,
         }
+    }
+
+    /// The category row a press at `(x, y)` would toggle: on the category
+    /// list, on a row, and not on the row's "View" link, which is a target
+    /// of its own -- the same rule [`Self::click_category_list`] keeps.
+    fn row_at(&self, lay: &Layout, x: f32, y: f32) -> Option<usize> {
+        if self.screen != UiScreen::CategoryList {
+            return None;
+        }
+        for (i, cat) in CleanupCategory::ALL.iter().enumerate() {
+            let row = lay.category_row(i)?;
+            if !hits(row, x, y) {
+                continue;
+            }
+            let size = self.category_sizes.get(cat).copied().unwrap_or(0);
+            let on_link = self.scan_complete
+                && size > 0
+                && lay
+                    .category_view_link(i)
+                    .is_some_and(|link| hits(link, x, y));
+            return if on_link { None } else { Some(i) };
+        }
+        None
     }
 
     /// The category list's own hit-test: checkboxes, "View" links, footer.
@@ -1818,28 +1877,27 @@ impl CleanupUI {
         let cx = box_hit.0 + (box_hit.2 - CHECKBOX_SIZE) / 2.0;
         let cy = box_hit.1 + (box_hit.3 - CHECKBOX_SIZE) / 2.0;
 
-        // Checkbox outline.
-        tree.push(RenderCommand::StrokeRect {
-            x: cx,
-            y: cy,
-            width: CHECKBOX_SIZE,
-            height: CHECKBOX_SIZE,
-            color: self.palette.subtext0,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Checkbox fill if checked.
-        if checked {
-            tree.push(RenderCommand::FillRect {
-                x: cx + 3.0,
-                y: cy + 3.0,
-                width: CHECKBOX_SIZE - 6.0,
-                height: CHECKBOX_SIZE - 6.0,
-                color: self.palette.blue,
-                corner_radii: CornerRadii::all(2.0),
-            });
-        }
+        // The toolkit's check box (lane C,
+        // c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs),
+        // lit while the pointer is on the row a press toggles.
+        let state = guitk::checkbox::State {
+            hovered: self.hovered_row == Some(index),
+            focused: false,
+            disabled: false,
+        };
+        guitk::checkbox::draw_box(
+            tree,
+            &self.palette,
+            guitk::frame::Rect::new(cx, cy, CHECKBOX_SIZE, CHECKBOX_SIZE),
+            if checked {
+                guitk::widget::CheckState::Checked
+            } else {
+                guitk::widget::CheckState::Unchecked
+            },
+            state,
+            self.focus_ring_width,
+            guitk::checkbox::paint(&self.palette, state).mark,
+        );
 
         // Category name.
         tree.push(RenderCommand::Text {
@@ -3644,6 +3702,82 @@ mod tests {
         assert!(!ui.selected[&cat]);
     }
 
+    /// A category's box is the toolkit's check box (lane C,
+    /// c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs):
+    /// ticked when the category is chosen, lit while the pointer is on its
+    /// row and out when the pointer leaves.
+    #[test]
+    fn a_categorys_box_is_the_toolkits_check_box() {
+        let mut ui = CleanupUI::new();
+        let lay = ui.layout();
+        let hit = lay.category_checkbox(1).expect("the second row");
+        let side = guitk::checkbox::SIZE;
+        let square = guitk::frame::Rect::new(
+            hit.0 + (hit.2 - side) / 2.0,
+            hit.1 + (hit.3 - side) / 2.0,
+            side,
+            side,
+        );
+        let drawn = |ui: &mut CleanupUI, ticked: bool, hovered: bool| {
+            let state = guitk::checkbox::State {
+                hovered,
+                focused: false,
+                disabled: false,
+            };
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::checkbox::draw_box(
+                &mut want,
+                &ui.palette,
+                square,
+                if ticked {
+                    guitk::widget::CheckState::Checked
+                } else {
+                    guitk::widget::CheckState::Unchecked
+                },
+                state,
+                ui.focus_ring_width,
+                guitk::checkbox::paint(&ui.palette, state).mark,
+            );
+            let tree = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT);
+            tree.commands
+                .windows(want.len())
+                .any(|w| w == want.as_slice())
+        };
+        assert!(drawn(&mut ui, false, false), "the box is not the toolkit's");
+        let (x, y) = centre(hit);
+        let at = |kind| Event::Mouse(MouseEvent { x, y, kind });
+        assert_eq!(
+            ui.handle_event(&at(MouseEventKind::Move)),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            ui.handle_event(&at(MouseEventKind::Move)),
+            EventResult::Ignored,
+            "a move that changed nothing redrew the window"
+        );
+        assert!(
+            drawn(&mut ui, false, true),
+            "the row under the pointer is not lit"
+        );
+        ui.handle_event(&click(x, y));
+        assert!(
+            drawn(&mut ui, true, true),
+            "a chosen category's box is not ticked"
+        );
+        assert_eq!(
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x: -1.0,
+                y: -1.0,
+                kind: MouseEventKind::Leave,
+            })),
+            EventResult::Consumed
+        );
+        assert!(
+            drawn(&mut ui, true, false),
+            "the box stayed lit after the pointer left"
+        );
+    }
+
     #[test]
     fn test_click_on_the_checkbox_toggles_the_same_row() {
         // The checkbox rectangle is wider than the drawn square, and the whole
@@ -3799,6 +3933,43 @@ mod tests {
             ui.selected_categories().len(),
             ticked,
             "control: A does nothing even with the card down"
+        );
+    }
+
+    /// **A press while the card is up puts it away and does nothing else.**
+    /// It used to go straight through the card to the control drawn under
+    /// it. The control at the end is the same press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let (mut ui, index) = scanned(CleanupCategory::TempFiles, 4096);
+        let category = CleanupCategory::ALL[index];
+        let lay = ui.layout();
+        let (x, y) = centre(lay.category_checkbox(index).expect("row is on screen"));
+        let ticked = ui.selected[&category];
+
+        ui.handle_key(Key::F1);
+        assert!(ui.show_help);
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert!(!ui.show_help, "the press did not put the card away");
+        assert_eq!(
+            ui.selected[&category], ticked,
+            "the press went through the card to the category's box"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        ui.handle_key(Key::F1);
+        ui.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!ui.show_help, "a right-button press left the card up");
+
+        ui.handle_event(&click(x, y));
+        assert_ne!(
+            ui.selected[&category], ticked,
+            "control: the press does nothing even with the card down"
         );
     }
 

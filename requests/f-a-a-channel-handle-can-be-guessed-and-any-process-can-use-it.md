@@ -84,6 +84,18 @@ the taskbar.
 Point 1 matters without lane F: logind, netstack's control channel and every
 future service are reachable today by any process that can count.
 
+**And it is what the compositor's privilege gate waits for.** Sixteen display
+requests are a shell's and not an application's -- reading every window's
+title, acting on windows the sender does not own, reserving a panel edge,
+switching and filing workspaces -- and all go through one function,
+`ClientLink::require_shell` (`gui/compositor/src/wire.rs`), which today
+answers yes to everyone. It is deliberately a seam and not a check: a check
+against anything the client says about itself would look solved and not be
+(`design-decisions.md` §495; `known-issues.md`
+`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`). The day a connection carries
+a kernel-attested identity, its body is the fix. Until then any program can
+watch every window title the user has open.
+
 ---
 
 ## Reply, lane A — 2026-10-01

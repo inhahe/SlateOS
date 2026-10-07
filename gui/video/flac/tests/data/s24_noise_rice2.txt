@@ -1,0 +1,22 @@
+# s24_noise_rice2.flac: what libFLAC 1.5.0 makes of it (generate_fixtures.py)
+meta 0 34
+info 4096 4096 1893 24462 44100 2 24 4410
+meta 3 18
+meta 4 40
+meta 1 8192
+frame 0 4096 2 24 44100 d0bd1c3d3eb8923a
+frame 4096 314 2 24 44100 9e56e67691e5d901
+end FLAC__STREAM_DECODER_END_OF_STREAM ok
+seek 0
+frame 0 4096 2 24 44100 d0bd1c3d3eb8923a
+frame 4096 314 2 24 44100 9e56e67691e5d901
+seek 1470
+frame 1470 2626 2 24 44100 6a4c6d24b533e5e0
+frame 4096 314 2 24 44100 9e56e67691e5d901
+seek 2206
+frame 2206 1890 2 24 44100 a9a7d49b704fa4ec
+frame 4096 314 2 24 44100 9e56e67691e5d901
+seek 4409
+frame 4409 1 2 24 44100 be2f56fa4e45ee1a
+seek 4415
+seek-failed

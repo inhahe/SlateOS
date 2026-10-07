@@ -26,7 +26,7 @@ SYSROOT="$ROOT/toolchain/sysroot/lib"
 # lanes relinking at once cannot write each other's objects or sysroot copy.
 # The boot lock serialises QEMU, not this.
 LANE="$SLATE_LANE"
-# Must match cross2.sh/cross3.sh. This was `/tmp/bash-cross` — unkeyed — while
+# Must match cross2.sh. This was `/tmp/bash-cross` — unkeyed — while
 # the sysroot copy beside it was keyed, so two lanes relinking concurrently
 # shared one object tree and produced each other's bash-slateos.elf.
 BUILD="$SLATE_WORK/bash-cross"
@@ -50,7 +50,6 @@ if [ ! -d "$BUILD" ]; then
     echo "ERROR: $BUILD does not exist — bash's objects have not been compiled yet."
     echo "       This script only relinks objects the compile step produced. Run:"
     echo "         bash scripts/bash-spike/cross2.sh   # cross-configure + compile"
-    echo "         bash scripts/bash-spike/cross3.sh   # work around a 5.2 configure bug"
     echo "       then this script again. See scripts/bash-spike/README.md."
     exit 1
 fi
@@ -70,7 +69,16 @@ test.o version.o alias.o array.o arrayfunc.o assoc.o braces.o bracecomp.o \
 bashhist.o bashline.o list.o stringlib.o locale.o findcmd.o redir.o \
 pcomplete.o pcomplib.o syntax.o xmalloc.o signames.o"
 
-# -nostdlib: we want SlateOS's libc, not zig's bundled musl.
+# SlateOS's libc and nothing else: scripts/lib/worktree.sh's link wrapper,
+# zig's ld.lld itself, given bash's own inputs and then our libc.a, with
+# zig's C++ runtime ahead of it and zig's compiler runtime behind it, which
+# is zig's own order (the wrapper's comment says why the order matters). Not
+# zig's cc driver with -nostdlib, as until 2026-10-01: that puts zig's own
+# musl libc.a behind every link, where it would supply whatever ours lacks
+# instead of a missing symbol being reported (known-issues
+# D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC). bash's own libraries go through
+# as -L and -l; the wrapper drops only the -l flags for what it links anyway,
+# -lm, -lpthread and the like, which our libc.a holds.
 #
 # libstubs.a is deliberately NOT linked. Both it and libc.a are Rust-built and
 # each carries its own panic handler, so together they collide on
@@ -85,11 +93,15 @@ pcomplete.o pcomplib.o syntax.o xmalloc.o signames.o"
 # and nothing else. If this fails to find them, re-run
 # toolchain/build-sysroot.ps1; scripts/bash-spike/checksyms.sh confirms they
 # are present in the archive.
-"$SLATE_CC" -static -nostdlib -o bash-slateos $OBJS \
+slate_make_link_wrappers "$BUILD/.slate-link" "$SLATE_SYSROOT_COPY" || exit 1
+# Removed first: ld.lld leaves an existing output alone when a link fails,
+# and the check at the end would then stage the last run's bash as this
+# one's -- with a fresh mtime, so create-ext4-rootfs.sh's staleness gate,
+# which compares mtimes with libc.a's, would pass it.
+rm -f bash-slateos
+"$SLATE_LINK_CC" -o bash-slateos $OBJS \
     -L./builtins -L./lib/glob -L./lib/tilde -L./lib/sh -L./lib/readline \
     -lbuiltins -lglob -lsh -ltilde -lhistory \
-    "$SLATE_SYSROOT_COPY"/libc.a "$SLATE_SYSROOT_COPY"/libc.a \
-    "$SLATE_SYSROOT_COPY"/libunwind.a \
     2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 
@@ -118,4 +130,5 @@ if [ -x "$BUILD/bash-slateos" ]; then
   cp "$BUILD/bash-slateos" "$SPIKE/bash-slateos.elf"
 else
   echo "NO_SLATE_BINARY"
+  exit 1
 fi

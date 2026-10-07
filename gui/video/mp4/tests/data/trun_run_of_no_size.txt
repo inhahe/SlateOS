@@ -1,0 +1,2 @@
+# trun_run_of_no_size.mp4: ffprobe refuses it (trun_run_of_no_size.mp4: Invalid data found when processing input) (generate_fixtures.py).
+refused

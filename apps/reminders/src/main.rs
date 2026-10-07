@@ -64,6 +64,8 @@ use unsaved::{Choice, Question};
 // with their own incompatible versions. See `known-issues.md`
 // C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
 use guitk::date;
+use guitk::field;
+use guitk::frame::Rect;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 #[allow(unused_imports)]
@@ -1984,6 +1986,8 @@ fn parse_subtasks_json(json: &str) -> Vec<Subtask> {
 const FORM_TEXT_SIZE: f32 = 13.0;
 /// A form row's height.
 const FORM_ROW_H: f32 = 36.0;
+/// How wide the form's labels are, before each row's box.
+const FORM_LABEL_W: f32 = 100.0;
 /// How many steps the form lists at once.
 const FORM_STEPS_SHOWN: usize = 4;
 
@@ -2324,6 +2328,10 @@ pub struct RemindersApp {
     pub sidebar_visible: bool,
     /// Whether the shortcut list is up.
     pub show_help: bool,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    pub focus_ring_width: f32,
     pub detail_visible: bool,
     pub show_completed_subtasks: bool,
     /// The user's colours, replaced whenever the theme changes.
@@ -2359,6 +2367,7 @@ impl RemindersApp {
     pub fn new(width: f32, height: f32, now: DateTime) -> Self {
         Self {
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             choosing_snooze: false,
@@ -2784,6 +2793,23 @@ impl RemindersApp {
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
             Picked::Ignored => {}
         }
+        // The shortcut card is modal: while it is up, F1, `?` and Escape put
+        // it away and every other key is its own. It was not -- N started a
+        // reminder under it, Delete asked about one, and D, B and C changed
+        // the view it covered. (Nothing here takes a press, so the card has
+        // no pointer to hold.)
+        if self.show_help
+            && let Event::Key(key_ev) = event
+            && key_ev.pressed
+        {
+            let closes = matches!(key_ev.key, Key::F1 | Key::Escape)
+                || key_ev.key == Key::Slash && key_ev.modifiers.shift;
+            if closes {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         match event {
             Event::Key(key_ev) if key_ev.pressed && self.form.is_some() => {
                 self.handle_form_key(key_ev)
@@ -2913,6 +2939,28 @@ impl RemindersApp {
         if self.choosing_snooze {
             return self.handle_snooze_key(key);
         }
+        // Ctrl's chords are Ctrl+O and Ctrl+S, and only those. A Ctrl chord,
+        // not Ctrl held: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
+                Key::S => {
+                    self.open_file_dialog(true);
+                    EventResult::Consumed
+                }
+                Key::O => {
+                    self.open_file_dialog(false);
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        // Every other binding is on a key, taken plain -- nothing held but
+        // Shift. A chord with Alt or the Windows key is the window's or the
+        // desktop's, and arrives carrying its key: Alt+S re-sorted the list,
+        // Alt+Delete asked to delete a reminder and Alt+Space completed one.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         // Shift and a digit ticks that step of the selected reminder: before
         // the digits' own arms, which are the views.
         if key.modifiers.shift
@@ -2925,11 +2973,11 @@ impl RemindersApp {
             };
         }
         match key.key {
-            Key::N if !key.modifiers.ctrl => {
+            Key::N => {
                 self.open_new_task();
                 EventResult::Consumed
             }
-            Key::E if !key.modifiers.ctrl => match self.selected_task_id {
+            Key::E => match self.selected_task_id {
                 Some(id) if self.store.get(id).is_some() => {
                     self.open_edit_task(id);
                     EventResult::Consumed
@@ -2948,18 +2996,6 @@ impl RemindersApp {
             Key::Num3 => self.set_view(ViewFilter::All),
             Key::Num4 => self.set_view(ViewFilter::Overdue),
             Key::Num5 => self.set_view(ViewFilter::Completed),
-            // `Key::S if ctrl` must come first: a guard arm that sorts
-            // rather than saves would make Ctrl+S reorder the list.
-            // `Key::S if ctrl` must come first: a guard arm that sorts
-            // rather than saves would make Ctrl+S reorder the list.
-            Key::S if key.modifiers.ctrl => {
-                self.open_file_dialog(true);
-                EventResult::Consumed
-            }
-            Key::O if key.modifiers.ctrl => {
-                self.open_file_dialog(false);
-                EventResult::Consumed
-            }
             Key::S => {
                 self.cycle_sort();
                 EventResult::Consumed
@@ -3021,26 +3057,33 @@ impl RemindersApp {
         let Some(form) = self.form.as_mut() else {
             return EventResult::Ignored;
         };
+        // The form's own keys are plain, nothing held but Shift: Alt+Tab is
+        // the desktop's window switcher, and moved between the fields; Alt+
+        // Enter saved and Alt+Delete took a step off. In a field typed into,
+        // a chord goes on to the field, which knows a command from typing;
+        // in one that is not, a chord does nothing.
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Tab => {
+            Key::Tab if plain => {
                 let all = TaskField::ALL;
                 let at = all.iter().position(|f| *f == field).unwrap_or(0);
                 let next = step_index(at, all.len(), !key.modifiers.shift);
                 self.form_field = all.get(next).copied().unwrap_or(field);
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 if field == TaskField::NewStep && form.add_step() {
                     return EventResult::Consumed;
                 }
                 self.save_form();
                 EventResult::Consumed
             }
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.form = None;
                 self.form_error = None;
                 EventResult::Consumed
             }
+            _ if !plain && !field.is_text() => EventResult::Ignored,
             Key::Up | Key::Down if field == TaskField::Steps => {
                 let len = form.steps.len();
                 if len == 0 {
@@ -3103,14 +3146,19 @@ impl RemindersApp {
     /// Keys while "Delete this reminder?" is up: Enter or Y deletes it,
     /// Escape or N keeps it, and every other key is swallowed -- a key that
     /// reached the list would be acted on under a question not yet answered.
+    ///
+    /// Answered by plain keys only: Alt+Y and Alt+Enter, each a chord of the
+    /// window's arriving carrying its key, deleted the reminder.
     fn handle_confirm_key(&mut self, key: &KeyEvent) -> EventResult {
         let Some(id) = self.pending_delete else {
             return EventResult::Ignored;
         };
-        match key.key {
-            Key::Enter | Key::Y => self.delete_task(id),
-            Key::Escape | Key::N => self.pending_delete = None,
-            _ => {}
+        if textline::is_plain(key.modifiers) {
+            match key.key {
+                Key::Enter | Key::Y => self.delete_task(id),
+                Key::Escape | Key::N => self.pending_delete = None,
+                _ => {}
+            }
         }
         EventResult::Consumed
     }
@@ -3191,7 +3239,14 @@ impl RemindersApp {
     }
 
     /// Answering the snooze prompt.
+    ///
+    /// A chord neither answers it nor puts it away: Alt+1 is not 1, and a
+    /// chord of the window's or the desktop's, arriving carrying its key,
+    /// snoozed the reminder.
     fn handle_snooze_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         let duration = match key.key {
             Key::Num1 => Some(SnoozeDuration::Minutes5),
             Key::Num2 => Some(SnoozeDuration::Minutes15),
@@ -3374,6 +3429,45 @@ impl RemindersApp {
 
     /// The form over the list: a row per field, the steps under their row,
     /// what the last Save found wrong, and the keys that work it.
+    /// Where each of the form's rows has its box, beside the row's label, in
+    /// order -- the steps' as tall as the steps it shows -- and where the
+    /// rows end. One answer for the drawing and anything that asks where a
+    /// row is.
+    fn form_rows(&self, form: &TaskForm) -> (Vec<(TaskField, Rect)>, f32) {
+        let (cx, cy, cw, _) = self.form_card();
+        let control_w = (cw - 40.0 - FORM_LABEL_W).max(0.0);
+        let row_h = FORM_ROW_H * 0.8;
+        let mut y = cy + 48.0;
+        let mut rows = Vec::with_capacity(TaskField::ALL.len());
+        for field in TaskField::ALL {
+            rows.push((
+                field,
+                Rect::new(cx + 20.0 + FORM_LABEL_W, y, control_w, row_h - 4.0),
+            ));
+            y += if field == TaskField::Steps {
+                #[allow(clippy::cast_precision_loss, reason = "a handful of rows")]
+                let shown = form.steps.len().clamp(1, FORM_STEPS_SHOWN) as f32;
+                row_h + (shown - 1.0) * 18.0
+            } else {
+                row_h
+            };
+        }
+        (rows, y)
+    }
+
+    /// Whether row `field` of `form` holds what the form cannot keep: a due
+    /// date that is not one, a due time that is not one for a date that is,
+    /// or -- once a save has been refused for it -- no title.
+    fn row_is_wrong(&self, form: &TaskForm, field: TaskField) -> bool {
+        let dated = !form.due_date.text().trim().is_empty();
+        match field {
+            TaskField::Title => self.form_error.is_some() && form.title.text().trim().is_empty(),
+            TaskField::DueDate => dated && parse_date_text(form.due_date.text()).is_none(),
+            TaskField::DueTime => dated && parse_time_text(form.due_time.text()).is_none(),
+            _ => false,
+        }
+    }
+
     fn render_form(&self, cmds: &mut Vec<RenderCommand>, form: &TaskForm) {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -3400,11 +3494,10 @@ impl RemindersApp {
             max_width: Some((cw - 40.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
-        let label_w = 100.0;
-        let control_w = (cw - 40.0 - label_w).max(0.0);
-        let row_h = FORM_ROW_H * 0.8;
-        let mut y = cy + 48.0;
-        for field in TaskField::ALL {
+        let label_w = FORM_LABEL_W;
+        let (rows, end_y) = self.form_rows(form);
+        for (field, rect) in rows {
+            let y = rect.y;
             let focused = self.form_field == field;
             cmds.push(RenderCommand::Text {
                 x: cx + 20.0,
@@ -3424,27 +3517,25 @@ impl RemindersApp {
                 max_width: Some(label_w - 8.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            let (x, w, h) = (cx + 20.0 + label_w, control_w, row_h - 4.0);
-            self.palette
-                .push_surface(cmds, x, y, w, h, 4.0, Surface::Card);
-            cmds.push(RenderCommand::StrokeRect {
-                x,
-                y,
-                width: w,
-                height: h,
-                color: if focused {
-                    self.palette.blue
-                } else {
-                    self.palette.surface1
+            let (x, w) = (rect.x, rect.w);
+            // The toolkit's field: the theme's box, and the keyboard's mark
+            // at the user's width round the row that has it, and red round a
+            // row that cannot be kept as it is. It was a panel whose edge
+            // turned blue. (The list of keys does not come up over the form.)
+            field::draw(
+                cmds,
+                &self.palette,
+                rect,
+                field::State {
+                    hovered: false,
+                    focused,
+                    disabled: false,
+                    invalid: self.row_is_wrong(form, field),
                 },
-                line_width: if focused { 2.0 } else { 1.0 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+                self.focus_ring_width,
+            );
             if field == TaskField::Steps {
                 self.render_form_steps(cmds, form, focused, (x, y, w));
-                #[allow(clippy::cast_precision_loss, reason = "a handful of rows")]
-                let shown = form.steps.len().clamp(1, FORM_STEPS_SHOWN) as f32;
-                y += row_h + (shown - 1.0) * 18.0;
                 continue;
             }
             if let Some(input) = form.input_ref(field) {
@@ -3503,12 +3594,11 @@ impl RemindersApp {
                     overflow: TextOverflow::Ellipsis,
                 });
             }
-            y += row_h;
         }
         if let Some(error) = &self.form_error {
             cmds.push(RenderCommand::Text {
                 x: cx + 20.0,
-                y: y + 4.0,
+                y: end_y + 4.0,
                 text: error.clone(),
                 font_size: 12.0,
                 color: self.palette.ink(self.palette.red),
@@ -5057,6 +5147,10 @@ impl App for RemindersApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         let overdue = self.store.count_overdue(self.now);
         if overdue == 0 {
@@ -5293,6 +5387,41 @@ mod tests {
         form.open_new_task();
 
         vec![plain, elsewhere, moved, notified, steps, form]
+    }
+
+    /// **The card is modal for the keys**: while it is up, F1, `?` and Escape
+    /// put it away and nothing else does or acts. N started a reminder under
+    /// it. The control at the end is the same key with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_while_it_is_up() {
+        let mut app = populated();
+        let detail = app.detail_visible;
+        app.handle_event(&press(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&press(Key::N));
+        assert!(app.form.is_none(), "N started a reminder under the card");
+        app.handle_event(&press(Key::D));
+        assert_eq!(
+            app.detail_visible, detail,
+            "D changed the view under the card"
+        );
+        assert!(app.show_help, "a key that is not the card's put it away");
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_help, "Escape did not put the card away");
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::shift(),
+            text: String::from("?"),
+        }));
+        assert!(!app.show_help, "? did not put the card away");
+
+        app.handle_event(&press(Key::N));
+        assert!(
+            app.form.is_some(),
+            "control: N does nothing with the card down"
+        );
     }
 
     /// **Completed subtasks can be put out of the way.**
@@ -5534,6 +5663,150 @@ mod tests {
     fn a_key_the_app_has_no_use_for_is_not_consumed() {
         let mut app = populated();
         assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Ignored);
+    }
+
+    /// **A key held with Alt or the Windows key is not the list's, and
+    /// AltGr+S is not Ctrl+S**: each such chord is the window's or the desktop's and
+    /// arrives carrying its key -- Alt+S re-sorted the list, Alt+Delete asked
+    /// to delete a reminder, Alt+Y then answered yes, Alt+1 snoozed one from
+    /// the snooze prompt and Alt+Tab walked the form's fields; and AltGr+S --
+    /// a Polish `ś` -- opened the save dialog as Ctrl+S does.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round, so B
+    /// twice would end where it began.
+    #[test]
+    fn a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let mut app = populated();
+        let id = app.selected_task_id.expect("control: a selection");
+        app.store.add_subtask(id, "Step 1");
+        app.store.add_subtask(id, "Step 2");
+        let shift_alt = Modifiers {
+            shift: true,
+            ..Modifiers::alt()
+        };
+        let state = |app: &RemindersApp| {
+            (
+                app.sort_mode,
+                app.view,
+                app.selected_task_id,
+                app.store.get(id).map(|t| t.completed),
+                app.store
+                    .get(id)
+                    .map(|t| t.subtasks.iter().map(|s| s.completed).collect::<Vec<_>>()),
+                (
+                    app.sidebar_visible,
+                    app.detail_visible,
+                    app.show_completed_subtasks,
+                    app.show_help,
+                ),
+            )
+        };
+        let before = state(&app);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr, shift_alt] {
+            for k in [
+                Key::S,
+                Key::O,
+                Key::Delete,
+                Key::Space,
+                Key::Enter,
+                Key::N,
+                Key::E,
+                Key::Z,
+                Key::B,
+                Key::D,
+                Key::C,
+                Key::F1,
+                Key::Num1,
+                Key::Num2,
+                Key::Down,
+            ] {
+                assert_eq!(
+                    app.handle_event(&key(k, m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&app), before, "{m:?} {k:?} changed the list");
+                assert!(app.pending_delete.is_none(), "{m:?} {k:?} asked to delete");
+                assert!(app.form.is_none(), "{m:?} {k:?} opened the form");
+                assert!(!app.choosing_snooze, "{m:?} {k:?} asked how long to snooze");
+                assert!(!app.picker.is_open(), "{m:?} {k:?} opened a file dialog");
+            }
+        }
+
+        // The question before a delete answers plain keys only.
+        assert_eq!(app.handle_event(&press(Key::Delete)), EventResult::Consumed);
+        for k in [Key::Y, Key::Enter, Key::N, Key::Escape] {
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                app.handle_event(&key(k, m));
+                assert!(app.store.get(id).is_some(), "{m:?} {k:?} deleted it");
+                assert_eq!(app.pending_delete, Some(id), "{m:?} {k:?} answered");
+            }
+        }
+        app.handle_event(&press(Key::N));
+        assert!(app.pending_delete.is_none(), "control: N keeps it");
+
+        // So does the snooze prompt, and a chord does not put it away.
+        app.handle_event(&press(Key::Z));
+        assert!(app.choosing_snooze, "control: Z asks how long");
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            assert_eq!(app.handle_event(&key(Key::Num1, m)), EventResult::Ignored);
+            assert!(app.choosing_snooze, "{m:?} 1 put the prompt away");
+            assert_eq!(
+                app.store.get(id).and_then(|t| t.snoozed_until),
+                None,
+                "{m:?} 1 snoozed it"
+            );
+        }
+        app.handle_event(&press(Key::Num1));
+        assert!(app.store.get(id).and_then(|t| t.snoozed_until).is_some());
+
+        // The form's keys are plain too.
+        app.open_edit_task(id);
+        let walk = |app: &mut RemindersApp, k: Key, m: Modifiers| app.handle_event(&key(k, m));
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            app.form_field = TaskField::Title;
+            walk(&mut app, Key::Tab, m);
+            assert_eq!(app.form_field, TaskField::Title, "{m:?} Tab moved on");
+            walk(&mut app, Key::Enter, m);
+            walk(&mut app, Key::Escape, m);
+            assert!(app.form.is_some(), "{m:?} Enter or Escape closed the form");
+
+            app.form_field = TaskField::Steps;
+            for k in [Key::Down, Key::Space, Key::Delete] {
+                assert_eq!(walk(&mut app, k, m), EventResult::Ignored);
+                let form = app.form.as_ref().expect("control: the form is up");
+                assert_eq!(form.step_at, 0, "{m:?} {k:?} chose another step");
+                assert_eq!(form.steps.len(), 2, "{m:?} {k:?} took a step off");
+                assert!(
+                    form.steps.iter().all(|s| !s.completed),
+                    "{m:?} {k:?} ticked a step"
+                );
+            }
+
+            app.form_field = TaskField::Priority;
+            let priority = app.form.as_ref().map(|f| f.priority);
+            assert_eq!(walk(&mut app, Key::Right, m), EventResult::Ignored);
+            assert_eq!(
+                app.form.as_ref().map(|f| f.priority),
+                priority,
+                "{m:?} Right stepped the priority"
+            );
+        }
+        app.form_field = TaskField::Title;
+        walk(&mut app, Key::Tab, Modifiers::NONE);
+        assert_ne!(app.form_field, TaskField::Title, "control: Tab moves on");
     }
 
     #[test]
@@ -7728,6 +8001,123 @@ mod tests {
 
     fn key(app: &mut RemindersApp, k: Key) -> EventResult {
         app.handle_event(&press(k))
+    }
+
+    /// **The form's rows are the toolkit's field**: the row with the
+    /// keyboard carries the theme's mark at the user's width, and the others
+    /// none; Tab moves it; a due date or time
+    /// that is not one is red, and so is an empty title once a save has been
+    /// refused for it. They were panels whose edge turned blue.
+    #[test]
+    fn the_forms_rows_are_the_toolkits_field() {
+        let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, make_now());
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        app.open_new_task();
+        let rect_of = |app: &RemindersApp, wanted: TaskField| {
+            let form = app.form.as_ref().expect("the form is open");
+            app.form_rows(form)
+                .0
+                .into_iter()
+                .find(|(field, _)| *field == wanted)
+                .map(|(_, rect)| rect)
+                .expect("the form has the row")
+        };
+        let draws = |app: &RemindersApp, rect: Rect, state: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, app.focus_ring_width);
+                v
+            };
+            let cmds = app.render_commands();
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        let wrong = field::State {
+            invalid: true,
+            ..idle
+        };
+        let title = rect_of(&app, TaskField::Title);
+        let date = rect_of(&app, TaskField::DueDate);
+        let time = rect_of(&app, TaskField::DueTime);
+        assert!(
+            draws(&app, title, focused),
+            "the title row, with the keyboard, has no mark"
+        );
+        assert!(
+            draws(&app, date, idle),
+            "the due date row is not the toolkit's field"
+        );
+
+        key(&mut app, Key::Tab);
+        assert!(
+            draws(&app, date, focused) && draws(&app, title, idle),
+            "Tab did not move the keyboard's mark to the due date"
+        );
+        type_in(&mut app, "2026-13-45");
+        assert!(
+            draws(
+                &app,
+                date,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a due date that is not one is not red"
+        );
+        key(&mut app, Key::Tab);
+        app.handle_event(&with_ctrl(Key::A));
+        type_in(&mut app, "99:99");
+        assert!(
+            draws(
+                &app,
+                time,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a due time that is not one is not red"
+        );
+        assert!(draws(&app, date, wrong), "the wrong date lost its red");
+
+        // An empty title is red once a save has been refused for it.
+        assert!(
+            draws(&app, title, idle),
+            "an empty title is red before any save"
+        );
+        app.save_form();
+        assert!(
+            app.form_error.is_some(),
+            "control: a reminder with no title is refused"
+        );
+        assert!(
+            draws(&app, title, wrong),
+            "an empty title a save refused is not red"
+        );
     }
 
     fn with_shift(k: Key) -> Event {

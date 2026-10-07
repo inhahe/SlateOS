@@ -1,16 +1,3 @@
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(clippy::manual_range_contains)]
-#![allow(clippy::unreadable_literal)]
-
 //! Slate OS Pinball — classic pinball arcade game.
 //!
 //! Features a tall vertical playfield with two flippers (left/right),
@@ -616,6 +603,168 @@ enum Hold {
     LeftFlipper,
     RightFlipper,
     Plunger,
+}
+
+/// How the scene, drawn at its design size, sits in a window: one scale
+/// for everything and an offset that centres it.
+///
+/// One scale rather than a layout solved afresh, because the scene's
+/// proportions are the game: the physics is measured in the table's own
+/// units, and a table stretched or re-proportioned to a window would be a
+/// different table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fit {
+    scale: f32,
+    dx: f32,
+    dy: f32,
+}
+
+impl Fit {
+    /// The largest scale at which the whole scene shows in a window of
+    /// `(w, h)`, centred.
+    fn of((w, h): (f32, f32)) -> Self {
+        let scale = (w / WINDOW_WIDTH).min(h / WINDOW_HEIGHT).max(0.0);
+        Self {
+            scale,
+            dx: ((w - WINDOW_WIDTH * scale) / 2.0).max(0.0),
+            dy: ((h - WINDOW_HEIGHT * scale) / 2.0).max(0.0),
+        }
+    }
+
+    fn x(self, x: f32) -> f32 {
+        self.dx + x * self.scale
+    }
+
+    fn y(self, y: f32) -> f32 {
+        self.dy + y * self.scale
+    }
+
+    fn len(self, v: f32) -> f32 {
+        v * self.scale
+    }
+
+    /// A rectangle of the scene, in the window.
+    fn rect(self, r: Rect) -> Rect {
+        Rect::new(self.x(r.x), self.y(r.y), self.len(r.w), self.len(r.h))
+    }
+
+    fn radii(self, r: CornerRadii) -> CornerRadii {
+        CornerRadii {
+            top_left: self.len(r.top_left),
+            top_right: self.len(r.top_right),
+            bottom_right: self.len(r.bottom_right),
+            bottom_left: self.len(r.bottom_left),
+        }
+    }
+
+    /// A command of the scene, in the window: every position moved and
+    /// scaled, every length -- a size, a line's width, a radius, a font
+    /// size, a text's room -- scaled. A translation inside the scene is a
+    /// length too: added to positions already moved once, it must not move
+    /// them again.
+    fn command(self, cmd: &RenderCommand) -> RenderCommand {
+        let mut out = cmd.clone();
+        match &mut out {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                corner_radii,
+                ..
+            } => {
+                (*x, *y) = (self.x(*x), self.y(*y));
+                (*width, *height) = (self.len(*width), self.len(*height));
+                *corner_radii = self.radii(*corner_radii);
+            }
+            RenderCommand::StrokeRect {
+                x,
+                y,
+                width,
+                height,
+                line_width,
+                corner_radii,
+                ..
+            } => {
+                (*x, *y) = (self.x(*x), self.y(*y));
+                (*width, *height) = (self.len(*width), self.len(*height));
+                *line_width = self.len(*line_width);
+                *corner_radii = self.radii(*corner_radii);
+            }
+            RenderCommand::Text {
+                x,
+                y,
+                font_size,
+                max_width,
+                ..
+            }
+            | RenderCommand::RichText {
+                x,
+                y,
+                font_size,
+                max_width,
+                ..
+            } => {
+                (*x, *y) = (self.x(*x), self.y(*y));
+                *font_size = self.len(*font_size);
+                *max_width = max_width.map(|m| self.len(m));
+            }
+            RenderCommand::Image {
+                x,
+                y,
+                width,
+                height,
+                ..
+            }
+            | RenderCommand::PushClip {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                (*x, *y) = (self.x(*x), self.y(*y));
+                (*width, *height) = (self.len(*width), self.len(*height));
+            }
+            RenderCommand::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                width,
+                ..
+            } => {
+                (*x1, *y1) = (self.x(*x1), self.y(*y1));
+                (*x2, *y2) = (self.x(*x2), self.y(*y2));
+                *width = self.len(*width);
+            }
+            RenderCommand::PushTranslate { dx, dy } => {
+                (*dx, *dy) = (self.len(*dx), self.len(*dy));
+            }
+            RenderCommand::BoxShadow {
+                x,
+                y,
+                width,
+                height,
+                offset_x,
+                offset_y,
+                blur,
+                spread,
+                corner_radii,
+                ..
+            } => {
+                (*x, *y) = (self.x(*x), self.y(*y));
+                (*width, *height) = (self.len(*width), self.len(*height));
+                (*offset_x, *offset_y) = (self.len(*offset_x), self.len(*offset_y));
+                (*blur, *spread) = (self.len(*blur), self.len(*spread));
+                *corner_radii = self.radii(*corner_radii);
+            }
+            RenderCommand::PopClip
+            | RenderCommand::PopTranslate
+            | RenderCommand::PushFont { .. }
+            | RenderCommand::PopFont => {}
+        }
+        out
+    }
 }
 
 /// What a click can land on.
@@ -1513,6 +1662,15 @@ impl Pinball {
     }
 
     fn handle_key(&mut self, ke: &KeyEvent) -> EventResult {
+        // A key pressed with Ctrl, Alt or the Windows key is a chord -- the
+        // window's or the desktop's -- arriving carrying its key: Alt+N asked
+        // to throw the game away and Alt+Z flipped. Every binding is on the
+        // key itself, so a press is the table's only with nothing but Shift
+        // held (Shift is a flipper). A release always is: a flipper let go
+        // with Alt down must still come back.
+        if ke.pressed && !textline::is_plain(ke.modifiers) {
+            return EventResult::Ignored;
+        }
         // The flippers and the plunger answer the key coming up as well as
         // going down; everything else only its press.
         if ke.key == Key::F1 {
@@ -1675,26 +1833,28 @@ impl Pinball {
 
     /// The window at `size`, with every control's hit box.
     ///
-    /// The table is drawn at its own size -- every collision bound in the
-    /// physics is measured in it -- and a larger window puts it in the middle
-    /// rather than in the corner.
+    /// The scene -- sidebar, table and footer -- is drawn at its design size,
+    /// the size every collision bound in the physics is measured in, and
+    /// fitted to the window whole ([`Fit`]): scaled by the largest factor at
+    /// which all of it shows, and centred. A larger window gets a larger
+    /// table and a smaller one a smaller table. It was drawn at the design
+    /// size whatever the window was, in the middle of a larger one and
+    /// cropped by a smaller one.
     fn frame_at(&self, (width, height): (f32, f32)) -> Frame<Target> {
         let window = Rect::new(0.0, 0.0, width.max(0.0), height.max(0.0));
         let mut f = Frame::new(window.w, window.h);
         f.clip(window);
         fill(&mut f, window, self.colours.base, 0.0);
-        let dx = ((window.w - WINDOW_WIDTH) / 2.0).max(0.0).floor();
-        let dy = ((window.h - WINDOW_HEIGHT) / 2.0).max(0.0).floor();
-        f.translate(dx, dy);
 
-        f.draw_with(|cmds| cmds.extend(self.render_commands()));
-        self.hit_table(&mut f);
-        self.draw_buttons(&mut f);
-        self.draw_overlay_buttons(&mut f);
-        if self.confirm_new_game {
-            self.draw_confirm(&mut f);
+        let fit = Fit::of((window.w, window.h));
+        let scene = self.scene();
+        for cmd in scene.commands() {
+            f.push(fit.command(cmd));
         }
-        f.untranslate();
+        // In the order they were recorded: the last is on top.
+        for (target, r) in scene.hits() {
+            f.hit(*target, fit.rect(*r));
+        }
 
         if self.show_help {
             // Modal: nothing behind the card can be clicked.
@@ -1710,6 +1870,21 @@ impl Pinball {
             f.hit(Target::HelpCard, window);
         }
         f.unclip();
+        f
+    }
+
+    /// The scene at its design size, `WINDOW_WIDTH` x `WINDOW_HEIGHT`, with
+    /// every control's hit box: what [`Pinball::frame_at`] fits to the
+    /// window.
+    fn scene(&self) -> Frame<Target> {
+        let mut f = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        f.draw_with(|cmds| cmds.extend(self.render_commands()));
+        self.hit_table(&mut f);
+        self.draw_buttons(&mut f);
+        self.draw_overlay_buttons(&mut f);
+        if self.confirm_new_game {
+            self.draw_confirm(&mut f);
+        }
         f
     }
 
@@ -3241,8 +3416,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let c = Colours::of(&p);
             let offs: Vec<_> = [c.panel]
                 .into_iter()
@@ -3266,7 +3440,7 @@ mod tests {
                 };
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -3289,6 +3463,59 @@ mod tests {
     /// table be driven from a seed the test chose.
     fn with_seed(seed: u64) -> Pinball {
         Pinball::with_rng(SeededRng::new(seed))
+    }
+
+    /// **A key pressed with Ctrl, Alt or the Windows key is not the
+    /// table's**: Alt+N asked to throw the game away and Alt+Z flipped, each
+    /// chord arriving carrying its key. A release is always the table's: a
+    /// flipper let go with Alt held comes back.
+    #[test]
+    fn a_key_pressed_with_a_modifier_is_not_the_tables() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let held = |key: Key, pressed: bool, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let mut app = test_app();
+        for m in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::N, Key::Z, Key::M, Key::P, Key::F1] {
+                assert_eq!(
+                    app.handle_event(&held(key, true, m)),
+                    EventResult::Ignored,
+                    "{m:?} {key:?} was taken"
+                );
+            }
+        }
+        assert!(
+            !app.confirm_new_game,
+            "a chord asked to throw the game away"
+        );
+        assert!(
+            !app.left_flipper.pressed && !app.right_flipper.pressed,
+            "a chord flipped"
+        );
+        assert!(!app.show_help, "a chord raised the keys");
+
+        // Pressed plainly, let go with Alt held: the flipper comes back.
+        app.handle_event(&key_press(Key::Z));
+        assert!(app.left_flipper.pressed, "control: Z flips");
+        app.handle_event(&held(Key::Z, false, Modifiers::alt()));
+        assert!(
+            !app.left_flipper.pressed,
+            "a release with Alt held kept the flipper up"
+        );
     }
 
     /// Helper to create a key press event.
@@ -4541,21 +4768,179 @@ mod tests {
         assert!(guitk::probe::rect_of(&app, Target::LeftFlipper).is_none());
     }
 
+    /// The window sizes the fitting tests draw at: the one it asks for,
+    /// larger, wider, taller, cramped and a sliver.
+    const WINDOWS: [(f32, f32); 6] = [
+        (WINDOW_WIDTH, WINDOW_HEIGHT),
+        (1600.0, 1200.0),
+        (1400.0, 500.0),
+        (500.0, 1400.0),
+        (320.0, 360.0),
+        (120.0, 80.0),
+    ];
+
+    /// **A larger window gets a larger table**, centred: the scene is scaled
+    /// whole by the largest factor at which all of it shows. It was drawn at
+    /// one size in the middle of whatever window it had.
     #[test]
-    fn a_larger_window_puts_the_table_in_the_middle() {
+    fn a_larger_window_gets_a_larger_table() {
         let app = test_app();
         let small =
             guitk::probe::rect_of_sized(&app, Target::NewGame, (WINDOW_WIDTH, WINDOW_HEIGHT))
                 .unwrap();
-        let big = guitk::probe::rect_of_sized(
-            &app,
-            Target::NewGame,
-            (WINDOW_WIDTH + 200.0, WINDOW_HEIGHT + 100.0),
-        )
-        .unwrap();
-        assert!((big.x - small.x - 100.0).abs() < 0.01 && (big.y - small.y - 50.0).abs() < 0.01);
-        let frame = app.frame_at((WINDOW_WIDTH + 200.0, WINDOW_HEIGHT + 100.0));
-        assert!(frame.is_balanced());
+        let size = (WINDOW_WIDTH * 2.0 + 200.0, WINDOW_HEIGHT * 2.0);
+        let big = guitk::probe::rect_of_sized(&app, Target::NewGame, size).unwrap();
+        assert!(
+            (big.w - small.w * 2.0).abs() < 0.01,
+            "{small:?} then {big:?}"
+        );
+        assert!(
+            (big.h - small.h * 2.0).abs() < 0.01,
+            "{small:?} then {big:?}"
+        );
+        // Centred across: the 200 points to spare are split either side.
+        assert!((big.x - (small.x * 2.0 + 100.0)).abs() < 0.01, "{big:?}");
+        assert!(app.frame_at(size).is_balanced());
+    }
+
+    /// **The whole scene shows in every window**, scaled and centred --
+    /// nothing drawn outside it, and the scene's corners where the fit puts
+    /// them.
+    #[test]
+    fn the_whole_scene_shows_in_every_window() {
+        let mut app = test_app();
+        launch_and_play(&mut app);
+        for (w, h) in WINDOWS {
+            let fit = Fit::of((w, h));
+            let scene = fit.rect(Rect::new(0.0, 0.0, WINDOW_WIDTH, WINDOW_HEIGHT));
+            assert!(
+                scene.x >= -0.01
+                    && scene.y >= -0.01
+                    && scene.right() <= w + 0.01
+                    && scene.bottom() <= h + 0.01,
+                "{w}x{h}: the scene {scene:?} leaves the window"
+            );
+            // It touches two opposite edges: the largest scale that fits.
+            let snug = (scene.w - w).abs() < 0.01 || (scene.h - h).abs() < 0.01;
+            assert!(snug, "{w}x{h}: {scene:?} could be larger");
+            let f = app.frame_at((w, h));
+            assert!(f.is_balanced());
+            for cmd in f.commands() {
+                if let RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } = cmd
+                {
+                    assert!(
+                        *x >= -0.01
+                            && *y >= -0.01
+                            && x + width <= w + 0.01
+                            && y + height <= h + 0.01,
+                        "{w}x{h}: {x},{y} {width}x{height} leaves the window"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A control is clicked where it is drawn, in any window**: a press
+    /// on the table's left half, where the fit draws it, holds the left
+    /// flipper, and one on the Pause label, where it is drawn, pauses. Read
+    /// from the picture rather than the hit boxes, which a test through the
+    /// boxes would only agree with.
+    #[test]
+    fn a_control_is_clicked_where_it_is_drawn_in_any_window() {
+        for size in WINDOWS {
+            let fit = Fit::of(size);
+            let mut app = test_app();
+            launch_and_play(&mut app);
+            let (tx, ty) = (Pinball::table_origin_x(), Pinball::table_origin_y());
+            let (x, y) = (
+                fit.x(tx + TABLE_WIDTH * 0.25),
+                fit.y(ty + TABLE_HEIGHT * 0.5),
+            );
+            app.click_at(x, y, MouseButton::Left, size);
+            assert_eq!(app.held, Some(Hold::LeftFlipper), "{size:?}: the left half");
+
+            let mut app = test_app();
+            launch_and_play(&mut app);
+            // A window too small for the label draws the button without it.
+            let Some((x, y)) = app
+                .frame_at(size)
+                .commands()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Text {
+                        x,
+                        y,
+                        text,
+                        font_size,
+                        font_weight,
+                        ..
+                    } if text == "Pause" => Some((
+                        x + guitk::text::measure(text, *font_size, *font_weight) / 2.0,
+                        y + guitk::text::line_height(*font_size, *font_weight) / 2.0,
+                    )),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+            app.click_at(x, y, MouseButton::Left, size);
+            assert_eq!(app.phase, GamePhase::Paused, "{size:?}: Pause");
+        }
+    }
+
+    /// **Every length is scaled and every position moved once**: a scene's
+    /// command, fitted, is where the fit says, a translation inside the
+    /// scene included.
+    #[test]
+    fn a_fitted_command_is_where_the_fit_says() {
+        let fit = Fit {
+            scale: 2.0,
+            dx: 10.0,
+            dy: 20.0,
+        };
+        let fitted = fit.command(&RenderCommand::Text {
+            x: 5.0,
+            y: 6.0,
+            text: "Score".into(),
+            color: Color::from_hex(0x00_00_00),
+            font_size: 12.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        assert!(matches!(
+            fitted,
+            RenderCommand::Text { x, y, font_size, max_width: Some(m), .. }
+                if x == 20.0 && y == 32.0 && font_size == 24.0 && m == 80.0
+        ));
+        assert_eq!(
+            fit.command(&RenderCommand::PushTranslate { dx: 3.0, dy: 4.0 }),
+            RenderCommand::PushTranslate { dx: 6.0, dy: 8.0 }
+        );
+        assert_eq!(
+            fit.command(&RenderCommand::Line {
+                x1: 1.0,
+                y1: 2.0,
+                x2: 3.0,
+                y2: 4.0,
+                color: Color::from_hex(0x00_00_00),
+                width: 1.5,
+            }),
+            RenderCommand::Line {
+                x1: 12.0,
+                y1: 24.0,
+                x2: 16.0,
+                y2: 28.0,
+                color: Color::from_hex(0x00_00_00),
+                width: 3.0,
+            }
+        );
     }
 
     // ── Keys ────────────────────────────────────────────────────────

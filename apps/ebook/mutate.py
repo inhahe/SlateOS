@@ -202,6 +202,166 @@ MAIN = [
         "                    if false {",
         [BUTTON],
     ),
+    (
+        'an announced theme is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as the reader's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a reader that keeps nothing follows the file',
+        '        if !self.keeps_settings {\n            return false;\n        }\n        let (theme, problem)',
+        '        let (theme, problem)',
+        ['a_reader_a_test_builds_follows_no_theme'],
+    ),
+    (
+        'a re-read keeps the theme it had',
+        '        let mut changed = std::mem::replace(&mut self.theme, theme) != theme;',
+        '        let mut changed = self.theme != theme;',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a theme written by hand that the reader does not know is not said',
+        '            changed |= self.status != problem;\n            self.status = problem;',
+        '            changed |= self.status != problem;',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        changed\n    }\n\n    /// Get current theme colors.',
+        '        changed && false\n    }\n\n    /// Get current theme colors.',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read always says it changed',
+        '        changed\n    }\n\n    /// Get current theme colors.',
+        '        changed || true\n    }\n\n    /// Get current theme colors.',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if event.key == Key::F1 && plain {',
+        '        if event.key == Key::F1 {',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'a chord answers the question before a book is removed',
+        '                _ if !plain => {}\n',
+        '',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.modifiers.ctrl {',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    # The search's typing is textline's editor's since 2026-10-04, which types
+    # only what a key typed and no command's letter: the rule is textline's.
+    # What is this program's is handing the editor the key as it came.
+    (
+        "a command's letter is typed into the search",
+        '            &mut self.search_editor,\n            event,\n',
+        '            &mut self.search_editor,\n'
+        '            &KeyEvent {\n'
+        '                modifiers: guitk::event::Modifiers::NONE,\n'
+        '                ..event.clone()\n'
+        '            },\n',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'a chord works the reader',
+        '        if !plain {\n            return false;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    # -- the shortcut card's hold on the pointer
+    (
+        'a press goes through the shortcut card',
+        '        if self.show_help {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n',
+        '        if false {\n'
+        '            // The card is modal for the pointer as it is for the keys: a\n',
+        ['test_mouse_click_library_under_the_card'],
+    ),
+    (
+        'only the left button puts the card away',
+        '            if matches!(event.kind, MouseEventKind::Press(_)) {\n'
+        '                self.show_help = false;\n',
+        '            if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {\n'
+        '                self.show_help = false;\n',
+        ['test_mouse_click_library_under_the_card'],
+    ),
+]
+
+# The search box is the toolkit's field, in the reading theme's colours, and
+# edited by textline's editor (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+SEARCH_BOX = "the_search_box_is_the_toolkits_field_in_the_reading_theme"
+
+MAIN += [
+    (
+        "the search box never has the keyboard's mark",
+        "                focused: !self.show_help,\n",
+        "                focused: false,\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "a search that found nothing is not red",
+        "                    && self.searched.as_deref() == Some(self.search_query.as_str()),\n",
+        "                    && false,\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "a query not yet searched for is red",
+        "                    && self.searched.as_deref() == Some(self.search_query.as_str()),\n",
+        "                    && true,\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "a sepia page's box is the desktop's",
+        "        p.crust = tc.background;\n",
+        "",
+        [SEARCH_BOX],
+    ),
+    (
+        "the search's editor is not reloaded",
+        "        if self.search_editor.text() != self.search_query {\n"
+        "            self.search_editor.set_text(&self.search_query);\n"
+        "        }\n"
+        "        let edit = textline::apply_key(\n",
+        "        let edit = textline::apply_key(\n",
+        ["test_search_backspace"],
+    ),
+    (
+        "a cut takes nothing to the clipboard",
+        "            self.search_clipboard = copied;\n",
+        "            let _ = copied;\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "the search box's keys come after the window's chords",
+        "        if self.view == AppView::Reading\n"
+        "            && self.search_active\n"
+        "            && let Some(taken) = self.search_box_key(event)\n",
+        "        if self.view == AppView::Reading\n"
+        "            && self.search_active\n"
+        "            && !textline::is_ctrl_chord(event.modifiers)\n"
+        "            && let Some(taken) = self.search_box_key(event)\n",
+        [SEARCH_BOX],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [SEARCH_BOX],
+    ),
 ]
 
 TABLES = {

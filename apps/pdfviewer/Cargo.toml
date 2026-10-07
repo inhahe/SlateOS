@@ -25,6 +25,8 @@ deflate = { path = "../../deflate" }
 # The window itself: `app::launch` is what turns the renderer below into a
 # program the desktop can open, rather than a struct with a `main` that returns.
 oswindow = { path = "../../gui/window" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a viewer key nor typing.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # `appearance::palette_check`.

@@ -544,6 +544,12 @@ def _snippet(text: str, q: str, width: int = 220) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The entries are UTF-8 (arrows, em dashes, accented names), and Python on
+    # Windows writes to a console or a redirect in cp1252: printing a title
+    # with a `→` in it raised UnicodeEncodeError after the first hit or two.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("query", nargs="*")

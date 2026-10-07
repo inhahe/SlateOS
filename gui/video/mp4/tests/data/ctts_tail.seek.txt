@@ -1,0 +1,22 @@
+# ctts_tail.mp4: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 1024 0 K__ 0
+packet 0 3072 1024 ___ 0
+packet 0 2048 2048 ___ 0
+packet 0 4096 3072 ___ 0
+packet 0 3072 4096 ___ 0
+packet 0 5120 5120 ___ 0
+seek 250
+packet 0 1024 0 K__ 0
+packet 0 3072 1024 ___ 0
+packet 0 2048 2048 ___ 0
+packet 0 4096 3072 ___ 0
+packet 0 3072 4096 ___ 0
+packet 0 5120 5120 ___ 0
+seek 400
+packet 0 1024 0 K__ 0
+packet 0 3072 1024 ___ 0
+packet 0 2048 2048 ___ 0
+packet 0 4096 3072 ___ 0
+packet 0 3072 4096 ___ 0
+packet 0 5120 5120 ___ 0

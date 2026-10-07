@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 # The chrome and the cards every game draws in the user's theme (C-Q16, §1422).
 gamechrome = { path = "../gamechrome" }
+# The undo history: the toolkit's tree, kept of whole games (C-Q24).
+statehistory = { path = "../statehistory" }
 guitk = { path = "../../gui/toolkit" }
 randrange = { path = "../../randrange" }
 # The window. Without it `main` was `let _app = SolitaireApp::new();` -- it

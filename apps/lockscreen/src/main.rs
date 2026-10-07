@@ -21,6 +21,7 @@ use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use guitk::field;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
@@ -57,10 +58,10 @@ const AVATAR_FONT_SIZE: f32 = 36.0;
 
 /// Password field width.
 const PASSWORD_FIELD_WIDTH: f32 = 320.0;
-/// Password field height.
+/// Password field height. Its corners are the theme's field's.
 const PASSWORD_FIELD_HEIGHT: f32 = 48.0;
-/// Password field corner radius.
-const PASSWORD_FIELD_RADIUS: f32 = 24.0;
+/// How far the caret stops short of the password field's top and bottom.
+const PASSWORD_CARET_INSET: f32 = 14.0;
 /// Password dot diameter (for masked characters).
 const PASSWORD_DOT_DIAMETER: f32 = 10.0;
 /// Spacing between password dots.
@@ -540,6 +541,17 @@ impl LockScreenConfig {
         }
         config
     }
+
+    /// The settings `lockscreen.yaml` holds, read again from `doc` over the
+    /// rest of this configuration: what an announcement that the file changed
+    /// asks for. The clock's two come from the file as at startup -- a file
+    /// deleted reads as their defaults -- and the rest, which the file does
+    /// not hold, stay as they are.
+    pub fn reread(&mut self, doc: &yamldoc::Document) {
+        let fresh = Self::from_settings(doc);
+        self.show_clock_seconds = fresh.show_clock_seconds;
+        self.show_date = fresh.show_date;
+    }
 }
 
 impl Default for LockScreenConfig {
@@ -959,6 +971,10 @@ pub struct LockScreen {
     submit_hovered: bool,
     /// Whether the password field is focused.
     password_focused: bool,
+    /// How wide the mark is round the password box while it has the
+    /// keyboard: the user's focus width (`App::appearance_changed`), the
+    /// toolkit's until it is known.
+    focus_ring_width: f32,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1003,6 +1019,7 @@ impl LockScreen {
             unlock_requested: false,
             submit_hovered: false,
             password_focused: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
         }
     }
 
@@ -1316,6 +1333,14 @@ impl LockScreen {
                 self.screen_height = *height as f32;
                 EventResult::Consumed
             }
+            // The Settings program saved the clock's settings -- or another
+            // copy of this screen did, or someone edited the file -- and the
+            // desktop says so (`design-decisions.md` §1418, §1434). Read at
+            // startup only, the change waited for the next lock.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                self.config.reread(&settingsfile::load(CONFIG_NAME));
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -1343,9 +1368,13 @@ impl LockScreen {
                     | Key::ScrollLock => EventResult::Ignored,
                     _ => {
                         self.enter_password_mode();
-                        // If the key was a printable character, also type it.
-                        for ch in key.typed() {
-                            self.type_char(ch);
+                        // If the key typed something, also type it -- what a
+                        // key typed, AltGr's among it, and not a command's
+                        // letter, which a chord carries.
+                        if textline::types_into_field(key) {
+                            for ch in key.typed() {
+                                self.type_char(ch);
+                            }
                         }
                         EventResult::Consumed
                     }
@@ -1373,12 +1402,17 @@ impl LockScreen {
                     self.clear_password();
                     EventResult::Consumed
                 }
-                _ => {
+                // What a key typed, AltGr's among it -- German `@` is AltGr+Q
+                // -- and not a command's letter: a chord carries its letter as
+                // text, and Ctrl+K put a `k` in the password the user then
+                // could not see to take out.
+                _ if textline::types_into_field(key) => {
                     for ch in key.typed() {
                         self.type_char(ch);
                     }
                     EventResult::Consumed
                 }
+                _ => EventResult::Ignored,
             },
         }
     }
@@ -1412,10 +1446,20 @@ impl LockScreen {
                         EventResult::Consumed
                     }
                     MouseEventKind::Move => {
-                        // Update submit button hover state.
+                        // Update submit button hover state -- a change is a
+                        // repaint. It said `Ignored` either way, so the button
+                        // lit or went dark only when something else redrew.
                         let submit_rect = self.submit_button_rect();
-                        self.submit_hovered = hit_test(mouse.x, mouse.y, &submit_rect);
-                        EventResult::Ignored
+                        let over = hit_test(mouse.x, mouse.y, &submit_rect);
+                        if over == self.submit_hovered {
+                            return EventResult::Ignored;
+                        }
+                        self.submit_hovered = over;
+                        EventResult::Consumed
+                    }
+                    MouseEventKind::Leave if self.submit_hovered => {
+                        self.submit_hovered = false;
+                        EventResult::Consumed
                     }
                     _ => EventResult::Ignored,
                 }
@@ -1731,33 +1775,31 @@ impl LockScreen {
     }
 
     /// Render the password input field.
+    /// How the password box is drawn now: marked while it has the keyboard,
+    /// red once a password has been refused -- until the typing changes --
+    /// and switched off while a lockout refuses every key. Never lit under
+    /// the pointer: it has no press of its own; the screen takes every press.
+    fn password_field_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: self.password_focused,
+            disabled: self.lockout.is_active(),
+            invalid: self.show_error,
+        }
+    }
+
     fn render_password_field(&self, tree: &mut RenderTree, x: f32, y: f32) {
-        let border_color = if self.password_focused {
-            self.palette.blue
-        } else {
-            self.palette.surface2
-        };
-
-        // Field background.
-        tree.fill_rounded_rect(
-            x,
-            y,
-            PASSWORD_FIELD_WIDTH,
-            PASSWORD_FIELD_HEIGHT,
-            self.palette.surface0,
-            CornerRadii::all(PASSWORD_FIELD_RADIUS),
+        // The toolkit's field, in the theme's shape: it was a rounded slab
+        // with a blue edge for the keyboard whatever the theme said, and a
+        // wrong password showed only in the words under it.
+        let state = self.password_field_state();
+        field::draw(
+            tree,
+            &self.palette,
+            guitk::frame::Rect::new(x, y, PASSWORD_FIELD_WIDTH, PASSWORD_FIELD_HEIGHT),
+            state,
+            self.focus_ring_width,
         );
-
-        // Field border.
-        tree.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: PASSWORD_FIELD_WIDTH,
-            height: PASSWORD_FIELD_HEIGHT,
-            color: border_color,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(PASSWORD_FIELD_RADIUS),
-        });
 
         if self.password_buffer.is_empty() {
             // Placeholder text.
@@ -1772,8 +1814,10 @@ impl LockScreen {
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
-            // Masked dots for each character entered.
-            let dot_count = self.password_buffer.len();
+            // A dot for each character entered -- characters, not bytes: an
+            // `é` is two bytes and was two dots, so the count on screen was
+            // not the count typed.
+            let dot_count = self.password_buffer.chars().count();
             let total_dot_width = dot_count as f32 * PASSWORD_DOT_SPACING;
             let dots_start_x = x + 20.0;
             let dot_cy = y + PASSWORD_FIELD_HEIGHT / 2.0;
@@ -1812,6 +1856,23 @@ impl LockScreen {
             }
 
             tree.unclip();
+        }
+
+        // The caret, after the last dot -- or at the start of an empty box --
+        // while the box has the keyboard. There was none: nothing on the
+        // screen said where the next character would go, or that one would.
+        if state.focused && !state.disabled {
+            let shown = (self.password_buffer.chars().count() as f32 * PASSWORD_DOT_SPACING)
+                .min(PASSWORD_FIELD_WIDTH - 40.0);
+            let caret_x = x + 20.0 + shown;
+            tree.push(RenderCommand::Line {
+                x1: caret_x,
+                y1: y + PASSWORD_CARET_INSET,
+                x2: caret_x,
+                y2: y + PASSWORD_FIELD_HEIGHT - PASSWORD_CARET_INSET,
+                color: self.palette.text,
+                width: guitk::textedit::CARET_WIDTH,
+            });
         }
     }
 
@@ -2196,6 +2257,10 @@ impl oswindow::app::App for LockScreen {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         String::from("Lock Screen")
     }
@@ -2330,6 +2395,62 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// **A changed settings file is read again when the desktop says so.**
+    /// The Settings program saves `lockscreen.yaml` and the desktop announces
+    /// it; the clock was read at startup only, so the change waited for the
+    /// next lock. Another program's file, and the desktop's own, are not this
+    /// screen's; and a file deleted reads as the defaults.
+    #[test]
+    fn a_changed_settings_file_is_read_again_when_announced() {
+        settingsfile::testing::with_scratch_config("lockscreen-reread", |dir| {
+            let mut ls = single_user_lockscreen();
+            assert!(
+                !ls.config.show_clock_seconds,
+                "the default shows no seconds"
+            );
+            let folder = dir.join("slateos");
+            std::fs::create_dir_all(&folder).expect("the settings folder");
+            let file = folder.join("lockscreen.yaml");
+            std::fs::write(&file, "clock:\n  seconds: true\n  date: false\n")
+                .expect("the settings file");
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+
+            assert_eq!(ls.handle_event(&announce(b"notes")), EventResult::Ignored);
+            let desktop = Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Appearance,
+            };
+            assert_eq!(ls.handle_event(&desktop), EventResult::Ignored);
+            assert!(
+                !ls.config.show_clock_seconds,
+                "another file was read as this one"
+            );
+
+            assert_eq!(
+                ls.handle_event(&announce(b"lockscreen")),
+                EventResult::Consumed
+            );
+            assert!(ls.config.show_clock_seconds, "the seconds were not read");
+            assert!(!ls.config.show_date, "the date was not read");
+            assert_eq!(
+                ls.config.wallpaper_tint_alpha,
+                LockScreenConfig::default().wallpaper_tint_alpha,
+                "a setting the file does not hold was changed"
+            );
+
+            std::fs::remove_file(&file).expect("delete the file");
+            ls.handle_event(&announce(b"lockscreen"));
+            assert!(
+                !ls.config.show_clock_seconds,
+                "a deleted file kept its seconds"
+            );
+            assert!(ls.config.show_date, "a deleted file kept its date");
+        });
     }
 
     fn single_user_lockscreen() -> LockScreen {
@@ -3869,5 +3990,243 @@ mod tests {
             !unset.show_clock_seconds && unset.show_date,
             "unset is not the default"
         );
+    }
+    // -- The password box is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls); chords stay out of it
+
+    /// The password box, where the screen draws it now.
+    fn password_box(ls: &mut LockScreen) -> guitk::frame::Rect {
+        let x = ls.center_x() - PASSWORD_FIELD_WIDTH / 2.0 + ls.shake.tick(0);
+        guitk::frame::Rect::new(
+            x,
+            ls.password_field_y(),
+            PASSWORD_FIELD_WIDTH,
+            PASSWORD_FIELD_HEIGHT,
+        )
+    }
+
+    /// Whether the screen draws exactly the toolkit's field for the password
+    /// box in `state` -- and, unless `state` has the keyboard, not the
+    /// focused one as well.
+    fn draws_password_box(ls: &mut LockScreen, p: &Palette, state: field::State) -> bool {
+        let rect = password_box(ls);
+        let ring = ls.focus_ring_width;
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, ring);
+            v
+        };
+        let cmds = ls.render().commands;
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// **The password box is the toolkit's field**: marked while it has the
+    /// keyboard, in the theme's way and the user's width; red once a
+    /// password is refused, until the typing changes; switched off while a
+    /// lockout refuses every key. It was a rounded slab with a blue edge,
+    /// and a refusal showed only in the words under it.
+    #[test]
+    fn the_password_box_is_the_toolkits_field() {
+        use oswindow::app::App as _;
+
+        let mut ls = single_user_lockscreen();
+        let mut p = ls.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        ls.theme_changed(&p);
+        ls.appearance_changed(&appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..appearance::AppearanceSettings::default()
+        });
+        assert!(
+            ls.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        ls.enter_password_mode();
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws_password_box(&mut ls, &p, focused),
+            "the password box does not have the keyboard"
+        );
+
+        type_password(&mut ls, "wronghorse");
+        ls.handle_event(&enter());
+        assert!(
+            draws_password_box(
+                &mut ls,
+                &p,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a refused password does not turn the box red"
+        );
+        ls.type_char('x');
+        assert!(
+            draws_password_box(&mut ls, &p, focused),
+            "the box stays red once the typing changes"
+        );
+
+        ls.lockout.start(30);
+        assert!(
+            draws_password_box(
+                &mut ls,
+                &p,
+                field::State {
+                    disabled: true,
+                    ..focused
+                }
+            ),
+            "the box is not switched off while a lockout refuses every key"
+        );
+    }
+
+    /// A key held with `modifiers` that typed `text`.
+    fn chord_key(key: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        })
+    }
+
+    /// **A chord's letter is not typed into the password, and AltGr's is.**
+    /// A chord carries its letter as text, and Ctrl+K put a `k` in a
+    /// password the user could not see to take out; Alt+X put an `x`.
+    #[test]
+    fn a_chord_is_not_typed_into_the_password_and_altgr_is() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        for (k, t, m) in [
+            (Key::K, "k", Modifiers::ctrl()),
+            (
+                Key::X,
+                "x",
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
+            (
+                Key::E,
+                "e",
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        ] {
+            assert_eq!(
+                ls.handle_event(&chord_key(k, t, m)),
+                EventResult::Ignored,
+                "{m:?}+{k:?} was taken"
+            );
+        }
+        assert_eq!(
+            ls.password_buffer, "",
+            "a chord's letter went into the password"
+        );
+        ls.handle_event(&chord_key(
+            Key::Q,
+            "@",
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(ls.password_buffer, "@", "AltGr+Q did not type its @");
+
+        // From the clock, a chord still brings the password up, and types
+        // nothing into it.
+        let mut ls = single_user_lockscreen();
+        ls.handle_event(&chord_key(Key::K, "k", Modifiers::ctrl()));
+        assert_eq!(ls.password_buffer, "");
+    }
+
+    /// The password's dots as the screen draws them: every fill the size of
+    /// one.
+    fn dots(ls: &mut LockScreen) -> usize {
+        ls.render()
+            .commands
+            .iter()
+            .filter(|c| {
+                matches!(c, RenderCommand::FillRect { width, height, .. }
+                    if (*width - PASSWORD_DOT_DIAMETER).abs() < 0.01
+                        && (*height - PASSWORD_DOT_DIAMETER).abs() < 0.01)
+            })
+            .count()
+    }
+
+    /// **One dot per character typed, and the caret after the last.** The
+    /// dots were counted in bytes, so `é` showed two; and there was no
+    /// caret, so nothing said where the next character would go.
+    #[test]
+    fn one_dot_per_character_and_the_caret_after_them() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        let before = dots(&mut ls);
+        type_password(&mut ls, "\u{e9}a");
+        assert_eq!(dots(&mut ls) - before, 2, "two characters are not two dots");
+
+        let rect = password_box(&mut ls);
+        let caret = ls
+            .render()
+            .commands
+            .iter()
+            .rev()
+            .find_map(|c| match *c {
+                RenderCommand::Line { x1, x2, .. }
+                    if (x1 - x2).abs() < 0.01 && x1 > rect.x && x1 < rect.right() =>
+                {
+                    Some(x1)
+                }
+                _ => None,
+            })
+            .expect("no caret in the password box");
+        let after = rect.x + 20.0 + 2.0 * PASSWORD_DOT_SPACING;
+        assert!(
+            (caret - after).abs() < 0.5,
+            "the caret is at {caret}, not after the second dot at {after}"
+        );
+    }
+
+    /// **The submit button's light is a repaint.** The pointer's movement
+    /// said `Ignored` whether it lit the button or not, so it lit or went
+    /// dark only when something else redrew.
+    #[test]
+    fn a_change_in_the_submit_buttons_light_is_a_repaint() {
+        let mut ls = single_user_lockscreen();
+        ls.enter_password_mode();
+        let r = ls.submit_button_rect();
+        let at = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+        let mouse = |kind, (x, y): (f32, f32)| Event::Mouse(MouseEvent { x, y, kind });
+        assert_eq!(
+            ls.handle_event(&mouse(MouseEventKind::Move, at)),
+            EventResult::Consumed,
+            "lighting the button is not a repaint"
+        );
+        assert!(ls.submit_hovered);
+        assert_eq!(
+            ls.handle_event(&mouse(MouseEventKind::Move, at)),
+            EventResult::Ignored,
+            "moving within the button is a repaint"
+        );
+        assert_eq!(
+            ls.handle_event(&mouse(MouseEventKind::Leave, at)),
+            EventResult::Consumed,
+            "the pointer leaving does not put the light out"
+        );
+        assert!(!ls.submit_hovered);
     }
 }

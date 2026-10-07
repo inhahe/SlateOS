@@ -13,7 +13,9 @@ hands the program's path to the file manager.
 
 And, from 2026-09-27, the machine's totals: `read_system`'s doc said a figure
 `/proc/meminfo` does not carry keeps the value last read, and the code zeroed
-it.
+it.  And, from 2026-10-04, the list of keys' hold on the pointer: a press with
+it up puts it away and reaches nothing under it, and the wheel scrolls nothing
+it covers.
 
 What is deliberately not here: where the box and its buttons are drawn.  The
 pointer tests click the middle of the rectangles `run_box_layout` returns, so
@@ -45,8 +47,39 @@ MENU = "the_context_menus_open_file_location_looks_for_the_program"
 HAND_OFF = "show_in_folder_hands_the_path_to_the_file_manager"
 READ_SYSTEM = "the_system_figures_are_read_and_not_invented"
 KEEP = "a_figure_the_file_stops_carrying_keeps_its_last_value"
+CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
 
 MUTATIONS = [
+    # --- The list of keys takes the pointer (known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it) ---
+    (
+        "a press goes through the list of keys",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n",
+        "",
+        [CARD],
+    ),
+    (
+        "only the left button puts the list of keys away",
+        "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n",
+        "                MouseEventKind::Press(MouseButton::Left) | MouseEventKind::DoubleClick(_) => {\n",
+        [CARD],
+    ),
+    (
+        "a press under the list of keys leaves it up",
+        "                    self.show_help = false;\n"
+        "                    return EventResult::Consumed;\n",
+        "                    return EventResult::Consumed;\n",
+        [CARD],
+    ),
+    (
+        "the wheel scrolls what the list of keys covers",
+        "                MouseEventKind::Scroll { .. } => return EventResult::Ignored,\n",
+        "",
+        [CARD],
+    ),
     # --- Splitting a command line ---
     (
         "white space does not end a word",
@@ -118,7 +151,7 @@ MUTATIONS = [
     # --- The box and the keys ---
     (
         "N alone is New Task",
-        "        if key.key == Key::N && key.modifiers.ctrl {",
+        "        if key.key == Key::N && ctrl {",
         "        if key.key == Key::N {",
         [PLAIN_N],
     ),
@@ -136,8 +169,8 @@ MUTATIONS = [
     ),
     (
         "the toolbar's New Task does nothing",
-        "        } else if mx < 170.0 {\n            self.open_run_box();",
-        "        } else if mx < 170.0 {\n            self.status_message.clear();",
+        "                ToolbarAction::NewTask => self.open_run_box(),\n",
+        "                ToolbarAction::NewTask => self.status_message.clear(),\n",
         [POINTER],
     ),
     (
@@ -291,6 +324,174 @@ MUTATIONS = [
         "            set_kib(&mut info.swap_used, mem.swap_used_kib());\n",
         "",
         [READ_SYSTEM, KEEP],
+    ),
+]
+
+ASK = "the_identify_button_and_ctrl_i_ask_for_a_window_pick"
+NAMED = "a_picked_window_names_and_selects_its_program"
+BUTTONS = "every_toolbar_button_is_pressed_where_it_is_drawn"
+
+MUTATIONS += [
+    # The window pick, through lane F's `App::take_pick` (2026-10-04), and
+    # the toolbar pressed where it is drawn.
+    (
+        "the Identify button asks for nothing",
+        "                ToolbarAction::IdentifyWindow => self.toggle_window_pick(),\n",
+        "                ToolbarAction::IdentifyWindow => {}\n",
+        [ASK],
+    ),
+    (
+        "pressing Identify again does not give the pick up",
+        "        if self.window_picker.active {\n            self.cancel_window_pick();\n        } else {\n",
+        "        if false {\n            self.cancel_window_pick();\n        } else {\n",
+        [ASK],
+    ),
+    (
+        "one press asks for a pick at every turn",
+        "        self.pick_request.take()\n",
+        "        self.pick_request\n",
+        [ASK],
+    ),
+    (
+        "Escape does not give the pick up",
+        "        if key.key == Key::Escape && plain && self.window_picker.active {\n            self.cancel_window_pick();\n            return EventResult::Consumed;\n        }\n",
+        "",
+        [ASK],
+    ),
+    (
+        "AltGr+I picks",
+        "        if key.key == Key::I && ctrl {\n",
+        "        if key.key == Key::I && key.modifiers.ctrl && !key.modifiers.super_key {\n",
+        [ASK],
+    ),
+    (
+        "nothing says the next click is a pick",
+        "        if self.window_picker.active {\n            tree.commands.extend(self.window_picker.render(\n",
+        "        if false {\n            tree.commands.extend(self.window_picker.render(\n",
+        [ASK],
+    ),
+    (
+        "the picked window's process is not selected",
+        "                        self.select_row(row);\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "the list the process is selected in is not shown",
+        "                            self.set_tab(Tab::Processes);\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "a pick that came to nothing leaves the banner up",
+        "        // Whatever the answer, the pick is over.\n        self.window_picker.cancel();\n",
+        "",
+        [NAMED],
+    ),
+    (
+        "a press beside a button presses it",
+        "        .find(|(r, _)| r.contains(x, y))\n",
+        "        .find(|(r, _)| x < r.right() + 6.0 && y >= r.y && y < r.bottom())\n",
+        [BUTTONS],
+    ),
+]
+
+# The filter box is the toolkit's field, edited by textline's editor; the
+# keys bound to themselves are plain, and a Ctrl chord is not AltGr
+# (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+FILTER = "the_filter_box_is_the_toolkits_field"
+EDITS = "the_filter_box_edits_like_a_field_and_types_no_chord"
+FILTER_PRESS = "a_press_in_the_filter_puts_the_caret_under_the_pointer"
+PLAIN = "a_chord_is_none_of_the_process_explorers_keys"
+CARET = "the_filter_caret_follows_the_glyphs"
+
+MUTATIONS += [
+    (
+        "a chord raises the list of keys",
+        "        if key.key == Key::F1 && plain {\n",
+        "        if key.key == Key::F1 {\n",
+        [PLAIN],
+    ),
+    (
+        "a chord works the explorer's keys",
+        "        if !plain {\n            return EventResult::Ignored;\n        }\n        match key.key {\n",
+        "        match key.key {\n",
+        [PLAIN],
+    ),
+    (
+        "AltGr+N opens New Task",
+        "        if key.key == Key::N && ctrl {",
+        "        if key.key == Key::N && key.modifiers.ctrl {",
+        [EDITS],
+    ),
+    (
+        "AltGr+F focuses the filter",
+        "        if key.key == Key::F && ctrl {\n",
+        "        if key.key == Key::F && key.modifiers.ctrl {\n",
+        [PLAIN],
+    ),
+    (
+        # What the box did before the editor: type whatever text a key
+        # carried, a chord's letter among it.
+        "the filter types a chord's letter",
+        "                self.sync_filter_editor();\n"
+        "                let before = self.filter_editor.text().to_owned();\n",
+        "                if key.types_text() && !textline::types_into_field(key) {\n"
+        "                    self.filter_text.push_str(&key.text);\n"
+        "                    self.rebuild_visible_list();\n"
+        "                    return EventResult::Consumed;\n"
+        "                }\n"
+        "                self.sync_filter_editor();\n"
+        "                let before = self.filter_editor.text().to_owned();\n",
+        [EDITS],
+    ),
+    (
+        "the filter box is never lit",
+        "            hovered: self.filter_hovered && !covered,\n",
+        "            hovered: false,\n",
+        [FILTER],
+    ),
+    (
+        "the pointer leaving leaves the filter lit",
+        "                self.hovered_index = None;\n                self.filter_hovered = false;\n",
+        "                self.hovered_index = None;\n",
+        [FILTER],
+    ),
+    (
+        "the filter keeps its mark under the list of keys",
+        "            focused: self.filter_focused && !covered,\n",
+        "            focused: self.filter_focused,\n",
+        [FILTER],
+    ),
+    (
+        "the filter keeps its mark under New Task",
+        "        let covered = self.show_help || self.run_box.is_some();\n",
+        "        let covered = self.show_help;\n",
+        [FILTER],
+    ),
+    (
+        "a filter that matches nothing is not red",
+        "            invalid: !self.filter_text.is_empty() && self.visible_indices.is_empty(),\n",
+        "            invalid: false,\n",
+        [FILTER],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FILTER],
+    ),
+    (
+        "a press leaves the caret at the end",
+        "        self.filter_editor.set_selection_anchor(None);\n        self.filter_editor.set_cursor(cursor);\n",
+        "        self.filter_editor.set_selection_anchor(None);\n",
+        [FILTER_PRESS],
+    ),
+    (
+        "the filter is drawn with no caret",
+        "                focused: state.focused,\n                x: tx,\n",
+        "                focused: false,\n                x: tx,\n",
+        [CARET],
     ),
 ]
 

@@ -12,6 +12,8 @@ guitk = { path = "../../gui/toolkit" }
 # and dropped it. `oswindow` is what turns a `render` into a window a
 # pointer and a keyboard can reach.
 oswindow = { path = "../../gui/window" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither the compass's key nor typing.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

@@ -2091,6 +2091,11 @@ impl PacmanApp {
 /// built the game and dropped it, so no event ever reached this match.
 pub fn handle_event(app: &mut PacmanApp, event: &Event) -> EventResult {
     match event {
+        // Every binding is on the key itself, so a key is the game's only
+        // with nothing but Shift held: a chord with Ctrl, Alt or the Windows
+        // key is the window's or the desktop's and arrives carrying its key
+        // -- Alt+N threw a paused game away.
+        Event::Key(ke) if !textline::is_plain(ke.modifiers) => EventResult::Ignored,
         Event::Key(ke) => app.handle_key(ke.key, ke.pressed),
         Event::Mouse(me) => app.handle_mouse(me),
         Event::Tick { elapsed_ms } => {
@@ -2283,8 +2288,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let chrome = gamechrome::Chrome::of(&p);
             let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
                 .into_iter()
@@ -2309,7 +2313,7 @@ mod tests {
             for (what, f) in every_look(&p) {
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -2365,6 +2369,42 @@ mod tests {
 
     fn press_key(app: &mut PacmanApp, key: Key) -> EventResult {
         handle_event(app, &Event::Key(make_key_event(key)))
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the game's**:
+    /// Alt+N threw a paused game away and Alt+P paused one, each chord
+    /// arriving carrying its key.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_games() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = playing_app();
+        app.score = 700;
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::P, Key::Escape, Key::Up, Key::N] {
+                assert_eq!(
+                    handle_event(&mut app, &Event::Key(probe::press_with(key, held))),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.state, GameState::Playing, "a chord paused the game");
+        assert!(app.queued_dir.is_none(), "a chord steered");
+        app.state = GameState::Paused;
+        handle_event(
+            &mut app,
+            &Event::Key(probe::press_with(Key::N, Modifiers::alt())),
+        );
+        assert_eq!(app.score, 700, "Alt+N threw the paused game away");
     }
 
     fn force_player_tick(app: &mut PacmanApp) {

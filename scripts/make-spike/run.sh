@@ -46,18 +46,51 @@ rm -rf "make-$VER"
 tar xf "$SLATE_MAKE_TARBALL" || exit 1
 cd "make-$VER" || exit 1
 
-export CC="$SLATE_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
+# Configured against SlateOS's libc, not zig's musl: CC is scripts/lib/
+# worktree.sh's link wrapper, so configure's link tests are answered by our
+# libc.a, and its compiles see posix/include, which declares what ours has
+# beyond musl. Until 2026-10-05 CC was zig's cc, which links against musl:
+# configure found no sigsetmask, which ours has, and -- given --host alone --
+# saw its test programs run on Linux, decided it was not cross-compiling, and
+# measured musl, not our libc, in every test it runs
+# (known-issues/D-SPIKES-PORTS-CONFIGURE-AGAINST-ZIGS-MUSL.md).
+# libstubs.a is deliberately not linked -- it and libc.a each carry a panic
+# handler and collide on __rustc::rust_begin_unwind.
+mkdir -p "$SPIKE_LIBS"
+cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
+export CC="$SLATE_LINK_CC" AR="$SLATE_AR" RANLIB="$SLATE_RANLIB"
 
+# --build as well as --host: a program linked against our libc.a cannot run on
+# Linux, so configure must not try. It takes each test it would have run from
+# the answers below instead -- SlateOS's answers, each the one the same test
+# gives on glibc 2.39 (Ubuntu 24.04, configured natively), which ours matches,
+# and each pinned by a host test of the probe in posix/src (`cargo test -p posix
+# make_configures`), so a change of behaviour breaks a test that names it:
+#
+#   ac_cv_func_gettimeofday=yes   gettimeofday fills the timeval with a time
+#       after the epoch and returns 0 (posix/src/time.rs). The cross guess,
+#       "no", made make read the clock through time() alone.
+#   ac_cv_func_strcoll_works=yes  in the C locale strcoll orders "abc" before
+#       "def", "ABC" before "DEF" and "123" before "456". The guess "no" made
+#       make compare names with strcmp.
+#   make_cv_synchronous_posix_spawn=yes  posix_spawn of a program that does not
+#       exist answers ENOENT from the call itself: the program is read before
+#       any process exists (posix/src/spawn.rs). The guess "no" made make fork
+#       and exec every command instead of spawning it.
+#   am_cv_func_iconv_works=yes    an unwritable character is EILSEQ and a full
+#       buffer E2BIG, with nothing written past it (posix/src/iconv.rs); the
+#       guess agreed, by guessing.
+#
 # --disable-shared: SlateOS has no dynamic loader on this path, so everything is
 # a static ET_EXEC. `--without-guile` because GNU Guile is an optional embedded
 # extension language that is not part of what anyone means by "make", and
 # letting configure find a host Guile would link a host library into a cross
 # binary.
-#
-# ac_cv_func_gettimeofday and friends are NOT overridden here: the entire point
-# is to let configure probe our libc through zig's musl headers and reach its
-# own conclusions, then see whether the link agrees.
-./configure --host=x86_64-linux-musl --disable-shared --without-guile \
+./configure --build=x86_64-pc-linux-gnu --host=x86_64-linux-musl \
+    --disable-shared --without-guile \
+    ac_cv_func_gettimeofday=yes ac_cv_func_strcoll_works=yes \
+    make_cv_synchronous_posix_spawn=yes am_cv_func_iconv_works=yes \
     >conf.log 2>&1
 echo "CONFIGURE_EXIT=$?"
 tail -5 conf.log
@@ -93,13 +126,15 @@ else
     echo "       absence of lines here as 'make made no such decisions'."
 fi
 
-# The decisive step. -nostdlib so we get SlateOS's libc, not zig's bundled musl.
-# libc.a twice: it is Rust-built and its intra-archive references are not
-# topologically ordered, so a second pass is cheaper than --start-group.
-# libstubs.a is deliberately not linked — it and libc.a each carry a panic
-# handler and collide on __rustc::rust_begin_unwind.
-mkdir -p "$SPIKE_LIBS"
-cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
+# The decisive step: the link against SlateOS's libc and nothing else, made
+# again on its own so that its counts can be read (the build above linked
+# through the same wrapper). zig's ld.lld itself, given this build's own
+# inputs and then our libc.a, with zig's C++ runtime ahead of it and zig's
+# compiler runtime behind it, which is zig's own order (the wrapper's comment
+# says why the order matters). Not zig's cc driver with -nostdlib, as until
+# 2026-10-01: that puts zig's own musl libc.a behind every link, where it
+# would supply whatever ours lacks instead of a missing symbol being reported
+# (known-issues-resolved/D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC.md).
 
 # Take the object list from make's own build rather than globbing *.o: the
 # tarball ships a `lib/` gnulib subdirectory and a `tests/` tree, and a glob
@@ -112,9 +147,7 @@ if [ -z "$OBJS" ]; then
 fi
 
 GLLIB="lib/libgnu.a"
-"$SLATE_CC" -static -nostdlib -o make-slateos $OBJS "$GLLIB" \
-    "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libc.a" "$SPIKE_LIBS/libunwind.a" \
-    2>slate-link.log
+"$SLATE_LINK_CC" -o make-slateos $OBJS "$GLLIB" 2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 
 MISSING="/tmp/make_missing-$SLATE_LANE.txt"
@@ -149,4 +182,5 @@ if [ -x make-slateos ]; then
     echo "SLATE_MAKE_BUILT"
 else
     echo "NO_SLATE_BINARY"
+    exit 1
 fi

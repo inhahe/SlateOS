@@ -61,6 +61,11 @@
 //! them: the question is whether the feature *reaches* this sequence, not what
 //! the eventual glyph would be. HarfBuzz does the same, and for the same
 //! reason — the answer is used to place a consonant, not to draw one.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's
+//! `src/hb-ot-layout-gsubgpos.hh`, copyright © 2007, 2008, 2009, 2010 Red Hat,
+//! Inc. and © 2010, 2012 Google, Inc. Used under HarfBuzz's licence: see
+//! `gui/font/licenses/harfbuzz-COPYING`.
 
 use crate::context::MAX_RULES;
 use crate::gsub::{

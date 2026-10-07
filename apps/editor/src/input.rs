@@ -97,6 +97,10 @@ pub enum Command {
     Undo,
     /// Redo the last undone edit.
     Redo,
+    /// Go to the version before this one in time, on whichever branch.
+    Earlier,
+    /// Go to the version after this one in time, on whichever branch.
+    Later,
     /// Copy the selection, then delete it.
     Cut,
     /// Copy the selection.
@@ -126,7 +130,7 @@ impl Command {
     /// undispatchable -- consistently missing rather than silently running
     /// something else, which is why [`Command::id`] is the discriminant rather
     /// than a position in this list.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::New,
         Self::Open,
         Self::Save,
@@ -134,6 +138,8 @@ impl Command {
         Self::CloseTab,
         Self::Undo,
         Self::Redo,
+        Self::Earlier,
+        Self::Later,
         Self::Cut,
         Self::Copy,
         Self::Paste,
@@ -167,6 +173,8 @@ impl Command {
             Self::CloseTab => "Close Tab",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
+            Self::Earlier => "Earlier Version",
+            Self::Later => "Later Version",
             Self::Cut => "Cut",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
@@ -193,9 +201,11 @@ impl Command {
             Self::Open => "Ctrl+O",
             Self::Save => "Ctrl+S",
             Self::SaveAs => "Ctrl+Shift+S",
-            Self::CloseTab => "Ctrl+W",
+            Self::CloseTab => "Ctrl+W / Ctrl+F4",
             Self::Undo => "Ctrl+Z",
-            Self::Redo => "Ctrl+Y",
+            Self::Redo => "Ctrl+Y / Ctrl+Shift+Z",
+            Self::Earlier => "Alt+Z",
+            Self::Later => "Alt+Shift+Z",
             Self::Cut => "Ctrl+X",
             Self::Copy => "Ctrl+C",
             Self::Paste => "Ctrl+V",
@@ -206,6 +216,41 @@ impl Command {
             Self::Replace => "Ctrl+H",
         }
     }
+}
+
+/// The keys no command row carries, for the F1 list.
+///
+/// The commands' own rows -- the menus' -- are not repeated here: the list is
+/// built from them ([`shortcut_rows`]), so a command's key is written once.
+/// Twenty-seven rows in all with those, which is what the window's opening
+/// size has room for; Ctrl+Home, End, Left and Right share a row to keep it so.
+const MORE_KEYS: &[(&str, &str)] = &[
+    (
+        "Ctrl+Home / Ctrl+End / Ctrl+Left / Ctrl+Right",
+        "The file's start or end; a word back or on",
+    ),
+    ("Ctrl+Tab / Ctrl+PageDown", "The next tab"),
+    ("Ctrl+Shift+Tab / Ctrl+PageUp", "The last tab"),
+    ("Shift+Arrows", "Select as the caret moves"),
+    ("Escape", "Let go of the selection, or close Find"),
+    ("Enter / Shift+Enter", "In Find: the next or the last match"),
+    ("Ctrl+R / Ctrl+Shift+R", "In Find: replace this one, or all"),
+    ("Ctrl+I", "In Find: match case, or not"),
+    ("Alt+F / Alt+E / Alt+S", "The File, Edit or Search menu"),
+];
+
+/// The keys the editor answers, as the F1 list shows them: F1, every command's
+/// own row, then the keys no command carries.
+///
+/// F1 did nothing. The menus printed their rows' keys, and nothing else did:
+/// Tabs or Spaces (Ctrl+T) and the two version keys (Alt+Z, Alt+Shift+Z) are
+/// in no menu, nor are the find bar's keys or the moves by word and by file.
+#[must_use]
+pub fn shortcut_rows() -> Vec<(&'static str, &'static str)> {
+    let mut rows = vec![("F1", "This list")];
+    rows.extend(Command::ALL.iter().map(|c| (c.shortcut(), c.label())));
+    rows.extend_from_slice(MORE_KEYS);
+    rows
 }
 
 /// Which of the find bar's two text fields the keyboard is typing into.
@@ -329,11 +374,27 @@ impl EditorState {
     }
 
     fn dispatch_key(&mut self, key: &KeyEvent) -> Response {
+        // The list of keys first: it is drawn over everything, and modal while
+        // it is up -- a plain F1 or Escape puts it away, and no other key
+        // reaches what it covers.
+        let plain = !key.modifiers.ctrl && !key.modifiers.alt && !key.modifiers.super_key;
+        if self.show_help {
+            if plain && matches!(key.key, Key::F1 | Key::Escape) {
+                self.show_help = false;
+            }
+            return Response::Redraw;
+        }
         if self.external_prompt.is_some() {
             return self.prompt_key(key);
         }
         if self.question.is_some() {
             return self.question_event(&Event::Key(key.clone()));
+        }
+        // F1 raises it from the text, the find bar or a menu: it is never
+        // typed. F1 alone -- `?` is a character here like any other.
+        if plain && key.key == Key::F1 {
+            self.show_help = true;
+            return Response::Redraw;
         }
         // The bar sees the key after the modal prompt, which is asking a
         // question that has to be answered first, and before the typing tables,
@@ -346,7 +407,19 @@ impl EditorState {
         {
             return response;
         }
-        if key.modifiers.ctrl {
+        // Alt without Ctrl: every version the document has been in, in the
+        // order each was made.
+        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key
+        {
+            return self.run(if key.modifiers.shift {
+                Command::Later
+            } else {
+                Command::Earlier
+            });
+        }
+        // Ctrl without Alt: Ctrl+Alt is AltGr, which types a letter on several
+        // layouts -- AltGr+Z is Polish's ż, which undid instead.
+        if key.modifiers.ctrl && !key.modifiers.alt {
             return self.control_key(key);
         }
         self.editing_key(key)
@@ -532,8 +605,10 @@ impl EditorState {
     pub fn command_enabled(&self, command: Command) -> bool {
         let doc = self.active_document();
         match command {
-            Command::Undo => !doc.undo_stack.is_empty(),
-            Command::Redo => !doc.redo_stack.is_empty(),
+            // Every version but the first has one before it, which is
+            // exactly when there is something to undo.
+            Command::Undo | Command::Earlier => doc.history.can_undo(),
+            Command::Redo => doc.history.can_redo(),
             Command::Cut | Command::Copy => doc.has_selection(),
             Command::Paste => !self.clipboard.is_empty(),
             Command::ToggleIndentStyle
@@ -545,7 +620,10 @@ impl EditorState {
             | Command::SelectAll
             | Command::SelectWord
             | Command::Find
-            | Command::Replace => true,
+            | Command::Replace
+            // Whether a later version exists is not something the history
+            // answers without going there; at the newest, running it says so.
+            | Command::Later => true,
         }
     }
 
@@ -594,6 +672,20 @@ impl EditorState {
             }
             Command::Redo => {
                 self.active_document_mut().redo();
+                self.after_cursor_move();
+                Response::Redraw
+            }
+            // Enabled only while there is an earlier version, so it always
+            // moves -- greyed at the first, as Undo is at the start.
+            Command::Earlier => {
+                self.active_document_mut().earlier();
+                self.after_cursor_move();
+                Response::Redraw
+            }
+            Command::Later => {
+                if !self.active_document_mut().later() {
+                    self.status = Some(String::from("This is the newest version"));
+                }
                 self.after_cursor_move();
                 Response::Redraw
             }
@@ -942,7 +1034,10 @@ impl EditorState {
             Key::X => self.run(Command::Cut),
             Key::V => self.run(Command::Paste),
             Key::D => self.run(Command::SelectWord),
-            Key::W => self.run(Command::CloseTab),
+            // Ctrl+F4 closes the current document as well (C-Q24, §1416),
+            // the key programs with documents have used for it since before
+            // Ctrl+W.
+            Key::W | Key::F4 => self.run(Command::CloseTab),
             Key::Home => {
                 self.moving(shift, Document::move_to_start);
                 Response::Redraw
@@ -1072,7 +1167,53 @@ impl EditorState {
     // Mouse
     // ======================================================================
 
+    /// The find bar's share of the pointer. It is drawn over the text, so a
+    /// press on it is its own: on a box it gives that box the keys, and
+    /// anywhere else on the bar it does nothing -- it went through to the text
+    /// and moved the caret under the bar. Where the pointer is, is followed,
+    /// so the box under it is drawn lit; a move that changes which box that
+    /// is, is a redraw. `None` for what is not the bar's.
+    fn find_bar_mouse(&mut self, mouse: &MouseEvent) -> Option<Response> {
+        match mouse.kind {
+            MouseEventKind::Move | MouseEventKind::Leave => {
+                let before = self.find_box_under_pointer();
+                self.pointer =
+                    matches!(mouse.kind, MouseEventKind::Move).then_some((mouse.x, mouse.y));
+                (self.find_box_under_pointer() != before).then_some(Response::Redraw)
+            }
+            MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+                if self.find_visible && self.find_panel_rect().contains(mouse.x, mouse.y) =>
+            {
+                let on = [FindField::Query, FindField::Replace]
+                    .into_iter()
+                    .find(|&f| self.find_box(f).contains(mouse.x, mouse.y));
+                match on {
+                    Some(field) if field != self.find_field => {
+                        self.find_field = field;
+                        Some(Response::Redraw)
+                    }
+                    _ => Some(Response::Idle),
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> Response {
+        // The list of keys is modal for the pointer as it is for the keys: a
+        // press with any button puts it away and does nothing else, and
+        // nothing under it follows the pointer or the wheel. A release passes,
+        // so a drag begun before it was raised still ends.
+        if self.show_help {
+            match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return Response::Redraw;
+                }
+                MouseEventKind::Release(_) => {}
+                _ => return Response::Idle,
+            }
+        }
         // The bar gets first refusal -- except during a drag that began in the
         // text, which owns the pointer until it is released: a selection being
         // extended past the top of the window must not be taken over by a menu
@@ -1084,6 +1225,14 @@ impl EditorState {
         if !self.dragging
             && self.external_prompt.is_none()
             && let Some(response) = self.menu_bar_mouse(mouse)
+        {
+            return response;
+        }
+        // Then the find bar, which is drawn over the text -- unless a drag
+        // that began in the text holds the pointer.
+        if !self.dragging
+            && self.external_prompt.is_none()
+            && let Some(response) = self.find_bar_mouse(mouse)
         {
             return response;
         }
@@ -1401,6 +1550,7 @@ mod tests {
             "X" => Key::X,
             "Y" => Key::Y,
             "Z" => Key::Z,
+            "F4" => Key::F4,
             other => panic!("no key is named {other}"),
         }
     }
@@ -1421,165 +1571,193 @@ mod tests {
     #[test]
     fn every_shortcut_a_menu_advertises_is_really_bound() {
         for command in Command::ALL {
-            let event = keystroke(command.shortcut());
-            match command {
-                // Adding the variant forces this arm to be *written*, but
-                // `Command::ALL` above decides whether it is ever *run* -- a
-                // variant left out of that array would compile with an arm
-                // that never executes, which is the "passes by accident"
-                // failure in its purest form. Both were changed together.
-                Command::ToggleIndentStyle => {
-                    let mut editor = editor_with("ab");
-                    let before = editor.active_document().use_spaces;
-                    editor.handle_event(&event);
-                    assert_ne!(
-                        editor.active_document().use_spaces,
-                        before,
-                        "Ctrl+T did not change the indent style"
-                    );
-                }
-                Command::New => {
-                    let mut editor = editor_with("ab");
-                    let before = editor.tabs.count();
-                    editor.handle_event(&event);
-                    assert_eq!(editor.tabs.count(), before + 1, "Ctrl+N did not open a tab");
-                    assert!(
-                        editor.active_document().lines.iter().all(String::is_empty),
-                        "the new tab is not empty"
-                    );
-                    assert!(editor.dialog.is_none(), "New should ask nothing");
-                }
-                Command::Open => {
-                    let mut editor = editor_with("ab");
-                    assert!(editor.dialog.is_none());
-                    editor.handle_event(&event);
-                    assert!(
-                        editor.dialog.is_some(),
-                        "Ctrl+O did not put up a file dialog"
-                    );
-                }
-                Command::SaveAs => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    assert!(
-                        editor.dialog.is_some(),
-                        "Ctrl+Shift+S did not put up a file dialog"
-                    );
-                    assert_eq!(
-                        editor.dialog_purpose,
-                        crate::DialogPurpose::SaveAs,
-                        "the dialog is up but asking the wrong question"
-                    );
-                }
-                Command::Save => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    // A document with no path cannot be saved without asking
-                    // where, so Ctrl+S puts up Save As. It used to answer "No
-                    // file name -- Save As needs a file dialog", which was true
-                    // until 2026-09-14. The property is unchanged and only its
-                    // evidence moved: the assertion is still "Ctrl+S reached
-                    // Save", now witnessed by the dialog rather than by a
-                    // refusal.
-                    assert!(
-                        editor.dialog.is_some(),
-                        "{} did not reach Save: {:?}",
-                        command.shortcut(),
-                        editor.status
-                    );
-                }
-                Command::CloseTab => {
-                    let mut editor = editor_with("ab");
-                    editor.tabs.open(Document::new());
-                    assert_eq!(editor.tabs.count(), 2);
-                    editor.handle_event(&event);
-                    assert_eq!(editor.tabs.count(), 1, "Ctrl+W did not reach Close Tab");
-                }
-                Command::Undo => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&typed('c'));
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "ab",
-                        "Ctrl+Z did not reach Undo"
-                    );
-                }
-                Command::Redo => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&typed('c'));
-                    editor.handle_event(&ctrl(Key::Z));
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "cab",
-                        "Ctrl+Y did not reach Redo"
-                    );
-                }
-                Command::Cut => {
-                    let mut editor = editor_with("ab");
-                    editor.active_document_mut().select_all();
-                    editor.handle_event(&event);
-                    assert_eq!(editor.clipboard, "ab", "Ctrl+X did not copy");
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "",
-                        "Ctrl+X copied but did not cut"
-                    );
-                }
-                Command::Copy => {
-                    let mut editor = editor_with("ab");
-                    editor.active_document_mut().select_all();
-                    editor.handle_event(&event);
-                    assert_eq!(editor.clipboard, "ab", "Ctrl+C did not reach Copy");
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "ab",
-                        "Ctrl+C deleted what it copied"
-                    );
-                }
-                Command::Paste => {
-                    let mut editor = editor_with("ab");
-                    editor.clipboard = "zz".to_string();
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "zzab",
-                        "Ctrl+V did not reach Paste"
-                    );
-                }
-                Command::SelectAll => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    assert!(
-                        editor.active_document().has_selection(),
-                        "Ctrl+A did not reach Select All"
-                    );
-                }
-                Command::SelectWord => {
-                    let mut editor = editor_with("hello world");
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().selected_text(),
-                        "hello",
-                        "Ctrl+D did not reach Select Word"
-                    );
-                }
-                Command::Find => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    assert!(editor.find_visible, "Ctrl+F did not open the find bar");
-                    assert_eq!(editor.find_field, FindField::Query);
-                }
-                Command::Replace => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    assert!(editor.find_visible, "Ctrl+H did not open the find bar");
-                    assert_eq!(
-                        editor.find_field,
-                        FindField::Replace,
-                        "Ctrl+H opened the find bar on the wrong field"
-                    );
+            // Every spelling the row names: Close Tab's is two.
+            for spelling in command.shortcut().split(" / ") {
+                let event = keystroke(spelling);
+                match command {
+                    // Adding the variant forces this arm to be *written*, but
+                    // `Command::ALL` above decides whether it is ever *run* -- a
+                    // variant left out of that array would compile with an arm
+                    // that never executes, which is the "passes by accident"
+                    // failure in its purest form. Both were changed together.
+                    Command::ToggleIndentStyle => {
+                        let mut editor = editor_with("ab");
+                        let before = editor.active_document().use_spaces;
+                        editor.handle_event(&event);
+                        assert_ne!(
+                            editor.active_document().use_spaces,
+                            before,
+                            "Ctrl+T did not change the indent style"
+                        );
+                    }
+                    Command::New => {
+                        let mut editor = editor_with("ab");
+                        let before = editor.tabs.count();
+                        editor.handle_event(&event);
+                        assert_eq!(editor.tabs.count(), before + 1, "Ctrl+N did not open a tab");
+                        assert!(
+                            editor.active_document().lines.iter().all(String::is_empty),
+                            "the new tab is not empty"
+                        );
+                        assert!(editor.dialog.is_none(), "New should ask nothing");
+                    }
+                    Command::Open => {
+                        let mut editor = editor_with("ab");
+                        assert!(editor.dialog.is_none());
+                        editor.handle_event(&event);
+                        assert!(
+                            editor.dialog.is_some(),
+                            "Ctrl+O did not put up a file dialog"
+                        );
+                    }
+                    Command::SaveAs => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        assert!(
+                            editor.dialog.is_some(),
+                            "Ctrl+Shift+S did not put up a file dialog"
+                        );
+                        assert_eq!(
+                            editor.dialog_purpose,
+                            crate::DialogPurpose::SaveAs,
+                            "the dialog is up but asking the wrong question"
+                        );
+                    }
+                    Command::Save => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        // A document with no path cannot be saved without asking
+                        // where, so Ctrl+S puts up Save As. It used to answer "No
+                        // file name -- Save As needs a file dialog", which was true
+                        // until 2026-09-14. The property is unchanged and only its
+                        // evidence moved: the assertion is still "Ctrl+S reached
+                        // Save", now witnessed by the dialog rather than by a
+                        // refusal.
+                        assert!(
+                            editor.dialog.is_some(),
+                            "{} did not reach Save: {:?}",
+                            command.shortcut(),
+                            editor.status
+                        );
+                    }
+                    Command::CloseTab => {
+                        let mut editor = editor_with("ab");
+                        editor.tabs.open(Document::new());
+                        assert_eq!(editor.tabs.count(), 2);
+                        editor.handle_event(&event);
+                        assert_eq!(editor.tabs.count(), 1, "{spelling} did not reach Close Tab");
+                    }
+                    Command::Undo => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&typed('c'));
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "ab",
+                            "Ctrl+Z did not reach Undo"
+                        );
+                    }
+                    Command::Redo => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&typed('c'));
+                        editor.handle_event(&ctrl(Key::Z));
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "cab",
+                            "Ctrl+Y did not reach Redo"
+                        );
+                    }
+                    Command::Earlier => {
+                        // "cab", undone, then "dab": the version made before
+                        // "dab" is the "cab" undone out of, on the other branch.
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&typed('c'));
+                        editor.handle_event(&ctrl(Key::Z));
+                        editor.handle_event(&typed('d'));
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "cab",
+                            "Alt+Z did not reach Earlier Version"
+                        );
+                    }
+                    Command::Later => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&typed('c'));
+                        editor.handle_event(&keystroke("Alt+Z"));
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "cab",
+                            "Alt+Shift+Z did not reach Later Version"
+                        );
+                    }
+                    Command::Cut => {
+                        let mut editor = editor_with("ab");
+                        editor.active_document_mut().select_all();
+                        editor.handle_event(&event);
+                        assert_eq!(editor.clipboard, "ab", "Ctrl+X did not copy");
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "",
+                            "Ctrl+X copied but did not cut"
+                        );
+                    }
+                    Command::Copy => {
+                        let mut editor = editor_with("ab");
+                        editor.active_document_mut().select_all();
+                        editor.handle_event(&event);
+                        assert_eq!(editor.clipboard, "ab", "Ctrl+C did not reach Copy");
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "ab",
+                            "Ctrl+C deleted what it copied"
+                        );
+                    }
+                    Command::Paste => {
+                        let mut editor = editor_with("ab");
+                        editor.clipboard = "zz".to_string();
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "zzab",
+                            "Ctrl+V did not reach Paste"
+                        );
+                    }
+                    Command::SelectAll => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        assert!(
+                            editor.active_document().has_selection(),
+                            "Ctrl+A did not reach Select All"
+                        );
+                    }
+                    Command::SelectWord => {
+                        let mut editor = editor_with("hello world");
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().selected_text(),
+                            "hello",
+                            "Ctrl+D did not reach Select Word"
+                        );
+                    }
+                    Command::Find => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        assert!(editor.find_visible, "Ctrl+F did not open the find bar");
+                        assert_eq!(editor.find_field, FindField::Query);
+                    }
+                    Command::Replace => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        assert!(editor.find_visible, "Ctrl+H did not open the find bar");
+                        assert_eq!(
+                            editor.find_field,
+                            FindField::Replace,
+                            "Ctrl+H opened the find bar on the wrong field"
+                        );
+                    }
                 }
             }
         }
@@ -1729,6 +1907,147 @@ mod tests {
         assert!(
             !editor.menu_bar.is_open(),
             "the menu stayed open after running a row"
+        );
+    }
+
+    /// **The find bar takes the pointer over itself, and its boxes are the
+    /// toolkit's fields** (lane C, c-e-a-theme-can-shape-the-controls). They
+    /// were bare fills -- nothing said which one the keys typed into -- and a
+    /// press on the bar went through to the text and moved the caret under it.
+    /// Now a press on a box gives it the keys, a press elsewhere on the bar
+    /// does nothing, the box under the pointer is lit, and the one the keys
+    /// type into is marked at the user's focus width -- neither while a menu
+    /// holds the keys.
+    #[test]
+    fn the_find_bar_takes_the_pointer_and_its_boxes_are_the_toolkits_fields() {
+        use guitk::field::State;
+        use oswindow::app::App;
+        let mut editor = editor_with("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta");
+        editor.resize(900, 600);
+        let mut palette = editor.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut editor, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut editor, &settings);
+        let draws = |editor: &mut EditorState, rect: guitk::frame::Rect, s: State| {
+            let mut want: Vec<guitk::render::RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, s, width);
+            let mut mark: Vec<guitk::render::RenderCommand> = Vec::new();
+            guitk::field::draw(
+                &mut mark,
+                &palette,
+                rect,
+                State { focused: true, ..s },
+                width,
+            );
+            let cmds = editor.render_tree().commands;
+            let has = |w: &[guitk::render::RenderCommand]| {
+                !w.is_empty() && cmds.windows(w.len()).any(|c| c == w)
+            };
+            has(&want) && (s.focused || !has(&mark))
+        };
+        let pointer = |editor: &mut EditorState, x: f32, y: f32, kind: MouseEventKind| {
+            editor.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+        };
+        let keyed = State {
+            focused: true,
+            ..State::default()
+        };
+        let lit = State {
+            hovered: true,
+            ..State::default()
+        };
+        let both = State {
+            hovered: true,
+            ..keyed
+        };
+
+        editor.handle_event(&ctrl(Key::F));
+        assert!(editor.find_visible);
+        let query = editor.find_box(FindField::Query);
+        let replace = editor.find_box(FindField::Replace);
+        assert!(
+            draws(&mut editor, query, keyed),
+            "the Find box is not marked with the keys"
+        );
+        assert!(
+            draws(&mut editor, replace, State::default()),
+            "the Replace box is not the field"
+        );
+
+        let (rx, ry) = replace.centre();
+        assert_eq!(
+            pointer(&mut editor, rx, ry, MouseEventKind::Move),
+            Response::Redraw,
+            "the light came on without a redraw"
+        );
+        assert!(
+            draws(&mut editor, replace, lit),
+            "the Replace box does not light under the pointer"
+        );
+        pointer(
+            &mut editor,
+            rx,
+            ry,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert_eq!(
+            editor.find_field,
+            FindField::Replace,
+            "a press gave the box no keys"
+        );
+        assert!(
+            draws(&mut editor, replace, both),
+            "the Replace box is not marked with the keys"
+        );
+        assert!(
+            draws(&mut editor, query, State::default()),
+            "the Find box kept its mark"
+        );
+        pointer(&mut editor, rx, ry, MouseEventKind::Leave);
+        assert!(
+            draws(&mut editor, replace, keyed),
+            "the light stayed when the pointer left"
+        );
+
+        // A press on the bar between its boxes moves no caret under it.
+        let panel = editor.find_panel_rect();
+        let caret = (
+            editor.active_document().cursor_line,
+            editor.active_document().cursor_col,
+        );
+        pointer(
+            &mut editor,
+            panel.x + 4.0,
+            panel.bottom() - 4.0,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert_eq!(
+            (
+                editor.active_document().cursor_line,
+                editor.active_document().cursor_col
+            ),
+            caret,
+            "a press on the find bar moved the caret under it"
+        );
+        assert!(editor.find_visible, "a press on the bar put it away");
+
+        // An open menu holds the keys: no mark.
+        pointer(
+            &mut editor,
+            20.0,
+            guitk::menubar::BAR_HEIGHT / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert!(editor.menu_bar.is_open());
+        assert!(
+            draws(&mut editor, replace, State::default()),
+            "the box shows the keys under an open menu"
         );
     }
 
@@ -2599,5 +2918,245 @@ mod tests {
             "K keeps the current buffer"
         );
         assert_eq!(editor.active_document().lines[0], "buffer");
+    }
+
+    // ---- the keys C-Q24 asks every program for (§1416) ----------------------
+
+    /// AltGr, which arrives as Ctrl+Alt, with the letter it types.
+    fn altgr(key: Key, letter: &str) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: letter.to_string(),
+        })
+    }
+
+    /// **AltGr is not Ctrl, and not Alt either.** AltGr arrives as
+    /// Ctrl+Alt, and AltGr+Z is how a Polish keyboard types ż -- which undid
+    /// the last edit instead; AltGr+E is € on most European layouts, and must
+    /// not open the Edit menu.
+    #[test]
+    fn an_altgr_letter_is_typed_not_taken_for_a_chord() {
+        let mut editor = editor_with("ab");
+        editor.handle_event(&typed('c'));
+        editor.handle_event(&altgr(Key::Z, "ż"));
+        assert_eq!(editor.active_document().lines[0], "cżab", "AltGr+Z undid");
+        editor.handle_event(&altgr(Key::E, "€"));
+        assert_eq!(
+            editor.active_document().lines[0],
+            "cż€ab",
+            "AltGr+E did not type"
+        );
+        assert!(!editor.menu_bar.is_open(), "AltGr+E opened a menu");
+    }
+
+    /// **Ctrl+F4 closes the current document**, as Ctrl+W does -- and the
+    /// menu says so, where Close Tab is: a key nothing names is a key a user
+    /// cannot find.
+    #[test]
+    fn ctrl_f4_closes_the_current_document() {
+        let mut editor = editor_with("ab");
+        editor.tabs.open(Document::new());
+        assert_eq!(editor.tabs.count(), 2);
+        editor.handle_event(&ctrl(Key::F4));
+        assert_eq!(editor.tabs.count(), 1, "Ctrl+F4 did not close the tab");
+        assert!(
+            Command::CloseTab
+                .shortcut()
+                .split(" / ")
+                .any(|spelling| spelling == "Ctrl+F4"),
+            "the menu does not name Ctrl+F4: {:?}",
+            Command::CloseTab.shortcut()
+        );
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut editor = editor_with("ab");
+        editor.handle_event(&typed('c'));
+        editor.handle_event(&ctrl(Key::Z));
+        editor.handle_event(&press(
+            Key::Z,
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(editor.active_document().lines[0], "cab");
+    }
+
+    /// **At either end of time, the keys say so rather than doing nothing
+    /// in silence** -- and the menu greys Earlier Version at the first.
+    #[test]
+    fn the_ends_of_the_history_are_said() {
+        let mut editor = editor_with("ab");
+        assert!(!editor.command_enabled(Command::Earlier));
+        editor.handle_event(&typed('c'));
+        assert!(editor.command_enabled(Command::Earlier));
+        editor.handle_event(&keystroke("Alt+Shift+Z"));
+        assert_eq!(editor.status.as_deref(), Some("This is the newest version"));
+        assert_eq!(editor.active_document().lines[0], "cab");
+    }
+
+    // ---- the list of keys ---------------------------------------------------
+
+    fn drawn_strings(editor: &mut EditorState) -> Vec<String> {
+        editor
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list names beyond the commands' own is answered** --
+    /// each from a state where it has something to do: the find bar's with
+    /// the bar open on a word that is there, Escape with a selection to let
+    /// go of. The commands' rows are
+    /// `every_shortcut_a_menu_advertises_is_really_bound`'s.
+    #[test]
+    fn every_key_the_list_adds_does_something() {
+        let added = std::iter::once(&("F1", "This list")).chain(MORE_KEYS.iter());
+        for (label, what) in added {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut editor = editor_with("alpha beta\ngamma delta\nepsilon");
+                if what.starts_with("In Find") {
+                    editor.handle_event(&ctrl(Key::F));
+                    editor.handle_event(&typed('a'));
+                }
+                if *label == "Escape" {
+                    editor.handle_event(&shift(Key::Right));
+                }
+                assert_ne!(
+                    editor.handle_event(&Event::Key(stroke.clone())),
+                    Response::Idle,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window** -- all of it, at the size the
+    /// window opens at -- and goes on F1 or a plain Escape, not on
+    /// Alt+Escape, which is the desktop's. `?` is typed, as every character
+    /// is in a document.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut editor = editor_with("ab");
+        assert!(
+            !drawn_strings(&mut editor)
+                .iter()
+                .any(|t| t.contains("F1 or Escape closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            editor.handle_event(&press(Key::F1, chord));
+            assert!(
+                !editor.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        editor.handle_event(&typed('?'));
+        assert!(!editor.show_help, "? raised the list");
+        assert_eq!(editor.active_document().lines[0], "?ab", "? was not typed");
+
+        editor.handle_event(&plain(Key::F1));
+        let rows = shortcut_rows();
+        let missing = guitk::shortcut::missing_rows(&drawn_strings(&mut editor), &rows);
+        assert!(missing.is_empty(), "{missing:?}");
+        editor.handle_event(&press(Key::Escape, Modifiers::alt()));
+        assert!(editor.show_help, "Alt+Escape put the list away");
+        editor.handle_event(&plain(Key::Escape));
+        assert!(!editor.show_help, "Escape left the list up");
+        editor.handle_event(&plain(Key::F1));
+        editor.handle_event(&plain(Key::F1));
+        assert!(!editor.show_help, "F1 left the list up");
+    }
+
+    /// **The list of keys is modal**: with it up, nothing typed reaches the
+    /// document, no chord runs a command, no menu opens, and a press puts the
+    /// list away and moves no caret. The document is the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        let mut editor = editor_with("alpha\nbeta\ngamma");
+        editor.handle_event(&plain(Key::F1));
+        for event in [
+            typed('x'),
+            plain(Key::Delete),
+            plain(Key::Down),
+            ctrl(Key::S),
+            ctrl(Key::N),
+            press(Key::F, Modifiers::alt()),
+        ] {
+            assert_eq!(editor.handle_event(&event), Response::Redraw);
+        }
+        assert!(
+            editor.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert_eq!(
+            editor.active_document().lines[0],
+            "alpha",
+            "a key edited under the list"
+        );
+        assert_eq!(
+            editor.active_document().cursor_line,
+            0,
+            "Down moved the caret under it"
+        );
+        assert!(
+            editor.dialog.is_none(),
+            "Ctrl+S asked where to save under the list"
+        );
+        assert_eq!(editor.tabs.count(), 1, "Ctrl+N opened a tab under the list");
+        assert!(
+            !editor.menu_bar.is_open(),
+            "Alt+F opened a menu under the list"
+        );
+
+        let (x, y) = (200.0, 120.0);
+        let wheel = Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        });
+        assert_eq!(editor.handle_event(&wheel), Response::Idle);
+        assert!(editor.show_help, "the wheel put the list away");
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!editor.show_help, "the press did not put the list away");
+        assert_eq!(
+            (
+                editor.active_document().cursor_line,
+                editor.active_document().cursor_col
+            ),
+            (0, 0),
+            "the press moved the caret under the list"
+        );
+        editor.handle_event(&plain(Key::F1));
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!editor.show_help, "a right-button press left the list up");
+
+        // The document.
+        editor.handle_event(&typed('x'));
+        assert_eq!(editor.active_document().lines[0], "xalpha");
     }
 }

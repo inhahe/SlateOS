@@ -14,6 +14,9 @@ guitk = { path = "../../gui/toolkit" }
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+# The keys that edit the search box, and which keys are commands rather than
+# typing.
+textline = { path = "../textline" }
 
 # Export writes through `safeio::write_str_atomically`, not `fs::write`,
 # which truncates the target before writing it.

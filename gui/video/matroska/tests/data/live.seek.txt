@@ -1,0 +1,28 @@
+# live.webm: ffprobe's first 6 packets after each seek (generate_fixtures.py).
+seek 0
+packet 0 0 K__
+packet 0 100 ___
+packet 0 200 ___
+packet 0 300 ___
+packet 0 400 K__
+packet 0 500 ___
+seek 250
+packet 0 0 K__
+packet 0 100 ___
+packet 0 200 ___
+packet 0 300 ___
+packet 0 400 K__
+packet 0 500 ___
+seek 550
+packet 0 400 K__
+packet 0 500 ___
+packet 0 600 ___
+packet 0 700 ___
+packet 0 800 K__
+packet 0 900 ___
+seek 1200
+packet 0 800 K__
+packet 0 900 ___
+seek 99000
+packet 0 800 K__
+packet 0 900 ___

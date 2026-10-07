@@ -127,6 +127,7 @@ pub(crate) fn powerctl(subcommand: &str) -> Launch {
     Launch {
         program: POWERCTL.into(),
         args: vec![subcommand.into()],
+        dir: None,
     }
 }
 

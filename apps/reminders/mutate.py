@@ -200,8 +200,8 @@ MUTATIONS = [
     ),
     (
         "N adds nothing",
-        "            Key::N if !key.modifiers.ctrl => {\n                self.open_new_task();",
-        "            Key::N if !key.modifiers.ctrl => {\n                let _ = 0;",
+        "            Key::N => {\n                self.open_new_task();",
+        "            Key::N => {\n                let _ = 0;",
         [KEPT],
     ),
     (
@@ -253,6 +253,135 @@ MUTATIONS = [
         "        if self.store.is_empty() {\n            lines.push((String::from(NO_TASKS_LINE), false));",
         "        if false {\n            lines.push((String::from(NO_TASKS_LINE), false));",
         [EMPTY, NOTICE],
+    ),
+    (
+        'AltGr is taken for Ctrl in the list',
+        '        // not Ctrl held: AltGr arrives as Ctrl+Alt.\n        if textline::is_ctrl_chord(key.modifiers) {',
+        '        // not Ctrl held: AltGr arrives as Ctrl+Alt.\n        if key.modifiers.ctrl {',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "a chord works the list's keys",
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n        // Shift and a digit',
+        '        // Shift and a digit',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord answers the question before a delete',
+        '        if textline::is_plain(key.modifiers) {\n            match key.key {\n                Key::Enter | Key::Y',
+        '        if !key.modifiers.shift || key.modifiers.shift {\n            match key.key {\n                Key::Enter | Key::Y',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord answers the snooze prompt',
+        '    fn handle_snooze_key(&mut self, key: &KeyEvent) -> EventResult {\n        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '    fn handle_snooze_key(&mut self, key: &KeyEvent) -> EventResult {\n',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        "Alt+Tab walks the form's fields",
+        '            Key::Tab if plain => {',
+        '            Key::Tab => {',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord saves the form',
+        '            Key::Enter if plain => {\n                if field == TaskField::NewStep',
+        '            Key::Enter => {\n                if field == TaskField::NewStep',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord closes the form',
+        '            Key::Escape if plain => {\n                self.form = None;',
+        '            Key::Escape => {\n                self.form = None;',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    (
+        'a chord works a field that is not typed into',
+        '            _ if !plain && !field.is_text() => EventResult::Ignored,\n',
+        '',
+        ['a_chord_is_not_a_reminders_key_and_altgr_is_not_ctrl'],
+    ),
+    # -- the shortcut card is modal for the keys
+    (
+        "the card is modal for nothing",
+        '        if self.show_help\n            && let Event::Key(key_ev) = event\n',
+        '        if false\n            && let Event::Key(key_ev) = event\n',
+        ['the_shortcut_card_takes_every_key_while_it_is_up'],
+    ),
+    (
+        "a key that is not the card's acts behind it",
+        '                return EventResult::Consumed;\n'
+        '            }\n'
+        '            return EventResult::Ignored;\n'
+        '        }\n'
+        '        match event {\n',
+        '                return EventResult::Consumed;\n'
+        '            }\n'
+        '        }\n'
+        '        match event {\n',
+        ['the_shortcut_card_takes_every_key_while_it_is_up'],
+    ),
+    (
+        "Escape does not put the card away",
+        '            let closes = matches!(key_ev.key, Key::F1 | Key::Escape)\n',
+        '            let closes = matches!(key_ev.key, Key::F1)\n',
+        ['the_shortcut_card_takes_every_key_while_it_is_up'],
+    ),
+    (
+        "? does not put the card away",
+        '                || key_ev.key == Key::Slash && key_ev.modifiers.shift;\n',
+        '                || false;\n',
+        ['the_shortcut_card_takes_every_key_while_it_is_up'],
+    ),
+]
+
+# The form's rows are the toolkit's field (2026-10-04; lane C,
+# c-e-a-theme-can-shape-the-controls).
+ROWS = "the_forms_rows_are_the_toolkits_field"
+
+MUTATIONS += [
+    (
+        "the row with the keyboard has no mark",
+        "                    focused,\n                    disabled: false,\n                    invalid: self.row_is_wrong(form, field),\n",
+        "                    focused: false,\n                    disabled: false,\n                    invalid: self.row_is_wrong(form, field),\n",
+        [ROWS],
+    ),
+    (
+        "no row is ever red",
+        "                    invalid: self.row_is_wrong(form, field),\n",
+        "                    invalid: false,\n",
+        [ROWS],
+    ),
+    (
+        "a due date that is not one is not red",
+        "            TaskField::DueDate => dated && parse_date_text(form.due_date.text()).is_none(),\n",
+        "            TaskField::DueDate => false,\n",
+        [ROWS],
+    ),
+    (
+        "a due time that is not one is not red",
+        "            TaskField::DueTime => dated && parse_time_text(form.due_time.text()).is_none(),\n",
+        "            TaskField::DueTime => false,\n",
+        [ROWS],
+    ),
+    (
+        "an empty title is red before any save",
+        "            TaskField::Title => self.form_error.is_some() && form.title.text().trim().is_empty(),\n",
+        "            TaskField::Title => form.title.text().trim().is_empty(),\n",
+        [ROWS],
+    ),
+    (
+        "an empty title a save refused is not red",
+        "            TaskField::Title => self.form_error.is_some() && form.title.text().trim().is_empty(),\n",
+        "            TaskField::Title => false,\n",
+        [ROWS],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [ROWS],
     ),
 ]
 

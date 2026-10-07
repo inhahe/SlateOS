@@ -10,6 +10,9 @@ quoting = { path = "../../userspace/quoting" }
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# `is_plain` and `is_ctrl_chord`: a key held with Alt or the Windows key is not
+# the recorder's, and AltGr is not Ctrl.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

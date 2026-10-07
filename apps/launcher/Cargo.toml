@@ -13,5 +13,18 @@ guitk = { path = "../../gui/toolkit" }
 # nothing but its own tests.
 oswindow = { path = "../../gui/window" }
 
+# The installed programs' desktop entries, read as the start menu reads them
+# (C-Q17, design-decisions §1423): the launcher finds what is installed rather
+# than keeping its own list of what might be.
+desktopentry = { path = "../../gui/desktopentry" }
+# SlateOS's own programs: the one list of them (C-Q20, design-decisions
+# §1425), which the start menu reads too, instead of a copy of its own.
+programs = { path = "../../gui/programs" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a launcher key nor typing.
+textline = { path = "../textline" }
+
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

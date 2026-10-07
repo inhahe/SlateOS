@@ -644,7 +644,9 @@ BASELINE_HEADER = """\
 # converter's, the radio groups in undelete, netmanager and podcast), lane
 # E's since the split, asked for in
 # requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md.
-# Delete each line when an application draws one.
+# Delete each line when an application draws one.  radio.rs's went on
+# 2026-10-03, when apps/undelete drew its scan modes as the toolkit's radio
+# buttons; dropdown.rs's stays until an application draws a drop-down.
 
 # Another line was ADDED on 2026-09-28, by lane F:
 # gui/imagecodec/src/avif/animation.rs, the player for animated AVIF pictures
@@ -664,6 +666,16 @@ BASELINE_HEADER = """\
 # their own copy of an editor and are lane E's -- asked for in
 # requests/c-e-the-toolkit-has-a-code-editor.md.  Delete the line when an
 # application draws a CodeView.
+#
+# Another line was ADDED on 2026-10-03, by lane E:
+# apps/mediaprobe/src/mkv/demux.rs, the Matroska and WebM demuxer
+# (`mediaprobe::mkv::Demuxer`), which gives a file's frames back in order with
+# their times, and seeks.  It is held to libvpx's own pictures by mediaprobe's
+# VP9 vector test -- a test, so this scan rightly does not count it.  Its caller
+# is the video player's playback, lane E's own, which waits on lane F exposing
+# the YUV-to-RGB conversion its AVIF decoder already has
+# (requests/f-e-vp9-video-decodes-now.md) rather than carrying a second copy.
+# Delete the line when the player demuxes a file.
 #
 # THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
 # rewrites this file from that constant, so anything added directly to the

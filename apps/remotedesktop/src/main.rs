@@ -33,6 +33,7 @@ use appearance::Surface;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::modal::{DialogResult, InputDialog};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
@@ -862,11 +863,25 @@ struct PanDrag {
     grab: f32,
 }
 
-/// Asking for a VNC password before connecting.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Asking for a VNC password before connecting, in the toolkit's input
+/// dialog with its password mode: a box with a caret and one mark a
+/// character, OK and Cancel. It was a panel with a row of bullets on it --
+/// no box, no caret, and Backspace from the end its only edit -- that a
+/// press went straight through to the window behind.
+#[derive(Clone, Debug)]
 pub struct PasswordPrompt {
+    /// The profile the password is for.
     pub profile_index: usize,
-    pub text: String,
+    /// The dialog asking.
+    pub dialog: InputDialog,
+}
+
+impl PasswordPrompt {
+    /// What has been typed so far.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        self.dialog.input_text()
+    }
 }
 
 pub struct RemoteDesktopApp {
@@ -959,6 +974,10 @@ pub struct RemoteDesktopApp {
     pending_images: Vec<oswindow::app::ImageChange>,
     /// The password being typed for a VNC connection, while one is.
     pub password_prompt: Option<PasswordPrompt>,
+    /// How wide the mark is round the control that has the keyboard: the
+    /// user's focus width (`App::appearance_changed`), the toolkit's until
+    /// it is known.
+    pub focus_ring_width: f32,
 }
 
 impl Default for RemoteDesktopApp {
@@ -1048,6 +1067,7 @@ impl RemoteDesktopApp {
             waker: None,
             pending_images: Vec::new(),
             password_prompt: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
         }
     }
 
@@ -1455,9 +1475,19 @@ impl RemoteDesktopApp {
             "Password for {} -- leave it empty for a server that asks for none",
             profile.display_name
         ));
+        let name = profile.display_name.clone();
+        let mut dialog = InputDialog::prompt(
+            "Connect",
+            &format!("The VNC password for {name}. It is used to connect and kept nowhere."),
+            "",
+        )
+        .with_password_mode(true)
+        .with_caret_width(guitk::textedit::CARET_WIDTH)
+        .with_focus_ring_width(self.focus_ring_width);
+        dialog.show();
         self.password_prompt = Some(PasswordPrompt {
             profile_index,
-            text: String::new(),
+            dialog,
         });
         None
     }
@@ -1832,77 +1862,36 @@ impl RemoteDesktopApp {
         }
     }
 
-    /// Draw the password prompt, while one is open.
-    fn render_password_prompt(&self, cmds: &mut Vec<RenderCommand>) {
-        let Some(prompt) = &self.password_prompt else {
-            return;
-        };
-        let name = self
-            .profiles
-            .get(prompt.profile_index)
-            .map_or("", |p| p.display_name.as_str());
-        let (w, h) = (420.0, 110.0);
-        let x = ((self.window_width - w) / 2.0).max(0.0);
-        let y = ((self.window_height - h) / 2.0).max(0.0);
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-        let lines = [
-            format!("VNC password for {name}"),
-            "\u{2022}".repeat(prompt.text.chars().count()),
-            String::from("Enter connects, Escape cancels. The password is kept nowhere."),
-        ];
-        for (i, line) in lines.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                #[expect(clippy::cast_precision_loss, reason = "three lines")]
-                y: y + 16.0 + i as f32 * 28.0,
-                text: line.clone(),
-                font_size: if i == 0 { 14.0 } else { 12.0 },
-                color: if i == 0 {
-                    self.palette.text
-                } else {
-                    self.palette.subtext0
-                },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(w - 32.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-    }
-
-    /// A key while the password prompt is open: it takes every key.
-    fn handle_prompt_key(&mut self, key: &KeyEvent) -> EventResult {
-        if !key.pressed {
+    /// A key or a press while the password prompt is open: it has every one
+    /// until it is answered, and acts on its answer once there is one -- OK
+    /// or Enter connects with what was typed, which may be nothing for a
+    /// server that asks for none; Cancel, Escape and a press away do not.
+    ///
+    /// A command is not passed on. It arrives carrying its letter as text,
+    /// and the dialog would type it: Alt+X put an `x` in the password, and
+    /// Ctrl+V a `v` (`requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`).
+    /// AltGr, which arrives as Ctrl+Alt, types, as it must for a password
+    /// with an `@` in it.
+    fn answer_prompt(&mut self, event: &Event) -> EventResult {
+        if let Event::Key(key) = event
+            && textline::is_command(key.modifiers)
+        {
             return EventResult::Consumed;
         }
         let Some(prompt) = self.password_prompt.as_mut() else {
             return EventResult::Ignored;
         };
-        match key.key {
-            Key::Escape => {
-                self.password_prompt = None;
-                self.status_message = Some(String::from("Not connected"));
+        prompt.dialog.handle_event(event);
+        let Some(answer) = prompt.dialog.result().cloned() else {
+            return EventResult::Consumed;
+        };
+        let profile_index = prompt.profile_index;
+        self.password_prompt = None;
+        match answer {
+            DialogResult::Text(password) => {
+                let _id = self.connect_vnc(profile_index, &password);
             }
-            Key::Backspace => {
-                prompt.text.pop();
-            }
-            Key::Enter => {
-                let prompt = self.password_prompt.take();
-                if let Some(prompt) = prompt {
-                    let _id = self.connect_vnc(prompt.profile_index, &prompt.text);
-                }
-            }
-            _ => prompt.text.push_str(&key.text),
+            _ => self.status_message = Some(String::from("Not connected")),
         }
         EventResult::Consumed
     }
@@ -2270,8 +2259,32 @@ impl RemoteDesktopApp {
     // ========================================================================
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The list of keys is drawn over everything -- a remote screen and
+        // the password prompt included -- and is modal: while it is up, no key
+        // and no press reaches the remote machine, the prompt or the window
+        // under it, and the wheel scrolls nothing. A press with any button
+        // puts the list away. A list raised before a session's screen came up
+        // used to forward every key to the remote machine under it -- Escape
+        // and F1 too, so no key could put it away. A release and a move still
+        // go the usual way, so nothing held down is left stuck.
+        if self.show_help {
+            match event {
+                Event::Key(key) if key.pressed => return self.handle_key(key),
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         match event {
-            Event::Key(key) if self.password_prompt.is_some() => self.handle_prompt_key(key),
+            Event::Key(_) | Event::Mouse(_) if self.password_prompt.is_some() => {
+                self.answer_prompt(event)
+            }
             Event::Key(key) => self
                 .forward_key(key)
                 .unwrap_or_else(|| self.handle_key(key)),
@@ -2493,43 +2506,42 @@ impl RemoteDesktopApp {
             return EventResult::Ignored;
         }
 
-        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        // A key on its own is taken plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+D disconnected the chosen session,
+        // Alt+Delete cleared the history, and Alt+Y answered "delete this
+        // profile?" with yes.
+        let plain = textline::is_plain(key.modifiers);
+        if plain && (key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
             // Modal. Letting keys through would mean disconnecting a session
             // the reader cannot see.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
 
-        // Fullscreen toggle check
+        // Fullscreen toggle check: the way out of a full screen, so it
+        // answers whatever is held with it.
         if key.key == self.escape_hotkey && self.fullscreen {
             self.toggle_fullscreen();
             return EventResult::Consumed;
         }
 
+        // Ctrl's chords: a Ctrl chord, not Ctrl held -- AltGr arrives as
+        // Ctrl+Alt, and AltGr+N made a new profile.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return self.handle_ctrl_chord(key);
+        }
+        if !plain {
+            return EventResult::Ignored;
+        }
+
         match key.key {
-            // Tab navigation
-            Key::Num1 if key.modifiers.ctrl => {
-                self.current_view = MainView::Connections;
-                EventResult::Consumed
-            }
-            Key::Num2 if key.modifiers.ctrl => {
-                self.current_view = MainView::ActiveSessions;
-                EventResult::Consumed
-            }
-            Key::Num3 if key.modifiers.ctrl => {
-                self.current_view = MainView::FileTransfer;
-                EventResult::Consumed
-            }
-            Key::Num4 if key.modifiers.ctrl => {
-                self.current_view = MainView::History;
-                EventResult::Consumed
-            }
             // The detail tabs. Four were drawn with the active one
             // highlighted and nothing moved the selection, so
             // `render_detail_display`, `render_detail_input` and
@@ -2654,12 +2666,6 @@ impl RemoteDesktopApp {
                 self.status_message = Some("history cleared".to_string());
                 EventResult::Consumed
             }
-            // New profile
-            Key::N if key.modifiers.ctrl => {
-                let profile = ConnectionProfile::new_default(0);
-                let _id = self.add_profile(profile);
-                EventResult::Consumed
-            }
             // Connect selected profile
             Key::Enter
                 if self.current_view == MainView::Connections
@@ -2668,11 +2674,6 @@ impl RemoteDesktopApp {
                 if let Some(sel) = self.selected_profile {
                     let _id = self.connect_profile(sel);
                 }
-                EventResult::Consumed
-            }
-            // Screenshot
-            Key::S if key.modifiers.ctrl && key.modifiers.shift => {
-                let _name = self.capture_screenshot();
                 EventResult::Consumed
             }
             // Navigate profiles up/down
@@ -2695,6 +2696,26 @@ impl RemoteDesktopApp {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Ctrl's chords: the four views, a new profile, and Ctrl+Shift+S's
+    /// screenshot of the remote screen.
+    fn handle_ctrl_chord(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Num1 => self.current_view = MainView::Connections,
+            Key::Num2 => self.current_view = MainView::ActiveSessions,
+            Key::Num3 => self.current_view = MainView::FileTransfer,
+            Key::Num4 => self.current_view = MainView::History,
+            Key::N => {
+                let profile = ConnectionProfile::new_default(0);
+                let _id = self.add_profile(profile);
+            }
+            Key::S if key.modifiers.shift => {
+                let _name = self.capture_screenshot();
+            }
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
     }
 
     // ========================================================================
@@ -2770,7 +2791,6 @@ impl RemoteDesktopApp {
 
         self.render_remote_screen(&mut cmds);
         self.render_status_bar(&mut cmds);
-        self.render_password_prompt(&mut cmds);
 
         if self.show_perf_overlay {
             self.render_perf_overlay(&mut cmds);
@@ -4545,6 +4565,10 @@ impl App for RemoteDesktopApp {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn wants_waker(&self) -> bool {
         true
     }
@@ -4614,9 +4638,15 @@ impl App for RemoteDesktopApp {
         // this file is derived from these two numbers.
         self.window_width = width;
         self.window_height = height;
-        RenderTree {
+        let mut tree = RenderTree {
             commands: self.render_commands(),
+        };
+        // Over everything: the prompt has every key and press while it is up.
+        let palette = self.palette;
+        if let Some(prompt) = self.password_prompt.as_mut() {
+            prompt.dialog.render(&palette, width, height, &mut tree);
         }
+        tree
     }
 }
 
@@ -6704,6 +6734,199 @@ mod tests {
     use crate::rfb::fake::{Step, handshake_none, server};
 
     /// An app with one VNC profile, for `127.0.0.1:port`.
+    /// **A chord is neither a remote-desktop key nor typing, and AltGr
+    /// types**: a chord with Alt or the Windows key carries its key --
+    /// Alt+D disconnected the chosen session, Alt+Delete cleared the history
+    /// and Alt+Y answered "delete this profile?" with yes; the password
+    /// prompt took any key's text, so Alt+X put an `x` in the password; and
+    /// AltGr+N made a new profile as Ctrl+N does.
+    #[test]
+    fn a_chord_is_neither_a_remote_desktop_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = RemoteDesktopApp::with_sample_data();
+        app.selected_profile = Some(0);
+        app.selected_session = Some(0);
+        let state = |app: &RemoteDesktopApp| {
+            (
+                (app.profiles.len(), app.selected_profile, app.confirm_delete),
+                (app.current_view, app.detail_tab, app.show_help),
+                (app.sessions.len(), app.history.len()),
+                app.sessions.iter().map(|s| s.state).collect::<Vec<_>>(),
+            )
+        };
+        for view in [
+            MainView::Connections,
+            MainView::ActiveSessions,
+            MainView::History,
+        ] {
+            app.current_view = view;
+            let before = (view, state(&app));
+            for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+                for k in [
+                    Key::D,
+                    Key::R,
+                    Key::Delete,
+                    Key::Left,
+                    Key::Down,
+                    Key::Z,
+                    Key::Q,
+                    Key::N,
+                    Key::Num2,
+                    Key::F1,
+                ] {
+                    assert_eq!(
+                        app.handle_event(&chord(k, "", m)),
+                        EventResult::Ignored,
+                        "{m:?} {k:?} was taken in {view:?}"
+                    );
+                    assert_eq!(
+                        (app.current_view, state(&app)),
+                        before,
+                        "{m:?} {k:?} changed the window in {view:?}"
+                    );
+                }
+            }
+        }
+
+        // The question before a profile goes answers plain keys only.
+        app.current_view = MainView::Connections;
+        app.handle_event(&chord(Key::Delete, "", Modifiers::NONE));
+        assert_eq!(app.confirm_delete, Some(0), "control: Delete asks");
+        for m in [Modifiers::alt(), Modifiers::super_key()] {
+            app.handle_event(&chord(Key::Y, "y", m));
+            app.handle_event(&chord(Key::Escape, "", m));
+            assert_eq!(app.confirm_delete, Some(0), "{m:?} answered it");
+        }
+        app.handle_event(&chord(Key::N, "n", Modifiers::NONE));
+
+        // The password prompt types what was typed, AltGr's `@` among it.
+        let mut app = vnc_app(9);
+        assert_eq!(app.connect_profile(0), None);
+        app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
+        app.handle_event(&chord(Key::V, "v", Modifiers::ctrl()));
+        app.handle_event(&chord(Key::Q, "@", altgr));
+        app.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
+        app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
+        app.handle_event(&chord(Key::Enter, "", Modifiers::super_key()));
+        assert_eq!(
+            app.password_prompt.as_ref().map(PasswordPrompt::text),
+            Some("@"),
+            "the password took a command's letter, or lost AltGr's"
+        );
+        assert!(app.sessions.is_empty(), "a chorded Enter connected");
+    }
+
+    /// **The password is asked in the toolkit's input dialog**: one mark a
+    /// character, never the password; the keyboard's ring at the user's
+    /// focus width; and modal -- a press beside it reaches nothing behind it.
+    /// It was a panel with bullets on it, and a press on New Connection behind
+    /// it made a profile. Enter connects with what was typed.
+    #[test]
+    fn the_password_is_asked_in_the_toolkits_dialog() {
+        let mut app = vnc_app(9);
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(&mut app, &p);
+        oswindow::app::App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            app.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        assert_eq!(app.connect_profile(0), None);
+        for c in "s3cret".chars() {
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: c.to_string(),
+            }));
+        }
+        let cmds = oswindow::app::App::render(&mut app, 1000.0, 700.0).commands;
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("The VNC password for desk")),
+            "no dialog asks for the password: {texts:?}"
+        );
+        assert!(
+            texts.contains(&"******"),
+            "the password is not drawn one mark a character: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("s3cret")),
+            "the password is drawn as it was typed"
+        );
+        let ring = app.focus_ring_width;
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::StrokeRect { line_width, color, .. }
+                    if *line_width == ring && *color == p.accent
+            )),
+            "the box with the keyboard has no ring at the user's width"
+        );
+
+        // A press on New Connection, behind the dialog, makes no profile.
+        let profiles = app.profiles.len();
+        app.handle_event(&Event::Mouse(guitk::event::MouseEvent {
+            x: SECTION_PADDING + 10.0,
+            y: TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(
+            app.profiles.len(),
+            profiles,
+            "a press went through the dialog"
+        );
+        assert!(
+            app.password_prompt.is_some(),
+            "a press beside the dialog put it away"
+        );
+        assert!(
+            app.sessions.is_empty(),
+            "a press beside the dialog connected"
+        );
+
+        // Enter connects with what was typed.
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert_eq!(
+            app.sessions.first().map(|s| s.state),
+            Some(SessionState::Connecting),
+            "Enter did not connect"
+        );
+    }
+
     fn vnc_app(port: u16) -> RemoteDesktopApp {
         let mut app = RemoteDesktopApp::new();
         let mut profile = ConnectionProfile::new_default(0);
@@ -7187,6 +7410,94 @@ mod tests {
         );
     }
 
+    /// **Nothing reaches the remote machine through the list of keys.** A
+    /// list raised before the session's screen came up forwarded every key to
+    /// the remote machine under it -- Escape and F1 too, so no key could put
+    /// it away -- and a press on the screen went through it. Now a key is the
+    /// list's, a press with either button puts it away and sends nothing, and
+    /// the wheel turns nothing. The controls are the same key and press with
+    /// the list down, which the remote machine hears.
+    #[test]
+    fn the_shortcut_card_keeps_keys_and_presses_from_the_remote_machine() {
+        let mut script = handshake_none();
+        script.push(Step::Hear(8));
+        script.push(Step::Hear(6));
+        // Listening still, so anything sent while the list was up is heard
+        // rather than swallowed after the script ends.
+        script.push(Step::Hear(8));
+        let (port, heard) = server(script);
+        let mut app = vnc_app(port);
+        let f1 = KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::default(),
+            text: String::new(),
+        };
+        app.handle_event(&Event::Key(f1));
+        assert!(app.show_help, "F1 raised no list before the session");
+        app.connect_vnc(0, "").expect("a session");
+        pump_until(&mut app, |a| a.sessions[0].state == SessionState::Connected);
+        for _ in 0..6 {
+            let _ = heard.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let (x, y, w, h) = app.screen_view().expect("the screen is shown").placed;
+        let on_screen = |kind| {
+            Event::Mouse(guitk::event::MouseEvent {
+                x: x + w - 0.5,
+                y: y + h - 0.5,
+                kind,
+            })
+        };
+        let key = |k: Key, text: &str| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers: Modifiers::default(),
+                text: text.to_owned(),
+            })
+        };
+        let nothing_sent = |what: &str| {
+            assert!(
+                heard.recv_timeout(Duration::from_millis(300)).is_err(),
+                "{what} reached the remote machine through the list"
+            );
+        };
+
+        app.handle_event(&key(Key::A, "a"));
+        nothing_sent("a key");
+        app.handle_event(&on_screen(MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }));
+        nothing_sent("the wheel");
+        assert!(app.show_help, "a key or the wheel put the list away");
+        app.handle_event(&key(Key::Escape, ""));
+        nothing_sent("Escape");
+        assert!(!app.show_help, "Escape left the list up");
+
+        // F1 is the remote machine's while its screen is shown, so the list
+        // is put back up as a reader would have left it.
+        app.show_help = true;
+        app.handle_event(&on_screen(MouseEventKind::Press(MouseButton::Left)));
+        nothing_sent("a press");
+        assert!(!app.show_help, "the press did not put the list away");
+        app.show_help = true;
+        app.handle_event(&on_screen(MouseEventKind::Press(MouseButton::Right)));
+        nothing_sent("a right-button press");
+        assert!(!app.show_help, "a right-button press left the list up");
+
+        // The controls.
+        app.handle_event(&key(Key::A, "a"));
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)).unwrap(),
+            [4, 1, 0, 0, 0, 0, 0, 0x61],
+            "control: a key reaches nothing even with the list down"
+        );
+        app.handle_event(&on_screen(MouseEventKind::Press(MouseButton::Left)));
+        assert_eq!(
+            heard.recv_timeout(Duration::from_secs(5)).unwrap(),
+            [5, 1, 0, 3, 0, 1],
+            "control: a press reaches nothing even with the list down"
+        );
+    }
+
     /// A refused password ends the session in the server's words, and the
     /// attempt is filed as failed.
     #[test]
@@ -7223,11 +7534,10 @@ mod tests {
         let mut app = vnc_app(9);
         assert_eq!(app.connect_profile(0), None);
         assert_eq!(
-            app.password_prompt,
-            Some(PasswordPrompt {
-                profile_index: 0,
-                text: String::new()
-            })
+            app.password_prompt
+                .as_ref()
+                .map(|p| (p.profile_index, p.text())),
+            Some((0, ""))
         );
         assert!(app.sessions.is_empty(), "a session before the password");
         let key = |k: Key, text: &str| {
@@ -7242,16 +7552,21 @@ mod tests {
         app.handle_event(&key(Key::Backspace, ""));
         app.handle_event(&key(Key::X, "x"));
         assert_eq!(
-            app.password_prompt.as_ref().map(|p| p.text.as_str()),
+            app.password_prompt.as_ref().map(PasswordPrompt::text),
             Some("x")
         );
         app.handle_event(&key(Key::Escape, ""));
-        assert_eq!(app.password_prompt, None);
+        assert!(app.password_prompt.is_none());
         assert!(app.sessions.is_empty(), "Escape connected");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Not connected"),
+            "a password given up is not said to be"
+        );
 
         assert_eq!(app.connect_profile(0), None);
         app.handle_event(&key(Key::Enter, ""));
-        assert_eq!(app.password_prompt, None, "Enter left the prompt open");
+        assert!(app.password_prompt.is_none(), "Enter left the prompt open");
         assert_eq!(
             app.sessions.first().map(|s| s.state),
             Some(SessionState::Connecting),
@@ -7260,7 +7575,7 @@ mod tests {
 
         app.profiles[0].protocol = Protocol::Rdp;
         assert_eq!(app.connect_profile(0), None);
-        assert_eq!(app.password_prompt, None);
+        assert!(app.password_prompt.is_none());
         let said = app.status_message.clone().unwrap_or_default();
         assert!(said.contains("RDP is not implemented"), "{said}");
     }

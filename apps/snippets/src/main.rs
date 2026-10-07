@@ -89,6 +89,7 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -159,6 +160,10 @@ const GUTTER_WIDEST: &str = "9999";
 const TOOLBAR_TITLE: &str = "Snippets";
 const STATS_TITLE: &str = "Library statistics";
 const SEARCH_PLACEHOLDER: &str = "Search snippets";
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 12.0;
+/// The most characters the search box holds.
+const SEARCH_CAPACITY: usize = 256;
 const CLEAR_MARK: &str = "x";
 const STAR: &str = "*";
 const TWISTY_OPEN: &str = "v";
@@ -1850,6 +1855,15 @@ pub struct App {
     /// thing that lets one keyboard serve both a text field and a set of
     /// shortcuts.
     search_focus: bool,
+    /// The search box's caret and selection, laid over `search_query`,
+    /// which stays the truth: reloaded whenever the query changes under it.
+    search_editor: TextInput,
+    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
+    search_clipboard: String,
+    /// How wide the mark is round the box that has the keyboard: the user's
+    /// focus width (`App::appearance_changed`), the toolkit's until it is
+    /// known.
+    focus_ring_width: f32,
 
     /// The first line of the selected snippet on show, as a line number.
     ///
@@ -2054,6 +2068,9 @@ impl App {
             search_query: String::new(),
             search_scope: SearchScope::All,
             search_focus: false,
+            search_editor: TextInput::new(),
+            search_clipboard: String::new(),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             code_scroll: 0,
             list_scroll: 0,
             wheel: wheel::Accumulator::default(),
@@ -2359,25 +2376,36 @@ impl App {
         let Some(ed) = self.editing.as_mut() else {
             return EventResult::Ignored;
         };
+        // The editor's own keys are plain, nothing held but Shift: a chord
+        // with Alt or the Windows key is the window's or the desktop's and
+        // arrives carrying its key -- Alt+Enter threw the edits away under
+        // "discard?", and Alt+Tab, the desktop's window switcher, moved
+        // between the fields. A chord goes on to a field typed into, which
+        // knows a command from typing.
+        let plain = textline::is_plain(ev.modifiers);
         if ed.confirm_discard {
-            match ev.key {
-                Key::Enter => self.editing = None,
-                Key::Escape => ed.confirm_discard = false,
-                _ => {}
+            if plain {
+                match ev.key {
+                    Key::Enter => self.editing = None,
+                    Key::Escape => ed.confirm_discard = false,
+                    _ => {}
+                }
             }
             return EventResult::Consumed;
         }
         let field = ed.field;
+        // Ctrl+S, a Ctrl chord and not Ctrl held: AltGr arrives as Ctrl+Alt,
+        // and AltGr+S -- a Polish `ś` -- saved instead of typing.
+        if textline::is_ctrl_chord(ev.modifiers) && ev.key == Key::S {
+            self.save_edit();
+            return EventResult::Consumed;
+        }
         match ev.key {
-            Key::S if ev.modifiers.ctrl => {
-                self.save_edit();
-                return EventResult::Consumed;
-            }
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.leave_editor();
                 return EventResult::Consumed;
             }
-            Key::Tab if ev.modifiers.shift => {
+            Key::Tab if plain && ev.modifiers.shift => {
                 let all = SnippetField::ALL;
                 let at = all.iter().position(|f| *f == field).unwrap_or(0);
                 ed.field = at
@@ -2388,10 +2416,10 @@ impl App {
                 return EventResult::Consumed;
             }
             // In the code, Tab is an indent: it is code.
-            Key::Tab if field == SnippetField::Content => {
+            Key::Tab if plain && field == SnippetField::Content => {
                 ed.content.insert(INDENT, MAX_CONTENT_LEN);
             }
-            Key::Tab => {
+            Key::Tab if plain => {
                 let all = SnippetField::ALL;
                 let at = all.iter().position(|f| *f == field).unwrap_or(0);
                 ed.field = all
@@ -2400,12 +2428,12 @@ impl App {
                     .unwrap_or(SnippetField::Title);
                 return EventResult::Consumed;
             }
-            Key::Enter if field != SnippetField::Content => {
+            Key::Enter if plain && field != SnippetField::Content => {
                 self.save_edit();
                 return EventResult::Consumed;
             }
             Key::Left | Key::Right | Key::Space
-                if matches!(field, SnippetField::Language | SnippetField::Folder) =>
+                if plain && matches!(field, SnippetField::Language | SnippetField::Folder) =>
             {
                 ed.step(field, ev.key != Key::Left, &folders);
             }
@@ -2965,7 +2993,7 @@ impl App {
             Target::Export => self.export(),
             Target::Stats => self.show_stats = true,
             Target::CloseStats => self.show_stats = false,
-            Target::Search => self.search_focus = true,
+            Target::Search => self.focus_search(),
             Target::ClearSearch => {
                 self.search_query.clear();
                 self.list_scroll = 0;
@@ -3116,11 +3144,18 @@ impl App {
         if self.editing.is_some() {
             return self.handle_edit_key(ev);
         }
+        // Every key below is taken plain, nothing held but Shift, but Ctrl+F:
+        // a chord with Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key -- Alt+Y answered "delete?"
+        // with yes, Alt+Delete asked it and Alt+F starred a snippet.
+        let plain = textline::is_plain(ev.modifiers);
         if let Some(id) = self.pending_delete {
-            match ev.key {
-                Key::Enter | Key::Y => self.confirm_delete(id),
-                Key::Escape | Key::N => self.pending_delete = None,
-                _ => {}
+            if plain {
+                match ev.key {
+                    Key::Enter | Key::Y => self.confirm_delete(id),
+                    Key::Escape | Key::N => self.pending_delete = None,
+                    _ => {}
+                }
             }
             return EventResult::Consumed;
         }
@@ -3129,7 +3164,7 @@ impl App {
         // the overlay describing a library that had moved on.
         if self.show_stats {
             return match ev.key {
-                Key::Escape | Key::Enter | Key::S => {
+                Key::Escape | Key::Enter | Key::S if plain => {
                     self.show_stats = false;
                     EventResult::Consumed
                 }
@@ -3139,13 +3174,20 @@ impl App {
         if self.search_focus {
             return self.handle_search_key(ev);
         }
+        // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt.
+        if textline::is_ctrl_chord(ev.modifiers) {
+            if ev.key == Key::F {
+                self.focus_search();
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+        if !plain {
+            return EventResult::Ignored;
+        }
         match ev.key {
             Key::Slash => {
-                self.search_focus = true;
-                EventResult::Consumed
-            }
-            Key::F if ev.modifiers.ctrl => {
-                self.search_focus = true;
+                self.focus_search();
                 EventResult::Consumed
             }
             Key::Up => self.move_selection(-1),
@@ -3187,35 +3229,128 @@ impl App {
     /// A letter means "find this" here and "do this" outside, which is the
     /// only thing that lets one keyboard serve both a text field and a set of
     /// single-letter shortcuts.
+    ///
+    /// Its own keys are plain, and it types only what was typed: a command
+    /// arrives carrying its letter, so Alt+X put an `x` in the query. AltGr
+    /// types; Backspace is refused only to Alt and the Windows key.
     fn handle_search_key(&mut self, ev: &KeyEvent) -> EventResult {
+        let plain = textline::is_plain(ev.modifiers);
         match ev.key {
-            Key::Escape | Key::Enter => {
+            Key::Escape | Key::Enter if plain => {
                 self.search_focus = false;
-                EventResult::Consumed
-            }
-            Key::Backspace => {
-                if self.search_query.pop().is_none() {
-                    return EventResult::Ignored;
-                }
-                self.list_scroll = 0;
                 EventResult::Consumed
             }
             // Arrows still move the selection while typing: a search you
             // cannot walk the results of is half a search.
-            Key::Up => self.move_selection(-1),
-            Key::Down => self.move_selection(1),
+            Key::Up if plain => self.move_selection(-1),
+            Key::Down if plain => self.move_selection(1),
+            // Every other key is the box's editor's (`textline::apply_key`):
+            // Left, Right, Home and End move the caret, Backspace and Delete
+            // delete at it, Ctrl+A, C, X and V, and typing. It typed onto the
+            // end, and Backspace from the end was its only edit.
             _ => {
-                if !ev.types_text() {
-                    return EventResult::Ignored;
+                if self.search_editor.text() != self.search_query {
+                    self.search_editor.set_text(&self.search_query);
                 }
-                // `typed`, not `text`: on most layouts Enter, Tab and Escape
-                // all produce text, and a field that appends whatever arrives
-                // fills up with control characters.
-                self.search_query.extend(ev.typed());
-                self.list_scroll = 0;
-                EventResult::Consumed
+                let before = (
+                    self.search_editor.cursor(),
+                    self.search_editor.selection_anchor(),
+                );
+                let edit = textline::apply_key(
+                    &mut self.search_editor,
+                    ev,
+                    SEARCH_CAPACITY,
+                    &self.search_clipboard,
+                    SEARCH_TEXT_SIZE,
+                );
+                let copied = edit.copied.is_some();
+                if let Some(text) = edit.copied {
+                    self.search_clipboard = text;
+                }
+                let typed = self.search_editor.text() != self.search_query;
+                if typed {
+                    self.search_query = self.search_editor.text().to_owned();
+                    self.list_scroll = 0;
+                }
+                // Something done, or nothing to show for it: a Backspace on
+                // an empty query is not a change, and saying it was asks for
+                // a frame that would be the same.
+                let moved = before
+                    != (
+                        self.search_editor.cursor(),
+                        self.search_editor.selection_anchor(),
+                    );
+                if typed || moved || copied {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
         }
+    }
+
+    /// Give the search box the keyboard, its caret after the query.
+    fn focus_search(&mut self) {
+        self.search_focus = true;
+        self.search_editor.set_text(&self.search_query);
+    }
+
+    /// Where the search's caret is drawn: the editor's while the box has the
+    /// keyboard (the end, if the query changed under the editor), the start
+    /// otherwise. One answer for the drawing and for a press.
+    fn search_cursor(&self) -> text::TextCursor {
+        if !self.search_focus {
+            text::TextCursor::default()
+        } else if self.search_editor.text() == self.search_query {
+            self.search_editor.cursor()
+        } else {
+            text::TextCursor::from(self.search_query.len())
+        }
+    }
+
+    /// The search box's parts, inside the box `outer`: where the query is
+    /// drawn, where the clear mark is (while there is a query), and where
+    /// the scope's label is. One answer for the drawing and for a press.
+    fn search_parts(&self, outer: Rect, l: &Layout) -> (Rect, Rect, Rect) {
+        let mut inner = inset_x(outer, outer.h / 2.0);
+        let cross = if self.search_query.is_empty() {
+            Rect::EMPTY
+        } else {
+            take_right(
+                &mut inner,
+                text::measure(CLEAR_MARK, l.small, FontWeightHint::Bold),
+                l.pad,
+            )
+        };
+        let scope = take_right(
+            &mut inner,
+            text::measure(self.search_scope.label(), l.tiny, FontWeightHint::Bold),
+            l.pad,
+        );
+        (inner, cross, scope)
+    }
+
+    /// A press on the search box at `x`, the box drawn at `outer`: it takes
+    /// the keyboard, with the caret under the pointer -- measured against the
+    /// box as it was drawn before the press.
+    fn press_search(&mut self, outer: Rect, x: f32) {
+        let l = self.layout();
+        let (inner, _, _) = self.search_parts(outer, &l);
+        let drawn = self.search_cursor();
+        self.search_focus = true;
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            inner.w,
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - inner.x,
+        );
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
     }
 
     /// How many rows a page key moves: one panel's worth, less a row so the
@@ -3255,6 +3390,12 @@ impl App {
             };
         }
         match ev.kind {
+            MouseEventKind::Press(MouseButton::Left) if target == Target::Search => {
+                if let Some(outer) = frame.rect_of(|t| *t == Target::Search) {
+                    self.press_search(outer, ev.x);
+                }
+                EventResult::Consumed
+            }
             MouseEventKind::Press(MouseButton::Left) => self.press(target),
             MouseEventKind::Scroll { dy, .. } => self.scroll(target, dy),
             _ => EventResult::Ignored,
@@ -3365,24 +3506,26 @@ impl App {
         if outer.is_empty() {
             return;
         }
-        let round = CornerRadii::all(outer.h / 2.0);
-        fill(f, outer, self.palette.surface0, round);
+        // The toolkit's field. Its mark is the one thing that says a letter
+        // will be typed rather than acted on; red, a query that finds nothing.
+        field::draw(
+            f,
+            &self.palette,
+            outer,
+            field::State {
+                hovered: false,
+                focused: self.search_focus,
+                disabled: false,
+                invalid: !self.search_query.is_empty() && self.filtered_snippets().is_empty(),
+            },
+            self.focus_ring_width,
+        );
         // Recorded before the two controls inside it, because a hit test takes
         // the last match and these are drawn on top of the box.
         f.hit(Target::Search, outer);
-        if self.search_focus {
-            // The one thing that says a letter will be typed rather than acted
-            // on.
-            stroke(f, outer, self.palette.blue, 1.0, round);
-        }
 
-        let mut inner = inset_x(outer, outer.h / 2.0);
+        let (inner, cross, scope_rect) = self.search_parts(outer, l);
         if !self.search_query.is_empty() {
-            let cross = take_right(
-                &mut inner,
-                text::measure(CLEAR_MARK, l.small, FontWeightHint::Bold),
-                l.pad,
-            );
             label_centred(
                 f,
                 &Label {
@@ -3397,11 +3540,6 @@ impl App {
         }
 
         let scope = self.search_scope.label();
-        let scope_rect = take_right(
-            &mut inner,
-            text::measure(scope, l.tiny, FontWeightHint::Bold),
-            l.pad,
-        );
         label_centred(
             f,
             &Label {
@@ -3414,21 +3552,60 @@ impl App {
         );
         f.hit(Target::Scope, scope_rect);
 
-        let (shown, color) = if self.search_query.is_empty() {
-            (SEARCH_PLACEHOLDER, self.palette.overlay0)
+        // The query, with the caret and the selection while the box has the
+        // keyboard; empty, what the box is for, with the caret before it.
+        let focused = self.search_focus;
+        let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let y = inner.y + (inner.h - line) / 2.0;
+        let mut tree = RenderTree::new();
+        if self.search_query.is_empty() {
+            label_left(
+                f,
+                &Label {
+                    text: SEARCH_PLACEHOLDER,
+                    size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.subtext0,
+                },
+                inner,
+            );
+            if focused {
+                textedit::push_caret(
+                    &mut tree,
+                    inner.x,
+                    y,
+                    line,
+                    self.palette.text,
+                    textedit::CARET_WIDTH,
+                );
+            }
         } else {
-            (self.search_query.as_str(), self.palette.text)
-        };
-        label_left(
-            f,
-            &Label {
-                text: shown,
-                size: l.small,
-                weight: FontWeightHint::Regular,
-                color,
-            },
-            inner,
-        );
+            let editing = self.search_editor.text() == self.search_query;
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: self.search_cursor(),
+                    selection_anchor: if focused && editing {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused,
+                    x: inner.x,
+                    y,
+                    width: inner.w,
+                    line_height: line,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+        }
+        f.extend(tree.commands);
     }
 
     fn draw_sidebar(&self, f: &mut Frame<Target>, l: &Layout) {
@@ -4506,17 +4683,20 @@ impl App {
                 Rect::new(row.x, row.y, label_w, row.h),
             );
             let control = Rect::new(row.x + label_w, row.y, (row.w - label_w).max(0.0), row.h);
-            fill(f, control, self.palette.base, CornerRadii::all(l.pad * 0.4));
-            stroke(
+            // The toolkit's field: the theme's box, with the keyboard's mark
+            // at the user's width round the one the keys type into. It was a
+            // panel whose edge turned blue.
+            field::draw(
                 f,
+                &self.palette,
                 control,
-                if focused {
-                    self.palette.blue
-                } else {
-                    self.palette.surface1
+                field::State {
+                    hovered: false,
+                    focused,
+                    disabled: false,
+                    invalid: false,
                 },
-                if focused { 2.0 } else { 1.0 },
-                CornerRadii::all(l.pad * 0.4),
+                self.focus_ring_width,
             );
             if let Some(input) = ed.line(field) {
                 if input.text().is_empty() && !focused {
@@ -5208,6 +5388,10 @@ impl WindowApp for App {
         self.palette = *palette;
     }
 
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         TOOLBAR_TITLE.to_string()
     }
@@ -5397,6 +5581,133 @@ mod tests {
             .find(|s| s.title == title)
             .unwrap_or_else(|| panic!("no snippet titled {title}"))
             .id
+    }
+
+    // ── Chords ──────────────────────────────────────────────────────────
+
+    /// **A chord is neither a library key nor typing, and AltGr+S is not
+    /// Ctrl+S**: a chord with Alt or the Windows key is the window's or the
+    /// desktop's and arrives carrying its key -- Alt+Delete asked to delete a
+    /// snippet and Alt+Y then deleted it, Alt+F starred one, Alt+X typed an
+    /// `x` into the search, Alt+Tab walked the editor's fields and Alt+Enter,
+    /// under "discard?", threw the edits away; and AltGr+S, a Polish `ś`,
+    /// saved the snippet being written instead of typing into it.
+    ///
+    /// Each key is asserted as it is pressed: the toggles go round. E is left
+    /// out because it writes an export file.
+    #[test]
+    fn a_chord_is_neither_a_library_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chord = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut a = app_with(&["one", "two", "three"]);
+        key(&mut a, &press(Key::Down));
+        assert!(selected_title(&a).is_some(), "control: a selection");
+        let state = |a: &App| {
+            (
+                titles(a),
+                selected_title(a),
+                a.snippets.iter().map(|s| s.favorite).collect::<Vec<_>>(),
+                (a.pending_delete, a.editing.is_some()),
+                (a.search_focus, a.show_stats, a.search_query.clone()),
+                (a.sort_order, a.sidebar_view),
+            )
+        };
+        let before = state(&a);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [
+                Key::Delete,
+                Key::F,
+                Key::S,
+                Key::N,
+                Key::F2,
+                Key::O,
+                Key::Slash,
+                Key::Tab,
+                Key::Down,
+                Key::End,
+                Key::Enter,
+            ] {
+                assert_eq!(
+                    key(&mut a, &chord(k, "", m)),
+                    EventResult::Ignored,
+                    "{m:?} {k:?} was taken"
+                );
+                assert_eq!(state(&a), before, "{m:?} {k:?} changed the library");
+            }
+        }
+
+        // The question before a delete answers plain keys only.
+        key(&mut a, &press(Key::Delete));
+        assert!(a.pending_delete.is_some(), "control: Delete asks");
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Y, Key::Enter, Key::N, Key::Escape] {
+                key(&mut a, &chord(k, "", m));
+                assert_eq!(titles(&a), before.0, "{m:?} {k:?} deleted it");
+                assert!(a.pending_delete.is_some(), "{m:?} {k:?} answered");
+            }
+        }
+        key(&mut a, &press(Key::N));
+        assert!(a.pending_delete.is_none(), "control: N keeps it");
+
+        // The search types what was typed, and AltGr's letters.
+        key(&mut a, &press(Key::Slash));
+        assert!(a.search_focus, "control: / opens the search");
+        key(&mut a, &chord(Key::X, "x", Modifiers::alt()));
+        key(&mut a, &chord(Key::X, "x", Modifiers::super_key()));
+        key(&mut a, &chord(Key::F, "f", Modifiers::ctrl()));
+        key(&mut a, &chord(Key::E, "ę", altgr));
+        key(&mut a, &chord(Key::Backspace, "", Modifiers::alt()));
+        key(&mut a, &chord(Key::Enter, "", Modifiers::alt()));
+        key(&mut a, &chord(Key::Escape, "", Modifiers::super_key()));
+        assert_eq!(
+            a.search_query, "ę",
+            "the search typed a command's letter, or lost AltGr's"
+        );
+        assert!(a.search_focus, "a chorded Enter or Escape left the search");
+        key(&mut a, &press(Key::Escape));
+        a.search_query.clear();
+
+        // The editor: its own keys plain, AltGr typing.
+        key(&mut a, &press(Key::N));
+        assert!(a.editing.is_some(), "control: N opens the editor");
+        let field = |a: &App| a.editing.as_ref().map(|ed| ed.field);
+        let start = field(&a);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            key(&mut a, &chord(Key::Tab, "", m));
+            assert_eq!(field(&a), start, "{m:?} Tab moved on");
+            key(&mut a, &chord(Key::Escape, "", m));
+            assert!(a.editing.is_some(), "{m:?} Escape left the editor");
+        }
+        key(&mut a, &chord(Key::S, "ś", altgr));
+        assert!(a.editing.is_some(), "AltGr+S saved");
+        let title = |a: &App| a.editing.as_ref().map(|ed| ed.title.text().to_owned());
+        assert!(
+            title(&a).is_some_and(|t| t.ends_with('ś')),
+            "AltGr+S typed nothing: {:?}",
+            title(&a)
+        );
+        key(&mut a, &chord(Key::Enter, "", Modifiers::alt()));
+        assert!(a.editing.is_some(), "Alt+Enter saved");
+
+        // "Discard?" answers plain keys only.
+        key(&mut a, &press(Key::Escape));
+        assert!(
+            a.editing.as_ref().is_some_and(|ed| ed.confirm_discard),
+            "control: Escape over changes asks"
+        );
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            key(&mut a, &chord(Key::Enter, "", m));
+            assert!(a.editing.is_some(), "{m:?} Enter threw the edits away");
+        }
     }
 
     // ── Languages ───────────────────────────────────────────────────────
@@ -7026,6 +7337,236 @@ mod tests {
         type_str(&mut a, "abc");
         key(&mut a, &press(Key::Backspace));
         assert_eq!(a.search_query, "ab");
+    }
+
+    /// Make the theme's keyboard mark a ring and the user's focus width
+    /// wider than the toolkit's, so that a box drawn with no mark, or with
+    /// the toolkit's width, is told from one drawn as asked. The palette
+    /// drawn with.
+    fn ringed(a: &mut App) -> Palette {
+        let mut p = a.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        oswindow::app::App::theme_changed(a, &p);
+        oswindow::app::App::appearance_changed(
+            a,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..appearance::AppearanceSettings::default()
+            },
+        );
+        assert!(
+            a.focus_ring_width > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        p
+    }
+
+    /// The box the window draws at about `near` -- a hit box is clipped, and
+    /// its width can differ from the drawn one in the last digit -- as it is
+    /// drawn.
+    fn drawn_box(a: &App, near: Rect) -> Rect {
+        let frame = a.frame(W.0, W.1);
+        frame
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (x - near.x).abs() < 0.01
+                    && (y - near.y).abs() < 0.01
+                    && (width - near.w).abs() < 0.01
+                    && (height - near.h).abs() < 0.01 =>
+                {
+                    Some(Rect::new(*x, *y, *width, *height))
+                }
+                _ => None,
+            })
+            .unwrap_or(near)
+    }
+
+    /// Whether the window draws the toolkit's field at `rect` in `state` --
+    /// and, unless `state` has the keyboard, without the keyboard's mark.
+    fn draws_box(a: &App, p: &Palette, rect: Rect, state: field::State) -> bool {
+        let seq = |s: field::State| {
+            let mut v: Vec<RenderCommand> = Vec::new();
+            field::draw(&mut v, p, rect, s, a.focus_ring_width);
+            v
+        };
+        let frame = a.frame(W.0, W.1);
+        let cmds = frame.commands();
+        let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+        has(&seq(state))
+            && (state.focused
+                || !has(&seq(field::State {
+                    focused: true,
+                    ..state
+                })))
+    }
+
+    /// **The search box is the toolkit's field, and edits like one**: no
+    /// mark until it has the keyboard, then the theme's mark at the user's
+    /// width; red while the query finds nothing; the caret keys, Backspace
+    /// and Delete at the caret, Ctrl+A, X and V; a press that puts the caret
+    /// under the pointer; and the arrows up and down still walk the results.
+    /// It was a pill whose edge turned blue, with no caret.
+    #[test]
+    fn the_search_box_is_the_toolkits_field_and_edits_like_one() {
+        let mut a = app();
+        let p = ringed(&mut a);
+        let rect = drawn_box(&a, rect_of(&a, Target::Search).expect("no search box"));
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        assert!(
+            draws_box(&a, &p, rect, idle),
+            "the search box is not the toolkit's field, or has a mark"
+        );
+        key(&mut a, &ctrl(Key::F));
+        assert!(a.search_focus, "control: Ctrl+F");
+        assert!(
+            draws_box(&a, &p, rect, focused),
+            "the search box with the keyboard has no mark"
+        );
+
+        type_str(&mut a, "orem");
+        key(&mut a, &press(Key::Home));
+        key(&mut a, &press(Key::Delete));
+        assert_eq!(
+            a.search_query, "rem",
+            "Home and Delete did not edit the start"
+        );
+        key(&mut a, &ctrl(Key::A));
+        key(&mut a, &ctrl(Key::X));
+        assert_eq!(a.search_query, "", "Ctrl+A and Ctrl+X did not cut");
+        key(&mut a, &ctrl(Key::V));
+        key(&mut a, &ctrl(Key::V));
+        assert_eq!(
+            a.search_query, "remrem",
+            "Ctrl+V did not paste what was cut"
+        );
+
+        // The caret is drawn after the query.
+        let l = a.layout();
+        let (inner, _, _) = a.search_parts(rect, &l);
+        let end = inner.x + text::measure("remrem", SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let carets: Vec<f32> = a
+            .frame(W.0, W.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Line { x1, y1, x2, .. }
+                    if (x1 - x2).abs() < f32::EPSILON && rect.contains(*x1, *y1) =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            carets.iter().any(|x| (x - end).abs() < 0.5),
+            "the caret is not after the query: {carets:?}, not {end}"
+        );
+
+        // A press at the start of the query puts the caret there.
+        a.click_at(inner.x + 1.0, inner.y + inner.h / 2.0, MouseButton::Left, W);
+        type_str(&mut a, "L");
+        assert_eq!(
+            a.search_query, "Lremrem",
+            "the caret did not go where the press was"
+        );
+
+        type_str(&mut a, "zzqq");
+        assert!(
+            draws_box(
+                &a,
+                &p,
+                rect,
+                field::State {
+                    invalid: true,
+                    ..focused
+                }
+            ),
+            "a query that finds nothing is not red"
+        );
+
+        // The arrows up and down still walk the results while typing.
+        a.search_query.clear();
+        let before = a.selected_snippet_id;
+        key(&mut a, &press(Key::Down));
+        assert_ne!(
+            a.selected_snippet_id, before,
+            "Down did not walk the results"
+        );
+
+        key(&mut a, &press(Key::Escape));
+        assert!(!a.search_focus, "control: Escape leaves the search");
+        assert!(
+            draws_box(&a, &p, rect, idle),
+            "the search box keeps its mark without the keyboard"
+        );
+
+        // Ctrl+F gives the box back with the caret after the query, wherever
+        // it was left.
+        key(&mut a, &ctrl(Key::F));
+        type_str(&mut a, "ab");
+        key(&mut a, &press(Key::Home));
+        key(&mut a, &press(Key::Escape));
+        key(&mut a, &ctrl(Key::F));
+        type_str(&mut a, "x");
+        assert_eq!(a.search_query, "abx", "Ctrl+F left the caret where it was");
+    }
+
+    /// **The editor's line boxes are the toolkit's field**: the one the keys
+    /// type into has the theme's mark at the user's width, the others none,
+    /// and Tab moves it. They were panels whose edge turned blue.
+    #[test]
+    fn the_editors_boxes_are_the_toolkits_field() {
+        let mut a = app();
+        let p = ringed(&mut a);
+        let id = a
+            .selected_snippet_id
+            .or_else(|| a.snippets.first().map(|s| s.id))
+            .expect("a snippet");
+        a.edit(id);
+        let title = rect_of(&a, Target::EditField(SnippetField::Title)).expect("no title box");
+        let tags = rect_of(&a, Target::EditField(SnippetField::Tags)).expect("no tags box");
+        let idle = field::State::default();
+        let focused = field::State {
+            focused: true,
+            ..idle
+        };
+        let has_keys = a.editing.as_ref().map(|ed| ed.field);
+        let (on, off) = if has_keys == Some(SnippetField::Title) {
+            (title, tags)
+        } else {
+            (tags, title)
+        };
+        assert!(
+            draws_box(&a, &p, on, focused),
+            "the box the keys type into has no mark"
+        );
+        assert!(
+            draws_box(&a, &p, off, idle),
+            "a box without the keys is not the toolkit's field, or has a mark"
+        );
+        key(&mut a, &press(Key::Tab));
+        let moved = a.editing.as_ref().map(|ed| ed.field);
+        assert_ne!(moved, has_keys, "control: Tab moves the keyboard");
+        if let Some(field) = moved
+            && let Some(rect) = rect_of(&a, Target::EditField(field))
+            && a.editing.as_ref().and_then(|ed| ed.line(field)).is_some()
+        {
+            assert!(
+                draws_box(&a, &p, rect, focused),
+                "Tab did not move the mark"
+            );
+        }
     }
 
     #[test]

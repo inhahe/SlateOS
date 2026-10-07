@@ -80,3 +80,5 @@ chosen so that three read across and two do not.
 in `gui/font/src/kern.rs`; `Face::kern_across` in `gui/font/src/sfnt.rs`; the
 `kern_left`/`between` shaping loop and `ScaledFont::kern_across` in
 `gui/font/src/scaled.rs`.
+
+**Revisited 2026-10-05 (lane F):** the legacy-table alternative is superseded by §1359 -- HarfBuzz reads that table with `IgnoreMarks`, so it is read across marks here too, inside the positioning pass.

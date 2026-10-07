@@ -288,6 +288,51 @@ pub enum FontFamily {
     Mono,
 }
 
+impl RenderCommand {
+    /// The same command with every colour it draws `alpha` times as opaque
+    /// (0 to 1): what a widget faded by its style's opacity draws.
+    ///
+    /// A picture has no colour here to fade, and is drawn as it is -- the
+    /// protocol carries no opacity for images, which would be the
+    /// compositor's to apply (lane F's). Commands that draw nothing pass
+    /// through unchanged.
+    #[must_use]
+    pub fn faded(mut self, alpha: f32) -> Self {
+        let fade = |c: &mut Color| {
+            let scaled = (f32::from(c.a) * alpha.clamp(0.0, 1.0)).round();
+            // In 0..=255: a byte times a factor in 0..=1, rounded.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a byte times a factor in 0..=1"
+            )]
+            let a = scaled as u8;
+            c.a = a;
+        };
+        match &mut self {
+            Self::FillRect { color, .. }
+            | Self::StrokeRect { color, .. }
+            | Self::Text { color, .. }
+            | Self::Line { color, .. }
+            | Self::BoxShadow { color, .. } => fade(color),
+            Self::RichText { spans, color, .. } => {
+                fade(color);
+                for span in spans.iter_mut() {
+                    fade(&mut span.color);
+                }
+            }
+            Self::Image { .. }
+            | Self::PushClip { .. }
+            | Self::PopClip
+            | Self::PushTranslate { .. }
+            | Self::PopTranslate
+            | Self::PushFont { .. }
+            | Self::PopFont => {}
+        }
+        self
+    }
+}
+
 /// Collected render output from a frame.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderTree {
@@ -755,6 +800,87 @@ pub fn content_bottom(cmds: &[RenderCommand]) -> Option<f32> {
 )]
 mod tests {
     use super::*;
+
+    /// **Fading scales the alpha of every colour a command draws** -- a
+    /// rich text's spans as well as its base colour -- and leaves what has
+    /// no colour, a picture or a translation, as it was.
+    #[test]
+    fn fading_scales_every_colour_a_command_draws() {
+        let ink = Color {
+            r: 10,
+            g: 20,
+            b: 30,
+            a: 200,
+        };
+        let faded = RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            color: ink,
+            corner_radii: CornerRadii::ZERO,
+        }
+        .faded(0.5);
+        let RenderCommand::FillRect { color, .. } = faded else {
+            panic!("the kind changed");
+        };
+        assert_eq!(
+            color,
+            Color {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 100
+            }
+        );
+
+        let rich = RenderCommand::RichText {
+            x: 0.0,
+            y: 0.0,
+            text: "ab".to_owned(),
+            spans: vec![TextSpan { end: 1, color: ink }],
+            color: ink,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        }
+        .faded(0.25);
+        let RenderCommand::RichText { spans, color, .. } = rich else {
+            panic!("the kind changed");
+        };
+        assert_eq!(color.a, 50);
+        assert_eq!(spans[0].color.a, 50);
+
+        let image = RenderCommand::Image {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+            image_id: 7,
+        };
+        assert_eq!(image.clone().faded(0.5), image);
+        let shift = RenderCommand::PushTranslate { dx: 1.0, dy: 2.0 };
+        assert_eq!(shift.clone().faded(0.0), shift);
+
+        // Out of range is held to it: a fade never makes a colour more
+        // opaque than it was, and nothing goes below invisible. (The colour
+        // is part-transparent so that a factor of 2 would show: on an opaque
+        // one the byte's own ceiling would hide it.)
+        let line = |a| {
+            RenderCommand::Line {
+                x1: 0.0,
+                y1: 0.0,
+                x2: 1.0,
+                y2: 1.0,
+                color: Color { a: 100, ..ink },
+                width: 1.0,
+            }
+            .faded(a)
+        };
+        assert!(matches!(line(2.0), RenderCommand::Line { color, .. } if color.a == 100));
+        assert!(matches!(line(-1.0), RenderCommand::Line { color, .. } if color.a == 0));
+    }
 
     fn drawn(tree: &RenderTree) -> (&str, Option<f32>) {
         match tree.commands.first().expect("one command") {

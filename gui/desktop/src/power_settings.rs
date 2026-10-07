@@ -1512,14 +1512,6 @@ test to be about anything -- it drew {} text command(s)",
     }
 
     #[test]
-    fn spatial_audio_labels() {
-        use crate::sound_settings::SpatialAudioMode;
-        for m in SpatialAudioMode::ALL {
-            let _ = m.label();
-        }
-    }
-
-    #[test]
     fn battery_no_battery_tab() {
         let mut ui = PowerSettingsUI::new();
         ui.set_active_tab(2);

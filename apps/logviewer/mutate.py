@@ -392,8 +392,8 @@ MUTATIONS = [
     # -- keys -----------------------------------------------------------------------------
     (
         "a chord nobody bound runs the bare key",
-        "        if key.modifiers.ctrl {\n            return self.handle_chord(key);\n        }\n",
-        "        if key.modifiers.ctrl && self.handle_chord(key) == EventResult::Consumed {\n"
+        "        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_chord(key);\n        }\n",
+        "        if textline::is_ctrl_chord(key.modifiers) && self.handle_chord(key) == EventResult::Consumed {\n"
         "            return EventResult::Consumed;\n        }\n",
         ["a_chord_nobody_bound_does_not_run_the_key_under_it"],
     ),
@@ -431,6 +431,112 @@ MUTATIONS = [
             "the_follow_button_starts_following_from_the_end_and_stops_it",
             "a_reader_who_selects_an_earlier_entry_is_not_dragged_away_from_it",
         ],
+    ),
+    (
+        "AltGr is a chord",
+        "        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_chord(key);",
+        "        if key.modifiers.ctrl {\n            return self.handle_chord(key);",
+        ["altgr_types_into_the_search_box_and_runs_no_chord"],
+    ),
+    (
+        "a key held with Alt or the Windows key is a shortcut",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return EventResult::Ignored;\n        }\n        match key.key {",
+        "        match key.key {",
+        [
+            "altgr_types_into_the_search_box_and_runs_no_chord",
+            "a_command_types_nothing_and_alt_or_windows_is_no_shortcut",
+        ],
+    ),
+    (
+        "a key held with the Windows key is a shortcut",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return EventResult::Ignored;\n        }\n        match key.key {",
+        "        if key.modifiers.alt {\n            return EventResult::Ignored;\n        }\n        match key.key {",
+        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
+    ),
+    (
+        "the search box types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if key.text.is_empty() {",
+        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
+    ),
+    (
+        "the search box refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["altgr_types_into_the_search_box_and_runs_no_chord"],
+    ),
+]
+
+MODAL = "the_shortcut_list_takes_every_key_while_it_is_up"
+
+MUTATIONS += [
+    # The shortcut list is modal for the keys (2026-10-04; known-issues
+    # E-a-press-goes-through-the-shortcut-card-to-the-control-drawn-under-it).
+    (
+        "a key reaches the log under the list of keys",
+        "        if self.show_help {\n"
+        "            if key.key == Key::Escape {\n"
+        "                self.show_help = false;\n"
+        "            }\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        "        if key.key == Key::Escape && self.show_help {\n"
+        "            self.show_help = false;\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n",
+        [MODAL],
+    ),
+    (
+        "Escape does not put the list of keys away",
+        "            if key.key == Key::Escape {\n"
+        "                self.show_help = false;\n"
+        "            }\n",
+        "",
+        [MODAL],
+    ),
+]
+
+FIELD = "the_search_box_is_the_toolkits_field"
+CARET = "the_search_caret_follows_the_query"
+
+MUTATIONS += [
+    # The search box is the toolkit's field (2026-10-04; lane C,
+    # c-e-a-theme-can-shape-the-controls).
+    (
+        "the search box never lights",
+        "            hovered: open && self.hover == Some(Target::SearchBox),\n",
+        "            hovered: false,\n",
+        [FIELD],
+    ),
+    (
+        "the search box is never marked",
+        "            focused: open && self.search_focused,\n",
+        "            focused: false,\n",
+        [FIELD, CARET],
+    ),
+    (
+        "the search box shows through the shortcut list",
+        "        let open = !self.show_help && !self.picker.is_open();\n        field::State {\n",
+        "        let open = !self.picker.is_open();\n        field::State {\n",
+        [FIELD],
+    ),
+    (
+        "a pattern that does not compile is not red",
+        "            invalid: matches!(self.filter.pattern(), Some(Err(_))),\n",
+        "            invalid: false,\n",
+        [FIELD],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [FIELD],
+    ),
+    (
+        "the caret is at the start of the query",
+        "                cursor: text::TextCursor::from(self.filter.search_query.len()),\n",
+        "                cursor: text::TextCursor::from(0),\n",
+        [CARET],
     ),
 ]
 

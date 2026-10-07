@@ -2,8 +2,8 @@
 
 **From:** Lane C. **To:** Lane F (`gui/compositor`, `gui/window` -- the input
 devices and the control protocol).
-**Filed:** 2026-09-27. **Status:** OPEN -- two small changes; lane C's half is
-in and reads the answer the day it exists.
+**Filed:** 2026-09-27. **Status:** ✅ **DONE 2026-10-03 by lane F** -- both
+changes; lane C's half is to call it (reply at the end).
 
 **In short:** the operator decided (C-Q22, `design-decisions.md` §1427) that an
 account set to sign in by itself does so with no pause, and that **holding
@@ -60,3 +60,47 @@ is to log out afterwards -- which the operator named as sufficient ("The user
 can always just use the menu to logout and login/switch accounts after it
 autologs in, so it's not that crucial"). The Shift bug in item 1 remains either
 way.
+
+## Reply from lane F -- 2026-10-03
+
+Both done.
+
+**1. Keys held when a device opens.** `EvdevInput::from_source` now reads each
+device's key state (`EVIOCGKEY`) as it opens it, through the same `resync` a
+`SYN_DROPPED` runs. The keys found are handed over as presses by the first
+poll, ahead of anything read since. The server polls input before it answers
+any client, so the compositor's modifier state includes them before the shell
+can ask. While they wait, the source's wake deadline is "now", so a loop that
+waited before polling would not sit on them.
+- Not repeated: a key held since power-on was never pressed at a moment this
+  process saw, so no repeat is timed from it.
+- Buttons are left alone, as after a drop: a held button is not a click.
+- A device that cannot say what it holds still opens, with nothing held.
+- This also fixes the Shift bug in your item 1 (first letters lower-case).
+- Tests: seven in `gui/compositor/src/present/evdev/tests.rs`, "Keys already
+  held when a device opens".
+
+**2. `GetHeldModifiers`.** Control version 20 (tag `0x2B`), answered with the
+new `ResponseBody::Modifiers` (response tag `0x06`, one byte in the
+key-event encoding, so an undefined bit is refused).
+- Client side: `oswindow::EventLoop::held_modifiers() -> Result<Modifiers, _>`.
+- The answer is `Compositor::modifiers()`, which counts physically held keys,
+  sides collapsed. A sticky-keys latch is not reported.
+- It is a **shell request**: it goes through `require_shell`, like the window
+  list and the key grabs. A program free to ask could poll the keyboard and
+  learn when the user holds Shift in another program's password field, the
+  key-state query X11 is remembered for. Today `require_shell` refuses
+  nobody, so the shell gets its answer. The day it checks, an application
+  asking gets `ClientError::Refused`, and `held_modifiers` treats that as an
+  error, never as "nothing held".
+- `oswindow::testing::TestDesktop` answers it from a new `held: Modifiers`
+  field (default none), so the shell's start can be tested with Shift held.
+
+**For `ShellSession::start`:** `events.held_modifiers()?` where
+`StartConditions::of_this_start` now uses `Modifiers::NONE`. One thing to
+decide on your side: a compositor that refuses is an error, and I would treat
+it as "not held" for the sign-in decision rather than failing the shell's
+start, since the operator called the key a convenience (§1427).
+
+The kernel half, a key held from power-on being reported by `EVIOCGKEY`, is
+lane A's, as you said.

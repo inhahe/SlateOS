@@ -588,6 +588,18 @@ MUTATIONS = [
         "                    // faintest grey is 2.3:1 on a light band.\n                    color: self.palette.overlay0,",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "a key pressed with a modifier is the game's",
+        '        if ev.pressed && !textline::is_plain(ev.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '',
+        ['a_key_pressed_with_a_modifier_is_not_the_games'],
+    ),
+    (
+        "a release with a modifier held is not the game's",
+        '        if ev.pressed && !textline::is_plain(ev.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        '        if !textline::is_plain(ev.modifiers) {\n            return EventResult::Ignored;\n        }\n',
+        ['a_key_pressed_with_a_modifier_is_not_the_games'],
+    ),
 ]
 
 if __name__ == "__main__":

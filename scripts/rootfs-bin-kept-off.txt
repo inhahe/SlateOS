@@ -1,0 +1,41 @@
+# rootfs-bin-kept-off.txt -- programs the workspace builds that do NOT go into
+# the image's /bin, each with the reason.
+#
+# Read by scripts/create-ext4-rootfs.sh, which stages every program the
+# workspace builds -- every binary target under userspace/, as
+# `scripts/build-userland.py --list` reports them -- except the names below
+# (design-decisions §1053, the operator's answer to B-Q21; §1164, how). The
+# names in rootfs-bin-manifest.txt are staged first, as the programs the image
+# must carry; this file is the other half: what is left off, and why.
+#
+# One name per line, then `# ` and the reason. A name with no reason is
+# refused: the reason is the whole of what this file records. A name the
+# workspace does not build is reported as a stale entry.
+#
+# Every entry today is a name a block above the userland's has already staged,
+# with a program of its own that is meant to be the one on /bin. A collision
+# the list does not know of is not silent either: the earlier copy stays, and
+# the image build names the program to add here.
+
+# The promoted fastpy commands own these names (the PROMOTED map in
+# create-ext4-rootfs.sh). design-decisions §108 part 1: fastpy stays "additive
+# only... No Rust coreutil is touched, shadowed or retired", and which
+# implementation a stock install prefers is deferred-questions.md DQ1.
+cat     # /bin/cat is fastpy's promoted cat (§108 part 1; DQ1)
+chmod   # /bin/chmod is fastpy's promoted chmod (§108 part 1; DQ1)
+chown   # /bin/chown is fastpy's promoted chown (§108 part 1; DQ1)
+grep    # /bin/grep is fastpy's promoted grep (§108 part 1; DQ1)
+head    # /bin/head is fastpy's promoted head (§108 part 1; DQ1)
+ls      # /bin/ls is fastpy's promoted ls (§108 part 1; DQ1)
+mkdir   # /bin/mkdir is fastpy's promoted mkdir (§108 part 1; DQ1)
+mv      # /bin/mv is fastpy's promoted mv (§108 part 1; DQ1)
+rm      # /bin/rm is fastpy's promoted rm (§108 part 1; DQ1)
+rmdir   # /bin/rmdir is fastpy's promoted rmdir (§108 part 1; DQ1)
+sort    # /bin/sort is fastpy's promoted sort (§108 part 1; DQ1)
+tail    # /bin/tail is fastpy's promoted tail (§108 part 1; DQ1)
+uniq    # /bin/uniq is fastpy's promoted uniq (§108 part 1; DQ1)
+wc      # /bin/wc is fastpy's promoted wc (§108 part 1; DQ1)
+
+# The system's shell and its make.
+sh      # /bin/sh is dash, staged far earlier; lane A's boot test asserts on it by name
+make    # /bin/make is GNU make 4.4.1, ported (build/spike/make-slateos.elf), which the image's build chain is tested with

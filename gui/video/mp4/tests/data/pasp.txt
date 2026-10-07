@@ -1,0 +1,11 @@
+# pasp.mp4: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vfx0 1/10240 64x48 8192 10/1
+look 0 sar=4:3 colour=unknown/unknown/unknown/unknown matrix=none crop=0,0,0,0
+packet 0 0 0 1024 10 670 K__ a84c4aea02a8fa3604c18b07e7d1ed0b 0
+packet 0 1024 1024 1024 10 680 ___ 0b4648fd02d8bc30c4b9dca2f3542646 0
+packet 0 2048 2048 1024 10 690 ___ b2299ea67f6cc710408072e9631d16eb 0
+packet 0 3072 3072 1024 10 700 ___ 7d69e2fd722b989d34d524e3b4ec7e28 0
+packet 0 4096 4096 1024 10 710 K__ de461a48b678ad1dc3a233899ae50e69 0
+packet 0 5120 5120 1024 10 720 ___ 3c4a1874215b4738510dd88841b9ab81 0
+packet 0 6144 6144 1024 10 730 ___ 58d26607d9bd1bd1677326d8c5dcdfe5 0
+packet 0 7168 7168 1024 10 740 ___ dcfc5f55b5e100b0de7a4a098bc2ea97 0

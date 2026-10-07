@@ -14,6 +14,10 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+TREE = "a_slide_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"
+CTRL_Y = "ctrl_y_and_ctrl_shift_z_make_a_slide_again_and_a_win_again"
+HELD = "a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_yards"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # ── Layout ──────────────────────────────────────────────────────
@@ -218,7 +222,7 @@ MUTATIONS = [
     # ── Text ────────────────────────────────────────────────────────
     (
         "the undo button is drawn live whether or not it can do anything",
-        "                Target::Undo => !self.undo_stack.is_empty(),",
+        "                Target::Undo => self.history.can_undo(),",
         "                Target::Undo => true,",
         ["the_undo_button_is_drawn_dim_until_there_is_something_to_undo"],
     ),
@@ -392,7 +396,9 @@ MUTATIONS = [
     ),
     (
         "a slide costs a move per cell travelled",
+        "        self.history.record(UndoEntry { vehicle: id, delta });\n"
         "        self.moves = self.moves.saturating_add(1);",
+        "        self.history.record(UndoEntry { vehicle: id, delta });\n"
         "        self.moves = self.moves.saturating_add(delta.unsigned_abs());",
         ["a_slide_costs_one_move_however_far_it_went"],
     ),
@@ -400,26 +406,23 @@ MUTATIONS = [
         # The oldest move has to go, and the header shows the depth so the loss
         # is at least visible.
         "the undo stack grows past its cap",
-        "        if self.undo_stack.len() > MAX_UNDO {\n            self.undo_stack.pop_front();\n        }",
-        "",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO + 100) {",
         ["the_undo_stack_forgets_its_oldest_move_at_the_cap"],
     ),
     (
         # An undo entry is a car id and one signed delta: the number the move
         # added, which undo subtracts.
         "undo repeats the move rather than reversing it",
-        "        let back = entry.delta.saturating_neg();",
-        "        let back = entry.delta;",
+        "        if !self.shift(entry.vehicle, entry.delta.saturating_neg()) {",
+        "        if !self.shift(entry.vehicle, entry.delta) {",
         ["undo_puts_the_car_back_and_lowers_the_count"],
     ),
-    (
-        # `undo` used to open with `if self.status == Won { return; }`, so the
-        # winning move was the one move you could not take back.
-        "undo unwinds the moves in the order they were made",
-        "        let Some(entry) = self.undo_stack.pop_back() else {",
-        "        let Some(entry) = self.undo_stack.pop_front() else {",
-        ["undo_unwinds_the_moves_in_the_order_they_were_made"],
-    ),
+    # The order undo unwinds in -- the newest first, as the stack's
+    # `pop_back` it replaced did -- is the toolkit's tree's to test now, and
+    # so was the row that swapped it for `pop_front`.
+    # `undo_unwinds_the_moves_in_the_order_they_were_made` still reads it
+    # from the game.
     (
         # Wrapping here as well as in `next_puzzle` would be a second answer to
         # the same question, and the two would come to disagree.
@@ -917,7 +920,153 @@ MUTATIONS = [
         "                p.yellow,\n                p.ink(p.mauve),",
         ["the_yard_is_seen_in_either_theme"],
     ),
+    (
+        "the cap is ten moves more",
+        "const MAX_UNDO: usize = 1000;",
+        "const MAX_UNDO: usize = 1010;",
+        ["the_undo_stack_forgets_its_oldest_move_at_the_cap"],
+    ),
+    # ── The history: a tree, walked with Alt+Z (C-Q24) ──────────────
+    (
+        "ctrl+z is not an undo",
+        "                HistoryKey::Undo => self.undo(),",
+        "                HistoryKey::Undo => false,",
+        [CTRL_Y],
+    ),
+    (
+        "ctrl+y is not a redo",
+        "                HistoryKey::Redo => self.redo(),",
+        "                HistoryKey::Redo => self.undo(),",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z goes forward",
+        "                HistoryKey::Earlier => self.earlier(),",
+        "                HistoryKey::Earlier => self.later(),",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "                HistoryKey::Later => self.later(),",
+        "                HistoryKey::Later => self.earlier(),",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let Some(entry) = self.history.redo() else {",
+        "        let Some(entry) = self.history.undo() else {",
+        [CTRL_Y, TREE],
+    ),
+    (
+        "alt+z only undoes",
+        "        let steps = self.history.earlier();",
+        "        let steps: Vec<Travel<UndoEntry>> =\n"
+        "            self.history.undo().map(Travel::Undo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let steps = self.history.later();",
+        "        let steps: Vec<Travel<UndoEntry>> =\n"
+        "            self.history.redo().map(Travel::Redo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "a journey takes its steps back the wrong way",
+        "                Travel::Undo(entry) => self.take_back(entry),",
+        "                Travel::Undo(entry) => self.make_again(entry),",
+        [TREE],
+    ),
+    (
+        "a slide made again is not counted",
+        "        if !self.shift(entry.vehicle, entry.delta) {\n"
+        "            return false;\n"
+        "        }\n"
+        "        self.moves = self.moves.saturating_add(1);",
+        "        if !self.shift(entry.vehicle, entry.delta) {\n"
+        "            return false;\n"
+        "        }",
+        [CTRL_Y],
+    ),
+    (
+        "a slide made again goes back the way it came",
+        "        if !self.shift(entry.vehicle, entry.delta) {",
+        "        if !self.shift(entry.vehicle, entry.delta.saturating_neg()) {",
+        [CTRL_Y],
+    ),
+    (
+        "a held key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [HELD],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {",
+        "        if m.ctrl || m.alt {",
+        [HELD],
+    ),
+    (
+        "the header says undo can go when it cannot",
+        '            if self.history.can_undo() { "yes" } else { "no" }',
+        '            if true { "yes" } else { "no" }',
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        'F1 does not raise the list',
+        '        if help::raises(ev) {\n            self.show_help = true;',
+        '        if false {\n            self.show_help = true;',
+        ["the_list_of_keys_reaches_the_window", "every_advertised_key_does_something", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'the list is not drawn',
+        '        if self.show_help {\n            guitk::shortcut::render_card(',
+        '        if false {\n            guitk::shortcut::render_card(',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        'nothing puts the list away',
+        '            if help::closes(ev) {\n                self.show_help = false;',
+        '            if false {\n                self.show_help = false;',
+        ["the_list_of_keys_reaches_the_window", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a key under the list reaches the board',
+        '                self.show_help = false;\n            }\n            return EventResult::Consumed;\n        }\n        if help::raises(ev) {',
+        '                self.show_help = false;\n            }\n        }\n        if help::raises(ev) {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click under the list plays',
+        '        if self.show_help {\n            if let MouseEventKind::Press(_) = ev.kind {',
+        '        if false {\n            if let MouseEventKind::Press(_) = ev.kind {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click leaves the list up',
+        '            if let MouseEventKind::Press(_) = ev.kind {\n                self.show_help = false;',
+        '            if let MouseEventKind::Press(_) = ev.kind {\n',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'the footer does not say how to raise the list',
+        '    "Enter: select   Arrows: slide   Z: undo   F1: all keys",',
+        '    "Enter: select   Arrows: slide   Z: undo   Ctrl+Y: redo",',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        'the puzzle sheet reads no list key',
+        '        if let Some(movement) = ListKey::of(ev) {',
+        '        if let Some(movement) = ListKey::of(ev).filter(|_| false) {',
+        ['home_end_and_the_page_keys_reach_the_ends_of_the_sheet', 'the_sheet_cursor_walks_the_list_and_stops_at_the_ends'],
+    ),
+    (
+        'a page of the puzzle sheet is one row',
+        'movement.target(Some(self.sheet_cursor), PUZZLE_COUNT, PUZZLE_COUNT)',
+        'movement.target(Some(self.sheet_cursor), PUZZLE_COUNT, 1)',
+        ['home_end_and_the_page_keys_reach_the_ends_of_the_sheet'],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "rush", timeout=120))
+    sys.exit(sweep(SRC, MUTATIONS, "rush", timeout=120, only=sys.argv[1:] or None))

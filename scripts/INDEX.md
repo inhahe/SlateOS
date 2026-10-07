@@ -19,7 +19,6 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/basenc-diff.sh` | basenc-diff.sh — compare our `base64`, `base32` and `basenc` against GNU's, |
 | `scripts/bash-spike/checksyms.sh` | Confirm the three functions the spike originally had to shim are now real |
 | `scripts/bash-spike/cross2.sh` | Cross-compile bash 5.2 -> x86_64-linux-musl (the ABI SlateOS's libc.a targets). |
-| `scripts/bash-spike/cross3.sh` | Continue the cross build after the strtoimax collision. |
 | `scripts/bash-spike/quality.sh` | Linking is not working: how many symbols bash actually uses are real |
 | `scripts/bash-spike/run.sh` | The shebang was missing until 2026-09-02 — the only one of the five |
 | `scripts/bash-spike/runbash.sh` | Does the cross-compiled musl bash actually execute? Run it on Linux first — |
@@ -37,6 +36,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/bootstrap-worktree.sh` | bootstrap-worktree.sh — make a fresh worktree or clone able to build and boot. |
 | `scripts/build-iso.sh` | Build the kernel and create a bootable ISO image using Limine. |
 | `scripts/build-usb-image.py` | Build a real, GPT-partitioned, UEFI-bootable raw disk image for SlateOS. |
+| `scripts/build-userland.py` | Build every program the userland workspace makes, for SlateOS's /bin. |
 | `scripts/c-maybe-probe.py` | Measure GNU's `c_maybe_quoting_style`, in both the plain form and the form |
 | `scripts/cal-diff.sh` | Differential test: our `cal` against util-linux `cal`. |
 | `scripts/calc-diff.sh` | Differential test: our bc and dc against GNU bc 1.07.1 and GNU dc 1.4.1. |
@@ -259,6 +259,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
 | `scripts/layout-sweep.py` | Measure how much of a benchmark's movement is caused by code *placement*. |
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
+| `scripts/llvm-spike/run.sh` | Cross-compile LLVM 20's `opt`, `llc` and `ld.lld` for SlateOS, linked against |
+| `scripts/llvm-spike/slatelink.sh` | Link LLVM's opt, llc and ld.lld for SlateOS from the objects |
 | `scripts/lockfile-diff.sh` | Differential test: our `lockfile` against procmail 3.24's, as Ubuntu builds it. |
 | `scripts/logger-diff.sh` | Differential test: our `logger` against util-linux 2.39.3's. |
 | `scripts/logname-diff.sh` | logname-diff.sh — compare our `logname` against the real GNU one, inside WSL. |
@@ -299,6 +301,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/oils-spec/sh_spec.py` | Oils' spec-test harness, ported from Python 2 to Python 3 to run on SlateOS. |
 | `scripts/oils-spec/validate.sh` | Prove the Python 3 spec harness judges every case as upstream's does. |
 | `scripts/oils-spike/run.sh` | Cross-compile genuine Oils (oils-for-unix) and link it against SlateOS's libc.a. |
+| `scripts/oils-spike/slatelink.sh` | Link genuine Oils' built objects against the CURRENT libc.a, and stage it. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
 | `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
 | `scripts/option-gap.sh` | Options the reference implementation has that OURS REJECTS AS UNKNOWN. |
@@ -458,6 +461,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-lane-claims.py` | Tests for `scripts/lane-claims.py` through its command line. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
+| `scripts/test-link-wrappers.sh` | Self-test for slate_make_link_wrappers in scripts/lib/worktree.sh: the |
 | `scripts/test-msysbash.py` | Tests for `msysbash.py`, the one place that decides which bash runs our scripts. |
 | `scripts/test-mutation_harness.py` | Tests for mutation_harness.check_the_table: where a table's tests are found. |
 | `scripts/test-open-requests.py` | Regression tests for `scripts/open-requests.py`. |
@@ -483,6 +487,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-src-digest.py` | Regression tests for `scripts/src_digest.py`. |
 | `scripts/test-srcload.py` | Regression tests for `scripts/srcload.py`. |
 | `scripts/test-straddle-check.py` | Regression tests for `scripts/straddle-check.py`. |
+| `scripts/test-verify_mutations.py` | Regression tests for `scripts/verify_mutations.py`. |
 | `scripts/test-worktree.sh` | Self-test for `slate_ensure_src` in scripts/lib/worktree.sh. |
 | `scripts/time-diff.sh` | Differential test: our `time` against GNU Time 1.9's `/usr/bin/time`. |
 | `scripts/timeout-diff.sh` | Differential test: our `timeout` against GNU coreutils 9.4's. |
@@ -503,7 +508,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/util-linux-extra.sh` | Unpacks Ubuntu's util-linux-extra and rfkill packages, without root, as harness references. |
 | `scripts/util-linux-source.sh` | Fetches util-linux 2.39.3's source and test data, for harnesses that need them. |
 | `scripts/uu-diff.sh` | Differential test: our `uuencode` and `uudecode` against GNU sharutils 4.15.2's. |
-| `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
+| `scripts/verify_mutations.py` | Check `mutate.py` tables against the source they claim to break. |
 | `scripts/w-diff.sh` | Differential test: our `w` against procps-ng 4.0.4's, built as SlateOS's |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
@@ -519,4 +524,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_509 scripts._
+_514 scripts._

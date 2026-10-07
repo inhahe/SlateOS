@@ -27,8 +27,18 @@ work and gives both of them the rest.
   `view.editor().text()`.
 - Forward keys to `handle_key` and pointer events to `handle_mouse` with the
   modifiers your window holds (mouse events carry none). Draw with `draw`.
-- The clipboard is yours: `CodeViewEvent::Copy(text)` and `Cut(text)` put
-  text on it, and on `CodeViewEvent::Paste` read it and call `paste`.
+- The clipboard is the program's (`guitk::clipboard`, since 2026-09-30),
+  shared with every text field: Ctrl+C, Ctrl+X and Ctrl+V use it without
+  you, and `CodeViewEvent::Copy(text)` / `Cut(text)` say what went on it.
+  (`CodeViewEvent::Paste`, which asked you to paste, is gone.)
+- A right-click on the text (added 2026-10-01): put up a menu of
+  `view.edit_menu()` where it landed -- Undo, Redo, Cut, Copy, Paste,
+  Delete, Select all, each greyed when it would do nothing -- and hand the
+  chosen row's id to `view.edit_command(id)`, which answers as the key that
+  does the same would (`None` for an id that is not one of its rows, so
+  rows of your own can follow them). As with the keys, Cut and Copy with
+  nothing selected take the caret's line. The same pattern as every text
+  field's: `requests/c-e-text-fields-have-a-right-click-menu.md`.
 - `CodeViewEvent::Changed` is the moment to mark the document modified.
 - A file with `\r\n` line endings keeps its `\r`s as text; convert on open and
   back on save if the editor offers a line-ending setting.
@@ -37,7 +47,7 @@ work and gives both of them the rest.
 
 Syntax highlighting is there now, and it is tree-sitter's (design-decisions
 §1437): the `syntax` crate (`gui/syntax`) has Ada, Bash, C, C++, CSS, diffs, Dockerfiles, DTD, Go, HTML, INI, Java, JavaScript,
-JSON, linker scripts, Lua, Makefiles, Markdown, PowerShell, Python, Rust, SQL, TOML, TypeScript, TSX, XML and YAML so far, each
+JSON, linker scripts, Lua, Makefiles, Markdown, Nushell, PowerShell, Python, Rust, SQL, TOML, tree-sitter queries, TypeScript, TSX, XML and YAML so far, each
 grammar passing its authors' own test corpus. A language inside another is coloured as itself: a Markdown code
 fence in the language its info string names, front matter as YAML.
 

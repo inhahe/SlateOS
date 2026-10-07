@@ -2429,6 +2429,34 @@ impl DiskImagerApp {
             return self.handle_confirm_event(event);
         }
 
+        // The shortcut card is modal: while it is up, F1 and Escape put it
+        // away and every other key is its own; a press, with any button, puts
+        // it away rather than reaching the control drawn under it; and the
+        // wheel scrolls nothing it covers. It was modal for none of it -- V,
+        // H and C changed the options under it, Ctrl+O opened a dialog, the
+        // arrows chose a drive and a click acted on whatever it covered. A
+        // move and a release still go through.
+        if self.show_help {
+            match event {
+                Event::Key(key) if key.pressed => {
+                    if textline::is_plain(key.modifiers) && matches!(key.key, Key::F1 | Key::Escape)
+                    {
+                        self.show_help = false;
+                    }
+                    return EventResult::Consumed;
+                }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                        self.show_help = false;
+                        return EventResult::Consumed;
+                    }
+                    MouseEventKind::Scroll { .. } => return EventResult::Ignored,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+
         match event {
             Event::Resize { width, height } => {
                 self.window_width = *width as f32;
@@ -2453,58 +2481,25 @@ impl DiskImagerApp {
             return result;
         }
 
-        // Tab switching
-        // Two checkboxes this window draws and could not tick, and the
-        // shortcut list that names them. `verify_after_write` was `true` and
-        // `compress` was `false`, both with no writer anywhere, and both are
-        // drawn -- a colour is chosen from each. Found by
-        // `scripts/frozen-flag-survey.py`.
-        match key.key {
-            Key::F1 => {
-                self.show_help = !self.show_help;
-                return EventResult::Consumed;
-            }
-            Key::Escape if self.show_help => {
-                self.show_help = false;
-                return EventResult::Consumed;
-            }
-            Key::V if !key.modifiers.ctrl => {
-                self.write_options.verify_after_write = !self.write_options.verify_after_write;
-                return EventResult::Consumed;
-            }
-            // Which checksum to compute. Three chips were drawn with the
-            // selected one highlighted and bold, and `hash_algorithm` was
-            // `Sha256` at construction with no writer -- so the other two
-            // could not be chosen, and a download published with an MD5 could
-            // not be checked against it by this program.
-            Key::H if !key.modifiers.ctrl => {
-                self.hash_algorithm = self.hash_algorithm.next();
-                return EventResult::Consumed;
-            }
-            Key::C if !key.modifiers.ctrl => {
-                self.create_options.compress = !self.create_options.compress;
-                return EventResult::Consumed;
-            }
-            _ => {}
-        }
-
-        if key.modifiers.ctrl {
-            match key.key {
+        // Tab switching and opening an image: Ctrl chords, not Ctrl held --
+        // AltGr arrives as Ctrl+Alt and types.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return match key.key {
                 Key::Num1 => {
                     self.active_tab = MainTab::Write;
-                    return EventResult::Consumed;
+                    EventResult::Consumed
                 }
                 Key::Num2 => {
                     self.active_tab = MainTab::Create;
-                    return EventResult::Consumed;
+                    EventResult::Consumed
                 }
                 Key::Num3 => {
                     self.active_tab = MainTab::Browse;
-                    return EventResult::Consumed;
+                    EventResult::Consumed
                 }
                 Key::Num4 => {
                     self.active_tab = MainTab::Verify;
-                    return EventResult::Consumed;
+                    EventResult::Consumed
                 }
                 // The one way into `load_image`. Opens on the directory the
                 // last image came from, so a user working through a folder of
@@ -2516,10 +2511,48 @@ impl DiskImagerApp {
                         .map(|img| parent_directory(&img.path))
                         .unwrap_or_else(|| PathBuf::from("."));
                     self.open_image_dialog(&start);
-                    return EventResult::Consumed;
+                    EventResult::Consumed
                 }
-                _ => {}
+                _ => EventResult::Ignored,
+            };
+        }
+        // Every other key is taken plain: a chord with Alt or the Windows key
+        // is the window's or the desktop's and arrives carrying its key --
+        // Alt+V turned verification off, and Alt+Escape cancelled a write.
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
+
+        // Two checkboxes this window draws and could not tick, and the
+        // shortcut list that names them. `verify_after_write` was `true` and
+        // `compress` was `false`, both with no writer anywhere, and both are
+        // drawn -- a colour is chosen from each. Found by
+        // `scripts/frozen-flag-survey.py`.
+        match key.key {
+            // (While the list is up its own keys never get here:
+            // `handle_event` takes every key the card is up for.)
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                return EventResult::Consumed;
             }
+            Key::V => {
+                self.write_options.verify_after_write = !self.write_options.verify_after_write;
+                return EventResult::Consumed;
+            }
+            // Which checksum to compute. Three chips were drawn with the
+            // selected one highlighted and bold, and `hash_algorithm` was
+            // `Sha256` at construction with no writer -- so the other two
+            // could not be chosen, and a download published with an MD5 could
+            // not be checked against it by this program.
+            Key::H => {
+                self.hash_algorithm = self.hash_algorithm.next();
+                return EventResult::Consumed;
+            }
+            Key::C => {
+                self.create_options.compress = !self.create_options.compress;
+                return EventResult::Consumed;
+            }
+            _ => {}
         }
 
         // Cancel operation
@@ -6639,6 +6672,56 @@ mod tests {
         })
     }
 
+    /// **A key held with Alt or the Windows key is not the window's, and
+    /// AltGr is not Ctrl**: Alt+V turned verification off and Alt+C turned
+    /// compression on, each chord arriving carrying its key, and AltGr+2 --
+    /// Ctrl+Alt, which types -- changed the tab as Ctrl+2 does.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_windows_and_altgr_is_not_ctrl() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = DiskImagerApp::new();
+        let before = (
+            app.write_options.verify_after_write,
+            app.create_options.compress,
+            app.hash_algorithm,
+            app.active_tab,
+            app.selected_drive_index,
+        );
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::V, Key::C, Key::H, Key::Num2, Key::Down, Key::F1] {
+                let ev = Event::Key(KeyEvent {
+                    key: k,
+                    pressed: true,
+                    modifiers: held,
+                    text: String::new(),
+                });
+                assert_eq!(
+                    app.handle_event(&ev),
+                    EventResult::Ignored,
+                    "{held:?} {k:?} was taken"
+                );
+            }
+        }
+        let after = (
+            app.write_options.verify_after_write,
+            app.create_options.compress,
+            app.hash_algorithm,
+            app.active_tab,
+            app.selected_drive_index,
+        );
+        assert_eq!(after, before, "a chord changed the window");
+        assert!(!app.show_help, "a chord raised the keys");
+        app.handle_event(&press_ctrl(Key::Num2));
+        assert_eq!(
+            app.active_tab,
+            MainTab::Create,
+            "Ctrl+2 no longer changes the tab"
+        );
+    }
+
     /// A key press with Ctrl held.
     fn press_ctrl(k: Key) -> Event {
         let mut modifiers = Modifiers::NONE;
@@ -7383,6 +7466,87 @@ mod tests {
 
     fn rows_per_notch() -> usize {
         wheel::ROWS_PER_NOTCH as usize
+    }
+
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1 and Escape put it away and nothing else does or acts; a press puts
+    /// it away and does nothing else; the wheel scrolls nothing under it. It
+    /// was modal for none of it. The controls at the end are the same key,
+    /// press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = app_with_many_drives();
+        let key = |k: Key, modifiers: guitk::event::Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: String::new(),
+            })
+        };
+        let plain = guitk::event::Modifiers::NONE;
+        // The second tab, where `handle_tab_click` measures it.
+        let tab = Event::Mouse(MouseEvent {
+            x: PANEL_PADDING + 120.0 + 60.0,
+            y: TOOLBAR_HEIGHT + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        let verify = app.write_options.verify_after_write;
+        let first = app.active_tab;
+
+        app.handle_event(&key(Key::F1, plain));
+        assert!(app.show_help);
+        app.handle_event(&key(Key::V, plain));
+        assert_eq!(
+            app.write_options.verify_after_write, verify,
+            "V changed an option under the card"
+        );
+        app.handle_event(&key(Key::O, guitk::event::Modifiers::ctrl()));
+        assert!(
+            app.open_dialog.is_none(),
+            "Ctrl+O opened a dialog under the card"
+        );
+        app.handle_event(&wheel_at(20.0, -1.0));
+        assert_eq!(
+            app.sidebar_scroll, 0,
+            "the wheel scrolled the drives under the card"
+        );
+        assert!(
+            app.show_help,
+            "a key or turn that is not the card's put it away"
+        );
+
+        app.handle_event(&tab);
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.active_tab, first,
+            "the press went through the card to a tab"
+        );
+
+        // Any button, and Escape.
+        app.handle_event(&key(Key::F1, plain));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: PANEL_PADDING + 180.0,
+            y: TOOLBAR_HEIGHT + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!app.show_help, "a right-button press left the card up");
+        app.handle_event(&key(Key::F1, plain));
+        app.handle_event(&key(Key::Escape, plain));
+        assert!(!app.show_help, "Escape did not put the card away");
+
+        app.handle_event(&wheel_at(20.0, -1.0));
+        assert!(app.sidebar_scroll > 0, "control: the wheel scrolls nothing");
+        app.handle_event(&key(Key::V, plain));
+        assert_ne!(
+            app.write_options.verify_after_write, verify,
+            "control: V does nothing with the card down"
+        );
+        app.handle_event(&tab);
+        assert_ne!(
+            app.active_tab, first,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     /// An app whose drive list is longer than the sidebar can show.

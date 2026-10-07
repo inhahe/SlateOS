@@ -11,6 +11,12 @@ layout put on a slide could be selected, undo and redo had no key, the notes
 could not be written, five of six layouts were unreachable, decks could not be
 saved, and the transitions every slide chose were never played.
 
+The undo history is a tree now (C-Q24): an edit after an undo keeps the undone
+deck as a branch, reached with Alt+Z.  Its rows cover the keys -- and AltGr,
+which arrives as Ctrl+Alt, being taken for no chord and no plain key -- the
+cap, and an opened deck's history starting with it; the tree itself is
+`statehistory`'s and the toolkit's to test.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -23,6 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
+
+TREE = "an_edit_after_an_undo_keeps_the_undone_deck_reachable_with_alt_z"
+GUARD = "a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -224,8 +233,8 @@ MUTATIONS = [
     # -- what is drawn --------------------------------------------------------------------------------
     (
         "a text box draws one line",
-        "        for line in text.split('\\n') {",
-        "        for line in [text] {",
+        "    for hard in text.split('\\n') {",
+        "    for hard in [text] {",
         ["a_text_box_draws_each_of_its_lines"],
     ),
     (
@@ -296,8 +305,8 @@ MUTATIONS = [
     ),
     (
         "a change does not mark the deck",
-        "        self.undo_mgr.save(now);\n        self.dirty = true;",
-        "        self.undo_mgr.save(now);",
+        "        self.undo_mgr.begin(now);\n        self.dirty = true;",
+        "        self.undo_mgr.begin(now);",
         ["the_window_bar_marks_unsaved_changes", "open_asks_before_losing_unsaved_changes"],
     ),
     (
@@ -362,7 +371,7 @@ MUTATIONS = [
         "words being typed are dropped when the window closes",
         "        // Words being typed into a box are part of the deck.\n"
         "        if let Some((edit, buf)) = self.editing.take() {\n"
-        "            self.commit_editing(edit, &buf);\n"
+        "            self.commit_editing(edit, buf.text());\n"
         "        }",
         "        // Words being typed into a box are part of the deck.\n"
         "        self.editing = None;",
@@ -499,6 +508,253 @@ MUTATIONS = [
         'x2=\\"{width}\\" y2=\\"{height}\\" \\',
         'x2=\\"{width}\\" y2=\\"0\\" \\',
         ["the_export_draws_lines_along_their_direction"],
+    ),
+    # -- the history: a tree, walked with Alt+Z (C-Q24) -----------------------------------------------
+    (
+        "a deck the history puts back is not marked",
+        "    fn restore(&mut self, snap: Snapshot) {\n        self.dirty = true;\n",
+        "    fn restore(&mut self, snap: Snapshot) {\n",
+        [TREE],
+    ),
+    (
+        "Alt+Z goes nowhere",
+        "let moved = if shift { self.later() } else { self.earlier() };",
+        "let moved = if shift { self.later() } else { false };",
+        [TREE, "every_advertised_key_does_something"],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "let moved = if shift { self.later() } else { self.earlier() };",
+        "let moved = if shift { self.earlier() } else { self.earlier() };",
+        [TREE],
+    ),
+    (
+        "Alt+Z only undoes",
+        "        let snap = self.undo_mgr.earlier(now);",
+        "        let snap = self.undo_mgr.undo(now);",
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z only redoes",
+        "        let snap = self.undo_mgr.later(now);",
+        "        let snap = self.undo_mgr.redo(now);",
+        [TREE],
+    ),
+    (
+        "AltGr+Z goes back",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key =>",
+        "Key::Z if key.modifiers.alt && !key.modifiers.super_key =>",
+        ["altgr_z_does_not_undo"],
+    ),
+    (
+        "Super+Alt+Z goes back",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key =>",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl =>",
+        ["alt_z_with_the_windows_key_goes_nowhere"],
+    ),
+    (
+        "a key held with Alt is a shortcut",
+        "            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,",
+        "            _ if key.modifiers.super_key => EventResult::Ignored,",
+        ["altgr_z_does_not_undo", GUARD],
+    ),
+    (
+        "a key held with the Windows key is a shortcut",
+        "            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,",
+        "            _ if key.modifiers.alt => EventResult::Ignored,",
+        [GUARD],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "            Key::Z if ctrl && shift => self.redo_if_any(),\n",
+        "",
+        ["undo_and_redo_have_keys"],
+    ),
+    (
+        "redo undoes",
+        "        let snap = self.undo_mgr.redo(now);",
+        "        let snap = self.undo_mgr.undo(now);",
+        ["undo_and_redo_have_keys", "test_undo_redo_integration"],
+    ),
+    (
+        "the history keeps more than a hundred edits",
+        "            undo_mgr: StateHistory::new(UNDO_LIMIT),",
+        "            undo_mgr: StateHistory::new(UNDO_LIMIT.saturating_add(20)),",
+        ["the_history_keeps_the_last_hundred_edits"],
+    ),
+    (
+        "an opened deck keeps the history of the one before",
+        "                self.undo_mgr.clear();\n",
+        "",
+        ["an_opened_deck_cannot_be_undone_into_the_one_before"],
+    ),
+    # The words' keys are the TextArea editor's since 2026-10-04, which types
+    # only what a key typed -- AltGr's letters, not a command's: the rule is
+    # textarea's, and its own tests cover it. What is this program's is
+    # handing the editor the key as it came, chord and all.
+    (
+        "a box refuses what AltGr types",
+        "            let edit = area.apply_key(key, capacity, &self.edit_clipboard, 1);\n",
+        "            let edit = if key.modifiers.ctrl {\n"
+        "                textarea::Edited::default()\n"
+        "            } else {\n"
+        "                area.apply_key(key, capacity, &self.edit_clipboard, 1)\n"
+        "            };\n",
+        ["a_box_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a box's editor is given the key without its chord",
+        "            let edit = area.apply_key(key, capacity, &self.edit_clipboard, 1);\n",
+        "            let edit = area.apply_key(\n"
+        "                &KeyEvent {\n"
+        "                    modifiers: guitk::event::Modifiers::NONE,\n"
+        "                    ..key.clone()\n"
+        "                },\n"
+        "                capacity,\n"
+        "                &self.edit_clipboard,\n"
+        "                1,\n"
+        "            );\n",
+        ["a_box_takes_altgr_letters_and_no_commands_letter"],
+    ),
+]
+
+# The words being typed have a caret and a selection, moved through the lines
+# as they are drawn, and a press puts the caret under the pointer; the deck's
+# name is typed in a field on the toolbar, and the notes follow the caret
+# (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+CARET = "typing_into_a_box_edits_at_a_caret_that_moves"
+ARROWS = "the_arrows_move_through_the_lines_as_drawn"
+PRESS = "a_press_on_the_words_puts_the_caret_there"
+LIST = "a_list_being_typed_into_shows_its_caret"
+NAME = "the_decks_name_is_typed_in_a_field_on_the_toolbar"
+NOTES = "the_notes_panel_follows_the_caret"
+
+MUTATIONS += [
+    (
+        "the caret is not drawn",
+        "        if cy >= clip.y && cy + layout.size <= clip.bottom() + 0.5 {\n",
+        "        if false && cy >= clip.y && cy + layout.size <= clip.bottom() + 0.5 {\n",
+        [CARET, LIST, NAME, NOTES],
+    ),
+    (
+        "the caret is drawn at the start of its line",
+        "            .map_or((0.0, 0.0), |line| (self.x_of(words, line, at), line.y))\n",
+        "            .map_or((0.0, 0.0), |line| (line.x, line.y))\n",
+        [LIST],
+    ),
+    (
+        "the arrows move by the lines Enter made",
+        "        } else if moves && !textline::is_alt_or_windows_chord(key.modifiers) {\n",
+        "        } else if false {\n",
+        [ARROWS],
+    ),
+    (
+        "Down stays on its line",
+        "            Key::Down => self.offset_on(&words, i.saturating_add(1), x),\n",
+        "            Key::Down => self.offset_on(&words, i, x),\n",
+        [ARROWS],
+    ),
+    (
+        "Up stays on its line",
+        "            Key::Up => self.offset_on(&words, i.saturating_sub(1), x),\n",
+        "            Key::Up => self.offset_on(&words, i, x),\n",
+        [ARROWS],
+    ),
+    (
+        "Home goes to the start of the words",
+        "            Key::Home => self.lines.get(i).map_or(0, |line| line.start),\n",
+        "            Key::Home => 0,\n",
+        [ARROWS],
+    ),
+    (
+        "End goes to the end of the words",
+        "            Key::End => self.lines.get(i).map_or(words.len(), |line| line.end),\n",
+        "            Key::End => words.len(),\n",
+        [ARROWS],
+    ),
+    (
+        "Ctrl+Home is Home",
+        "            Key::Home if chord => 0,\n",
+        "",
+        [ARROWS],
+    ),
+    (
+        "Ctrl+End is End",
+        "            Key::End if chord => words.len(),\n",
+        "",
+        [ARROWS],
+    ),
+    (
+        "Shift does not select with the arrows",
+        "        area.move_to(to, shift);\n",
+        "        area.move_to(to, false);\n",
+        [ARROWS],
+    ),
+    (
+        "a press on the words leaves the caret where it was",
+        "                            area.move_to(at, false);\n",
+        "                            let _ = at;\n",
+        [PRESS],
+    ),
+    (
+        "a press on the words stops the typing",
+        "                        | (EditTarget::DeckTitle, Some(Target::Tool(Tool::Title))) => true,\n"
+        "                        _ => false,\n"
+        "                    };\n"
+        "                    if inside {\n",
+        "                        | (EditTarget::DeckTitle, Some(Target::Tool(Tool::Title))) => true,\n"
+        "                        _ => false,\n"
+        "                    };\n"
+        "                    if false && inside {\n",
+        [PRESS],
+    ),
+    (
+        "the deck's name takes a second line",
+        "            if plain && shift && !self.one_line(target) {\n",
+        "            if plain && shift {\n",
+        [NAME],
+    ),
+    (
+        "Shift+Enter makes no second line",
+        "                area.insert(\"\\n\", capacity);\n",
+        "                let _ = capacity;\n",
+        [CARET, LIST, NOTES],
+    ),
+    (
+        "the deck's name is typed blind",
+        "        if let Some((EditTarget::DeckTitle, area)) = &self.editing {\n            let mut tree = RenderTree::new();\n",
+        "        if let Some((EditTarget::DeckTitle, area)) = None::<&(EditTarget, TextArea)> {\n            let mut tree = RenderTree::new();\n",
+        [NAME],
+    ),
+    (
+        "the deck's name field has no mark",
+        "                    focused: !self.show_help,\n                    disabled: false,\n                    invalid: false,\n",
+        "                    focused: false,\n                    disabled: false,\n                    invalid: false,\n",
+        [NAME],
+    ),
+    (
+        "the notes show the last three lines",
+        "    at.saturating_sub(NOTES_ROOM - 1)\n",
+        "    lines.len().saturating_sub(NOTES_ROOM).max(at.min(0))\n",
+        [NOTES],
+    ),
+    (
+        "a list's lines lose a byte to each bullet",
+        "                            item_start = item_start.saturating_add(item.len()).saturating_add(1);\n",
+        "                            item_start = item_start.saturating_add(item.len());\n",
+        [LIST],
+    ),
+    (
+        "a list's caret is drawn at the bullet",
+        "                                    x: bx + indent,\n",
+        "                                    x: bx,\n",
+        [LIST],
+    ),
+    (
+        "the focus mark is the toolkit's width, not the user's",
+        "        self.focus_ring_width = settings.focus_ring_width();\n",
+        "        let _ = settings;\n",
+        [NAME],
     ),
 ]
 

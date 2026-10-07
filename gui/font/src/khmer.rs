@@ -43,6 +43,10 @@
 //! [`split_matras`] is the pass that does, transcribed from HarfBuzz's
 //! `decompose_khmer`; [`present`] is the cheap test that lets every other
 //! string skip it.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-ot-shaper-khmer.cc`,
+//! copyright © 2011, 2012 Google, Inc. Used under HarfBuzz's licence: see
+//! `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 

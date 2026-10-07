@@ -819,8 +819,9 @@ pub unsafe extern "C" fn __libc_start_main(
         let argv0 = unsafe { *actual_argv };
         if !argv0.is_null() {
             // One write for each variable: each is both of its names.
+            // SAFETY: the variable's own word.
             unsafe {
-                addr_of_mut!(__progname_full).write(argv0);
+                progname_full_slot().write(argv0);
             }
             // Find basename (after last '/').
             let mut last_slash: *const u8 = core::ptr::null();
@@ -838,8 +839,9 @@ pub unsafe extern "C" fn __libc_start_main(
             } else {
                 unsafe { last_slash.add(1) }
             };
+            // SAFETY: as above.
             unsafe {
-                addr_of_mut!(__progname).write(short);
+                progname_slot().write(short);
             }
         }
     }
@@ -1178,7 +1180,11 @@ pub(crate) static mut PROGRAM_ARGV: *const *const u8 = core::ptr::null();
 // defined here in assembly, both labels on one word; the `__` names are the
 // variables and the GNU names weak aliases of them, as glibc has them, so a
 // program that defines one of those itself links. The host has no C program
-// to share them with, and keeps the two variables as plain statics.
+// to share them with, and keeps one pair per thread ([`host_names`]).
+//
+// The library reaches them through [`progname_full_slot`] and
+// [`progname_slot`], never by name, so that the host's tests each see their
+// own.
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
     ".pushsection .data.slateos_progname,\"aw\",@progbits",
@@ -1214,13 +1220,75 @@ unsafe extern "C" {
     pub static mut __progname: *const u8;
 }
 
-/// argv[0], as the program was started (`program_invocation_name`).
-#[cfg(not(target_os = "none"))]
-pub static mut __progname_full: *const u8 = UNKNOWN_PROG.as_ptr();
+/// Where `__progname_full` -- `program_invocation_name`, argv[0] as the
+/// program was started -- is kept: the variable the assembly above defines,
+/// on the target; on the host, the calling thread's own ([`host_names`]).
+#[inline]
+pub(crate) fn progname_full_slot() -> *mut *const u8 {
+    #[cfg(target_os = "none")]
+    {
+        &raw mut __progname_full
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_names::full()
+    }
+}
 
-/// Its last component (`program_invocation_short_name`).
+/// Where `__progname` -- `program_invocation_short_name`, argv[0]'s last
+/// component -- is kept; as [`progname_full_slot`].
+#[inline]
+pub(crate) fn progname_slot() -> *mut *const u8 {
+    #[cfg(target_os = "none")]
+    {
+        &raw mut __progname
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_names::short()
+    }
+}
+
+/// The host's program names: a pair for each thread, each starting at
+/// `unknown`.
+///
+/// libtest runs every test as a thread of one process, so one pair of statics
+/// was every test's. A test that names the program -- argp's scenarios name it
+/// `prog`, as glibc's oracle ran, and `--program-name` renames it -- renamed it
+/// under every test running beside it that prints it: `warn`'s and `error`'s
+/// messages, `assert`'s, `syslog`'s ident, `dladdr`'s file name. The pre-push
+/// gate that runs the suite in a shuffled order caught `err`'s test reading
+/// `prog` on 2026-10-06. A thread is a process here, as `perprocess` has it.
+/// `perprocess::process_global!` is not used because the target's storage is
+/// the assembly's symbol, not a static of the macro's own.
 #[cfg(not(target_os = "none"))]
-pub static mut __progname: *const u8 = UNKNOWN_PROG.as_ptr();
+mod host_names {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static FULL: Cell<*const u8> = const { Cell::new(super::UNKNOWN_PROG.as_ptr()) };
+        static SHORT: Cell<*const u8> = const { Cell::new(super::UNKNOWN_PROG.as_ptr()) };
+    }
+
+    /// Reached only while the thread's storage is being destroyed: somewhere
+    /// harmless for a late message to read the name from.
+    static mut FALLBACK_FULL: *const u8 = super::UNKNOWN_PROG.as_ptr();
+    /// As [`FALLBACK_FULL`].
+    static mut FALLBACK_SHORT: *const u8 = super::UNKNOWN_PROG.as_ptr();
+
+    /// This thread's `__progname_full`.
+    pub(super) fn full() -> *mut *const u8 {
+        FULL.try_with(Cell::as_ptr)
+            .unwrap_or(&raw mut FALLBACK_FULL)
+    }
+
+    /// This thread's `__progname`.
+    pub(super) fn short() -> *mut *const u8 {
+        SHORT
+            .try_with(Cell::as_ptr)
+            .unwrap_or(&raw mut FALLBACK_SHORT)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GCC initialization/finalization stubs
@@ -2498,14 +2566,45 @@ mod tests {
 
     #[test]
     fn test_progname_not_null() {
-        let ptr = unsafe { core::ptr::addr_of!(__progname).read() };
+        // SAFETY: a plain read of this thread's name.
+        let ptr = unsafe { progname_slot().read() };
         assert!(!ptr.is_null());
     }
 
     #[test]
     fn test_progname_full_not_null() {
-        let ptr = unsafe { core::ptr::addr_of!(__progname_full).read() };
+        // SAFETY: as above.
+        let ptr = unsafe { progname_full_slot().read() };
         assert!(!ptr.is_null());
+    }
+
+    /// Each host test thread has its own names: one renaming the program is
+    /// not seen by another, which still reads `unknown`.
+    #[test]
+    fn a_threads_program_name_is_its_own() {
+        let name = c"/usr/bin/renamed";
+        // SAFETY: this thread's words; `name` outlives every read below.
+        unsafe {
+            progname_full_slot().write(name.as_ptr().cast());
+            progname_slot().write(name.as_ptr().cast::<u8>().add(9));
+        }
+        let other = std::thread::spawn(|| {
+            // SAFETY: plain reads of that thread's names.
+            let (full, short) = unsafe { (progname_full_slot().read(), progname_slot().read()) };
+            // SAFETY: both C strings.
+            unsafe {
+                (
+                    core::ffi::CStr::from_ptr(full.cast()).to_bytes().to_vec(),
+                    core::ffi::CStr::from_ptr(short.cast()).to_bytes().to_vec(),
+                )
+            }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(other, (b"unknown".to_vec(), b"unknown".to_vec()));
+        // SAFETY: this thread's names, C strings.
+        let short = unsafe { core::ffi::CStr::from_ptr(progname_slot().read().cast()) };
+        assert_eq!(short.to_bytes(), b"renamed");
     }
 
     // -----------------------------------------------------------------------

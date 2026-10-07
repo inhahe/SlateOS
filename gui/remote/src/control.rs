@@ -122,7 +122,26 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// to any program's own settings file reaches every open window, relayed as
 /// input version 8's `SettingsGroup::Program`. Incompatible on 2's terms: an
 /// unknown tag stops the decoder.
-pub const CONTROL_VERSION: u8 = 19;
+/// **20** — [`RequestBody::GetHeldModifiers`] (tag `0x2B`), by which a shell
+/// asks which modifier keys are down, and its answer
+/// [`ResponseBody::Modifiers`] (response tag `0x06`). Incompatible on 2's
+/// terms in both directions: an unknown tag stops either decoder.
+/// **21** — [`RequestBody::RequestAttention`] (tag `0x2C`), by which a window
+/// asks for the user's attention, shown in the window list's
+/// `demands_attention`. Incompatible on 2's terms.
+/// **22** — the clipboard: [`RequestBody::SetClipboard`] (tag `0x2D`),
+/// [`RequestBody::GetClipboard`] (tag `0x2E`) and its answer
+/// [`ResponseBody::Clipboard`] (response tag `0x07`). Incompatible on 2's
+/// terms in both directions.
+/// **23** — [`RequestBody::SleepDisplays`] (tag `0x2F`), answered when the
+/// displays wake, and [`RequestBody::WakeDisplays`] (tag `0x30`).
+/// Incompatible on 2's terms.
+/// **24** — the window picker: [`RequestBody::PickWindow`] (tag `0x31`),
+/// answered once the user has clicked a window or given up, with
+/// [`ResponseBody::Picked`] (response tag `0x08`); and
+/// [`RequestBody::CancelPick`] (tag `0x32`). Incompatible on 2's terms in
+/// both directions.
+pub const CONTROL_VERSION: u8 = 24;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1001,6 +1020,14 @@ pub enum RequestBody {
     /// connection. A client that could name an owner could put an icon in the
     /// tray on another program's behalf, and clicking it would deliver to a
     /// process that never asked.
+    ///
+    /// Text past [`MAX_GLYPH_BYTES`](crate::tray::MAX_GLYPH_BYTES) and
+    /// [`MAX_TOOLTIP_BYTES`](crate::tray::MAX_TOOLTIP_BYTES) is cut, on a
+    /// character boundary. A new id is refused with [`ResponseBody::Error`]
+    /// once this client has
+    /// [`MAX_TRAY_ICONS_PER_CLIENT`](crate::tray::MAX_TRAY_ICONS_PER_CLIENT)
+    /// icons, or the tray [`MAX_TRAY_ICONS`](crate::tray::MAX_TRAY_ICONS);
+    /// replacing an icon the client has is never refused.
     SetTrayIcon {
         id: u32,
         glyph: String,
@@ -1226,6 +1253,117 @@ pub enum RequestBody {
     /// else here: it cannot name a path, only a file in the settings folder.
     /// Answered with [`ResponseBody::Ok`], whatever the file says.
     AnnounceSettings { name: SettingsName },
+    /// Which modifier keys are down now, on any keyboard. Answered with
+    /// [`ResponseBody::Modifiers`].
+    ///
+    /// For a shell deciding something as it starts: holding Shift while the
+    /// machine starts shows the login screen instead of signing in by itself
+    /// (`design-decisions.md` §1427). A question rather than an event, because
+    /// the answer is needed before the first frame, and a client that connects
+    /// with a key already down is sent no event for it. A key that was down
+    /// before the compositor opened its keyboard counts: the compositor reads
+    /// each device's key state when it opens it.
+    ///
+    /// Keys physically held, sides collapsed as in every key event. A
+    /// sticky-keys latch is not a held key and is not reported.
+    ///
+    /// A shell's request. A program able to ask at will could poll the
+    /// keyboard and learn when the user presses Shift in another program's
+    /// password field -- the key-state query X11 is remembered for. So it goes
+    /// through the compositor's shell check, which, like that of every other
+    /// shell-only request, refuses nobody until the kernel can say who a
+    /// connection is.
+    GetHeldModifiers,
+    /// Ask for the user's attention for one of the sender's own windows
+    /// (`wanted`), or withdraw the request. Answered with
+    /// [`ResponseBody::Ok`].
+    ///
+    /// A chat with a new message, a finished download, a dialog behind other
+    /// windows: the shell shows it on the window's taskbar tile, through the
+    /// window list's [`demands_attention`](crate::window_list::WindowInfo::demands_attention).
+    /// It lasts until the window is next focused, which clears it. A focused
+    /// window's request changes nothing -- it already has the user -- and is
+    /// still answered `Ok`, since the request was not wrong, only moot.
+    ///
+    /// Asking for attention, not for focus: nothing here raises the window or
+    /// moves the keyboard to it. The user decides whether to look.
+    RequestAttention { window: u64, wanted: bool },
+    /// Put `text` on the clipboard: a copy or a cut. Answered with
+    /// [`ResponseBody::Ok`], or an error if refused.
+    ///
+    /// The compositor holds the clipboard, as the X server and a Wayland
+    /// compositor do, so copying in one program and pasting in another needs
+    /// no connection besides the one every window already has.
+    ///
+    /// **Only from a client whose window has the keyboard focus.** A copy is
+    /// something the user does in the window they are working in; a program in
+    /// the background that could set the clipboard could replace an address the
+    /// user just copied with one of its own before they paste it. Refused
+    /// otherwise.
+    ///
+    /// Text only, for now: formats beside text (HTML, images) are a MIME-typed
+    /// list on a later version. At most [`MAX_STRING_LEN`](crate::MAX_STRING_LEN)
+    /// bytes, as any string on this wire.
+    SetClipboard { text: String },
+    /// What is on the clipboard: a paste. Answered with
+    /// [`ResponseBody::Clipboard`].
+    ///
+    /// **Only for a client whose window has the keyboard focus**, for
+    /// [`SetClipboard`](Self::SetClipboard)'s reason the other way round: what
+    /// a person copies is often a password, and a program in the background
+    /// that could read the clipboard whenever it liked would collect them.
+    /// Refused otherwise.
+    GetClipboard,
+    /// Put every display to sleep: powered down where the hardware can be
+    /// (its scanout disabled), black and no longer presented to where it
+    /// cannot. A shell's request -- "a key to put the monitor to sleep", and
+    /// an idle timer's.
+    ///
+    /// **Answered when the displays wake, not when they sleep.** That is the
+    /// report the shell needs (to show the lock screen, if waking needs a
+    /// password), and a deferred reply carries it without a new event. So send
+    /// it with [`Connection::send`](crate::client::Connection::send) and
+    /// collect the answer later with
+    /// [`take_reply`](crate::client::Connection::take_reply), never with
+    /// `round_trip`, which would wait until somebody touched the keyboard.
+    ///
+    /// The displays wake at the next key press, click, scroll, or pointer
+    /// movement -- motion within a second of going to sleep excepted, since
+    /// the hand that clicked "sleep" is still on the mouse -- and **that input
+    /// is not delivered**: the key that wakes the screen does not also type,
+    /// as a click on a sleeping laptop's touchpad does not click. A key
+    /// released while asleep does not wake: it is the hotkey being let go.
+    /// [`WakeDisplays`](Self::WakeDisplays) wakes them too. Every pending
+    /// `SleepDisplays` is answered `Ok` at the wake.
+    SleepDisplays,
+    /// Wake the displays if they are asleep, answering every pending
+    /// [`SleepDisplays`](Self::SleepDisplays). Answered with
+    /// [`ResponseBody::Ok`], asleep or not. A shell's request: an alarm, a call.
+    WakeDisplays,
+    /// Let the user point at a window. The pointer becomes a crosshair, drawn
+    /// by the compositor so that no program can fake the mode, and the next
+    /// click is taken by the pick instead of reaching the window it lands
+    /// on. The answer, [`ResponseBody::Picked`], names that window: its title,
+    /// its program and the process that opened it -- nothing of its contents.
+    ///
+    /// Answered when the user has clicked or given up, which may be long
+    /// after, so -- as for [`SleepDisplays`](Self::SleepDisplays) -- send it
+    /// with [`Connection::send`](crate::client::Connection::send) and collect
+    /// the answer with [`take_reply`](crate::client::Connection::take_reply).
+    /// Escape, any other mouse button, or [`CancelPick`](Self::CancelPick)
+    /// gives up, answered `Picked(None)`; so does a click where there is no
+    /// window.
+    ///
+    /// Allowed only while one of the asker's windows has the keyboard focus
+    /// -- the window whose button the user just pressed to start the pick --
+    /// so a program in the background cannot turn the user's next click into
+    /// an answer for itself. One pick at a time on the whole desktop: asking
+    /// while another program's pick is open is refused, and asking again
+    /// while one's own is open answers the earlier request `Picked(None)`.
+    PickWindow,
+    /// Give up this connection's [`PickWindow`](Self::PickWindow): its answer
+    /// is then `Picked(None)`. Answered `Ok` whether or not a pick was open.
+    CancelPick,
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1493,6 +1631,14 @@ enum RequestTag {
     RecoverDisplay = 0x28,
     PatchImage = 0x29,
     AnnounceSettings = 0x2A,
+    GetHeldModifiers = 0x2B,
+    RequestAttention = 0x2C,
+    SetClipboard = 0x2D,
+    GetClipboard = 0x2E,
+    SleepDisplays = 0x2F,
+    WakeDisplays = 0x30,
+    PickWindow = 0x31,
+    CancelPick = 0x32,
 }
 
 impl RequestTag {
@@ -1539,6 +1685,14 @@ impl RequestTag {
             0x28 => Self::RecoverDisplay,
             0x29 => Self::PatchImage,
             0x2A => Self::AnnounceSettings,
+            0x2B => Self::GetHeldModifiers,
+            0x2C => Self::RequestAttention,
+            0x2D => Self::SetClipboard,
+            0x2E => Self::GetClipboard,
+            0x2F => Self::SleepDisplays,
+            0x30 => Self::WakeDisplays,
+            0x31 => Self::PickWindow,
+            0x32 => Self::CancelPick,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1602,6 +1756,35 @@ pub enum ResponseBody {
         width: u32,
         height: u32,
     },
+    /// Answer to [`RequestBody::GetHeldModifiers`]: the modifier keys down
+    /// when the compositor answered.
+    ///
+    /// One byte on the wire, in the same encoding key events use, so a bit
+    /// this version does not define is refused here as it is there.
+    Modifiers(Modifiers),
+    /// Answer to [`RequestBody::GetClipboard`]: the text on the clipboard, or
+    /// `None` when nothing has been copied this session. An empty copy is
+    /// `Some("")`: something was copied, and it was nothing.
+    Clipboard(Option<String>),
+    /// Answer to [`RequestBody::PickWindow`]: the window the user clicked, or
+    /// `None` when they gave up or clicked where there is no window.
+    Picked(Option<PickedWindow>),
+}
+
+/// The window a user picked ([`RequestBody::PickWindow`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickedWindow {
+    /// The compositor's id for it.
+    pub window: u64,
+    /// Its title, as its program last set it.
+    pub title: String,
+    /// Which program it belongs to, as the program declares it; empty when it
+    /// declared nothing.
+    pub app_id: String,
+    /// The process that opened it, as the kernel names it: `None` when that
+    /// program reached the compositor over TCP, which cannot say. Never the
+    /// per-connection number the window list carries as its `pid`.
+    pub pid: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1612,6 +1795,9 @@ enum ResponseTag {
     Error = 0x03,
     Display = 0x04,
     WorkArea = 0x05,
+    Modifiers = 0x06,
+    Clipboard = 0x07,
+    Picked = 0x08,
 }
 
 impl ResponseTag {
@@ -1622,6 +1808,9 @@ impl ResponseTag {
             0x03 => Self::Error,
             0x04 => Self::Display,
             0x05 => Self::WorkArea,
+            0x06 => Self::Modifiers,
+            0x07 => Self::Clipboard,
+            0x08 => Self::Picked,
             _ => return None,
         })
     }
@@ -1860,6 +2049,21 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::AnnounceSettings as u8);
             write_settings_name(out, *name);
         }
+        RequestBody::GetHeldModifiers => out.push(RequestTag::GetHeldModifiers as u8),
+        RequestBody::RequestAttention { window, wanted } => {
+            out.push(RequestTag::RequestAttention as u8);
+            write_u64(out, *window);
+            out.push(u8::from(*wanted));
+        }
+        RequestBody::SetClipboard { text } => {
+            out.push(RequestTag::SetClipboard as u8);
+            write_string(out, text);
+        }
+        RequestBody::GetClipboard => out.push(RequestTag::GetClipboard as u8),
+        RequestBody::SleepDisplays => out.push(RequestTag::SleepDisplays as u8),
+        RequestBody::WakeDisplays => out.push(RequestTag::WakeDisplays as u8),
+        RequestBody::PickWindow => out.push(RequestTag::PickWindow as u8),
+        RequestBody::CancelPick => out.push(RequestTag::CancelPick as u8),
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
@@ -1999,6 +2203,39 @@ fn encode_response_body(out: &mut Vec<u8>, body: &ResponseBody) {
             write_i32(out, *y);
             write_u32(out, *width);
             write_u32(out, *height);
+        }
+        ResponseBody::Modifiers(modifiers) => {
+            out.push(ResponseTag::Modifiers as u8);
+            out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        ResponseBody::Clipboard(text) => {
+            out.push(ResponseTag::Clipboard as u8);
+            match text {
+                Some(text) => {
+                    out.push(1);
+                    write_string(out, text);
+                }
+                None => out.push(0),
+            }
+        }
+        ResponseBody::Picked(picked) => {
+            out.push(ResponseTag::Picked as u8);
+            match picked {
+                Some(picked) => {
+                    out.push(1);
+                    write_u64(out, picked.window);
+                    write_string(out, &picked.title);
+                    write_string(out, &picked.app_id);
+                    match picked.pid {
+                        Some(pid) => {
+                            out.push(1);
+                            write_u32(out, pid);
+                        }
+                        None => out.push(0),
+                    }
+                }
+                None => out.push(0),
+            }
         }
     }
 }
@@ -2278,6 +2515,19 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::AnnounceSettings => RequestBody::AnnounceSettings {
             name: read_settings_name(r)?,
         },
+        RequestTag::GetHeldModifiers => RequestBody::GetHeldModifiers,
+        RequestTag::RequestAttention => RequestBody::RequestAttention {
+            window: r.read_u64()?,
+            wanted: read_bool(r)?,
+        },
+        RequestTag::SetClipboard => RequestBody::SetClipboard {
+            text: r.read_string()?,
+        },
+        RequestTag::GetClipboard => RequestBody::GetClipboard,
+        RequestTag::SleepDisplays => RequestBody::SleepDisplays,
+        RequestTag::WakeDisplays => RequestBody::WakeDisplays,
+        RequestTag::PickWindow => RequestBody::PickWindow,
+        RequestTag::CancelPick => RequestBody::CancelPick,
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2438,6 +2688,28 @@ fn decode_response_body(r: &mut Reader<'_>) -> Result<ResponseBody, DecodeError>
                 height,
             }
         }
+        ResponseTag::Modifiers => {
+            ResponseBody::Modifiers(crate::input::decode_modifiers(r.read_u8()?)?)
+        }
+        ResponseTag::Clipboard => ResponseBody::Clipboard(if read_bool(r)? {
+            Some(r.read_string()?)
+        } else {
+            None
+        }),
+        ResponseTag::Picked => ResponseBody::Picked(if read_bool(r)? {
+            Some(PickedWindow {
+                window: r.read_u64()?,
+                title: r.read_string()?,
+                app_id: r.read_string()?,
+                pid: if read_bool(r)? {
+                    Some(r.read_u32()?)
+                } else {
+                    None
+                },
+            })
+        } else {
+            None
+        }),
     })
 }
 
@@ -2690,8 +2962,87 @@ mod tests {
                     name: SettingsName::new(b"appearance").unwrap(),
                 },
             ),
+            Request::new(28, RequestBody::GetHeldModifiers),
+            // Both polarities, for `SubscribeWindowList`'s reason.
+            Request::new(
+                29,
+                RequestBody::RequestAttention {
+                    window: 7,
+                    wanted: true,
+                },
+            ),
+            Request::new(
+                30,
+                RequestBody::RequestAttention {
+                    window: u64::MAX,
+                    wanted: false,
+                },
+            ),
+            // A copy of nothing is still a copy; and text is not ASCII.
+            Request::new(
+                31,
+                RequestBody::SetClipboard {
+                    text: "copied — ✓".to_string(),
+                },
+            ),
+            Request::new(
+                32,
+                RequestBody::SetClipboard {
+                    text: String::new(),
+                },
+            ),
+            Request::new(33, RequestBody::GetClipboard),
+            Request::new(34, RequestBody::SleepDisplays),
+            Request::new(35, RequestBody::WakeDisplays),
+            Request::new(36, RequestBody::PickWindow),
+            Request::new(37, RequestBody::CancelPick),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// The held-modifiers question carries nothing, and its answer is every
+    /// combination of the four keys -- each bit its own, so an encoder that
+    /// crossed two of them fails here.
+    #[test]
+    fn the_held_modifiers_question_is_a_tag_and_its_answer_one_byte() {
+        let asked = encode_requests(&[Request::new(1, RequestBody::GetHeldModifiers)]);
+        assert_eq!(
+            asked.len(),
+            CONTROL_HEADER_LEN + 4 + 1,
+            "a header, a seq and a tag: the question names no key and no window"
+        );
+
+        for bits in 0u8..16 {
+            let held = Modifiers {
+                shift: bits & 1 != 0,
+                ctrl: bits & 2 != 0,
+                alt: bits & 4 != 0,
+                super_key: bits & 8 != 0,
+            };
+            let answer = vec![Response::new(
+                u32::from(bits),
+                ResponseBody::Modifiers(held),
+            )];
+            let bytes = encode_responses(&answer);
+            assert_eq!(bytes.len(), CONTROL_HEADER_LEN + 4 + 1 + 1, "{held:?}");
+            assert_eq!(round_trip_responses(&answer), answer);
+        }
+    }
+
+    /// A bit the encoding does not define is refused, as it is in a key
+    /// event: a newer compositor's fifth modifier must not read as no key.
+    #[test]
+    fn a_held_modifiers_answer_with_an_undefined_bit_is_refused() {
+        let mut bytes = encode_responses(&[Response::new(
+            1,
+            ResponseBody::Modifiers(Modifiers::shift()),
+        )]);
+        let last = bytes.len() - 1;
+        bytes[last] |= 0x80;
+        assert_eq!(
+            decode_responses(&bytes).err(),
+            Some(DecodeError::ReservedFlags(bytes[last]))
+        );
     }
 
     /// An announcement names a file in the settings folder and nothing else:
@@ -2920,8 +3271,48 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x2B),
+            Some(RequestTag::GetHeldModifiers),
+            "0x2B was taken by GetHeldModifiers in control version 20"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2C),
+            Some(RequestTag::RequestAttention),
+            "0x2C was taken by RequestAttention in control version 21"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2D),
+            Some(RequestTag::SetClipboard),
+            "0x2D was taken by SetClipboard in control version 22"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2E),
+            Some(RequestTag::GetClipboard),
+            "0x2E was taken by GetClipboard in control version 22"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2F),
+            Some(RequestTag::SleepDisplays),
+            "0x2F was taken by SleepDisplays in control version 23"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x30),
+            Some(RequestTag::WakeDisplays),
+            "0x30 was taken by WakeDisplays in control version 23"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x31),
+            Some(RequestTag::PickWindow),
+            "0x31 was taken by PickWindow in control version 24"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x32),
+            Some(RequestTag::CancelPick),
+            "0x32 was taken by CancelPick in control version 24"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x33),
             None,
-            "0x2B is the next free tag"
+            "0x33 is the next free tag"
         );
     }
 
@@ -3282,8 +3673,63 @@ mod tests {
                     scale_factor: 1.5,
                 }),
             ),
+            Response::new(
+                5,
+                ResponseBody::WorkArea {
+                    x: -1920,
+                    y: 0,
+                    width: 1920,
+                    height: 1040,
+                },
+            ),
+            Response::new(
+                6,
+                ResponseBody::Modifiers(Modifiers {
+                    shift: true,
+                    super_key: true,
+                    ..Modifiers::NONE
+                }),
+            ),
+            // Three different answers a paste can get: text, an empty copy,
+            // and nothing copied at all. A codec that wrote an absent text as
+            // an empty one would collapse the last two.
+            Response::new(7, ResponseBody::Clipboard(Some("pasted ✓".to_string()))),
+            Response::new(8, ResponseBody::Clipboard(Some(String::new()))),
+            Response::new(9, ResponseBody::Clipboard(None)),
+            // A pick: a window whose program the kernel named, one it could
+            // not, an empty title and app id, and nothing picked. A codec that
+            // wrote an absent pid as zero would name process 0.
+            Response::new(
+                10,
+                ResponseBody::Picked(Some(PickedWindow {
+                    window: u64::MAX,
+                    title: "notes.txt — Editor".to_string(),
+                    app_id: "org.slateos.Editor".to_string(),
+                    pid: Some(4321),
+                })),
+            ),
+            Response::new(
+                11,
+                ResponseBody::Picked(Some(PickedWindow {
+                    window: 7,
+                    title: String::new(),
+                    app_id: String::new(),
+                    pid: None,
+                })),
+            ),
+            Response::new(12, ResponseBody::Picked(None)),
         ];
         assert_eq!(round_trip_responses(&resps), resps);
+    }
+
+    #[test]
+    fn a_response_tag_past_picked_is_refused() {
+        assert_eq!(ResponseTag::from_byte(0x08), Some(ResponseTag::Picked));
+        assert_eq!(
+            ResponseTag::from_byte(0x09),
+            None,
+            "0x09 is the next free tag"
+        );
     }
 
     #[test]

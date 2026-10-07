@@ -1,0 +1,15 @@
+[package]
+name = "pwhash"
+version = "0.1.0"
+edition = "2024"
+description = "The hashes behind posix's crypt -- SHA-256, SHA-512, MD5, yescrypt and scrypt -- compiled for speed, apart from the size-optimised libc."
+
+[lib]
+path = "src/lib.rs"
+
+# None, and `no_std` without `alloc`: this is part of the libc, which has
+# neither to give.  yescrypt's memory comes from its caller (`posix`).
+[dependencies]
+
+[lints]
+workspace = true

@@ -821,15 +821,35 @@ struct AppState {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// What the pointer is over, which is drawn lit.
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
 }
 
 impl AppState {
+    /// How the text box that `target` names is drawn now.
+    fn field_look(&self, target: Target, focused: bool) -> FieldLook {
+        FieldLook {
+            state: guitk::field::State {
+                hovered: self.hover == Some(target),
+                focused,
+                disabled: false,
+                invalid: false,
+            },
+            focus_width: self.focus_ring_width,
+        }
+    }
+
     fn new() -> Self {
         Self {
             picker: FilePicker::default(),
             picker_saves: false,
             store: ClipboardStore::new(),
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             search_query: String::new(),
             type_filter: None,
             filtered_ids: Vec::new(),
@@ -1274,27 +1294,27 @@ fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
 }
 
 /// The colour a text box's border takes when it holds the caret.
-fn field_border(focused: bool, pal: &Palette) -> Color {
-    if focused { pal.blue } else { pal.surface1 }
+/// How a text box is drawn: the toolkit's field (lane C,
+/// c-e-a-theme-can-shape-the-controls) in this state, at the user's focus
+/// width.
+#[derive(Clone, Copy)]
+struct FieldLook {
+    state: guitk::field::State,
+    focus_width: f32,
+}
+
+impl FieldLook {
+    fn draw(self, frame: &mut Frame, pal: &Palette, rect: Rect) {
+        guitk::field::draw(frame, pal, rect, self.state, self.focus_width);
+    }
 }
 
 fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
     let focused = state.focus == Some(Field::Search);
     let box_rect = Rect::new(x, y, w, h);
     state
-        .palette
-        .push_surface(frame, x, y, w, h, 6.0, Surface::Card);
-    if focused {
-        frame.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: field_border(true, &state.palette),
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-    }
+        .field_look(Target::SearchBox, focused)
+        .draw(frame, &state.palette, box_rect);
 
     frame.push(RenderCommand::Text {
         x: x + 10.0,
@@ -1613,7 +1633,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
             entry,
             Rect::new(detail_x, y, detail_w, h),
             state.now,
-            state.focus == Some(Field::Tag),
+            state.field_look(Target::TagField, state.focus == Some(Field::Tag)),
             &state.tag_input,
         ),
         None => frame.push(RenderCommand::Text {
@@ -1776,9 +1796,10 @@ fn render_detail_panel(
     entry: &ClipEntry,
     rect: Rect,
     now: u64,
-    tag_focused: bool,
+    tag: FieldLook,
     tag_input: &str,
 ) {
+    let tag_focused = tag.state.focused;
     let Rect { x, y, w, h } = rect;
     frame.push(RenderCommand::PushClip {
         x,
@@ -1860,24 +1881,7 @@ fn render_detail_panel(
     // Tag entry: a box that takes the keyboard and a button that commits it.
     let add_w = 44.0_f32;
     let field = Rect::new(x + pad, cy, (w - pad * 2.0 - add_w - 6.0).max(0.0), 20.0);
-    pal.push_surface(
-        frame,
-        field.x,
-        field.y,
-        field.w,
-        field.h,
-        3.0,
-        Surface::Card,
-    );
-    frame.push(RenderCommand::StrokeRect {
-        x: field.x,
-        y: field.y,
-        width: field.w,
-        height: field.h,
-        color: field_border(tag_focused, pal),
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    tag.draw(frame, pal, field);
     let tag_display = if tag_input.is_empty() && !tag_focused {
         "add a tag...".to_string()
     } else if tag_focused {
@@ -2146,7 +2150,10 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
             label: "Name:",
             placeholder: "e.g. Email Reply",
             value: &state.template_name_input,
-            focused: state.focus == Some(Field::TemplateName),
+            look: state.field_look(
+                Target::TemplateName,
+                state.focus == Some(Field::TemplateName),
+            ),
             target: Target::TemplateName,
             height: 20.0,
         },
@@ -2162,7 +2169,10 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
             label: "Body:",
             placeholder: "Dear {name}, ...",
             value: &state.template_body_input,
-            focused: state.focus == Some(Field::TemplateBody),
+            look: state.field_look(
+                Target::TemplateBody,
+                state.focus == Some(Field::TemplateBody),
+            ),
             target: Target::TemplateBody,
             height: 40.0,
         },
@@ -2199,7 +2209,7 @@ struct TemplateField<'a> {
     label: &'a str,
     placeholder: &'a str,
     value: &'a str,
-    focused: bool,
+    look: FieldLook,
     target: Target,
     height: f32,
 }
@@ -2225,21 +2235,12 @@ fn render_template_field(
     });
 
     let rect = Rect::new(x + 60.0, y - 2.0, (w - 60.0).max(0.0), field.height);
-    let mut paint = pal.surface_paint(Surface::Card);
-    paint.border = Some(field_border(field.focused, pal));
-    pal.push_paint_radii(
-        frame,
-        rect.x,
-        rect.y,
-        rect.w,
-        rect.h,
-        CornerRadii::all(3.0),
-        paint,
-    );
+    field.look.draw(frame, pal, rect);
+    let focused = field.look.state.focused;
 
-    let display = if field.value.is_empty() && !field.focused {
+    let display = if field.value.is_empty() && !focused {
         field.placeholder.to_string()
-    } else if field.focused {
+    } else if focused {
         format!("{}_", field.value)
     } else {
         field.value.to_string()
@@ -2248,7 +2249,7 @@ fn render_template_field(
         x: rect.x + 6.0,
         y,
         text: display,
-        color: if field.value.is_empty() && !field.focused {
+        color: if field.value.is_empty() && !focused {
             pal.subtext0
         } else {
             pal.text
@@ -2724,23 +2725,24 @@ impl AppState {
         if !key.pressed {
             return Action::None;
         }
+        let plain = textline::is_plain(key.modifiers);
         // Above the field branch, which takes every character and returns.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return Action::Redraw;
         }
         if self.show_help {
             // Modal, and Escape especially: on this window it quits.
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return Action::Redraw;
         }
 
-        if let Some(field) = self.focus {
-            return self.handle_key_in_field(key, field);
-        }
-        if key.modifiers.ctrl {
+        // A Ctrl chord, not Ctrl held -- AltGr, which arrives as Ctrl+Alt,
+        // types: AltGr+S is a Polish `ś` -- and ahead of the fields, which
+        // took Ctrl+S as a typed `s` and never saved.
+        if textline::is_ctrl_chord(key.modifiers) {
             match key.key {
                 // The two keys that let a snippet outlive the window. The
                 // existing Export and Import controls move the history in and
@@ -2756,8 +2758,18 @@ impl AppState {
                     self.picker.open_to_read();
                     return Action::Redraw;
                 }
-                _ => {}
+                _ => return Action::None,
             }
+        }
+        if let Some(field) = self.focus {
+            return self.handle_key_in_field(key, field);
+        }
+        // The list's keys are its own only with nothing but Shift held: a
+        // chord with Alt or the Windows key is the window's or the
+        // desktop's, and arrives carrying its key -- Alt+Delete deleted the
+        // selected entry and Alt+Escape closed the window.
+        if !plain {
+            return Action::None;
         }
         let page = rows_that_fit(size.1).max(1);
         match key.key {
@@ -2795,6 +2807,21 @@ impl AppState {
 
     /// A keystroke while a text box holds the keyboard.
     fn handle_key_in_field(&mut self, key: &KeyEvent, field: Field) -> Action {
+        // What a key typed goes in, AltGr's among it -- and not a command's
+        // letter: Alt+W typed a `w`.
+        if textline::types_into_field(key) {
+            let typed: String = key.typed().collect();
+            self.field_mut(field).push_str(&typed);
+            if field == Field::Search {
+                self.scroll_offset = 0;
+                self.refresh_filter();
+            }
+            return Action::Redraw;
+        }
+        // The field's own keys take no chord: Alt+Enter added a tag.
+        if !textline::is_plain(key.modifiers) {
+            return Action::None;
+        }
         match key.key {
             Key::Escape => {
                 self.focus = None;
@@ -2822,21 +2849,7 @@ impl AppState {
                 }
                 Action::Redraw
             }
-            _ => {
-                // `typed()` already drops the control characters Enter, Tab,
-                // Escape and Backspace produce on most layouts, so an unmatched
-                // key cannot smuggle a `\r` into a tag.
-                let typed: String = key.typed().collect();
-                if typed.is_empty() {
-                    return Action::None;
-                }
-                self.field_mut(field).push_str(&typed);
-                if field == Field::Search {
-                    self.scroll_offset = 0;
-                    self.refresh_filter();
-                }
-                Action::Redraw
-            }
+            _ => Action::None,
         }
     }
 
@@ -2885,7 +2898,35 @@ impl AppState {
         }
         match event {
             Event::Mouse(mouse) => match mouse.kind {
+                // The card is modal for the pointer as it is for the keys: a
+                // press, with any button, puts it away rather than reaching
+                // the control drawn under it, and the wheel scrolls nothing
+                // it covers. A move is still followed, so the light is right
+                // when the card goes.
+                MouseEventKind::Press(_) if self.show_help => {
+                    self.show_help = false;
+                    Action::Redraw
+                }
+                MouseEventKind::Scroll { .. } if self.show_help => Action::None,
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
+                // What is under the pointer is drawn lit; only a change in it
+                // is worth a redraw.
+                MouseEventKind::Move => {
+                    let over = self.hit_test(mouse.x, mouse.y, size);
+                    if over == self.hover {
+                        Action::None
+                    } else {
+                        self.hover = over;
+                        Action::Redraw
+                    }
+                }
+                MouseEventKind::Leave => {
+                    if self.hover.take().is_some() {
+                        Action::Redraw
+                    } else {
+                        Action::None
+                    }
+                }
                 MouseEventKind::Scroll { dy, .. } => {
                     // The accumulator keeps the fractions a trackpad sends, so a
                     // slow drag moves instead of rounding to zero every frame.
@@ -2940,6 +2981,10 @@ fn next_type_filter(current: Option<ClipType>) -> Option<ClipType> {
 impl App for AppState {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -2997,6 +3042,151 @@ impl App for AppState {
 /// Lets the tests drive this window by naming its controls rather than
 /// measuring them. Three lines of forwarding; the helpers are in
 /// [`guitk::probe`].
+#[cfg(test)]
+mod field_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use guitk::event::MouseEvent;
+    use guitk::probe::{click, rect_of};
+
+    /// The search box, the tag entry and the template fields are the
+    /// toolkit's (lane C, c-e-a-theme-can-shape-the-controls): lit under the
+    /// pointer, out when it leaves, and marked at the user's focus width while
+    /// they have the keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut state = AppState::new();
+        state.refresh_filter();
+        let mut palette = state.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut state, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut state, &settings);
+        let size = AppState::SIZE;
+        let draws = |state: &AppState, rect: Rect, s: guitk::field::State| {
+            let seq = |f: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, f, width);
+                want
+            };
+            let frame = build_frame(state, size.0, size.1);
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(s)) && (s.focused || !has(&seq(guitk::field::State { focused: true, ..s })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |state: &mut AppState, x: f32, y: f32, kind: MouseEventKind| {
+            state.handle_event(&Event::Mouse(MouseEvent { x, y, kind }), size)
+        };
+
+        let search = rect_of(&state, Target::SearchBox).expect("the search box");
+        assert!(
+            draws(&state, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        assert_eq!(
+            pointer(&mut state, x, y, MouseEventKind::Move),
+            Action::Redraw
+        );
+        assert_eq!(
+            pointer(&mut state, x + 1.0, y, MouseEventKind::Move),
+            Action::None,
+            "a move that changed nothing redrew the window"
+        );
+        assert!(
+            draws(&state, search, lit),
+            "the box under the pointer is not lit"
+        );
+        assert_eq!(
+            pointer(&mut state, -1.0, -1.0, MouseEventKind::Leave),
+            Action::Redraw
+        );
+        assert!(
+            draws(&state, search, idle),
+            "the box stayed lit after the pointer left"
+        );
+        click(&mut state, Target::SearchBox);
+        assert!(
+            draws(&state, search, keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+
+        click(&mut state, Target::Tab(ActiveTab::Templates));
+        click(&mut state, Target::TemplateName);
+        let name = rect_of(&state, Target::TemplateName).expect("the template name");
+        let body = rect_of(&state, Target::TemplateBody).expect("the template body");
+        assert!(
+            draws(&state, name, keyed),
+            "the name with the keyboard is not marked"
+        );
+        let (bx, by) = body.centre();
+        pointer(&mut state, bx, by, MouseEventKind::Move);
+        assert!(
+            draws(&state, body, lit),
+            "the body under the pointer is not lit"
+        );
+    }
+
+    /// The tag entry, in the detail panel of a chosen entry, is the toolkit's
+    /// field too.
+    #[test]
+    fn the_tag_entry_is_the_toolkits_field() {
+        let mut state = AppState::new();
+        for i in 0..3 {
+            state.store.add(
+                format!("clip number {i}"),
+                ClipType::PlainText,
+                i,
+                format!("app{i}"),
+            );
+        }
+        state.refresh_filter();
+        state.selected_id = state.filtered_ids.first().copied();
+        let width = state.focus_ring_width;
+        let palette = state.palette;
+        click(&mut state, Target::TagField);
+        let tag = rect_of(&state, Target::TagField).expect("the tag entry");
+        let mut want: Vec<RenderCommand> = Vec::new();
+        guitk::field::draw(
+            &mut want,
+            &palette,
+            tag,
+            guitk::field::State {
+                focused: true,
+                ..guitk::field::State::default()
+            },
+            width,
+        );
+        let frame = build_frame(&state, AppState::SIZE.0, AppState::SIZE.1);
+        assert!(
+            frame
+                .commands()
+                .windows(want.len())
+                .any(|w| w == want.as_slice()),
+            "the tag entry with the keyboard is not the toolkit's field"
+        );
+    }
+}
+
 impl Probe for AppState {
     type Target = Target;
     type Outcome = Action;
@@ -3006,12 +3196,23 @@ impl Probe for AppState {
         build_frame(self, size.0, size.1)
     }
 
+    // Through `handle_event`, the window's own way in: a probe that called
+    // the press handler directly went round whatever the event routing
+    // does first -- the shortcut card's hold on the pointer among it -- and
+    // a test of what a press does passed against a path no window takes.
     fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
-        self.handle_click(x, y, button, size)
+        self.handle_event(
+            &Event::Mouse(guitk::event::MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        )
     }
 
     fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
-        self.handle_key(key, size)
+        self.handle_event(&Event::Key(key.clone()), size)
     }
 }
 
@@ -3059,6 +3260,65 @@ mod tests {
             modifiers: guitk::event::Modifiers::ctrl(),
             text: String::new(),
         })
+    }
+
+    /// **A chord is neither a key of the list nor typing, and AltGr types**:
+    /// Alt+Delete deleted the selected entry and Alt+Escape closed the
+    /// window; AltGr+S, a Polish `ś`, opened the save dialog; and in a field
+    /// Ctrl+S typed an `s` rather than saving, and Alt+W typed a `w`.
+    #[test]
+    fn a_chord_is_neither_a_key_of_the_list_nor_typing_and_altgr_types() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let size = (1000.0, 700.0);
+        let key = |k: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = AppState::new();
+        app.store.add(
+            String::from("kept"),
+            ClipType::PlainText,
+            10,
+            String::from("t"),
+        );
+        app.refresh_filter();
+        app.selected_id = app.filtered_ids.first().copied();
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::Delete, Key::Escape, Key::Enter, Key::F1, Key::S] {
+                assert_eq!(
+                    app.handle_event(&key(k, "", held), size),
+                    Action::None,
+                    "{held:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(app.filtered_ids.len(), 1, "a chord deleted the entry");
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(!app.picker.is_open(), "AltGr+S opened the save dialog");
+
+        // In the search field: AltGr's `ś` is typed, a command's letter is
+        // not, and Ctrl+S saves rather than typing.
+        app.focus = Some(Field::Search);
+        app.handle_event(&key(Key::W, "w", Modifiers::alt()), size);
+        app.handle_event(&key(Key::W, "w", Modifiers::super_key()), size);
+        app.handle_event(&key(Key::S, "ś", altgr), size);
+        assert_eq!(
+            app.search_query, "ś",
+            "the field typed a command or lost AltGr's ś"
+        );
+        app.handle_event(&key(Key::Enter, "", Modifiers::alt()), size);
+        assert_eq!(app.focus, Some(Field::Search), "Alt+Enter left the field");
+        app.handle_event(&key(Key::S, "s", Modifiers::ctrl()), size);
+        assert_eq!(app.search_query, "ś", "Ctrl+S was typed");
+        assert!(app.picker.is_open(), "Ctrl+S in a field did not save");
     }
 
     /// An open picker takes the keys, and the list behind it does not move.
@@ -4371,6 +4631,77 @@ mod tests {
         let results = store.search("number 15");
         // Should match "entry number 15", "entry number 150", etc.
         assert!(!results.is_empty());
+    }
+
+    /// **A press while the card is up puts it away and does nothing else,
+    /// and the wheel scrolls nothing under it.** A press used to go straight
+    /// through the card to the control drawn under it. The controls at the
+    /// end are the same press and turn with the card down.
+    #[test]
+    fn the_shortcut_card_takes_a_press_rather_than_passing_it_on() {
+        let size = (WINDOW_WIDTH, 400.0);
+        let mut state = AppState::new();
+        for i in 0..30 {
+            state
+                .store
+                .add(format!("e{i}"), ClipType::PlainText, i, String::new());
+        }
+        state.refresh_filter();
+        state.window_size = size;
+        let at = |state: &AppState, target: Target| {
+            guitk::probe::rect_of_sized(state, target, size)
+                .unwrap_or_else(|| panic!("{target:?} is not drawn"))
+                .centre()
+        };
+        let mouse = |state: &mut AppState, (x, y): (f32, f32), kind: MouseEventKind| {
+            state.handle_event(&Event::Mouse(guitk::event::MouseEvent { x, y, kind }), size)
+        };
+        let tab = at(&state, Target::Tab(ActiveTab::Templates));
+        let first = state.filtered_ids.first().copied().expect("an entry");
+        let row = at(&state, Target::Entry(first));
+        let before = state.active_tab;
+
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        assert!(state.show_help);
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert_eq!(
+            state.scroll_offset, 0,
+            "the wheel scrolled the list under the card"
+        );
+        assert_eq!(
+            mouse(&mut state, tab, MouseEventKind::Press(MouseButton::Left)),
+            Action::Redraw
+        );
+        assert!(!state.show_help, "the press did not put the card away");
+        assert_eq!(
+            state.active_tab, before,
+            "the press went through the card to a tab"
+        );
+
+        // Any button: the right one does nothing to a control, but it is
+        // still a press on the card.
+        state.handle_key(&guitk::probe::press(Key::F1), size);
+        mouse(&mut state, tab, MouseEventKind::Press(MouseButton::Right));
+        assert!(!state.show_help, "a right-button press left the card up");
+
+        mouse(
+            &mut state,
+            row,
+            MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        );
+        assert!(
+            state.scroll_offset > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+        mouse(&mut state, tab, MouseEventKind::Press(MouseButton::Left));
+        assert_ne!(
+            state.active_tab, before,
+            "control: the press does nothing even with the card down"
+        );
     }
 
     #[test]

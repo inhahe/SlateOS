@@ -4,8 +4,9 @@ Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
 program is not testing the program.
 
-Two tables, one per source file: the chrome and its buttons (`lib.rs`), and
-the legibility reader a game's tests hold every text to (`legibility.rs`).
+Three tables, one per source file: the chrome and its buttons (`lib.rs`),
+the legibility reader a game's tests hold every text to (`legibility.rs`),
+and the keys a game's undo history answers (`history.rs`).
 
 Usage:  python -u apps/gamechrome/mutate.py [substring ...]
 """
@@ -19,6 +20,8 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 LIB = Path(__file__).parent / "src" / "lib.rs"
 LEGIBILITY = Path(__file__).parent / "src" / "legibility.rs"
+HISTORY = Path(__file__).parent / "src" / "history.rs"
+HELP = Path(__file__).parent / "src" / "help.rs"
 
 # (name, old, new, [tests that must fail])
 LIB_MUTATIONS = [
@@ -145,13 +148,162 @@ LEGIBILITY_MUTATIONS = [
         "    size >= 24.0 || (bold && size >= 24.0)",
         ["an_ink_is_picked_by_the_size_it_is_drawn_at"],
     ),
+    (
+        "the looks leave out the soft-text themes",
+        "            (\n                \"soft text, light\",\n                soft_text(true, Color::from_hex(0x65_7B_83)),\n            ),\n            (\n                \"soft text, dark\",\n                soft_text(false, Color::from_hex(0x83_94_96)),\n            ),\n",
+        "",
+        ["the_looks_are_each_palette_in_either_surface_look"],
+    ),
+    (
+        "a soft-text theme keeps the palette's text",
+        "    roles.insert(\"text\".to_string(), text);",
+        "    let _ = (roles, text);",
+        ["a_theme_without_room_leaves_a_raised_ground_none"],
+    ),
+    (
+        "a theme's hues are its own",
+        "    p.green = from.green;",
+        "",
+        ["a_theme_without_room_leaves_a_raised_ground_none"],
+    ),
+    (
+        "every look is bordered",
+        "            p.set_surface_style(if cards {\n                SurfaceStyle::Cards\n",
+        "            p.set_surface_style(if false {\n                SurfaceStyle::Cards\n",
+        ["the_looks_are_each_palette_in_either_surface_look"],
+    ),
+]
+
+HISTORY_MUTATIONS = [
+    (
+        "a key held with the Windows key is a history key",
+        "        if !key.pressed || m.super_key {",
+        "        if !key.pressed {",
+        ["nothing_with_the_windows_key"],
+    ),
+    (
+        "a release is a press",
+        "        if !key.pressed || m.super_key {",
+        "        if m.super_key {",
+        ["a_bare_key_or_a_release_is_not_one"],
+    ),
+    (
+        "AltGr+Z undoes",
+        "            (Key::Z, true, false, false) => Some(Self::Undo),",
+        "            (Key::Z, true, _, false) => Some(Self::Undo),",
+        ["altgr_is_neither_ctrl_nor_alt"],
+    ),
+    (
+        "Ctrl+Z redoes",
+        "            (Key::Z, true, false, false) => Some(Self::Undo),",
+        "            (Key::Z, true, false, false) => Some(Self::Redo),",
+        ["the_four_are_read"],
+    ),
+    (
+        "Ctrl+Shift+Z is not a redo",
+        "            (Key::Z, true, false, true) | (Key::Y, true, false, false) => Some(Self::Redo),",
+        "            (Key::Y, true, false, false) => Some(Self::Redo),",
+        ["the_four_are_read"],
+    ),
+    (
+        "Ctrl+Shift+Y redoes",
+        "(Key::Y, true, false, false) => Some(Self::Redo),",
+        "(Key::Y, true, false, _) => Some(Self::Redo),",
+        ["other_keys_are_not_one"],
+    ),
+    (
+        "AltGr+Z goes back",
+        "            (Key::Z, false, true, false) => Some(Self::Earlier),",
+        "            (Key::Z, _, true, false) => Some(Self::Earlier),",
+        ["altgr_is_neither_ctrl_nor_alt"],
+    ),
+    (
+        "a bare Z goes back",
+        "            (Key::Z, false, true, false) => Some(Self::Earlier),",
+        "            (Key::Z, false, _, false) => Some(Self::Earlier),",
+        ["a_bare_key_or_a_release_is_not_one"],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "            (Key::Z, false, true, true) => Some(Self::Later),",
+        "            (Key::Z, false, true, true) => Some(Self::Earlier),",
+        ["the_four_are_read"],
+    ),
+]
+
+HELP_MUTATIONS = [
+    (
+        "F1 does not raise the list",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        "    (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        ["f1_and_a_question_mark_raise_the_list"],
+    ),
+    (
+        "the slash key with Shift does not raise it",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        "    key.key == Key::F1 || key.single_char() == Some('?')",
+        ["f1_and_a_question_mark_raise_the_list"],
+    ),
+    (
+        "the slash key alone raises it",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        "    key.key == Key::F1 || key.key == Key::Slash || key.single_char() == Some('?')",
+        ["f1_and_a_question_mark_raise_the_list"],
+    ),
+    (
+        "a ? from another key does not raise it",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift)",
+        ["f1_and_a_question_mark_raise_the_list"],
+    ),
+    (
+        "a key held with Ctrl, Alt or the Windows key raises it",
+        "    if !key.pressed || m.ctrl || m.alt || m.super_key {",
+        "    if !key.pressed {",
+        ["nothing_held_with_ctrl_alt_or_the_windows_key_raises_it"],
+    ),
+    (
+        "a release raises it",
+        "    if !key.pressed || m.ctrl || m.alt || m.super_key {",
+        "    if m.ctrl || m.alt || m.super_key {",
+        ["nothing_held_with_ctrl_alt_or_the_windows_key_raises_it"],
+    ),
+    (
+        "Escape and Enter do not put it away",
+        "    raises(key) || (key.pressed && matches!(key.key, Key::Escape | Key::Enter))",
+        "    raises(key)",
+        ["escape_enter_and_what_raised_it_put_it_away"],
+    ),
+    (
+        "any key puts it away",
+        "    raises(key) || (key.pressed && matches!(key.key, Key::Escape | Key::Enter))",
+        "    key.pressed",
+        ["escape_enter_and_what_raised_it_put_it_away"],
+    ),
+    (
+        "what raised it does not put it away",
+        "    raises(key) || (key.pressed && matches!(key.key, Key::Escape | Key::Enter))",
+        "    key.pressed && matches!(key.key, Key::Escape | Key::Enter)",
+        ["escape_enter_and_what_raised_it_put_it_away"],
+    ),
+    (
+        "a released Escape puts it away",
+        "    raises(key) || (key.pressed && matches!(key.key, Key::Escape | Key::Enter))",
+        "    raises(key) || matches!(key.key, Key::Escape | Key::Enter)",
+        ["escape_enter_and_what_raised_it_put_it_away"],
+    ),
 ]
 
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
     only = sys.argv[1:]
-    tables = [(LIB, LIB_MUTATIONS), (LEGIBILITY, LEGIBILITY_MUTATIONS)]
+    tables = [
+        (LIB, LIB_MUTATIONS),
+        (LEGIBILITY, LEGIBILITY_MUTATIONS),
+        (HISTORY, HISTORY_MUTATIONS),
+        (HELP, HELP_MUTATIONS),
+    ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]
     if unmatched:

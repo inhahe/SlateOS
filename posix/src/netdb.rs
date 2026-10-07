@@ -646,7 +646,10 @@ impl Cursor {
     /// the `_r` form, NULL from the other) with the caller's `errno`.
     fn text(&mut self, which: Which, builtin: &'static [u8]) -> Option<&[u8]> {
         if !self.open {
-            match nss_files::read(which) {
+            let saved = errno::get_errno();
+            let read = nss_files::read(which);
+            errno::set_errno(saved);
+            match read {
                 Ok(nss_files::Db::Text(t)) => {
                     let (ptr, len) = t.into_raw();
                     self.text = ptr;

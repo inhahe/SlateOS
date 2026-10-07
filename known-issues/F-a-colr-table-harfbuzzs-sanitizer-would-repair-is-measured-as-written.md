@@ -1,5 +1,8 @@
 ### [F] A `COLR` table HarfBuzz's sanitizer would repair is measured as written -- 2026-09-27 -- **OPEN**
 
+**Status:** OPEN -- lane F's; low priority: only a hostile or fuzzed font
+is affected, and the walk's own nesting limit keeps it safe.
+
 **In short:** HarfBuzz checks a colour font's `COLR` table before it uses it,
 and quietly repairs what fails the check. It cuts a paint graph off where it
 nests more than 64 levels deep. It drops the whole table if the repairs would

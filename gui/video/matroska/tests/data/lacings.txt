@@ -1,0 +1,12 @@
+# lacings.mkv: what ffprobe makes of it (generate_fixtures.py).
+stream 0 vp9 1/1000
+stream 1 opus 1/1000
+packet 0 0 40 300 343 K__ 77a26a3e80b0e32bd518156a43a93e03 -
+packet 0 40 40 254 343 K__ 6ce194adad688cd70110c7863b3ab7af -
+packet 0 80 40 7 343 K__ 4ab97701809142bdf39fce28ae275913 -
+packet 0 200 40 300 921 ___ 77a26a3e80b0e32bd518156a43a93e03 -
+packet 0 240 40 254 921 ___ 6ce194adad688cd70110c7863b3ab7af -
+packet 0 280 40 7 921 ___ 4ab97701809142bdf39fce28ae275913 -
+packet 0 400 40 4 1500 ___ bc2a899adf5032ed55263f04e7e33927 -
+packet 0 440 40 4 1500 ___ fac5516c6d4ac5d813e89e896de8557d -
+packet 0 480 40 4 1500 ___ 41b074e2268af59e182993cc6dc80b36 -

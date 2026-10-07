@@ -1828,6 +1828,9 @@ pub enum Command {
     ChangeSetting,
     /// Put up the file picker to open a video.
     Open,
+    /// Show this list of keys -- the Shortcuts tab -- or go back to the tab
+    /// that was showing.
+    ToggleShortcuts,
 }
 
 /// Which keystroke runs a command.
@@ -1850,13 +1853,19 @@ impl Press {
     /// them, so `Shift+Right` cannot also be `Right`. That makes the table's
     /// order irrelevant, which is what stops a row added at the top from
     /// silently shadowing one below it.
+    ///
+    /// Clear of the Windows key too, whose chords are the desktop's: none of
+    /// these asked, so Windows+Space played and paused the film and
+    /// Ctrl+Windows+O opened a file. `Ctrl` is a Ctrl chord, not Ctrl held:
+    /// AltGr arrives as Ctrl+Alt.
     pub fn matches(self, event: &KeyEvent) -> bool {
         let mods = event.modifiers;
+        let plain = textline::is_plain(mods);
         match self {
-            Self::Plain(key) => event.key == key && !mods.shift && !mods.ctrl && !mods.alt,
-            Self::Shift(key) => event.key == key && mods.shift && !mods.ctrl && !mods.alt,
-            Self::Ctrl(key) => event.key == key && mods.ctrl && !mods.alt,
-            Self::Digit => Self::digit_of(event.key).is_some() && !mods.ctrl && !mods.alt,
+            Self::Plain(key) => event.key == key && plain && !mods.shift,
+            Self::Shift(key) => event.key == key && plain && mods.shift,
+            Self::Ctrl(key) => event.key == key && textline::is_ctrl_chord(mods),
+            Self::Digit => Self::digit_of(event.key).is_some() && plain,
         }
     }
 
@@ -1925,6 +1934,22 @@ impl Shortcuts {
             }
         }
         static TABLE: &[Shortcut] = &[
+            // F1 did nothing here, though the whole table was a tab away:
+            // "press F1 to see the keys" is true of every application in the
+            // suite (design-decisions 863), and `?` too where nothing types
+            // one -- nothing here does.
+            sc(
+                "F1",
+                "These keys, or back",
+                Press::Plain(Key::F1),
+                Command::ToggleShortcuts,
+            ),
+            sc(
+                "?",
+                "These keys, or back",
+                Press::Shift(Key::Slash),
+                Command::ToggleShortcuts,
+            ),
             sc("Ctrl+O", "Open a File", Press::Ctrl(Key::O), Command::Open),
             sc(
                 "Space",
@@ -2821,6 +2846,8 @@ pub struct VideoPlayerApp {
 
     // Active tab in settings
     pub active_tab: PlayerTab,
+    /// The tab F1 opened the Shortcuts tab over, which F1 goes back to.
+    tab_before_keys: Option<PlayerTab>,
     /// Which row of the Settings tab the cursor is on.
     pub settings_row: usize,
 
@@ -2933,6 +2960,7 @@ impl VideoPlayerApp {
             recent: RecentHistory::default(),
             preferences: PlayerPreferences::default(),
             active_tab: PlayerTab::Player,
+            tab_before_keys: None,
             settings_row: 0,
             osd_message: None,
             osd_remaining_ms: 0,
@@ -3626,6 +3654,14 @@ impl VideoPlayerApp {
                         self.show_osd(&said);
                         self.save_settings();
                     }
+                }
+            }
+            Command::ToggleShortcuts => {
+                if self.active_tab == PlayerTab::Shortcuts {
+                    self.active_tab = self.tab_before_keys.take().unwrap_or(PlayerTab::Player);
+                } else {
+                    self.tab_before_keys = Some(self.active_tab);
+                    self.active_tab = PlayerTab::Shortcuts;
                 }
             }
             Command::AddBookmark => {
@@ -8573,6 +8609,65 @@ as many times as before",
         assert!(!Press::Plain(Key::Right).matches(&shifted));
     }
 
+    /// **The Windows key's chords are the desktop's, and AltGr is not
+    /// Ctrl**: no binding asked about the Windows key, so Windows+Space
+    /// played and paused the film, Windows+5 sought to half way and
+    /// Ctrl+Windows+O opened a file. AltGr, which arrives as Ctrl+Alt, was
+    /// already refused by Ctrl's bindings; this keeps it so.
+    #[test]
+    fn a_key_held_with_the_windows_key_is_not_the_players() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let windows = Modifiers::super_key();
+        let event = |k: Key, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        };
+        let cases = [
+            (Press::Plain(Key::Space), event(Key::Space, windows)),
+            (
+                Press::Shift(Key::Right),
+                event(
+                    Key::Right,
+                    Modifiers {
+                        shift: true,
+                        ..windows
+                    },
+                ),
+            ),
+            (
+                Press::Ctrl(Key::O),
+                event(
+                    Key::O,
+                    Modifiers {
+                        ctrl: true,
+                        ..windows
+                    },
+                ),
+            ),
+            (Press::Ctrl(Key::O), event(Key::O, altgr)),
+            (Press::Digit, event(Key::Num5, windows)),
+        ];
+        for (press, chord) in cases {
+            assert!(
+                !press.matches(&chord),
+                "{press:?} answered {:?}",
+                chord.modifiers
+            );
+        }
+        // And through the window: nothing runs.
+        let mut app = loaded();
+        let (state, position) = (app.state, app.position);
+        assert!(!app.handle_event(&Event::Key(event(Key::Space, windows))));
+        assert!(!app.handle_event(&Event::Key(event(Key::Num5, windows))));
+        assert_eq!((app.state, app.position), (state, position));
+        assert!(!app.picker.is_open(), "Ctrl+Windows+O opened a file");
+    }
+
     #[test]
     fn a_preview_dragged_off_the_end_still_names_a_point_in_the_film() {
         let mut app = loaded();
@@ -9306,6 +9401,57 @@ as many times as before",
         assert!(
             drawn_texts(&app).contains(&line),
             "the tab does not say the steps"
+        );
+    }
+
+    /// **F1 shows the keys, and goes back**: it did nothing, though the whole
+    /// table was a tab away. `?` does the same, nothing here typing one; each
+    /// goes back to the tab it was pressed on, and Alt+F1 is the desktop's.
+    #[test]
+    fn f1_shows_the_keys_and_goes_back() {
+        let mut app = loaded();
+        app.active_tab = PlayerTab::Settings;
+        app.handle_event(&press(Key::F1));
+        assert_eq!(
+            app.active_tab,
+            PlayerTab::Shortcuts,
+            "F1 did not show the keys"
+        );
+        assert!(
+            drawn_texts(&app).iter().any(|t| t == "Keyboard Shortcuts"),
+            "the Shortcuts tab is not drawn"
+        );
+        app.handle_event(&press(Key::F1));
+        assert_eq!(
+            app.active_tab,
+            PlayerTab::Settings,
+            "F1 did not go back to the tab it was pressed on"
+        );
+        app.handle_event(&press_with(Key::Slash, shift()));
+        assert_eq!(
+            app.active_tab,
+            PlayerTab::Shortcuts,
+            "? did not show the keys"
+        );
+        app.handle_event(&press_with(Key::Slash, shift()));
+        assert_eq!(app.active_tab, PlayerTab::Settings, "? did not go back");
+
+        // The Shortcuts tab chosen by hand: F1 goes to the player.
+        app.active_tab = PlayerTab::Shortcuts;
+        app.handle_event(&press(Key::F1));
+        assert_eq!(app.active_tab, PlayerTab::Player);
+
+        app.handle_event(&press_with(
+            Key::F1,
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert_eq!(
+            app.active_tab,
+            PlayerTab::Player,
+            "Alt+F1, the desktop's, was taken"
         );
     }
 }

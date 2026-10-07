@@ -10,6 +10,8 @@ hwquery = { path = "../hwquery" }
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# The text boxes' editing keys, and the line between a chord and a character.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # Its fixture-tree provider, for the tests that fake /proc.

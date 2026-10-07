@@ -1,0 +1,21 @@
+[package]
+name = "filechooser"
+version = "0.1.0"
+edition = "2024"
+description = "A program's Open and Save window shown by the file explorer, asked for over a SlateOS service (design-decisions 1463)"
+
+[dependencies]
+# The toolkit's own dialog, which stands in where no explorer can be asked.
+guitk = { path = "../toolkit" }
+# The transport: a SlateOS channel to the chooser service, through the same
+# `Transport` the display protocol uses.
+guiremote = { path = "../remote" }
+# The frame and its bounded fields, shared with the credential service's
+# protocol.
+msgframe = { path = "../msgframe" }
+# Connecting to the chooser by name, and reading one framed message off the
+# connection.
+svcconn = { path = "../svcconn" }
+
+[lints]
+workspace = true

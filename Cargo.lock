@@ -58,6 +58,7 @@ dependencies = [
  "pathcodec",
  "scratchdir",
  "settingsfile",
+ "sound",
  "yamldoc",
 ]
 
@@ -74,12 +75,15 @@ name = "archivemanager"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "bzip2",
  "deflate",
  "guitk",
  "oswindow",
  "pathtext",
  "quoting",
+ "sevenz",
  "tararchive",
+ "xz",
  "ziparchive",
 ]
 
@@ -125,6 +129,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "textline",
 ]
 
 [[package]]
@@ -236,6 +241,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "textline",
 ]
 
 [[package]]
@@ -247,6 +253,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -363,6 +370,10 @@ name = "byteread"
 version = "0.1.0"
 
 [[package]]
+name = "bzip2"
+version = "0.1.0"
+
+[[package]]
 name = "c2rust-bitfields"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -389,6 +400,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -481,6 +493,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -548,6 +561,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -583,6 +597,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -596,6 +611,8 @@ dependencies = [
  "keylayout",
  "osfont",
  "settingsfile",
+ "videocodec",
+ "vp9",
 ]
 
 [[package]]
@@ -606,6 +623,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "statehistory",
 ]
 
 [[package]]
@@ -619,6 +637,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textfmt",
+ "textline",
  "unsaved",
 ]
 
@@ -699,9 +718,27 @@ version = "0.1.0"
 name = "credentials"
 version = "0.1.0"
 dependencies = [
+ "guiremote",
+ "msgframe",
  "pwkdf",
  "randrange",
+ "secret",
  "sha2",
+ "svcconn",
+]
+
+[[package]]
+name = "credentialsd"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "credentials",
+ "guiremote",
+ "guitk",
+ "journalrec",
+ "oswindow",
+ "pathcodec",
+ "secret",
 ]
 
 [[package]]
@@ -718,6 +755,7 @@ dependencies = [
  "settingsfile",
  "sha2",
  "textfmt",
+ "textline",
 ]
 
 [[package]]
@@ -751,6 +789,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -804,6 +843,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -827,6 +867,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -853,9 +894,12 @@ dependencies = [
  "procinfo",
  "programs",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
  "settingswatch",
+ "sound",
  "tzrules",
+ "windowrules",
  "yamldoc",
 ]
 
@@ -877,6 +921,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -897,6 +942,8 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "statehistory",
+ "textline",
  "unsaved",
  "yamldoc",
 ]
@@ -971,6 +1018,7 @@ dependencies = [
  "scratchdir",
  "sha1",
  "sha2",
+ "textline",
 ]
 
 [[package]]
@@ -1016,7 +1064,27 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
+
+[[package]]
+name = "dyndns"
+version = "0.1.0"
+dependencies = [
+ "dyndnsproviders",
+ "dyndnsrouter",
+ "httpclient",
+ "journalrec",
+ "yamldoc",
+]
+
+[[package]]
+name = "dyndnsproviders"
+version = "0.1.0"
+
+[[package]]
+name = "dyndnsrouter"
+version = "0.1.0"
 
 [[package]]
 name = "earlyoom"
@@ -1039,6 +1107,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -1100,6 +1169,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -1129,6 +1199,7 @@ dependencies = [
  "audiotags",
  "byteread",
  "deflate",
+ "desktopentry",
  "exif",
  "guitk",
  "imagecodec",
@@ -1136,11 +1207,13 @@ dependencies = [
  "offloop",
  "oswindow",
  "pathtext",
+ "programs",
  "recyclebin",
  "scratchdir",
  "settingsfile",
  "tararchive",
  "textfind",
+ "textline",
  "thumbs",
  "yamldoc",
  "ziparchive",
@@ -1167,13 +1240,26 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "associations",
+ "desktopentry",
  "guitk",
  "oswindow",
  "pathtext",
+ "programs",
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
  "yamldoc",
+]
+
+[[package]]
+name = "filechooser"
+version = "0.1.0"
+dependencies = [
+ "guiremote",
+ "guitk",
+ "msgframe",
+ "svcconn",
 ]
 
 [[package]]
@@ -1187,6 +1273,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -1200,6 +1287,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -1261,6 +1349,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "flac"
+version = "0.1.0"
+dependencies = [
+ "md5",
+]
+
+[[package]]
 name = "flashcards"
 version = "0.1.0"
 dependencies = [
@@ -1318,6 +1413,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "statehistory",
 ]
 
 [[package]]
@@ -1371,6 +1467,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "statehistory",
 ]
 
 [[package]]
@@ -1444,6 +1541,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "statehistory",
 ]
 
 [[package]]
@@ -1458,10 +1556,12 @@ name = "guitk"
 version = "0.1.0"
 dependencies = [
  "civildate",
+ "imagecodec",
  "osfont",
  "pathcodec",
  "randrange",
  "regex",
+ "secret",
  "settingsname",
  "textfind",
  "textfmt",
@@ -1484,6 +1584,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "tzrules",
  "yamldoc",
 ]
@@ -1496,6 +1597,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -1539,6 +1641,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "unsaved",
 ]
 
@@ -1626,6 +1729,7 @@ dependencies = [
  "crc32",
  "deflate",
  "rav1d",
+ "yuv",
 ]
 
 [[package]]
@@ -1731,6 +1835,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -1774,6 +1879,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "textarea",
+ "textline",
  "unsaved",
 ]
 
@@ -1788,6 +1894,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textfmt",
+ "textline",
  "unsaved",
 ]
 
@@ -1857,8 +1964,12 @@ name = "launcher"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "desktopentry",
  "guitk",
  "oswindow",
+ "programs",
+ "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -1932,6 +2043,8 @@ dependencies = [
 name = "life"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1992,6 +2105,7 @@ dependencies = [
  "scratchdir",
  "settingsfile",
  "sha2",
+ "textline",
  "tzrules",
  "userdb",
  "yamldoc",
@@ -2092,6 +2206,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -2236,6 +2351,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "statehistory",
 ]
 
 [[package]]
@@ -2284,6 +2400,17 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
+]
+
+[[package]]
+name = "matroska"
+version = "0.1.0"
+dependencies = [
+ "deflate",
+ "md5",
+ "rav1d",
+ "vp9",
 ]
 
 [[package]]
@@ -2313,12 +2440,17 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "wavpcm",
 ]
 
 [[package]]
 name = "mediaprobe"
 version = "0.1.0"
+dependencies = [
+ "md5",
+ "vp9",
+]
 
 [[package]]
 name = "memchr"
@@ -2343,6 +2475,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -2354,6 +2487,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "unsaved",
  "yamldoc",
 ]
@@ -2420,6 +2554,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mp3"
+version = "0.1.0"
+
+[[package]]
+name = "mp4"
+version = "0.1.0"
+dependencies = [
+ "md5",
+]
+
+[[package]]
+name = "msgframe"
+version = "0.1.0"
+
+[[package]]
 name = "musicplayer"
 version = "0.1.0"
 dependencies = [
@@ -2430,6 +2579,7 @@ dependencies = [
  "pathtext",
  "quoting",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -2466,6 +2616,8 @@ dependencies = [
  "offloop",
  "oswindow",
  "scratchdir",
+ "textline",
+ "unsaved",
 ]
 
 [[package]]
@@ -2488,6 +2640,7 @@ dependencies = [
  "hwquery",
  "oswindow",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -2569,6 +2722,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textfmt",
+ "textline",
  "tzrules",
  "unsaved",
 ]
@@ -2585,6 +2739,7 @@ dependencies = [
 name = "notifications"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "tzrules",
@@ -2637,6 +2792,14 @@ name = "offloop"
 version = "0.1.0"
 
 [[package]]
+name = "ogg"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "vorbis",
+]
+
+[[package]]
 name = "oils"
 version = "0.1.0"
 dependencies = [
@@ -2658,6 +2821,10 @@ version = "0.1.0"
 dependencies = [
  "scratchdir",
 ]
+
+[[package]]
+name = "opus"
+version = "0.1.0"
 
 [[package]]
 name = "osfont"
@@ -2687,6 +2854,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "textline",
 ]
 
 [[package]]
@@ -2701,6 +2869,8 @@ dependencies = [
  "pngwrite",
  "safeio",
  "scratchdir",
+ "statehistory",
+ "textline",
  "unsaved",
 ]
 
@@ -2734,6 +2904,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -2766,6 +2937,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -2800,6 +2972,7 @@ dependencies = [
  "pathtext",
  "printjob",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -2825,6 +2998,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
  "thumbs",
 ]
 
@@ -2840,6 +3014,7 @@ dependencies = [
  "randrange",
  "safeio",
  "settingsfile",
+ "textline",
 ]
 
 [[package]]
@@ -2891,6 +3066,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -2918,6 +3094,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -2934,7 +3111,10 @@ dependencies = [
 name = "posix"
 version = "0.1.0"
 dependencies = [
+ "charwidth",
+ "journalrec",
  "libm",
+ "pwhash",
  "tzrules",
 ]
 
@@ -3022,6 +3202,10 @@ name = "pwdb"
 version = "0.1.0"
 
 [[package]]
+name = "pwhash"
+version = "0.1.0"
+
+[[package]]
 name = "pwkdf"
 version = "0.1.0"
 dependencies = [
@@ -3061,6 +3245,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3195,6 +3380,7 @@ dependencies = [
  "deflate",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3202,6 +3388,7 @@ name = "renamer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "coreutils",
  "ere",
  "guitk",
  "oswindow",
@@ -3217,6 +3404,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3245,6 +3433,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textfmt",
+ "textline",
  "unsaved",
 ]
 
@@ -3330,6 +3519,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "quoting",
+ "textline",
 ]
 
 [[package]]
@@ -3344,6 +3534,7 @@ dependencies = [
  "pngwrite",
  "safeio",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -3358,6 +3549,10 @@ dependencies = [
  "hex-literal",
  "poly1305",
 ]
+
+[[package]]
+name = "secret"
+version = "0.1.0"
 
 [[package]]
 name = "serde_core"
@@ -3395,22 +3590,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "servicemenus"
+version = "0.1.0"
+dependencies = [
+ "desktopentry",
+ "pathcodec",
+ "scratchdir",
+ "settingsfile",
+ "yamldoc",
+]
+
+[[package]]
 name = "settings"
 version = "0.1.0"
 dependencies = [
  "appearance",
  "associations",
+ "calendarstore",
  "compositor",
  "datetimesettings",
+ "desktopentry",
  "guitk",
  "inputsettings",
  "loginusers",
+ "notices",
  "notifsettings",
  "oswindow",
  "pathtext",
+ "programs",
  "quoting",
  "scratchdir",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -3434,6 +3645,18 @@ dependencies = [
  "libcall",
  "scratchdir",
  "settingsname",
+]
+
+[[package]]
+name = "sevenz"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "bzip2",
+ "crc32",
+ "deflate",
+ "sha2",
+ "xz",
 ]
 
 [[package]]
@@ -3476,6 +3699,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3491,6 +3715,9 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "statehistory",
+ "textarea",
+ "textline",
  "unsaved",
  "yamldoc",
 ]
@@ -3586,6 +3813,17 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "statehistory",
+]
+
+[[package]]
+name = "sound"
+version = "0.1.0"
+dependencies = [
+ "ogg",
+ "opus",
+ "scratchdir",
+ "vorbis",
 ]
 
 [[package]]
@@ -3618,6 +3856,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3709,6 +3948,14 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
+]
+
+[[package]]
+name = "statehistory"
+version = "0.1.0"
+dependencies = [
+ "guitk",
 ]
 
 [[package]]
@@ -3726,6 +3973,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
 ]
 
 [[package]]
@@ -3735,6 +3983,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -3806,6 +4055,14 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+]
+
+[[package]]
+name = "svcconn"
+version = "0.1.0"
+dependencies = [
+ "guiremote",
+ "msgframe",
 ]
 
 [[package]]
@@ -3895,6 +4152,7 @@ dependencies = [
  "pathtext",
  "procinfo",
  "safeio",
+ "textline",
 ]
 
 [[package]]
@@ -3918,6 +4176,7 @@ dependencies = [
  "pathtext",
  "procinfo",
  "quoting",
+ "textline",
 ]
 
 [[package]]
@@ -3957,6 +4216,7 @@ dependencies = [
  "scratchdir",
  "settingsfile",
  "snapstore",
+ "textline",
 ]
 
 [[package]]
@@ -3970,6 +4230,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -4001,6 +4262,7 @@ dependencies = [
  "libcall",
  "oswindow",
  "termchild",
+ "textline",
 ]
 
 [[package]]
@@ -4018,6 +4280,7 @@ name = "textarea"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "textline",
 ]
 
 [[package]]
@@ -4065,6 +4328,7 @@ dependencies = [
  "oswindow",
  "termchild",
  "terminal",
+ "textline",
  "tzrules",
 ]
 
@@ -4160,6 +4424,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -4233,6 +4498,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -4362,6 +4628,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "videocodec"
+version = "0.1.0"
+dependencies = [
+ "flac",
+ "matroska",
+ "md5",
+ "mp3",
+ "mp4",
+ "ogg",
+ "opus",
+ "rav1d",
+ "vorbis",
+ "vp8",
+ "vp9",
+ "yuv",
+]
+
+[[package]]
 name = "videoplayer"
 version = "0.1.0"
 dependencies = [
@@ -4371,6 +4655,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -4387,6 +4672,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "vorbis"
+version = "0.1.0"
+
+[[package]]
+name = "vp8"
+version = "0.1.0"
+dependencies = [
+ "md5",
+]
+
+[[package]]
+name = "vp9"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "yuv",
+]
+
+[[package]]
 name = "vpnmanager"
 version = "0.1.0"
 dependencies = [
@@ -4396,6 +4700,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "textline",
 ]
 
 [[package]]
@@ -4427,6 +4732,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 
@@ -4446,6 +4752,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "unsaved",
  "yamldoc",
 ]
@@ -4455,6 +4762,14 @@ name = "whois"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "windowrules"
+version = "0.1.0"
+dependencies = [
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -4486,6 +4801,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -4497,6 +4813,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "textline",
 ]
 
 [[package]]
@@ -4506,6 +4823,7 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "textline",
  "tzrules",
 ]
 
@@ -4530,6 +4848,14 @@ name = "xxhash64"
 version = "0.1.0"
 
 [[package]]
+name = "xz"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "sha2",
+]
+
+[[package]]
 name = "yacc"
 version = "0.1.0"
 dependencies = [
@@ -4545,10 +4871,15 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "textline",
 ]
 
 [[package]]
 name = "yamldoc"
+version = "0.1.0"
+
+[[package]]
+name = "yuv"
 version = "0.1.0"
 
 [[package]]

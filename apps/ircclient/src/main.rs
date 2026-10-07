@@ -24,9 +24,11 @@ use appearance::Surface;
 // `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::field;
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::textedit;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
@@ -992,6 +994,10 @@ pub struct IrcClientApp {
     pub nick_list_visible: bool,
     /// Whether the key list is up.
     pub show_help: bool,
+    /// How wide the mark is round the message line while it has the
+    /// keyboard: the user's focus width (`App::appearance_changed`), the
+    /// toolkit's until it is known.
+    pub focus_ring_width: f32,
     pub show_timestamps: bool,
 
     // Notifications
@@ -1063,6 +1069,7 @@ impl IrcClientApp {
             input_history_idx: None,
             nick_list_visible: true,
             show_help: false,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             show_timestamps: true,
             highlight_words: Vec::new(),
             notification_sound: true,
@@ -1920,6 +1927,19 @@ impl IrcClientApp {
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
         let (x, y) = (event.x, event.y);
+        // The card is modal for the pointer as it is for the keys: a press,
+        // with any button, puts it away rather than reaching the channel or
+        // nick drawn under it, and the wheel scrolls nothing it covers.
+        if self.show_help {
+            match event.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    return true;
+                }
+                MouseEventKind::Scroll { .. } => return false,
+                _ => {}
+            }
+        }
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 if let Some(panel) = self.sidebar_panel_at(x, y) {
@@ -1975,6 +1995,36 @@ impl IrcClientApp {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // The shortcut card is modal: while it is up, F1 and Escape put it
+        // away and every other key is its own. It was not -- what was typed
+        // went into the message line under it, and Enter sent that line to
+        // the channel the card covered.
+        if self.show_help {
+            let closes =
+                textline::is_plain(event.modifiers) && matches!(event.key, Key::F1 | Key::Escape);
+            if closes {
+                self.show_help = false;
+            }
+            return closes;
+        }
+        // What a key typed goes into the message line -- AltGr's among it,
+        // and not a command's letter. The compositor hands a chord its letter
+        // as text (Ctrl+K arrives carrying `k`, Alt+X carrying `x`), and with
+        // no check here every chord typed its letter into the line, ready to
+        // be sent to the channel by the next Enter.
+        if textline::types_into_field(event) {
+            self.input_text.extend(event.typed());
+            // Typing leaves the history: the line being edited is the user's
+            // own, not the recalled one it started from.
+            self.input_history_idx = None;
+            return true;
+        }
+        // The line's own keys are plain. A chord with Alt or the Windows key
+        // is the window's or the desktop's, and arrives carrying its key:
+        // Alt+Enter sent the line.
+        if !textline::is_plain(event.modifiers) {
+            return false;
+        }
         match event.key {
             Key::Enter => self.submit_input(),
             Key::Backspace => self.input_text.pop().is_some(),
@@ -1990,11 +2040,8 @@ impl IrcClientApp {
                 self.scroll_chat(-PAGE_SCROLL_LINES);
                 self.chat_scroll != before
             }
+            // (The card's own Escape is taken at the top, while it is up.)
             Key::Escape => {
-                if self.show_help {
-                    self.show_help = false;
-                    return true;
-                }
                 if self.input_text.is_empty() {
                     return false;
                 }
@@ -2010,17 +2057,7 @@ impl IrcClientApp {
                 self.show_help = !self.show_help;
                 true
             }
-            _ => {
-                let typed: String = event.typed().collect();
-                if typed.is_empty() {
-                    return false;
-                }
-                self.input_text.push_str(&typed);
-                // Typing leaves the history: the line being edited is the
-                // user's own, not the recalled one it started from.
-                self.input_history_idx = None;
-                true
-            }
+            _ => false,
         }
     }
 
@@ -2300,12 +2337,13 @@ impl IrcClientApp {
         self.render_title_bar(&mut cmds);
 
         let content_y = 32.0;
-        let sidebar_w = 180.0;
-        let input_h = 36.0;
+        // The chat and the nick list stand on the input band, right of the
+        // channel sidebar: one rectangle says where all three are.
+        let band = self.input_band();
         let nick_list_w = if self.nick_list_visible { 160.0 } else { 0.0 };
-        let chat_x = sidebar_w;
-        let chat_w = self.width - sidebar_w - nick_list_w;
-        let chat_h = self.height - content_y - input_h;
+        let chat_x = band.x;
+        let chat_w = band.w - nick_list_w;
+        let chat_h = band.y - content_y;
 
         // Channel sidebar
         self.render_sidebar(&mut cmds, content_y);
@@ -2318,14 +2356,8 @@ impl IrcClientApp {
             self.render_nick_list(&mut cmds, chat_x + chat_w, content_y, nick_list_w, chat_h);
         }
 
-        // Input area
-        self.render_input(
-            &mut cmds,
-            chat_x,
-            content_y + chat_h,
-            chat_w + nick_list_w,
-            input_h,
-        );
+        // Input area, under the chat and the nick list.
+        self.render_input(&mut cmds, band.x, band.y, band.w, band.h);
 
         // Over everything, including the cannot-connect banner: it is the one
         // thing a reader asked for.
@@ -2924,39 +2956,91 @@ impl IrcClientApp {
             width: 1.0,
         });
 
-        // Input field
-        self.palette.push_surface(
+        // The message line: the toolkit's field. It has the keyboard whenever
+        // the key list is not over it -- every key that types goes into it --
+        // and is never lit under the pointer, having no press of its own.
+        let field_rect = Self::input_field_rect(x, y, w, h);
+        let state = self.input_field_state();
+        field::draw(
             cmds,
-            x + 8.0,
-            y + 6.0,
-            w - 16.0,
-            h - 12.0,
-            4.0,
-            Surface::Card,
+            &self.palette,
+            field_rect,
+            state,
+            self.focus_ring_width,
         );
 
-        let display_text = if self.input_text.is_empty() {
-            "Type a message... (/help for commands)".to_string()
-        } else {
-            self.input_text.clone()
-        };
+        // The line, with the caret after it -- scrolled so the end being
+        // typed stays in view rather than cut off with an ellipsis -- or,
+        // empty, what it is for.
+        let line = guitk::text::line_height(12.0, FontWeightHint::Regular);
+        let (tx, ty, tw) = (
+            field_rect.x + 8.0,
+            field_rect.y + (field_rect.h - line) / 2.0,
+            (field_rect.w - 16.0).max(0.0),
+        );
+        if self.input_text.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: tx,
+                y: ty,
+                text: "Type a message... (/help for commands)".to_string(),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(tw),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut tree = RenderTree::new();
+        textedit::draw(
+            &mut tree,
+            &textedit::SingleLine {
+                text: &self.input_text,
+                // Typed and erased at its end, so the end is where the caret
+                // is.
+                cursor: guitk::text::TextCursor::from(self.input_text.len()),
+                selection_anchor: None,
+                focused: state.focused,
+                x: tx,
+                y: ty,
+                width: tw,
+                line_height: line,
+                font_size: 12.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
+    }
 
-        let text_color = if self.input_text.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
+    /// The input band along the bottom of the window, under the chat and the
+    /// nick list, right of the channel sidebar.
+    fn input_band(&self) -> Rect {
+        let (sidebar_w, input_h) = (180.0, 36.0);
+        Rect::new(
+            sidebar_w,
+            self.height - input_h,
+            self.width - sidebar_w,
+            input_h,
+        )
+    }
 
-        cmds.push(RenderCommand::Text {
-            x: x + 16.0,
-            y: y + 12.0,
-            text: display_text,
-            font_size: 12.0,
-            color: text_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(w - 32.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+    /// The message line's box in the input band at `(x, y)`, `w` by `h`.
+    fn input_field_rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect::new(x + 8.0, y + 6.0, (w - 16.0).max(0.0), (h - 12.0).max(0.0))
+    }
+
+    /// How the message line is drawn now: with the keyboard, unless the key
+    /// list is over it.
+    fn input_field_state(&self) -> field::State {
+        field::State {
+            hovered: false,
+            focused: !self.show_help,
+            disabled: false,
+            invalid: false,
+        }
     }
 }
 
@@ -3046,6 +3130,10 @@ fn seeded_client() -> IrcClientApp {
 impl App for IrcClientApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -3869,6 +3957,76 @@ mod tests {
         vec![typed(), long, scrolled_up, recalled, walked_back, helping]
     }
 
+    /// **The card is modal for the keys and the pointer**: while it is up,
+    /// F1 and Escape put it away and nothing else does or acts; a press puts
+    /// it away and does nothing else; the wheel scrolls nothing under it.
+    /// Enter sent the line under the card to the channel. The controls at
+    /// the end are the same keys and press with the card down.
+    #[test]
+    fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
+        let mut app = joined();
+        app.input_text = String::from("hello");
+        let panel = app.active_panel.clone();
+        // A sidebar row naming some other panel, found with the geometry the
+        // press is read with.
+        let (rx, ry) = (20.0, {
+            let mut y = CONTENT_TOP;
+            while app.sidebar_panel_at(20.0, y).is_none_or(|p| p == panel) {
+                y += 2.0;
+                assert!(y < WINDOW_HEIGHT, "no other panel in the sidebar");
+            }
+            y
+        });
+        let press = |button| {
+            Event::Mouse(MouseEvent {
+                x: rx,
+                y: ry,
+                kind: MouseEventKind::Press(button),
+            })
+        };
+        let typed_h = Event::Key(KeyEvent {
+            key: Key::H,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("h"),
+        });
+
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&typed_h);
+        app.handle_event(&key(Key::Enter));
+        assert_eq!(
+            app.input_text, "hello",
+            "a key typed or sent the line under the card"
+        );
+        app.handle_event(&key(Key::Tab));
+        assert!(app.show_help, "a key that is not the card's put it away");
+
+        assert!(app.handle_event(&press(MouseButton::Left)));
+        assert!(!app.show_help, "the press did not put the card away");
+        assert_eq!(
+            app.active_panel, panel,
+            "the press went through the card to another panel"
+        );
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&press(MouseButton::Right));
+        assert!(!app.show_help, "a right-button press left the card up");
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&key(Key::Escape));
+        assert!(!app.show_help, "Escape did not put the card away");
+
+        app.handle_event(&key(Key::Enter));
+        assert!(
+            app.input_text.is_empty(),
+            "control: Enter sends nothing with the card down"
+        );
+        app.handle_event(&press(MouseButton::Left));
+        assert_ne!(
+            app.active_panel, panel,
+            "control: the press does nothing even with the card down"
+        );
+    }
+
     fn drawn_text(app: &IrcClientApp) -> String {
         app.render_commands()
             .iter()
@@ -4655,6 +4813,31 @@ mod tests {
         assert_eq!(app.max_chat_scroll(), 0, "it all fits");
     }
 
+    /// **The wheel scrolls nothing under the shortcut card**; the control
+    /// is the same turn with the card down.
+    #[test]
+    fn the_wheel_scrolls_no_chat_under_the_card() {
+        let mut app = app_with_history(200);
+        let chat = app.chat_rect();
+        let notch = Event::Mouse(MouseEvent {
+            x: chat.x + chat.w / 2.0,
+            y: chat.y + chat.h / 2.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: 1.0 },
+        });
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&notch);
+        assert_eq!(
+            app.chat_scroll, 0,
+            "the wheel scrolled the chat under the card"
+        );
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&notch);
+        assert!(
+            app.chat_scroll > 0,
+            "control: the wheel scrolls nothing at all"
+        );
+    }
+
     #[test]
     fn the_wheel_scrolls_the_chat() {
         let mut app = app_with_history(200);
@@ -5049,5 +5232,162 @@ mod tests {
             "hello /connect a b c"
         );
         assert_eq!(without_password("/msg bob hi there"), "/msg bob hi there");
+    }
+    /// A key held with `modifiers` that typed `text`.
+    fn chord(k: Key, text: &str, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// **A command's letter is not typed into the message line, and a chord
+    /// is not one of the line's keys.** The compositor hands a chord its
+    /// letter as text -- Ctrl+K arrives carrying `k`, Alt+X carrying `x`,
+    /// Windows+E carrying `e` -- and with no check every chord typed its
+    /// letter into the line, ready for the next Enter to send to the
+    /// channel; Alt+Enter sent the line itself. AltGr -- Ctrl+Alt -- types:
+    /// German `@` is AltGr+Q.
+    #[test]
+    fn a_chord_is_neither_typed_into_the_line_nor_one_of_its_keys() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let win = Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let mut app = joined();
+        for (k, t, m) in [(Key::K, "k", ctrl), (Key::X, "x", alt), (Key::E, "e", win)] {
+            assert!(!app.handle_event(&chord(k, t, m)), "{m:?}+{k:?} was taken");
+        }
+        assert_eq!(app.input_text, "", "a command's letter was typed");
+        app.handle_event(&chord(Key::Q, "@", altgr));
+        assert_eq!(app.input_text, "@", "AltGr+Q did not type its @");
+
+        app.input_text = String::from("hello");
+        let sent = app.outbox.len();
+        for m in [ctrl, alt, win] {
+            app.handle_event(&chord(Key::Enter, "\r", m));
+        }
+        assert_eq!(app.input_text, "hello", "a chord on Enter sent the line");
+        assert_eq!(app.outbox.len(), sent);
+        let shown = app.nick_list_visible;
+        app.handle_event(&chord(Key::Tab, "\t", ctrl));
+        assert_eq!(app.nick_list_visible, shown, "Ctrl+Tab is not Tab");
+        app.handle_event(&chord(Key::F1, "", alt));
+        assert!(!app.show_help, "Alt+F1 put the card up");
+
+        // Nor does a chord put the card away: it is F1 or Escape, plain.
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help);
+        app.handle_event(&chord(Key::Escape, "", alt));
+        assert!(app.show_help, "Alt+Escape put the card away");
+        app.handle_event(&key(Key::Escape));
+        assert!(!app.show_help);
+    }
+    // -- The message line is the toolkit's field (lane C,
+    //    c-e-a-theme-can-shape-the-controls)
+
+    /// The message line's box as the window draws it.
+    fn message_box(app: &IrcClientApp) -> Rect {
+        let band = app.input_band();
+        IrcClientApp::input_field_rect(band.x, band.y, band.w, band.h)
+    }
+
+    /// **The message line is the toolkit's field**: it has the keyboard --
+    /// every key that types goes into it -- marked as the theme marks a
+    /// field, in the user's width, and gives the mark up under the key list.
+    /// It was a card, the same with the keyboard as without, with no caret.
+    #[test]
+    fn the_message_line_is_the_toolkits_field() {
+        let mut app = joined();
+        let mut p = app.palette;
+        p.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &p);
+        App::appearance_changed(
+            &mut app,
+            &appearance::AppearanceSettings {
+                focus_ring_scale: 2.5,
+                ..Default::default()
+            },
+        );
+        let ring = app.focus_ring_width;
+        assert!(
+            ring > guitk::style::FOCUS_RING_WIDTH,
+            "the user's focus width did not arrive"
+        );
+        let rect = message_box(&app);
+        let draws = |app: &IrcClientApp, s: field::State| {
+            let seq = |s: field::State| {
+                let mut v: Vec<RenderCommand> = Vec::new();
+                field::draw(&mut v, &p, rect, s, ring);
+                v
+            };
+            let cmds = app.render_commands();
+            let has = |want: &[RenderCommand]| cmds.windows(want.len()).any(|w| w == want);
+            has(&seq(s)) && (s.focused || !has(&seq(field::State { focused: true, ..s })))
+        };
+        let focused = field::State {
+            focused: true,
+            ..field::State::default()
+        };
+        assert!(
+            draws(&app, focused),
+            "the message line does not have the keyboard"
+        );
+        app.handle_event(&key(Key::F1));
+        assert!(app.show_help);
+        assert!(
+            draws(&app, field::State::default()),
+            "the message line keeps the keyboard's mark under the key list"
+        );
+    }
+
+    /// **The caret follows the typing, and a long line scrolls under it**
+    /// rather than being cut off with an ellipsis, which hid exactly the
+    /// words being typed.
+    #[test]
+    fn the_caret_follows_the_typing_and_a_long_line_scrolls() {
+        let mut app = joined();
+        let caret_after = |app: &IrcClientApp| -> f32 {
+            let cmds = app.render_commands();
+            let at = cmds
+                .iter()
+                .position(|c| {
+                    matches!(c, RenderCommand::RichText { text, .. } if *text == app.input_text)
+                })
+                .expect("the line is not drawn in its box");
+            match cmds.get(at + 1) {
+                Some(RenderCommand::Line { x1, x2, .. }) if (x1 - x2).abs() < 0.01 => *x1,
+                other => panic!("no caret after the line: {other:?}"),
+            }
+        };
+        type_line(&mut app, "hello");
+        let rect = message_box(&app);
+        let end = rect.x + 8.0 + guitk::text::measure("hello", 12.0, FontWeightHint::Regular);
+        let caret = caret_after(&app);
+        assert!(
+            (caret - end).abs() < 0.5,
+            "the caret is at {caret}, not after the typing at {end}"
+        );
+        type_line(&mut app, &"w".repeat(300));
+        let caret = caret_after(&app);
+        assert!(
+            caret > rect.x && caret < rect.right(),
+            "the caret of a long line is at {caret}, outside the box {rect:?}"
+        );
     }
 }

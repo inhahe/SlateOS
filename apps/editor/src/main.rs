@@ -30,10 +30,12 @@ use appearance::Palette;
 use guitk::color::Color;
 use guitk::dialog::FileDialog;
 use guitk::event::Event;
+use guitk::frame::Rect;
 use guitk::menubar;
 use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
 use guitk::text;
+use guitk::undo::{Travel, UndoHistory};
 use highlight::{HighlightState, StyledToken, Theme, Token};
 use input::FindField;
 use oswindow::app::Response;
@@ -46,7 +48,6 @@ use diffcore::{
 };
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 
@@ -133,10 +134,12 @@ pub struct Document {
     /// `snap_to_boundary` call standing between the scroll position and a
     /// panic.
     pub scroll_px: f32,
-    /// Undo history.
-    pub undo_stack: VecDeque<EditAction>,
-    /// Redo history.
-    pub redo_stack: VecDeque<EditAction>,
+    /// The edits, kept as a tree: an edit made after undoing starts a branch
+    /// beside what was undone, rather than throwing it away (C-Q24,
+    /// `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go back and forth
+    /// along the branch the document is on; Alt+Z and Alt+Shift+Z walk every
+    /// version it has been in, in the order each was made.
+    pub history: UndoHistory<EditAction>,
     /// Line ending style.
     pub line_ending: LineEnding,
     /// Tab width (spaces).
@@ -217,6 +220,10 @@ pub struct EditAction {
     /// Caret position after the edit; where redo puts it back.
     cursor_after: (usize, usize),
 }
+
+/// The most edits a document keeps, as its undo stack did before it was a
+/// tree. Past it the oldest go -- branches the document is not on first.
+const UNDO_LIMIT: core::num::NonZeroUsize = core::num::NonZeroUsize::MIN.saturating_add(999);
 
 /// Line ending style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -370,8 +377,7 @@ impl Document {
             scroll_line: 0,
             wheel: guitk::wheel::Accumulator::default(),
             scroll_px: 0.0,
-            undo_stack: VecDeque::new(),
-            redo_stack: VecDeque::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             line_ending: LineEnding::Lf,
             tab_width: 4,
             use_spaces: true,
@@ -443,8 +449,7 @@ impl Document {
             scroll_line: 0,
             wheel: guitk::wheel::Accumulator::default(),
             scroll_px: 0.0,
-            undo_stack: VecDeque::new(),
-            redo_stack: VecDeque::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             line_ending,
             tab_width: 4,
             language,
@@ -542,8 +547,7 @@ impl Document {
         } else {
             self.sync.base = Some(disk.to_string());
         }
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        self.history.clear();
     }
 
     /// Compute the three-way merge of the current buffer against `disk`.
@@ -704,7 +708,6 @@ impl Document {
 
         self.modified = true;
         self.invalidate_highlight(line);
-        self.redo_stack.clear();
         self.push_undo(EditAction {
             line,
             before,
@@ -834,26 +837,61 @@ impl Document {
         }
     }
 
-    /// Undo the last action.
+    /// Undo the last action on the branch the document is on.
     pub fn undo(&mut self) {
-        if let Some(action) = self.undo_stack.pop_back() {
-            self.splice_lines(action.line, action.after.len(), &action.before);
-            (self.cursor_line, self.cursor_col) = action.cursor_before;
-            self.clamp_cursor();
-            self.redo_stack.push_back(action);
-            self.modified = true;
+        if let Some(action) = self.history.undo() {
+            self.revert(&action);
         }
     }
 
-    /// Redo the last undone action.
+    /// Redo the last undone action on the branch the document is on -- the
+    /// one undone out of, or the one made since.
     pub fn redo(&mut self) {
-        if let Some(action) = self.redo_stack.pop_back() {
-            self.splice_lines(action.line, action.before.len(), &action.after);
-            (self.cursor_line, self.cursor_col) = action.cursor_after;
-            self.clamp_cursor();
-            self.undo_stack.push_back(action);
-            self.modified = true;
+        if let Some(action) = self.history.redo() {
+            self.reapply(&action);
         }
+    }
+
+    /// Go to the version the document was in before this one was first
+    /// reached, on whichever branch -- Alt+Z. Answers whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version first reached after this one, on whichever branch --
+    /// Alt+Shift+Z. Answers whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<EditAction>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(action) => self.revert(&action),
+                Travel::Redo(action) => self.reapply(&action),
+            }
+        }
+        moved
+    }
+
+    /// Put back the lines `action` replaced, and the caret where it was.
+    fn revert(&mut self, action: &EditAction) {
+        self.splice_lines(action.line, action.after.len(), &action.before);
+        (self.cursor_line, self.cursor_col) = action.cursor_before;
+        self.clamp_cursor();
+        self.modified = true;
+    }
+
+    /// Make `action` again, and put the caret where it left it.
+    fn reapply(&mut self, action: &EditAction) {
+        self.splice_lines(action.line, action.before.len(), &action.after);
+        (self.cursor_line, self.cursor_col) = action.cursor_after;
+        self.clamp_cursor();
+        self.modified = true;
     }
 
     /// Pull the caret back inside the buffer and onto a character boundary.
@@ -872,10 +910,7 @@ impl Document {
     }
 
     fn push_undo(&mut self, action: EditAction) {
-        self.undo_stack.push_back(action);
-        if self.undo_stack.len() > 1000 {
-            self.undo_stack.pop_front();
-        }
+        self.history.record(action);
     }
 
     // ======================================================================
@@ -1645,6 +1680,8 @@ pub struct EditorState {
     pub gutter_width: f32,
     /// Font size.
     pub font_size: f32,
+    /// Whether the list of keys is up (F1).
+    pub show_help: bool,
     /// Line-to-line spacing of the text area.
     ///
     /// There is deliberately no matching `char_width`: horizontal positions
@@ -1685,6 +1722,11 @@ pub struct EditorState {
     pub clipboard: String,
     /// Which of the find bar's two fields the keyboard is typing into.
     pub find_field: FindField,
+    /// Where the pointer is, while it is over the window: the find bar's box
+    /// under it is drawn lit.
+    pub pointer: Option<(f32, f32)>,
+    /// How wide the focus mark is drawn, from the user's appearance settings.
+    focus_ring_width: f32,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1774,6 +1816,7 @@ impl EditorState {
             window_height: 600,
             gutter_width: 50.0,
             font_size,
+            show_help: false,
             line_height: font_size * 1.5,
             external_prompt: None,
             status: None,
@@ -1781,6 +1824,8 @@ impl EditorState {
             modifiers: oswindow::Modifiers::NONE,
             clipboard: String::new(),
             find_field: FindField::Query,
+            pointer: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             dialog: None,
             dialog_purpose: DialogPurpose::Open,
             menu_bar: menubar::MenuBar::new(Vec::new()),
@@ -2166,6 +2211,19 @@ impl EditorState {
         // External-change prompt / merge review (modal overlay)
         if let Some(prompt) = self.external_prompt.as_ref() {
             self.render_external_prompt(&mut tree, prompt);
+        }
+
+        // The list of keys over everything: it is the one thing on screen a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (w, h),
+                0.0,
+                &input::shortcut_rows(),
+                "F1 or Escape closes this",
+            );
         }
 
         tree
@@ -2654,11 +2712,63 @@ impl EditorState {
         tree.text(w - 100.0, bar_y + 5.0, &lc, self.palette.subtext0, 11.0);
     }
 
+    /// The find bar's frame, over the top right of the text. One rectangle
+    /// for the drawing and the pointer.
+    pub(crate) fn find_panel_rect(&self) -> Rect {
+        let w = 350.0;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a window's width is exact in f32"
+        )]
+        let x = self.window_width as f32 - w - 16.0;
+        Rect::new(x, TEXT_TOP, w, 80.0)
+    }
+
+    /// One of the find bar's two boxes, inside [`Self::find_panel_rect`].
+    pub(crate) fn find_box(&self, field: FindField) -> Rect {
+        let panel = self.find_panel_rect();
+        let dy = match field {
+            FindField::Query => 6.0,
+            FindField::Replace => 36.0,
+        };
+        Rect::new(panel.x + 50.0, panel.y + dy, panel.w - 60.0, 22.0)
+    }
+
+    /// The find bar's box under the pointer, if it is up and the pointer is
+    /// on one.
+    pub(crate) fn find_box_under_pointer(&self) -> Option<FindField> {
+        let (x, y) = self.pointer?;
+        if !self.find_visible {
+            return None;
+        }
+        [FindField::Query, FindField::Replace]
+            .into_iter()
+            .find(|&f| self.find_box(f).contains(x, y))
+    }
+
+    /// Whether something takes the keys and presses ahead of the find bar:
+    /// the external-change prompt, the unsaved-changes question, or an open
+    /// menu.
+    fn find_covered(&self) -> bool {
+        self.external_prompt.is_some() || self.question.is_some() || self.menu_bar.is_open()
+    }
+
+    /// How one of the find bar's boxes is drawn now: lit under the pointer,
+    /// marked while the keys type into it -- neither while something takes
+    /// them ahead of the bar.
+    fn find_box_state(&self, field: FindField) -> guitk::field::State {
+        let open = !self.find_covered();
+        guitk::field::State {
+            hovered: open && self.find_box_under_pointer() == Some(field),
+            focused: open && self.find_field == field,
+            disabled: false,
+            invalid: false,
+        }
+    }
+
     fn render_find_panel(&self, tree: &mut RenderTree) {
-        let panel_y = TEXT_TOP;
-        let panel_w = 350.0;
-        let panel_h = 80.0;
-        let panel_x = self.window_width as f32 - panel_w - 16.0;
+        let panel = self.find_panel_rect();
+        let (panel_x, panel_y, panel_w, panel_h) = (panel.x, panel.y, panel.w, panel.h);
 
         tree.fill_rect(panel_x, panel_y, panel_w, panel_h, self.palette.surface0);
         tree.stroke_rect(
@@ -2678,16 +2788,20 @@ impl EditorState {
             self.palette.subtext0,
             11.0,
         );
-        tree.fill_rect(
-            panel_x + 50.0,
-            panel_y + 6.0,
-            panel_w - 60.0,
-            22.0,
-            self.palette.base,
+        // The toolkit's fields (lane C, c-e-a-theme-can-shape-the-controls):
+        // they were bare fills, and nothing said which of the two the keys
+        // typed into.
+        let query = self.find_box(FindField::Query);
+        guitk::field::draw(
+            tree,
+            &self.palette,
+            query,
+            self.find_box_state(FindField::Query),
+            self.focus_ring_width,
         );
         tree.text(
-            panel_x + 54.0,
-            panel_y + 10.0,
+            query.x + 4.0,
+            query.y + 4.0,
             &self.find.query,
             self.palette.text,
             12.0,
@@ -2701,16 +2815,17 @@ impl EditorState {
             self.palette.subtext0,
             11.0,
         );
-        tree.fill_rect(
-            panel_x + 50.0,
-            panel_y + 36.0,
-            panel_w - 60.0,
-            22.0,
-            self.palette.base,
+        let replace = self.find_box(FindField::Replace);
+        guitk::field::draw(
+            tree,
+            &self.palette,
+            replace,
+            self.find_box_state(FindField::Replace),
+            self.focus_ring_width,
         );
         tree.text(
-            panel_x + 54.0,
-            panel_y + 40.0,
+            replace.x + 4.0,
+            replace.y + 4.0,
             &self.find.replace_text,
             self.palette.text,
             12.0,
@@ -2932,6 +3047,11 @@ impl EditorState {
 impl oswindow::app::App for EditorState {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    /// The focus mark is drawn at the width the user asked for.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5061,21 +5181,61 @@ mod undo_tests {
         assert_eq!(doc.lines, vec!["one".to_string(), "two".to_string()]);
     }
 
-    /// Only `insert_char` used to clear the redo stack, so a backspace after an
-    /// undo left a redo entry describing an edit against a buffer that had since
-    /// moved on — pressing redo then re-applied it at a stale position.
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept** -- reachable with Alt+Z, never redone onto the new one.
+    ///
+    /// Only `insert_char` used to clear the redo stack, so a backspace after
+    /// an undo left a redo entry describing an edit against a buffer that had
+    /// since moved on -- pressing redo then re-applied it at a stale
+    /// position. Redo still never does that: it follows the branch just made.
+    /// What changed (C-Q24, §1416) is that the undone edit is not lost.
     #[test]
-    fn a_new_edit_after_an_undo_clears_the_redo_stack() {
+    fn a_new_edit_after_an_undo_starts_a_branch_and_keeps_the_undone_one() {
         let mut doc = doc_with(&["ab"], 0, 2);
         doc.insert_char('c');
         doc.undo();
-        assert_eq!(doc.redo_stack.len(), 1);
+        assert!(doc.history.can_redo());
 
         doc.backspace();
+        assert_eq!(doc.lines, vec!["a".to_string()]);
         assert!(
-            doc.redo_stack.is_empty(),
-            "an edit made after an undo invalidates the redo stack, whatever the edit was"
+            !doc.history.can_redo(),
+            "redo would re-apply the undone edit onto a buffer that has moved on"
         );
+        doc.redo();
+        assert_eq!(doc.lines, vec!["a".to_string()]);
+
+        // Back in time, in the order the versions were made: the "abc" that
+        // was undone came before the "a", and the "ab" before both.
+        assert!(doc.earlier());
+        assert_eq!(
+            doc.lines,
+            vec!["abc".to_string()],
+            "the undone branch was lost"
+        );
+        assert_eq!((doc.cursor_line, doc.cursor_col), (0, 3));
+        assert!(doc.earlier());
+        assert_eq!(doc.lines, vec!["ab".to_string()]);
+        assert!(!doc.earlier(), "before the first version");
+        // And forward again, to the newest.
+        assert!(doc.later());
+        assert_eq!(doc.lines, vec!["abc".to_string()]);
+        assert!(doc.later());
+        assert_eq!(doc.lines, vec!["a".to_string()]);
+        assert!(!doc.later(), "past the newest version");
+    }
+
+    /// Alt+Z at the first version, and Alt+Shift+Z at the newest, change
+    /// nothing and say so.
+    #[test]
+    fn there_is_nothing_before_the_first_version_or_after_the_newest() {
+        let mut doc = doc_with(&["ab"], 0, 2);
+        assert!(!doc.earlier());
+        doc.insert_char('c');
+        assert!(!doc.later());
+        assert!(doc.earlier());
+        assert!(!doc.earlier());
+        assert_eq!(doc.lines, vec!["ab".to_string()]);
     }
 
     /// Every editing operation, applied in sequence to a document with
@@ -5487,6 +5647,23 @@ mod external_merge_tests {
         assert!(!d.modified);
         assert_eq!(d.sync.base.as_deref(), Some("new\ndisk\ncontent"));
         assert!(d.cursor_line <= 2); // clamped
+    }
+
+    /// **A reload starts the history again**: the edits made to the old
+    /// buffer describe lines that are not there any more, and undoing one
+    /// -- or travelling back to one -- would splice it into the new text.
+    #[test]
+    fn a_reload_starts_the_history_again() {
+        let mut d = loaded_doc("old\ncontent");
+        d.cursor_line = 0;
+        d.cursor_col = 0;
+        d.insert_char('x');
+        assert!(d.history.can_undo());
+        d.reload_from_disk("new\ndisk\ncontent");
+        assert!(!d.history.can_undo());
+        assert!(!d.earlier());
+        d.undo();
+        assert_eq!(d.lines, vec!["new", "disk", "content"]);
     }
 
     #[test]

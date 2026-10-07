@@ -217,6 +217,129 @@ MUTATIONS = [
         "        \"jpg\" | \"jpeg\" | \"png\" | \"gif\" | \"bmp\" | \"svg\" | \"ico\" | \"webp\" | \"tif\"",
         ["test_categorize_image"],
     ),
+    (
+        'an announced change is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a search forgotten elsewhere stays saved here',
+        '            if search.is_bookmarked && !kept {',
+        '            if false && search.is_bookmarked && !kept {',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a search saved elsewhere that this window ran is not saved here',
+        '                search.is_bookmarked = true;\n                search.name = Some(query);\n                continue;',
+        '                continue;',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a search saved elsewhere that this window ran is listed twice',
+        '                .find(|s| s.mode == mode && s.query == query)',
+        '                .find(|_| false)',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'an unreadable entry is kept once more at every reading',
+        '        self.unreadable_saved.clear();\n',
+        '',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != self.saved_search_items()\n    }',
+        '        false\n    }',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'the filters scroll is left past its end by a re-read',
+        '        self.keep_filters_in_reach();\n    }\n\n    /// Read the saved searches again',
+        '    }\n\n    /// Read the saved searches again',
+        ['the_filters_panel_is_not_left_scrolled_past_its_end'],
+    ),
+    (
+        "the filters scroll is left past its end by forgetting a saved search",
+        '            search.name = None;\n        }\n        self.keep_filters_in_reach();\n',
+        '            search.name = None;\n        }\n',
+        ['the_filters_panel_is_not_left_scrolled_past_its_end'],
+    ),
+    (
+        'the filters scroll is left past its end by a taller window',
+        '                self.keep_selection_visible();\n                self.keep_filters_in_reach();\n',
+        '                self.keep_selection_visible();\n',
+        ['the_filters_panel_is_not_left_scrolled_past_its_end'],
+    ),
+    (
+        'keeping the filters scroll in reach keeps nothing',
+        '            .min(self.filters_scroll_limit(l.filters));',
+        '            .min(f32::MAX);',
+        ['the_filters_panel_is_not_left_scrolled_past_its_end'],
+    ),
+]
+
+FIELD = 'the_query_box_is_the_toolkits_field'
+ALTGR = 'altgr_types_into_the_query_and_a_command_does_not'
+CARET = 'the_caret_follows_the_query_in_its_box'
+
+MUTATIONS += [
+    # The query's box is the toolkit's field, with a caret, and takes what
+    # AltGr types (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+    (
+        'the box never lights',
+        '            hovered: open && self.hover == Some(Target::SearchBox),\n',
+        '            hovered: false,\n',
+        [FIELD],
+    ),
+    (
+        'the box never has the keyboard',
+        '            focused: open,\n',
+        '            focused: false,\n',
+        [FIELD],
+    ),
+    (
+        'the box shows through the card',
+        '        let open = !self.show_help && !self.picker.is_open();\n        field::State {\n',
+        '        let open = !self.picker.is_open();\n        field::State {\n',
+        [FIELD],
+    ),
+    (
+        'a query that finds nothing is not red',
+        '                && self.results.is_empty()\n                && self.content.is_none(),\n',
+        '                && false,\n',
+        [FIELD],
+    ),
+    (
+        'the focus mark is the toolkit\'s width, not the user\'s',
+        '        self.focus_ring_width = settings.focus_ring_width();\n',
+        '        let _ = settings;\n',
+        [FIELD],
+    ),
+    (
+        'the caret is at the start of the query',
+        '                cursor: guitk::text::TextCursor::from(self.criteria.query.len()),\n',
+        '                cursor: guitk::text::TextCursor::from(0),\n',
+        [CARET],
+    ),
+    (
+        'AltGr+S sorts',
+        '        let ctrl = textline::is_ctrl_chord(key.modifiers);\n',
+        '        let ctrl = key.modifiers.ctrl;\n',
+        [ALTGR],
+    ),
+    (
+        'a command\'s letter is typed',
+        '                if !textline::types_into_field(key) {\n',
+        '                if !key.types_text() {\n',
+        [ALTGR],
+    ),
 ]
 
 if __name__ == "__main__":

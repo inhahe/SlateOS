@@ -1,0 +1,33 @@
+# archive verdict -- made by 7-Zip 26.00 with: args
+lzma2-solid.7z OK -- -m0=LZMA2 -mx=5 -ms=on
+lzma2-files.7z OK -- -m0=LZMA2 -mx=5 -ms=off
+lzma.7z OK -- -m0=LZMA -mx=5
+lzma-fast.7z OK -- -m0=LZMA -mx=1
+bzip2.7z OK -- -m0=BZip2
+deflate.7z OK -- -m0=Deflate
+deflate64.7z OK -- -m0=Deflate64
+copy.7z OK -- -m0=Copy
+ppmd.7z OK -- -m0=PPMd
+ppmd-small-mem.7z OK -- -m0=PPMd:mem=64k:o=32
+bcj-lzma2.7z OK -- -mf=BCJ -m0=LZMA2
+bcj2.7z OK -- -mf=BCJ2 -m0=LZMA
+delta.7z OK -- -mf=Delta:4 -m0=LZMA2
+arm.7z OK -- -mf=ARM -m0=LZMA2
+arm64.7z OK -- -mf=ARM64 -m0=LZMA2
+riscv.7z OK -- -mf=RISCV -m0=LZMA2
+headers-plain.7z OK -- -m0=LZMA2 -mhc=off
+times.7z OK -- -m0=LZMA2 -mtc=on -mta=on
+encrypted.7z OK -- -m0=LZMA2 -psecret
+encrypted-headers.7z OK -- -m0=LZMA2 -psecret -mhe=on
+small-lzma2.7z OK -- -m0=LZMA2 -mx=5
+small-headers-plain.7z OK -- -m0=LZMA -mhc=off
+small-copy.7z OK -- -m0=Copy -mhc=off
+small-ppmd.7z OK -- -m0=PPMd -mhc=off
+small-bzip2.7z OK -- -m0=BZip2 -mhc=off
+small-deflate.7z OK -- -m0=Deflate -mhc=off
+small-deflate64.7z OK -- -m0=Deflate64 -mhc=off
+small-bcj-lzma2.7z OK -- -mf=BCJ -m0=LZMA2 -mhc=off
+small-bcj2.7z OK -- -mf=BCJ2 -m0=LZMA -mhc=off
+small-arm64.7z OK -- -mf=ARM64 -m0=Copy -mhc=off
+chunks-lzma2.7z OK -- -m0=LZMA2 -mx=5
+blocks-lzma2.7z OK -- -m0=LZMA2:d=64k:c=64k

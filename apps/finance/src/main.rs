@@ -599,6 +599,9 @@ struct FinanceApp {
     show_help: bool,
     /// What the pointer is over, so it can be drawn lit.
     hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
     /// Every box the last paint recorded, for hover and the wheel.
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder.
@@ -690,6 +693,7 @@ impl FinanceApp {
             budget_scroll: 0,
             show_help: false,
             hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
             persist: false,
@@ -1602,8 +1606,12 @@ impl FinanceApp {
         if !fields.contains(&self.field) {
             self.field = fields.first().copied().unwrap_or(FormField::Description);
         }
+        // The form's own keys are taken plain -- Alt+Enter saved it and
+        // Alt+Escape threw it away -- and anything else goes to the field,
+        // which knows a command from typing (`textline::apply_key`).
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Tab => {
+            Key::Tab if plain => {
                 let at = fields.iter().position(|f| *f == self.field).unwrap_or(0);
                 let next = if key.modifiers.shift {
                     at.checked_sub(1).unwrap_or(fields.len().saturating_sub(1))
@@ -1613,17 +1621,17 @@ impl FinanceApp {
                 self.field = fields.get(next).copied().unwrap_or(self.field);
                 EventResult::Consumed
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.save_form();
                 EventResult::Consumed
             }
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.form = None;
                 self.form_error = None;
                 self.status_msg = String::from("Cancelled");
                 EventResult::Consumed
             }
-            Key::Left | Key::Right | Key::Space if !self.field.is_text() => {
+            Key::Left | Key::Right | Key::Space if plain && !self.field.is_text() => {
                 if self.step_choice(self.field, key.key != Key::Left) {
                     EventResult::Consumed
                 } else {
@@ -2050,25 +2058,30 @@ impl FinanceApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
-        let ctrl = key.modifiers.ctrl;
+        let plain = textline::is_plain(key.modifiers);
         let shift = key.modifiers.shift;
         // The list of keys, from anywhere; modal while it is up.
-        if key.key == Key::F1 {
+        if key.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            if matches!(key.key, Key::Escape | Key::Enter) {
+            if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
                 return EventResult::Consumed;
             }
             return EventResult::Ignored;
         }
-        // A delete waiting on its answer takes the next key; only Y deletes.
+        // A delete waiting on its answer takes the next key; only Y deletes --
+        // a Y typed, plain or with AltGr, not a chord carrying its letter:
+        // Alt+Y deleted.
         if let Some(doomed) = self.pending_delete.take() {
-            let yes = key
-                .single_char()
-                .map_or(key.key == Key::Y, |c| c.eq_ignore_ascii_case(&'y'));
+            let typed_y = |c: char| c.eq_ignore_ascii_case(&'y');
+            let yes = if plain {
+                key.single_char().map_or(key.key == Key::Y, typed_y)
+            } else {
+                textline::types_into_field(key) && key.single_char().is_some_and(typed_y)
+            };
             if yes {
                 self.delete_doomed(doomed);
             } else {
@@ -2082,10 +2095,25 @@ impl FinanceApp {
         }
 
         // While searching, a typed character is search text and not a shortcut:
-        // a search for "1" must not be read as "switch to the dashboard".
-        if self.search_active && !ctrl && !key.text.is_empty() {
+        // a search for "1" must not be read as "switch to the dashboard". What
+        // a key typed: AltGr's among it -- refused, with Ctrl held -- and not a
+        // command's letter, which a chord carries.
+        if self.search_active && textline::types_into_field(key) {
             self.handle_search_text(&key.text);
             return EventResult::Consumed;
+        }
+
+        // Ctrl+D is the one Ctrl chord: Ctrl+C cycled the category filter
+        // as C does, the chord carrying its letter. A chord with Alt alone or
+        // the Windows key is the window's or the desktop's. AltGr counts by
+        // what it types, as a plain key by its character -- and AltGr that
+        // types nothing is not the letter under it.
+        let ctrl = textline::is_ctrl_chord(key.modifiers);
+        if ctrl && key.key != Key::D {
+            return EventResult::Ignored;
+        }
+        if !ctrl && !plain && !textline::types_into_field(key) {
+            return EventResult::Ignored;
         }
 
         let Some(name) = Self::key_name(key) else {
@@ -2123,10 +2151,12 @@ impl FinanceApp {
                 // Everything else is only interesting as the character typed,
                 // which is how the shortcuts below are written -- or, with no
                 // text on it (as a keystroke built from its key alone
-                // arrives), the character its key types.
+                // arrives), the character its key types. `typed`, not the raw
+                // text: Windows hands Ctrl+D over as the control character
+                // 0x04, which is no character and was read as one, so Ctrl+D
+                // did nothing on the development host.
                 let typed = key
-                    .text
-                    .chars()
+                    .typed()
                     .next()
                     .or_else(|| key_char(key.key, key.modifiers.shift))?;
                 return Some(typed.to_string());
@@ -3013,19 +3043,20 @@ impl FinanceApp {
     /// The search box: what is typed, a caret while typing, and -- once there
     /// is a query -- that it reaches every month.
     fn render_search(&self, f: &mut Frame<Target>, rect: Rect) {
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 6.0, Surface::Card);
-        if self.search_active {
-            f.push(RenderCommand::StrokeRect {
-                x: rect.x,
-                y: rect.y,
-                width: rect.w,
-                height: rect.h,
-                color: self.palette.blue,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-        }
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Search),
+                focused: self.search_active,
+                disabled: false,
+                invalid: false,
+            },
+            self.focus_ring_width,
+        );
         let room = (rect.w - 110.0).max(0.0);
         let placeholder = self.search_query.is_empty() && !self.search_active;
         f.push(RenderCommand::Text {
@@ -3701,21 +3732,20 @@ impl FinanceApp {
     /// wants while it is empty and the keys are elsewhere.
     fn render_text_field(&self, f: &mut Frame<Target>, form: &Form, field: FormField, rect: Rect) {
         let focused = self.field == field;
-        self.palette
-            .push_surface(f, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        f.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: if focused {
-                self.palette.blue
-            } else {
-                self.palette.surface1
+        // The toolkit's field, in the theme's shape (lane C,
+        // c-e-a-theme-can-shape-the-controls).
+        guitk::field::draw(
+            f,
+            &self.palette,
+            rect,
+            guitk::field::State {
+                hovered: self.hover == Some(Target::Field(field)),
+                focused,
+                disabled: false,
+                invalid: false,
             },
-            line_width: if focused { 2.0 } else { 1.0 },
-            corner_radii: CornerRadii::all(4.0),
-        });
+            self.focus_ring_width,
+        );
         if let Some(input) = form.input_ref(field) {
             if input.text().is_empty() && !focused {
                 f.push(RenderCommand::Text {
@@ -4125,6 +4155,10 @@ impl FinanceApp {
 impl App for FinanceApp {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
     }
 
     fn title(&self) -> String {
@@ -5327,6 +5361,89 @@ mod tests {
         app
     }
 
+    /// **A chord is neither a finance key nor typing, and AltGr types**:
+    /// Alt+C and Ctrl+C cycled the category filter, the chord carrying its
+    /// letter, and an AltGr+C that typed nothing was the C under it; Alt+N
+    /// opened a form and Windows+2 changed the screen; Alt+Y answered
+    /// "delete?" with yes and Alt+Escape threw a form away; and the search
+    /// typed Alt+X's `x` but refused AltGr's `ś`. Ctrl+D still asks.
+    #[test]
+    fn a_chord_is_neither_a_finance_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Accounts;
+        let id = app.accounts[0].id;
+        app.selected_account = Some(id);
+        let (screen, month, filter) = (app.screen, app.view_month, app.category_filter);
+        for (k, text, m) in [
+            (Key::C, "c", Modifiers::alt()),
+            (Key::C, "c", Modifiers::ctrl()),
+            (Key::C, "", altgr),
+            (Key::D, "", altgr),
+            (Key::N, "n", Modifiers::alt()),
+            (Key::Num2, "2", Modifiers::super_key()),
+            (Key::Right, "", Modifiers::alt()),
+            (Key::Delete, "", Modifiers::alt()),
+            (Key::F1, "", Modifiers::alt()),
+        ] {
+            assert_eq!(
+                app.handle_key_event(&key(k, text, m)),
+                EventResult::Ignored,
+                "{m:?} {k:?} {text:?} was taken"
+            );
+        }
+        assert_eq!(app.screen, screen, "a chord changed the screen");
+        assert_eq!(app.view_month, month, "a chord changed the month");
+        assert_eq!(app.category_filter, filter, "a chord cycled the filter");
+        assert!(app.form.is_none(), "a chord opened a form");
+        assert!(app.pending_delete.is_none(), "a chord asked to delete");
+        assert!(!app.show_help, "a chord raised the keys");
+
+        // Ctrl+D asks; a chorded Y is no answer.
+        app.handle_key_event(&key(Key::D, "d", Modifiers::ctrl()));
+        assert_eq!(
+            app.pending_delete,
+            Some(Doomed::Account(id)),
+            "Ctrl+D no longer asks"
+        );
+        app.handle_key_event(&key(Key::Y, "y", Modifiers::alt()));
+        assert!(
+            app.accounts.iter().any(|a| a.id == id),
+            "Alt+Y deleted the account"
+        );
+
+        // A form's own keys are plain.
+        app.handle_key_event(&key(Key::N, "n", Modifiers::NONE));
+        assert!(app.form.is_some(), "control: N opens a form");
+        app.handle_key_event(&key(Key::Escape, "", Modifiers::alt()));
+        app.handle_key_event(&key(Key::Enter, "", Modifiers::alt()));
+        assert!(
+            app.form.is_some(),
+            "a chorded Escape or Enter closed the form"
+        );
+        app.handle_key_event(&key(Key::Escape, "", Modifiers::NONE));
+
+        // The search types what a key typed.
+        app.handle_key_event(&key(Key::Slash, "/", Modifiers::NONE));
+        assert!(app.search_active, "control: / searches");
+        app.handle_key_event(&key(Key::X, "x", Modifiers::alt()));
+        app.handle_key_event(&key(Key::S, "ś", altgr));
+        assert_eq!(
+            app.search_query, "ś",
+            "the search typed a command or refused AltGr's ś"
+        );
+    }
+
     /// A left press at `(x, y)`.
     fn press_at(app: &mut FinanceApp, x: f32, y: f32) -> EventResult {
         app.handle_event(&Event::Mouse(MouseEvent {
@@ -5947,6 +6064,88 @@ mod tests {
         assert_eq!(
             app.selected_id, chosen,
             "a press behind the form chose a row"
+        );
+    }
+
+    /// The search box and the form's fields are the toolkit's (lane C,
+    /// c-e-a-theme-can-shape-the-controls): lit under the pointer, out when it
+    /// leaves, and marked at the user's focus width while they have the
+    /// keyboard.
+    #[test]
+    fn the_text_boxes_are_the_toolkits_fields() {
+        let mut app = one_account();
+        let mut palette = app.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(&mut app, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(&mut app, &settings);
+        let draws = |app: &FinanceApp, rect: Rect, state: guitk::field::State| {
+            let seq = |s: guitk::field::State| {
+                let mut want: Vec<RenderCommand> = Vec::new();
+                guitk::field::draw(&mut want, &palette, rect, s, width);
+                want
+            };
+            let frame = app.frame();
+            let cmds = frame.commands();
+            let has = |want: &[RenderCommand]| {
+                !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+            };
+            // Not focused means no focus mark either: an unfocused box's
+            // commands begin a focused one's.
+            has(&seq(state))
+                && (state.focused
+                    || !has(&seq(guitk::field::State {
+                        focused: true,
+                        ..state
+                    })))
+        };
+        let idle = guitk::field::State::default();
+        let lit = guitk::field::State {
+            hovered: true,
+            ..idle
+        };
+        let keyed = guitk::field::State {
+            focused: true,
+            ..idle
+        };
+        let pointer = |app: &mut FinanceApp, x: f32, y: f32, kind: MouseEventKind| {
+            app.handle_event(&Event::Mouse(MouseEvent { x, y, kind }))
+        };
+
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        assert!(
+            draws(&app, search, idle),
+            "the search box is not the toolkit's"
+        );
+        let (x, y) = search.centre();
+        pointer(&mut app, x, y, MouseEventKind::Move);
+        assert!(
+            draws(&app, search, lit),
+            "the box under the pointer is not lit"
+        );
+        pointer(&mut app, -1.0, -1.0, MouseEventKind::Leave);
+        assert!(
+            draws(&app, search, idle),
+            "the box stayed lit after the pointer left"
+        );
+        probe::click(&mut app, Target::Search);
+        assert!(
+            draws(&app, search, keyed),
+            "the search box with the keyboard is not marked at the user's width"
+        );
+        app.handle_event(&Event::Key(probe::press(Key::Escape)));
+
+        probe::click(&mut app, Target::NewTransaction);
+        let amount = probe::rect_of(&app, Target::Field(FormField::Amount)).expect("amount");
+        probe::click(&mut app, Target::Field(FormField::Amount));
+        assert!(
+            draws(&app, amount, keyed),
+            "the field with the keyboard is not marked at the user's width"
         );
     }
 

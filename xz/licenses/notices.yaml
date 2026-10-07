@@ -1,0 +1,12 @@
+# Third-party code in this crate, for the image's notices (design-decisions 1433).
+#
+# src/ is a port of liblzma from XZ Utils 5.2.5 -- the LZMA and LZMA2
+# decoders, the .xz container's stream, block and index decoders, the .lzma
+# (LZMA_Alone) decoder, the delta and branch-converter filters, the checks --
+# by Lasse Collin and Igor Pavlov, who put liblzma in the public domain.
+# tests/data/files/ is XZ Utils' own tests/files, also public domain.
+liblzma:
+  version: 5.2.5
+  licence: LicenseRef-Public-Domain
+  texts:
+    - liblzma-COPYING

@@ -11,6 +11,8 @@ guitk = { path = "../../gui/toolkit" }
 # program the desktop can open, rather than a keypad that lays itself out once
 # and returns from `main`.
 oswindow = { path = "../../gui/window" }
+# The line between a chord and a character: Alt+5 is not a 5.
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

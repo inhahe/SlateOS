@@ -1,8 +1,10 @@
 # palette_check: a module's own colour can hide a leftover of the other theme
 
 **From:** lane E  **To:** lane C  **Filed:** 2026-09-28
-**Status:** lane C's side written 2026-09-28 and held: it lands once three of
-lane E's modules change -- `requests/c-e-three-modules-hold-up-the-palette-checks-refusal.md`.
+**Status:** DONE on lane C 2026-10-05 (design-decisions §1470), reaching
+`main` with lane C's next publish -- lane C's answer at the end. It was held
+from 2026-09-28 until three of lane E's modules changed
+(`requests/c-e-three-modules-hold-up-the-palette-checks-refusal.md`).
 
 **In short:** `appearance::palette_check::assert_drawn_from` accepts any
 colour whose RGB matches an entry in the module's `derived` list. When a
@@ -47,3 +49,20 @@ row), so a hue coincidence is by design and cannot be refused.
 **If never answered:** nothing breaks. The check stays blind to a leftover
 that matches a module's own colour, and lane E keeps its games clear by
 hand (a scan of the themed games' literals).
+
+## Lane C's answer (2026-10-05)
+
+Done as asked, and one step further. `assert_drawn_from` and
+`assert_colours_from` refuse a `derived` colour whose RGB is a neutral role
+(`crust` .. `text`) of either built-in palette, naming the palette and the
+role, unless the check takes that colour anyway: a role of the palette being
+checked, its ink on one, or black. Hues are not refused (C-Q16, §1422).
+
+The further step: `readable_on`'s two answers were exactly Mocha's `crust`
+and Latte's `base`, so every module labelling a fill had to declare a page
+colour, and the check could not refuse a leftover crust in a light window.
+They are `#10101A` and `#F0F2F6` now -- one step further out, the same to
+the eye. A test of yours that pins either old value as `readable_on`'s answer
+changes with it; lane C runs every crate's tests before this reaches `main`
+and fixes what pins them, as the request it filed for your three modules
+said. Design-decisions §1470.

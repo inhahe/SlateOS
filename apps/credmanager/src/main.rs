@@ -104,6 +104,38 @@ const HEADING_FONT_SIZE: f32 = 18.0;
 const SMALL_FONT_SIZE: f32 = 12.0;
 const CORNER_RADIUS: f32 = 6.0;
 const DEFAULT_AUTO_LOCK_MINUTES: u32 = 15;
+
+/// The auto-lock times the settings slider offers, in minutes: one to an hour.
+const AUTO_LOCK_MINUTES: (u32, u32) = (1, 60);
+
+/// The settings panel's padding.
+const SETTINGS_PAD: f32 = 24.0;
+
+/// Where the settings panel draws the auto-lock slider in a window `width`
+/// wide: below the heading (36 pixels), the SECURITY label (24) and the
+/// auto-lock row (32), across the panel inside its padding.
+///
+/// An auto-lock slider value as the whole minutes it stands for, in the
+/// slider's range.
+fn whole_minutes(value: f64) -> u32 {
+    let (lo, hi) = AUTO_LOCK_MINUTES;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rounded and clamped into the slider's own range first"
+    )]
+    let minutes = value.round().clamp(f64::from(lo), f64::from(hi)) as u32;
+    minutes
+}
+
+/// One function, read by the drawing and by the pointer, so a press lands
+/// on the value the thumb is drawn at.
+fn auto_lock_placement(width: f32) -> guitk::slider::Placement {
+    let x = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH + SETTINGS_PAD;
+    let y = TOOLBAR_HEIGHT + SETTINGS_PAD + 36.0 + 24.0 + 32.0;
+    let w = (width - SIDEBAR_WIDTH - ENTRY_LIST_WIDTH - SETTINGS_PAD * 2.0).max(0.0);
+    guitk::slider::Placement::horizontal(Rect::new(x, y, w, 4.0), 12.0)
+}
 const PASSWORD_OLD_DAYS: u64 = 90;
 const WEAK_PASSWORD_LEN: usize = 8;
 
@@ -160,6 +192,10 @@ enum Target {
     RestoreBackup,
     /// Settings: export as plain text.
     ExportCsv,
+    /// Settings: the auto-lock slider. Its press, drag and release go to the
+    /// slider itself ([`AppState::auto_lock_mouse`]), which needs where on it
+    /// they land; this target is its place in the hit boxes.
+    AutoLock,
     /// The export warning: go on.
     ExportAnyway,
     /// The restore dialog's password field.
@@ -189,6 +225,21 @@ enum Target {
     /// The index is into [`copyable_fields`], which is what the detail view
     /// draws a button beside, so the row and the target cannot disagree.
     CopyField(usize),
+}
+
+impl Target {
+    /// Whether this is a text box: the targets the pointer lights.
+    fn is_text_box(self) -> bool {
+        matches!(
+            self,
+            Self::Search
+                | Self::MasterInput
+                | Self::NewPassword
+                | Self::ConfirmPassword
+                | Self::RestoreInput
+                | Self::NewField(_)
+        )
+    }
 }
 
 type Frame = guitk::frame::Frame<Target>;
@@ -860,6 +911,17 @@ impl Vault {
 
     fn is_unlocked(&self) -> bool {
         self.state == VaultState::Unlocked
+    }
+
+    /// Seconds from `now` until the auto-lock falls due, or `None` while the
+    /// vault is locked and there is nothing to lock.
+    fn auto_lock_in(&self, now: u64) -> Option<u64> {
+        if self.state == VaultState::Locked {
+            return None;
+        }
+        let timeout_seconds = u64::from(self.auto_lock_minutes).saturating_mul(60);
+        let due = self.last_access.saturating_add(timeout_seconds);
+        Some(due.saturating_sub(now))
     }
 
     /// Check if auto-lock timeout has been exceeded.
@@ -3097,6 +3159,11 @@ struct NewVault {
     confirming: bool,
     /// Why the last press of Create made nothing.
     error: Option<String>,
+    /// The field that refusal was about, drawn red until it is typed in:
+    /// the first, too short, or the second, which did not match. `None` for
+    /// a refusal that is no field's fault -- which only a pair long enough
+    /// and alike can reach, and so only after both were typed in.
+    wrong: Option<Target>,
 }
 
 /// A question the vault's own controls ask before they act.
@@ -3203,7 +3270,46 @@ fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// What moves [`AppState::now`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Clock {
+    /// The system's wall clock, read as each event arrives: what a window
+    /// runs on. The auto-lock is a span of real time -- a machine asleep for
+    /// an hour has been away from its vault for an hour -- and an entry's
+    /// times are dates.
+    Wall,
+    /// Moved only by ticks, by the time each says elapsed, carrying the part
+    /// of a second the last one left over: what the tests run on, so one can
+    /// say "fifteen minutes pass" without waiting them.
+    Ticked {
+        /// Milliseconds elapsed and not yet a whole second.
+        carry_ms: u64,
+    },
+}
+
 /// Top-level application state.
+/// The keys the open vault answers, as the F1 list shows them.
+///
+/// It had no list: F1 did nothing, and of all of these only Ctrl+E was
+/// written anywhere, on its button -- Ctrl+L, which locks the vault, Ctrl+G,
+/// which makes a password, and Delete, which asks to delete an entry, could
+/// be found only by pressing them. F1 alone raises it: what a key types goes
+/// into the search, `?` among it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Choose an entry"),
+    ("Ctrl+E", "Edit the entry"),
+    ("Delete", "Delete the entry (it asks first)"),
+    ("Ctrl+G", "Make a password"),
+    ("Ctrl+M", "Generator: the next kind of password"),
+    ("Ctrl+1-4", "Generator: a set of characters"),
+    ("Left / Right", "Generator: shorter or longer"),
+    ("Ctrl+F", "Clear the search"),
+    ("Escape", "Clear the search, close the panel"),
+    ("Ctrl+L", "Lock the vault"),
+    ("Ctrl+Q", "Close the window"),
+];
+
 struct AppState {
     vault: Vault,
     /// Where the vault is kept. `None` when there is no home folder: the vault
@@ -3243,7 +3349,12 @@ struct AppState {
     /// a generator the user simply has not pressed yet.
     generator_error: Option<String>,
     show_password: bool,
+    /// The time, in seconds since the Unix epoch, as of the event being
+    /// taken: what the auto-lock measures the vault's idleness against, and
+    /// what an entry's times are stamped with.
     now: u64,
+    /// What moves [`Self::now`]: the wall clock in a window, ticks in a test.
+    clock: Clock,
     /// Filtered and sorted entry IDs for the list.
     filtered_ids: Vec<u64>,
     /// Cached audit results.
@@ -3265,8 +3376,16 @@ struct AppState {
     /// could be scrolled into blank space indefinitely.
     width: f32,
     height: f32,
-    /// Settings: auto-lock minutes.
-    settings_auto_lock: u32,
+    /// Settings: the auto-lock slider, the toolkit's, from one minute to an
+    /// hour. Its value is the vault's own `auto_lock_minutes` whenever no
+    /// drag is moving it ([`Self::sync_auto_lock`]); a drag shows its minutes
+    /// as it goes and writes them to the vault only when let go.
+    ///
+    /// It was `settings_auto_lock`, a number set to the default once and
+    /// read by nothing but its own picture: the panel said "15 minutes" of a
+    /// vault restored with five, and the knob drawn under it moved for
+    /// nothing.
+    auto_lock: guitk::slider::Slider,
     /// The credential being written, while [`DetailView::NewEntry`] is up.
     ///
     /// `None` at every other moment rather than a form kept warm between
@@ -3276,6 +3395,19 @@ struct AppState {
     /// The field a Copy press was refused for, to say so in the toolbar --
     /// see [`NOT_COPIED`].
     copy_refused: Option<String>,
+    /// Where the pointer is in the window, or `None` once it has left.
+    pointer: Option<(f32, f32)>,
+    /// The text box under the pointer, settled after every event against
+    /// what is drawn by then (`App::on_event`) -- so a dialog or the file
+    /// dialog over the window, which leave nothing under them to hit, leave
+    /// nothing lit.
+    hover: Option<Target>,
+    /// The user's focus width, which the text boxes draw their focus mark
+    /// at (`appearance_changed`).
+    focus_ring_width: f32,
+    /// Whether the list of keys is up. Only over the open vault: locking
+    /// puts it away (`lock_vault`).
+    show_help: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -3321,6 +3453,7 @@ impl AppState {
             generator_error: None,
             show_password: false,
             now: 1000000,
+            clock: Clock::Ticked { carry_ms: 0 },
             filtered_ids: Vec::new(),
             audit_issues: Vec::new(),
             master_input: String::new(),
@@ -3329,12 +3462,142 @@ impl AppState {
             detail_scroll: 0.0,
             width: DEFAULT_WINDOW_WIDTH,
             height: DEFAULT_WINDOW_HEIGHT,
-            settings_auto_lock: DEFAULT_AUTO_LOCK_MINUTES,
+            auto_lock: guitk::slider::Slider::new(
+                f64::from(AUTO_LOCK_MINUTES.0),
+                f64::from(AUTO_LOCK_MINUTES.1),
+                f64::from(DEFAULT_AUTO_LOCK_MINUTES),
+            )
+            .with_step(1.0),
             new_entry: None,
             copy_refused: None,
+            pointer: None,
+            hover: None,
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
+            show_help: false,
         };
         state.refresh_filter();
         state
+    }
+
+    /// The text box a key types into now, if any.
+    ///
+    /// The window has no focus to move from box to box: where typing goes
+    /// follows from what is showing, in the order the keys are offered --
+    /// the file dialog, the lock screen, a vault dialog, the new-entry form,
+    /// and otherwise the search. Read here from the same state, so the box
+    /// drawn as having the keyboard is the one that does.
+    fn typing_into(&self) -> Option<Target> {
+        if self.picker.is_open() {
+            return None;
+        }
+        if !self.vault.is_unlocked() {
+            return match &self.gate {
+                Gate::Unlock => Some(Target::MasterInput),
+                Gate::Create(form) if form.confirming => Some(Target::ConfirmPassword),
+                Gate::Create(_) => Some(Target::NewPassword),
+                Gate::Unreadable(_) => None,
+            };
+        }
+        match &self.dialog {
+            Some(VaultDialog::RestorePassword { .. }) => return Some(Target::RestoreInput),
+            Some(_) => return None,
+            None => {}
+        }
+        if self.detail_view == DetailView::NewEntry
+            && let Some(form) = &self.new_entry
+        {
+            return Some(Target::NewField(form.focused));
+        }
+        Some(Target::Search)
+    }
+
+    /// How the text box `target` is drawn now: lit under the pointer, marked
+    /// while what is typed goes into it, and red when what is in it is
+    /// `wrong` -- in the toolkit's field, the theme's shape (lane C,
+    /// c-e-a-theme-can-shape-the-controls).
+    fn field_state(&self, target: Target, wrong: bool) -> guitk::field::State {
+        guitk::field::State {
+            hovered: self.hover == Some(target),
+            focused: self.typing_into() == Some(target),
+            disabled: false,
+            invalid: wrong,
+        }
+    }
+
+    /// Whether the settings panel is drawn and can be used: the vault open,
+    /// the panel chosen, and no vault dialog over it. (The file dialog needs
+    /// no check here: it takes all input before any reaches the window.)
+    fn settings_live(&self) -> bool {
+        self.vault.is_unlocked()
+            && self.detail_view == DetailView::Settings
+            && self.dialog.is_none()
+    }
+
+    /// The auto-lock slider as it is drawn: at the vault's own minutes --
+    /// which opening the vault and a restore set as well -- unless a drag is
+    /// moving it.
+    fn auto_lock_shown(&self) -> guitk::slider::Slider {
+        let mut shown = self.auto_lock.clone();
+        if !shown.is_dragging() {
+            shown.set_value(f64::from(self.vault.auto_lock_minutes));
+        }
+        shown
+    }
+
+    /// Keep a value the slider settled on as the vault's auto-lock time:
+    /// written with the vault, and the time the next lock is counted by.
+    fn set_auto_lock(&mut self, minutes: f64) {
+        self.vault.auto_lock_minutes = whole_minutes(minutes);
+    }
+
+    /// The auto-lock slider's share of a pointer event while the settings
+    /// panel is up, or `None` for an event that is not the slider's.
+    ///
+    /// A drag shows its minutes as it goes and writes them to the vault only
+    /// when it is let go: the vault is sealed and written whenever what it
+    /// holds changes, and once per pixel of a drag is a file rewritten fifty
+    /// times for one decision.
+    fn auto_lock_mouse(&mut self, mouse: &MouseEvent) -> Option<EventResult> {
+        if !self.settings_live() {
+            return None;
+        }
+        self.auto_lock = self.auto_lock_shown();
+        let lit = self.auto_lock.is_hovered();
+        let response = self
+            .auto_lock
+            .handle_mouse(&auto_lock_placement(self.width), mouse);
+        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {
+            self.set_auto_lock(minutes);
+        }
+        (response.is_taken() || lit != self.auto_lock.is_hovered()).then_some(EventResult::Consumed)
+    }
+
+    /// The auto-lock slider's share of a key while the settings panel is up:
+    /// Left and Right, Home and End, Page Up and Page Down move it, and during
+    /// a drag Escape takes the drag back. Up and Down stay the entry list's.
+    fn auto_lock_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
+        if !self.settings_live() {
+            return None;
+        }
+        let its_key = matches!(
+            key.key,
+            Key::Left | Key::Right | Key::Home | Key::End | Key::PageUp | Key::PageDown
+        );
+        if !its_key && !self.auto_lock.is_dragging() {
+            return None;
+        }
+        self.auto_lock = self.auto_lock_shown();
+        let response = self.auto_lock.handle_key(key);
+        if let Some(guitk::slider::SliderEvent::Confirmed(minutes)) = response.event() {
+            self.set_auto_lock(minutes);
+        }
+        response.is_taken().then_some(EventResult::Consumed)
+    }
+
+    /// The text box under the pointer in what is drawn now, if any.
+    fn text_box_under_pointer(&self) -> Option<Target> {
+        let (x, y) = self.pointer?;
+        self.target_at(x, y).filter(|t| t.is_text_box())
     }
 
     /// App state around a locked test vault whose master password is
@@ -3414,6 +3677,7 @@ impl AppState {
     fn lock_vault(&mut self) {
         self.keep_if_changed();
         self.vault.lock();
+        self.show_help = false;
         self.saved = None;
         self.dialog = None;
         self.picker.close();
@@ -3706,12 +3970,32 @@ impl AppState {
         self.audit_issues = audit_vault(&self.vault, self.now);
     }
 
-    fn tick(&mut self, elapsed_ms: u64) {
-        self.now = self.now.saturating_add(elapsed_ms / 1000);
-
+    /// Bring [`Self::now`] up to date for `event`, and lock the vault if it
+    /// has been left alone for its auto-lock time. Returns whether it locked.
+    ///
+    /// Run before the event is taken, not after: after an hour away, the key
+    /// that wakes the window must find the vault locked, rather than count as
+    /// the use that keeps it open.
+    fn advance_clock(&mut self, event: &Event) -> bool {
+        match &mut self.clock {
+            Clock::Wall => self.now = unix_now(),
+            Clock::Ticked { carry_ms } => {
+                if let Event::Tick { elapsed_ms } = event {
+                    // The carry, because ticks come at the auto-lock's
+                    // deadline and whenever else the harness runs the loop,
+                    // and `elapsed_ms / 1000` lost every tick's part second:
+                    // all of it, for a tick shorter than one.
+                    let total = carry_ms.saturating_add(*elapsed_ms);
+                    self.now = self.now.saturating_add(total / 1000);
+                    *carry_ms = total % 1000;
+                }
+            }
+        }
         if self.vault.should_auto_lock(self.now) {
             self.lock_vault();
+            return true;
         }
+        false
     }
 }
 
@@ -3727,31 +4011,6 @@ fn draw_rect(frame: &mut Frame, x: f32, y: f32, w: f32, h: f32, color: Color, ra
         width: w,
         height: h,
         color,
-        corner_radii: CornerRadii::all(radius),
-    });
-}
-
-/// Render a stroked rounded rectangle.
-// 8 args: rect (x,y,w,h) + color + line_width + radius; introducing a wrapper
-// struct would only add noise at every call site.
-#[allow(clippy::too_many_arguments)]
-fn draw_stroke_rect(
-    frame: &mut Frame,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: Color,
-    line_width: f32,
-    radius: f32,
-) {
-    frame.push(RenderCommand::StrokeRect {
-        x,
-        y,
-        width: w,
-        height: h,
-        color,
-        line_width,
         corner_radii: CornerRadii::all(radius),
     });
 }
@@ -4055,14 +4314,15 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     // Search box -- the one elastic control in the row; see
     // `search_box_width` for why it is the one that gives.
     let search = take_toolbar(&mut x, search_box_width(width));
-    draw_rect(
+    // The toolbar leaves TOOLBAR_BUTTON_INSET above and below it, and the gap
+    // beside it, which is room for the widest focus ring (eight pixels, at the
+    // appearance settings' 4x clamp) inside the toolbar's clip.
+    guitk::field::draw(
         frame,
-        search.x,
-        search.y,
-        search.w,
-        search.h,
-        state.palette.surface0,
-        CORNER_RADIUS,
+        &state.palette,
+        search,
+        state.field_state(Target::Search, false),
+        state.focus_ring_width,
     );
     let search_text = if state.search_query.is_empty() {
         "Search..."
@@ -5176,10 +5436,18 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
     );
     y += 12.0;
 
-    let created_text = format!(
-        "Created: {} seconds ago",
-        state.now.saturating_sub(entry.created_at)
-    );
+    // Dates, as every program here renders an instant (`guitk::datetime`);
+    // UTC, explicitly, until the system has a zone of its own (known-issues
+    // `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). They were counts of seconds --
+    // "Created: 31536000 seconds ago" for an entry a year old -- a number to
+    // work out rather than a date to read.
+    let stamp = |secs: u64| {
+        guitk::datetime::stamp(
+            i64::try_from(secs).unwrap_or(i64::MAX),
+            &guitk::tzrules::Tz::utc(),
+        )
+    };
+    let created_text = format!("Created: {}", stamp(entry.created_at));
     draw_text(
         frame,
         field_label_x,
@@ -5192,10 +5460,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
     );
     y += 18.0;
 
-    let modified_text = format!(
-        "Modified: {} seconds ago",
-        state.now.saturating_sub(entry.modified_at)
-    );
+    let modified_text = format!("Modified: {}", stamp(entry.modified_at));
     draw_text(
         frame,
         field_label_x,
@@ -5410,20 +5675,13 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         );
         y += 18.0;
 
-        let focused = index == form.focused;
         let rect = Rect::new(x_start + pad, y, inner, 30.0);
-        draw_rect(
+        guitk::field::draw(
             frame,
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            if focused {
-                state.palette.surface1
-            } else {
-                state.palette.surface0
-            },
-            CORNER_RADIUS,
+            &state.palette,
+            rect,
+            state.field_state(Target::NewField(index), false),
+            state.focus_ring_width,
         );
 
         // A secret is drawn masked while it is typed, because a password
@@ -5910,7 +6168,9 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         0.0,
     );
 
-    let pad = 24.0;
+    // The rows down to the auto-lock slider are the ones
+    // `auto_lock_placement` counts; it and this must change together.
+    let pad = SETTINGS_PAD;
     let mut y = y_start + pad;
 
     draw_text(
@@ -5948,7 +6208,13 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         FontWeightHint::Regular,
         None,
     );
-    let timeout_text = format!("{} minutes", state.settings_auto_lock);
+    let slider = state.auto_lock_shown();
+    let minutes = whole_minutes(slider.value());
+    let timeout_text = if minutes == 1 {
+        String::from("1 minute")
+    } else {
+        format!("{minutes} minutes")
+    };
     draw_text(
         frame,
         x_start + pad + 200.0,
@@ -5959,32 +6225,22 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
         FontWeightHint::Bold,
         None,
     );
-    y += 32.0;
 
-    // Timeout slider
-    let slider_x = x_start + pad;
-    let slider_w = panel_width - pad * 2.0;
-    draw_rect(
+    // The slider: the toolkit's, at the place the pointer is read against.
+    // No focus ring: Left and Right move it while this panel is up, as they
+    // move the generator's, but what is typed goes to the search box, and
+    // one keyboard drawn in two places would say neither.
+    let placement = auto_lock_placement(width);
+    slider.draw(
         frame,
-        slider_x,
-        y,
-        slider_w,
-        4.0,
-        state.palette.surface1,
-        2.0,
+        &state.palette,
+        &placement,
+        guitk::slider::Look::accent(&state.palette, state.palette.surface1),
+        false,
+        state.focus_ring_width,
     );
-    let frac = (state.settings_auto_lock as f32 - 1.0) / 59.0;
-    let knob_x = slider_x + slider_w * frac.clamp(0.0, 1.0);
-    draw_rect(
-        frame,
-        knob_x - 6.0,
-        y - 4.0,
-        12.0,
-        12.0,
-        state.palette.blue,
-        6.0,
-    );
-    y += 24.0;
+    frame.hit(Target::AutoLock, placement.hit());
+    y = placement.track.bottom() + 20.0;
 
     draw_text(
         frame,
@@ -6368,46 +6624,23 @@ fn centred_lines(
     y
 }
 
-/// A masked password field, with its hit box.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "a field is a box, its text, its state and its target"
-)]
+/// A masked password field, with its hit box: the toolkit's field, drawn
+/// from what [`AppState::field_state`] says of `target` and red when
+/// `wrong`.
 fn masked_field(
     frame: &mut Frame,
     state: &AppState,
     rect: Rect,
-    value: &str,
-    placeholder: &str,
-    focused: bool,
-    failed: bool,
+    (value, placeholder): (&str, &str),
+    wrong: bool,
     target: Target,
 ) {
-    let border = if failed {
-        state.palette.red
-    } else if focused {
-        state.palette.blue
-    } else {
-        state.palette.surface2
-    };
-    draw_rect(
+    guitk::field::draw(
         frame,
-        rect.x,
-        rect.y,
-        rect.w,
-        rect.h,
-        state.palette.base,
-        CORNER_RADIUS,
-    );
-    draw_stroke_rect(
-        frame,
-        rect.x,
-        rect.y,
-        rect.w,
-        rect.h,
-        border,
-        1.0,
-        CORNER_RADIUS,
+        &state.palette,
+        rect,
+        state.field_state(target, wrong),
+        state.focus_ring_width,
     );
     let masked = "*".repeat(value.chars().count());
     let (shown, color) = if masked.is_empty() {
@@ -6467,19 +6700,9 @@ fn render_create_panel(
     );
     y += 8.0;
     let field_w = w - 60.0;
-    for (label, value, confirming, target) in [
-        (
-            "Master password",
-            &form.password,
-            false,
-            Target::NewPassword,
-        ),
-        (
-            "Type it again",
-            &form.confirm,
-            true,
-            Target::ConfirmPassword,
-        ),
+    for (label, value, target) in [
+        ("Master password", &form.password, Target::NewPassword),
+        ("Type it again", &form.confirm, Target::ConfirmPassword),
     ] {
         draw_text(
             frame,
@@ -6496,10 +6719,8 @@ fn render_create_panel(
             frame,
             state,
             Rect::new(px + 30.0, y, field_w, 40.0),
-            value,
-            "",
-            form.confirming == confirming,
-            false,
+            (value, ""),
+            form.wrong == Some(target),
             target,
         );
         y += 52.0;
@@ -6758,9 +6979,7 @@ fn render_vault_dialog(
             frame,
             state,
             Rect::new(px + 24.0, py + h - 100.0, w - 48.0, 36.0),
-            input,
-            "",
-            true,
+            (input, ""),
             error.is_some(),
             Target::RestoreInput,
         );
@@ -6871,29 +7090,12 @@ fn render_unlock_panel(frame: &mut Frame, state: &AppState, width: f32, height: 
     let input_w = panel_w - 60.0;
     let input_h = 40.0;
 
-    let border_color = if state.unlock_failed {
-        state.palette.red
-    } else {
-        state.palette.surface2
-    };
-    draw_rect(
+    guitk::field::draw(
         frame,
-        input_x,
-        input_y,
-        input_w,
-        input_h,
-        state.palette.base,
-        CORNER_RADIUS,
-    );
-    draw_stroke_rect(
-        frame,
-        input_x,
-        input_y,
-        input_w,
-        input_h,
-        border_color,
-        1.0,
-        CORNER_RADIUS,
+        &state.palette,
+        Rect::new(input_x, input_y, input_w, input_h),
+        state.field_state(Target::MasterInput, state.unlock_failed),
+        state.focus_ring_width,
     );
 
     // Masked input display
@@ -7047,6 +7249,19 @@ impl AppState {
                 frame.push(command);
             }
         }
+        // The list of keys over all of it: it is the one thing on screen a
+        // reader asked for explicitly. Nothing under it takes a press.
+        if self.show_help {
+            frame.discard_hits();
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                "F1 or Escape closes this",
+            );
+        }
 
         debug_assert!(frame.is_balanced(), "a clip was pushed and not popped");
         frame
@@ -7075,6 +7290,19 @@ fn build_render_tree(state: &AppState) -> RenderTree {
 
 /// Keys while the new-entry form is up.
 fn handle_new_entry_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
+    // What a key typed goes into the field -- AltGr's characters among it,
+    // and not a command's letter, which a chord carries as text: Ctrl+L
+    // typed an `l` into a password. The form's own keys are taken plain.
+    if textline::types_into_field(key) {
+        let typed: String = key.typed().collect();
+        if let Some(form) = state.new_entry.as_mut() {
+            form.type_text(&typed);
+        }
+        return EventResult::Consumed;
+    }
+    if !textline::is_plain(key.modifiers) {
+        return EventResult::Ignored;
+    }
     match key.key {
         Key::Escape => {
             cancel_new_entry(state);
@@ -7107,19 +7335,7 @@ fn handle_new_entry_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                 EventResult::Ignored
             }
         }
-        _ => {
-            if !key.types_text() {
-                return EventResult::Ignored;
-            }
-            let typed: String = key.typed().collect();
-            if typed.is_empty() {
-                return EventResult::Ignored;
-            }
-            if let Some(form) = state.new_entry.as_mut() {
-                form.type_text(&typed);
-            }
-            EventResult::Consumed
-        }
+        _ => EventResult::Ignored,
     }
 }
 
@@ -7291,11 +7507,16 @@ fn handle_event(state: &mut AppState, event: &Event) -> EventResult {
 }
 
 fn dispatch_event(state: &mut AppState, event: &Event) -> EventResult {
+    if state.advance_clock(event) {
+        // Locked by the time that has passed. The event is not taken: it was
+        // meant for a vault that is no longer open -- a key would go into the
+        // master password, a press land on the lock screen.
+        return EventResult::Consumed;
+    }
     match event {
-        Event::Tick { elapsed_ms } => {
-            state.tick(*elapsed_ms);
-            EventResult::Consumed
-        }
+        // A tick that did not lock changed nothing drawn: the entry's times
+        // are dates, not spans counted to now.
+        Event::Tick { .. } => EventResult::Ignored,
         Event::Key(key_event) if key_event.pressed => handle_key(state, key_event),
         Event::Mouse(mouse_event) => handle_mouse(state, mouse_event),
         Event::Resize { width, height } => {
@@ -7317,6 +7538,24 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             Gate::Unlock => None,
             // Nothing to type into and nothing to do: the file is left alone.
             Gate::Unreadable(_) => return EventResult::Consumed,
+            // What a key typed goes into the password -- AltGr's characters
+            // among it (Polish `ł` is AltGr+L), and not a command's letter,
+            // which a chord carries as text: Ctrl+V typed a `v` into the
+            // master password. The form's own keys are taken plain.
+            Gate::Create(form) if textline::types_into_field(key) => {
+                let field = if form.confirming {
+                    &mut form.confirm
+                } else {
+                    &mut form.password
+                };
+                field.extend(key.typed());
+                form.error = None;
+                form.wrong = None;
+                Some(false)
+            }
+            Gate::Create(_) if !textline::is_plain(key.modifiers) => {
+                return EventResult::Ignored;
+            }
             Gate::Create(form) => Some(match key.key {
                 Key::Enter if form.confirming => true,
                 Key::Enter | Key::Tab => {
@@ -7331,25 +7570,14 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                     };
                     field.pop();
                     form.error = None;
+                    form.wrong = None;
                     false
                 }
                 Key::Escape => {
                     *form = NewVault::default();
                     false
                 }
-                _ => {
-                    if !key.types_text() {
-                        return EventResult::Ignored;
-                    }
-                    let field = if form.confirming {
-                        &mut form.confirm
-                    } else {
-                        &mut form.password
-                    };
-                    field.extend(key.typed());
-                    form.error = None;
-                    false
-                }
+                _ => return EventResult::Ignored,
             }),
         };
         if let Some(create) = create {
@@ -7357,6 +7585,15 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                 create_vault(state);
             }
             return EventResult::Consumed;
+        }
+        // The master password, as the new vault's is typed.
+        if textline::types_into_field(key) {
+            state.master_input.extend(key.typed());
+            state.unlock_failed = false;
+            return EventResult::Consumed;
+        }
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
         }
         match key.key {
             Key::Enter => attempt_unlock(state),
@@ -7368,14 +7605,16 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
                 state.master_input.clear();
                 state.unlock_failed = false;
             }
-            _ => {
-                if !key.types_text() {
-                    return EventResult::Ignored;
-                }
-                state.master_input.extend(key.typed());
-                state.unlock_failed = false;
-            }
+            _ => return EventResult::Ignored,
         }
+        return EventResult::Consumed;
+    }
+
+    // F1 raises the list of keys over the open vault, from a dialog, the
+    // form or a panel too: none of them types it. F1 alone -- what a key types
+    // goes into the search, `?` among it.
+    if key.key == Key::F1 && textline::is_plain(key.modifiers) {
+        state.show_help = true;
         return EventResult::Consumed;
     }
 
@@ -7400,29 +7639,48 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         return EventResult::Consumed;
     }
 
-    // Main app key handling
+    // The settings panel's auto-lock slider, the same way: its keys while the
+    // panel is up, ahead of the catch-all that types into the search box.
+    if let Some(result) = state.auto_lock_key(key) {
+        state.vault.touch(state.now);
+        return result;
+    }
+
+    // Main app key handling. The four shortcuts are Ctrl chords, not Ctrl
+    // held: AltGr arrives as Ctrl+Alt, and AltGr+L -- a Polish `ł`, typed
+    // into the search -- locked the vault. What a key types goes into the
+    // search, and not a command's letter; the list's keys are taken plain,
+    // so Alt+Delete does not ask to delete an entry.
+    let chord = textline::is_ctrl_chord(key.modifiers);
     let result = match key.key {
-        Key::L if key.modifiers.ctrl => {
+        Key::L if chord => {
             state.lock_vault();
             EventResult::Consumed
         }
-        Key::F if key.modifiers.ctrl => {
+        Key::F if chord => {
             // Focus search (toggle)
             state.search_query.clear();
             state.refresh_filter();
             state.clamp_scroll();
             EventResult::Consumed
         }
-        Key::G if key.modifiers.ctrl => {
+        Key::G if chord => {
             state.detail_view = DetailView::PasswordGenerator;
             regenerate_password(state);
             EventResult::Consumed
         }
         // A plain letter goes to the search box, so editing is Ctrl+E.
-        Key::E if key.modifiers.ctrl => {
+        Key::E if chord => {
             open_edit_entry(state);
             EventResult::Consumed
         }
+        _ if textline::types_into_field(key) => {
+            state.search_query.extend(key.typed());
+            state.refresh_filter();
+            state.clamp_scroll();
+            EventResult::Consumed
+        }
+        _ if !textline::is_plain(key.modifiers) => EventResult::Ignored,
         Key::Delete if state.selected_entry_id.is_some() => {
             ask_delete(state);
             EventResult::Consumed
@@ -7456,16 +7714,7 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
             state.clamp_scroll();
             EventResult::Consumed
         }
-        _ => {
-            // Text input for search
-            if !key.types_text() {
-                return EventResult::Ignored;
-            }
-            state.search_query.extend(key.typed());
-            state.refresh_filter();
-            state.clamp_scroll();
-            EventResult::Consumed
-        }
+        _ => EventResult::Ignored,
     };
 
     // Only a keystroke the app acted on postpones the auto-lock. A modifier
@@ -7483,15 +7732,17 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
 /// there invites reading it as the new ones' output -- the same reason the
 /// kind keys in `apps/passwordgen` produce immediately.
 fn generator_key(state: &mut AppState, key: &KeyEvent) -> bool {
-    let ctrl = key.modifiers.ctrl;
+    // Ctrl chords, not Ctrl held: AltGr arrives as Ctrl+Alt and types.
+    let ctrl = textline::is_ctrl_chord(key.modifiers);
     if ctrl && key.key == Key::M {
         state.password_generator.mode = state.password_generator.mode.next();
         regenerate_password(state);
         return true;
     }
 
-    // Length, on the arrows, because the control drawn for it is a slider.
-    if !ctrl && matches!(key.key, Key::Left | Key::Right) {
+    // Length, on the arrows, because the control drawn for it is a slider --
+    // plain arrows: a chord with Alt or the Windows key is not the panel's.
+    if textline::is_plain(key.modifiers) && matches!(key.key, Key::Left | Key::Right) {
         let len = state.password_generator.length;
         let next = if key.key == Key::Left {
             len.saturating_sub(1)
@@ -7558,6 +7809,18 @@ fn navigate_entry_list(state: &mut AppState, direction: i32) {
 }
 
 fn handle_mouse(state: &mut AppState, mouse: &MouseEvent) -> EventResult {
+    // The auto-lock slider's press, drag and release, and its thumb's light.
+    // The press and the release are use of the vault; the pointer moving is
+    // not.
+    if let Some(result) = state.auto_lock_mouse(mouse) {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Press(_) | MouseEventKind::Release(_)
+        ) {
+            state.vault.touch(state.now);
+        }
+        return result;
+    }
     let result = match mouse.kind {
         MouseEventKind::Press(MouseButton::Left) => handle_click(state, mouse.x, mouse.y),
         MouseEventKind::Scroll { dy, .. } => handle_scroll(state, mouse.x, mouse.y, dy),
@@ -7617,6 +7880,10 @@ fn act_on(state: &mut AppState, target: Target) -> EventResult {
             state.dialog = Some(VaultDialog::ExportWarning);
             EventResult::Consumed
         }
+        // The slider takes its own presses, where on it they land, before
+        // a press reaches here (`handle_mouse`); a target with no point has
+        // nothing to set it to.
+        Target::AutoLock => EventResult::Ignored,
         Target::ExportAnyway => {
             state.dialog = None;
             state.open_picker(PickFor::Export);
@@ -7717,8 +7984,10 @@ fn act_on(state: &mut AppState, target: Target) -> EventResult {
             }
             EventResult::Consumed
         }
+        // As Ctrl+L locks, through `lock_vault`: it locked the vault alone,
+        // so a change whose save had failed was not tried again, and gone.
         Target::LockVault => {
-            state.vault.lock();
+            state.lock_vault();
             EventResult::Consumed
         }
         Target::Settings => {
@@ -7823,7 +8092,18 @@ fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         Delete(u64),
         Nothing,
     }
+    // What a key types goes into the password being asked for -- not a
+    // command's letter -- and the dialog's own keys are taken plain: Alt+Enter
+    // answered "delete this entry?" with yes.
     let then = match (&mut state.dialog, key.key) {
+        (Some(VaultDialog::RestorePassword { input, error, .. }), _)
+            if textline::types_into_field(key) =>
+        {
+            input.extend(key.typed());
+            *error = None;
+            Then::Nothing
+        }
+        _ if !textline::is_plain(key.modifiers) => Then::Nothing,
         (_, Key::Escape) => Then::Close,
         (Some(VaultDialog::ExportWarning), Key::Enter) => Then::Export,
         (Some(VaultDialog::RestorePassword { .. }), Key::Enter) => Then::Open,
@@ -7831,11 +8111,6 @@ fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         (Some(VaultDialog::DeleteConfirm { id }), Key::Enter) => Then::Delete(*id),
         (Some(VaultDialog::RestorePassword { input, error, .. }), Key::Backspace) => {
             input.pop();
-            *error = None;
-            Then::Nothing
-        }
-        (Some(VaultDialog::RestorePassword { input, error, .. }), _) if key.types_text() => {
-            input.extend(key.typed());
             *error = None;
             Then::Nothing
         }
@@ -7864,11 +8139,13 @@ fn create_vault(state: &mut AppState) {
         form.error = Some(format!(
             "Choose a master password of at least {MIN_MASTER_PASSWORD_CHARS} characters."
         ));
+        form.wrong = Some(Target::NewPassword);
         form.confirming = false;
         return;
     }
     if form.password != form.confirm {
         form.error = Some("The two do not match. Type it again.".to_string());
+        form.wrong = Some(Target::ConfirmPassword);
         form.confirm.clear();
         form.confirming = true;
         return;
@@ -7904,26 +8181,54 @@ fn create_vault(state: &mut AppState) {
 // Entry point
 // =============================================================================
 
-impl App for AppState {
-    fn theme_changed(&mut self, palette: &Palette) {
-        self.palette = *palette;
+impl AppState {
+    /// An event while the list of keys is up, which is modal: a plain F1 or
+    /// Escape puts it away and no other key reaches what it covers -- Ctrl+Q
+    /// does not close the window under it, Delete does not ask to delete an
+    /// entry; a press with any button puts it away and does nothing else; the
+    /// wheel scrolls nothing it covers. `None` while it is down, and for what
+    /// is no key or press: a tick may still lock the vault, which puts the
+    /// list away.
+    fn help_event(&mut self, event: &Event) -> Option<Response> {
+        if !self.show_help {
+            return None;
+        }
+        match event {
+            Event::Key(key) => {
+                if key.pressed
+                    && textline::is_plain(key.modifiers)
+                    && matches!(key.key, Key::F1 | Key::Escape)
+                {
+                    self.show_help = false;
+                }
+                Some(Response::Redraw)
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {
+                    self.show_help = false;
+                    Some(Response::Redraw)
+                }
+                MouseEventKind::Scroll { .. } => Some(Response::Idle),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
-    fn title(&self) -> String {
-        "Credential Manager".to_string()
-    }
-
-    fn initial_size(&self) -> (u32, u32) {
-        (DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32)
-    }
-
-    fn on_event(&mut self, event: &Event) -> Response {
+    /// What the window does with `event`, before the pointer's light is
+    /// settled (`App::on_event`).
+    fn respond(&mut self, event: &Event) -> Response {
+        if let Some(response) = self.help_event(event) {
+            return response;
+        }
         // Ctrl+Q closes the window. Ctrl+L is *not* a close -- it locks the
-        // vault, which is the point of having it.
+        // vault, which is the point of having it. A Ctrl chord, not Ctrl
+        // held: AltGr+Q -- Ctrl+Alt -- is a German `@`, typed into a user
+        // name, and closed the window.
         if let Event::Key(key) = event
             && key.pressed
             && key.key == Key::Q
-            && key.modifiers.ctrl
+            && textline::is_ctrl_chord(key.modifiers)
         {
             return Response::Exit;
         }
@@ -7957,6 +8262,57 @@ impl App for AppState {
         match handle_event(self, event) {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
+        }
+    }
+}
+
+impl App for AppState {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
+    fn title(&self) -> String {
+        "Credential Manager".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32)
+    }
+
+    /// A clock only while there is a vault open to lock, and only for the
+    /// moment its auto-lock falls due. The harness never pushes a wake later,
+    /// so use in the meantime costs one early tick, after which this is asked
+    /// again. There was no clock at all, the trait's default being none: no
+    /// tick ever came, and the vault never locked itself however long it was
+    /// left.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        self.vault
+            .auto_lock_in(self.now)
+            .map(std::time::Duration::from_secs)
+    }
+
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if let Event::Mouse(mouse) = event {
+            match mouse.kind {
+                MouseEventKind::Move => self.pointer = Some((mouse.x, mouse.y)),
+                MouseEventKind::Leave => self.pointer = None,
+                _ => {}
+            }
+        }
+        let response = self.respond(event);
+        // What the pointer is over is settled after every event, against
+        // what is drawn by then: a dialog that came up or went, a lock, or a
+        // list that moved under a still pointer changes it as surely as a
+        // move does. A change of light is worth a repaint on its own.
+        let lit = self.hover;
+        self.hover = self.text_box_under_pointer();
+        match response {
+            Response::Idle if self.hover != lit => Response::Redraw,
+            other => other,
         }
     }
 
@@ -8006,6 +8362,7 @@ impl Probe for AppState {
 /// the gap from theoretical into visible.
 fn main() -> ExitCode {
     let mut state = AppState::open(vault_path());
+    state.clock = Clock::Wall;
     state.now = unix_now();
     app::launch("credmanager", &mut state)
 }
@@ -9134,6 +9491,8 @@ mod tests {
             "a,b",
             "say \"hi\"",
             "\"",
+            "\"\"",
+            "nul\0inside",
             "line\nbreak",
             "cr\rand\r\ncrlf",
             " leading and trailing ",
@@ -9476,12 +9835,119 @@ mod tests {
         assert_eq!(state.filtered_ids.len(), 1);
     }
 
-    #[test]
-    fn test_app_state_tick() {
+    // == The auto-lock ========================================================
+
+    /// The unlocked test vault, with the time its auto-lock takes.
+    fn unlocked_for_the_clock() -> (AppState, u64) {
         let mut state = AppState::for_test();
-        let old_now = state.now;
-        state.tick(5000);
-        assert!(state.now > old_now);
+        assert!(state.vault.unlock(TEST_MASTER_PASSWORD, state.now));
+        let timeout = u64::from(state.vault.auto_lock_minutes) * 60;
+        (state, timeout)
+    }
+
+    fn tick(state: &mut AppState, elapsed_ms: u64) {
+        handle_event(state, &Event::Tick { elapsed_ms });
+    }
+
+    /// **Left alone for its auto-lock time, the vault locks itself** -- which
+    /// it never did in a window: the app asked for no clock, so no tick came.
+    /// The clock is asked for at the deadline. Ticks a millisecond short of
+    /// it leave the vault open and the millisecond after locks it, which is
+    /// the carry `elapsed_ms / 1000` lost.
+    #[test]
+    fn left_alone_the_vault_locks_itself_on_time() {
+        use std::time::Duration;
+        let (mut state, timeout) = unlocked_for_the_clock();
+        assert_eq!(
+            App::tick_interval(&state),
+            Some(Duration::from_secs(timeout)),
+            "the clock is not asked for at the auto-lock's deadline"
+        );
+        tick(&mut state, 400);
+        tick(&mut state, 400);
+        tick(&mut state, timeout * 1000 - 801);
+        assert!(state.vault.is_unlocked(), "locked before its time");
+        assert_eq!(App::tick_interval(&state), Some(Duration::from_secs(1)));
+        tick(&mut state, 1);
+        assert!(
+            !state.vault.is_unlocked(),
+            "the vault did not lock itself when its time came"
+        );
+        assert_eq!(
+            App::tick_interval(&state),
+            None,
+            "a locked vault, with nothing to lock, still wants a clock"
+        );
+    }
+
+    /// **Use puts the lock off**, and the clock asked for with it.
+    #[test]
+    fn use_puts_the_auto_lock_off() {
+        use std::time::Duration;
+        let (mut state, timeout) = unlocked_for_the_clock();
+        tick(&mut state, (timeout - 60) * 1000);
+        assert_eq!(App::tick_interval(&state), Some(Duration::from_mins(1)));
+        type_in(&mut state, "a");
+        assert_eq!(state.search_query, "a", "control: the key was taken");
+        assert_eq!(
+            App::tick_interval(&state),
+            Some(Duration::from_secs(timeout)),
+            "use did not put the lock off"
+        );
+        tick(&mut state, 60 * 1000);
+        assert!(
+            state.vault.is_unlocked(),
+            "locked a minute after it was used"
+        );
+    }
+
+    /// **The event that finds the lock due is not taken.** A machine asleep
+    /// past the deadline sends no tick: the first key after it must find the
+    /// vault locked rather than count as the use that keeps it open -- and
+    /// must not be typed into the master password either.
+    #[test]
+    fn the_event_that_finds_the_lock_due_is_not_taken() {
+        let (mut state, timeout) = unlocked_for_the_clock();
+        // Time passes with no tick, as it does across a sleep.
+        state.now += timeout;
+        type_in(&mut state, "x");
+        assert!(
+            !state.vault.is_unlocked(),
+            "a key after the deadline kept the vault open"
+        );
+        assert!(
+            state.search_query.is_empty() && state.master_input.is_empty(),
+            "the key that found the lock due was taken as well"
+        );
+    }
+
+    /// **A window runs on the wall clock**, read at every event: an entry's
+    /// times are dates, and a span spent asleep counts towards the auto-lock.
+    #[test]
+    fn a_window_runs_on_the_wall_clock() {
+        let (mut state, _) = unlocked_for_the_clock();
+        state.clock = Clock::Wall;
+        let before = unix_now();
+        handle_event(
+            &mut state,
+            &Event::Mouse(MouseEvent {
+                x: 1.0,
+                y: 1.0,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        let after = unix_now();
+        assert!(
+            (before..=after).contains(&state.now),
+            "{} is not the time it is ({before}..={after})",
+            state.now
+        );
+        // And the wall clock's time is the one the auto-lock counts against:
+        // the test vault was opened in 1970.
+        assert!(
+            !state.vault.is_unlocked(),
+            "fifty years idle, and the vault is still open"
+        );
     }
 
     #[test]
@@ -10978,6 +11444,173 @@ mod tests {
         state
     }
 
+    /// **A chord is neither a vault key nor typing, and AltGr types** -- in
+    /// the program where a stray letter is a password that opens nothing:
+    ///
+    /// - the master password, an entry's fields and the search took a
+    ///   command's letter, which a chord carries as text: Ctrl+V typed a
+    ///   `v` into the master password, Ctrl+L an `l` into an entry;
+    /// - AltGr+L, a Polish `ł`, locked the vault rather than typing, and
+    ///   AltGr+Q, a German `@`, closed the window;
+    /// - Alt+Enter answered "delete this entry?" with yes, and tried the
+    ///   master password.
+    #[test]
+    fn a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |key: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let commands = [
+            (Key::V, "v", Modifiers::ctrl()),
+            (Key::X, "x", Modifiers::alt()),
+            (Key::X, "x", Modifiers::super_key()),
+        ];
+
+        // The lock screen.
+        let mut state = AppState::for_test();
+        for (k, text, m) in commands {
+            handle_event(&mut state, &key(k, text, m));
+        }
+        assert_eq!(
+            state.master_input, "",
+            "a command's letter went into the master password"
+        );
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        assert_eq!(state.master_input, "ł", "AltGr's ł was not typed");
+        handle_event(&mut state, &key(Key::Enter, "", Modifiers::alt()));
+        assert!(!state.unlock_failed, "Alt+Enter tried the master password");
+
+        // A new vault's master password, the same.
+        let mut state = AppState::for_test();
+        state.gate = Gate::Create(NewVault::default());
+        for (k, text, m) in commands {
+            handle_event(&mut state, &key(k, text, m));
+        }
+        handle_event(&mut state, &key(Key::Tab, "", Modifiers::alt()));
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        let Gate::Create(form) = &state.gate else {
+            panic!("the new-vault form went away");
+        };
+        assert_eq!(
+            form.password, "ł",
+            "the new password typed a command or lost AltGr's ł"
+        );
+        assert!(!form.confirming, "Alt+Tab moved to the second field");
+
+        // Past it: AltGr+L types into the search and does not lock.
+        let mut state = unlocked_app();
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        assert!(state.vault.is_unlocked(), "AltGr+L locked the vault");
+        handle_event(&mut state, &key(Key::W, "w", Modifiers::alt()));
+        assert_eq!(
+            state.search_query, "ł",
+            "the search typed a command or lost AltGr's ł"
+        );
+        assert!(
+            !matches!(state.on_event(&key(Key::Q, "@", altgr)), Response::Exit),
+            "AltGr+Q closed the window"
+        );
+
+        // An entry's field.
+        let mut state = unlocked_app();
+        press(&mut state, Target::Add);
+        for (k, text, m) in commands {
+            handle_event(&mut state, &key(k, text, m));
+        }
+        handle_event(&mut state, &key(Key::L, "l", Modifiers::ctrl()));
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        let typed = state
+            .new_entry
+            .as_ref()
+            .and_then(|form| form.values.get(form.focused).cloned());
+        assert_eq!(
+            typed.as_deref(),
+            Some("ł"),
+            "the field typed a command or lost AltGr's ł"
+        );
+        handle_event(&mut state, &key(Key::Escape, "", Modifiers::alt()));
+        assert!(state.new_entry.is_some(), "Alt+Escape threw the form away");
+
+        // The generator panel: its Ctrl+M is a Ctrl chord, its arrows plain.
+        let mut state = unlocked_app();
+        handle_event(&mut state, &key(Key::G, "g", Modifiers::ctrl()));
+        assert_eq!(state.detail_view, DetailView::PasswordGenerator);
+        let (mode, length) = (
+            state.password_generator.mode,
+            state.password_generator.length,
+        );
+        handle_event(&mut state, &key(Key::M, "", altgr));
+        handle_event(&mut state, &key(Key::Right, "", Modifiers::alt()));
+        handle_event(&mut state, &key(Key::Right, "", Modifiers::super_key()));
+        assert_eq!(
+            state.password_generator.mode, mode,
+            "AltGr+M changed the mode"
+        );
+        assert_eq!(
+            state.password_generator.length, length,
+            "a chord moved the length"
+        );
+
+        // The list: Alt+Delete does not ask to delete.
+        let mut state = state_with_login();
+        let id = state.selected_entry_id.expect("the new login is selected");
+        handle_event(&mut state, &key(Key::Delete, "", Modifiers::alt()));
+        assert!(
+            state.dialog.is_none(),
+            "Alt+Delete asked to delete the entry"
+        );
+
+        // A backup's password, asked for in a dialog, types as the others.
+        state.dialog = Some(VaultDialog::RestorePassword {
+            path: std::path::PathBuf::from("backup.vault"),
+            backup: Box::new(unlocked_vault()),
+            input: String::new(),
+            error: None,
+        });
+        for (k, text, m) in commands {
+            handle_event(&mut state, &key(k, text, m));
+        }
+        handle_event(&mut state, &key(Key::L, "ł", altgr));
+        let Some(VaultDialog::RestorePassword { input, .. }) = &state.dialog else {
+            panic!("a chord closed the dialog");
+        };
+        assert_eq!(
+            input, "ł",
+            "the backup's password typed a command or lost AltGr's ł"
+        );
+
+        // "Delete this entry?" -- asked by a plain Delete -- is answered by a
+        // plain Enter only.
+        state.dialog = None;
+        handle_event(&mut state, &key(Key::Delete, "", Modifiers::NONE));
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::DeleteConfirm { .. })),
+            "control: Delete asks"
+        );
+        for m in [
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+            Modifiers::ctrl(),
+        ] {
+            handle_event(&mut state, &key(Key::Enter, "", m));
+        }
+        assert!(
+            state.vault.get_entry(id).is_some(),
+            "a chord deleted the entry"
+        );
+        assert!(state.dialog.is_some(), "a chord answered the question");
+    }
+
     /// **A Copy press says nothing was copied, and why** -- where it said
     /// "Copied Password -- clears in 30s" over a clipboard only this program
     /// could read, so the user pasted nothing elsewhere and could not tell
@@ -11594,7 +12227,7 @@ mod tests {
     #[test]
     fn the_contents_keep_every_character_of_every_field() {
         let mut vault = unlocked_vault();
-        let odd = "tab\there\nline\rreturn\\slash \u{e9}\u{1F512} ,\"quoted\"; = + -";
+        let odd = "tab\there\nline\rreturn\\slash \u{e9}\u{1F512} ,\"quoted\"; = + - nul\0";
         let folder = vault.add_folder(odd);
         let mut login = LoginData::new(odd, odd, odd);
         login.url = odd.to_string();
@@ -11695,6 +12328,32 @@ mod tests {
         state.selected_entry_id = Some(id);
         state.refresh_filter();
         (state, id)
+    }
+
+    /// **An entry's times are dates**: they were counts of seconds to now,
+    /// "Created: 31536000 seconds ago" for an entry a year old.
+    #[test]
+    fn an_entrys_times_are_dates() {
+        let mut state = unlocked_app();
+        // 2023-11-14 22:13:20 UTC, and a day later.
+        let id = state.vault.add_entry(
+            EntryData::Login(LoginData::new("bank.example", "ann", "pw")),
+            1_700_000_000,
+        );
+        assert!(state.vault.update_entry(
+            id,
+            EntryData::Login(LoginData::new("bank.example", "ann", "pw2")),
+            1_700_086_400,
+        ));
+        state.selected_entry_id = Some(id);
+        state.refresh_filter();
+        let shown = drawn(&state);
+        assert!(
+            shown.contains("Created: 2023-11-14 22:13")
+                && shown.contains("Modified: 2023-11-15 22:13"),
+            "{shown}"
+        );
+        assert!(!shown.contains("seconds ago"), "{shown}");
     }
 
     #[test]
@@ -11813,5 +12472,680 @@ mod tests {
         let (state, _) = app_with_a_login();
         assert!(probe::is_visible(&state, Target::EditEntry));
         assert!(probe::is_visible(&state, Target::DeleteEntry));
+    }
+
+    // == The text boxes, the toolkit's fields =================================
+    //
+    // Lane C's c-e-a-theme-can-shape-the-controls. Driven through
+    // `App::on_event`, as a window drives them, because that is where what
+    // the pointer is over is settled.
+
+    /// The theme's fields with a ring for a focus mark, and the user's focus
+    /// width wider than the toolkit's: what the boxes are drawn against.
+    fn field_rig(state: &mut AppState) -> (Palette, f32) {
+        let mut palette = state.palette;
+        palette.widget_style.field.focus = guitk::widget_style::FocusMark::Ring;
+        App::theme_changed(state, &palette);
+        let settings = appearance::AppearanceSettings {
+            focus_ring_scale: 2.5,
+            ..Default::default()
+        };
+        let width = settings.focus_ring_width();
+        assert!(width > guitk::style::FOCUS_RING_WIDTH);
+        App::appearance_changed(state, &settings);
+        (palette, width)
+    }
+
+    /// Whether `state` draws the toolkit's field at `rect` in state `s` --
+    /// and, when `s` is not focused, no focus mark round it either: an
+    /// unfocused box's commands begin a focused one's.
+    fn draws(
+        state: &AppState,
+        (palette, width): (Palette, f32),
+        rect: Rect,
+        s: guitk::field::State,
+    ) -> bool {
+        let seq = |f: guitk::field::State| {
+            let mut want: Vec<RenderCommand> = Vec::new();
+            guitk::field::draw(&mut want, &palette, rect, f, width);
+            want
+        };
+        let frame = state.frame(state.width, state.height);
+        let cmds = frame.commands();
+        let has = |want: &[RenderCommand]| {
+            !want.is_empty() && cmds.windows(want.len()).any(|w| w == want)
+        };
+        has(&seq(s)) && (s.focused || !has(&seq(guitk::field::State { focused: true, ..s })))
+    }
+
+    fn pointer_at(state: &mut AppState, x: f32, y: f32, kind: MouseEventKind) -> Response {
+        App::on_event(state, &Event::Mouse(MouseEvent { x, y, kind }))
+    }
+
+    /// A press on `target`, through the window.
+    fn press_on(state: &mut AppState, target: Target) {
+        let (x, y) = probe::rect_of(state, target)
+            .unwrap_or_else(|| panic!("{target:?} is not drawn"))
+            .centre();
+        pointer_at(state, x, y, MouseEventKind::Move);
+        pointer_at(state, x, y, MouseEventKind::Press(MouseButton::Left));
+    }
+
+    const IDLE: guitk::field::State = guitk::field::State {
+        hovered: false,
+        focused: false,
+        disabled: false,
+        invalid: false,
+    };
+    const LIT: guitk::field::State = guitk::field::State {
+        hovered: true,
+        ..IDLE
+    };
+    const KEYED: guitk::field::State = guitk::field::State {
+        focused: true,
+        ..IDLE
+    };
+    const BOTH: guitk::field::State = guitk::field::State {
+        hovered: true,
+        ..KEYED
+    };
+
+    /// **The lock screen's box**: it has the keyboard, lights under the
+    /// pointer and goes out when it leaves, and is red when the password in
+    /// it was refused.
+    #[test]
+    fn the_lock_screens_box_is_the_toolkits_field() {
+        let mut state = AppState::for_test();
+        let rig = field_rig(&mut state);
+        let master = probe::rect_of(&state, Target::MasterInput).expect("the master password box");
+        assert!(
+            draws(&state, rig, master, KEYED),
+            "the box the master password is typed into is not marked at the user's width"
+        );
+
+        let (x, y) = master.centre();
+        assert_eq!(
+            pointer_at(&mut state, x, y, MouseEventKind::Move),
+            Response::Redraw
+        );
+        assert!(
+            draws(&state, rig, master, BOTH),
+            "the box does not light under the pointer"
+        );
+        assert_eq!(
+            pointer_at(&mut state, x + 1.0, y, MouseEventKind::Move),
+            Response::Idle,
+            "a move within the box repaints"
+        );
+        assert_eq!(
+            pointer_at(&mut state, x, master.y - 2.0, MouseEventKind::Move),
+            Response::Redraw
+        );
+        assert!(
+            draws(&state, rig, master, KEYED),
+            "the box stays lit after the pointer moves off"
+        );
+        pointer_at(&mut state, x, y, MouseEventKind::Move);
+        assert_eq!(
+            pointer_at(&mut state, -1.0, -1.0, MouseEventKind::Leave),
+            Response::Redraw
+        );
+        assert!(
+            draws(&state, rig, master, KEYED),
+            "the box stays lit after the pointer leaves the window"
+        );
+        // A button is not a box: crossing one lights nothing, and asks for no
+        // repaint.
+        let (ux, uy) = probe::rect_of(&state, Target::Unlock)
+            .expect("the Unlock button")
+            .centre();
+        assert_eq!(
+            pointer_at(&mut state, ux, uy, MouseEventKind::Move),
+            Response::Idle,
+            "the pointer crossing the Unlock button repaints, though nothing lit"
+        );
+
+        type_in(&mut state, "not it");
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(state.unlock_failed, "control: the password must be refused");
+        assert!(
+            draws(
+                &state,
+                rig,
+                master,
+                guitk::field::State {
+                    invalid: true,
+                    ..KEYED
+                }
+            ),
+            "a refused password is not shown red"
+        );
+    }
+
+    /// **The search box and the new-entry form's boxes**: the search has the
+    /// keyboard until the form takes it; under a dialog or the file dialog
+    /// neither is lit nor marked, and when it goes the light under a pointer
+    /// that has not moved comes back.
+    #[test]
+    fn the_search_and_the_forms_boxes_are_the_toolkits_fields() {
+        let mut state = unlocked_app();
+        let rig = field_rig(&mut state);
+        let search = probe::rect_of(&state, Target::Search).expect("the search box");
+        assert!(
+            draws(&state, rig, search, KEYED),
+            "the search box, which takes what is typed, is not marked"
+        );
+        let (sx, sy) = search.centre();
+        pointer_at(&mut state, sx, sy, MouseEventKind::Move);
+        assert!(draws(&state, rig, search, BOTH));
+
+        // A vault dialog.
+        press_on(&mut state, Target::Settings);
+        press_on(&mut state, Target::ExportCsv);
+        assert!(matches!(state.dialog, Some(VaultDialog::ExportWarning)));
+        pointer_at(&mut state, sx, sy, MouseEventKind::Move);
+        assert!(
+            draws(&state, rig, search, IDLE),
+            "the search box is lit or marked under a dialog"
+        );
+        press_on(&mut state, Target::DialogCancel);
+        assert!(state.dialog.is_none());
+        assert_eq!(
+            pointer_at(&mut state, sx, sy, MouseEventKind::Move),
+            Response::Redraw,
+            "the light under the pointer did not come back with the dialog gone"
+        );
+        assert!(draws(&state, rig, search, BOTH));
+
+        // The file dialog, closed by a key -- the pointer has not moved, and
+        // the light comes back with no move to bring it.
+        press_on(&mut state, Target::BackUp);
+        assert!(state.picker.is_open());
+        pointer_at(&mut state, sx, sy, MouseEventKind::Move);
+        assert!(
+            draws(&state, rig, search, IDLE),
+            "the search box is lit or marked under the file dialog"
+        );
+        App::on_event(&mut state, &key(Key::Escape));
+        assert!(!state.picker.is_open());
+        assert!(
+            draws(&state, rig, search, BOTH),
+            "the light was not settled when the file dialog went"
+        );
+
+        // The new-entry form takes the keyboard from the search box.
+        press_on(&mut state, Target::Add);
+        assert!(state.new_entry.is_some());
+        pointer_at(&mut state, sx, sy, MouseEventKind::Move);
+        assert!(
+            draws(&state, rig, search, LIT),
+            "the search box is marked while the form has the keyboard"
+        );
+        let first = probe::rect_of(&state, Target::NewField(0)).expect("the form's first box");
+        let second = probe::rect_of(&state, Target::NewField(1)).expect("the form's second box");
+        assert!(
+            draws(&state, rig, first, KEYED),
+            "the form's box with the keyboard is not marked"
+        );
+        let (fx, fy) = second.centre();
+        pointer_at(&mut state, fx, fy, MouseEventKind::Move);
+        assert!(
+            draws(&state, rig, second, LIT),
+            "the form's box does not light under the pointer"
+        );
+    }
+
+    // == The auto-lock slider ==================================================
+
+    /// **The auto-lock setting is the vault's own, and the slider sets it.**
+    /// It was a number set to the default once and a knob drawn for nothing:
+    /// the panel said fifteen minutes of a vault restored with five, and no
+    /// press, drag or key moved it. A drag shows its minutes as it goes and
+    /// keeps them only when let go; a key keeps its at once; Escape takes a
+    /// drag back; and what is kept is the vault's -- the lock is counted by
+    /// it, and it is there when the vault is opened again.
+    #[test]
+    fn the_auto_lock_slider_shows_and_sets_the_vaults_own_time() {
+        use std::time::Duration;
+        let (scratch, mut state) = first_run("auto_lock");
+        make_vault(&mut state, MASTER, MASTER);
+        assert!(state.vault.is_unlocked(), "control: the vault must be made");
+        state.vault.auto_lock_minutes = 7; // as a restore sets it
+        press_on(&mut state, Target::Settings);
+        let shown = drawn(&state);
+        assert!(
+            shown.contains("7 minutes") && !shown.contains("15 minutes"),
+            "the panel does not show the vault's own time: {shown}"
+        );
+        assert!(
+            probe::is_visible(&state, Target::AutoLock),
+            "the slider has no place among the window's controls"
+        );
+
+        let placement = auto_lock_placement(state.width);
+        let at = |minutes: f32| placement.track.x + placement.track.w * (minutes - 1.0) / 59.0;
+        let y = placement.track.y + placement.track.h / 2.0;
+        pointer_at(&mut state, at(30.0), y, MouseEventKind::Move);
+        pointer_at(
+            &mut state,
+            at(30.0),
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        assert!(
+            drawn(&state).contains("30 minutes"),
+            "a press on the track did not move the slider there"
+        );
+        assert_eq!(
+            state.vault.auto_lock_minutes, 7,
+            "a drag kept its minutes before it was let go"
+        );
+        pointer_at(&mut state, at(45.0), y, MouseEventKind::Move);
+        assert!(
+            drawn(&state).contains("45 minutes"),
+            "the drag's minutes are not shown as it goes"
+        );
+        pointer_at(
+            &mut state,
+            at(45.0),
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(
+            state.vault.auto_lock_minutes, 45,
+            "letting the drag go kept nothing"
+        );
+        assert_eq!(
+            App::tick_interval(&state),
+            Some(Duration::from_mins(45)),
+            "the lock is not counted by the time set"
+        );
+
+        App::on_event(&mut state, &key(Key::Left));
+        assert_eq!(state.vault.auto_lock_minutes, 44, "Left took no minute off");
+        App::on_event(&mut state, &key(Key::Up));
+        assert_eq!(
+            state.vault.auto_lock_minutes, 44,
+            "Up, the entry list's, moved the slider"
+        );
+        App::on_event(&mut state, &key(Key::End));
+        assert_eq!(
+            state.vault.auto_lock_minutes, 60,
+            "End did not go to the hour"
+        );
+
+        pointer_at(&mut state, at(10.0), y, MouseEventKind::Move);
+        pointer_at(
+            &mut state,
+            at(10.0),
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        App::on_event(&mut state, &key(Key::Escape));
+        pointer_at(
+            &mut state,
+            at(10.0),
+            y,
+            MouseEventKind::Release(MouseButton::Left),
+        );
+        assert_eq!(
+            state.vault.auto_lock_minutes, 60,
+            "a drag taken back with Escape kept its minutes"
+        );
+        assert!(drawn(&state).contains("60 minutes"));
+
+        let mut again = reopen(&scratch);
+        assert!(again.vault.unlock(MASTER, 0));
+        assert_eq!(
+            again.vault.auto_lock_minutes, 60,
+            "the time set was not kept with the vault"
+        );
+    }
+
+    /// **The slider is the panel's only while the panel can be used**: under
+    /// a dialog a press on it is the dialog's, and the pointer passing over
+    /// it is no use of the vault -- a press is.
+    #[test]
+    fn the_auto_lock_slider_is_not_used_through_a_dialog_or_by_passing_over_it() {
+        let mut state = unlocked_app();
+        let placement = auto_lock_placement(state.width);
+        let (x, y) = (
+            placement.track.x + 1.0,
+            placement.track.y + placement.track.h / 2.0,
+        );
+        let before = state.vault.auto_lock_minutes;
+
+        // Not the slider's keys or presses with another panel up.
+        App::on_event(&mut state, &key(Key::Home));
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        assert_eq!(
+            state.vault.auto_lock_minutes, before,
+            "the slider was moved with the settings panel not up"
+        );
+
+        press_on(&mut state, Target::Settings);
+        state.now += 30;
+        let used = state.vault.last_access;
+        pointer_at(&mut state, x, y, MouseEventKind::Move);
+        assert_eq!(
+            state.vault.last_access, used,
+            "the pointer passing over the slider counted as use of the vault"
+        );
+
+        press_on(&mut state, Target::ExportCsv);
+        assert!(state.dialog.is_some(), "control: the dialog must be up");
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        assert_eq!(
+            state.vault.auto_lock_minutes, before,
+            "a press under a dialog moved the slider"
+        );
+
+        App::on_event(&mut state, &key(Key::Escape));
+        assert!(state.dialog.is_none());
+        state.now += 30;
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        assert_eq!(
+            state.vault.auto_lock_minutes, 1,
+            "control: with the dialog gone the press moves it"
+        );
+        assert_eq!(
+            state.vault.last_access, state.now,
+            "a press on the slider was not counted as use of the vault"
+        );
+
+        // Nor through the lock screen, which is drawn over the panel.
+        App::on_event(&mut state, &key(Key::End));
+        assert_eq!(state.vault.auto_lock_minutes, 60);
+        state.lock_vault();
+        pointer_at(&mut state, x, y, MouseEventKind::Press(MouseButton::Left));
+        pointer_at(&mut state, x, y, MouseEventKind::Release(MouseButton::Left));
+        // Read while still locked: opening the vault reads its time back
+        // from the sealed file, which would hide a change made in memory.
+        assert_eq!(
+            state.vault.auto_lock_minutes, 60,
+            "a press on the lock screen moved the slider behind it"
+        );
+    }
+
+    /// **The first run's two boxes and the restore dialog's**: the keyboard
+    /// is in one of the two, and a refusal makes the box it is about red
+    /// until that box is typed in; the restore box is red while the backup's
+    /// password is refused.
+    #[test]
+    fn the_first_runs_and_the_restores_boxes_are_the_toolkits_fields() {
+        let (_scratch, mut state) = first_run("fields");
+        let rig = field_rig(&mut state);
+        let new = probe::rect_of(&state, Target::NewPassword).expect("the first box");
+        let again = probe::rect_of(&state, Target::ConfirmPassword).expect("the second box");
+        let red = |s: guitk::field::State| guitk::field::State { invalid: true, ..s };
+        assert!(draws(&state, rig, new, KEYED) && draws(&state, rig, again, IDLE));
+
+        // Too short: the first box is wrong.
+        type_in(&mut state, "short");
+        handle_event(&mut state, &key(Key::Enter));
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(
+            draws(&state, rig, new, red(KEYED)) && draws(&state, rig, again, IDLE),
+            "a password refused as too short is not the box shown red"
+        );
+        type_in(&mut state, "-and-longer");
+        assert!(
+            draws(&state, rig, new, KEYED),
+            "the box stays red once it is typed in"
+        );
+
+        // Not the same twice: the second box is wrong.
+        handle_event(&mut state, &key(Key::Tab));
+        assert!(draws(&state, rig, new, IDLE) && draws(&state, rig, again, KEYED));
+        type_in(&mut state, "something else");
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(
+            draws(&state, rig, again, red(KEYED)) && draws(&state, rig, new, IDLE),
+            "a second password that does not match is not the box shown red"
+        );
+        // Emptied for the retyping, it is still put right by a Backspace.
+        handle_event(&mut state, &key(Key::Backspace));
+        assert!(
+            draws(&state, rig, again, KEYED),
+            "the box stays red after a Backspace in it"
+        );
+
+        // The restore dialog's box.
+        let mut state = unlocked_app();
+        let rig = field_rig(&mut state);
+        state.dialog = Some(VaultDialog::RestorePassword {
+            path: std::path::PathBuf::from("backup.vault"),
+            backup: Box::new(unlocked_vault()),
+            input: String::new(),
+            error: None,
+        });
+        let restore = probe::rect_of(&state, Target::RestoreInput).expect("the restore box");
+        assert!(
+            draws(&state, rig, restore, KEYED),
+            "the restore dialog's box is not marked"
+        );
+        type_in(&mut state, "not it");
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(
+            draws(&state, rig, restore, red(KEYED)),
+            "a backup password refused is not shown red"
+        );
+    }
+
+    // --- The list of keys, and the Lock button ---
+
+    fn chord_of(k: Key, modifiers: guitk::event::Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    fn drawn_strings(state: &AppState) -> Vec<String> {
+        state
+            .frame(state.width, state.height)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Every key the list of keys advertises is answered by this window**,
+    /// over an open vault with an entry chosen -- the generator's with the
+    /// generator up. Ctrl+Q closes the window.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut state = unlocked_with_entries(4);
+                state.on_event(&key(Key::Down));
+                assert!(
+                    state.selected_entry_id.is_some(),
+                    "the test needs an entry chosen"
+                );
+                if what.starts_with("Generator") {
+                    state.detail_view = DetailView::PasswordGenerator;
+                    regenerate_password(&mut state);
+                }
+                assert_ne!(
+                    state.on_event(&Event::Key(stroke.clone())),
+                    Response::Idle,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The list of keys reaches the window** over the open vault, and goes
+    /// on F1 or a plain Escape -- not on Alt+Escape, which is the desktop's.
+    /// `?` is typed into the search, as every character is here; and on the
+    /// lock screen, whose keys these are not, F1 raises nothing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        use guitk::event::Modifiers;
+        let mut state = unlocked_with_entries(3);
+        assert!(
+            !drawn_strings(&state)
+                .iter()
+                .any(|t| t.contains("F1 or Escape closes this")),
+            "the list is up before anybody asked for it"
+        );
+        for chord in [Modifiers::alt(), Modifiers::super_key()] {
+            state.on_event(&chord_of(Key::F1, chord, ""));
+            assert!(
+                !state.show_help,
+                "{chord:?}+F1, the desktop's, raised the list"
+            );
+        }
+        state.on_event(&chord_of(Key::Slash, Modifiers::shift(), "?"));
+        assert!(!state.show_help, "? raised the list");
+        assert_eq!(state.search_query, "?", "? was not typed into the search");
+
+        state.on_event(&key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn_strings(&state), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        state.on_event(&chord_of(Key::Escape, Modifiers::alt(), ""));
+        assert!(state.show_help, "Alt+Escape put the list away");
+        state.on_event(&key(Key::Escape));
+        assert!(!state.show_help, "Escape left the list up");
+        assert_eq!(
+            state.search_query, "?",
+            "Escape under the list cleared the search under it"
+        );
+        state.on_event(&key(Key::F1));
+        state.on_event(&key(Key::F1));
+        assert!(!state.show_help, "F1 left the list up");
+
+        state.on_event(&chord_of(Key::L, Modifiers::ctrl(), "l"));
+        assert!(!state.vault.is_unlocked());
+        state.on_event(&key(Key::F1));
+        assert!(
+            !state.show_help,
+            "F1 raised the vault's keys over the lock screen"
+        );
+    }
+
+    /// **The list of keys is modal**: with it up, no key, press or turn of the
+    /// wheel reaches what it covers -- Ctrl+Q does not close the window,
+    /// Delete does not ask to delete the entry, Ctrl+L does not lock. The
+    /// window is the same with it down.
+    #[test]
+    fn the_shortcut_list_takes_the_keys_and_a_press() {
+        use guitk::event::Modifiers;
+        let mut state = unlocked_with_entries(40);
+        state.on_event(&key(Key::Down));
+        let chosen = state.selected_entry_id;
+        let row = probe::rect_of(&state, Target::EntryRow(3)).expect("a fourth row");
+        let (rx, ry) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+        let mouse = |kind| Event::Mouse(guitk::event::MouseEvent { x: rx, y: ry, kind });
+
+        state.on_event(&key(Key::F1));
+        assert_eq!(
+            state.on_event(&chord_of(Key::Q, Modifiers::ctrl(), "q")),
+            Response::Redraw,
+            "Ctrl+Q closed the window under the list"
+        );
+        for (k, m, t) in [
+            (Key::Delete, Modifiers::NONE, ""),
+            (Key::Down, Modifiers::NONE, ""),
+            (Key::L, Modifiers::ctrl(), "l"),
+            (Key::G, Modifiers::ctrl(), "g"),
+            (Key::A, Modifiers::NONE, "a"),
+        ] {
+            state.on_event(&chord_of(k, m, t));
+        }
+        assert!(
+            state.show_help,
+            "a key other than F1 or Escape put the list away"
+        );
+        assert!(
+            state.dialog.is_none(),
+            "Delete asked to delete under the list"
+        );
+        assert_eq!(state.selected_entry_id, chosen, "Down moved under the list");
+        assert!(
+            state.vault.is_unlocked(),
+            "Ctrl+L locked the vault under the list"
+        );
+        assert_eq!(
+            state.detail_view,
+            DetailView::EntryDetail,
+            "Ctrl+G under the list"
+        );
+        assert_eq!(state.search_query, "", "a key was typed under the list");
+        assert_eq!(
+            state.on_event(&mouse(MouseEventKind::Scroll { dx: 0.0, dy: -3.0 })),
+            Response::Idle
+        );
+        assert!(
+            state.list_scroll.abs() < f32::EPSILON,
+            "the wheel scrolled the entries under it"
+        );
+        state.on_event(&mouse(MouseEventKind::Press(MouseButton::Left)));
+        assert!(!state.show_help, "the press did not put the list away");
+        assert_eq!(
+            state.selected_entry_id, chosen,
+            "the press chose an entry under it"
+        );
+        state.on_event(&key(Key::F1));
+        state.on_event(&mouse(MouseEventKind::Press(MouseButton::Right)));
+        assert!(!state.show_help, "a right-button press left the list up");
+
+        // The window.
+        state.on_event(&key(Key::Down));
+        assert_ne!(state.selected_entry_id, chosen);
+    }
+
+    /// **Locking puts the list away**, by the clock as by Ctrl+L: it is the
+    /// open vault's list, and it would come back over the next unlock.
+    #[test]
+    fn locking_puts_the_list_away() {
+        let mut state = unlocked_with_entries(2);
+        state.on_event(&key(Key::F1));
+        assert!(state.show_help);
+        state.on_event(&Event::Tick {
+            elapsed_ms: 24 * 60 * 60 * 1000,
+        });
+        assert!(
+            !state.vault.is_unlocked(),
+            "the clock did not lock the vault"
+        );
+        assert!(!state.show_help, "the list outlived the lock");
+    }
+
+    /// **The Lock button locks as Ctrl+L does**: it saves first what could not
+    /// be saved before. It locked the vault alone, so a change whose save had
+    /// failed was gone with the lock.
+    #[test]
+    fn the_lock_button_saves_what_could_not_be_saved_as_ctrl_l_does() {
+        let (scratch, mut state) = first_run("lockbutton");
+        make_vault(&mut state, MASTER, MASTER);
+        state.entropy = no_entropy;
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        assert!(
+            state.save_error.is_some(),
+            "the test needs a save that failed"
+        );
+        let unsaved = std::fs::read(vault_file(&scratch)).unwrap();
+        state.entropy = test_entropy;
+        probe::click(&mut state, Target::LockVault);
+        assert!(!state.vault.is_unlocked(), "the Lock button did not lock");
+        assert_ne!(
+            std::fs::read(vault_file(&scratch)).unwrap(),
+            unsaved,
+            "the Lock button threw away the change that could not be saved"
+        );
+        let mut again = reopen(&scratch);
+        assert!(again.vault.unlock(MASTER, again.now));
+        assert_eq!(again.vault.entries.len(), 1, "the login was not kept");
     }
 }

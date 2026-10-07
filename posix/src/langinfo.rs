@@ -203,71 +203,84 @@ pub extern "C" fn nl_langinfo_l(item: i32, _locale: usize) -> *const u8 {
 
 /// Core lookup — maps an `nl_item` to the corresponding C locale string.
 fn langinfo_lookup(item: i32) -> *const u8 {
+    langinfo_bytes(item).as_ptr()
+}
+
+/// `item`'s C-locale string without its NUL: what `nl_langinfo(item)`
+/// points at. `strftime` reads its names and formats here, as glibc's reads
+/// them from the locale, so the two cannot disagree.
+pub(crate) fn c_locale_string(item: i32) -> &'static [u8] {
+    let s = langinfo_bytes(item);
+    s.strip_suffix(b"\0").unwrap_or(s)
+}
+
+/// `item`'s C-locale string, NUL-terminated.
+fn langinfo_bytes(item: i32) -> &'static [u8] {
     match item {
-        RADIXCHAR => RADIX_STR.as_ptr(),
-        D_T_FMT => D_T_FMT_STR.as_ptr(),
-        D_FMT => D_FMT_STR.as_ptr(),
-        T_FMT => T_FMT_STR.as_ptr(),
-        T_FMT_AMPM => T_FMT_AMPM_STR.as_ptr(),
-        AM_STR => AM_STR_VAL.as_ptr(),
-        PM_STR => PM_STR_VAL.as_ptr(),
+        RADIXCHAR => RADIX_STR,
+        D_T_FMT => D_T_FMT_STR,
+        D_FMT => D_FMT_STR,
+        T_FMT => T_FMT_STR,
+        T_FMT_AMPM => T_FMT_AMPM_STR,
+        AM_STR => AM_STR_VAL,
+        PM_STR => PM_STR_VAL,
 
         // Full day names.
-        DAY_1 => DAY_STRS[0].as_ptr(),
-        DAY_2 => DAY_STRS[1].as_ptr(),
-        DAY_3 => DAY_STRS[2].as_ptr(),
-        DAY_4 => DAY_STRS[3].as_ptr(),
-        DAY_5 => DAY_STRS[4].as_ptr(),
-        DAY_6 => DAY_STRS[5].as_ptr(),
-        DAY_7 => DAY_STRS[6].as_ptr(),
+        DAY_1 => DAY_STRS[0],
+        DAY_2 => DAY_STRS[1],
+        DAY_3 => DAY_STRS[2],
+        DAY_4 => DAY_STRS[3],
+        DAY_5 => DAY_STRS[4],
+        DAY_6 => DAY_STRS[5],
+        DAY_7 => DAY_STRS[6],
 
         // Abbreviated day names.
-        ABDAY_1 => ABDAY_STRS[0].as_ptr(),
-        ABDAY_2 => ABDAY_STRS[1].as_ptr(),
-        ABDAY_3 => ABDAY_STRS[2].as_ptr(),
-        ABDAY_4 => ABDAY_STRS[3].as_ptr(),
-        ABDAY_5 => ABDAY_STRS[4].as_ptr(),
-        ABDAY_6 => ABDAY_STRS[5].as_ptr(),
-        ABDAY_7 => ABDAY_STRS[6].as_ptr(),
+        ABDAY_1 => ABDAY_STRS[0],
+        ABDAY_2 => ABDAY_STRS[1],
+        ABDAY_3 => ABDAY_STRS[2],
+        ABDAY_4 => ABDAY_STRS[3],
+        ABDAY_5 => ABDAY_STRS[4],
+        ABDAY_6 => ABDAY_STRS[5],
+        ABDAY_7 => ABDAY_STRS[6],
 
         // Full month names.
-        MON_1 => MON_STRS[0].as_ptr(),
-        MON_2 => MON_STRS[1].as_ptr(),
-        MON_3 => MON_STRS[2].as_ptr(),
-        MON_4 => MON_STRS[3].as_ptr(),
-        MON_5 => MON_STRS[4].as_ptr(),
-        MON_6 => MON_STRS[5].as_ptr(),
-        MON_7 => MON_STRS[6].as_ptr(),
-        MON_8 => MON_STRS[7].as_ptr(),
-        MON_9 => MON_STRS[8].as_ptr(),
-        MON_10 => MON_STRS[9].as_ptr(),
-        MON_11 => MON_STRS[10].as_ptr(),
-        MON_12 => MON_STRS[11].as_ptr(),
+        MON_1 => MON_STRS[0],
+        MON_2 => MON_STRS[1],
+        MON_3 => MON_STRS[2],
+        MON_4 => MON_STRS[3],
+        MON_5 => MON_STRS[4],
+        MON_6 => MON_STRS[5],
+        MON_7 => MON_STRS[6],
+        MON_8 => MON_STRS[7],
+        MON_9 => MON_STRS[8],
+        MON_10 => MON_STRS[9],
+        MON_11 => MON_STRS[10],
+        MON_12 => MON_STRS[11],
 
         // Abbreviated month names.
-        ABMON_1 => ABMON_STRS[0].as_ptr(),
-        ABMON_2 => ABMON_STRS[1].as_ptr(),
-        ABMON_3 => ABMON_STRS[2].as_ptr(),
-        ABMON_4 => ABMON_STRS[3].as_ptr(),
-        ABMON_5 => ABMON_STRS[4].as_ptr(),
-        ABMON_6 => ABMON_STRS[5].as_ptr(),
-        ABMON_7 => ABMON_STRS[6].as_ptr(),
-        ABMON_8 => ABMON_STRS[7].as_ptr(),
-        ABMON_9 => ABMON_STRS[8].as_ptr(),
-        ABMON_10 => ABMON_STRS[9].as_ptr(),
-        ABMON_11 => ABMON_STRS[10].as_ptr(),
-        ABMON_12 => ABMON_STRS[11].as_ptr(),
+        ABMON_1 => ABMON_STRS[0],
+        ABMON_2 => ABMON_STRS[1],
+        ABMON_3 => ABMON_STRS[2],
+        ABMON_4 => ABMON_STRS[3],
+        ABMON_5 => ABMON_STRS[4],
+        ABMON_6 => ABMON_STRS[5],
+        ABMON_7 => ABMON_STRS[6],
+        ABMON_8 => ABMON_STRS[7],
+        ABMON_9 => ABMON_STRS[8],
+        ABMON_10 => ABMON_STRS[9],
+        ABMON_11 => ABMON_STRS[10],
+        ABMON_12 => ABMON_STRS[11],
 
         // Era (empty in C locale).
-        ERA | ERA_D_FMT | ERA_D_T_FMT | ERA_T_FMT | ALT_DIGITS => EMPTY.as_ptr(),
+        ERA | ERA_D_FMT | ERA_D_T_FMT | ERA_T_FMT | ALT_DIGITS => EMPTY,
 
-        THOUSEP => THOUSEP_STR.as_ptr(),
-        YESEXPR => YESEXPR_STR.as_ptr(),
-        NOEXPR => NOEXPR_STR.as_ptr(),
-        CRNCYSTR => CRNCYSTR_STR.as_ptr(),
-        CODESET => CODESET_STR.as_ptr(),
+        THOUSEP => THOUSEP_STR,
+        YESEXPR => YESEXPR_STR,
+        NOEXPR => NOEXPR_STR,
+        CRNCYSTR => CRNCYSTR_STR,
+        CODESET => CODESET_STR,
 
-        _ => EMPTY.as_ptr(),
+        _ => EMPTY,
     }
 }
 

@@ -1094,7 +1094,10 @@ fn test_pointer_write_release() {
     let mut v: DisjointMut<Vec<[u8; 4]>> = Default::default();
     v.resize(10, [0u8; 4]);
 
-    let borrow = unsafe { v.index(0..) };
+    // SlateOS (VENDORED.md, change 5): `index` is a safe function in this
+    // release, so the `unsafe` blocks upstream's test kept around it are gone;
+    // only the raw pointer's write needs one.
+    let borrow = v.index(0..);
     let ptr = v.as_mut_ptr().wrapping_offset(3) as *mut u8;
     unsafe {
         ptr.wrapping_offset(2).write(42);
@@ -1107,10 +1110,13 @@ fn test_pointer_write_release() {
     // assert_eq!(borrow[3][2], 0);
 
     // We are fine to re-borrow at this point now that the write is done.
-    assert_eq!(unsafe { v.index(4)[0] }, 0);
-    assert_eq!(unsafe { v.index(3)[2] }, 42);
+    assert_eq!(v.index(4)[0], 0);
+    assert_eq!(v.index(3)[2], 42);
 }
 
+// SlateOS (VENDORED.md, change 5): `Bounds::overlaps` exists only where the
+// debug build's checks call it, so its test does too.
+#[cfg(debug_assertions)]
 #[test]
 fn test_range_overlap() {
     fn overlaps(a: impl Into<Bounds>, b: impl Into<Bounds>) -> bool {

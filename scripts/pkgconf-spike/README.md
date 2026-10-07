@@ -17,7 +17,7 @@ Reproduce with `./run.sh` from WSL.
 |---|---|
 | `./configure --host=x86_64-linux-musl --disable-shared --enable-static` | exit 0, clean |
 | `make -j8` (against zig's musl headers) | exit 0, **no errors, no implicit-declaration warnings** |
-| Relink against `toolchain/sysroot/lib/libc.a` with `-nostdlib` | exit 0 |
+| Relink against `toolchain/sysroot/lib/libc.a` with `-nostdlib` (see below) | exit 0 |
 | Undefined symbols in the SlateOS link | **0** |
 | Distinct libc symbols pkgconf actually needs | 53 (of 132 external references; the other 79 are pkgconf's own) |
 | Output | 2.9 MB static `ET_EXEC`, no `PT_INTERP`, no `PT_TLS`, `_start` from our `posix` crate |
@@ -99,9 +99,16 @@ a fixture `.pc` file and assert the output, false-pass-proof.
 - **`libstubs.a` is deliberately not linked.** It and `libc.a` are both
   Rust-built and each carries a panic handler, so together they collide on
   `__rustc::rust_begin_unwind`. `libc.a` alone covers pkgconf.
-- **`libc.a` is listed twice** rather than wrapped in `--start-group`; its
-  intra-archive references are not topologically ordered and a second pass is
-  cheaper.
+- **The link is zig's `ld.lld`, with exactly its inputs**, since 2026-10-01
+  (`slate_make_link_wrappers` in `scripts/lib/worktree.sh`). The `zig cc
+  -nostdlib` it replaced put zig's own musl `libc.a` behind ours on every link,
+  so a function ours lacked would have come from musl rather than counting as
+  missing (known-issues `D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC`); relinked
+  without it, pkgconf has nothing undefined, so the table above stands.
+- **`libc.a` is listed once.** It was listed twice, rather than wrapped in
+  `--start-group`, until 2026-10-01; but ld.lld takes a symbol from any archive
+  on the line, wherever the reference is, and the binary is byte-identical
+  either way.
 
 ## Comparison with the bash spike
 

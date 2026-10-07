@@ -1,5 +1,7 @@
 ## `C-NO-APP-IS-WIRED-TO-AN-EVENT-LOOP`
 
+**Status:** FIXED -- `oswindow::app` (`f5b98e1f1`, 2026-08-25) is the loop every application now runs, and the boot test's own gate reports "136 program(s) open a window, 0 do not". On `main` since. Stamped 2026-09-28 by lane F, `gui/window`'s owner since the six-lane split.
+
 **In short:** none of the 140 apps in `apps/` can be used. Each one builds its
 picture correctly and has tests proving the picture is right, but no app is
 connected to the thing that delivers mouse clicks and keystrokes, so `fn main()`

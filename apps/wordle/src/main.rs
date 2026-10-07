@@ -134,7 +134,9 @@ fn letter_ink(face: Color, c: &Colours) -> Color {
     if [CORRECT, PRESENT, ABSENT].contains(&face) {
         gamechrome::legible_on(ANSWER_INKS, face)
     } else {
-        c.chrome.text
+        // An unguessed key's face is not the page: under a theme whose text
+        // is only as dark as the page needs, the page's text was 3.0:1 on it.
+        c.chrome.on(face).text
     }
 }
 
@@ -1195,15 +1197,23 @@ impl Wordle {
         // order is the whole reason `?` works: `?` is Shift and the slash key,
         // so a bail that drops every modified key would drop it, and the list
         // would advertise a key of its own that did nothing.
-        if ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift) {
+        //
+        // Plain, though -- nothing held but Shift: Alt+F1 and Alt+Escape are
+        // the window's or the desktop's, and raised and put away the list.
+        let plain = textline::is_plain(ev.modifiers);
+        if plain && (ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift)) {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
-        // Escape closes the card before it deals a new word. A reader who
-        // opened the list and wants out should not find they have thrown away
-        // the finished board behind it.
-        if self.show_help && ev.key == Key::Escape {
-            self.show_help = false;
+        // The card is modal. A plain Escape puts it away -- before it could
+        // deal a new word: a reader who opened the list and wants out should
+        // not find they have thrown away the finished board behind it -- and
+        // no other key reaches the board it covers. It took only Escape, so
+        // a letter was typed into the guess under it and Enter submitted it.
+        if self.show_help {
+            if plain && ev.key == Key::Escape {
+                self.show_help = false;
+            }
             return EventResult::Consumed;
         }
 
@@ -1242,6 +1252,19 @@ impl Wordle {
     }
 
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        // The card is modal for the pointer as it is for the keys, and drawn
+        // over everything, the end-of-game panel included: a press with any
+        // button puts it away and does nothing else, where it used to press
+        // the on-screen key or button under it.
+        if self.show_help
+            && matches!(
+                ev.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
         }
@@ -1334,7 +1357,8 @@ impl Wordle {
             } else if lit {
                 c.on_lit
             } else {
-                c.chrome.text
+                // Written for the raised button, not the page.
+                c.chrome.on(c.chrome.raised).text
             };
             fill(f, r, bg, CornerRadii::all(4.0));
             label_centred(
@@ -1457,7 +1481,7 @@ impl Wordle {
                     text: name,
                     size: l.key_h * 0.28,
                     weight: FontWeightHint::Bold,
-                    color: c.chrome.text,
+                    color: c.chrome.on(c.chrome.lit).text,
                 },
                 r,
             );
@@ -1804,7 +1828,18 @@ mod tests {
     fn the_window_is_drawn_in_the_users_colours() {
         for (light, cards) in LOOKS {
             let p = palette(light, cards);
-            let derived = [CORRECT, PRESENT, ABSENT, ANSWER_INKS.0, ANSWER_INKS.1];
+            // A lit header button's letter is `on_accent`, which is
+            // `readable_on(accent)`: a colour made from the accent, so it is
+            // declared -- today it happens to equal one of the palette's
+            // roles, and the check will not always take that on trust.
+            let derived = [
+                CORRECT,
+                PRESENT,
+                ABSENT,
+                ANSWER_INKS.0,
+                ANSWER_INKS.1,
+                p.on_accent(),
+            ];
             for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
@@ -1865,8 +1900,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             // A switched-off button's label is exempt, as WCAG exempts an
             // inactive control: Hard mode, once the first guess is in.
             let c = Colours::of(&p);
@@ -1900,7 +1934,7 @@ mod tests {
                 }
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground
@@ -3244,6 +3278,79 @@ mod tests {
             assert_eq!(probe::key(&mut g, &ev), EventResult::Ignored);
             assert_eq!(typed(&g), "", "{:?} typed a letter", ev.modifiers);
         }
+    }
+
+    /// **The list of keys answers F1 and Escape plain**: Alt+F1 and
+    /// Alt+Escape, the window's or the desktop's, raised it and put it away.
+    #[test]
+    fn a_chord_neither_raises_nor_dismisses_the_list_of_keys() {
+        let chord = |k: Key, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        };
+        let mut g = game();
+        for m in [Modifiers::alt(), Modifiers::super_key(), Modifiers::ctrl()] {
+            assert_eq!(probe::key(&mut g, &chord(Key::F1, m)), EventResult::Ignored);
+            assert!(!g.show_help, "{m:?}+F1 raised the list");
+        }
+        probe::key(&mut g, &probe::press(Key::F1));
+        assert!(g.show_help, "control: F1 raises it");
+        for m in [Modifiers::alt(), Modifiers::super_key(), Modifiers::ctrl()] {
+            probe::key(&mut g, &chord(Key::Escape, m));
+            assert!(g.show_help, "{m:?}+Escape put it away");
+        }
+    }
+
+    /// **The shortcut list is modal for the keys and the pointer alike.** It
+    /// took only Escape: with it up, a letter was typed into the guess under
+    /// it and a digit changed the difficulty; a press typed the on-screen key
+    /// under it. The controls are the same press and key with the list down.
+    #[test]
+    fn the_shortcut_card_takes_the_keys_and_a_press_rather_than_passing_them_on() {
+        let mut g = game();
+        let level = g.difficulty;
+        let f1 = probe::press(Key::F1);
+
+        probe::key(&mut g, &f1);
+        assert!(g.show_help);
+        probe::key(&mut g, &probe::press(Key::A));
+        probe::key(&mut g, &probe::press(Key::Num3));
+        assert!(
+            g.show_help,
+            "a key other than F1, ? or Escape put the list away"
+        );
+        assert!(
+            g.current_input.is_empty(),
+            "a letter was typed under the list"
+        );
+        assert_eq!(
+            g.difficulty, level,
+            "a digit changed the difficulty under it"
+        );
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(!g.show_help, "Escape left the list up");
+
+        probe::key(&mut g, &f1);
+        assert_eq!(
+            probe::click(&mut g, Target::Key('A')),
+            EventResult::Consumed
+        );
+        assert!(!g.show_help, "the press did not put the list away");
+        assert!(
+            g.current_input.is_empty(),
+            "the press typed a letter under the list"
+        );
+        probe::key(&mut g, &f1);
+        probe::click_with(&mut g, Target::Key('A'), MouseButton::Right);
+        assert!(!g.show_help, "a right-button press left the list up");
+
+        // The controls.
+        probe::click(&mut g, Target::Key('A'));
+        assert_eq!(g.current_input.len(), 1, "control: the press types nothing");
+        probe::key(&mut g, &probe::press(Key::B));
+        assert_eq!(g.current_input.len(), 2, "control: a letter types nothing");
     }
 
     /// A key that is not a letter and not one of the shortcuts is not ours.

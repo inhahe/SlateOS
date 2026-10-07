@@ -34,7 +34,7 @@ use crate::bitmap;
 use crate::colr::{self, ColourImage};
 use crate::device::Corrections;
 use crate::fallback::{self, Extents};
-use crate::gpos::{Adjust, Run};
+use crate::gpos::{Adjust, LegacyKern, Run};
 use crate::gsub::SubGlyph;
 use crate::hangul;
 use crate::hint::{FaceHints, Glyphs, Hinter};
@@ -1340,8 +1340,16 @@ impl ScaledFont {
                 // `calt`; everything else takes its cursive form. The two are
                 // exclusive — no character is both — and `jamo` is empty for
                 // every run with no Korean in it, so the lookup costs nothing.
+                //
+                // Not in a run the face has called its shaper off for: the
+                // joining forms are the Arabic and USE shapers' features, and
+                // HarfBuzz's default shaper asks for none of them, so N'Ko in
+                // a face that files everything under `latn` -- or Syriac under
+                // `DFLT` -- keeps its letters' isolated shapes there.
                 ..if hangul::is_jamo(ch) {
                     SubGlyph::jamo(gid, cluster, jamo.get(i).copied().flatten())
+                } else if simple {
+                    SubGlyph::new(gid, cluster)
                 } else {
                     SubGlyph::cursive(gid, cluster, forms.get(i).copied().flatten())
                 }
@@ -1459,18 +1467,27 @@ impl ScaledFont {
         drop(prep);
         let mark_timer = Timer::start(Phase::Marks);
         let by_gdef = self.face.classifies_glyphs();
-        let marks: Vec<bool> = glyphs
+        // Which glyphs are marks *by class*, whether or not the script takes
+        // their width. The legacy kerning below steps over exactly these, as
+        // HarfBuzz's `hb_kern_machine_t` does with `IgnoreMarks`: a matcher
+        // flag reads the glyph's class and nothing else, so a mark in one of
+        // the scripts that keep their marks' widths is still stepped over.
+        let classed: Vec<bool> = glyphs
             .iter()
             .enumerate()
             .map(|(i, glyph)| {
                 let tab = tabs.get(i).copied().unwrap_or(false);
-                zeroed_at.get(i).copied().unwrap_or(false)
-                    && if by_gdef {
-                        !tab && self.face.is_mark(glyph.gid)
-                    } else {
-                        glyph.mark
-                    }
+                if by_gdef {
+                    !tab && self.face.is_mark(glyph.gid)
+                } else {
+                    glyph.mark
+                }
             })
+            .collect();
+        let marks: Vec<bool> = classed
+            .iter()
+            .enumerate()
+            .map(|(i, &classed)| classed && zeroed_at.get(i).copied().unwrap_or(false))
             .collect();
         drop(mark_timer);
         let advances: Vec<i32> = {
@@ -1495,9 +1512,11 @@ impl ScaledFont {
         // their nominal `hmtx` advance unless the loop below takes it away.
         // `DejaVuMathTeXGyre.ttf` is exactly that face, and asking the script
         // instead left every Myanmar mark in it a missing-glyph box wide.
-        let (adjusted, kept_at) = {
+        let (adjusted, kept_at, kerned_at) = {
             let _t = Timer::start(Phase::Gpos);
-            self.position_segments(&segments, lang, &glyphs, &advances, &marks, &levels, extra)
+            self.position_segments(
+                &segments, lang, &glyphs, &advances, &marks, &classed, &tabs, &levels, extra,
+            )
         };
         let tail = Timer::start(Phase::Tail);
         // Whether pairs still have to be kerned one at a time here. They do
@@ -1506,12 +1525,11 @@ impl ScaledFont {
         // not be charged again, in the company of every other lookup.
         let legacy_kerning = legacy_at.iter().any(|&yes| yes);
         let mut out: Vec<ShapedGlyph> = Vec::with_capacity(glyphs.len());
-        // Where in `out` the left half of the next kerning pair sits, and the
-        // glyphs standing between it and the position being filled. A tab is
-        // never a left half: its advance is a layout decision, not a glyph
-        // width, and a face that kerns after a space would quietly narrow it.
+        // Where in `out` the left half of the next kerning pair sits. Only marks
+        // may stand between it and the position being filled. A tab is never a
+        // left half: its advance is a layout decision, not a glyph width, and a
+        // face that kerns after a space would quietly narrow it.
         let mut kern_left: Option<usize> = None;
-        let mut between: Vec<u16> = Vec::new();
         // The half of a split legacy kern that belongs to the *right* glyph of
         // the pair, carried to the iteration that pushes it. See the split
         // below for why a legacy kern has two halves at all.
@@ -1519,13 +1537,14 @@ impl ScaledFont {
         for (i, glyph) in glyphs.iter().enumerate() {
             let tab = tabs.get(i).copied().unwrap_or(false);
             let gid = glyph.gid;
-            // A combining mark is not part of the spacing, and real faces mark
-            // their kerning lookups "ignore marks" so that `A` and `V` still
-            // kern with an accent between them. The mark goes into `between`
-            // and the face decides from its own lookup flags whether to read
-            // across it; kerning *against* the mark instead would shove the
-            // accent off the letter it belongs to.
+            // A combining mark is not part of the spacing: `A` and `V` still
+            // kern with an accent between them, and kerning *against* the mark
+            // instead would shove the accent off the letter it belongs to. The
+            // legacy table has no flags of its own, and HarfBuzz reads it with
+            // `IgnoreMarks`, so a mark by class is stepped over (`classed`),
+            // whatever the script does with its width (`mark`).
             let mark = marks.get(i).copied().unwrap_or(false);
+            let stepped_over = classed.get(i).copied().unwrap_or(false);
             // Whether the positioning pass has already had the last word on
             // this mark's advance — see `kept_at`. Only ever true of a mark,
             // and only in a Myanmar segment the pass really ran on.
@@ -1535,9 +1554,7 @@ impl ScaledFont {
             // positioning lookup steps over every default ignorable —
             // HarfBuzz's matcher ignores the joiners and the hidden ones alike
             // in `GPOS` — so a soft hyphen between `A` and `V` must not be
-            // allowed to break the pair the way a letter would. Recording it in
-            // `between` would do exactly that, since the face's flag says
-            // nothing about a character it never expected to see.
+            // allowed to break the pair the way a letter would.
             let erased = glyph.ignorable.erased();
             let adjust = adjusted
                 .get(i)
@@ -1550,9 +1567,13 @@ impl ScaledFont {
             // charged to the pair's *left* glyph — not to whatever was pushed
             // last — so that the advances still sum to the run's width when
             // the pair was read across a mark.
+            // The positioning pass kerns the legacy table itself for the
+            // segments it reaches (`kerned_at`, and `LegacyKern` for why), so
+            // this kerns only the rest.
             if legacy_at.get(i).copied().unwrap_or(false)
+                && !kerned_at.get(i).copied().unwrap_or(false)
                 && !tab
-                && !mark
+                && !stepped_over
                 && !erased
                 && let Some(last) = kern_left.and_then(|at| out.get_mut(at))
             {
@@ -1579,7 +1600,7 @@ impl ScaledFont {
                 //
                 // Across every font on the host this took the sweep's
                 // `misplaced` bucket from 168 to 1.
-                let whole = self.face.legacy_kern_across(last.key.gid(), gid, &between);
+                let whole = self.face.legacy_kern(last.key.gid(), gid);
                 let half = whole >> 1;
                 let rest = whole.saturating_sub(half);
                 let kern = f32::from(half) * self.scale;
@@ -1660,19 +1681,11 @@ impl ScaledFont {
                     self.px(adjust.y_offset),
                 ),
             });
-            if erased {
-                // Not in `between` and not a new left half: see above.
-            } else if mark {
-                // Keep the mark in the run between the pair, but only while
-                // there is a pair to read across: a mark with no letter before
-                // it starts nothing.
-                if kern_left.is_some() {
-                    between.push(gid);
-                }
-            } else {
-                between.clear();
+            if !erased && !stepped_over {
                 // A tab ends the pair rather than starting one, so the glyph
-                // after it kerns against nothing.
+                // after it kerns against nothing. A mark and a never-drawn
+                // character are stepped over and leave the left half where it
+                // was: see above.
                 kern_left = (!tab).then(|| out.len().saturating_sub(1));
             }
         }
@@ -1938,10 +1951,17 @@ impl ScaledFont {
     /// `GPOS` — keeps its nominal advance and no displacement, which is the
     /// same answer the pass would give for a glyph no lookup matched.
     ///
-    /// The second half of the answer is one flag per glyph saying the pass
+    /// The second part of the answer is one flag per glyph saying the pass
     /// zeroed that segment's marks *before* its lookups, so that whatever a
     /// lookup then charged back on is the final word and must not be zeroed a
     /// second time. True only where the pass actually ran — see the call site.
+    ///
+    /// The third is one flag per glyph saying the pass kerned it from the
+    /// legacy `kern` table, which it does for a segment whose script reaches
+    /// no `GPOS` `kern` feature (see [`LegacyKern`] for why there and not
+    /// after); the caller kerns only the glyphs the pass did not. `classed`
+    /// says which glyphs are marks by class and `tabs` which are tabs, both
+    /// parallel to `glyphs`, for that kerning.
     #[allow(
         clippy::too_many_arguments,
         reason = "each is one of the shaping pass's own products, passed on rather than bundled for one call"
@@ -1953,14 +1973,19 @@ impl ScaledFont {
         glyphs: &[SubGlyph],
         advances: &[i32],
         marks: &[bool],
+        classed: &[bool],
+        tabs: &[bool],
         levels: &[Level],
         extra: Extra,
-    ) -> (Vec<Adjust>, Vec<bool>) {
+    ) -> (Vec<Adjust>, Vec<bool>, Vec<bool>) {
         let mut out: Vec<Adjust> = advances.iter().copied().map(Adjust::plain).collect();
         let mut kept: Vec<bool> = alloc::vec![false; advances.len()];
+        let mut kerned: Vec<bool> = alloc::vec![false; advances.len()];
         if !self.face.has_gpos_lookups() {
-            return (out, kept);
+            return (out, kept, kerned);
         }
+        let legacy = self.face.has_legacy_kern();
+        let pair = |left: u16, right: u16| self.face.legacy_kern(left, right);
         for segment in segments {
             // A segment whose script refuses this face's `GPOS` outright. Not
             // "no lookup matched" — those two look the same in the output and
@@ -1988,6 +2013,26 @@ impl ScaledFont {
                     .is_some_and(|level| !level.is_multiple_of(2))
             });
             let first = self.zeroes_marks_first(segment.script);
+            // The legacy table, where the segment's kerning comes from it: the
+            // same per-segment question the caller asks for the runs no `GPOS`
+            // reaches, answered here for the ones it does.
+            let reads_legacy = legacy
+                && !self
+                    .face
+                    .gpos_kerns(segment.script, lang, self.coords.as_slice());
+            let legacy_kern = match (
+                reads_legacy,
+                classed.get(span.clone()),
+                tabs.get(span.clone()),
+            ) {
+                (true, Some(stepped_over), Some(tabs)) => Some(LegacyKern {
+                    pair: &pair,
+                    stepped_over,
+                    tabs,
+                }),
+                _ => None,
+            };
+            let kerns = legacy_kern.is_some();
             let Some(done) = self.face.position_at(
                 &Run {
                     glyphs: run,
@@ -1999,6 +2044,7 @@ impl ScaledFont {
                     lang,
                     features: crate::gpos::DEFAULT_FEATURES | extra.gpos,
                     corrections: self.corrections(),
+                    legacy: legacy_kern,
                 },
                 self.coords.as_slice(),
             ) else {
@@ -2017,9 +2063,12 @@ impl ScaledFont {
                 if let Some(slot) = kept.get_mut(at) {
                     *slot = first;
                 }
+                if let Some(slot) = kerned.get_mut(at) {
+                    *slot = kerns;
+                }
             }
         }
-        (out, kept)
+        (out, kept, kerned)
     }
 
     /// Place every combining mark in `glyphs` by measuring it against the
@@ -3321,6 +3370,110 @@ mod tests {
             shaped(build_test_font()),
             alloc::vec![(300.0, 0.0), (0.0, 162.0)]
         );
+    }
+
+    /// A legacy `kern` table: version 0, one horizontal format-0 subtable
+    /// kerning `pairs`.
+    fn kern_table(pairs: &[(u16, u16, i16)]) -> Vec<u8> {
+        let be16 = |v: usize| u16::try_from(v).unwrap().to_be_bytes();
+        let mut t = Vec::new();
+        t.extend_from_slice(&be16(0)); // table version
+        t.extend_from_slice(&be16(1)); // nTables
+        t.extend_from_slice(&be16(0)); // subtable version
+        t.extend_from_slice(&be16(14 + pairs.len() * 6)); // length
+        t.extend_from_slice(&be16(0x0001)); // coverage: horizontal, format 0
+        t.extend_from_slice(&be16(pairs.len()));
+        t.extend_from_slice(&[0; 6]); // searchRange, entrySelector, rangeShift
+        for &(left, right, value) in pairs {
+            t.extend_from_slice(&left.to_be_bytes());
+            t.extend_from_slice(&right.to_be_bytes());
+            t.extend_from_slice(&value.to_be_bytes());
+        }
+        t
+    }
+
+    /// `A` and `B` kern by -100 in a legacy table, in a face with no `GPOS`
+    /// and no `GDEF`. HarfBuzz reads that table with `IgnoreMarks`, and in a
+    /// face with no classes a mark is what the character says it is, so a
+    /// combining acute between the two does not break the pair.
+    #[test]
+    fn the_legacy_table_kerns_a_pair_across_an_accent() {
+        let font = ScaledFont::from_bytes(
+            crate::sfnt::tests::build_test_font_with(alloc::vec![(
+                *b"kern",
+                kern_table(&[(1, 2, -100)])
+            )]),
+            1000.0,
+        )
+        .unwrap();
+        let measured = |text: &str| -> Vec<(f32, f32)> {
+            font.shape(text)
+                .glyphs()
+                .iter()
+                .map(|g| (g.advance, g.offset.0))
+                .collect()
+        };
+        let adjacent = measured("AB");
+        // Split as HarfBuzz splits it: -50 onto `A`, -50 onto `B`'s advance
+        // and its offset. `A` is 300 wide.
+        assert_eq!(adjacent.first().map(|g| g.0), Some(250.0));
+        let across = measured("A\u{301}B");
+        assert_eq!(across.len(), 3);
+        assert_eq!(across[0], adjacent[0], "`A` is kerned across the acute");
+        assert_eq!(
+            across.get(1).map(|g| g.0),
+            Some(0.0),
+            "the acute takes no room"
+        );
+        assert_eq!(across[2], adjacent[1], "`B` takes its half of the kern");
+        // A letter between them is a letter in the way.
+        let blocked = measured("ACB");
+        assert_eq!(blocked.first().map(|g| g.0), Some(300.0));
+    }
+
+    /// A `GSUB` whose `fina` feature, filed under `script`, turns glyph 2 into
+    /// glyph 3: the second of two joining letters taking its final form.
+    fn fina_under(script: &[u8; 4]) -> Vec<u8> {
+        use crate::fixture::{be16, coverage1, gsub_scripts};
+        let mut single = Vec::new();
+        single.extend_from_slice(&be16(1)); // SingleSubstFormat1
+        single.extend_from_slice(&be16(6)); // coverage, after the header
+        single.extend_from_slice(&be16(1)); // deltaGlyphID
+        single.extend_from_slice(&coverage1(&[2]));
+        gsub_scripts(&[(script, b"fina")], crate::gsub::LOOKUP_SINGLE, &[&single])
+    }
+
+    /// A face that files its features under a tag that calls the joining
+    /// shaper off gets no joining forms, as HarfBuzz's default shaper applies
+    /// none: `DFLT` or `latn` for a USE script such as N'Ko, `DFLT` alone for
+    /// Syriac, which reaches HarfBuzz's Arabic shaper.
+    #[test]
+    fn a_face_that_calls_the_joining_shaper_off_keeps_the_letters_unjoined() {
+        let shaped = |first: u16, text: &str, script: &[u8; 4]| -> Vec<u16> {
+            let font = ScaledFont::from_bytes(
+                crate::sfnt::tests::build_test_font_at_with(
+                    first,
+                    alloc::vec![(*b"GSUB", fina_under(script))],
+                ),
+                1000.0,
+            )
+            .unwrap();
+            font.shape(text)
+                .glyphs()
+                .iter()
+                .map(|g| g.key.gid())
+                .collect()
+        };
+        // N'KO LETTER A and LETTER EE, both dual-joining, the second final.
+        let nko = "\u{07CA}\u{07CB}";
+        assert_eq!(shaped(0x07CA, nko, b"nko "), [1, 3]);
+        assert_eq!(shaped(0x07CA, nko, b"latn"), [1, 2]);
+        assert_eq!(shaped(0x07CA, nko, b"DFLT"), [1, 2]);
+        // SYRIAC LETTER BETH and GAMAL: `latn` keeps the final form.
+        let syriac = "\u{0712}\u{0713}";
+        assert_eq!(shaped(0x0712, syriac, b"syrc"), [1, 3]);
+        assert_eq!(shaped(0x0712, syriac, b"latn"), [1, 3]);
+        assert_eq!(shaped(0x0712, syriac, b"DFLT"), [1, 2]);
     }
 
     /// Both of HarfBuzz's zeroing passes, each shown where the other cannot

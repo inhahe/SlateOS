@@ -1,5 +1,13 @@
 ## TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE
 
+**Status:** OPEN -- the gate is built (lane F, 2026-10-03, design-decisions
+§1336). Under `compositor --require-shell-key`, `require_shell` refuses every
+client the kernel does not name as holding the display service's key, which
+is every TCP client. What remains is the session's part: start the shell
+holding the key, give the compositor `(Service, WRITE)`, and pass the flag
+(`requests/f-bd-the-display-service-needs-two-grants-and-a-flag-from-the-session.md`).
+It is live once lane A's channel descriptors reach `main`.
+
 **In short:** Any program connected to the compositor can ask to be sent the
 list of every window on the desktop — including each window's title. Titles are
 usually filenames, URLs or email subject lines, so a program with no business

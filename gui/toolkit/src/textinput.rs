@@ -1,5 +1,7 @@
-//! A single-line text field's state: the text, the caret, the selection and a
-//! clipboard, with the editing operations that move between them.
+//! A single-line text field's state: the text, the caret and the selection,
+//! with the editing operations that move between them -- cutting, copying
+//! and pasting through the program's clipboard ([`crate::clipboard`]), which
+//! every field shares.
 //!
 //! State only. Nothing here draws — a caller owns the rectangle, the colours
 //! and the focus, and asks this for what to put in them. That split is why one
@@ -24,14 +26,16 @@
 //! that set the text without moving the caret would leave an offset pointing
 //! into the middle of a character, and the next arrow key would panic.
 
+use crate::editmenu::{EditCommand, EditState};
 use crate::event::{Key, KeyEvent};
+use crate::menu::{ContextMenu, MenuItemId};
 use crate::render::FontWeightHint;
 use crate::text;
 use crate::text::TextCursor;
 use crate::textedit;
 use core::num::NonZeroU32;
 
-/// Single-line text input state with cursor, selection, and clipboard.
+/// Single-line text input state: text, cursor and selection.
 #[derive(Clone, Debug, Default)]
 pub struct TextInput {
     /// The text content.
@@ -52,14 +56,6 @@ pub struct TextInput {
     /// on screen, so it has no side of a boundary to be on. Only the caret
     /// does.
     selection_anchor: Option<usize>,
-    /// Clipboard contents (internal; real clipboard would use IPC), `None`
-    /// for nothing copied.
-    ///
-    /// A `Box<str>` in an `Option` rather than a `String`: sixteen bytes
-    /// rather than twenty-four, for the reason [`capacity`](Self::capacity)
-    /// is four -- see the size note on the struct's test,
-    /// `a_text_field_stays_eighty_bytes`.
-    clipboard: Option<Box<str>>,
     /// The most characters typing and pasting may leave in the field, plus
     /// one -- so a limit of nothing has a value and `None`, no limit, is the
     /// niche -- or `None` for no limit. See [`set_capacity`](Self::set_capacity).
@@ -106,23 +102,32 @@ impl TextInput {
         self.selection_anchor = anchor;
     }
 
-    /// Put text on this field's clipboard.
+    /// Put text on the clipboard: the program's ([`crate::clipboard`]),
+    /// which every field shares.
     ///
     /// For a caller arranging a paste it did not cut -- a test, or a menu
-    /// command wired to a real clipboard service when one exists.
+    /// command. A method of the field, though the clipboard is not the
+    /// field's, because callers wrote it as one while it was.
+    #[allow(
+        clippy::unused_self,
+        reason = "kept as a method for callers written when each field had a clipboard"
+    )]
     pub fn set_clipboard(&mut self, text: String) {
-        self.clipboard = Some(text.into_boxed_str());
+        crate::clipboard::set_text(&text);
     }
 
-    /// What the last cut or copy put on the clipboard.
+    /// What the last cut or copy -- in this field or any other of the
+    /// program's -- put on the clipboard ([`crate::clipboard`]).
     ///
-    /// Internal to this field for now: there is no clipboard service to ask,
-    /// so text cut here can only be pasted here. That is a smaller promise
-    /// than the name suggests and is made explicit rather than left to be
-    /// discovered.
+    /// Only this program's: text cut here cannot be pasted in another program
+    /// until the system's clipboard is reached (`open-questions.md` C-Q29).
     #[must_use]
-    pub fn clipboard(&self) -> &str {
-        self.clipboard.as_deref().unwrap_or("")
+    #[allow(
+        clippy::unused_self,
+        reason = "kept as a method for callers written when each field had a clipboard"
+    )]
+    pub fn clipboard(&self) -> String {
+        crate::clipboard::text()
     }
 
     pub fn new() -> Self {
@@ -130,7 +135,6 @@ impl TextInput {
             text: String::new(),
             cursor: TextCursor::default(),
             selection_anchor: None,
-            clipboard: None,
             capacity: None,
         }
     }
@@ -396,31 +400,68 @@ impl TextInput {
         self.replace_range(at, end, "");
     }
 
+    /// Put the selection on the program's clipboard and delete it.
     pub fn cut(&mut self) {
         if self.has_selection() {
-            self.clipboard = Some(Box::from(self.selected_text()));
+            crate::clipboard::set_text(self.selected_text());
             self.delete_selection();
         }
     }
 
+    /// Put the selection on the program's clipboard.
     pub fn copy(&mut self) {
         if self.has_selection() {
-            self.clipboard = Some(Box::from(self.selected_text()));
+            crate::clipboard::set_text(self.selected_text());
         }
     }
 
-    /// Paste the clipboard over the selection, as [`insert_text`](Self::insert_text)
-    /// types: control characters left out, and cut to the capacity.
+    /// Paste the program's clipboard over the selection, as
+    /// [`insert_text`](Self::insert_text) types: control characters left
+    /// out, and cut to the capacity.
     pub fn paste(&mut self) {
-        // Taken for the length of the insert, which borrows `self` mutably,
-        // and put back: pasting does not consume the clipboard.
-        let Some(clip) = self.clipboard.take() else {
-            return;
-        };
+        let clip = crate::clipboard::text();
         if !clip.is_empty() {
             self.insert_text(&clip);
         }
-        self.clipboard = Some(clip);
+    }
+
+    /// The menu a right-click on this field offers ([`crate::editmenu`]):
+    /// Cut, Copy, Paste, Delete and Select all, each dimmed when it would do
+    /// nothing and saying why while the pointer rests on it. The window shows
+    /// it where the click landed.
+    #[must_use]
+    pub fn edit_menu(&self) -> ContextMenu {
+        crate::editmenu::menu(EditState {
+            selected: self.has_selection(),
+            editable: true,
+            has_text: !self.text.is_empty(),
+            ..EditState::default()
+        })
+    }
+
+    /// Do what the row `id` of [`edit_menu`](Self::edit_menu) says, and
+    /// answer as the key that does the same would: `Changed` when the text
+    /// changed, `Handled` when it did not, `Unhandled` for an id that is
+    /// none of the menu's rows -- a row of the window's own beside them.
+    pub fn edit_command(&mut self, id: MenuItemId) -> KeyEdit {
+        let Some(command) = EditCommand::from_id(id) else {
+            return KeyEdit::Unhandled;
+        };
+        let before = self.text.clone();
+        match command {
+            EditCommand::Cut => self.cut(),
+            EditCommand::Copy => self.copy(),
+            EditCommand::Paste => self.paste(),
+            EditCommand::Delete => {
+                if self.has_selection() {
+                    self.delete_selection();
+                }
+            }
+            EditCommand::SelectAll => self.select_all(),
+            // A one-line field keeps no history, and offers neither.
+            EditCommand::Undo | EditCommand::Redo => return KeyEdit::Unhandled,
+        }
+        KeyEdit::of(&before, &self.text)
     }
 }
 
@@ -475,7 +516,7 @@ impl TextInput {
             return KeyEdit::Unhandled;
         }
         let shift = key.modifiers.shift;
-        let chord = key.modifiers.ctrl && !key.modifiers.alt;
+        let chord = key.modifiers.is_ctrl_chord();
         match key.key {
             Key::A if chord => {
                 self.select_all();
@@ -780,9 +821,98 @@ mod tests {
     /// lint's threshold on the shipping target and stopped every boot test at
     /// the `cfg(unix)` gate. Pinned so the next growth is a decision: if this
     /// fails, check the programs that embed several fields before raising it.
+    /// Sixty-four since 2026-09-30, when the clipboard left the field for the
+    /// program ([`crate::clipboard`]).
     #[test]
-    fn a_text_field_stays_eighty_bytes() {
-        assert_eq!(core::mem::size_of::<TextInput>(), 80);
+    fn a_text_field_stays_sixty_four_bytes() {
+        assert_eq!(core::mem::size_of::<TextInput>(), 64);
+    }
+
+    /// **A field's right-click menu does what its keys do**, each row lit
+    /// only when it can act; a one-line field offers no Undo, and an id that
+    /// is none of its rows is not the field's.
+    #[test]
+    fn the_right_click_menu_does_what_the_keys_do() {
+        use crate::editmenu::EditCommand;
+        let lit = |input: &TextInput| -> Vec<String> {
+            input
+                .edit_menu()
+                .items()
+                .iter()
+                .filter_map(|r| match r {
+                    crate::menu::MenuItem::Action {
+                        label,
+                        enabled: true,
+                        ..
+                    } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        crate::clipboard::set_text("");
+        let mut input = TextInput::new();
+        assert!(lit(&input).is_empty());
+        input.insert_text("hello");
+        assert_eq!(lit(&input), ["Select all"]);
+        assert_eq!(
+            input.edit_command(EditCommand::SelectAll.id()),
+            KeyEdit::Handled
+        );
+        assert_eq!(lit(&input), ["Cut", "Copy", "Delete", "Select all"]);
+        assert_eq!(input.edit_command(EditCommand::Copy.id()), KeyEdit::Handled);
+        assert_eq!(crate::clipboard::text(), "hello");
+        assert_eq!(
+            input.edit_command(EditCommand::Delete.id()),
+            KeyEdit::Changed
+        );
+        assert_eq!(input.text(), "");
+        assert_eq!(lit(&input), ["Paste"]);
+        assert_eq!(
+            input.edit_command(EditCommand::Paste.id()),
+            KeyEdit::Changed
+        );
+        assert_eq!(input.text(), "hello");
+        input.select_all();
+        assert_eq!(input.edit_command(EditCommand::Cut.id()), KeyEdit::Changed);
+        assert_eq!(input.text(), "");
+        assert_eq!(
+            input.edit_command(EditCommand::Undo.id()),
+            KeyEdit::Unhandled
+        );
+        assert_eq!(input.edit_command(42), KeyEdit::Unhandled);
+        assert!(
+            !input.edit_menu().items().iter().any(
+                |r| matches!(r, crate::menu::MenuItem::Action { label, .. } if label == "Undo")
+            ),
+            "a field with no history offers Undo"
+        );
+
+        // The menu's Delete takes what is selected and nothing else: with
+        // nothing selected it is no Delete key, which would take the
+        // character after the caret.
+        input.insert_text("abc");
+        input.move_home(false);
+        assert_eq!(
+            input.edit_command(EditCommand::Delete.id()),
+            KeyEdit::Handled
+        );
+        assert_eq!(input.text(), "abc");
+    }
+
+    /// **Two fields share the program's clipboard**: a copy in one pastes in
+    /// the other, which it could not while each field kept its own.
+    #[test]
+    fn a_copy_in_one_field_pastes_in_another() {
+        let mut from = TextInput::new();
+        from.insert_text("shared");
+        from.select_all();
+        from.copy();
+        let mut to = TextInput::new();
+        to.paste();
+        assert_eq!(to.text(), "shared");
+        assert_eq!(to.clipboard(), "shared");
+        to.set_clipboard("set".to_owned());
+        assert_eq!(from.clipboard(), "set");
     }
 
     /// **A field holds at most its capacity**, counted in characters: typing
@@ -941,6 +1071,51 @@ mod tests {
         let mut input = TextInput::new();
         assert_eq!(edit(&mut input, Key::X, false, "\u{b4}x"), KeyEdit::Changed);
         assert_eq!(input.text(), "\u{b4}x");
+    }
+
+    /// **A shortcut the field does not know is the owner's, not a letter**:
+    /// Ctrl+K, Alt+F and Windows+E, each handed its letter by the
+    /// compositor, leave the field as it was and come back unhandled.
+    #[test]
+    fn a_shortcut_the_field_does_not_know_types_nothing() {
+        use crate::event::{Key, Modifiers};
+        for (k, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            let mut input = TextInput::new();
+            input.set_text("x");
+            let event = KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_string(),
+            };
+            assert_eq!(
+                input.edit_key(&event, FONT_SIZE, FontWeightHint::Regular),
+                KeyEdit::Unhandled,
+                "{modifiers:?}"
+            );
+            assert_eq!(input.text(), "x", "{modifiers:?} typed its letter");
+        }
+        // Ctrl+Windows+A is the desktop's, not select-all.
+        let mut input = TextInput::new();
+        input.set_text("x");
+        let super_a = KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            text: "a".to_string(),
+        };
+        assert_eq!(
+            input.edit_key(&super_a, FONT_SIZE, FontWeightHint::Regular),
+            KeyEdit::Unhandled
+        );
     }
 
     #[test]

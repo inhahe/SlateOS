@@ -988,9 +988,9 @@ pub fn feed_file(
 
     let result = if name == b"-" {
         *read_stdin = true;
-        let stdin = io::stdin();
-        let mut stdin = stdin.lock();
-        feed(&mut stdin)
+        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty, so
+        // `md5sum <&-` printed the empty input's digest and exited 0.
+        feed(&mut stdfd::RawStdin)
     } else {
         match File::open(os_from_bytes(name)) {
             Ok(f) => {
@@ -1608,10 +1608,14 @@ fn run_main(build: Build) -> ExitCode {
         }
     }
 
-    // `if (have_read_stdin && fclose (stdin) == EOF)`. There is no `fclose` on
-    // a locked Rust stdin, and the case it catches — a read error latched but
-    // not yet reported — is already reported by `feed_file`.
-    let _ = read_stdin;
+    // `if (have_read_stdin && fclose (stdin) == EOF) error (EXIT_FAILURE,
+    // errno, _("standard input"))`. Measured, `md5sum <&-` says
+    // `md5sum: -: Bad file descriptor` for the read and then
+    // `md5sum: standard input: Bad file descriptor` for this.
+    if read_stdin && let Err(e) = stdfd::close_stdin() {
+        diag!("{}: standard input: {}", build.name(), strerror(&e));
+        ok = false;
+    }
 
     let earned = if ok {
         ExitCode::SUCCESS
@@ -1649,7 +1653,8 @@ fn check_file(
 
     let mut source: Box<dyn Read> = if is_stdin {
         *read_stdin = true;
-        Box::new(io::stdin())
+        // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+        Box::new(stdfd::RawStdin)
     } else {
         match File::open(os_from_bytes(checkfile)) {
             Ok(f) => Box::new(f),

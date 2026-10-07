@@ -37,6 +37,9 @@ use coreutils::xnum::{self, Status};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
+
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
 use std::process::ExitCode;
 
 const OD: Program = Program::new("od", 1);
@@ -1315,7 +1318,9 @@ fn print_fields<W: Write>(
 
 /// An enum rather than `Box<dyn Read>` so that `skip` can seek a real file.
 enum Source {
-    Stdin(BufReader<io::Stdin>),
+    /// Descriptor 0 itself: `io::stdin()` reads a closed one as empty, where
+    /// upstream's `od <&-` is `od: 'standard input': Bad file descriptor`.
+    Stdin(BufReader<stdfd::RawStdin>),
     File(BufReader<File>),
 }
 
@@ -1340,6 +1345,9 @@ struct Input {
     name: Vec<u8>,
     pending: Option<io::Error>,
     capacity: usize,
+    /// Upstream's `have_read_stdin`: a `-` was opened, so standard input is
+    /// closed -- and a failure to close it reported -- at the end.
+    have_read_stdin: bool,
 }
 
 impl Input {
@@ -1350,6 +1358,7 @@ impl Input {
             stream: None,
             name: Vec::new(),
             pending: None,
+            have_read_stdin: false,
             capacity,
         }
     }
@@ -1366,9 +1375,10 @@ impl Input {
             let raw = arg_bytes(&arg);
             if raw.as_slice() == b"-" {
                 self.name = b"standard input".to_vec();
+                self.have_read_stdin = true;
                 self.stream = Some(Source::Stdin(BufReader::with_capacity(
                     self.capacity,
-                    io::stdin(),
+                    stdfd::RawStdin,
                 )));
                 return ok;
             }
@@ -1812,14 +1822,33 @@ fn dump_strings<W: Write>(sink: &mut Sink<W>, o: &Options, input: &mut Input) ->
 /// The line length `od` aims for when the formats allow it.
 const DEFAULT_BYTES_PER_BLOCK: usize = 16;
 
-fn finish_run<W: Write>(sink: &mut Sink<W>, ok: bool) -> ExitCode {
+/// Upstream's `cleanup:` and the `atexit (close_stdout)` after it.
+fn finish_run<W: Write>(sink: &mut Sink<W>, ok: bool, input: &Input) -> ExitCode {
+    // First, because upstream's `error ()` flushes standard output before it
+    // prints: measured, `od <&-` shows `0000000` between its two messages.
     if let Err(e) = sink.inner.flush() {
         sink.failed = true;
         sink.error.get_or_insert(e);
     }
-    if let Some(e) = sink.error.take() {
-        diagnose_str(&format!("write error: {}", strerror(&e)));
+    let reader_left = sink.error.as_ref().is_some_and(stdfd::reader_gone);
+    // `if (have_read_stdin && fclose (stdin) == EOF) error (EXIT_FAILURE,
+    // errno, _("standard input"))` -- never reached by a run whose reader
+    // went away, since upstream died of `SIGPIPE` at the write.
+    if input.have_read_stdin
+        && !reader_left
+        && let Err(e) = stdfd::close_stdin()
+    {
+        diagnose_str(&format!("standard input: {}", strerror(&e)));
         return ExitCode::from(1);
+    }
+    if let Some(e) = sink.error.take() {
+        // Upstream dies of `SIGPIPE` when the reader goes away, printing
+        // nothing; Rust masks that signal, so it arrives as `EPIPE`, and the
+        // run keeps the status it had earned (design-decisions 377).
+        if !stdfd::reader_gone(&e) {
+            diagnose_str(&format!("write error: {}", strerror(&e)));
+            return ExitCode::from(1);
+        }
     }
     if ok {
         ExitCode::SUCCESS
@@ -1829,8 +1858,9 @@ fn finish_run<W: Write>(sink: &mut Sink<W>, ok: bool) -> ExitCode {
 }
 
 fn run(o: &Options) -> ExitCode {
-    let stdout = io::stdout();
-    let mut sink = Sink::new(BufWriter::new(stdout.lock()));
+    // Descriptor 1 itself: `io::stdout()` answers a closed one's `EBADF` with
+    // success, where upstream's `od f >&-` is a write error.
+    let mut sink = Sink::new(BufWriter::new(stdfd::RawStdout));
 
     // `-N` without `-S` makes upstream turn input buffering off, so that no
     // more of the input is consumed than is dumped. That is observable when
@@ -1844,7 +1874,7 @@ fn run(o: &Options) -> ExitCode {
 
     let mut ok = input.open_next();
     if input.stream.is_none() {
-        return finish_run(&mut sink, ok);
+        return finish_run(&mut sink, ok, &input);
     }
     match input.skip(o.skip, sink.failed) {
         None => {
@@ -1854,7 +1884,7 @@ fn run(o: &Options) -> ExitCode {
         Some(k) => ok &= k,
     }
     if input.stream.is_none() {
-        return finish_run(&mut sink, ok);
+        return finish_run(&mut sink, ok, &input);
     }
 
     let mut specs = o.specs.clone();
@@ -1910,7 +1940,7 @@ fn run(o: &Options) -> ExitCode {
             Some(k) => ok &= k,
         }
     }
-    finish_run(&mut sink, ok)
+    finish_run(&mut sink, ok, &input)
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -1922,6 +1952,7 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args, getopt::posixly_correct()) {
         Ok(parsed) => {
@@ -1929,14 +1960,11 @@ fn run_main() -> ExitCode {
                 diagnose(message);
             }
             match parsed.request {
-                Request::Help => {
-                    print!("{}", help_text());
-                    ExitCode::SUCCESS
-                }
-                Request::Version => {
-                    println!("od (SlateOS coreutils) 0.1.0");
-                    ExitCode::SUCCESS
-                }
+                // Writes like any other, through the funnel: `print!` panicked
+                // on a full disk and said nothing of a closed standard output,
+                // where upstream's `close_stdout` reports `write error`.
+                Request::Help => say(help_text().as_bytes()),
+                Request::Version => say(b"od (SlateOS coreutils) 0.1.0\n"),
                 Request::Run(options) => run(&options),
             }
         }
@@ -1953,6 +1981,14 @@ fn run_main() -> ExitCode {
             ExitCode::from(u8::try_from(fail.status).unwrap_or(1))
         }
     }
+}
+
+/// Say one thing and stop -- `--help` and `--version`.
+fn say(bytes: &[u8]) -> ExitCode {
+    let mut out = stdfd::Stream::stdout();
+    // The stream records a failure for the funnel; it never returns one.
+    let _ = out.write_all(bytes);
+    stdfd::close_stdout("od", out, ExitCode::SUCCESS)
 }
 
 /// GNU's `--help`, byte for byte, minus the trailing block of URLs naming the

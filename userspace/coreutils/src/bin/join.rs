@@ -503,9 +503,18 @@ struct Input {
 impl Input {
     fn open(name: &OsStr, which: u8) -> Result<Self, Trouble> {
         let reader: Box<dyn BufRead> = if name == "-" {
-            Box::new(io::stdin().lock())
+            // Descriptor 0 itself: `io::stdin()` reads a closed one as empty,
+            // where upstream's `join - g <&-` is `join: read error: Bad file
+            // descriptor`.
+            Box::new(BufReader::new(stdfd::RawStdin))
         } else {
-            let file = File::open(name).map_err(|e| Trouble::Open(name.to_os_string(), e))?;
+            // `fopen` is gnulib's `fopen_safer` here (`stdio--.h`), which
+            // never returns descriptor 0, 1 or 2: with standard input closed,
+            // a plain open would land on descriptor 0, and `join f -` would
+            // read `f` twice instead of reporting the closed input.
+            let file = File::open(name)
+                .and_then(stdfd::fd_safer)
+                .map_err(|e| Trouble::Open(name.to_os_string(), e))?;
             Box::new(BufReader::new(file))
         };
         Ok(Self {

@@ -1,6 +1,6 @@
 ## B-SED-I-REWROTE-FILES-WHERE-THEY-STOOD (lane B, 2026-10-03)
 
-**Status:** FIXED 2026-10-03 (lane B), boot confirmation pending.
+**Status:** FIXED 2026-10-03 (lane B); boot-tested on main (394c97655, published as 109a26eec).
 
 **In short:** `sed -i` is meant to replace a file with its edited copy. GNU
 sed writes the copy to a new file beside the original and renames it into

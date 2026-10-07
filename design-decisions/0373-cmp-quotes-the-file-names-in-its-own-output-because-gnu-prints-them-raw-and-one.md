@@ -56,11 +56,17 @@ $ cmp $'\xff\xfe-bad' $'\xff\xfe-bad2'
 ```
 
 One line, always. The `EOF on …` note on stderr is quoted the same way, and so
-is the `cmp: NAME: No such file or directory` diagnostic — which GNU *already*
-quotes, through `error (0, errno, "%s", file[i])` reaching gnulib's quoting.
-That inconsistency inside GNU is part of the argument: upstream quotes the name
-when it prints it as a diagnostic and does not when it prints it as a result,
-and there is no reason for the two to differ.
+is the `cmp: NAME: No such file or directory` diagnostic.
+
+*Correction, 2026-10-03 (lane B):* this paragraph used to say that GNU already
+quotes the diagnostic, through `error (0, errno, "%s", file[i])` reaching
+gnulib's quoting, and argued from that inconsistency inside GNU. Measured
+against diffutils 3.10, it does not: `cmp 'a b' f` says
+`cmp: a b: No such file or directory`, raw, because `error` formats `%s`
+without quoting anything. So the diagnostic is a third deliberate difference,
+not a place where GNU agrees. The decision stands on its own reason -- a name
+printed by `cmp` cannot forge a line, wherever it is printed -- and the
+diagnostic stays quoted with the other two.
 
 ### The alternative, and why it lost
 

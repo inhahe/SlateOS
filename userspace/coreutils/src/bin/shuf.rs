@@ -50,6 +50,9 @@ use std::ffi::OsString;
 use std::io::{Read, Write as _};
 use std::process::ExitCode;
 
+// Before `main`, so that `stdfd::restore` still sees a caller's descriptors.
+coreutils::guard_std_fds!();
+
 /// `shuf -Z; echo $?` is 1.
 const SHUF: Program = Program::new("shuf", 1);
 
@@ -643,7 +646,17 @@ mod imp {
         let file = match named {
             Some(name) => File::open(os_from_bytes(&name))
                 .map(ManuallyDrop::new)
-                .map_err(|e| Fatal(format!("{}: {}", quotef(&name), strerror(&e))))?,
+                .map_err(|e| {
+                    // Upstream opens it with `freopen (name, "r", stdin)`, and
+                    // glibc's `freopen` closes the stream's descriptor when
+                    // the open fails, so `errno` is whatever that close left:
+                    // `EBADF` when standard input was already closed.
+                    // Measured: `shuf nosuch <&-` says
+                    // `shuf: nosuch: Bad file descriptor`. The process exits
+                    // next, so closing descriptor 0 here changes nothing else.
+                    let e = coreutils::stdfd::close_descriptor(0).err().unwrap_or(e);
+                    Fatal(format!("{}: {}", quotef(&name), strerror(&e)))
+                })?,
             // SAFETY: descriptor 0 is standard input, open for the life of the
             // process; it stays in the `ManuallyDrop` and is never closed here.
             None => ManuallyDrop::new(unsafe { File::from_raw_fd(0) }),

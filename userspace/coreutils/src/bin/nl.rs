@@ -51,6 +51,7 @@
 //! `scripts/nl-diff.sh` is the executable form of every claim in this file.
 
 use coreutils::diag;
+use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::{quote, quotef_os};
 use coreutils::stdfd::{self, Stream};
@@ -58,7 +59,7 @@ use coreutils::xnum;
 use ere::{Regex, bre};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::process::ExitCode;
 
 coreutils::guard_std_fds!();
@@ -984,29 +985,43 @@ fn run(options: &Options, files: &[OsString], out: &mut Stream) -> ExitCode {
     let stdin_only = [OsString::from("-")];
     let operands: &[OsString] = if files.is_empty() { &stdin_only } else { files };
 
+    // Upstream's `have_read_stdin`: standard input is closed at the end, and
+    // a failure to close it reported, only if a `-` was read.
+    let mut have_read_stdin = false;
+
     for path in operands {
-        let opened: io::Result<Box<dyn Read>> = if path == "-" {
-            Ok(Box::new(io::stdin()))
-        } else {
-            File::open(path).map(|f| Box::new(f) as Box<dyn Read>)
-        };
-        let reader = match opened {
-            Ok(r) => r,
-            Err(e) => {
-                // `quotef`, not `quote`: a file name in an I/O error is shell
-                // quoting with the quotes elided when they are not needed.
-                diag!("nl: {}: {}", quotef_os(path), errno_text(&e));
-                ok = false;
-                continue;
-            }
-        };
         // The only failure `number_stream` can still report is a *read*
         // failure. It used to write through an `io::Write` and hand back
         // whichever of the two had gone wrong, so a full disk was announced as
         // if the input had gone bad — and without the `write error: ` that GNU
         // puts in front of it. A [`Stream`] records its own failures instead of
         // returning them, and `close_stdout` words them.
-        match number_stream(BufReader::new(reader), &mut numberer, out) {
+        let result = if path == "-" {
+            have_read_stdin = true;
+            // Descriptor 0 itself: `io::stdin()` reads a closed one as empty.
+            number_stream(BufReader::new(stdfd::RawStdin), &mut numberer, out)
+        } else {
+            let file = match File::open(path) {
+                Ok(file) => file,
+                Err(e) => {
+                    // `quotef`, not `quote`: a file name in an I/O error is
+                    // shell quoting with the quotes elided when they are not
+                    // needed.
+                    diag!("nl: {}: {}", quotef_os(path), strerror(&e));
+                    ok = false;
+                    continue;
+                }
+            };
+            let result = number_stream(BufReader::new(&file), &mut numberer, out);
+            // `else if (fclose (stream) != 0 && !err) err = errno;`: a failed
+            // close is the file's error only when reading it had not failed.
+            let closed = stdfd::close(file);
+            match result {
+                Ok(Outcome::Complete) => closed.map(|()| Outcome::Complete),
+                other => other,
+            }
+        };
+        match result {
             Ok(Outcome::Complete) => {}
             Ok(Outcome::Overflow) => {
                 // Upstream calls `error (EXIT_FAILURE, …)` from inside the
@@ -1019,11 +1034,23 @@ fn run(options: &Options, files: &[OsString], out: &mut Stream) -> ExitCode {
                 return ExitCode::from(1);
             }
             Err(e) => {
-                let _ = out.flush();
-                diag!("nl: {}", errno_text(&e));
-                return ExitCode::from(1);
+                // Upstream's `nl_file`: the lines read before the failure are
+                // numbered, the file is named -- `error (0, err, "%s", quotef
+                // (file))` -- and the run goes on to the next operand. This
+                // used to end the run and leave the name out. Measured,
+                // `nl < dir` is `nl: -: Is a directory`, status 1.
+                diag!("nl: {}: {}", quotef_os(path), strerror(&e));
+                ok = false;
             }
         }
+    }
+
+    // Upstream's `if (have_read_stdin && fclose (stdin) == EOF) error
+    // (EXIT_FAILURE, errno, "-")`. Measured, `nl <&-` says
+    // `nl: -: Bad file descriptor` twice: the read, then this.
+    if have_read_stdin && let Err(e) = stdfd::close_stdin() {
+        diag!("nl: -: {}", strerror(&e));
+        ok = false;
     }
 
     if ok {
@@ -1070,25 +1097,6 @@ fn number_stream(
     match reader.failure {
         Some(e) => Err(e),
         None => Ok(Outcome::Complete),
-    }
-}
-
-/// glibc's `strerror` wording for the errors `nl` can print, which is what the
-/// harness compares against. `io::Error`'s own `Display` adds an ` (os error N)`
-/// tail that GNU does not print.
-fn errno_text(e: &io::Error) -> String {
-    match e.kind() {
-        ErrorKind::NotFound => "No such file or directory".to_string(),
-        ErrorKind::PermissionDenied => "Permission denied".to_string(),
-        ErrorKind::IsADirectory => "Is a directory".to_string(),
-        other => {
-            let _ = other;
-            let text = e.to_string();
-            match text.find(" (os error ") {
-                Some(at) => text.get(..at).unwrap_or(&text).to_string(),
-                None => text,
-            }
-        }
     }
 }
 

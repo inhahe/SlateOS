@@ -540,8 +540,9 @@ Sampled and wrong:
   `ENOSYS` it tests for (§1108). `isastream` called a closed descriptor "not a
   stream"; glibc says `EBADF`.
 
-Sampled and right: `setkey`'s `EFAULT` (crypt.rs: the §303 substitute, with no
-upstream to check against since glibc 2.39 dropped `setkey`); `TIOCSPGRP`
+Sampled and right: `setkey`'s `EFAULT` (des.rs since 2026-10-06, crypt.rs
+before: the §303 substitute, with no upstream to check against since glibc
+2.39 dropped `setkey`); `TIOCSPGRP`
 (ioctl.rs: `ENOTTY` before the `get_user`, as `tiocspgrp`); `perf_event_open`
 (`perf_copy_attr`'s order); `SECCOMP_GET_ACTION_AVAIL`; `getpwuid_r` (the §303
 substitute — upstream's answer depends on the NSS backend); the NULL pointers of
@@ -886,6 +887,11 @@ failure tokens on, and probed there.
 - **`crypt_r(k, s, NULL)`** stays NULL, now documented as the substitute for
   the fault libxcrypt takes writing its token there; it is `EFAULT`.
 - **`encrypt(NULL, …)`, `setkey(NULL)`** keep `EFAULT` for the same reason.
+  (Since 2026-10-06 they are real DES, in des.rs, and still do.)
+- **`crypt_rn(k, s, NULL, size)`** and **`crypt_gensalt_rn(…, NULL, size)`**
+  (2026-10-06) are `EFAULT` for the same reason when `size` is positive --
+  libxcrypt faults writing its token -- and `ERANGE` when it is not, where
+  libxcrypt writes no token and answers `ERANGE` itself.
 - Beside them, the finding of the pass: every failure was NULL where
   libxcrypt returns the token, and three of libxcrypt's refusals were missing
   -- `B-D-CRYPT-FAILED-WITH-NULL` (new, fixed with it).

@@ -743,6 +743,27 @@ strip = "none"
 opt-level = 3
 codegen-units = 1
 
+# The hashes behind the libc's `crypt` (`posix/pwhash`: SHA-2, MD5, yescrypt,
+# scrypt). Every login, `su`, `doas`, screen unlock and SSH password check is
+# one deliberately expensive hash, and at the libc's `-Os` ours took up to 3.7x
+# libxcrypt's time for the same one (yescrypt at 1 MiB: 5.7 ms against 1.5;
+# Ubuntu's `$y$j9T$`: 51 ms against 37; SHA-512 crypt: 9.8 ms against 4.8). At
+# `-O3` the same code matches libxcrypt's SSE2 build (1.6, 23 and 5.2 ms). The
+# hashes are a crate of their own so that only they pay `-O3`'s size; the rest
+# of the libc, in every program, stays `-Os`. Measured by
+# `cargo bench -p posix --bench crypt` against `posix/benches/libxcrypt-
+# reference.c`; performance-targets.md, "Password hashing". Lane D, 2026-10-06.
+#
+# And in the dev profile too: the hashes are run thousands of times by
+# posix's tests (libxcrypt's 1926 answers), which at opt-level 0 took three
+# minutes of the suite's four. Only the optimisation changes; the dev
+# profile's overflow checks and debug assertions stay on.
+[profile.release.package.pwhash]
+opt-level = 3
+
+[profile.dev.package.pwhash]
+opt-level = 3
+
 # Decoding pictures is arithmetic over every pixel, and `opt-level = "s"`
 # forgoes the loop unrolling and vectorisation that arithmetic runs on. rav1d
 # (the AV1 decoder, `gui/video/rav1d`) is pure Rust, without dav1d's assembly,

@@ -16,6 +16,7 @@ struct argp	argp.h	56	options=0,parser=8,args_doc=16,doc=24,children=32,help_fil
 struct argp_child	argp.h	32	argp=0,flags=8,header=16,group=24
 struct argp_option	argp.h	48	name=0,key=8,arg=16,flags=24,doc=32,group=40
 struct argp_state	argp.h	96	root_argp=0,argc=8,argv=16,next=24,flags=28,arg_num=32,quoted=36,input=40,child_inputs=48,hook=56,name=64,err_stream=72,out_stream=80,pstate=88
+struct crypt_data	crypt.h	32768	output=0,setting=384,input=768,reserved=1280,initialized=2047,internal=2048
 struct dl_find_object	dlfcn.h	96	dlfo_flags=0,dlfo_map_start=8,dlfo_map_end=16,dlfo_link_map=24,dlfo_eh_frame=32,__dflo_reserved=40
 struct drand48_data	stdlib.h	24	__x=0,__old_x=6,__c=12,__init=14,__a=16
 struct fstab	fstab.h	48	fs_spec=0,fs_file=8,fs_vfstype=16,fs_mntops=24,fs_type=32,fs_freq=40,fs_passno=44

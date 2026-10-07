@@ -1,4 +1,6 @@
-//! ln — create links between files: GNU coreutils 9.4's `ln`, every option.
+//! ln — create links between files.
+//!
+//! GNU coreutils 9.4's `ln`, every option:
 //!
 //! ```text
 //! ln [OPTION]... [-T] TARGET LINK_NAME

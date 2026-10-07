@@ -571,6 +571,46 @@ fn a_notes_menu_removes_the_note() {
     assert_eq!(shell.widgets.count(), 0);
 }
 
+/// **A note's "Size" opens as a submenu, the menu staying up, and a size
+/// chosen in it resizes the note**, saved with the layout. A click on a row
+/// that opens a submenu used to close the menu, as a miss does: the field
+/// menu asked only whether a row was chosen.
+#[test]
+fn a_notes_size_is_chosen_from_its_menu() {
+    use crate::widgets::WidgetSize;
+    let mut shell = DesktopShell::new(1600, 1000);
+    let (id, (x, y)) = add_note(&mut shell);
+    let _ = shell.take_widgets_dirty();
+    right_click(&mut shell, x, y);
+    let press = |shell: &mut DesktopShell, row: u64| {
+        let (px, py) = shell
+            .field_menu
+            .as_mut()
+            .expect("the menu is up")
+            .0
+            .press_point(row)
+            .expect("the row is shown");
+        let _ = shell.handle_mouse(&click(px, py));
+        let _ = shell.handle_mouse(&at(px, py, MouseEventKind::Release(MouseButton::Left)));
+    };
+    press(&mut shell, DesktopShell::MENU_WIDGET_SIZE_SUBMENU);
+    assert!(
+        shell.field_menu.is_some(),
+        "the click on Size closed the menu"
+    );
+    let large = DesktopShell::widget_size_menu_id(WidgetSize::LARGE).expect("a row for Large");
+    press(&mut shell, large);
+    assert!(
+        shell.field_menu.is_none(),
+        "choosing a size left the menu up"
+    );
+    assert_eq!(
+        shell.widgets.get(id).map(|w| w.size),
+        Some(WidgetSize::LARGE)
+    );
+    assert!(shell.take_widgets_dirty(), "the new size is not saved");
+}
+
 /// **A note's title bar is still the widget's**: a right-click there offers
 /// the widget menu, not the writing area's.
 #[test]

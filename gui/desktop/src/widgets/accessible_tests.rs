@@ -279,6 +279,7 @@ fn a_photo_frame_names_its_picture_or_says_why_not() {
             image_id: crate::widgets::FRAME_PICTURE_TAG | 1,
             width: 400,
             height: 100,
+            fit: (400, 100),
         },
     );
     let picture = node_of(&layer, &live, WidgetPart::Picture(id)).expect("seen");

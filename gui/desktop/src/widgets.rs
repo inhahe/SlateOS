@@ -94,11 +94,45 @@ pub struct WidgetSize {
 }
 
 impl WidgetSize {
+    /// One cell.
     pub const SMALL: Self = Self { cols: 1, rows: 1 };
-    pub const MEDIUM: Self = Self { cols: 2, rows: 1 };
-    pub const WIDE: Self = Self { cols: 2, rows: 2 };
+    /// Two cells side by side.
+    ///
+    /// The sizes were named apart from their shapes until 2026-10-06 --
+    /// this one was `MEDIUM`, a square of four cells `WIDE` and three by two
+    /// `LARGE` -- which a menu offering them by name would have repeated.
+    pub const WIDE: Self = Self { cols: 2, rows: 1 };
+    /// Two cells, one above the other.
     pub const TALL: Self = Self { cols: 1, rows: 2 };
-    pub const LARGE: Self = Self { cols: 3, rows: 2 };
+    /// Two cells by two.
+    pub const LARGE: Self = Self { cols: 2, rows: 2 };
+    /// Three cells across, two down.
+    pub const EXTRA_LARGE: Self = Self { cols: 3, rows: 2 };
+
+    /// Every size a widget is offered at, smallest first, as a widget's
+    /// "Size" menu lists them.
+    pub const ALL: [Self; 5] = [
+        Self::SMALL,
+        Self::WIDE,
+        Self::TALL,
+        Self::LARGE,
+        Self::EXTRA_LARGE,
+    ];
+
+    /// What a widget's "Size" menu calls it: its shape. `None` for a size
+    /// none of [`ALL`](Self::ALL) is -- one a layout file gave -- which the
+    /// menu does not offer.
+    #[must_use]
+    pub const fn label(self) -> Option<&'static str> {
+        match (self.cols, self.rows) {
+            (1, 1) => Some("Small"),
+            (2, 1) => Some("Wide"),
+            (1, 2) => Some("Tall"),
+            (2, 2) => Some("Large"),
+            (3, 2) => Some("Extra large"),
+            _ => None,
+        }
+    }
 
     pub fn new(cols: u32, rows: u32) -> Self {
         Self {
@@ -373,19 +407,40 @@ impl WidgetKind {
     pub fn default_size(&self) -> WidgetSize {
         match self {
             Self::Clock => WidgetSize::SMALL,
-            Self::Weather => WidgetSize::MEDIUM,
-            Self::SystemMonitor => WidgetSize::MEDIUM,
-            Self::Calendar => WidgetSize::WIDE,
-            Self::Notes => WidgetSize::MEDIUM,
+            Self::Weather => WidgetSize::WIDE,
+            Self::SystemMonitor => WidgetSize::WIDE,
+            Self::Calendar => WidgetSize::LARGE,
+            Self::Notes => WidgetSize::WIDE,
             Self::RssFeed => WidgetSize::TALL,
-            Self::MusicPlayer => WidgetSize::MEDIUM,
-            Self::PhotoFrame => WidgetSize::WIDE,
-            Self::WorldClock => WidgetSize::MEDIUM,
+            Self::MusicPlayer => WidgetSize::WIDE,
+            Self::PhotoFrame => WidgetSize::LARGE,
+            Self::WorldClock => WidgetSize::WIDE,
             Self::Reminders => WidgetSize::TALL,
             Self::DiskUsage => WidgetSize::SMALL,
             Self::NetworkMonitor => WidgetSize::SMALL,
             Self::BatteryStatus => WidgetSize::SMALL,
-            Self::Custom { .. } => WidgetSize::MEDIUM,
+            Self::Custom { .. } => WidgetSize::WIDE,
+        }
+    }
+
+    /// The sizes a widget of this kind is drawn well at, smallest first --
+    /// what its menu's "Size" offers. Its [`default_size`](Self::default_size)
+    /// is always among them; empty for a kind with no content of its own
+    /// yet, which is drawn at its default and offered no other.
+    ///
+    /// A calendar is not offered less than two cells by two: six weeks in
+    /// one cell's height would be drawn smaller than text is read at. A
+    /// clock, the meters and the battery are a line or three, which a wider
+    /// box only pads.
+    #[must_use]
+    pub const fn sizes(&self) -> &'static [WidgetSize] {
+        match self {
+            Self::Clock | Self::SystemMonitor | Self::BatteryStatus => {
+                &[WidgetSize::SMALL, WidgetSize::WIDE]
+            }
+            Self::Calendar => &[WidgetSize::LARGE, WidgetSize::EXTRA_LARGE],
+            Self::Notes | Self::PhotoFrame => &WidgetSize::ALL,
+            _ => &[],
         }
     }
 }
@@ -930,6 +985,11 @@ pub struct FramePicture {
     pub width: u32,
     /// Its height, in pixels, as decoded.
     pub height: u32,
+    /// The box it was decoded to fit, `(width, height)` in pixels: the
+    /// frame's content when it was asked for. A frame resized since asks
+    /// for it again at its new size ([`DesktopWidgetManager::frames_to_fetch`]),
+    /// rather than drawing a picture decoded smaller than it is drawn.
+    pub fit: (u32, u32),
 }
 
 /// What a photo frame shows, and what it is to show next.
@@ -1479,9 +1539,10 @@ impl DesktopWidgetManager {
         changed
     }
 
-    /// The pictures photo frames want and do not show yet, with the size
-    /// each is drawn at in pixels -- what to decode it to fit: `(frame, file,
-    /// (width, height))`.
+    /// The pictures photo frames want and do not show yet -- or show
+    /// decoded for a box the frame no longer is, since it was resized --
+    /// with the size each is drawn at in pixels, what to decode it to fit:
+    /// `(frame, file, (width, height))`.
     #[must_use]
     pub fn frames_to_fetch(&self) -> Vec<(WidgetInstanceId, PathBuf, (u32, u32))> {
         self.widgets
@@ -1489,9 +1550,6 @@ impl DesktopWidgetManager {
             .filter_map(|w| {
                 let state = self.frames.get(&w.id)?;
                 let wanted = state.wanted.as_ref()?;
-                if state.shown.as_ref().is_some_and(|s| &s.path == wanted) {
-                    return None;
-                }
                 let (_, _, width, height) = self.content_of(w);
                 #[expect(
                     clippy::cast_possible_truncation,
@@ -1499,6 +1557,13 @@ impl DesktopWidgetManager {
                     reason = "a widget's box is a few hundred pixels, positive by `content_of`"
                 )]
                 let fit = ((width.ceil() as u32).max(1), (height.ceil() as u32).max(1));
+                if state
+                    .shown
+                    .as_ref()
+                    .is_some_and(|s| &s.path == wanted && s.fit == fit)
+                {
+                    return None;
+                }
                 Some((w.id, wanted.clone(), fit))
             })
             .collect()
@@ -1571,23 +1636,30 @@ impl DesktopWidgetManager {
         }
     }
 
-    /// Resize a widget.
-    pub fn resize_widget(&mut self, id: WidgetInstanceId, new_size: WidgetSize) -> bool {
-        let pos = match self.widgets.iter().find(|w| w.id == id) {
-            Some(w) => w.position,
-            None => return false,
-        };
+    /// Whether the widget `id` would fit at `size` where it is: inside the
+    /// grid, over no other widget -- what [`resize_widget`](Self::resize_widget)
+    /// asks before it resizes, and a widget's "Size" menu before it offers a
+    /// size.
+    #[must_use]
+    pub fn can_resize(&self, id: WidgetInstanceId, size: WidgetSize) -> bool {
+        self.get(id).is_some_and(|w| {
+            let rect = GridRect::new(w.position, size);
+            self.fits(rect) && !self.overlaps_any(rect, Some(id))
+        })
+    }
 
-        let rect = GridRect::new(pos, new_size);
-        if !self.fits(rect) || self.overlaps_any(rect, Some(id)) {
+    /// Resize a widget where it is, if it fits there
+    /// ([`can_resize`](Self::can_resize)); answers whether it was.
+    pub fn resize_widget(&mut self, id: WidgetInstanceId, new_size: WidgetSize) -> bool {
+        if !self.can_resize(id, new_size) {
             return false;
         }
-
-        if let Some(w) = self.widgets.iter_mut().find(|w| w.id == id) {
-            w.size = new_size;
-            true
-        } else {
-            false
+        match self.get_mut(id) {
+            Some(w) => {
+                w.size = new_size;
+                true
+            }
+            None => false,
         }
     }
 
@@ -2493,7 +2565,7 @@ mod tests {
         // at column u32::MAX panics in a debug build and wraps in a release
         // one -- and the wrapped value is small, so it *passes* the bounds
         // check it was computed for.
-        let far = GridRect::new(GridPos::new(u32::MAX, u32::MAX), WidgetSize::LARGE);
+        let far = GridRect::new(GridPos::new(u32::MAX, u32::MAX), WidgetSize::EXTRA_LARGE);
         assert!(!far.fits_in(8, 6));
         assert!(
             !far.fits_in(u32::MAX, u32::MAX),
@@ -2529,11 +2601,11 @@ mod tests {
     #[test]
     fn a_block_fits_exactly_up_to_the_last_cell_and_no_further() {
         // 3x2 at (5,4) ends at column 8, row 6 -- flush with an 8x6 grid.
-        let flush = GridRect::new(GridPos::new(5, 4), WidgetSize::LARGE);
+        let flush = GridRect::new(GridPos::new(5, 4), WidgetSize::EXTRA_LARGE);
         assert_eq!((flush.right(), flush.bottom()), (8, 6));
         assert!(flush.fits_in(8, 6));
-        assert!(!GridRect::new(GridPos::new(6, 4), WidgetSize::LARGE).fits_in(8, 6));
-        assert!(!GridRect::new(GridPos::new(5, 5), WidgetSize::LARGE).fits_in(8, 6));
+        assert!(!GridRect::new(GridPos::new(6, 4), WidgetSize::EXTRA_LARGE).fits_in(8, 6));
+        assert!(!GridRect::new(GridPos::new(5, 5), WidgetSize::EXTRA_LARGE).fits_in(8, 6));
     }
 
     #[test]
@@ -2574,7 +2646,7 @@ mod tests {
         for (col, row) in [(0, 0), (3, 0), (1, 2), (5, 4)] {
             mgr.add_widget(WidgetKind::Calendar, GridPos::new(col, row));
         }
-        let size = WidgetSize::WIDE; // 2x2
+        let size = WidgetSize::LARGE; // 2x2
         let pos = mgr.find_free_position(size).expect("the grid is not full");
         let rect = GridRect::new(pos, size);
         assert!(rect.fits_in(mgr.grid.columns, mgr.grid.rows));
@@ -2589,7 +2661,7 @@ mod tests {
 
     #[test]
     fn widget_size_pixels() {
-        let size = WidgetSize::MEDIUM; // 2x1
+        let size = WidgetSize::WIDE; // 2x1
         let (w, h) = size.pixels(180.0, 150.0, 12.0);
         assert!((w - 372.0).abs() < 0.01); // 2*180 + 1*12
         assert!((h - 150.0).abs() < 0.01); // 1*150 + 0*12
@@ -2691,8 +2763,8 @@ mod tests {
     #[test]
     fn kind_default_sizes() {
         assert_eq!(WidgetKind::Clock.default_size(), WidgetSize::SMALL);
-        assert_eq!(WidgetKind::Calendar.default_size(), WidgetSize::WIDE);
-        assert_eq!(WidgetKind::SystemMonitor.default_size(), WidgetSize::MEDIUM);
+        assert_eq!(WidgetKind::Calendar.default_size(), WidgetSize::LARGE);
+        assert_eq!(WidgetKind::SystemMonitor.default_size(), WidgetSize::WIDE);
     }
 
     // ---- WidgetInstance ----
@@ -2725,6 +2797,70 @@ mod tests {
         assert!(w.update_interval_ms > 0);
         assert!(w.needs_update(2000));
         assert!(!WidgetInstance::new(2, WidgetKind::Notes, GridPos::new(0, 0)).needs_update(1000));
+    }
+
+    /// A kind's sizes, where it has more than its default, include its
+    /// default, smallest first; every size offered has a name of its own,
+    /// and one no menu offers has none.
+    #[test]
+    fn a_kinds_sizes_include_its_default_and_each_is_named() {
+        let area = |s: &WidgetSize| s.cols * s.rows;
+        for kind in all_builtin() {
+            let sizes = kind.sizes();
+            assert!(
+                sizes.is_empty() || sizes.contains(&kind.default_size()),
+                "{kind:?} is not offered the size it is put out at"
+            );
+            assert!(
+                sizes
+                    .windows(2)
+                    .all(|pair| area(&pair[0]) <= area(&pair[1])),
+                "{kind:?}'s sizes are not smallest first"
+            );
+        }
+        assert!(
+            WidgetKind::Weather.sizes().is_empty(),
+            "a placeholder offered sizes"
+        );
+        let mut labels: Vec<&str> = WidgetSize::ALL
+            .iter()
+            .map(|size| size.label().expect("every size offered is named"))
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(
+            labels.len(),
+            WidgetSize::ALL.len(),
+            "two sizes share a name"
+        );
+        assert_eq!(WidgetSize::new(4, 4).label(), None);
+    }
+
+    /// A widget can be resized only to where it fits where it is: inside the
+    /// grid, over no other widget.
+    #[test]
+    fn a_widget_can_be_resized_only_where_it_fits() {
+        let mut mgr = make_mgr();
+        let clock = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
+            .unwrap();
+        assert!(mgr.can_resize(clock, WidgetSize::WIDE));
+        let other = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(1, 0))
+            .unwrap();
+        assert!(
+            !mgr.can_resize(clock, WidgetSize::WIDE),
+            "over its neighbour"
+        );
+        assert!(mgr.can_resize(clock, WidgetSize::TALL));
+        let edge = mgr
+            .add_widget(WidgetKind::Clock, GridPos::new(7, 5))
+            .unwrap();
+        assert!(!mgr.can_resize(edge, WidgetSize::WIDE), "off the grid");
+        assert!(!mgr.can_resize(other + 100, WidgetSize::SMALL), "not out");
+        assert!(!mgr.resize_widget(clock, WidgetSize::WIDE));
+        assert!(mgr.resize_widget(clock, WidgetSize::TALL));
+        assert_eq!(mgr.get(clock).unwrap().size, WidgetSize::TALL);
     }
 
     /// A calendar is due once a minute, so midnight moves today: one that
@@ -2843,8 +2979,8 @@ mod tests {
         let id = mgr
             .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
             .unwrap();
-        assert!(mgr.resize_widget(id, WidgetSize::MEDIUM));
-        assert_eq!(mgr.get(id).unwrap().size, WidgetSize::MEDIUM);
+        assert!(mgr.resize_widget(id, WidgetSize::WIDE));
+        assert_eq!(mgr.get(id).unwrap().size, WidgetSize::WIDE);
     }
 
     #[test]
@@ -2854,7 +2990,7 @@ mod tests {
             .add_widget(WidgetKind::Clock, GridPos::new(0, 0))
             .unwrap();
         mgr.add_widget(WidgetKind::Clock, GridPos::new(1, 0));
-        assert!(!mgr.resize_widget(id, WidgetSize::MEDIUM)); // would overlap
+        assert!(!mgr.resize_widget(id, WidgetSize::WIDE)); // would overlap
     }
 
     /// A widget is out and shown when added; one a layout file hides is
@@ -3086,6 +3222,33 @@ mod tests {
         );
     }
 
+    /// A calendar's six weeks are laid out below its weekdays -- not over
+    /// them, as days begun at the weekdays' top were, today's disc reaching
+    /// up into the names -- seven to a row, each inside the content, none
+    /// over another.
+    #[test]
+    fn a_calendars_days_are_below_its_weekdays_and_inside_it() {
+        let (x, y, w, h) = (10.0, 20.0, 368.0, 280.0);
+        let weekdays = calendar_weekdays();
+        let below = y + weekdays.top + weekdays.height();
+        let cells: Vec<crate::Rect> = (0..42).map(|i| calendar_cell(i, x, y, w, h)).collect();
+        for (i, cell) in cells.iter().enumerate() {
+            assert!(cell.y >= below - 0.01, "day {i} begins over the weekdays");
+            assert!(
+                cell.x >= x - 0.01 && cell.right() <= x + w + 0.01 && cell.bottom() <= y + h + 0.01,
+                "day {i} is outside the content"
+            );
+        }
+        for week in cells.chunks(7) {
+            for pair in week.windows(2) {
+                assert!(pair[0].right() <= pair[1].x + 0.01, "two days overlap");
+            }
+        }
+        for (above, beneath) in cells.iter().zip(cells.iter().skip(7)) {
+            assert!(above.bottom() <= beneath.y + 0.01, "two weeks overlap");
+        }
+    }
+
     /// With no month to show -- the shell makes one only while a calendar is
     /// drawn -- a calendar draws no days, rather than a month of blanks.
     #[test]
@@ -3100,6 +3263,15 @@ mod tests {
         let cmds = mgr.render(&Palette::for_mode(false), &live);
         assert!(texts_saying(&cmds, "1", CALENDAR_DAY_SIZE).is_empty());
         assert!(texts_saying(&cmds, "Su", 10.0).is_empty());
+        // Nor a title, nor a row of weekdays, with nothing in them.
+        assert!(
+            texts_saying(&cmds, "", CALENDAR_TITLE.size).is_empty(),
+            "an empty title is drawn"
+        );
+        assert!(
+            texts_saying(&cmds, "", 10.0).is_empty(),
+            "empty weekdays are drawn"
+        );
     }
 
     /// Every colour the calendar draws is one its palette accounts for: the
@@ -4287,14 +4459,56 @@ mod tests {
         (mgr, id)
     }
 
-    /// The picture `path` as the session would hand it up, under `image_id`.
+    /// The box `id`'s frame in `mgr` asks its pictures to fit, as
+    /// `frames_to_fetch` works it out.
+    fn fit_of(mgr: &DesktopWidgetManager, id: WidgetInstanceId) -> (u32, u32) {
+        let (_, _, w, h) = mgr.content_rect(id).unwrap();
+        (w.ceil() as u32, h.ceil() as u32)
+    }
+
+    /// The picture `path` as the session would hand it up, under `image_id`,
+    /// decoded for the box `one_frame`'s frame is.
     fn up(path: PathBuf, image_id: u64) -> FramePicture {
+        let (mgr, id) = one_frame();
         FramePicture {
             path,
             image_id: FRAME_PICTURE_TAG | image_id,
             width: 400,
             height: 300,
+            fit: fit_of(&mgr, id),
         }
+    }
+
+    /// **A frame resized asks for the picture it shows again, at its new
+    /// size** -- decoded for the old box, it would be drawn larger than it
+    /// was decoded -- and shows the old one until the new one is up.
+    #[test]
+    fn a_resized_frame_asks_for_its_picture_again_at_its_new_size() {
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&["a.png"]));
+        mgr.frame_picture_ready(id, up(picture("a.png"), 1));
+        assert!(mgr.frames_to_fetch().is_empty());
+
+        assert!(mgr.resize_widget(id, WidgetSize::EXTRA_LARGE));
+        let bigger = fit_of(&mgr, id);
+        assert_eq!(mgr.frames_to_fetch(), [(id, picture("a.png"), bigger)]);
+        assert_eq!(
+            mgr.frame_state(id)
+                .unwrap()
+                .shown
+                .as_ref()
+                .map(|s| s.image_id),
+            Some(FRAME_PICTURE_TAG | 1),
+            "the old picture was taken down before the new one is up"
+        );
+        mgr.frame_picture_ready(
+            id,
+            FramePicture {
+                fit: bigger,
+                ..up(picture("a.png"), 2)
+            },
+        );
+        assert!(mgr.frames_to_fetch().is_empty(), "fetched again once up");
     }
 
     /// **A frame just placed looks at once, and wants its folder's first

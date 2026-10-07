@@ -1,5 +1,16 @@
 ## TD-C-THE-DESKTOP-OFFERS-A-CALENDAR-WIDGET-THAT-SHOWS-ONLY-ITS-NAME (lane C, 2026-10-06) — OPEN
-**Status:** OPEN -- (1), (2) and (4) done 2026-10-06; (3) open.
+**Status:** OPEN until the fixes have had a boot test on `main` -- all four items are fixed on lane C (2026-10-06); then it moves to `known-issues-resolved/`.
+
+**2026-10-06, last: (3).** A widget's menu offers "Size" -- the sizes its
+kind is drawn well at (`WidgetKind::sizes`), named by their shapes (Small,
+Wide, Tall, Large, Extra large; the constants were renamed to match, as
+`MEDIUM` was two cells wide and `WIDE` four), the one it is ticked, one it
+would not fit at where it is greyed. A calendar is offered no less than
+Large, as six weeks in one cell's height would be drawn too small to read;
+a clock, the meters and the battery Small and Wide; a note and a photo
+frame all five; a kind with no content of its own none. A photo frame
+resized asks for its picture again at its new size, rather than drawing
+one decoded smaller (`FramePicture::fit`).
 
 **2026-10-06, later still: (2) and (4).** The edit mode and its selected
 widget are one thing now, the widget *held* (`DesktopWidgetManager::hold`):

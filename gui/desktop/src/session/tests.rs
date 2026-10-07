@@ -5270,6 +5270,68 @@ fn photo_frame_in_turn() {
     );
 }
 
+/// **A photo frame made bigger is sent its picture again, decoded for its
+/// new size** -- sent once, for the box it was, the picture would be drawn
+/// larger than it was decoded -- asked for once however often the loop
+/// paints before it is up, and the smaller one let go once nothing names it.
+#[test]
+fn a_photo_frame_made_bigger_is_sent_its_picture_again() {
+    settingsfile::testing::with_scratch_config("session-photo-frame-bigger", |_root| {
+        use crate::widgets::{WidgetKind, WidgetSize, is_frame_picture};
+
+        let (mut session, desktop, _turn) = session();
+        let folder = scratch_dir().join("photo-frame-bigger");
+        std::fs::create_dir_all(&folder).expect("the temp directory is not writable");
+        plain_png(&folder, "a.png", 1600, 1200, 0xFF_20_40_80);
+        session.set_frame_folder(Some(folder.clone()));
+        session
+            .shell_mut()
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_PHOTO_FRAME);
+        let frame = session
+            .shell()
+            .widgets
+            .all_widgets()
+            .iter()
+            .find(|w| matches!(w.kind, WidgetKind::PhotoFrame))
+            .map(|w| w.id)
+            .expect("the menu placed no photo frame");
+        session.paint_background().expect("paint");
+        session.settle_pictures().expect("the picture went up");
+        let sent = |desktop: &Desktop| -> Vec<(u64, u64, u32, u32, u32, usize)> {
+            uploads(desktop)
+                .into_iter()
+                .filter(|u| is_frame_picture(u.1))
+                .collect()
+        };
+        let before = sent(&desktop);
+        assert_eq!(before.len(), 1, "{before:?}");
+
+        assert!(
+            session
+                .shell_mut()
+                .widgets
+                .resize_widget(frame, WidgetSize::EXTRA_LARGE)
+        );
+        session.paint_background().expect("paint");
+        session.paint_background().expect("paint");
+        session
+            .settle_pictures()
+            .expect("the bigger picture went up");
+        let after = sent(&desktop);
+        assert_eq!(after.len(), 2, "not sent again at its new size: {after:?}");
+        let (_, bigger, width, height, _, _) = after[1];
+        assert!(
+            width > before[0].2 || height > before[0].3,
+            "sent again no bigger: {after:?}"
+        );
+        assert!(background_names(&session, bigger));
+        assert!(
+            !background_names(&session, before[0].1),
+            "the frame still names the smaller picture"
+        );
+    });
+}
+
 /// **A photo frame shows the folder the start menu's Pictures place opens**
 /// -- one definition, so the two cannot come to name different folders --
 /// and, with no home to find it in, none.

@@ -277,6 +277,18 @@ enum PictureUpload {
     Failed(String),
 }
 
+/// What a photo frame has asked the decoding thread for
+/// (`Session::frame_requests`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FrameRequest {
+    /// The file.
+    path: PathBuf,
+    /// The box it is to be decoded to fit, in pixels.
+    fit: (u32, u32),
+    /// The image id it is to be uploaded under.
+    id: u64,
+}
+
 /// One window the shell draws on, and where it sits on screen.
 ///
 /// Deliberately not a `Window`: [`oswindow::Window`] is what the compositor
@@ -538,11 +550,12 @@ pub struct ShellSession<T: Transport> {
     /// -- no picture, or a rotation folder's.
     wallpaper_stamp: Option<FileStamp>,
     /// What each photo frame on the desktop has asked the decoding thread
-    /// for, by the frame's widget id: the file and the image id. How an
-    /// answer is known to be still wanted -- and, kept after a failure as the
-    /// wallpaper's is, what stops a file that will not open being read again
-    /// at every paint until the frame moves on.
-    frame_requests: BTreeMap<u64, (PathBuf, u64)>,
+    /// for, by the frame's widget id: the file, the box it is to fit -- a
+    /// frame resized asks for the same file again at its new size -- and the
+    /// image id. How an answer is known to be still wanted -- and, kept after
+    /// a failure as the wallpaper's is, what stops a file that will not open
+    /// being read again at every paint until the frame moves on.
+    frame_requests: BTreeMap<u64, FrameRequest>,
     /// The frames' pictures the background surface holds, by image id:
     /// released once no frame shows them (`refresh_frame_pictures`).
     frame_uploaded: std::collections::BTreeSet<u64>,
@@ -2293,7 +2306,7 @@ impl<T: Transport> ShellSession<T> {
             Slot::Frame(frame) => {
                 // Still the one asked for, and still wanted: the frame may
                 // have stepped on, or gone, since.
-                let asked = self.frame_requests.get(&frame).map(|(_, id)| *id);
+                let asked = self.frame_requests.get(&frame).map(|asked| asked.id);
                 if asked != Some(job.id) || !self.shell.widgets.frame_wants(frame, &job.path) {
                     return Ok(());
                 }
@@ -2311,6 +2324,10 @@ impl<T: Transport> ShellSession<T> {
                             image_id: job.id,
                             width,
                             height,
+                            // A frame's picture is always asked for fitted;
+                            // one that somehow was not was decoded at its own
+                            // size, which is the box it fills.
+                            fit: job.fit.unwrap_or((width, height)),
                         };
                         // The picture it replaces is released by the refresh
                         // below, once the frame that no longer names it is sent.
@@ -2532,7 +2549,7 @@ impl<T: Transport> ShellSession<T> {
             if self
                 .frame_requests
                 .get(&frame)
-                .is_some_and(|(asked, _)| *asked == path)
+                .is_some_and(|asked| asked.path == path && asked.fit == fit)
             {
                 continue;
             }
@@ -2546,7 +2563,8 @@ impl<T: Transport> ShellSession<T> {
             };
             self.pictures
                 .request_fitted(Slot::Frame(frame), id, path.clone(), Some(fit));
-            self.frame_requests.insert(frame, (path, id));
+            self.frame_requests
+                .insert(frame, FrameRequest { path, fit, id });
         }
         let widgets = &self.shell.widgets;
         self.frame_requests

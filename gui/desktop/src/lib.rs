@@ -168,11 +168,13 @@ mod tray_window_tests;
 mod volume_wiring_tests;
 #[cfg(test)]
 mod wallpaper_move_tests;
+#[cfg(test)]
+mod widget_menu_tests;
 
 use appearance::config;
 use guitk::menu::{ContextMenu, MenuAction, MenuItem, MenuItemId};
 
-use crate::widgets::{DesktopWidgetManager, WidgetInstanceId, WidgetKind};
+use crate::widgets::{DesktopWidgetManager, WidgetInstanceId, WidgetKind, WidgetSize};
 use appearance::{
     AppearanceSettings, DecorationColors, Palette, TaskbarStyle, TransparencyLevel, emphasized,
     readable_on,
@@ -11974,9 +11976,15 @@ impl DesktopShell {
         // Every field takes a character it has no key for, from the one
         // picker (`char_picker`).
         menu.extend([MenuItem::Separator, char_picker::menu_row()]);
-        if matches!(field, MenuField::Note(_)) {
-            // A note is never a photo frame.
-            menu.extend(std::iter::once(MenuItem::Separator).chain(Self::widget_menu_items(false)));
+        // A note's own rows below what its keys do: its sizes, and removing
+        // it -- the widget menu's, about this note.
+        if let MenuField::Note(note) = field
+            && let Some(w) = self.widgets.get(note)
+        {
+            let rows = Self::widget_menu_items(&w.kind, w.size, |size| {
+                self.widgets.can_resize(note, size)
+            });
+            menu.extend(std::iter::once(MenuItem::Separator).chain(rows));
         }
         self.desktop_menu.hide();
         self.tray_overflow_menu = None;
@@ -11990,14 +11998,23 @@ impl DesktopShell {
     /// A press while a text field's menu is open: a row takes its action, and
     /// a press anywhere else closes the menu, as every menu's does.
     fn click_field_menu(&mut self, x: f32, y: f32) -> ShellAction {
-        let chosen = self
+        let clicked = self
             .field_menu
             .as_mut()
-            .and_then(|(menu, field)| menu.handle_click(x, y).map(|id| (id, *field)));
-        self.field_menu = None;
-        match chosen {
-            Some((id, field)) => self.activate_field_menu_item(id, field),
-            None => ShellAction::Consumed,
+            .map(|(menu, field)| (menu.click(x, y), *field));
+        match clicked {
+            // A row that opens a submenu -- a note's "Size" -- opened it, and
+            // the menu stays, as the desktop menu's does. Asked as a row
+            // chosen or nothing, it closed the menu it should have opened.
+            Some((guitk::menu::MenuClick::Opened, _)) => ShellAction::Consumed,
+            Some((guitk::menu::MenuClick::Chosen(id), field)) => {
+                self.field_menu = None;
+                self.activate_field_menu_item(id, field)
+            }
+            Some((guitk::menu::MenuClick::Missed, _)) | None => {
+                self.field_menu = None;
+                ShellAction::Consumed
+            }
         }
     }
 
@@ -13653,6 +13670,10 @@ impl DesktopShell {
     const MENU_MOVE_WALLPAPER: u64 = 12;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
+    // A widget's "Size", and its rows: the base plus the size's place in
+    // `WidgetSize::ALL`.
+    const MENU_WIDGET_SIZE_SUBMENU: u64 = 102;
+    const MENU_WIDGET_SIZE_BASE: u64 = 400;
     // An icon's own menu, opened by a right-click on the icon.
     const MENU_ICON_OPEN: u64 = 300;
     const MENU_ICON_PIN: u64 = 301;
@@ -13688,6 +13709,21 @@ impl DesktopShell {
             appearance::IconSize::Large => "Large icons",
             appearance::IconSize::ExtraLarge => "Extra large icons",
         }
+    }
+
+    /// The id of a widget's "Size" row offering `size`, if the menu offers
+    /// that size at all.
+    pub(crate) fn widget_size_menu_id(size: WidgetSize) -> Option<MenuItemId> {
+        let index = WidgetSize::ALL
+            .iter()
+            .position(|&offered| offered == size)?;
+        Self::MENU_WIDGET_SIZE_BASE.checked_add(u64::try_from(index).ok()?)
+    }
+
+    /// The size a widget's "Size" row offers, if `id` is one's.
+    fn menu_widget_size(id: MenuItemId) -> Option<WidgetSize> {
+        let index = usize::try_from(id.checked_sub(Self::MENU_WIDGET_SIZE_BASE)?).ok()?;
+        WidgetSize::ALL.get(index).copied()
     }
 
     /// The icon size a menu item id names, if it names one.
@@ -14192,9 +14228,16 @@ impl DesktopShell {
         }
     }
 
-    /// The items for a right-click *on a widget*: removing it, or every
-    /// widget -- and, on a photo frame, choosing the folder it shows.
-    fn widget_menu_items(photo_frame: bool) -> Vec<MenuItem> {
+    /// The items for a right-click *on a widget* of `kind`, drawn at `size`:
+    /// on a photo frame, choosing the folder it shows; "Size", where its kind
+    /// is drawn well at more than one ([`WidgetKind::sizes`]), the sizes it
+    /// would not fit at where it is (`fits` says) greyed; and removing it, or
+    /// every widget.
+    fn widget_menu_items(
+        kind: &WidgetKind,
+        size: WidgetSize,
+        fits: impl Fn(WidgetSize) -> bool,
+    ) -> Vec<MenuItem> {
         let add = |id: u64, label: &str| MenuItem::Action {
             id,
             label: label.to_string(),
@@ -14204,8 +14247,35 @@ impl DesktopShell {
             checked: None,
         };
         let mut items = Vec::new();
-        if photo_frame {
+        if matches!(kind, WidgetKind::PhotoFrame) {
             items.push(add(Self::MENU_FRAME_FOLDER, "Choose folder…"));
+            items.push(MenuItem::Separator);
+        }
+        // The sizes its kind is drawn well at, the one it is ticked, as the
+        // View submenu ticks the icons' size -- and one it would not fit at
+        // where it is greyed: over another widget, or off the grid.
+        let sizes: Vec<MenuItem> = kind
+            .sizes()
+            .iter()
+            .filter_map(|&offered| {
+                Some(MenuItem::Action {
+                    id: Self::widget_size_menu_id(offered)?,
+                    label: offered.label()?.to_string(),
+                    shortcut: None,
+                    icon: None,
+                    enabled: offered == size || fits(offered),
+                    checked: Some(offered == size),
+                })
+            })
+            .collect();
+        if sizes.len() > 1 {
+            items.push(MenuItem::Submenu {
+                id: Self::MENU_WIDGET_SIZE_SUBMENU,
+                label: "Size".to_string(),
+                icon: None,
+                enabled: true,
+                children: sizes,
+            });
             items.push(MenuItem::Separator);
         }
         items.extend([
@@ -14537,12 +14607,10 @@ impl DesktopShell {
         } else {
             self.icons.icon_at(x, y)
         };
-        let items = if let Some(widget) = self.menu_widget {
-            let photo_frame = self
-                .widgets
-                .get(widget)
-                .is_some_and(|w| matches!(w.kind, WidgetKind::PhotoFrame));
-            Self::widget_menu_items(photo_frame)
+        let items = if let Some(widget) = self.menu_widget.and_then(|id| self.widgets.get(id)) {
+            Self::widget_menu_items(&widget.kind, widget.size, |size| {
+                self.widgets.can_resize(widget.id, size)
+            })
         } else if let Some(id) = self.menu_icon {
             // A right-click on an icon that is not selected selects it alone,
             // as a left click would: the menu is about what is selected, and
@@ -14766,6 +14834,16 @@ impl DesktopShell {
     }
 
     fn activate_desktop_menu_item_inner(&mut self, id: MenuItemId) -> bool {
+        // A widget's "Size": the widget the menu was opened over, resized
+        // where it is if it fits -- the size it is already is no change,
+        // and nothing to save.
+        if let Some(size) = Self::menu_widget_size(id) {
+            let Some(widget) = self.menu_widget.take() else {
+                return false;
+            };
+            return self.widgets.get(widget).is_some_and(|w| w.size != size)
+                && self.widgets.resize_widget(widget, size);
+        }
         let kind = match id {
             Self::MENU_ADD_CLOCK => Some(WidgetKind::Clock),
             Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),
@@ -26324,7 +26402,16 @@ mod view_menu_tests {
                     &DesktopShell::desktop_menu_items(*size, mode, true),
                     &mut all,
                 );
-                ids(&DesktopShell::widget_menu_items(true), &mut all);
+                // A photo frame's, which has every row a widget's can:
+                // "Choose folder…" and every size.
+                ids(
+                    &DesktopShell::widget_menu_items(
+                        &crate::widgets::WidgetKind::PhotoFrame,
+                        crate::widgets::WidgetSize::LARGE,
+                        |_| true,
+                    ),
+                    &mut all,
+                );
                 // The widget menu repeats "Remove all widgets" on purpose --
                 // the same item, so the same id -- and nothing else.
                 let remove_all = all

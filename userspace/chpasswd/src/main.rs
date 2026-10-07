@@ -168,10 +168,18 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
 /// random is worse than no password change: it silently makes every entry
 /// this tool writes share a precomputable table.  A caller that cannot
 /// produce a salt must fail rather than write a weak entry.
+///
+/// Exactly `len` bytes are read: `/dev/urandom` never ends, so the read to end
+/// of file this used to make (`std::fs::read`) never returned, and every run
+/// that hashed a password hung there until 2026-10-07.
 fn generate_salt(len: usize) -> Option<String> {
+    use std::io::Read;
     const CHARS: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let bytes = std::fs::read("/dev/urandom").ok()?;
-    let bytes = bytes.get(..len)?;
+    let mut bytes = vec![0u8; len];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
     Some(
         bytes
             .iter()
@@ -783,8 +791,12 @@ mod tests {
                 );
                 assert_ne!(generate_salt(16), Some(salt), "salt is not random");
             }
+            // `File::open`, not `std::fs::read`, which reads to an end that
+            // `/dev/urandom` does not have -- the hang `generate_salt` itself
+            // had until 2026-10-07, when this test could not finish on any
+            // host with a `/dev/urandom`.
             None => assert!(
-                std::fs::read("/dev/urandom").is_err(),
+                std::fs::File::open("/dev/urandom").is_err(),
                 "`/dev/urandom' is readable but no salt was produced"
             ),
         }

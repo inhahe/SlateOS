@@ -1551,19 +1551,37 @@ impl Staged {
     }
 }
 
-/// Draw a salt from `/dev/urandom`, or `None` if it cannot be read.
+/// Draw a salt for the method new passwords get from `/dev/urandom`, or
+/// `None` if it cannot be read. See [`random_salt_of`].
+#[must_use]
+pub fn random_salt() -> Option<String> {
+    random_salt_of(PASSWORD_METHOD.salt_max())
+}
+
+/// Draw `len` salt characters from `/dev/urandom`, or `None` if it cannot be
+/// read.
+///
+/// Exactly `len` bytes are read. `/dev/urandom` has no end: on Linux, and on
+/// SlateOS (`kernel/src/fs/devfs.rs`), a read at any offset returns fresh
+/// bytes. So a read to end of file, which is what `std::fs::read` does, never
+/// returns: it grows its buffer until the allocation fails. That is what this
+/// did until 2026-10-07, and every `passwd` and `useradm` that set a password
+/// hung there.
 ///
 /// `& 0x3f` is an unbiased reduction and not the usual modulo mistake: 256 is
 /// exactly four times 64, so every alphabet character is the image of exactly
 /// four byte values.
 #[must_use]
-pub fn random_salt() -> Option<String> {
+pub fn random_salt_of(len: usize) -> Option<String> {
+    use std::io::Read;
     const ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let len = PASSWORD_METHOD.salt_max();
-    let data = std::fs::read("/dev/urandom").ok()?;
+    let mut data = vec![0u8; len];
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut data)
+        .ok()?;
     Some(
-        data.get(..len)?
-            .iter()
+        data.iter()
             .map(|b| char::from(*ALPHABET.get(usize::from(*b & 0x3f)).unwrap_or(&b'.')))
             .collect(),
     )
@@ -1872,6 +1890,35 @@ users:
             Err(PasswordError::Salt)
         );
         assert!(!record.contains(field::PASSWORD_HASH));
+    }
+
+    /// `/dev/urandom` never ends, so a salt read from it must stop at the
+    /// length it needs. This read to end of file until 2026-10-07 and never
+    /// returned: a `passwd` that set a password hung there. On a host with no
+    /// `/dev/urandom` (the Windows development host) it must say so rather
+    /// than invent a salt.
+    #[test]
+    fn a_random_salt_is_drawn_once_at_its_length_and_never_reads_to_the_end() {
+        let Some(salt) = random_salt() else {
+            assert!(
+                std::fs::File::open("/dev/urandom").is_err(),
+                "`/dev/urandom` opens, but no salt was drawn from it"
+            );
+            return;
+        };
+        assert_eq!(salt.len(), PASSWORD_METHOD.salt_max());
+        assert!(
+            salt.bytes()
+                .all(|b| b == b'.' || b == b'/' || b.is_ascii_alphanumeric()),
+            "{salt}"
+        );
+        assert_ne!(random_salt(), Some(salt), "two draws gave the same salt");
+        assert_eq!(random_salt_of(22).map(|s| s.len()), Some(22));
+        assert_eq!(random_salt_of(0).as_deref(), Some(""));
+        // And the whole password path that reaches it, which is what hung.
+        let mut record = Record::new();
+        assert_eq!(record.set_password("pw"), Ok(()));
+        assert_eq!(record.check_password("pw"), Auth::Accepted);
     }
 
     /// A quotation mark in a display name used to end the value early and

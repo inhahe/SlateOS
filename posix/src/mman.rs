@@ -90,15 +90,17 @@ pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_v
 /// - arg2: its own flags: `MAP_READ`, `MAP_WRITE` and `MAP_EXEC` are
 ///   `PROT_READ`'s, `PROT_WRITE`'s and `PROT_EXEC`'s numbers, and the rest are
 ///   its own (8 is `MAP_NOCACHE`, uncached memory, which is also `PROT_SEM`'s
-///   number);
+///   number; 128 is its `MAP_SHARED`);
 /// - arg3: a physical address, for device registers only.
 ///
-/// So only `prot`'s three access bits are passed, and nothing of `flags`
-/// (lane A's `requests/a-d-libc-mmap-should-say-map-shared-and-translate-prot.md`).
+/// So only `prot`'s three access bits are passed, and of `flags` only
+/// `MAP_SHARED`, as the native `MAP_SHARED` ([`native_flags`]; lane A's
+/// `requests/a-d-libc-mmap-should-say-map-shared-and-translate-prot.md`).
 /// Until 2026-10-06 `prot` went whole into arg2 and `flags` into arg3, and a
-/// `PROT_SEM` mapping would have been uncached. Where the mapping goes is
-/// `place`'s, as Linux places it. A file mapping goes to `file_map`: the
-/// native call takes no file.
+/// `PROT_SEM` mapping would have been uncached; until 2026-10-07 a shared
+/// anonymous mapping was private, and a `fork` copied it. Where the mapping
+/// goes is `place`'s, as Linux places it. A file mapping goes to `file_map`:
+/// the native call takes no file.
 ///
 /// Argument-domain validation (Linux-matching, before the syscall):
 /// * `length == 0` → `EINVAL`.  Linux's
@@ -108,6 +110,10 @@ pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_v
 /// * `flags & MAP_TYPE` is not one of `MAP_SHARED`, `MAP_PRIVATE`, or
 ///   `MAP_SHARED_VALIDATE` → `EINVAL`.  Linux's `switch (flags &
 ///   MAP_TYPE)` falls into the `default` case for any other value.
+/// * Anonymous memory with `MAP_SHARED_VALIDATE`, or with `MAP_SHARED |
+///   MAP_GROWSDOWN` → `EINVAL`: `do_mmap`'s switch for a mapping with no
+///   file has no `MAP_SHARED_VALIDATE` case, and a shared one may not grow
+///   (measured on Linux 6.6.87). A file takes `MAP_SHARED_VALIDATE`.
 /// * `offset` is not a multiple of the 16 KiB page size → `EINVAL`.
 ///   `mm/util.c::vm_mmap_pgoff` rounds offset to page-granular
 ///   `pgoff_t` and refuses misaligned values.
@@ -171,10 +177,20 @@ pub extern "C" fn mmap(
         }
         return file_map::map(addr, length, prot, flags, fd, offset);
     }
+    // Anonymous memory is MAP_SHARED or MAP_PRIVATE and nothing else, and a
+    // shared mapping cannot grow: Linux's `do_mmap` answers EINVAL to
+    // MAP_SHARED_VALIDATE and to MAP_SHARED | MAP_GROWSDOWN without a file
+    // (measured on Linux 6.6.87), where a file takes MAP_SHARED_VALIDATE.
+    if flags & MAP_TYPE == MAP_SHARED_VALIDATE
+        || (flags & MAP_TYPE == MAP_SHARED && flags & MAP_GROWSDOWN != 0)
+    {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
 
-    let access = native_access(prot);
+    let native = native_flags(prot, flags);
     let ret = place(
-        &mut |at| syscall6(SYS_MMAP, at, length as u64, access, 0, 0, 0),
+        &mut |at| syscall6(SYS_MMAP, at, length as u64, native, 0, 0, 0),
         &mut || {
             // What was there goes, as MAP_FIXED has it. munmap's own
             // answer is not this call's: a range with nothing in it unmaps
@@ -199,6 +215,32 @@ pub extern "C" fn mmap(
 /// `PROT_GROWS*` bits, which no native flag means.
 fn native_access(prot: i32) -> u64 {
     u64::try_from(prot & (PROT_READ | PROT_WRITE | PROT_EXEC)).unwrap_or(0)
+}
+
+/// The native `SYS_MMAP`'s `MAP_SHARED` (`kernel/src/syscall/number.rs`):
+/// anonymous memory whose pages are committed and marked shared, so that a
+/// `fork` maps the same frames into the child, writable on both sides, and a
+/// futex word in it is one futex in both. Not the Linux `MAP_SHARED` (1),
+/// whose number the native call reads as `MAP_READ`.
+const NATIVE_MAP_SHARED: u64 = 1 << 7;
+
+/// The native `SYS_MMAP`'s flags for an anonymous mapping of `prot` and
+/// `flags`: [`native_access`]'s, and [`NATIVE_MAP_SHARED`] for a
+/// `MAP_SHARED` one. (Anonymous memory has no `MAP_SHARED_VALIDATE`: `mmap`
+/// refuses it first, as Linux does.) Never the native `MAP_LAZY`: the kernel
+/// refuses it beside `MAP_SHARED`, since a page faulted in lazily would be
+/// faulted separately in each process and share nothing, and keeps a shared
+/// mapping committed whatever the process's default.
+///
+/// A kernel that predates the native `MAP_SHARED` ignores the bit, as it
+/// ignores every flag it does not know, and the mapping is private -- what
+/// every shared anonymous mapping was until 2026-10-07.
+fn native_flags(prot: i32, flags: i32) -> u64 {
+    if flags & MAP_TYPE == MAP_SHARED {
+        native_access(prot) | NATIVE_MAP_SHARED
+    } else {
+        native_access(prot)
+    }
 }
 
 /// Map where Linux would put the mapping, through `map` (the native call,
@@ -909,6 +951,51 @@ mod tests {
         assert_eq!(native_access(PROT_WRITE | PROT_GROWSDOWN), 2);
     }
 
+    /// Of the mapping's own flags, only sharing reaches the native call, as
+    /// its own `MAP_SHARED` (128) -- never Linux's number, 1, which the native
+    /// call would read as `MAP_READ` -- and never its `MAP_LAZY` (64).
+    #[test]
+    fn a_shared_mapping_asks_for_the_native_map_shared() {
+        let rw = PROT_READ | PROT_WRITE;
+        assert_eq!(native_flags(rw, MAP_SHARED | MAP_ANONYMOUS), 3 | 128);
+        assert_eq!(native_flags(PROT_NONE, MAP_SHARED | MAP_ANONYMOUS), 128);
+        assert_eq!(native_flags(rw, MAP_PRIVATE | MAP_ANONYMOUS), 3);
+        assert_eq!(
+            native_flags(
+                rw | PROT_SEM,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED | MAP_POPULATE
+            ),
+            3
+        );
+        for flags in [MAP_SHARED, MAP_PRIVATE] {
+            assert_eq!(
+                native_flags(rw, flags | MAP_ANONYMOUS) & 64,
+                0,
+                "never MAP_LAZY"
+            );
+        }
+    }
+
+    /// Anonymous memory is shared or private, and a shared mapping does not
+    /// grow: what Linux 6.6.87 answers EINVAL, measured, is refused before
+    /// the kernel is asked -- each case once, so the kernel's answer (the
+    /// host's ENOSYS stand-in) would show if it were asked.
+    #[test]
+    fn anonymous_memory_refuses_shared_validate_and_a_growing_shared_mapping() {
+        let rw = PROT_READ | PROT_WRITE;
+        for flags in [
+            MAP_SHARED_VALIDATE | MAP_ANONYMOUS,
+            MAP_SHARED | MAP_ANONYMOUS | MAP_GROWSDOWN,
+        ] {
+            errno::set_errno(0);
+            assert_eq!(
+                mmap(core::ptr::null_mut(), 4096, rw, flags, -1, 0),
+                MAP_FAILED
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL, "flags {flags:#x}");
+        }
+    }
+
     /// Where `place` asks the native call to map, and whether it unmapped
     /// first: (the addresses asked for, in order, and the unmaps), given
     /// the native call's answer for each address.
@@ -1341,25 +1428,23 @@ mod tests {
 
     #[test]
     fn test_mmap_shared_validate_accepted() {
-        // MAP_SHARED_VALIDATE = 0x03 is a recognized type
-        // discriminator.  This call still fails (the syscall can't
-        // satisfy a 16 KiB anonymous request in unit tests), but it
-        // must clear the libc type check — meaning errno must not be
-        // EINVAL set by our type-discriminator branch.  We don't
-        // assert on the kernel's eventual errno because that varies;
-        // we only assert that the call attempted the syscall (it
-        // returns MAP_FAILED either way).
+        // MAP_SHARED_VALIDATE = 0x03 is a recognized type discriminator for
+        // a file mapping (anonymous memory refuses it, as Linux does: see
+        // anonymous_memory_refuses_shared_validate_and_a_growing_shared_mapping).
+        // With no file behind the descriptor the call still fails, but on
+        // the descriptor -- EBADF, as Linux answers fd -1 -- not on the
+        // type check's EINVAL.
+        crate::errno::set_errno(0);
         let ret = mmap(
             core::ptr::null_mut(),
             16_384,
             PROT_READ,
-            MAP_SHARED_VALIDATE | MAP_ANONYMOUS,
+            MAP_SHARED_VALIDATE,
             -1,
             0,
         );
-        // Just ensure no panic.  The syscall will likely fail with
-        // some kernel-defined errno (often ENOSYS in this build).
-        let _ = ret;
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]

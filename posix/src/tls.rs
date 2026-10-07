@@ -634,10 +634,12 @@ pub unsafe fn setup_main_thread() -> bool {
     use crate::syscall::{SYS_MMAP, syscall6};
 
     let img = image();
-    // PROT_READ|PROT_WRITE = 3, MAP_PRIVATE|MAP_ANONYMOUS = 0x22, fd = -1.
-    // Anonymous pages are zero-filled, which is exactly what `.tbss` and
-    // the unused TCB slots need.
-    let base = syscall6(SYS_MMAP, 0, img.reserve(), 3, 0x22, u64::MAX, 0);
+    // The native call: arg2 its flags, `MAP_READ | MAP_WRITE` = 3; arg3 a
+    // physical address, which only device mappings have. (Linux's
+    // `MAP_PRIVATE | MAP_ANONYMOUS` and a -1 file went there until
+    // 2026-10-07, unread.) Anonymous pages are zero-filled, which is exactly
+    // what `.tbss` and the unused TCB slots need.
+    let base = syscall6(SYS_MMAP, 0, img.reserve(), 3, 0, 0, 0);
     if base < 0 {
         return false;
     }

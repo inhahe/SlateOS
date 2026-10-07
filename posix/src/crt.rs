@@ -491,22 +491,17 @@ impl InitArgSource for KernelArgs {
 
     fn grow(&mut self, len: usize) -> *mut u8 {
         use crate::syscall::{SYS_MMAP, syscall6};
-        // PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS. Deliberately a raw
-        // mmap and not malloc: this runs before `init_environ()` and before the
-        // ELF constructors, and the allocator is not something startup should
+        // The native call, which makes private anonymous memory: arg2 its
+        // flags, `MAP_READ | MAP_WRITE`; arg3 a physical address, which only
+        // device mappings have. (This passed Linux's `MAP_PRIVATE |
+        // MAP_ANONYMOUS` there, and a -1 file after it, until 2026-10-07: the
+        // native call took no notice of either.) Deliberately a raw mmap and
+        // not malloc: this runs before `init_environ()` and before the ELF
+        // constructors, and the allocator is not something startup should
         // depend on this early. It is also a once-per-process call on a path
         // that almost never runs, so nothing is lost by being blunt.
-        const PROT_READ_WRITE: u64 = 0x1 | 0x2;
-        const MAP_PRIVATE_ANON: u64 = 0x02 | 0x20;
-        let r = syscall6(
-            SYS_MMAP,
-            0,
-            len as u64,
-            PROT_READ_WRITE,
-            MAP_PRIVATE_ANON,
-            u64::MAX,
-            0,
-        );
+        const MAP_READ_WRITE: u64 = 0x1 | 0x2;
+        let r = syscall6(SYS_MMAP, 0, len as u64, MAP_READ_WRITE, 0, 0, 0);
         // mmap reports failure as a small negative value (an errno), which must
         // not be cast into a plausible-looking pointer.
         if r <= 0 {

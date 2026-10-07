@@ -3065,6 +3065,16 @@ D's to act on once answered).
     file mappings in the kernel
     (`requests/d-a-a-native-program-cannot-map-a-file.md`;
     `known-issues/D-POSIX-A-NATIVE-FILE-MAPPING-IS-A-COPY.md`).
+  - `[-]` **Shared anonymous memory** (2026-10-07; lane A's
+    `requests/a-d-libc-mmap-should-say-map-shared-and-translate-prot.md`).
+    `mmap(MAP_SHARED | MAP_ANONYMOUS)` was private -- a `fork` copied it --
+    because the library never asked the kernel to share it. It now passes
+    the kernel's own `MAP_SHARED` (`posix/src/mman.rs`, `native_flags`), and
+    refuses what Linux 6.6 refuses for anonymous memory: `MAP_SHARED_VALIDATE`,
+    and a shared mapping that grows down. Lane A's kernel honours the flag
+    from its next publish; the kernel on `main` until then ignores it, as
+    before. `services/ctest-shared-anon` checks the two together on SlateOS
+    then (passes on Linux).
   - `[-]` **Unix sockets with names** (2026-10-07; lane A's
     `requests/a-d-resource-type-33-is-unixsocket.md`).
     `socket(AF_UNIX, ...)` was `EAFNOSUPPORT`; it is now built on the

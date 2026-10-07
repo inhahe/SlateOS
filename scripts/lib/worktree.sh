@@ -250,6 +250,48 @@ SLATE_LLVM_SHA256="6898f963c8e938981e6c4a302e83ec5beb4630147c7311183cf61069af163
 # shellcheck disable=SC2034
 SLATE_LLVM_TARBALL="$SLATE_ZIG_CACHE/llvm-project-$SLATE_LLVM_VERSION.src.tar.xz"
 
+# Upstream GDB, for scripts/gdb-spike/: the debugger the operator asked for
+# (design-decisions.md 1050). 18.1 is the current release. Three packagers
+# attest the tarball, each recomputed here over the download and compared in
+# full, 2026-10-07:
+#
+#   OpenEmbedded  meta/recipes-devtools/gdb/gdb.inc, beside gdb_18.1.bb:
+#                 SRC_URI[sha256sum] = the hex below.
+#   Gentoo        dev-debug/gdb/Manifest, DIST gdb-18.1.tar.xz 22158720
+#                 SHA512 e7079ad3...ab8b5a0 BLAKE2B 9cf68cd9...8f30e1d -- two
+#                 *different functions*, the stronger corroboration.
+#   Arch          packaging/packages/gdb PKGBUILD, pkgver=18.1, b2sums
+#                 9cf68cd9...8f30e1d.
+SLATE_GDB_VERSION="18.1"
+SLATE_GDB_SHA256="cd9fc3fe2b47743840e42c1592d3d87f8302eb18639c0b8b4ba0898002e2348f"
+# shellcheck disable=SC2034
+SLATE_GDB_TARBALL="$SLATE_ZIG_CACHE/gdb-$SLATE_GDB_VERSION.tar.xz"
+
+# GMP and MPFR, which GDB will not configure without (its top-level
+# configure.ac: `require_gmp=yes` for a tree with gdb/ in it, and
+# `gmplibs="-lmpfr -lgmp"`). Built by scripts/gdb-spike/ against our libc too.
+#
+# GMP 6.3.0, the .tar.xz -- which matters: OpenEmbedded pins the .tar.bz2
+# (ac28211a...) and Arch the .tar.lz (be5c908a...), different archives of the
+# same release, and neither is an attestation of the file opened here. These
+# three are, compared in full 2026-10-07:
+#   Void      srcpkgs/gmp/template, version=6.3.0, checksum= the hex below.
+#   Alpine    main/gmp/APKBUILD, pkgver=6.3.0, sha512sums e85a0dab...8f29fd2.
+#   Homebrew  Formula/g/gmp.rb, sha256 the hex below.
+SLATE_GMP_VERSION="6.3.0"
+SLATE_GMP_SHA256="a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
+# shellcheck disable=SC2034
+SLATE_GMP_TARBALL="$SLATE_ZIG_CACHE/gmp-$SLATE_GMP_VERSION.tar.xz"
+
+# MPFR 4.2.2, compared in full 2026-10-07:
+#   OpenEmbedded  meta/recipes-support/mpfr/mpfr_4.2.2.bb, SRC_URI[sha256sum]
+#                 = the hex below.
+#   Arch          packaging/packages/mpfr PKGBUILD, b2sums 6bbf5658...d7b21ec.
+SLATE_MPFR_VERSION="4.2.2"
+SLATE_MPFR_SHA256="b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01"
+# shellcheck disable=SC2034
+SLATE_MPFR_TARBALL="$SLATE_ZIG_CACHE/mpfr-$SLATE_MPFR_VERSION.tar.xz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -575,6 +617,38 @@ slate_ensure_llvm_src() {
         "$SLATE_LLVM_SHA256" \
         "https://github.com/llvm/llvm-project/releases/download/llvmorg-$SLATE_LLVM_VERSION/llvm-project-$SLATE_LLVM_VERSION.src.tar.xz" \
         "$SLATE_WORK/llvm-spike")" || return 1
+}
+
+# The GDB, GMP and MPFR counterparts, for scripts/gdb-spike/.
+slate_ensure_gdb_src() {
+    # SLATE_GDB_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gdb-spike/run.sh (`tar xf "$SLATE_GDB_TARBALL"`). The linter
+    # cannot follow a `source`, so it sees the write and never the read.
+    # shellcheck disable=SC2034
+    SLATE_GDB_TARBALL="$(slate_ensure_src gdb "$SLATE_GDB_VERSION" \
+        "$SLATE_GDB_SHA256" \
+        "https://ftp.gnu.org/gnu/gdb/gdb-$SLATE_GDB_VERSION.tar.xz" \
+        "$SLATE_WORK/gdb-spike")" || return 1
+}
+
+slate_ensure_gmp_src() {
+    # SLATE_GMP_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gdb-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_GMP_TARBALL="$(slate_ensure_src gmp "$SLATE_GMP_VERSION" \
+        "$SLATE_GMP_SHA256" \
+        "https://ftp.gnu.org/gnu/gmp/gmp-$SLATE_GMP_VERSION.tar.xz" \
+        "$SLATE_WORK/gdb-spike")" || return 1
+}
+
+slate_ensure_mpfr_src() {
+    # SLATE_MPFR_TARBALL is this function's OUTPUT PARAMETER, read by
+    # scripts/gdb-spike/run.sh. The linter cannot follow a `source`.
+    # shellcheck disable=SC2034
+    SLATE_MPFR_TARBALL="$(slate_ensure_src mpfr "$SLATE_MPFR_VERSION" \
+        "$SLATE_MPFR_SHA256" \
+        "https://ftp.gnu.org/gnu/mpfr/mpfr-$SLATE_MPFR_VERSION.tar.xz" \
+        "$SLATE_WORK/gdb-spike")" || return 1
 }
 
 slate_make_zig_wrappers() {
